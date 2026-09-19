@@ -106,9 +106,11 @@ test("live cockpit: set up → create project → chat → send message → pane
 
   // 4) The agent runtime step BLOCKS on having one. Claude Code always resolves
   //    (the SDK bundles its own runtime), so it is preselected and Continue is
-  //    live — if that ever stops being true this assertion is the alarm.
+  //    live — if that ever stops being true this assertion is the alarm. The
+  //    step also probes the LOGIN and relabels the button "Continue anyway" on
+  //    a machine with none, which a CI box is; hence the prefix match.
   await expect(page.getByRole("heading", { name: "Agent runtime" })).toBeVisible();
-  const continueHarness = page.getByRole("button", { name: "Continue" });
+  const continueHarness = page.getByRole("button", { name: /^Continue/ });
   await expect(continueHarness).toBeEnabled();
   await continueHarness.click();
 

@@ -1746,43 +1746,50 @@ describe("cliStatus", () => {
     const { exec, calls, push } = makeExec();
     push({ stdout: "gh version 2.62.0 (2024-11-14)\nhttps://github.com/cli/cli/releases/latest\n" });
     push({ stdout: "octocat\n" });
+    push({ stdout: "git version 2.47.1.windows.1\n" });
 
     expect(await new GitHubService({ bus, exec }).cliStatus()).toEqual({
       installed: true,
       version: "2.62.0",
       authenticated: true,
       login: "octocat",
+      git: { installed: true, version: "2.47.1" },
     });
     expect(calls[0]).toMatchObject({ file: "gh", args: ["--version"] });
     expect(calls[1]).toMatchObject({ file: "gh", args: ["api", "user", "--jq", ".login"] });
+    expect(calls[2]).toMatchObject({ file: "git", args: ["--version"] });
   });
 
   it("reports NOT installed when gh cannot be spawned — and does not ask who is logged in", async () => {
     const calls: string[] = [];
     const exec: ExecaLike = async (file) => {
       calls.push(file);
-      throw Object.assign(new Error("spawn gh ENOENT"), { code: "ENOENT" });
+      throw Object.assign(new Error(`spawn ${file} ENOENT`), { code: "ENOENT" });
     };
 
     const status = await new GitHubService({ bus, exec }).cliStatus();
     expect(status.installed).toBe(false);
     expect(status.authenticated).toBe(false);
     expect(status.error).toContain("ENOENT");
-    // One call, not two: telling someone to run `gh auth login` when gh isn't
-    // installed sends them in a circle.
-    expect(calls).toEqual(["gh"]);
+    // One gh call, not two: telling someone to run `gh auth login` when gh
+    // isn't installed sends them in a circle. git is still asked about — it is
+    // installed independently, and the project step needs it whatever gh says.
+    expect(calls).toEqual(["gh", "git"]);
+    expect(status.git).toEqual({ installed: false });
   });
 
   it("separates installed-but-logged-out from missing", async () => {
     const { exec, push } = makeExec();
     push({ stdout: "gh version 2.62.0 (2024-11-14)\n" });
     push({ exitCode: 1, stderr: "gh: To get started with GitHub CLI, please run: gh auth login" });
+    push({ stdout: "git version 2.47.1\n" });
 
     const status = await new GitHubService({ bus, exec }).cliStatus();
     expect(status.installed).toBe(true);
     expect(status.version).toBe("2.62.0");
     expect(status.authenticated).toBe(false);
     expect(status.error).toContain("gh auth login");
+    expect(status.git).toEqual({ installed: true, version: "2.47.1" });
   });
 
   it("still reports installed when the version line will not parse", async () => {

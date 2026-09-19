@@ -20,7 +20,10 @@
  *   3. **Agent runtime** — BLOCKING, alone among the four. Every other gap
  *      degrades to a feature you don't have; no harness means no chat can ever
  *      run, so letting someone past this step would hand them an app whose one
- *      purpose fails silently.
+ *      purpose fails silently. Installed is only half of it: the step also asks
+ *      each runtime whether it is LOGGED IN, because for Claude "installed" is
+ *      always true (the SDK bundles a binary) and a machine with no
+ *      subscription used to pass this step and fail at its first send.
  *   4. **First project** — the real `NewProjectView`, not a smaller copy of it.
  *      Setup ends by making something that exists rather than by asserting the
  *      setup is done.
@@ -44,12 +47,18 @@ import {
   TriangleAlert,
 } from "lucide-react";
 import { providerFor } from "@dispatch/shared";
-import type { AuthSessionResponse, GhCliStatus, HarnessKind } from "@dispatch/shared";
+import type {
+  AuthSessionResponse,
+  GhCliStatus,
+  HarnessKind,
+  RuntimeLoginStatus,
+  RuntimeSetupStatus,
+} from "@dispatch/shared";
 import { Button } from "../ui/Button.js";
 import { Spinner } from "../ui/Spinner.js";
 import { Field, InlineError, TextInput } from "../sidebar/Modal.js";
 import { NewProjectView } from "../project/NewProjectView.js";
-import { api, type HarnessInfo } from "../../lib/api.js";
+import { api } from "../../lib/api.js";
 import { cn } from "../../lib/cn.js";
 import { authPost, useAuth } from "../../stores/auth.js";
 import { useSetup } from "../../stores/setup.js";
@@ -354,6 +363,14 @@ function ghInstallCommand(): string {
   return "sudo apt install gh    # or see cli.github.com";
 }
 
+/** The install command for `git` on this OS — same guess, same reasoning, as `ghInstallCommand`. */
+function gitInstallCommand(): string {
+  const ua = navigator.userAgent;
+  if (/Windows/i.test(ua)) return "winget install --id Git.Git";
+  if (/Mac OS X|Macintosh/i.test(ua)) return "xcode-select --install    # or: brew install git";
+  return "sudo apt install git";
+}
+
 function GithubStep({ onBack, onDone }: { onBack: () => void; onDone: () => void }) {
   const [status, setStatus] = useState<GhCliStatus | null>(null);
   const [checking, setChecking] = useState(true);
@@ -421,6 +438,18 @@ function GithubStep({ onBack, onDone }: { onBack: () => void; onDone: () => void
       {status?.error && !ok && (
         <p className="break-words text-xs leading-relaxed text-faint">{status.error}</p>
       )}
+      {/* git, on the gh screen: it is the tool the LAST step needs (`git init`
+          for the first project, then every worktree), and this is the only
+          place a missing one can be said before that step trips over it. */}
+      {status?.git && !status.git.installed ? (
+        <StatusLine tone="warn">
+          git is not on this machine&apos;s PATH. The next steps create a repository and every
+          worktree runs git, so install it before continuing.
+          <Cmd>{gitInstallCommand()}</Cmd>
+        </StatusLine>
+      ) : status?.git?.installed ? (
+        <p className="text-xs leading-relaxed text-faint">git {status.git.version ?? ""} is installed.</p>
+      ) : null}
       <p className="text-xs leading-relaxed text-faint">
         Whichever account gh is logged in as is the account Dispatch opens pull requests as.
       </p>
@@ -440,13 +469,50 @@ function GithubStep({ onBack, onDone }: { onBack: () => void; onDone: () => void
  * a `bundled` answer is how "why is the newest model missing from the picker"
  * gets diagnosed months later. Saying it once, here, costs a word.
  */
-function runtimeHint(runtime: HarnessInfo["runtime"]): string {
+function runtimeHint(runtime: RuntimeSetupStatus): string {
   if (!runtime.available) return "not installed";
   return [runtime.version, runtime.source].filter(Boolean).join(" · ");
 }
 
+/** The login command for a runtime, for the not-logged-in line. */
+function loginCommand(kind: HarnessKind): string {
+  return kind === "codex" ? "codex login" : "claude auth login";
+}
+
+/**
+ * One line under each runtime card: logged in as whom, on what plan — or not.
+ *
+ * The plan is shown when the runtime names it because it is the fact people
+ * come back to this screen to confirm ("is this the Max account or the Pro
+ * one?"), and nothing else in the app surfaces it. An UNCHECKED login is
+ * rendered as a quiet note rather than a warning: it means the probe could not
+ * run (an older runtime with no `auth status`), not that the login is absent.
+ */
+function LoginLine({ kind, login }: { kind: HarnessKind; login: RuntimeLoginStatus }) {
+  if (!login.checked) {
+    return (
+      <span className="mt-1 block text-2xs text-faint">
+        Login not checked{login.error ? ` — ${login.error}` : ""}.
+      </span>
+    );
+  }
+  if (login.loggedIn) {
+    const who = [login.account, login.subscription ?? login.method].filter(Boolean).join(" · ");
+    return (
+      <span className="mt-1 block text-2xs text-success">
+        Logged in{who ? <> as <strong className="font-medium">{who}</strong></> : null}.
+      </span>
+    );
+  }
+  return (
+    <span className="mt-1 block text-2xs text-warn">
+      Not logged in — run <code className="font-mono">{loginCommand(kind)}</code> and press Re-check.
+    </span>
+  );
+}
+
 function HarnessStep({ onBack, onDone }: { onBack: () => void; onDone: () => void }) {
-  const [harnesses, setHarnesses] = useState<HarnessInfo[] | null>(null);
+  const [runtimes, setRuntimes] = useState<RuntimeSetupStatus[] | null>(null);
   const [picked, setPicked] = useState<HarnessKind | null>(null);
   const [checking, setChecking] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -457,12 +523,12 @@ function HarnessStep({ onBack, onDone }: { onBack: () => void; onDone: () => voi
     setError(null);
     try {
       const [list, settings] = await Promise.all([
-        api.harnesses.list(),
+        api.setup.runtimes(),
         // Only for the preselection below, and allowed to fail: not knowing the
         // saved default is a worse first guess, not a broken step.
         api.settings.get().catch(() => null),
       ]);
-      setHarnesses(list);
+      setRuntimes(list);
       // Preselect: the default already saved, else the first runtime that can
       // actually run — so the common case (exactly one installed) is a single
       // click on Continue.
@@ -474,11 +540,11 @@ function HarnessStep({ onBack, onDone }: { onBack: () => void; onDone: () => voi
       // reload left the install on Claude.
       const saved = settings?.harness?.defaultHarness;
       const usable = (k: HarnessKind | undefined) =>
-        k ? list.find((h) => h.kind === k && h.runtime.available)?.kind : undefined;
-      setPicked((p) => p ?? usable(saved) ?? list.find((h) => h.runtime.available)?.kind ?? null);
+        k ? list.find((h) => h.kind === k && h.available)?.kind : undefined;
+      setPicked((p) => p ?? usable(saved) ?? list.find((h) => h.available)?.kind ?? null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
-      setHarnesses([]);
+      setRuntimes([]);
     } finally {
       setChecking(false);
     }
@@ -488,7 +554,12 @@ function HarnessStep({ onBack, onDone }: { onBack: () => void; onDone: () => voi
     void check();
   }, [check]);
 
-  const available = (harnesses ?? []).filter((h) => h.runtime.available);
+  const available = (runtimes ?? []).filter((h) => h.available);
+  const chosen = runtimes?.find((h) => h.kind === picked);
+  // Known-logged-out, specifically. An unchecked login is not a reason to warn
+  // — see LoginLine — and neither is "no pick yet", which the disabled Continue
+  // already covers.
+  const loggedOut = !!chosen && chosen.login.checked && !chosen.login.loggedIn;
 
   async function save() {
     if (!picked) return;
@@ -538,18 +609,28 @@ function HarnessStep({ onBack, onDone }: { onBack: () => void; onDone: () => voi
             disabled={!picked || saving || checking}
             onClick={() => void save()}
           >
-            Continue
+            {loggedOut ? "Continue anyway" : "Continue"}
           </Button>
         </>
       }
     >
-      {checking && !harnesses ? (
+      {checking && !runtimes ? (
         <StatusLine tone="info">Looking for installed agent runtimes…</StatusLine>
       ) : available.length === 0 ? (
         <StatusLine tone="bad">
           No agent runtime found. Dispatch cannot run a chat without one — install Claude Code, then
           press Re-check.
           <Cmd>npm install -g @anthropic-ai/claude-code</Cmd>
+        </StatusLine>
+      ) : loggedOut && chosen ? (
+        // Not blocking, deliberately: the fix is a login in another window, and
+        // someone may reasonably finish setup first. But it is the one warning
+        // on this screen that names the failure a fresh install used to meet
+        // silently, so it sits above the cards, not under one.
+        <StatusLine tone="warn">
+          {providerFor(chosen.kind).label} is installed but not logged in, so chats on it will fail
+          until it is. Log in and press Re-check.
+          <Cmd>{loginCommand(chosen.kind)}</Cmd>
         </StatusLine>
       ) : null}
 
@@ -571,8 +652,8 @@ function HarnessStep({ onBack, onDone }: { onBack: () => void; onDone: () => voi
           without angle brackets on purpose: written the obvious way, this
           comment counts as a raw button and fails the test it is explaining. */}
       <div role="radiogroup" aria-label="Default agent runtime" className="grid grid-cols-1 gap-2">
-        {(harnesses ?? []).map((h) => {
-          const usable = h.runtime.available;
+        {(runtimes ?? []).map((h) => {
+          const usable = h.available;
           const selected = picked === h.kind;
           return (
             <label
@@ -610,14 +691,15 @@ function HarnessStep({ onBack, onDone }: { onBack: () => void; onDone: () => voi
               <span className="min-w-0 flex-1">
                 <span className="flex items-baseline gap-2">
                   <span className="text-sm font-medium text-primary">{providerFor(h.kind).label}</span>
-                  <span className="truncate text-2xs text-faint">{runtimeHint(h.runtime)}</span>
+                  <span className="truncate text-2xs text-faint">{runtimeHint(h)}</span>
                 </span>
                 <span className="mt-0.5 block text-xs leading-relaxed text-muted">
                   {providerFor(h.kind).blurb}
                 </span>
-                {usable && h.runtime.path && (
+                {usable && <LoginLine kind={h.kind} login={h.login} />}
+                {usable && h.path && (
                   <span className="mt-1 block truncate font-mono text-2xs text-faint">
-                    {h.runtime.path}
+                    {h.path}
                   </span>
                 )}
               </span>
