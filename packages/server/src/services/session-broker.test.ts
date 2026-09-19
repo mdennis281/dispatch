@@ -1942,6 +1942,39 @@ describe("SessionBroker — live controls", () => {
     expect(broker.getSession("c1")?.effort).toBe("max");
   });
 
+  // The DEFAULT harness runs on this legacy in-broker loop, so this is the
+  // common Stop, not an edge case.
+  it("settles a Stop on the default harness as a stopped turn, not an error", async () => {
+    const gate = deferred();
+    const { fn, controllers } = makeFakeQuery(async () => {
+      await gate.promise;
+      // What the Claude SDK reports for an interrupt: a failed turn with no
+      // message, which used to render as "Turn ended with an error".
+      return [{ ...resultMsg("error_during_execution"), is_error: true, result: undefined }];
+    });
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+
+    await broker.sendMessage("c1", "long job");
+    await until(() => controllers.length === 1);
+    expect(await broker.interrupt("c1")).toBe(true);
+    gate.resolve();
+
+    // Idle, not failed: there is no error for the user to clear.
+    await broker.waitFor("c1", "idle");
+    const rows = await store.readMessages("c1");
+    expect(rows.find((r) => r.kind === "result")).toMatchObject({
+      subtype: "interrupted",
+      isError: false,
+    });
+    // The attention list is the same claim as the transcript row, so it must
+    // not call a stopped turn complete.
+    expect(
+      events.find((e) => e.type === "attention-add" && e.item.kind === "idle"),
+    ).toMatchObject({ item: { summary: "Stopped — awaiting your input" } });
+  });
+
   it("starts the query at the chat's effort as a level, not a thinking budget", async () => {
     const gate = deferred();
     const { fn, controllers } = makeFakeQuery(async () => {

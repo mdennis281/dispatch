@@ -4438,7 +4438,7 @@ export class SessionBroker {
         } else if (!ok) {
           this.onTurnFailed(session);
         } else {
-          this.onTurnEnd(session);
+          this.onTurnEnd(session, { stopped });
         }
         return;
     }
@@ -4753,14 +4753,22 @@ export class SessionBroker {
         // The provider has already ended this turn; close it synchronously so
         // a one-frame-late Stop cannot become intent for the following turn.
         session.turnOpen = false;
+        const legacyExplicitInterrupt = session.explicitInterruptPending;
         session.explicitInterruptPending = false;
         // No `limit` on this path — the legacy loop only learns about a usage
         // limit by parsing the error text downstream (see onTurnError), so a
         // pause span is the harness path's to open.
         session.activity.turnEnd({}, this.now());
-        const isError = Boolean((m as { is_error?: unknown }).is_error);
-        const resultText =
-          typeof (m as { result?: unknown }).result === "string"
+        // Stop is not a failure — see the matching branch in the harness seam's
+        // `turn-end`. This loop is the one the DEFAULT harness runs on, so it is
+        // the common case, not the fallback: `interrupt()` sets the flag for
+        // both loops and this handler used to clear it without ever reading it.
+        const providerErrored = Boolean((m as { is_error?: unknown }).is_error);
+        const stopped = legacyExplicitInterrupt && providerErrored;
+        const isError = providerErrored && !stopped;
+        const resultText = stopped
+          ? undefined
+          : typeof (m as { result?: unknown }).result === "string"
             ? ((m as { result?: string }).result as string)
             : undefined;
         const legacyTurnCost = this.turnCost(
@@ -4774,7 +4782,7 @@ export class SessionBroker {
           ts: this.now(),
           turn: session.turn,
           sessionId: session.sessionId,
-          subtype: String((m as { subtype?: unknown }).subtype ?? "success"),
+          subtype: stopped ? "interrupted" : String((m as { subtype?: unknown }).subtype ?? "success"),
           isError,
           numTurns: (m as { num_turns?: number }).num_turns,
           durationMs: (m as { duration_ms?: number }).duration_ms,
@@ -4792,7 +4800,9 @@ export class SessionBroker {
         // Relearn the window off-loop for the next turn's row (cheap; the model
         // — hence window — can shift mid-session on a switch or fallback).
         void this.refreshContextWindow(session);
-        await this.compactIfPastThreshold(session, !isError);
+        // `providerErrored`, not `isError`: a stopped turn settles as idle, but
+        // Stop must not be what kicks off a compaction turn.
+        await this.compactIfPastThreshold(session, !providerErrored);
         // Chained turn buffered? Stay running; otherwise the turn is complete.
         if (session.input && session.input.pending() > 0) {
           session.turnOpen = true;
@@ -4800,7 +4810,7 @@ export class SessionBroker {
         } else if (isError) {
           this.onTurnFailed(session);
         } else {
-          this.onTurnEnd(session);
+          this.onTurnEnd(session, { stopped });
         }
         return;
       }
@@ -6007,7 +6017,7 @@ export class SessionBroker {
     );
   }
 
-  private onTurnEnd(session: LiveSession): void {
+  private onTurnEnd(session: LiveSession, opts: { stopped?: boolean } = {}): void {
     // Stop can arrive while the terminal row is still being persisted but after
     // turn-end already sampled the marker. Settlement is the final backstop that
     // keeps that late, provider-no-op Stop from leaking into the next turn.
@@ -6022,7 +6032,11 @@ export class SessionBroker {
         id,
         chatId: session.chatId,
         kind: "idle",
-        summary: "Turn complete — awaiting your input",
+        // The attention list and the transcript's terminal row are two views of
+        // the same turn, so they must not disagree about whether it finished.
+        summary: opts.stopped
+          ? "Stopped — awaiting your input"
+          : "Turn complete — awaiting your input",
         projectId: session.projectId || undefined,
         createdAt: this.now(),
       },
