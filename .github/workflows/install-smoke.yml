@@ -128,16 +128,33 @@ jobs:
         run: npm install -g @anthropic-ai/claude-code @openai/codex
         continue-on-error: true
 
+      # ON PULL REQUESTS ONLY: checks whose fix is in this checkout but not yet
+      # in any release. The smoke installs PUBLISHED releases, so a PR fixing
+      # the server can never make its own run green — the payload under test
+      # predates the fix. Listed checks are reported as skipped-with-reason,
+      # and a listed check that passes says so, which is the cue to delete the
+      # line. The scheduled run passes none of these and stays strict.
+      - name: Expectations for an unreleased fix (pull requests only)
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          {
+            # fix(terminal): POSIX shell backend — terminals were PowerShell-only.
+            echo 'SMOKE_EXPECT_UNRELEASED=--expect-unreleased "terminal runs a command in the project"'
+          } >> "$GITHUB_ENV"
+
       - name: Install, set up, exercise, update, restart, reinstall, stop
         shell: bash
         env:
           SMOKE_EXPECT_INSTALLED_CLIS: ${{ runner.os != 'Windows' && '1' || '0' }}
         run: |
+          eval "set -- $SMOKE_EXPECT_UNRELEASED"
           node tools/ci/install-smoke.mjs \
             --channel "${{ matrix.channel }}" \
             --previous "${{ github.event.inputs.previous || 'auto' }}" \
             --root "$RUNNER_TEMP/dispatch-smoke" \
-            --report "$RUNNER_TEMP/smoke-report/${{ matrix.os }}-${{ matrix.channel }}.json"
+            --report "$RUNNER_TEMP/smoke-report/${{ matrix.os }}-${{ matrix.channel }}.json" \
+            "$@"
 
       # The smoke ends with `launch.py --stop`, but a leg that aborted mid-way
       # leaves a detached supervisor holding the port — and on Windows that

@@ -84,6 +84,16 @@ function parseArgs(argv) {
      * per-user, not per-root, and the smoke would overwrite them.
      */
     noLaunchers: false,
+    /**
+     * Checks expected to fail because their fix is in the CHECKOUT and not yet
+     * in any release. This smoke installs published releases, so a PR that
+     * fixes the server can never turn its own run green — the payload under
+     * test predates the fix by definition. The workflow passes these only on
+     * pull_request events; a scheduled run gets none and stays strict. A
+     * listed check that PASSES is reported, so the entry gets removed once the
+     * fix has shipped.
+     */
+    expectUnreleased: new Set(),
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -99,6 +109,7 @@ function parseArgs(argv) {
     else if (arg === "--report") out.report = resolve(value());
     else if (arg === "--expect-installed-clis") out.expectInstalledClis = true;
     else if (arg === "--no-launchers") out.noLaunchers = true;
+    else if (arg === "--expect-unreleased") out.expectUnreleased.add(value());
     else throw new Error(`unknown argument: ${arg}`);
   }
   if (out.channel !== "stable" && out.channel !== "unstable") {
@@ -119,16 +130,25 @@ function record(name, ok, detail, ms) {
   console.log(`${mark} ${name}${detail ? ` — ${detail}` : ""}${ms !== undefined ? ` (${ms}ms)` : ""}`);
 }
 
+/** Names passed with `--expect-unreleased`; see parseArgs. */
+let expectUnreleased = new Set();
+
 /** Run a check; a throw is a failed row, never a crashed job. */
 async function check(name, fn) {
   const started = Date.now();
   try {
     const detail = await fn();
+    if (expectUnreleased.has(name)) note(`"${name}" was expected to fail until released, but passed — drop it from --expect-unreleased`);
     record(name, true, typeof detail === "string" ? detail : "", Date.now() - started);
     return true;
   } catch (error) {
     if (error instanceof Abort) throw error;
-    record(name, false, error?.message ?? String(error), Date.now() - started);
+    const message = error?.message ?? String(error);
+    if (expectUnreleased.has(name)) {
+      record(name, "skip", `expected until the fix ships — ${message}`, Date.now() - started);
+      return true;
+    }
+    record(name, false, message, Date.now() - started);
     return false;
   }
 }
@@ -327,6 +347,7 @@ async function previousRelease(repo, channel, head) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const { root, channel } = args;
+  expectUnreleased = args.expectUnreleased;
   const installer = join(repoRoot, "tools", "install.mjs");
   const python = findPython();
   const launcher = () => join(root, "app", "tools", "app", "launch.py");
