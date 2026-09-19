@@ -436,22 +436,26 @@ const SECTION_LABEL: Record<ChatSection, string> = {
  * `children`: a reviewer hangs off the spawned chat rather than off the root, so
  * the one being read can be two levels down.
  *
- * Nor does it hide a question waiting under it. A child's question files the
- * whole branch under "Needs input" ({@link chatSection} via `ChatBranch.section`),
- * so the parent sat in that queue with a pulsing dot and the row that actually
- * wanted the answer folded away behind a chevron. Keyed on the SAME predicate
- * that filed it there, plus the attention set the dot reads, so the fold can
- * never disagree with the queue the row is drawn in.
+ * Nor does it hide a chat that is LIVE under it — one waiting on an answer or
+ * one still working. Either files the whole branch under "Needs input" or
+ * "Working" ({@link chatSection} via `ChatBranch.section`), so the parent sat
+ * in that queue with a dot or a spinner and the row actually doing the thing
+ * folded away behind a chevron. Keyed on the SAME predicate that filed it
+ * there, plus the attention set the dot reads, so the fold can never disagree
+ * with the queue the row is drawn in. The chevron only gets a say once every
+ * chat below is at rest — idle or unstarted — which is the only time there is
+ * nothing under here worth a row.
  */
 function mustStayOpen(
   descendants: Chat[],
   activeChatId: string | null,
   attentionByChat: Set<string>,
 ): boolean {
-  return descendants.some(
-    (c) =>
-      c.id === activeChatId || attentionByChat.has(c.id) || chatSection(c) === "attention",
-  );
+  return descendants.some((c) => {
+    if (c.id === activeChatId || attentionByChat.has(c.id)) return true;
+    const section = chatSection(c);
+    return section === "attention" || section === "working";
+  });
 }
 
 /**
@@ -465,7 +469,7 @@ function mustStayOpen(
  *
  * Collapsed by default, and the flag is component state rather than a store:
  * it's where this reader's eye is right now, and nothing else in the app has an
- * opinion about it. Two things override it — see {@link mustStayOpen}.
+ * opinion about it. A live chat underneath overrides it — see {@link mustStayOpen}.
  */
 function ChatBranchRows({
   branch,
@@ -484,7 +488,8 @@ function ChatBranchRows({
 }) {
   const { chat, children, descendants } = branch;
   const [expanded, setExpanded] = useState(false);
-  const open = expanded || mustStayOpen(descendants, activeChatId, attentionByChat);
+  const pinned = mustStayOpen(descendants, activeChatId, attentionByChat);
+  const open = expanded || pinned;
 
   return (
     <div data-flip-id={chat.id}>
@@ -500,6 +505,7 @@ function ChatBranchRows({
         childChats={descendants}
         childrenNeedInput={descendants.some((c) => attentionByChat.has(c.id))}
         expanded={open}
+        pinnedOpen={pinned}
         onToggleChildren={() => setExpanded((v) => !v)}
         onClick={() => onSelect(chat.id)}
       />
@@ -580,7 +586,8 @@ function ChildBranchRows({
   const [expanded, setExpanded] = useState(false);
   // Same forced-open cases as the top-level row: a grandchild's question has to
   // open every fold between it and the root, not just the outermost one.
-  const open = expanded || mustStayOpen(descendants, activeChatId, attentionByChat);
+  const pinned = mustStayOpen(descendants, activeChatId, attentionByChat);
+  const open = expanded || pinned;
   const Row = isReviewerChat(chat) ? ReviewRow : SpawnRow;
 
   return (
@@ -598,6 +605,7 @@ function ChildBranchRows({
         childChats={descendants}
         childrenNeedInput={descendants.some((c) => attentionByChat.has(c.id))}
         expanded={open}
+        pinnedOpen={pinned}
         onToggleChildren={() => setExpanded((v) => !v)}
         onClick={() => onSelect(chat.id)}
       />
@@ -629,8 +637,19 @@ interface ChildRowProps {
   childChats: readonly Chat[];
   childrenNeedInput: boolean;
   expanded: boolean;
+  /** `expanded` is being held true by {@link mustStayOpen}; the toggle is inert. */
+  pinnedOpen: boolean;
   onToggleChildren: () => void;
   onClick: () => void;
+}
+
+/**
+ * Tip for a fold control. One string, three rows: the tray button on the
+ * top-level row and the chevron on both child rows all say the same thing.
+ */
+function foldTip(folded: string, expanded: boolean, pinned: boolean): string {
+  if (pinned) return `Shown while live — ${folded}`;
+  return expanded ? `Hide ${folded}` : `Show ${folded}`;
 }
 
 /**
@@ -649,11 +668,14 @@ interface ChildRowProps {
 function ChildDisclosure({
   depth,
   open,
+  pinned,
   label,
   onToggle,
 }: {
   depth: number;
   open: boolean;
+  /** The fold is held open by what's under it — the chevron is a marker, not a control. */
+  pinned: boolean;
   label: string;
   onToggle: () => void;
 }) {
@@ -663,13 +685,17 @@ function ChildDisclosure({
       aria-expanded={open}
       aria-label={label}
       title={label}
+      disabled={pinned}
       onClick={onToggle}
       className={cn(
         "absolute inset-y-0 z-10 flex w-5 items-center justify-center",
         // `muted`, not `faint`. Faint is this sidebar's "nothing to report" tone
         // (see the resting row markers), and a chevron only exists on a row that
         // HAS something to report — it is the one affordance saying so.
-        "text-muted transition-colors hover:text-primary [&_svg]:size-2.5",
+        "text-muted transition-colors [&_svg]:size-2.5",
+        // Still drawn when pinned — it is what says the rows below are THIS
+        // row's — but it neither lights up nor invites the click it would swallow.
+        pinned ? "cursor-default" : "hover:text-primary",
         atDepth(DISCLOSURE_INSET, depth - 1),
       )}
     >
@@ -717,6 +743,7 @@ function ChatRow({
   childChats,
   childrenNeedInput,
   expanded,
+  pinnedOpen,
   onToggleChildren,
   onClick,
 }: {
@@ -731,6 +758,8 @@ function ChatRow({
   childChats: Chat[];
   childrenNeedInput: boolean;
   expanded: boolean;
+  /** `expanded` is being held true by {@link mustStayOpen}; the toggle is inert. */
+  pinnedOpen: boolean;
   onToggleChildren: () => void;
   onClick: () => void;
 }) {
@@ -1103,8 +1132,9 @@ function ChatRow({
               <IconButton
                 size="sm"
                 active={expanded}
+                disabled={pinnedOpen}
                 aria-expanded={expanded}
-                tip={expanded ? `Hide ${foldedLabel}` : `Show ${foldedLabel}`}
+                tip={foldTip(foldedLabel, expanded, pinnedOpen)}
                 onClick={trayAction(onToggleChildren)}
               >
                 <MessagesSquare />
@@ -1227,6 +1257,7 @@ function ReviewRow({
   childChats,
   childrenNeedInput,
   expanded,
+  pinnedOpen,
   onToggleChildren,
   onClick,
 }: ChildRowProps) {
@@ -1249,7 +1280,8 @@ function ReviewRow({
         <ChildDisclosure
           depth={depth}
           open={expanded}
-          label={expanded ? `Hide ${folded}` : `Show ${folded}`}
+          pinned={pinnedOpen}
+          label={foldTip(folded, expanded, pinnedOpen)}
           onToggle={onToggleChildren}
         />
       )}
@@ -1367,6 +1399,7 @@ function SpawnRow({
   childChats,
   childrenNeedInput,
   expanded,
+  pinnedOpen,
   onToggleChildren,
   onClick,
 }: ChildRowProps) {
@@ -1382,7 +1415,8 @@ function SpawnRow({
         <ChildDisclosure
           depth={depth}
           open={expanded}
-          label={expanded ? `Hide ${folded}` : `Show ${folded}`}
+          pinned={pinnedOpen}
+          label={foldTip(folded, expanded, pinnedOpen)}
           onToggle={onToggleChildren}
         />
       )}
