@@ -107,6 +107,28 @@ export interface IssuePollResult {
   error?: string;
 }
 
+/**
+ * One open issue as the pane lists it: the tracker's row plus what THIS
+ * instance would do with it — the claim it already holds, or why the next
+ * poll would pass it over. The pane's "why didn't it pick that one up" answer,
+ * and the row a human hands over by hand.
+ */
+export interface ListedIssue {
+  issue: Issue;
+  claim?: Pick<IssueClaim, "state" | "chatId" | "note">;
+  /** Why a poll would not take it; absent when it would. */
+  reason?: string;
+}
+
+/** What a manual hand-over did — per issue, since some may be refused. */
+export interface IssueTakeResult {
+  projectId: string;
+  taken: number[];
+  refused: Array<{ number: number; reason: string }>;
+  chatId?: string;
+  error?: string;
+}
+
 export class IssueWatcher {
   private readonly store: IssueWatcherOptions["store"];
   private readonly bus: IssueWatcherOptions["bus"];
@@ -305,6 +327,34 @@ export class IssueWatcher {
       return { ...result, skipped: room === 0 && overflow.length ? "at-capacity" : undefined };
     }
 
+    const out = await this.handOff(tracker, policy, projectId, candidates, now, sourceLabel, "new");
+    for (const r of out.refused) mark(result.seen, r.number, r.reason);
+    for (const n of out.taken) mark(result.seen, n, undefined, true);
+    result.taken = out.taken;
+    result.chatId = out.chatId;
+    result.error = out.error;
+    await save({ lastError: result.error, lastSeen: result.seen });
+    return result;
+  }
+
+  /**
+   * The hand-over itself: claim in the store, label on the tracker, spawn ONE
+   * chat for whatever survived. Shared by the poll and by {@link take}, so a
+   * human handing an issue over by hand gets exactly the lock, the label and
+   * the briefing a polled one gets — the only difference is who chose it.
+   */
+  private async handOff(
+    tracker: BoundIssueTracker,
+    policy: ResolvedIssuePolicy,
+    projectId: string,
+    candidates: Issue[],
+    now: number,
+    sourceLabel: string,
+    /** "new" for the poll's own finds; a human's pick is just "issues". */
+    adjective: "new" | "",
+  ): Promise<Omit<IssueTakeResult, "projectId">> {
+    const out: Omit<IssueTakeResult, "projectId"> = { taken: [], refused: [] };
+    if (!candidates.length) return out;
     // Claim in the store first: a second poll landing right now gets the rest.
     const taken = await this.store.claimIssues(
       candidates.map((issue) => ({
@@ -324,7 +374,7 @@ export class IssueWatcher {
     const batch: Issue[] = [];
     for (const issue of candidates) {
       if (!takenNumbers.has(issue.number)) {
-        mark(result.seen, issue.number, "claimed by a concurrent poll");
+        out.refused.push({ number: issue.number, reason: "claimed by a concurrent poll" });
         continue;
       }
       // The label is the lock the OTHER instance sees. Labelling fails → that
@@ -336,49 +386,167 @@ export class IssueWatcher {
       } catch (err) {
         const key = issueKey(tracker.source, issue.number);
         await this.store.updateIssueClaim(key, { state: "failed", note: `label: ${msg(err)}`, updatedAt: now });
-        mark(result.seen, issue.number, `could not label: ${msg(err)}`);
+        out.refused.push({ number: issue.number, reason: `could not label: ${msg(err)}` });
       }
     }
-    if (!batch.length) {
-      await save({ lastError: undefined, lastSeen: result.seen });
-      return result;
-    }
+    if (!batch.length) return out;
 
     const spawned = await this.opts
       .spawn({ projectId, issues: batch, policy, sourceLabel })
       .catch((err: unknown) => {
-        result.error = msg(err);
+        out.error = msg(err);
         return null;
       });
     for (const issue of batch) {
       const key = issueKey(tracker.source, issue.number);
       if (spawned) {
         await this.store.updateIssueClaim(key, { state: "working", chatId: spawned.chatId, updatedAt: now });
-        mark(result.seen, issue.number, undefined, true);
-        result.taken.push(issue.number);
+        out.taken.push(issue.number);
       } else {
         // Spawn failed: give the issue back. The label comes off so nothing
         // reads it as being worked, and the row records why.
         await this.store.updateIssueClaim(key, {
           state: "failed",
-          note: `spawn: ${result.error ?? "unknown"}`,
+          note: `spawn: ${out.error ?? "unknown"}`,
           updatedAt: now,
         });
         await tracker.update(issue.number, { removeLabels: [policy.claimLabel] }).catch(() => {});
-        mark(result.seen, issue.number, `chat could not be started: ${result.error ?? "unknown"}`);
+        out.refused.push({ number: issue.number, reason: `chat could not be started: ${out.error ?? "unknown"}` });
       }
     }
     if (spawned) {
-      result.chatId = spawned.chatId;
+      out.chatId = spawned.chatId;
       const n = batch.length;
       this.bus.publish({
         type: "notice",
         chatId: spawned.chatId,
         level: "info",
-        text: `Started a chat for ${n === 1 ? `issue #${batch[0]!.number}` : `${n} new issues`} in ${sourceLabel}`,
+        text: `Started a chat for ${n === 1 ? `issue #${batch[0]!.number}` : `${n} ${adjective ? `${adjective} ` : ""}issues`} in ${sourceLabel}`,
       });
     }
-    await save({ lastError: result.error, lastSeen: result.seen });
+    return out;
+  }
+
+  /**
+   * Every open issue in the tracker, read NOW, with what this instance would
+   * do about each — not the last poll's memory of it. The pane lists these so
+   * a human can hand one over whatever the poll thinks: a dev instance never
+   * polls and an un-enrolled project has no watch row, and both still have a
+   * backlog worth pointing a chat at.
+   */
+  async listOpen(projectId: string): Promise<ListedIssue[]> {
+    const tracker = await this.opts.trackerFor(projectId);
+    if (!tracker) throw new Error("no issue source: set issues.source or point origin at a supported host");
+    const policy = resolveIssuePolicy(this.opts.configFor(projectId));
+    const [open, claims, watch] = await Promise.all([
+      tracker.list({ state: "open", limit: POLL_LIMIT }),
+      this.store.listIssueClaims(projectId).catch(() => []),
+      this.store.getIssueWatch(projectId).catch(() => null),
+    ]);
+    const claimed = new Map(claims.map((c) => [c.key, c]));
+    const rows = open.map((issue) => {
+      const prior = claimed.get(issueKey(tracker.source, issue.number));
+      const row: ListedIssue = { issue };
+      if (prior) {
+        row.claim = { state: prior.state, chatId: prior.chatId, note: prior.note };
+        if (prior.state === "claimed" || prior.state === "working") row.reason = `${prior.state} by this instance`;
+      }
+      if (row.reason) return row;
+      if (!policy.enabled) row.reason = "handling is off";
+      else if (!watch) row.reason = "not enrolled yet";
+      else if (Date.parse(issue.createdAt) <= watch.baselineAt) row.reason = "opened before enrolment";
+      else {
+        const m = matchIssue(issue, policy);
+        if (!m.ok) row.reason = m.reason;
+      }
+      return row;
+    });
+    // The cap, applied the way the poll applies it — oldest candidate first,
+    // the rest "at capacity". Without this, two issues that both pass the
+    // filters under a cap with one slot free would both read "would take", and
+    // the pane's answer to "why didn't it pick that one up" would be wrong for
+    // exactly the case the cap exists for. Counted the same way as the poll:
+    // claimed or working here. (The poll also drops a claim whose chat has
+    // vanished; this read does not touch the store, so such a claim still
+    // counts until the next poll reaps it.)
+    const inFlight = claims.filter((c) => c.state === "claimed" || c.state === "working").length;
+    const room = Math.max(0, policy.maxConcurrent - inFlight);
+    const candidates = rows
+      .filter((r) => !r.reason)
+      .sort((a, b) => Date.parse(a.issue.createdAt) - Date.parse(b.issue.createdAt));
+    for (const r of candidates.slice(room)) r.reason = `at capacity (${policy.maxConcurrent} in flight)`;
+    return rows;
+  }
+
+  /**
+   * Hand chosen issues to ONE chat, because a human said so.
+   *
+   * Skips every gate the poll applies on the human's behalf — enrolment, the
+   * baseline, the author/label filters, the cap, even the master switch: each
+   * of those exists so the watcher doesn't act on its own, and none of them
+   * should stop a person who clicked on a specific issue. What it keeps is the
+   * lock: an issue already claimed or working here, or carrying the claim label
+   * (another instance's lock), is refused rather than handed out twice. A
+   * finished claim (done, released, failed) is replaced, since taking it again
+   * is exactly what "start a chat" on a settled issue means.
+   */
+  async take(projectId: string, numbers: number[]): Promise<IssueTakeResult> {
+    const run = this.chain.then(() => this.runTake(projectId, numbers));
+    this.chain = run.catch(() => undefined);
+    this.inflight = this.chain.then(() => undefined);
+    return run;
+  }
+
+  private async runTake(projectId: string, numbers: number[]): Promise<IssueTakeResult> {
+    const result: IssueTakeResult = { projectId, taken: [], refused: [] };
+    const now = this.now();
+    const policy = resolveIssuePolicy(this.opts.configFor(projectId));
+    let tracker: BoundIssueTracker | null;
+    try {
+      tracker = await this.opts.trackerFor(projectId);
+    } catch (err) {
+      return { ...result, error: msg(err) };
+    }
+    if (!tracker) return { ...result, error: "no issue source: set issues.source or point origin at a supported host" };
+    const sourceLabel = issueSourceLabel(tracker.source);
+    const claims = new Map(
+      (await this.store.listIssueClaims(projectId).catch(() => [])).map((c) => [c.key, c]),
+    );
+    const candidates: Issue[] = [];
+    for (const number of [...new Set(numbers)]) {
+      const key = issueKey(tracker.source, number);
+      const prior = claims.get(key);
+      if (prior && (prior.state === "claimed" || prior.state === "working")) {
+        result.refused.push({ number, reason: `already ${prior.state} by this instance` });
+        continue;
+      }
+      let issue: Issue | null;
+      try {
+        issue = await tracker.get(number);
+      } catch (err) {
+        result.refused.push({ number, reason: msg(err) });
+        continue;
+      }
+      if (!issue) {
+        result.refused.push({ number, reason: "not found (or a pull request)" });
+        continue;
+      }
+      if (issue.state !== "open") {
+        result.refused.push({ number, reason: "closed" });
+        continue;
+      }
+      if (issue.labels.includes(policy.claimLabel)) {
+        result.refused.push({ number, reason: `carries ${policy.claimLabel} — being worked elsewhere` });
+        continue;
+      }
+      if (prior) await this.store.deleteIssueClaim(key).catch(() => {});
+      candidates.push(issue);
+    }
+    const out = await this.handOff(tracker, policy, projectId, candidates, now, sourceLabel, "");
+    result.taken = out.taken;
+    result.refused.push(...out.refused);
+    result.chatId = out.chatId;
+    result.error = out.error;
     return result;
   }
 

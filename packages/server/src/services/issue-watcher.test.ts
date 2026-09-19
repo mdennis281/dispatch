@@ -80,7 +80,7 @@ function fakeTracker(open: Issue[]) {
     list: vi.fn(async () => open.filter((i) => i.state === "open")),
     get: vi.fn(async (n: number) => open.find((i) => i.number === n) ?? null),
     comments: async () => [],
-    comment: async () => ({ id: "1" }),
+    comment: async (_n, body) => ({ id: "1", author: "bot", authorTrust: "owner" as const, body, createdAt: "" }),
     update,
   };
   return { tracker, labels, update };
@@ -345,5 +345,89 @@ describe("IssueWatcher", () => {
     expect(r.error).toContain("Bad credentials");
     expect(t.watches.get("p1")?.lastError).toContain("Bad credentials");
     expect(t.notices[0]).toContain("Issue poll failed");
+  });
+
+  describe("take — the human's hand-over", () => {
+    it("takes backlog issues the poll would refuse, and skips nothing it was not asked for", async () => {
+      const before = new Date(T0 - HOUR).toISOString();
+      // Untrusted author + predates enrolment: the poll passes it over twice.
+      const open = [issue(1, { createdAt: before, authorTrust: "none" }), issue(2, { createdAt: before })];
+      const t = watcher({ open });
+      await t.enrol();
+      const r = await t.w.take("p1", [1]);
+      expect(r.taken).toEqual([1]);
+      expect(r.refused).toEqual([]);
+      expect(r.chatId).toBe("chat-1");
+      expect(t.spawns[0]!.issues.map((i) => i.number)).toEqual([1]);
+      expect([...t.labels.get(1)!]).toEqual(["dispatch:working"]);
+      expect(t.claims.get("github:acme/api#1")).toMatchObject({ state: "working", chatId: "chat-1" });
+      expect(t.claims.has("github:acme/api#2")).toBe(false);
+      expect(t.notices).toEqual(["Started a chat for issue #1 in github:acme/api"]);
+    });
+
+    it("works without enrolment and with handling switched off — the person is the switch", async () => {
+      const t = watcher({ open: [issue(1)], config: { enabled: false } });
+      const r = await t.w.take("p1", [1]);
+      expect(r.taken).toEqual([1]);
+      expect(t.watches.has("p1")).toBe(false);
+    });
+
+    it("refuses what is already held here or labelled elsewhere, and replaces a settled claim", async () => {
+      const open = [issue(1), issue(2, { labels: ["dispatch:working"] }), issue(3), issue(4, { state: "closed" })];
+      const t = watcher({ open });
+      expect((await t.w.take("p1", [1])).taken).toEqual([1]);
+      t.claims.set("github:acme/api#3", { ...t.claims.get("github:acme/api#1")!, key: "github:acme/api#3", number: 3, state: "done" });
+      const r = await t.w.take("p1", [1, 2, 3, 4, 99]);
+      expect(r.taken).toEqual([3]);
+      expect(r.refused).toEqual([
+        { number: 1, reason: "already working by this instance" },
+        { number: 2, reason: "carries dispatch:working — being worked elsewhere" },
+        { number: 4, reason: "closed" },
+        { number: 99, reason: "not found (or a pull request)" },
+      ]);
+      expect(t.claims.get("github:acme/api#3")).toMatchObject({ state: "working", chatId: "chat-2" });
+      expect(t.spawns).toHaveLength(2);
+    });
+
+    it("gives the issue back when the chat cannot be started", async () => {
+      const t = watcher({ open: [issue(1)], spawn: async () => null });
+      const r = await t.w.take("p1", [1]);
+      expect(r.taken).toEqual([]);
+      expect(r.refused[0]?.reason).toContain("chat could not be started");
+      expect(t.claims.get("github:acme/api#1")?.state).toBe("failed");
+      expect(t.labels.get(1)?.has("dispatch:working")).toBe(false);
+    });
+  });
+
+  describe("listOpen", () => {
+    it("annotates each open issue with the claim held here or the reason a poll would skip it", async () => {
+      const before = new Date(T0 - HOUR).toISOString();
+      const open = [issue(1, { createdAt: before }), issue(2, { createdAt: new Date(T0 + 1).toISOString(), authorTrust: "none" }), issue(3, { createdAt: new Date(T0 + 1).toISOString() })];
+      const t = watcher({ open });
+      expect((await t.w.listOpen("p1")).map((r) => r.reason)).toEqual(["not enrolled yet", "not enrolled yet", "not enrolled yet"]);
+      await t.enrol();
+      await t.w.take("p1", [1]);
+      const rows = await t.w.listOpen("p1");
+      expect(rows.map((r) => [r.issue.number, r.reason, r.claim?.state])).toEqual([
+        [1, "working by this instance", "working"],
+        [2, "author alice is none, not owner/member/collaborator", undefined],
+        [3, undefined, undefined],
+      ]);
+    });
+
+    it("applies the cap the way the poll would — oldest candidate first, the rest at capacity", async () => {
+      const after = (s: number) => new Date(T0 + s * 1000).toISOString();
+      const open = [issue(1, { createdAt: after(1) }), issue(2, { createdAt: after(30) }), issue(3, { createdAt: after(10) })];
+      const t = watcher({ open, config: { enabled: true, maxConcurrent: 2 } });
+      await t.enrol();
+      await t.w.take("p1", [1]);
+      // One slot left, two candidates: #3 (opened first) would go, #2 would wait.
+      const rows = await t.w.listOpen("p1");
+      expect(rows.map((r) => [r.issue.number, r.reason])).toEqual([
+        [1, "working by this instance"],
+        [2, "at capacity (2 in flight)"],
+        [3, undefined],
+      ]);
+    });
   });
 });

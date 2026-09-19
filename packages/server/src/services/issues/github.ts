@@ -95,6 +95,17 @@ function toIssue(raw: RawIssue): Issue {
   };
 }
 
+function mapComment(c: RawComment): IssueComment {
+  return {
+    id: String(c.id),
+    author: c.user?.login ?? "ghost",
+    authorTrust: trustOf(c.author_association),
+    body: c.body ?? "",
+    createdAt: c.created_at ?? "",
+    url: c.html_url,
+  };
+}
+
 export class GitHubIssueProvider implements IssueProvider {
   readonly id = "github" as const;
 
@@ -151,17 +162,10 @@ export class GitHubIssueProvider implements IssueProvider {
     const last = Math.max(1, Math.ceil((total ?? 0) / perPage));
     let raw = await fetchPage(last);
     if (raw.length < want && last > 1) raw = [...(await fetchPage(last - 1)), ...raw];
-    return raw.slice(-want).map((c) => ({
-      id: String(c.id),
-      author: c.user?.login ?? "ghost",
-      authorTrust: trustOf(c.author_association),
-      body: c.body ?? "",
-      createdAt: c.created_at ?? "",
-      url: c.html_url,
-    }));
+    return raw.slice(-want).map(mapComment);
   }
 
-  async comment(source: IssueSource, number: number, body: string): Promise<{ id: string; url?: string }> {
+  async comment(source: IssueSource, number: number, body: string): Promise<IssueComment> {
     // The body goes through a file, never argv: Windows caps a whole command line
     // at 32,767 chars, so a long comment would die as `spawn ENAMETOOLONG`
     // before reaching GitHub. `--input` is read as JSON, so a body starting with
@@ -174,7 +178,9 @@ export class GitHubIssueProvider implements IssueProvider {
         "--method", "POST", this.path(source, `issues/${this.num(number)}/comments`),
         "--input", file,
       ]);
-      return { id: String(raw?.id ?? ""), url: raw?.html_url };
+      // GitHub echoes the created comment back, author included — that is how
+      // the transcript card knows which account it was posted as.
+      return mapComment({ ...(raw ?? { id: "" }), body: raw?.body ?? body });
     } finally {
       await rm(dir, { recursive: true, force: true }).catch(() => {});
     }

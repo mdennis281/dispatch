@@ -39,7 +39,7 @@ export interface IssueProvider {
    * to the last page instead of returning the first page's tail.
    */
   comments(source: IssueSource, number: number, limit?: number, total?: number): Promise<IssueComment[]>;
-  comment(source: IssueSource, number: number, body: string): Promise<{ id: string; url?: string }>;
+  comment(source: IssueSource, number: number, body: string): Promise<IssueComment>;
   /** Apply a patch and return the issue as it now stands. */
   update(source: IssueSource, number: number, patch: IssuePatch): Promise<Issue>;
 }

@@ -9,6 +9,7 @@ import { ToolCallCard } from "./rows/ToolCallCard.js";
 import { ShellRunGroup } from "./rows/ShellRunGroup.js";
 import { FileRunGroup } from "./rows/FileRunGroup.js";
 import { PrRunGroup } from "./rows/PrRunGroup.js";
+import { IssueRunGroup } from "./rows/IssueRunGroup.js";
 import { DispatchToolCard } from "./rows/DispatchToolCard.js";
 import { SubagentCard } from "./rows/SubagentCard.js";
 import { ThinkingGroup } from "./rows/ThinkingGroup.js";
@@ -255,6 +256,19 @@ export const MessageList = memo(function MessageList({ chatId, messages }: Messa
           return (
             <div key={`pr:${first.id}`} className="cm-row-cv">
               <PrRunGroup
+                entries={item.rows.map((use) => {
+                  const result = resultsByUse.get(use.toolUseId);
+                  return { use, result, task: findTaskStatus(taskStatus, use.toolUseId, result) };
+                })}
+              />
+            </div>
+          );
+        }
+        if (item.kind === "issue") {
+          const first = item.rows[0]!;
+          return (
+            <div key={`issue:${first.id}`} className="cm-row-cv">
+              <IssueRunGroup
                 entries={item.rows.map((use) => {
                   const result = resultsByUse.get(use.toolUseId);
                   return { use, result, task: findTaskStatus(taskStatus, use.toolUseId, result) };
