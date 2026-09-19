@@ -428,34 +428,49 @@ const SECTION_LABEL: Record<ChatSection, string> = {
 };
 
 /**
- * Whether a fold is held open regardless of its chevron.
+ * Whether a folded chat is drawn even while its parent's fold is closed.
  *
- * A branch never hides the transcript that's on screen. The PRs panel links
+ * A fold never hides the transcript that's on screen. The PRs panel links
  * straight to a reviewer chat, and landing there with its parent collapsed left
- * the sidebar with no row for what you were looking at. `descendants`, not
- * `children`: a reviewer hangs off the spawned chat rather than off the root, so
- * the one being read can be two levels down.
+ * the sidebar with no row for what you were looking at.
  *
- * Nor does it hide a chat that is LIVE under it — one waiting on an answer or
- * one still working. Either files the whole branch under "Needs input" or
- * "Working" ({@link chatSection} via `ChatBranch.section`), so the parent sat
- * in that queue with a dot or a spinner and the row actually doing the thing
- * folded away behind a chevron. Keyed on the SAME predicate that filed it
- * there, plus the attention set the dot reads, so the fold can never disagree
- * with the queue the row is drawn in. The chevron only gets a say once every
- * chat below is at rest — idle or unstarted — which is the only time there is
- * nothing under here worth a row.
+ * Nor does it hide a chat that is LIVE — one waiting on an answer or one still
+ * working. Either files the whole branch under "Needs input" or "Working"
+ * ({@link chatSection} via `ChatBranch.section`), so the parent sat in that
+ * queue with a dot or a spinner and the row actually doing the thing folded
+ * away behind a chevron. Keyed on the SAME predicate that filed it there, plus
+ * the attention set the dot reads, so what's shown can never disagree with the
+ * queue the row is drawn in.
+ *
+ * Only the live rows, though — not the whole fold. A parent with three
+ * questions under it and twelve finished reviews is filed under "Needs input"
+ * for the three; the twelve stay behind the chevron, where the reader who wants
+ * them has always found them. See {@link visibleChildren}.
  */
-function mustStayOpen(
-  descendants: Chat[],
+function isLive(chat: Chat, activeChatId: string | null, attentionByChat: Set<string>): boolean {
+  if (chat.id === activeChatId || attentionByChat.has(chat.id)) return true;
+  const section = chatSection(chat);
+  return section === "attention" || section === "working";
+}
+
+/**
+ * The child branches a fold draws right now: every one of them once it's been
+ * expanded, otherwise just those with a live chat somewhere inside — the
+ * branch is drawn, not only the live leaf, so the rows between the root and a
+ * live grandchild are there to show which sub-branch it belongs to. Each level
+ * then applies the same rule to its own children, so an unexpanded path down
+ * to a live grandchild shows nothing but that path.
+ */
+function visibleChildren(
+  children: ChatBranch[],
+  expanded: boolean,
   activeChatId: string | null,
   attentionByChat: Set<string>,
-): boolean {
-  return descendants.some((c) => {
-    if (c.id === activeChatId || attentionByChat.has(c.id)) return true;
-    const section = chatSection(c);
-    return section === "attention" || section === "working";
-  });
+): { shown: ChatBranch[]; live: boolean } {
+  const live = children.filter((b) =>
+    [b.chat, ...b.descendants].some((c) => isLive(c, activeChatId, attentionByChat)),
+  );
+  return { shown: expanded ? children : live, live: live.length > 0 };
 }
 
 /**
@@ -469,7 +484,8 @@ function mustStayOpen(
  *
  * Collapsed by default, and the flag is component state rather than a store:
  * it's where this reader's eye is right now, and nothing else in the app has an
- * opinion about it. A live chat underneath overrides it — see {@link mustStayOpen}.
+ * opinion about it. A live chat underneath is drawn either way — see
+ * {@link isLive}.
  */
 function ChatBranchRows({
   branch,
@@ -488,8 +504,7 @@ function ChatBranchRows({
 }) {
   const { chat, children, descendants } = branch;
   const [expanded, setExpanded] = useState(false);
-  const pinned = mustStayOpen(descendants, activeChatId, attentionByChat);
-  const open = expanded || pinned;
+  const { shown, live } = visibleChildren(children, expanded, activeChatId, attentionByChat);
 
   return (
     <div data-flip-id={chat.id}>
@@ -504,14 +519,14 @@ function ChatBranchRows({
         // typo away from being rendered instead of counted.
         childChats={descendants}
         childrenNeedInput={descendants.some((c) => attentionByChat.has(c.id))}
-        expanded={open}
-        pinnedOpen={pinned}
+        expanded={expanded}
+        liveShown={live}
         onToggleChildren={() => setExpanded((v) => !v)}
         onClick={() => onSelect(chat.id)}
       />
-      {open && children.length > 0 && (
+      {shown.length > 0 && (
         <ChildRows
-          branches={children}
+          branches={shown}
           depth={1}
           activeChatId={activeChatId}
           attentionByChat={attentionByChat}
@@ -584,10 +599,9 @@ function ChildBranchRows({
 }: { branch: ChatBranch; depth: number } & RowContext) {
   const { chat, children, descendants } = branch;
   const [expanded, setExpanded] = useState(false);
-  // Same forced-open cases as the top-level row: a grandchild's question has to
-  // open every fold between it and the root, not just the outermost one.
-  const pinned = mustStayOpen(descendants, activeChatId, attentionByChat);
-  const open = expanded || pinned;
+  // Same rule as the top-level row, one level down: a live grandchild is drawn
+  // through every fold between it and the root, and nothing else is.
+  const { shown, live } = visibleChildren(children, expanded, activeChatId, attentionByChat);
   const Row = isReviewerChat(chat) ? ReviewRow : SpawnRow;
 
   return (
@@ -604,14 +618,14 @@ function ChildBranchRows({
         runtimeMs={branchRuntimeMs(runtimeByChat, chat.id, descendants)}
         childChats={descendants}
         childrenNeedInput={descendants.some((c) => attentionByChat.has(c.id))}
-        expanded={open}
-        pinnedOpen={pinned}
+        expanded={expanded}
+        liveShown={live}
         onToggleChildren={() => setExpanded((v) => !v)}
         onClick={() => onSelect(chat.id)}
       />
-      {open && children.length > 0 && (
+      {shown.length > 0 && (
         <ChildRows
-          branches={children}
+          branches={shown}
           depth={depth + 1}
           activeChatId={activeChatId}
           attentionByChat={attentionByChat}
@@ -637,8 +651,11 @@ interface ChildRowProps {
   childChats: readonly Chat[];
   childrenNeedInput: boolean;
   expanded: boolean;
-  /** `expanded` is being held true by {@link mustStayOpen}; the toggle is inert. */
-  pinnedOpen: boolean;
+  /**
+   * Some children are drawn even while `expanded` is false — the live ones
+   * ({@link isLive}). The toggle then reveals the rest rather than the first.
+   */
+  liveShown: boolean;
   onToggleChildren: () => void;
   onClick: () => void;
 }
@@ -646,10 +663,11 @@ interface ChildRowProps {
 /**
  * Tip for a fold control. One string, three rows: the tray button on the
  * top-level row and the chevron on both child rows all say the same thing.
+ * When live rows are already showing, the toggle is about the REST of them.
  */
-function foldTip(folded: string, expanded: boolean, pinned: boolean): string {
-  if (pinned) return `Shown while live — ${folded}`;
-  return expanded ? `Hide ${folded}` : `Show ${folded}`;
+function foldTip(folded: string, expanded: boolean, liveShown: boolean): string {
+  if (expanded) return liveShown ? "Show live chats only" : `Hide ${folded}`;
+  return liveShown ? `Show all — ${folded}` : `Show ${folded}`;
 }
 
 /**
@@ -668,14 +686,14 @@ function foldTip(folded: string, expanded: boolean, pinned: boolean): string {
 function ChildDisclosure({
   depth,
   open,
-  pinned,
+  liveShown,
   label,
   onToggle,
 }: {
   depth: number;
   open: boolean;
-  /** The fold is held open by what's under it — the chevron is a marker, not a control. */
-  pinned: boolean;
+  /** Live rows are showing under a closed fold — the chevron sits half-way. */
+  liveShown: boolean;
   label: string;
   onToggle: () => void;
 }) {
@@ -685,23 +703,25 @@ function ChildDisclosure({
       aria-expanded={open}
       aria-label={label}
       title={label}
-      disabled={pinned}
       onClick={onToggle}
       className={cn(
         "absolute inset-y-0 z-10 flex w-5 items-center justify-center",
         // `muted`, not `faint`. Faint is this sidebar's "nothing to report" tone
         // (see the resting row markers), and a chevron only exists on a row that
         // HAS something to report — it is the one affordance saying so.
-        "text-muted transition-colors [&_svg]:size-2.5",
-        // Still drawn when pinned — it is what says the rows below are THIS
-        // row's — but it neither lights up nor invites the click it would swallow.
-        pinned ? "cursor-default" : "hover:text-primary",
+        "text-muted transition-colors hover:text-primary [&_svg]:size-2.5",
         atDepth(DISCLOSURE_INSET, depth - 1),
       )}
     >
+      {/* Half-turned when live rows show under a closed fold: rows below a
+          closed chevron read as someone else's, and an open one promises
+          there is nothing more to see. */}
       <ChevronRight
         aria-hidden
-        className={cn("transition-transform duration-150", open && "rotate-90")}
+        className={cn(
+          "transition-transform duration-150",
+          open ? "rotate-90" : liveShown && "rotate-45",
+        )}
       />
     </button>
   );
@@ -743,7 +763,7 @@ function ChatRow({
   childChats,
   childrenNeedInput,
   expanded,
-  pinnedOpen,
+  liveShown,
   onToggleChildren,
   onClick,
 }: {
@@ -758,8 +778,11 @@ function ChatRow({
   childChats: Chat[];
   childrenNeedInput: boolean;
   expanded: boolean;
-  /** `expanded` is being held true by {@link mustStayOpen}; the toggle is inert. */
-  pinnedOpen: boolean;
+  /**
+   * Some children are drawn even while `expanded` is false — the live ones
+   * ({@link isLive}). The toggle then reveals the rest rather than the first.
+   */
+  liveShown: boolean;
   onToggleChildren: () => void;
   onClick: () => void;
 }) {
@@ -1132,9 +1155,8 @@ function ChatRow({
               <IconButton
                 size="sm"
                 active={expanded}
-                disabled={pinnedOpen}
                 aria-expanded={expanded}
-                tip={foldTip(foldedLabel, expanded, pinnedOpen)}
+                tip={foldTip(foldedLabel, expanded, liveShown)}
                 onClick={trayAction(onToggleChildren)}
               >
                 <MessagesSquare />
@@ -1257,7 +1279,7 @@ function ReviewRow({
   childChats,
   childrenNeedInput,
   expanded,
-  pinnedOpen,
+  liveShown,
   onToggleChildren,
   onClick,
 }: ChildRowProps) {
@@ -1280,8 +1302,8 @@ function ReviewRow({
         <ChildDisclosure
           depth={depth}
           open={expanded}
-          pinned={pinnedOpen}
-          label={foldTip(folded, expanded, pinnedOpen)}
+          liveShown={liveShown}
+          label={foldTip(folded, expanded, liveShown)}
           onToggle={onToggleChildren}
         />
       )}
@@ -1399,7 +1421,7 @@ function SpawnRow({
   childChats,
   childrenNeedInput,
   expanded,
-  pinnedOpen,
+  liveShown,
   onToggleChildren,
   onClick,
 }: ChildRowProps) {
@@ -1415,8 +1437,8 @@ function SpawnRow({
         <ChildDisclosure
           depth={depth}
           open={expanded}
-          pinned={pinnedOpen}
-          label={foldTip(folded, expanded, pinnedOpen)}
+          liveShown={liveShown}
+          label={foldTip(folded, expanded, liveShown)}
           onToggle={onToggleChildren}
         />
       )}
