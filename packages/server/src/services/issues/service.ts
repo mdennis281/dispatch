@@ -35,7 +35,7 @@ export interface BoundIssueTracker {
   list(query?: IssueListQuery): Promise<Issue[]>;
   get(number: number): Promise<Issue | null>;
   comments(number: number, limit?: number, total?: number): Promise<IssueComment[]>;
-  comment(number: number, body: string): Promise<{ id: string; url?: string }>;
+  comment(number: number, body: string): Promise<IssueComment>;
   update(number: number, patch: IssuePatch): Promise<Issue>;
 }
 

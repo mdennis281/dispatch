@@ -80,7 +80,7 @@ function fakeTracker(open: Issue[]) {
     list: vi.fn(async () => open.filter((i) => i.state === "open")),
     get: vi.fn(async (n: number) => open.find((i) => i.number === n) ?? null),
     comments: async () => [],
-    comment: async () => ({ id: "1" }),
+    comment: async (_n, body) => ({ id: "1", author: "bot", authorTrust: "owner" as const, body, createdAt: "" }),
     update,
   };
   return { tracker, labels, update };

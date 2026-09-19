@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import type { ChatMessage, ToolUseRow } from "@dispatch/shared";
 import {
   groupTranscriptRows,
+  isIssuePresentation,
   isPrPresentation,
   shellGroupPresentation,
   toolPresentation,
@@ -67,5 +68,27 @@ describe("PR calls leave the terminal frame", () => {
   it("has retired the `pr` shell-filter toggle", () => {
     // The toggle described rows that no longer live there.
     expect(SHELL_FILTER_OPTIONS.map((o) => o.id)).not.toContain("pr");
+  });
+});
+
+describe("issue calls leave the terminal frame too", () => {
+  const issues = (tool: string, input?: Record<string, unknown>, id?: string) =>
+    use(`mcp__dispatch-issues__${tool}`, input, id);
+
+  it("groups adjacent issue calls into a run of their own, apart from a PR run", () => {
+    // Reading an issue then opening a PR for it are two stories; an issue read
+    // filed under a "Pull request" header names the wrong thing.
+    const items = groupTranscriptRows([
+      issues("issue_read", { number: 5 }, "a"),
+      issues("issue_comment", { number: 5, body: "on it" }, "b"),
+      mcp("create_pr", { title: "fix: #5" }, "c"),
+    ] as ChatMessage[]);
+    expect(items.map((i) => i.kind)).toEqual(["issue", "pr"]);
+  });
+
+  it("refuses to present an issue call as a shell-frame row", () => {
+    const row = issues("issue_update", { number: 5, state: "closed" });
+    expect(isIssuePresentation(toolPresentation(row))).toBe(true);
+    expect(shellGroupPresentation(row)).toBeNull();
   });
 });

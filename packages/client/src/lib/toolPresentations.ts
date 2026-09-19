@@ -275,12 +275,19 @@ export function toolPresentation(use: ToolUseRow): ToolPresentation | null {
 export function shellGroupPresentation(use: ToolUseRow): ShellGroupPresentation | null {
   const presentation = toolPresentation(use);
   if (!presentation || presentation.kind === "file") return null;
-  return presentation.kind === "dispatch" && presentation.category === "pr" ? null : presentation;
+  return presentation.kind === "dispatch" && (presentation.category === "pr" || presentation.category === "issue")
+    ? null
+    : presentation;
 }
 
 /** True for a call that belongs in a PR card rather than the terminal frame. */
 export function isPrPresentation(presentation: ToolPresentation | null): boolean {
   return presentation?.kind === "dispatch" && presentation.category === "pr";
+}
+
+/** True for a call that belongs in an issue card rather than the terminal frame. */
+export function isIssuePresentation(presentation: ToolPresentation | null): boolean {
+  return presentation?.kind === "dispatch" && presentation.category === "issue";
 }
 
 export interface TranscriptRowItem {
@@ -312,6 +319,17 @@ export interface TranscriptPrItem {
 }
 
 /**
+ * Adjacent issue calls, as their own run — the same treatment as a PR, for
+ * the same reason. An `issue_read` is a document, not a command, and its
+ * receipt used to be two lines of fenced provenance text, which is written for
+ * the model and says nothing to a person about the issue itself.
+ */
+export interface TranscriptIssueItem {
+  kind: "issue";
+  rows: ToolUseRow[];
+}
+
+/**
  * Adjacent reasoning, as one stack.
  *
  * The SDK finalizes one assistant message per API turn, and a turn that thinks
@@ -334,6 +352,7 @@ export type TranscriptItem =
   | TranscriptShellItem
   | TranscriptFilesItem
   | TranscriptPrItem
+  | TranscriptIssueItem
   | TranscriptThinkingItem;
 
 /**
@@ -348,7 +367,7 @@ export type TranscriptItem =
 export function groupTranscriptRows(rows: ChatMessage[]): TranscriptItem[] {
   const items: TranscriptItem[] = [];
   let run:
-    | { kind: "shell" | "files" | "pr"; rows: ToolUseRow[] }
+    | { kind: "shell" | "files" | "pr" | "issue"; rows: ToolUseRow[] }
     | { kind: "thinking"; rows: AssistantMessageRow[] }
     | null = null;
   const resultsByUse = new Map(
@@ -398,9 +417,11 @@ export function groupTranscriptRows(rows: ChatMessage[]): TranscriptItem[] {
       if (presentation) {
         const kind = isPrPresentation(presentation)
           ? "pr"
-          : presentation.kind === "file"
-            ? "files"
-            : "shell";
+          : isIssuePresentation(presentation)
+            ? "issue"
+            : presentation.kind === "file"
+              ? "files"
+              : "shell";
         if (!run || run.kind !== kind) {
           flush();
           run = { kind, rows: [row] };

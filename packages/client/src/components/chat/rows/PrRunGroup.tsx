@@ -21,7 +21,7 @@
  * thing worth avoiding.
  */
 import { memo, useMemo, useState, type ReactNode } from "react";
-import { Check, ChevronRight, Circle, Eye, GitPullRequest, X } from "lucide-react";
+import { Eye, GitPullRequest } from "lucide-react";
 import {
   decodePrToolPayload,
   prRecordKey,
@@ -38,14 +38,14 @@ import {
 import { RowShell } from "./RowShell.js";
 import { ResultMediaStrip } from "./ResultMediaStrip.js";
 import { PrStatePanel, PrStateStrip } from "./PrStateView.js";
+import { DetailLines, OutcomeCard, RawExchange, StateMark } from "./ToolCardBits.js";
 import { Modal } from "../../sidebar/Modal.js";
-import { CodeBlock } from "../CodeBlock.js";
 import { Button } from "../../ui/Button.js";
 import { Chip } from "../../ui/Chip.js";
 import { OverflowTooltip } from "../../ui/OverflowTooltip.js";
 import { Spinner } from "../../ui/Spinner.js";
 import { cn } from "../../../lib/cn.js";
-import { dur, parseMcpName, relTime, safeJson, untilShort } from "../../../lib/format.js";
+import { dur, parseMcpName, relTime, untilShort } from "../../../lib/format.js";
 import { hydrateFullRows } from "../../../stores/index.js";
 import { useNowTick } from "../../../stores/agentRun.js";
 import { usePrs } from "../../../stores/prs.js";
@@ -69,13 +69,6 @@ const VERB: Record<string, string> = {
   post_review: "review",
   approve_pr: "merge",
 };
-
-function StateMark({ state }: { state: ToolDetailState }) {
-  if (state === "running") return <Spinner size={10} />;
-  if (state === "failed") return <X className="text-danger" />;
-  if (state === "stopped") return <Circle className="text-muted" />;
-  return <Check className="text-success" />;
-}
 
 /** The PR a `watch_pr` call names in its input — all a still-running watch has. */
 function watchTarget(input: Record<string, unknown>): { number: number; repo?: string } | null {
@@ -225,7 +218,7 @@ function PrToolCard({ entry }: { entry: PrRunEntry }) {
               record={record}
             />
           ) : (
-            payload && <OutcomeCard payload={payload} elapsed={elapsed} />
+            payload && <OutcomeCard outcome={payload.outcome} elapsed={elapsed} />
           )}
           {pr ? (
             <PrStatePanel pr={pr} reviewAgent={record?.reviewAgent} live={live} />
@@ -236,7 +229,12 @@ function PrToolCard({ entry }: { entry: PrRunEntry }) {
                 : "The tool could not read this pull request, so there is no state to show."}
             </p>
           )}
-          <RawExchange input={entry.use.input} response={text} running={state === "running"} />
+          <RawExchange
+            input={entry.use.input}
+            response={text}
+            running={state === "running"}
+            runningNote="No response yet — the watch is still running."
+          />
         </div>
       </Modal>
     </>
@@ -265,43 +263,6 @@ function Fact({ label, children }: { label: string; children: ReactNode }) {
     <div className="flex min-w-0 flex-col gap-0.5">
       <dt className="text-2xs uppercase tracking-wide text-faint">{label}</dt>
       <dd className="min-w-0 truncate cm-mono !text-xs text-secondary">{children}</dd>
-    </div>
-  );
-}
-
-function DetailLines({ lines }: { lines: string[] }) {
-  if (lines.length === 0) return null;
-  return (
-    <ul className="flex flex-col gap-1 border-t border-line-soft pt-2">
-      {lines.map((line, i) => (
-        <li key={i} className="text-xs leading-snug text-secondary">
-          {line}
-        </li>
-      ))}
-    </ul>
-  );
-}
-
-/** What a one-shot PR tool did — the headline, whether it worked, and why. */
-function OutcomeCard({ payload, elapsed }: { payload: PrToolPayload; elapsed?: number }) {
-  const ok = payload.outcome.ok;
-  return (
-    <div
-      className={cn(
-        "flex flex-col gap-2 rounded-md border bg-inset px-3 py-2.5",
-        ok ? "border-line" : "border-danger/40",
-      )}
-    >
-      <div className="flex items-center gap-2 [&_svg]:size-3.5">
-        {ok ? <Check className="text-success" /> : <X className="text-danger" />}
-        <span className={cn("min-w-0 flex-1 text-sm", ok ? "text-primary" : "text-danger")}>
-          {payload.outcome.summary}
-        </span>
-        {elapsed !== undefined && (
-          <span className="shrink-0 cm-mono !text-2xs text-faint">{dur(elapsed)}</span>
-        )}
-      </div>
-      <DetailLines lines={payload.outcome.details} />
     </div>
   );
 }
@@ -391,38 +352,6 @@ function WatchStatus({
         payload && <DetailLines lines={payload.outcome.details} />
       )}
     </div>
-  );
-}
-
-/**
- * The call as the model saw it, collapsed. Labelled Request/Response because the
- * prose answer is not code — the block's default language used to call it
- * "TypeScript".
- */
-function RawExchange({
-  input,
-  response,
-  running,
-}: {
-  input: Record<string, unknown>;
-  response: string;
-  running: boolean;
-}) {
-  return (
-    <details className="group rounded-md border border-line-soft">
-      <summary className="flex cursor-pointer list-none items-center gap-1.5 rounded-md px-2.5 py-1.5 text-2xs uppercase tracking-wide text-faint outline-none hover:text-secondary focus-visible:ring-1 focus-visible:ring-accent [&::-webkit-details-marker]:hidden">
-        <ChevronRight className="size-3 transition-transform group-open:rotate-90" />
-        Raw exchange
-      </summary>
-      <div className="flex flex-col px-2.5 pb-1">
-        <CodeBlock code={safeJson(input)} language="json" filename="Request" />
-        <CodeBlock
-          code={response || (running ? "No response yet — the watch is still running." : "No response")}
-          language="text"
-          filename="Response"
-        />
-      </div>
-    </details>
   );
 }
 

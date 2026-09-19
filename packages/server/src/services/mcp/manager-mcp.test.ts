@@ -13,6 +13,7 @@ import { EventBus } from "../../bus.js";
 import { PEER_MESSAGE_LIMIT } from "../chat-messenger.js";
 import { memorySimilarity } from "../memory.js";
 import {
+  decodeIssueToolPayload,
   decodePrToolPayload,
   HUMAN_REVIEW_ANSWERS,
   HUMAN_REVIEW_SUMMARY_MAX,
@@ -4865,6 +4866,35 @@ describe("issue tools", () => {
     );
     expect(res.isError).toBe(true);
     expect(update).not.toHaveBeenCalled();
+  });
+
+  it("appends a card payload the transcript can draw — the issue, its comments, what was done", async () => {
+    const posted = { id: "9", author: "dispatch-bot", authorTrust: "member" as const, body: "hi", createdAt: "2026-09-14T00:00:00Z", url: "u" };
+    const { issueRead, issueComment, issueUpdate } = tools({
+      get: async () => ({ ...issue, commentCount: 1 }),
+      comments: async () => [posted],
+      comment: async () => posted,
+      update: async () => ({ ...issue, state: "closed" as const }),
+    });
+    const read = decodeIssueToolPayload(textOf(await issueRead.handler({ number: 5, comments: undefined }, {})));
+    expect(read.payload).toMatchObject({ tool: "issue_read", issue: { number: 5 }, comments: [posted], commentCount: 1 });
+    // The prose the model sees is unchanged: fence, provenance line, no envelope.
+    expect(read.text).toContain("Written by @mallory (none)");
+    expect(read.text).not.toContain("<<dispatch:issue>>");
+
+    const commented = decodeIssueToolPayload(textOf(await issueComment.handler({ number: 5, body: "hi" }, {})));
+    expect(commented.payload).toMatchObject({ tool: "issue_comment", issue: { number: 5 }, comments: [posted] });
+
+    const closed = decodeIssueToolPayload(
+      textOf(
+        await issueUpdate.handler(
+          { number: 5, addLabels: ["wontfix"], removeLabels: undefined, addAssignees: undefined, removeAssignees: undefined, state: "closed", stateReason: "not_planned" },
+          {},
+        ),
+      ),
+    );
+    expect(closed.payload?.outcome).toEqual({ summary: "Closed #5 as not planned", ok: true, details: ["labelled wontfix"] });
+    expect(closed.payload?.issue?.state).toBe("closed");
   });
 });
 

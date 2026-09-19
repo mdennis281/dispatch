@@ -91,6 +91,7 @@ import {
   PermissionModeSchema,
   type PermissionMode,
   MERGE_HOLD_LABEL,
+  encodeIssueToolPayload,
   encodePrToolPayload,
   WATCH_PR_DEFAULT_TIMEOUT_SECONDS,
   WATCH_PR_POLL_INTERVAL_MS,
@@ -115,6 +116,7 @@ import {
   issueSourceLabel,
   type Issue,
   type IssueComment,
+  type IssueToolPayload,
   SECRET_WHY_MAX,
   SECRET_SCOPES,
   SecretNameSchema,
@@ -2044,6 +2046,21 @@ function fenceUntrusted(author: string, trust: string, text: string): string {
 
 function commentBlock(c: IssueComment): string {
   return `— ${c.createdAt} ${fenceUntrusted(c.author, c.authorTrust, c.body)}`;
+}
+
+/**
+ * An issue tool's result: the fenced prose the model reads, plus one
+ * machine-readable line the transcript renders as a card (see
+ * `@dispatch/shared/issue-tools`). Same split as `prToolResult`, for the same
+ * reason — the prose is written for a model, and a human scrolling the
+ * transcript should see an issue, not a fence.
+ */
+function issueToolResult(
+  prose: string,
+  payload: Omit<IssueToolPayload, "v">,
+  isError = false,
+): CallToolResult {
+  return textResult(`${prose}\n${encodeIssueToolPayload({ v: 1, ...payload })}`, isError);
 }
 
 /**
@@ -7202,7 +7219,11 @@ ${look}` : "")
       withTracker(async (t) => {
         const issues = await t.list({ state, labels, limit });
         const head = `${issueSourceLabel(t.source)} — ${issues.length} ${state ?? "open"} issue(s)`;
-        return textResult(`${head}\n${issues.map(issueLine).join("\n") || "(none)"}`);
+        return issueToolResult(`${head}\n${issues.map(issueLine).join("\n") || "(none)"}`, {
+          tool: "issue_list",
+          outcome: { summary: head, ok: true, details: [] },
+          issues,
+        });
       }),
   );
 
@@ -7218,7 +7239,8 @@ ${look}` : "")
       withTracker(async (t) => {
         const issue = await t.get(number);
         if (!issue) {
-          return textResult(`No issue #${number} in ${issueSourceLabel(t.source)} (or it is a pull request).`, true);
+          const summary = `No issue #${number} in ${issueSourceLabel(t.source)} (or it is a pull request).`;
+          return issueToolResult(summary, { tool: "issue_read", outcome: { summary, ok: false, details: [] } }, true);
         }
         const want = comments ?? 10;
         const thread = want > 0 && issue.commentCount > 0 ? await t.comments(number, want, issue.commentCount) : [];
@@ -7230,7 +7252,13 @@ ${look}` : "")
         if (thread.length) {
           parts.push(`Comments (${thread.length} of ${issue.commentCount}):`, ...thread.map(commentBlock));
         }
-        return textResult(parts.join("\n\n"));
+        return issueToolResult(parts.join("\n\n"), {
+          tool: "issue_read",
+          outcome: { summary: `Read #${issue.number}: ${issue.title}`, ok: true, details: [] },
+          issue,
+          comments: thread,
+          commentCount: issue.commentCount,
+        });
       }),
   );
 
@@ -7245,7 +7273,17 @@ ${look}` : "")
     async ({ number, body }): Promise<CallToolResult> =>
       withTracker(async (t) => {
         const posted = await t.comment(number, body);
-        return textResult(`Commented on #${number}${posted.url ? `: ${posted.url}` : "."}`);
+        const summary = `Commented on #${number}`;
+        // Re-read so the card shows the issue the comment landed on. Best
+        // effort: the comment is posted either way, and a card without the
+        // issue's title beats a failed call that says the comment was not.
+        const issue = await t.get(number).catch(() => null);
+        return issueToolResult(`${summary}${posted.url ? `: ${posted.url}` : "."}`, {
+          tool: "issue_comment",
+          outcome: { summary, ok: true, details: posted.url ? [posted.url] : [] },
+          issue: issue ?? undefined,
+          comments: [posted],
+        });
       }),
   );
 
@@ -7267,7 +7305,22 @@ ${look}` : "")
         const changed = Object.values(patch).some((v) => (Array.isArray(v) ? v.length > 0 : v !== undefined));
         if (!changed) return textResult("Nothing to change — pass labels, assignees or a state.", true);
         const issue = await t.update(number, patch);
-        return textResult(`Updated.\n${issueLine(issue)}`);
+        const details: string[] = [];
+        if (patch.addLabels?.length) details.push(`labelled ${patch.addLabels.join(", ")}`);
+        if (patch.removeLabels?.length) details.push(`unlabelled ${patch.removeLabels.join(", ")}`);
+        if (patch.addAssignees?.length) details.push(`assigned ${patch.addAssignees.join(", ")}`);
+        if (patch.removeAssignees?.length) details.push(`unassigned ${patch.removeAssignees.join(", ")}`);
+        const summary =
+          patch.state === "closed"
+            ? `Closed #${number}${patch.stateReason === "not_planned" ? " as not planned" : ""}`
+            : patch.state === "open"
+              ? `Reopened #${number}`
+              : `Updated #${number}`;
+        return issueToolResult(`Updated.\n${issueLine(issue)}`, {
+          tool: "issue_update",
+          outcome: { summary, ok: true, details },
+          issue,
+        });
       }),
   );
 
