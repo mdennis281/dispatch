@@ -56,6 +56,7 @@ import {
   isReviewerChat,
   reviewTargetKey,
   CHAT_SECTIONS,
+  chatSection,
   type ChatBranch,
   type ChatSection,
   type ProjectAgentCounts,
@@ -427,6 +428,33 @@ const SECTION_LABEL: Record<ChatSection, string> = {
 };
 
 /**
+ * Whether a fold is held open regardless of its chevron.
+ *
+ * A branch never hides the transcript that's on screen. The PRs panel links
+ * straight to a reviewer chat, and landing there with its parent collapsed left
+ * the sidebar with no row for what you were looking at. `descendants`, not
+ * `children`: a reviewer hangs off the spawned chat rather than off the root, so
+ * the one being read can be two levels down.
+ *
+ * Nor does it hide a question waiting under it. A child's question files the
+ * whole branch under "Needs input" ({@link chatSection} via `ChatBranch.section`),
+ * so the parent sat in that queue with a pulsing dot and the row that actually
+ * wanted the answer folded away behind a chevron. Keyed on the SAME predicate
+ * that filed it there, plus the attention set the dot reads, so the fold can
+ * never disagree with the queue the row is drawn in.
+ */
+function mustStayOpen(
+  descendants: Chat[],
+  activeChatId: string | null,
+  attentionByChat: Set<string>,
+): boolean {
+  return descendants.some(
+    (c) =>
+      c.id === activeChatId || attentionByChat.has(c.id) || chatSection(c) === "attention",
+  );
+}
+
+/**
  * A chat, and the tree of chats filed under it.
  *
  * Dispatch spawns one reviewer chat PER ROUND, so a PR reviewed four times put
@@ -437,7 +465,7 @@ const SECTION_LABEL: Record<ChatSection, string> = {
  *
  * Collapsed by default, and the flag is component state rather than a store:
  * it's where this reader's eye is right now, and nothing else in the app has an
- * opinion about it.
+ * opinion about it. Two things override it — see {@link mustStayOpen}.
  */
 function ChatBranchRows({
   branch,
@@ -456,12 +484,7 @@ function ChatBranchRows({
 }) {
   const { chat, children, descendants } = branch;
   const [expanded, setExpanded] = useState(false);
-  // A branch never hides the transcript that's on screen. The PRs panel links
-  // straight to a reviewer chat, and landing there with its parent collapsed
-  // left the sidebar with no row for what you were looking at. `descendants`,
-  // not `children`: a reviewer now hangs off the spawned chat rather than off
-  // this row, so the one being read can be two levels down.
-  const open = expanded || descendants.some((c) => c.id === activeChatId);
+  const open = expanded || mustStayOpen(descendants, activeChatId, attentionByChat);
 
   return (
     <div data-flip-id={chat.id}>
@@ -555,7 +578,9 @@ function ChildBranchRows({
 }: { branch: ChatBranch; depth: number } & RowContext) {
   const { chat, children, descendants } = branch;
   const [expanded, setExpanded] = useState(false);
-  const open = expanded || descendants.some((c) => c.id === activeChatId);
+  // Same forced-open cases as the top-level row: a grandchild's question has to
+  // open every fold between it and the root, not just the outermost one.
+  const open = expanded || mustStayOpen(descendants, activeChatId, attentionByChat);
   const Row = isReviewerChat(chat) ? ReviewRow : SpawnRow;
 
   return (
