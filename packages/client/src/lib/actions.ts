@@ -189,9 +189,10 @@ export const actions = {
   interrupt(chatId: string): void {
     ws.send({ type: "interrupt", chatId });
   },
-  /** Compact the model's context in place (native SDK `/compact`). */
-  compactContext(chatId: string): void {
-    ws.send({ type: "compact-context", chatId });
+  /** Compact the model's context in place, optionally telling the summary what to keep. */
+  compactContext(chatId: string, focus?: string): void {
+    const trimmed = focus?.trim();
+    ws.send({ type: "compact-context", chatId, ...(trimmed ? { focus: trimmed } : {}) });
   },
   /** Clear the model's context (native SDK `/clear`); the transcript is kept. */
   clearContext(chatId: string): void {

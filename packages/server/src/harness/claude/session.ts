@@ -36,6 +36,7 @@ import type {
   HarnessSessionSpec,
 } from "../types.js";
 import { catchToolGuard } from "../guard.js";
+import { compactCommand } from "../compact.js";
 import { ClaudeStreamDecoder, QUESTION_TOOL } from "./stream.js";
 import { buildQuestionAnswer, neutralQuestions } from "./questions.js";
 import { claudeExecutableOption } from "../../services/runtime.js";
@@ -648,12 +649,13 @@ export class ClaudeSession implements HarnessSession {
     }
   }
 
-  async compact(): Promise<void> {
+  async compact(focus?: string): Promise<void> {
     // The SDK compacts via a slash command on the input channel; there is no
-    // control-channel equivalent.
+    // control-channel equivalent. The argument rides the same way the CLI's
+    // `/compact focus on the API changes` does.
     this.input?.push({
       type: "user",
-      message: { role: "user", content: [{ type: "text", text: "/compact" }] },
+      message: { role: "user", content: [{ type: "text", text: compactCommand(focus) }] },
     } as unknown as SDKUserMessage);
   }
 

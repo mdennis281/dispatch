@@ -536,8 +536,13 @@ export interface HarnessSession {
   setModel(model: string): Promise<void>;
   /** Switch effort mid-session. */
   setEffort(effort: Effort): Promise<void>;
-  /** Compact the context in place, where supported. */
-  compact(): Promise<void>;
+  /**
+   * Compact the context in place, where supported. `focus` is what the summary
+   * must keep (the task, open decisions, paths still needed) — Claude takes it
+   * as `/compact <focus>`; Codex has no argument on `thread/compact/start`, so
+   * the adapter injects it as a user note the summarizer reads.
+   */
+  compact(focus?: string): Promise<void>;
   /**
    * Replace some of the session's EXTERNAL MCP server definitions in place —
    * the ones whose `${secret:…}` changed — without restarting the chat. Merged

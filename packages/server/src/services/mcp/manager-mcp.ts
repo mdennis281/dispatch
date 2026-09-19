@@ -150,6 +150,7 @@ import {
   type WorktreeInfo,
   HarnessKindSchema,
   PROVIDER_IDS,
+  COMPACT_FOCUS_MAX,
 } from "@dispatch/shared";
 import type { EventBus } from "../../bus.js";
 import type { ManagerMcpModes, ModeScope, WritableModeScope } from "./mode-editor.js";
@@ -288,8 +289,8 @@ export interface ManagerMcpBroker {
   getStatus(chatId: string): ChatStatus | undefined;
   /** Live context-window breakdown for a chat (null when not live / unsupported). */
   getContextUsage(chatId: string): Promise<ContextUsage | null>;
-  /** Compact a chat's context in place (native SDK `/compact`). */
-  compact(chatId: string): void;
+  /** Compact a chat's context in place, telling the summary what to keep. */
+  compact(chatId: string, focus?: string): void | Promise<void>;
   /**
    * Flag that a `watch_pr` on this chat hit a terminal PR state (drives the green
    * "PR done" dot). Pass the PR so the state is stamped on the chat's ref and
@@ -3173,13 +3174,28 @@ export function createManagerTools(ctx: ManagerMcpContext) {
     "Compact YOUR OWN context in place — summarize the conversation so far and " +
       "continue with a much smaller window, keeping the session. Use when " +
       "`context_usage` shows the window filling up (e.g. past ~80%) and you have " +
-      "more work to do. Compaction runs right after the current turn ends.",
-    {},
-    async (): Promise<CallToolResult> => {
-      ctx.broker.compact(ctx.chatId);
+      "more work to do. Compaction runs right after the current turn ends. " +
+      "Pass `focus` to tell the summary what it must keep — the task and its " +
+      "acceptance criteria, decisions already made, file paths and commands you " +
+      "will need again, the PR number. Without it the summary keeps what it " +
+      "judges important, which is where a half-finished plan gets lost.",
+    {
+      focus: z
+        .string()
+        .trim()
+        .max(COMPACT_FOCUS_MAX)
+        .optional()
+        .describe(
+          "What the summary must preserve, in one or two sentences. Omit for the app's default focus.",
+        ),
+    },
+    async ({ focus }): Promise<CallToolResult> => {
+      await ctx.broker.compact(ctx.chatId, focus);
       return textResult(
         "Compaction requested — it will run after this turn ends. Your next turn " +
-          "starts from a summarized, much smaller context.",
+          "starts from a summarized, much smaller context" +
+          (focus ? `, steered to keep: ${focus}` : "") +
+          ".",
       );
     },
   );

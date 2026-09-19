@@ -76,6 +76,8 @@ function normalize(s: AppSettings): AppSettings {
     autoCompact: {
       enabled: s.autoCompact?.enabled ?? true,
       window: s.autoCompact?.window,
+      perModel: s.autoCompact?.perModel ?? {},
+      instructions: s.autoCompact?.instructions ?? "",
     },
     showInjectedContext: s.showInjectedContext ?? false,
     shellFilter: s.shellFilter ?? [...SHELL_TRANSCRIPT_CATEGORIES],
@@ -190,7 +192,13 @@ export function AppSettingsView() {
       // and `||` would silently turn it back into "use the default".
       idleSessionMinutes: draft.idleSessionMinutes ?? undefined,
       webhook: { ...draft.webhook, url: draft.webhook?.url?.trim() || undefined },
-      autoCompact: { ...draft.autoCompact, window: draft.autoCompact?.window || undefined },
+      autoCompact: {
+        ...draft.autoCompact,
+        window: draft.autoCompact?.window || undefined,
+        // An empty box is "no standing focus", not an empty string the broker
+        // would dutifully send as `/compact `.
+        instructions: draft.autoCompact?.instructions?.trim() || undefined,
+      },
       harness: {
         ...draft.harness,
         defaultHarness: draft.harness?.defaultHarness ?? DEFAULT_HARNESS,
