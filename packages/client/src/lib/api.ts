@@ -95,6 +95,7 @@ import type {
   SecretPut,
   SecretRefreshReport,
   SecretSummary,
+  Issue,
   IssueConfig,
   IssueSource,
   IssueWatch,
@@ -1309,6 +1310,23 @@ export const api = {
         chatId?: string;
         error?: string;
       }>(`/api/projects/${projectId}/issues/poll`),
+    /** The tracker's open issues NOW, each with what a poll would do about it. */
+    open: (projectId: string) =>
+      get<{
+        issues: Array<{
+          issue: Issue;
+          claim?: Pick<IssueClaim, "state" | "chatId" | "note">;
+          reason?: string;
+        }>;
+      }>(`/api/projects/${projectId}/issues/open`),
+    /** Hand chosen issues to one chat — the human's pick, past every filter. */
+    take: (projectId: string, numbers: number[]) =>
+      post<{
+        taken: number[];
+        refused: Array<{ number: number; reason: string }>;
+        chatId?: string;
+        error?: string;
+      }>(`/api/projects/${projectId}/issues/take`, { numbers }),
   },
 
   /**
