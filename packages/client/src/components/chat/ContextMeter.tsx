@@ -9,6 +9,7 @@ import { api } from "../../lib/api.js";
 import { actions } from "../../lib/actions.js";
 import { cn } from "../../lib/cn.js";
 import { TextArea } from "../sidebar/Modal.js";
+import { Button } from "../ui/Button.js";
 
 /**
  * Fallback context windows by model id, used ONLY until a turn reports the SDK's
@@ -310,20 +311,12 @@ function ContextPanel({ chatId, fallbackTokens, fallbackWindow, close }: Context
               className="!text-xs"
             />
             <div className="flex items-center justify-end gap-1">
-              <button
-                type="button"
-                onClick={() => setCompactOpen(false)}
-                className="rounded-sm px-1.5 py-0.5 text-xs text-muted hover:text-secondary"
-              >
+              <Button size="sm" variant="ghost" onClick={() => setCompactOpen(false)}>
                 Cancel
-              </button>
-              <button
-                type="button"
-                onClick={doCompact}
-                className="rounded-sm bg-accent/15 px-1.5 py-0.5 text-xs font-medium text-accent hover:bg-accent/25"
-              >
+              </Button>
+              <Button size="sm" variant="primary" onClick={doCompact}>
                 Compact
-              </button>
+              </Button>
             </div>
           </div>
         ) : (
