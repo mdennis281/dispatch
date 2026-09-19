@@ -29,6 +29,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Store } from "./store/index.js";
 import { readInstalledRelease } from "./services/release.js";
+import { perfSnapshot, type PerfSnapshot } from "./perf.js";
 
 /** Millisecond epoch this process finished loading — the process's identity in time. */
 const STARTED_AT = Date.now();
@@ -67,6 +68,13 @@ export interface HealthReport {
   store: boolean;
   /** Human-readable reasons `ok` is false. Empty when healthy. */
   problems: string[];
+  /**
+   * Event-loop lag and spawn cost for the current window (see `perf.ts`).
+   * A probe that arrives late carries its own explanation: `ok` with a p99 in
+   * the hundreds of ms is a stalled loop, not a sick store, and HAProxy's
+   * timeout — not this report's verdict — is what the user is seeing.
+   */
+  perf?: PerfSnapshot;
 }
 
 /**
@@ -195,6 +203,7 @@ export async function healthReport(deps: HealthDeps): Promise<HealthReport> {
   // reason given" and burns the whole health timeout before rolling back.
   const sha = payloadSha();
   const version = payloadVersion();
+  const perf = perfSnapshot();
   return {
     ok: problems.length === 0,
     status: problems.length === 0 ? "ok" : "degraded",
@@ -208,5 +217,6 @@ export async function healthReport(deps: HealthDeps): Promise<HealthReport> {
     spa,
     store,
     problems,
+    ...(perf ? { perf } : {}),
   };
 }

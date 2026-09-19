@@ -22,6 +22,7 @@
  */
 import { dirname, basename, resolve } from "node:path";
 import { execa } from "execa";
+import { execBinary } from "./exec-binary.js";
 import getPort, { portNumbers } from "get-port";
 import treeKill from "tree-kill";
 import { nanoid } from "nanoid";
@@ -239,7 +240,7 @@ const defaultSpawn: SpawnFn = (command, opts) => {
 };
 
 const defaultRunOnce: RunOnceFn = async (file, args, opts) => {
-  const res = await execa(file, args, {
+  const res = await execBinary(file, args, {
     cwd: opts.cwd,
     // Same contract as defaultSpawn — but only when an env was supplied, since
     // `extendEnv:false` with no env would hand docker an EMPTY environment (no

@@ -37,7 +37,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { execa } from "execa";
+import { execBinary } from "./exec-binary.js";
 import type {
   InstalledRelease,
   LatestRelease,
@@ -255,7 +255,7 @@ export class ReleaseService {
     this.bus = deps.bus;
     this.fetchImpl = deps.fetchImpl ?? fetch;
     this.execImpl =
-      deps.execImpl ?? ((file, args) => execa(file, args as string[]) as Promise<{ stdout: string }>);
+      deps.execImpl ?? ((file, args) => execBinary(file, args as string[]) as Promise<{ stdout: string }>);
     this.now = deps.now ?? Date.now;
     this.pollMs = deps.pollMs ?? DEFAULT_POLL_MS;
     this.firstCheckMs = deps.firstCheckMs ?? DEFAULT_FIRST_CHECK_MS;

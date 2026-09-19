@@ -797,7 +797,10 @@ export class InspectService {
       agents?: { id?: string; name?: string }[];
       modes?: { id?: string; name?: string }[];
       skills?: { name?: string }[];
-      mcpServers?: { name?: string }[];
+      // A RECORD keyed by server name (`z.record` in ProjectConfigSchema), not
+      // a list like the others — `named()` on it threw `.map is not a function`
+      // and took every project_info call down with it.
+      mcpServers?: Record<string, unknown>;
     } | null;
 
     const named = (items: { id?: string; name?: string }[] | undefined): string[] =>
@@ -833,7 +836,7 @@ export class InspectService {
         ports: s.ports,
         url: s.url,
       })),
-      mcpServers: named(config?.mcpServers as { id?: string; name?: string }[] | undefined),
+      mcpServers: Object.keys(config?.mcpServers ?? {}),
       memoryIndex,
       recentChats,
     };

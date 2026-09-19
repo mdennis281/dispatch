@@ -17,14 +17,14 @@
  * every keystroke, and re-running git for each one would be both slow and
  * pointless — the tree doesn't change between two characters of typing.
  */
-import { execa } from "execa";
+import { execBinary } from "./exec-binary.js";
 import { join } from "node:path";
 import type { ExecFn, ExecResult } from "./worktree.js";
 
 /** Default runner: execa with an argument array, never rejecting. */
 const realExec: ExecFn = async (file, args, opts) => {
   try {
-    const r = await execa(file, args, {
+    const r = await execBinary(file, args, {
       cwd: opts.cwd,
       reject: false,
       stripFinalNewline: false,

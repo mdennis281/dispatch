@@ -19,6 +19,7 @@
  * leaving it to finish diffing a history nobody will read.
  */
 import { execa } from "execa";
+import { execBinary, resolveBinary } from "./exec-binary.js";
 import treeKill from "tree-kill";
 import {
   GROWTH_GENERATED_KEY,
@@ -317,7 +318,7 @@ export interface GrowthWalkOptions {
 export class GrowthService {
   /** A buffered git call for the small reads around the walk. */
   private async git(args: string[], cwd: string, signal?: AbortSignal): Promise<string> {
-    const r = await execa("git", args, {
+    const r = await execBinary("git", args, {
       cwd,
       env: GIT_ENV,
       reject: false,
@@ -352,8 +353,11 @@ export class GrowthService {
     onProgress({ phase: "walking", done: 0, total });
 
     const acc = new GrowthAccumulator();
+    // The walk streams, so it needs the child object itself — the one place
+    // that calls execa directly. Still through the memoised path, so a long
+    // history never pays the PATH walk `exec-binary.ts` exists to remove.
     const child = execa(
-      "git",
+      await resolveBinary("git"),
       [
         // `core.quotePath=false` keeps non-ASCII paths readable; quoting still
         // happens for control characters, which `unquotePath` handles.

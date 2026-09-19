@@ -21,7 +21,7 @@
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { execa } from "execa";
+import { execBinary } from "./exec-binary.js";
 import { parse as parseYaml } from "yaml";
 import type {
   GhCliStatus,
@@ -71,7 +71,7 @@ export type ExecaLike = (
 
 /** Default: the real execa, with reject:false handling delegated to callers. */
 const defaultExec: ExecaLike = (file, args = [], options) =>
-  execa(file, args as string[], {
+  execBinary(file, args as string[], {
     cwd: options?.cwd,
     reject: options?.reject,
     env: options?.env,
