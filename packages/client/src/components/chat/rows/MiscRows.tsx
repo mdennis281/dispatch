@@ -7,6 +7,7 @@ import {
   Brain,
   Check,
   CheckCircle2,
+  CircleSlash,
   XCircle,
   Cpu,
 } from "lucide-react";
@@ -176,9 +177,13 @@ export const ResultRowView = memo(function ResultRowView({
   }
   const { parts, note } = turnFooter(row);
   const meta = <span className="cm-mono !text-2xs text-faint"> · {parts.join(" · ")}</span>;
+  // A turn you stopped yourself is not a completed turn and not a failed one.
+  // Claiming "Turn complete" over a half-finished turn is the lie that matters
+  // here — you can't tell from the row whether the work got done.
+  const stopped = row.subtype === "interrupted";
   return (
-    <CenterNote icon={<CheckCircle2 />}>
-      Turn complete
+    <CenterNote tone={stopped ? "muted" : "faint"} icon={stopped ? <CircleSlash /> : <CheckCircle2 />}>
+      {stopped ? "Stopped — you interrupted this turn" : "Turn complete"}
       {parts.length > 0 && (note ? <Tooltip label={note}>{meta}</Tooltip> : meta)}
     </CenterNote>
   );
