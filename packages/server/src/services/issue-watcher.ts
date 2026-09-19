@@ -444,7 +444,7 @@ export class IssueWatcher {
       this.store.getIssueWatch(projectId).catch(() => null),
     ]);
     const claimed = new Map(claims.map((c) => [c.key, c]));
-    return open.map((issue) => {
+    const rows = open.map((issue) => {
       const prior = claimed.get(issueKey(tracker.source, issue.number));
       const row: ListedIssue = { issue };
       if (prior) {
@@ -461,6 +461,21 @@ export class IssueWatcher {
       }
       return row;
     });
+    // The cap, applied the way the poll applies it — oldest candidate first,
+    // the rest "at capacity". Without this, two issues that both pass the
+    // filters under a cap with one slot free would both read "would take", and
+    // the pane's answer to "why didn't it pick that one up" would be wrong for
+    // exactly the case the cap exists for. Counted the same way as the poll:
+    // claimed or working here. (The poll also drops a claim whose chat has
+    // vanished; this read does not touch the store, so such a claim still
+    // counts until the next poll reaps it.)
+    const inFlight = claims.filter((c) => c.state === "claimed" || c.state === "working").length;
+    const room = Math.max(0, policy.maxConcurrent - inFlight);
+    const candidates = rows
+      .filter((r) => !r.reason)
+      .sort((a, b) => Date.parse(a.issue.createdAt) - Date.parse(b.issue.createdAt));
+    for (const r of candidates.slice(room)) r.reason = `at capacity (${policy.maxConcurrent} in flight)`;
+    return rows;
   }
 
   /**

@@ -414,5 +414,20 @@ describe("IssueWatcher", () => {
         [3, undefined, undefined],
       ]);
     });
+
+    it("applies the cap the way the poll would — oldest candidate first, the rest at capacity", async () => {
+      const after = (s: number) => new Date(T0 + s * 1000).toISOString();
+      const open = [issue(1, { createdAt: after(1) }), issue(2, { createdAt: after(30) }), issue(3, { createdAt: after(10) })];
+      const t = watcher({ open, config: { enabled: true, maxConcurrent: 2 } });
+      await t.enrol();
+      await t.w.take("p1", [1]);
+      // One slot left, two candidates: #3 (opened first) would go, #2 would wait.
+      const rows = await t.w.listOpen("p1");
+      expect(rows.map((r) => [r.issue.number, r.reason])).toEqual([
+        [1, "working by this instance"],
+        [2, "at capacity (2 in flight)"],
+        [3, undefined],
+      ]);
+    });
   });
 });
