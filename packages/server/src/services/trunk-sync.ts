@@ -11,7 +11,7 @@
  * the checkout is actually sitting on the trunk, and never fatally — this is
  * housekeeping, not a step anything else waits on.
  */
-import { execa } from "execa";
+import { execBinary } from "./exec-binary.js";
 import { isAbsolute, relative } from "node:path";
 import { resolveWorkflow, type Project, type WorkflowSyncMain } from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
@@ -22,7 +22,7 @@ import type { ExecFn, ExecResult } from "./memory-committer.js";
 
 const realExec: ExecFn = async (file, args, opts) => {
   try {
-    const r = await execa(file, args, {
+    const r = await execBinary(file, args, {
       cwd: opts.cwd,
       reject: false,
       stripFinalNewline: true,

@@ -368,6 +368,31 @@ describe("projectInfo", () => {
     expect(result.project.id).toBe("p1");
   });
 
+  it("reads a real config shape: mcpServers is a record keyed by name, not a list", async () => {
+    // The loaded ProjectConfig's `mcpServers` is `z.record(...)`; treating it
+    // like the `agents`/`modes`/`skills` arrays threw `.map is not a function`
+    // for EVERY project with a config, which is every project.
+    const svc = new InspectService({
+      store,
+      projectConfig: {
+        get: () => ({
+          sourceDir: "/cfg",
+          errors: [],
+          config: {
+            agents: [{ id: "a1", name: "Reviewer" }],
+            modes: [],
+            skills: [{ name: "deploy" }],
+            mcpServers: { linear: { transport: "http" }, sentry: { transport: "stdio" } },
+          },
+        }),
+      },
+    });
+    const result = await svc.projectInfo({ project: "dispatch" });
+    expect(result.mcpServers).toEqual(["linear", "sentry"]);
+    expect(result.agents).toEqual(["Reviewer"]);
+    expect(result.skills).toEqual(["deploy"]);
+  });
+
   it("errors when there is nothing to describe", async () => {
     await expect(service().projectInfo({})).rejects.toThrow(/No project to describe/);
     await expect(service().projectInfo({ project: "ghost" })).rejects.toThrow(/No project matching/);

@@ -20,7 +20,7 @@
  * so branch names / paths can never be shell-injected. Domain changes publish
  * `worktree-update` / `chat-update` / `notice` events on the EventBus.
  */
-import { execa } from "execa";
+import { execBinary } from "./exec-binary.js";
 import { existsSync } from "node:fs";
 import { mkdir, readFile as fsReadFile, writeFile as fsWriteFile } from "node:fs/promises";
 import { basename, join, resolve, relative, isAbsolute, dirname } from "node:path";
@@ -64,7 +64,7 @@ export type ExecFn = (
 /** Default runner: execa with an argument array, never rejecting. */
 export const realExec: ExecFn = async (file, args, opts) => {
   try {
-    const r = await execa(file, args, {
+    const r = await execBinary(file, args, {
       cwd: opts.cwd,
       ...(opts.timeout ? { timeout: opts.timeout } : {}),
       reject: false,

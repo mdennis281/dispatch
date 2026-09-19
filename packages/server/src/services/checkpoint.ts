@@ -23,7 +23,7 @@
  * All git work respects `.gitignore` (via `git add -A` / `--exclude-standard`), so
  * ignored trees like node_modules are never snapshotted or deleted.
  */
-import { execa } from "execa";
+import { execBinary } from "./exec-binary.js";
 import { rm, rmdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
@@ -149,7 +149,7 @@ export class CheckpointService {
     cwd: string,
     extraEnv?: Record<string, string>,
   ): Promise<string> {
-    const res = await execa(this.gitBin, [...GIT_CONFIG_ARGS, ...args], {
+    const res = await execBinary(this.gitBin, [...GIT_CONFIG_ARGS, ...args], {
       cwd,
       env: extraEnv ? { ...GIT_ENV, ...extraEnv } : { ...GIT_ENV },
       stripFinalNewline: true,
@@ -159,7 +159,7 @@ export class CheckpointService {
 
   /** Run git allowing a non-zero exit (returns stdout, empty on failure). */
   private async gitTry(args: string[], cwd: string): Promise<string> {
-    const res = await execa(this.gitBin, [...GIT_CONFIG_ARGS, ...args], {
+    const res = await execBinary(this.gitBin, [...GIT_CONFIG_ARGS, ...args], {
       cwd,
       env: { ...GIT_ENV },
       stripFinalNewline: true,
@@ -179,7 +179,7 @@ export class CheckpointService {
    * all — which this reports as failure along with a non-zero exit.
    */
   private async gitOk(args: string[], cwd: string): Promise<boolean> {
-    const res = await execa(this.gitBin, [...GIT_CONFIG_ARGS, ...args], {
+    const res = await execBinary(this.gitBin, [...GIT_CONFIG_ARGS, ...args], {
       cwd,
       env: { ...GIT_ENV },
       stripFinalNewline: true,
@@ -536,7 +536,7 @@ export class CheckpointService {
         .slice(i, i + REF_DELETE_BATCH)
         .map((ref) => `delete ${ref}\n`)
         .join("");
-      const res = await execa(this.gitBin, [...GIT_CONFIG_ARGS, "update-ref", "--stdin"], {
+      const res = await execBinary(this.gitBin, [...GIT_CONFIG_ARGS, "update-ref", "--stdin"], {
         cwd,
         env: { ...GIT_ENV },
         input,

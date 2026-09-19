@@ -24,6 +24,7 @@ import { registerRoutes } from "./routes/index.js";
 import { migrateManagerToolNames } from "./services/manager-tool-migration.js";
 import { isManagerBridgePath } from "./services/mcp/manager-http.js";
 import { healthReport } from "./health.js";
+import { startPerfMonitor } from "./perf.js";
 import { AuthService, type RequestIdentity } from "./services/auth.js";
 
 /** Wired context shared across routes/services via `app.cm`. */
@@ -73,6 +74,10 @@ export async function buildApp(
 ): Promise<FastifyInstance> {
   const config = opts.config ?? defaultConfig;
   const store = opts.store ?? new Store(config.dataDir, config.configDir);
+  // Loop-lag sampling from the first moment there is a loop worth watching.
+  // Idempotent, so the tests' many apps share one histogram; `perf.log` is
+  // only written when a data dir was actually configured.
+  startPerfMonitor({ dataDir: config.dataDir });
   const bus = opts.bus ?? defaultBus;
 
   await store.init();

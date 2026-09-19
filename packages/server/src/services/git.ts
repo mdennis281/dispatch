@@ -20,7 +20,7 @@
  * askpass, so a push that needs credentials FAILS FAST with a readable error
  * instead of hanging a request on an invisible prompt.
  */
-import { execa } from "execa";
+import { execBinary } from "./exec-binary.js";
 import { existsSync } from "node:fs";
 import {
   readFile as fsReadFile,
@@ -87,7 +87,7 @@ const GIT_ENV: Record<string, string> = {
 
 const realExec: GitExecFn = async (file, args, opts) => {
   try {
-    const r = await execa(file, args, {
+    const r = await execBinary(file, args, {
       cwd: opts.cwd,
       env: { ...GIT_ENV, ...(opts.env ?? {}) },
       timeout: opts.timeout ?? DEFAULT_TIMEOUT_MS,

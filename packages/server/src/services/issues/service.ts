@@ -16,7 +16,7 @@ import {
   type IssueSource,
   type Project,
 } from "@dispatch/shared";
-import { execa } from "execa";
+import { execBinary } from "../exec-binary.js";
 import type { ExecaLike } from "../github.js";
 import { GitHubIssueProvider } from "./github.js";
 import type { IssueListQuery, IssueProvider } from "./provider.js";
@@ -50,7 +50,7 @@ export interface IssueServiceDeps {
 }
 
 const defaultExec: ExecaLike = (file, args = [], options) =>
-  execa(file, args as string[], {
+  execBinary(file, args as string[], {
     cwd: options?.cwd,
     reject: options?.reject,
     env: options?.env,

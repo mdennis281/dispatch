@@ -22,7 +22,7 @@
  *     on a feature branch is someone's workspace; don't drop commits on it),
  *   - and never fatally: a failure emits a notice and leaves the files dirty.
  */
-import { execa } from "execa";
+import { execBinary } from "./exec-binary.js";
 import { isAbsolute, relative } from "node:path";
 import { resolveWorkflow } from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
@@ -48,7 +48,7 @@ export type ExecFn = (
 
 const realExec: ExecFn = async (file, args, opts) => {
   try {
-    const r = await execa(file, args, {
+    const r = await execBinary(file, args, {
       cwd: opts.cwd,
       reject: false,
       stripFinalNewline: true,

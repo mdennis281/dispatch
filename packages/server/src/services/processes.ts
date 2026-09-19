@@ -28,7 +28,7 @@
  * port it picked. That makes the panel a real answer to "what is this chat still
  * running?" instead of "what is on the ports we declared?".
  */
-import { execa } from "execa";
+import { execBinary } from "./exec-binary.js";
 import treeKill from "tree-kill";
 import type { Store } from "../store/index.js";
 import { PORT_SCAN_RANGE } from "./runner.js";
@@ -178,13 +178,13 @@ const defaultScan: ScanFn = async () => {
     // IPv6-only `[::1]`, which made a live dev server invisible to the roster.
     // With no protocol filter netstat returns both TCP families plus UDP; UDP
     // has no LISTENING state, so the parser's state check excludes those rows.
-    const res = await execa("netstat", ["-ano"], {
+    const res = await execBinary("netstat", ["-ano"], {
       reject: false,
       buffer: true,
     });
     return parseNetstat(res.stdout ?? "");
   }
-  const res = await execa("lsof", ["-nP", "-iTCP", "-sTCP:LISTEN"], {
+  const res = await execBinary("lsof", ["-nP", "-iTCP", "-sTCP:LISTEN"], {
     reject: false,
     buffer: true,
   });
@@ -205,7 +205,7 @@ export function parseTasklist(output: string): Map<number, string> {
 const defaultDescribe: DescribeFn = async (pids) => {
   if (pids.length === 0) return new Map();
   if (process.platform === "win32") {
-    const res = await execa("tasklist", ["/FO", "CSV", "/NH"], {
+    const res = await execBinary("tasklist", ["/FO", "CSV", "/NH"], {
       reject: false,
       buffer: true,
     });
@@ -213,7 +213,7 @@ const defaultDescribe: DescribeFn = async (pids) => {
     const wanted = new Set(pids);
     return new Map([...all].filter(([pid]) => wanted.has(pid)));
   }
-  const res = await execa("ps", ["-o", "pid=,comm=", "-p", pids.join(",")], {
+  const res = await execBinary("ps", ["-o", "pid=,comm=", "-p", pids.join(",")], {
     reject: false,
     buffer: true,
   });
@@ -397,7 +397,7 @@ function parsePsTime(t: string): number {
  */
 export const defaultProcTable: ProcTableFn = async () => {
   if (process.platform === "win32") {
-    const res = await execa(
+    const res = await execBinary(
       "powershell.exe",
       [
         "-NoLogo",
@@ -412,7 +412,7 @@ export const defaultProcTable: ProcTableFn = async () => {
   }
   // `args` LAST: it is the only field that can contain spaces, so anything
   // after it would be unparseable.
-  const res = await execa("ps", ["-ww", "-e", "-o", "pid=,ppid=,rss=,time=,comm=,args="], {
+  const res = await execBinary("ps", ["-ww", "-e", "-o", "pid=,ppid=,rss=,time=,comm=,args="], {
     reject: false,
     buffer: true,
   });

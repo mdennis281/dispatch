@@ -71,7 +71,7 @@ import {
 } from "@dispatch/shared";
 import { scorePath } from "./file-index.js";
 import type { ExecFn } from "./worktree.js";
-import { execa } from "execa";
+import { execBinary } from "./exec-binary.js";
 
 /* ------------------------------------------------------------------- limits */
 
@@ -399,7 +399,7 @@ async function mapLimit<T, R>(
 /** Default runner: execa with an argument array, never rejecting. */
 const realExec: ExecFn = async (file, args, opts) => {
   try {
-    const r = await execa(file, args, {
+    const r = await execBinary(file, args, {
       cwd: opts.cwd,
       reject: false,
       stripFinalNewline: true,
