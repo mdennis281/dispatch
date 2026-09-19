@@ -51,7 +51,12 @@ import {
 } from "./media-types.js";
 import { identifyMedia } from "./media-sniff.js";
 import type { ChatInterruption } from "@dispatch/shared";
-import { compactCommand, normalizeCompactFocus, perModelThreshold } from "../harness/compact.js";
+import {
+  compactCommand,
+  normalizeCompactFocus,
+  oneLineFocus,
+  perModelThreshold,
+} from "../harness/compact.js";
 import type {
   Options,
   Query,
@@ -3112,7 +3117,9 @@ export class SessionBroker {
       ts: this.now(),
       sessionId: session.sessionId,
       level: "info",
-      text: resolved ? `Compacting context — keep: ${resolved}` : "Compacting context…",
+      // One transcript line; the focus itself keeps its shape on the way to the
+      // adapter.
+      text: resolved ? `Compacting context — keep: ${oneLineFocus(resolved)}` : "Compacting context…",
     });
     if (session.harnessSession) void session.harnessSession.compact(resolved);
     else {

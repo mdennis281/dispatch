@@ -4,10 +4,20 @@
  * the broker persists in its "Compacting context…" notice.
  */
 
-/** Collapse whitespace and drop an empty focus, so `/compact ` is never sent. */
+/**
+ * Trim a focus and drop an empty one, KEEPING its line structure — the
+ * Settings textarea invites a list, and the system-prompt section that carries
+ * the standing focus has no single-line constraint. Only the two wire shapes
+ * below flatten, because they must.
+ */
 export function normalizeCompactFocus(focus: string | undefined): string | undefined {
-  const trimmed = focus?.replace(/\s+/g, " ").trim();
+  const trimmed = focus?.trim();
   return trimmed ? trimmed : undefined;
+}
+
+/** One line, for the places a newline would change meaning. */
+export function oneLineFocus(focus: string): string {
+  return focus.replace(/\s+/g, " ").trim();
 }
 
 /**
@@ -16,7 +26,7 @@ export function normalizeCompactFocus(focus: string | undefined): string | undef
  */
 export function compactCommand(focus?: string): string {
   const f = normalizeCompactFocus(focus);
-  return f ? `/compact ${f}` : "/compact";
+  return f ? `/compact ${oneLineFocus(f)}` : "/compact";
 }
 
 /**
@@ -28,7 +38,7 @@ export function compactCommand(focus?: string): string {
 export function codexCompactNote(focus: string): string {
   return (
     "Context is about to be compacted. When writing the summary, make sure it preserves: " +
-    `${focus}. This note is guidance for the summary only — it is not a new request.`
+    `${oneLineFocus(focus)}. This note is guidance for the summary only — it is not a new request.`
   );
 }
 

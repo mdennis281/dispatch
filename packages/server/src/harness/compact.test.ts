@@ -24,6 +24,12 @@ describe("normalizeCompactFocus", () => {
     expect(normalizeCompactFocus("")).toBeUndefined();
     expect(normalizeCompactFocus(" \n ")).toBeUndefined();
   });
+
+  it("keeps a list's line structure — only the wire edges flatten", () => {
+    expect(normalizeCompactFocus(" Keep:\n- PR #249\n- the failing test\n")).toBe(
+      "Keep:\n- PR #249\n- the failing test",
+    );
+  });
 });
 
 describe("codexCompactNote", () => {
@@ -31,6 +37,12 @@ describe("codexCompactNote", () => {
     const note = codexCompactNote("the failing test");
     expect(note).toContain("the failing test");
     expect(note).toMatch(/not a new request/);
+  });
+
+  it("folds a multi-line focus into the one-line note", () => {
+    expect(codexCompactNote("- PR #249\n- the failing test")).toContain(
+      "preserves: - PR #249 - the failing test.",
+    );
   });
 });
 

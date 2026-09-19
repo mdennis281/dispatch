@@ -631,7 +631,9 @@ describe("SessionBroker neutral harness path", () => {
       await broker.sendMessage(chat.id, "hi");
       await broker.waitFor(chat.id, "idle");
       await broker.compact(chat.id, "  the PR\n number ");
-      expect(session.compactions).toEqual(["the PR number"]);
+      // Trimmed, but the line break survives: the adapter decides what needs
+      // to be one line. The notice row, which is one line, flattens it.
+      expect(session.compactions).toEqual(["the PR\n number"]);
       const notice = (await store.readMessages(chat.id)).find((r) => r.kind === "notice");
       expect(notice?.text).toBe("Compacting context — keep: the PR number");
     });
