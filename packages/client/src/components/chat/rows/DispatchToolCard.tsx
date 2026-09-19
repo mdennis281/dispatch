@@ -176,7 +176,11 @@ function commandPreview(
   }
   if (tool === "chat_find") return `find ${textInput(use, "query") ?? textInput(use, "project") ?? "chats"}`;
   if (tool === "spawn_chat") {
-    return `spawn ${who ?? textInput(use, "title") ?? firstLine(textInput(use, "prompt")) ?? "chat"}`;
+    // Until the result lands there is no chat to resolve, so the requested
+    // title stands in — flattened like a real one, or the row reads
+    // `spawn **save**: …` for the whole approval wait and then flips.
+    const requested = textInput(use, "title");
+    return `spawn ${who ?? (requested ? plainTitle(requested) : firstLine(textInput(use, "prompt")) ?? "chat")}`;
   }
   if (tool === "recall" || tool === "memory_search") {
     return textInput(use, "query") ?? subject ?? "search";
