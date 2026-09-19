@@ -28,6 +28,11 @@ export type DispatchToolCategory =
   | "memory"
   | "config"
   | "chat"
+  // Talking TO or ABOUT another chat (spawn, message, ask, wait on, inspect).
+  // Split from `chat`, which is a session's own context and posture: the
+  // reader's question on a peer call is "which chat?", and every one of these
+  // carries an id the card can resolve to a title and a link.
+  | "peer"
   | "general";
 
 export interface DispatchToolPresentation {
@@ -38,6 +43,12 @@ export interface DispatchToolPresentation {
   subject?: string;
   category: DispatchToolCategory;
   countdownSeconds?: number;
+  /**
+   * The OTHER chat this call names in its arguments. Kept apart from `subject`
+   * so the card can render it as a chat — title, status, a way to open it —
+   * instead of the opaque id the model was working with.
+   */
+  peerChatId?: string;
 }
 
 /**
@@ -188,8 +199,8 @@ function subjectFor(use: ToolUseRow, tool: string): string | undefined {
   if (name) return name;
   const query = stringArg(use, "query");
   if (query) return query;
-  const chatId = stringArg(use, "chatId");
-  if (chatId) return chatId;
+  // A chatId is deliberately NOT a subject: it travels as `peerChatId` so the
+  // card can show the chat's title rather than a 20-character id nobody reads.
   const threadId = stringArg(use, "threadId");
   if (threadId) return threadId;
   return undefined;
@@ -206,7 +217,14 @@ const DISPATCH_COPY: Record<string, { title: string; activity: string; category:
   issue_comment: { title: "Comment on issue", activity: "Commenting", category: "issue" },
   issue_update: { title: "Update issue", activity: "Updating issue", category: "issue" },
   wait: { title: "Wait", activity: "Waiting", category: "wait" },
-  wait_for_chat: { title: "Wait for chat", activity: "Watching chat", category: "wait" },
+  wait_for_chat: { title: "Wait for chat", activity: "Waiting for chat", category: "peer" },
+  spawn_chat: { title: "Spawn chat", activity: "Starting a chat", category: "peer" },
+  chat_find: { title: "Find chats", activity: "Searching chats", category: "peer" },
+  chat_read: { title: "Read chat", activity: "Reading chat", category: "peer" },
+  chat_send: { title: "Message chat", activity: "Sending message", category: "peer" },
+  chat_ask: { title: "Ask chat", activity: "Waiting for an answer", category: "peer" },
+  chat_reply: { title: "Reply to chat", activity: "Replying", category: "peer" },
+  chat_state: { title: "Chat state", activity: "Checking chat", category: "peer" },
   terminal_output: { title: "Terminal output", activity: "Reading terminal", category: "terminal" },
   create_pr: { title: "Open pull request", activity: "Opening pull request", category: "pr" },
   watch_pr: { title: "Watch pull request", activity: "Watching pull request", category: "pr" },
@@ -256,7 +274,49 @@ function dispatchPresentation(use: ToolUseRow): DispatchToolPresentation | null 
     subject: subjectFor(use, mcp.tool),
     category: copy.category,
     countdownSeconds: seconds,
+    peerChatId: stringArg(use, "chatId"),
   };
+}
+
+/**
+ * The chat a peer tool's RESULT names, when the arguments did not — `spawn_chat`
+ * only knows the new chat's id once it exists, and `chat_reply` is addressed by
+ * askId and learns the asker's id from the courier. Both end their prose with
+ * one machine-readable JSON line carrying `chatId`, which is what this reads.
+ */
+export function peerChatIdFromResult(content: unknown): string | undefined {
+  const trailer = jsonTrailer(resultText(content));
+  const chatId = trailer?.chatId;
+  return typeof chatId === "string" && chatId.trim() ? chatId : undefined;
+}
+
+/**
+ * A peer/session tool result with its trailing JSON line removed.
+ *
+ * Every manager tool answers "prose for the model, then one JSON line for the
+ * machine". The line is for `peerChatIdFromResult` and the PR card, not for a
+ * human — rendered, it is the exact wire noise the Dispatch-native card exists
+ * to hide. Only a FINAL line that parses as an object is dropped, so a result
+ * that is genuinely JSON-shaped prose is left alone.
+ */
+export function peerResultProse(content: unknown): string {
+  const text = displayResultText(content);
+  const lines = text.split(/\r?\n/);
+  if (lines.length > 1 && jsonTrailer(text)) lines.pop();
+  return lines.join("\n").trim();
+}
+
+function jsonTrailer(text: string): Record<string, unknown> | null {
+  const last = text.trimEnd().split(/\r?\n/).pop()?.trim();
+  if (!last || !last.startsWith("{") || !last.endsWith("}")) return null;
+  try {
+    const parsed: unknown = JSON.parse(last);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 export function toolPresentation(use: ToolUseRow): ToolPresentation | null {
