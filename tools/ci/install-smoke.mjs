@@ -184,13 +184,23 @@ function run(command, args, { cwd, env, allowFail = false, timeoutMs = 20 * 60_0
       clearTimeout(timer);
       reject(error);
     });
-    child.on("close", (code) => {
+    // `exit`, not `close`. The installer starts a DETACHED supervisor, and a
+    // release of launch.py that predates its stdio being pointed at /dev/null
+    // leaves that supervisor — and the node under it — holding these pipes for
+    // as long as the server runs. `close` waits for the pipes; it never came,
+    // and the first run of this smoke sat on a finished install for the whole
+    // job timeout. Give late output a moment to land, then let the pipes go.
+    child.on("exit", (code) => {
       clearTimeout(timer);
-      if (code !== 0 && !allowFail) {
-        reject(new Error(`${command} exited ${code}\n${out.slice(-2000)}`));
-        return;
-      }
-      resolveRun({ code, out });
+      setTimeout(() => {
+        child.stdout.destroy();
+        child.stderr.destroy();
+        if (code !== 0 && !allowFail) {
+          reject(new Error(`${command} exited ${code}\n${out.slice(-2000)}`));
+          return;
+        }
+        resolveRun({ code, out });
+      }, 250);
     });
   });
 }
@@ -335,6 +345,16 @@ async function main() {
     ...(process.env.GH_TOKEN ? { GH_TOKEN: process.env.GH_TOKEN } : {}),
   };
   Object.assign(process.env, env);
+  if (IS_WIN) {
+    // A Windows user runs `install.ps1` from PowerShell, where the OS's own
+    // `System32\tar.exe` is first on PATH. This job runs under `shell: bash`,
+    // where Git for Windows' GNU tar is first — and that one reads `D:\a\…`
+    // as a remote host. The checkout's installer copes (see `tar()` in
+    // tools/install.mjs); the PUBLISHED installer the bootstrap step downloads
+    // may predate that, so give every child the PowerShell user's PATH order.
+    const system32 = join(process.env.SystemRoot || "C:\\Windows", "System32");
+    process.env.PATH = `${system32};${process.env.PATH ?? ""}`;
+  }
 
   console.log(`smoke: ${platform()}/${process.arch} node ${process.version}, channel=${channel}, root=${root}`);
   if (existsSync(root)) {
@@ -799,7 +819,9 @@ function writeReport(args, fatal) {
     "",
     "| | Check | Detail |",
     "|---|---|---|",
-    ...results.map((r) => `| ${r.ok === "skip" ? "⏭" : r.ok ? "✅" : "❌"} | ${r.name} | ${String(r.detail).replace(/\|/g, "\\|").replace(/\r?\n/g, " ").slice(0, 400)} |`),
+    // A pipe inside a cell would split the table; a look-alike bar keeps the
+    // row intact without an escape sequence to get wrong.
+    ...results.map((r) => `| ${r.ok === "skip" ? "⏭" : r.ok ? "✅" : "❌"} | ${r.name} | ${String(r.detail).replaceAll("|", "│").replace(/\r?\n/g, " ").slice(0, 400)} |`),
     ...(notes.length ? ["", "Notes:", ...notes.map((n) => `- ${n}`)] : []),
     "",
   ];

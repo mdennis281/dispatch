@@ -284,8 +284,30 @@ function checksumFor(text, filename) {
   throw new Error(`SHA256SUMS has no entry for ${filename}`);
 }
 
+/**
+ * The `tar` this installer runs, and why it is not simply "tar".
+ *
+ * On Windows two tars answer to that name: the OS's own `System32\tar.exe`
+ * (bsdtar, since Windows 10 1803) and Git for Windows' GNU tar, which is FIRST
+ * on PATH inside Git Bash — the shell `install.sh` runs under there, and the one
+ * a CI runner's `shell: bash` gives you. GNU tar reads `D:\a\…\x.tar.gz` as
+ * `host:path` and fails with "Cannot connect to D: resolve failed", so every
+ * install from a Git Bash prompt died at the listing step. Prefer the OS tar
+ * by absolute path; when it is somehow absent, tell GNU tar the colon is a
+ * drive letter (`--force-local`, which bsdtar does not accept — hence the
+ * split rather than passing it always).
+ */
+function tar(args, options) {
+  if (platform() === "win32") {
+    const system = join(process.env.SystemRoot || "C:\Windows", "System32", "tar.exe");
+    if (existsSync(system)) return run(system, args, options);
+    return run("tar", ["--force-local", ...args], options);
+  }
+  return run("tar", args, options);
+}
+
 export function inspectArchive(path) {
-  const listing = run("tar", ["-tzf", path], { quiet: true });
+  const listing = tar(["-tzf", path], { quiet: true });
   for (const raw of listing.split(/\r?\n/).filter(Boolean)) {
     const normalized = raw.replace(/\\/g, "/");
     const parts = normalized.split("/").filter((part) => part && part !== ".");
@@ -302,7 +324,7 @@ export function inspectArchive(path) {
   // `link/file` can redirect a later extraction outside stage/. Release
   // payloads need only ordinary files and directories, so reject every other
   // tar entry type before extraction (symlink, hardlink, device, FIFO, etc.).
-  const verboseListing = run("tar", ["-tvzf", path], { quiet: true });
+  const verboseListing = tar(["-tvzf", path], { quiet: true });
   for (const line of verboseListing.split(/\r?\n/).filter(Boolean)) {
     const kind = line[0];
     if (kind !== "-" && kind !== "d") {
@@ -626,7 +648,7 @@ async function main() {
     safeRemove(stage, root);
     mkdirSync(stage, { recursive: true });
     try {
-      run("tar", ["-xzf", archivePath, "-C", stage]);
+      tar(["-xzf", archivePath, "-C", stage]);
       // The archive deliberately has no node_modules yet. At this point verify
       // structure only; importing shared would turn a valid clean install into
       // a false failure because zod/yaml have not been installed.
