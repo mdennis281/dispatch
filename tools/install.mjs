@@ -718,35 +718,50 @@ async function main() {
           }
         }
 
+        // A failure here is reported and swallowed — the app is installed,
+        // running and usable; not coming back by itself after a reboot is a
+        // smaller problem than an install that reports failure.
+        const registerAutostart = () => {
+          try {
+            run(
+              process.execPath,
+              [
+                join(app, "tools", "app", "autostart.mjs"),
+                autostart ? "--enable" : "--disable",
+                "--target",
+                root,
+                ...(args.start ? [] : ["--no-activate"]),
+              ],
+              { cwd: app },
+            );
+          } catch (autostartError) {
+            console.warn(
+              `warning: Dispatch installed, but ${autostart ? "will not start at login" : "its login entry could not be removed"}: ${autostartError.message}`,
+            );
+          }
+        };
+
+        // Order matters, and differently for the two directions:
+        //
+        //   --disable runs BEFORE the start. On systemd it is `disable --now`,
+        //   and stopping a unit that was active runs its ExecStop, which stops
+        //   Dispatch. Run after the start, `install.sh --no-autostart` over an
+        //   install that had autostart on stopped the app it had just started
+        //   and reported success. Before the start there is nothing up to stop:
+        //   the swap already stopped the old instance.
+        //
+        //   --enable runs AFTER the start: enabling the unit with `--now` is
+        //   what leaves it active so its ExecStop can stop agents at logout,
+        //   and that is only honest once the app is actually meant to be up.
+        if (!autostart) registerAutostart();
+
         if (args.start) {
           const launcher = join(app, "tools", "app", "launch.py");
           launch(python, launcher, ["--no-window", "--target", root]);
           if (args.open) openBrowser("http://127.0.0.1:4318");
         }
 
-        // AFTER the start, not beside the shortcut: enabling the systemd user
-        // unit with `--now` is what leaves it active so its ExecStop can stop
-        // agents at logout, and that is only honest once the app is actually
-        // meant to be up. A failure here is reported and swallowed — the app is
-        // installed, running and usable; not coming back by itself after a
-        // reboot is a smaller problem than an install that reports failure.
-        try {
-          run(
-            process.execPath,
-            [
-              join(app, "tools", "app", "autostart.mjs"),
-              autostart ? "--enable" : "--disable",
-              "--target",
-              root,
-              ...(args.start ? [] : ["--no-activate"]),
-            ],
-            { cwd: app },
-          );
-        } catch (autostartError) {
-          console.warn(
-            `warning: Dispatch installed, but ${autostart ? "will not start at login" : "its login entry could not be removed"}: ${autostartError.message}`,
-          );
-        }
+        if (autostart) registerAutostart();
 
         // The new payload is relinked, verified, stamped and (if asked) up, so
         // `backup` is the rollback target now and everything older is dead

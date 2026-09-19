@@ -28,8 +28,8 @@
  *      websocket (`DISPATCH_FAKE_SDK=1`, so no credentials and no network),
  *      models, git, worktrees, terminals, the update surface, the CLI.
  *   8. Stop / start through `launch.py`, and everything is still there.
- *   9. A same-version reinstall: idempotent, prunes to one backup, honours
- *      `--no-autostart`.
+ *   9. A same-version reinstall: idempotent, prunes to one backup, removes the
+ *      login entry with `--no-autostart` — and is still up afterwards.
  *  10. Stop, and prove it is gone.
  *
  * Every check is recorded rather than thrown, so one red row does not hide the
@@ -438,9 +438,12 @@ async function main() {
     const h = (await get("/api/health", { expect: 200 })).json;
     assert(h.status === "ok" && h.spa === true && h.store === true, `health: ${JSON.stringify(h)}`);
     assert(h.problems.length === 0, `problems: ${h.problems.join("; ")}`);
-    assert(h.version === firstTag.replace(/^v/, ""), `health.version ${h.version} ≠ ${firstTag}`);
+    // The first install may be an older release; `version` arrived in the
+    // health report after some of those. The UPDATE below asserts it strictly.
+    if (h.version === undefined) note(`${firstTag}'s /api/health has no version field (predates it)`);
+    else assert(h.version === firstTag.replace(/^v/, ""), `health.version ${h.version} ≠ ${firstTag}`);
     assert(resolve(h.dataDir).startsWith(resolve(root)), `dataDir ${h.dataDir} is outside the install root`);
-    return `version ${h.version}`;
+    return `version ${h.version ?? "(none)"}`;
   });
 
   await check("launch.py --status sees the instance", async () => {
@@ -560,16 +563,15 @@ async function main() {
     });
   }
 
+  // Registration only, here. Removal is exercised by the `--no-autostart`
+  // reinstall below, through the installer — not by calling `--disable` now:
+  // on systemd that is `disable --now`, whose ExecStop stops the running app,
+  // and every REST check after it would fail for a reason that is not a bug.
   const autostart = (mode) => runQuiet(process.execPath, [join(app, "tools/app/autostart.mjs"), mode, "--target", root]);
-  if (!args.noLaunchers) await check("autostart entry registered by the install, then removed", () => {
+  if (!args.noLaunchers) await check("autostart entry registered by the install", () => {
     const status = autostart("--status");
     assert(status.code === 0, `--status after install: ${status.out.trim()}`);
-    const kind = /registered \((.+?)\)/.exec(status.out)?.[1];
-    const off = autostart("--disable");
-    assert(off.code === 0, `--disable: ${off.out.trim()}`);
-    const after = autostart("--status");
-    assert(after.code === 1, `--status after disable should be 1: ${after.out.trim()}`);
-    return kind ?? status.out.trim();
+    return /registered \((.+?)\)/.exec(status.out)?.[1] ?? status.out.trim();
   });
 
   /* ---- 5. the setup wizard, over REST ---- */
@@ -654,6 +656,7 @@ async function main() {
   /* ---- 6. core features against the installed build ---- */
 
   // A commit, so worktrees and the git panel have something to look at.
+  mkdirSync(repoPath, { recursive: true });
   const git = (a) => runQuiet("git", a, { cwd: repoPath });
   git(["config", "user.email", "smoke@example.com"]);
   git(["config", "user.name", "Install Smoke"]);
@@ -781,10 +784,13 @@ async function main() {
     assert(backups.length === 1, `expected one backup after prune, found ${backups.length}: ${backups.join(", ")}`);
     if (!args.noLaunchers) {
       const status = autostart("--status");
-      assert(status.code === 1, `autostart should be off: ${status.out.trim()}`);
+      assert(status.code === 1, `the login entry should be gone: ${status.out.trim()}`);
     }
     return backups[0];
   });
+  // Health AFTER the entry's removal is the point: removing a systemd unit is
+  // `disable --now`, and an installer that did that after starting the app
+  // reported success over a stopped Dispatch.
   await check("the reinstalled build is healthy with its data", async () => {
     const rt = readJson(join(root, "runtime.json"));
     port = rt.port;
