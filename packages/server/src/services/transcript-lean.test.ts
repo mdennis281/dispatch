@@ -69,6 +69,24 @@ describe("lean transcript projection — large payloads are clipped + flagged", 
     expect(String(lean.content).startsWith("xxx")).toBe(true);
   });
 
+  it("carries a card payload's tail line through the clip, on its own line", () => {
+    // A PR or issue card is drawn from that line. Before this, any result over
+    // the inline limit lost it, and the collapsed card drew no strip at all
+    // until someone opened it — the one thing the projection must keep drawable.
+    const tail = `<<dispatch:issue>>${JSON.stringify({ v: 1, tool: "issue_read", n: 5 })}`;
+    const lean = leanRow(toolResult([{ type: "text", text: `${BIG}\n${tail}` }])) as ToolResultRow;
+    expect(lean.contentOmitted).toBe(true);
+    const content = String(lean.content);
+    expect(content.startsWith("xxx")).toBe(true);
+    expect(content.endsWith(`\n${tail}`)).toBe(true);
+    expect(content.length).toBeLessThan(1_700);
+    // A payload too big to inline is dropped like any other bulk; the card
+    // hydrates on open.
+    const huge = `<<dispatch:issue>>${JSON.stringify({ body: BIG })}`;
+    const dropped = leanRow(toolResult(`prose\n${huge}`)) as ToolResultRow;
+    expect(String(dropped.content)).not.toContain("<<dispatch:");
+  });
+
   it("previews a non-string result payload as readable JSON", () => {
     const lean = leanRow(toolResult({ files: Array.from({ length: 500 }, (_, i) => `f${i}.ts`) })) as ToolResultRow;
     expect(lean.contentOmitted).toBe(true);

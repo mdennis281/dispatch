@@ -41,6 +41,8 @@ export * from "./wire.js";
 export * from "./metrics.js";
 export * from "./growth.js";
 export * from "./pr-tools.js";
+export * from "./issue-tools.js";
+export * from "./tail-payload.js";
 export * from "./manager-tools.js";
 export * from "./human-review.js";
 export * from "./secrets.js";

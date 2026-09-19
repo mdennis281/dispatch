@@ -114,7 +114,7 @@ describe("GitHubIssueProvider", () => {
       sent = JSON.parse(readFileSync(c.args[c.args.indexOf("--input") + 1]!, "utf8"));
       return { stdout: JSON.stringify({ id: 11, html_url: "u" }) };
     });
-    expect(await new GitHubIssueProvider(exec).comment(src, 3, body)).toEqual({ id: "11", url: "u" });
+    expect(await new GitHubIssueProvider(exec).comment(src, 3, body)).toMatchObject({ id: "11", url: "u", body });
     expect(sent).toEqual({ body });
     expect(calls[0].args.slice(0, 4)).toEqual(["api", "--method", "POST", "repos/acme/api/issues/3/comments"]);
     // The argv stays short however long the comment is — Windows' 32K cap.
