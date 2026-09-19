@@ -7,6 +7,7 @@
 import type {
   Persona,
   GhCliStatus,
+  RuntimeSetupStatus,
   SetupStatus,
   Project,
   Chat,
@@ -1268,6 +1269,7 @@ export const api = {
   setup: {
     status: () => get<SetupStatus>("/api/setup"),
     github: () => get<GhCliStatus>("/api/setup/github"),
+    runtimes: () => get<RuntimeSetupStatus[]>("/api/setup/runtimes"),
     complete: () => post<SetupStatus>("/api/setup/complete", {}),
   },
 

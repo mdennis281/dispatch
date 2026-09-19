@@ -25,6 +25,7 @@ import { execBinary } from "./exec-binary.js";
 import { parse as parseYaml } from "yaml";
 import type {
   GhCliStatus,
+  GitCliStatus,
   Project,
   PRInfo,
   PRRef,
@@ -1067,6 +1068,13 @@ export class GitHubService {
    * is not the useful fact — "logged in as which account" is, because the PR
    * workflow acts as whoever this is.
    *
+   * `git` rides along as a third fact. It is not what this probe is named for,
+   * but it is the tool the wizard's LAST step depends on (`git init` for the
+   * first project, then every worktree), and nothing before that step asked
+   * whether it existed — so a machine without git learned from a raw spawn
+   * error in the project form. Probed AFTER `gh`, and reported even when `gh` is
+   * missing: they are installed independently and fixed independently.
+   *
    * Never throws. Every failure here is an expected answer about the machine,
    * not an exception: an install with no `gh` is a supported install.
    */
@@ -1081,6 +1089,7 @@ export class GitHubService {
         installed: false,
         authenticated: false,
         error: (probe.stderr || probe.stdout || "gh is not on PATH").trim().slice(0, 300),
+        git: await this.gitStatus(),
       };
     }
     // `gh version 2.62.0 (2024-11-14)` — first dotted number on the first line.
@@ -1092,7 +1101,21 @@ export class GitHubService {
       authenticated: !!who.login,
       ...(who.login ? { login: who.login } : {}),
       ...(who.error ? { error: who.error } : {}),
+      git: await this.gitStatus(),
     };
+  }
+
+  /** `git --version` → presence and version. Never throws. */
+  private async gitStatus(): Promise<GitCliStatus> {
+    const probe = await this.exec("git", ["--version"], { reject: false }).catch((e: unknown) => ({
+      stdout: "",
+      stderr: e instanceof Error ? e.message : String(e),
+      exitCode: 1,
+    }));
+    if (probe.exitCode !== 0) return { installed: false };
+    // `git version 2.47.1.windows.1` — the dotted number, without the platform suffix.
+    const version = /(\d+\.\d+\.\d+)/.exec(probe.stdout ?? "")?.[1];
+    return { installed: true, ...(version ? { version } : {}) };
   }
 
   /**

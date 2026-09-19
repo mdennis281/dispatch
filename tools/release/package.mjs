@@ -50,6 +50,10 @@ const files = [
   "install.sh",
   "packages/server/package.json",
   "packages/server/dist",
+  // Read at runtime by `AuthoredConfigService.shipped()` (services/authored-
+  // config.ts), the same way `skills` and `personas` are — a release without
+  // it booted fine and simply had no shipped instructions to offer.
+  "packages/server/instructions",
   "packages/server/skills",
   "packages/server/personas",
   "packages/client/dist",

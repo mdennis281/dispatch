@@ -199,7 +199,7 @@ def supervise(paths: Paths, app: Path, port: int) -> int:
     """
     node = shutil.which("node")
     if not node:
-        raise SystemExit("node is not on PATH - install Node 20+ and retry")
+        raise SystemExit("node is not on PATH - install Node 24+ and retry")
 
     paths.data_dir.mkdir(parents=True, exist_ok=True)
     paths.config_dir.mkdir(parents=True, exist_ok=True)
@@ -444,6 +444,21 @@ def start(paths: Paths, app: Path, port: int) -> None:
         kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         kwargs["start_new_session"] = True
+        # Let go of the caller's stdio. A new session does not close inherited
+        # descriptors, so the supervisor — and the node it spawns, which
+        # inherits from it — kept holding whatever stdout/stderr THIS process
+        # was given. From a terminal that is invisible; from anything that
+        # captures the installer's output (`out=$(sh install.sh …)`, a CI step,
+        # the smoke that found this) the pipe never reaches EOF and the caller
+        # waits on a finished install until it times out. Windows never had the
+        # problem: DETACHED_PROCESS gives the child no console handles at all.
+        # What this costs: the supervisor's one stderr message (the stranded-pid
+        # warning on a failed stop) no longer reaches a terminal — but a
+        # detached process's terminal has usually moved on by then, and the
+        # runtime.json it deliberately leaves behind is the durable signal.
+        kwargs["stdin"] = subprocess.DEVNULL
+        kwargs["stdout"] = subprocess.DEVNULL
+        kwargs["stderr"] = subprocess.DEVNULL
 
     subprocess.Popen(argv, **kwargs)
 

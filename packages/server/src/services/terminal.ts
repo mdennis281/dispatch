@@ -6,7 +6,16 @@
  * commands, exposed to the agent as `mcp__dispatch-workspace__terminal` and mirrored
  * read-only in the UI.
  *
- * ── Backend chosen: long-lived `powershell.exe -Command -` child process ──────
+ * ── Backend chosen: a long-lived shell reading a PIPED stdin ─────────────────
+ * `powershell.exe -Command -` on Windows; `bash` (falling back to `sh`) on
+ * macOS and Linux. The POSIX half was MISSING until the install smoke ran a
+ * terminal on a macOS runner: every platform spawned `powershell.exe`, the
+ * spawn failed with ENOENT, and the terminal tool, the Terminals panel and
+ * `run_subapp`-adjacent shells all reported "Terminal has exited." on the two
+ * OSes this repo had never run a terminal on. The protocol below is the same
+ * on both — only the spawn and the probe line differ (see `shellFor`).
+ *
+ * ── Why this shape and not node-pty ─────────────────────────────────────────
  * We deliberately DID NOT use node-pty. Its native postinstall build is gated
  * off by pnpm's `allowBuilds` policy on this repo, and a real ConPTY stream
  * carries ANSI + prompt-echo + line-wrapping that has to be parsed back out —
@@ -42,6 +51,8 @@
  * list, attribute to a chat, and tree-kill.
  */
 import { spawn as nodeSpawn } from "node:child_process";
+import { statSync } from "node:fs";
+import { join } from "node:path";
 import treeKill from "tree-kill";
 import { nanoid } from "nanoid";
 import {
@@ -95,13 +106,67 @@ export interface ShellProcess {
 /** Factory for a shell process rooted at `cwd`. Defaults to piped PowerShell. */
 export type SpawnShell = (cwd: string) => ShellProcess;
 
-/** Default shell: a persistent, stdin-piped PowerShell (see file header). */
+/**
+ * Which shell this platform drives, and how to ask it for the sentinel.
+ *
+ * Both shells execute a piped stdin INCREMENTALLY, line by line, which is what
+ * the whole design rests on; both keep cwd and env across writes because they
+ * are one live process. `bash` over `$SHELL` on purpose: zsh is the macOS
+ * default and reads a pipe just as well, but the probe below is written once
+ * and bash is the one shell present on every macOS and Linux box this can
+ * land on (`sh` only as the last resort, where `$?` and `printf` still hold).
+ */
+export type ShellFlavour = "powershell" | "posix";
+export const shellFlavour: ShellFlavour = process.platform === "win32" ? "powershell" : "posix";
+
+/** Default shell: a persistent, stdin-piped PowerShell or bash (see file header). */
 export const defaultSpawnShell: SpawnShell = (cwd) =>
-  nodeSpawn(
-    "powershell.exe",
-    ["-NoLogo", "-NoProfile", "-Command", "-"],
-    { cwd, windowsHide: true, env: process.env },
-  ) as unknown as ShellProcess;
+  (shellFlavour === "powershell"
+    ? nodeSpawn(
+        "powershell.exe",
+        ["-NoLogo", "-NoProfile", "-Command", "-"],
+        { cwd, windowsHide: true, env: process.env },
+      )
+    : nodeSpawn(posixShell(), [], { cwd, env: process.env })) as unknown as ShellProcess;
+
+/** `bash` where it exists, else `sh`. Resolved per spawn: PATH can change. */
+function posixShell(): string {
+  const dirs = (process.env.PATH ?? "").split(":").filter(Boolean);
+  for (const name of ["bash", "sh"]) {
+    for (const dir of dirs) {
+      try {
+        if (statSync(join(dir, name)).isFile()) return join(dir, name);
+      } catch {
+        /* not here */
+      }
+    }
+  }
+  return "/bin/sh";
+}
+
+/**
+ * The probe line for one flavour: prints `<marker>|<exit>|<ok>|<cwd>` on
+ * stdout right after the command, so `onLine` can resolve the run. Exported
+ * for the unit tests, which drive a fake shell and only need the text.
+ */
+export function probeLine(marker: string, flavour: ShellFlavour = shellFlavour): string {
+  if (flavour === "powershell") {
+    // Capture $?/$LASTEXITCODE before anything else can change them.
+    // `[Console]::Out.Flush` is implicit for Write-Output; the piped shell
+    // flushes per line.
+    return (
+      `$__cm_ok = $?; $__cm_ec = $LASTEXITCODE; ` +
+      `Write-Output ("${marker}|" + $(if ($null -ne $__cm_ec) { $__cm_ec } ` +
+      `elseif ($__cm_ok) { 0 } else { 1 }) + "|" + $__cm_ok + "|" + $PWD.Path)`
+    );
+  }
+  // `$?` first, on the same line, before any other command can overwrite it.
+  // `True`/`False` to match PowerShell's `$?` spelling, so the parser is one.
+  return (
+    `__cm_ec=$?; printf '%s|%s|%s|%s\\n' '${marker}' "$__cm_ec" ` +
+    `"$([ "$__cm_ec" -eq 0 ] && echo True || echo False)" "$PWD"`
+  );
+}
 
 /* ---------------------------------------------------------------------- deps */
 
@@ -121,6 +186,8 @@ const defaultKillTree: KillTreeFn = (pid) =>
 
 export interface TerminalServiceDeps {
   spawn?: SpawnShell;
+  /** Which probe dialect the injected `spawn` speaks; defaults to this platform's. */
+  flavour?: ShellFlavour;
   genId?: () => string;
   now?: () => number;
   killTree?: KillTreeFn;
@@ -251,6 +318,7 @@ interface Terminal {
 export class TerminalService {
   private readonly bus: EventBus;
   private readonly spawn: SpawnShell;
+  private readonly flavour: ShellFlavour;
   private readonly genId: () => string;
   private readonly now: () => number;
   private readonly maxPerChat: number;
@@ -284,6 +352,7 @@ export class TerminalService {
   constructor(opts: TerminalServiceOptions) {
     this.bus = opts.bus;
     this.spawn = opts.deps?.spawn ?? defaultSpawnShell;
+    this.flavour = opts.deps?.flavour ?? shellFlavour;
     this.genId = opts.deps?.genId ?? (() => nanoid());
     this.now = opts.deps?.now ?? (() => Date.now());
     this.killTree = opts.deps?.killTree ?? defaultKillTree;
@@ -553,13 +622,9 @@ export class TerminalService {
         cleanups.push(() => sig.removeEventListener("abort", onAbort));
       }
 
-      // The probe: capture $?/$LASTEXITCODE right after the command, then print
-      // the marker line `<marker>|<exit>|<ok>|<cwd>`. `[Console]::Out.Flush` is
-      // implicit for Write-Output; the piped shell flushes per line.
-      const probe =
-        `$__cm_ok = $?; $__cm_ec = $LASTEXITCODE; ` +
-        `Write-Output ("${marker}|" + $(if ($null -ne $__cm_ec) { $__cm_ec } ` +
-        `elseif ($__cm_ok) { 0 } else { 1 }) + "|" + $__cm_ok + "|" + $PWD.Path)`;
+      // The probe: the marker line `<marker>|<exit>|<ok>|<cwd>`, in whichever
+      // dialect the shell under this terminal speaks.
+      const probe = probeLine(marker, this.flavour);
       try {
         term.proc.stdin.write(command + "\n");
         term.proc.stdin.write(probe + "\n");

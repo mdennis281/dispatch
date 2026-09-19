@@ -52,6 +52,11 @@ const REQUIRED_PAYLOAD = [
   "packages/cli/dist/index.js",
   "tools/app/launch.py",
   "tools/app/autostart.mjs",
+  // Both are RUN by this installer a few lines after verifyPayload passes
+  // (autostart.mjs imports paths.mjs; the shortcut step spawns create-shortcut),
+  // so a payload without them used to verify clean and fail at the swap.
+  "tools/app/paths.mjs",
+  "tools/app/create-shortcut.mjs",
 ];
 
 function usage() {
@@ -279,8 +284,30 @@ function checksumFor(text, filename) {
   throw new Error(`SHA256SUMS has no entry for ${filename}`);
 }
 
+/**
+ * The `tar` this installer runs, and why it is not simply "tar".
+ *
+ * On Windows two tars answer to that name: the OS's own `System32\tar.exe`
+ * (bsdtar, since Windows 10 1803) and Git for Windows' GNU tar, which is FIRST
+ * on PATH inside Git Bash — the shell `install.sh` runs under there, and the one
+ * a CI runner's `shell: bash` gives you. GNU tar reads `D:\a\…\x.tar.gz` as
+ * `host:path` and fails with "Cannot connect to D: resolve failed", so every
+ * install from a Git Bash prompt died at the listing step. Prefer the OS tar
+ * by absolute path; when it is somehow absent, tell GNU tar the colon is a
+ * drive letter (`--force-local`, which bsdtar does not accept — hence the
+ * split rather than passing it always).
+ */
+function tar(args, options) {
+  if (platform() === "win32") {
+    const system = join(process.env.SystemRoot || "C:\Windows", "System32", "tar.exe");
+    if (existsSync(system)) return run(system, args, options);
+    return run("tar", ["--force-local", ...args], options);
+  }
+  return run("tar", args, options);
+}
+
 export function inspectArchive(path) {
-  const listing = run("tar", ["-tzf", path], { quiet: true });
+  const listing = tar(["-tzf", path], { quiet: true });
   for (const raw of listing.split(/\r?\n/).filter(Boolean)) {
     const normalized = raw.replace(/\\/g, "/");
     const parts = normalized.split("/").filter((part) => part && part !== ".");
@@ -297,7 +324,7 @@ export function inspectArchive(path) {
   // `link/file` can redirect a later extraction outside stage/. Release
   // payloads need only ordinary files and directories, so reject every other
   // tar entry type before extraction (symlink, hardlink, device, FIFO, etc.).
-  const verboseListing = run("tar", ["-tvzf", path], { quiet: true });
+  const verboseListing = tar(["-tvzf", path], { quiet: true });
   for (const line of verboseListing.split(/\r?\n/).filter(Boolean)) {
     const kind = line[0];
     if (kind !== "-" && kind !== "d") {
@@ -471,11 +498,18 @@ function createPosixLauncher(root, python) {
   const target = join(bin, "dispatch");
   const launcher = join(root, "app", "tools", "app", "launch.py");
   mkdirSync(bin, { recursive: true });
-  const quoted = launcher.replace(/'/g, `'"'"'`);
-  const pythonCommand = [python.command, ...python.prefix]
-    .map((part) => `'${String(part).replace(/'/g, `'"'"'`)}'`)
-    .join(" ");
-  writeFileSync(target, `#!/usr/bin/env sh\nexec ${pythonCommand} '${quoted}' "$@"\n`);
+  const sq = (value) => `'${String(value).replace(/'/g, `'"'"'`)}'`;
+  const pythonCommand = [python.command, ...python.prefix].map(sq).join(" ");
+  // `--target` pins the shim to THIS install, before the user's own arguments so
+  // a `dispatch --target elsewhere` still wins. Without it the shim resolved the
+  // default root at run time, and a `--target` install (a second copy, a test
+  // root) got a `dispatch` command that reported "not running" for the instance
+  // it had just started — the login entry autostart.mjs writes never had this
+  // bug because it always carried the root.
+  writeFileSync(
+    target,
+    `#!/usr/bin/env sh\nexec ${pythonCommand} ${sq(launcher)} --target ${sq(root)} "$@"\n`,
+  );
   chmodSync(target, 0o755);
   console.log(`created ${target}`);
   if (!(process.env.PATH || "").split(":").includes(bin)) {
@@ -614,7 +648,7 @@ async function main() {
     safeRemove(stage, root);
     mkdirSync(stage, { recursive: true });
     try {
-      run("tar", ["-xzf", archivePath, "-C", stage]);
+      tar(["-xzf", archivePath, "-C", stage]);
       // The archive deliberately has no node_modules yet. At this point verify
       // structure only; importing shared would turn a valid clean install into
       // a false failure because zod/yaml have not been installed.
@@ -684,35 +718,50 @@ async function main() {
           }
         }
 
+        // A failure here is reported and swallowed — the app is installed,
+        // running and usable; not coming back by itself after a reboot is a
+        // smaller problem than an install that reports failure.
+        const registerAutostart = () => {
+          try {
+            run(
+              process.execPath,
+              [
+                join(app, "tools", "app", "autostart.mjs"),
+                autostart ? "--enable" : "--disable",
+                "--target",
+                root,
+                ...(args.start ? [] : ["--no-activate"]),
+              ],
+              { cwd: app },
+            );
+          } catch (autostartError) {
+            console.warn(
+              `warning: Dispatch installed, but ${autostart ? "will not start at login" : "its login entry could not be removed"}: ${autostartError.message}`,
+            );
+          }
+        };
+
+        // Order matters, and differently for the two directions:
+        //
+        //   --disable runs BEFORE the start. On systemd it is `disable --now`,
+        //   and stopping a unit that was active runs its ExecStop, which stops
+        //   Dispatch. Run after the start, `install.sh --no-autostart` over an
+        //   install that had autostart on stopped the app it had just started
+        //   and reported success. Before the start there is nothing up to stop:
+        //   the swap already stopped the old instance.
+        //
+        //   --enable runs AFTER the start: enabling the unit with `--now` is
+        //   what leaves it active so its ExecStop can stop agents at logout,
+        //   and that is only honest once the app is actually meant to be up.
+        if (!autostart) registerAutostart();
+
         if (args.start) {
           const launcher = join(app, "tools", "app", "launch.py");
           launch(python, launcher, ["--no-window", "--target", root]);
           if (args.open) openBrowser("http://127.0.0.1:4318");
         }
 
-        // AFTER the start, not beside the shortcut: enabling the systemd user
-        // unit with `--now` is what leaves it active so its ExecStop can stop
-        // agents at logout, and that is only honest once the app is actually
-        // meant to be up. A failure here is reported and swallowed — the app is
-        // installed, running and usable; not coming back by itself after a
-        // reboot is a smaller problem than an install that reports failure.
-        try {
-          run(
-            process.execPath,
-            [
-              join(app, "tools", "app", "autostart.mjs"),
-              autostart ? "--enable" : "--disable",
-              "--target",
-              root,
-              ...(args.start ? [] : ["--no-activate"]),
-            ],
-            { cwd: app },
-          );
-        } catch (autostartError) {
-          console.warn(
-            `warning: Dispatch installed, but ${autostart ? "will not start at login" : "its login entry could not be removed"}: ${autostartError.message}`,
-          );
-        }
+        if (autostart) registerAutostart();
 
         // The new payload is relinked, verified, stamped and (if asked) up, so
         // `backup` is the rollback target now and everything older is dead

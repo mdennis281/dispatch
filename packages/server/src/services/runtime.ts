@@ -80,6 +80,38 @@ export function bundledVersion(): string | undefined {
   }
 }
 
+/**
+ * The SDK's own Claude Code binary on disk, for callers that need to RUN it
+ * rather than hand it to `query()` — the setup wizard's login probe spawns
+ * `claude auth status`, and when nothing newer is installed the bundled copy is
+ * the runtime every chat will use, so it is the one whose login matters.
+ *
+ * Mirrors the SDK's own lookup: an optional dependency per platform
+ * (`@anthropic-ai/claude-agent-sdk-<platform>-<arch>[-musl]`) resolved from the
+ * SDK package, so it lands on the same file `query()` would spawn. `undefined`
+ * when the platform package is absent — the SDK would fail to spawn too, and
+ * the probe reports that instead of guessing.
+ */
+export function bundledExecutable(): string | undefined {
+  try {
+    const require = createRequire(import.meta.url);
+    const sdkRequire = createRequire(require.resolve("@anthropic-ai/claude-agent-sdk"));
+    const base = `@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}`;
+    const names = process.platform === "linux" ? [base, `${base}-musl`] : [base];
+    for (const name of names) {
+      try {
+        const candidate = sdkRequire.resolve(`${name}/${EXE_NAME}`);
+        if (existsSync(candidate)) return candidate;
+      } catch {
+        /* this variant isn't installed — try the next */
+      }
+    }
+  } catch {
+    /* no SDK at all */
+  }
+  return undefined;
+}
+
 /** `claude --version` → "2.1.222". Undefined if it won't run or won't parse. */
 function versionOf(exe: string): string | undefined {
   try {
