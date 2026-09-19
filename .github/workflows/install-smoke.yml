@@ -39,6 +39,11 @@ on:
         description: Release to install FIRST (then update to the head). `auto` = the one before the head; `none` = skip the update phase.
         type: string
         default: auto
+  # Exactly the files the smoke takes FROM THE CHECKOUT. Everything else it
+  # exercises — launch.py, autostart.mjs, create-shortcut.mjs, the server and
+  # its routes — comes out of the PUBLISHED release payload it installs, so a
+  # PR touching those would trigger six jobs that cannot observe the change.
+  # Their proof is the first scheduled run after the merge has been released.
   pull_request:
     branches: [main]
     paths:
