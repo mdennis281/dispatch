@@ -7222,7 +7222,10 @@ ${look}` : "")
         return issueToolResult(`${head}\n${issues.map(issueLine).join("\n") || "(none)"}`, {
           tool: "issue_list",
           outcome: { summary: head, ok: true, details: [] },
-          issues,
+          // Bodies dropped: the list card draws titles and labels only, and
+          // thirty bodies would push the payload past what the lean transcript
+          // carries inline — leaving the card with no rows until opened.
+          issues: issues.map((i) => ({ ...i, body: "" })),
         });
       }),
   );

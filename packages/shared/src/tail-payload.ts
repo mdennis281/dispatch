@@ -10,6 +10,24 @@
  */
 import type * as z from "zod";
 
+/**
+ * What every tail marker starts with. The lean transcript projection uses it
+ * to recognise a payload line without knowing which tool wrote it, so a
+ * clipped result keeps the one line its card is drawn from.
+ */
+export const TAIL_PAYLOAD_PREFIX = "<<dispatch:";
+
+/**
+ * The payload line of a result, whichever tool wrote it, or null. Line-anchored
+ * like the decoder: the last line that BEGINS with the prefix.
+ */
+export function findTailPayloadLine(text: string): string | null {
+  const at = lastLineStartMarker(text, TAIL_PAYLOAD_PREFIX);
+  if (at < 0) return null;
+  const end = text.indexOf("\n", at);
+  return end < 0 ? text.slice(at) : text.slice(at, end);
+}
+
 /** Serialize a payload as the tail line of a tool result. */
 export function encodeTailPayload(marker: string, payload: unknown): string {
   return `${marker}${JSON.stringify(payload)}`;

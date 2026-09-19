@@ -21,7 +21,7 @@
  *   - Everything the client reads off a collapsed row is whitelisted below. Adding
  *     a new field to a collapsed card means adding its key here.
  */
-import { fileEditStat, fileResultStat, type ChatMessage } from "@dispatch/shared";
+import { fileEditStat, fileResultStat, findTailPayloadLine, type ChatMessage } from "@dispatch/shared";
 
 /** Inputs at or under this serialized size ship verbatim (no hydrate needed). */
 const INPUT_INLINE_LIMIT = 4_096;
@@ -31,6 +31,14 @@ const RESULT_INLINE_LIMIT = 2_048;
 const RESULT_PREVIEW_CHARS = 1_500;
 /** How much of a clipped string input value to keep. */
 const INPUT_STRING_PREVIEW_CHARS = 512;
+/**
+ * The largest `<<dispatch:…>>` tail line a clipped result carries along. A PR
+ * or issue card is drawn FROM that line — its strip, its title, its labels —
+ * and a collapsed card with no strip is exactly the "one-line header" this
+ * projection exists to keep drawable. Past this the card hydrates on open,
+ * as it already had to; an issue body pasted with a 60 KB log is the case.
+ */
+const TAIL_PAYLOAD_INLINE_LIMIT = 16_384;
 
 /**
  * `tool_use.input` keys the client reads WITHOUT expanding the card. Keep this in
@@ -148,9 +156,23 @@ export function leanRow(row: ChatMessage, toolName?: string): ChatMessage {
       // so it comes from the paired tool_use (see leanRows); when that row is
       // outside this page there is no stat and the client falls back.
       const name = row.name ?? toolName;
+      const text = resultAsText(row.content);
+      const tail = findTailPayloadLine(text);
+      // A result with a card payload is previewed as its TEXT, not as the
+      // JSON of its content blocks: the card decodes the payload off the text,
+      // and the prose head is what its summary line shows meanwhile. A payload
+      // too big to carry is cut off whole rather than truncated mid-JSON, so
+      // the preview never ends in half an envelope.
+      let content: string;
+      if (tail) {
+        const head = clip(text.slice(0, text.length - tail.length).trimEnd(), RESULT_PREVIEW_CHARS);
+        content = tail.length <= TAIL_PAYLOAD_INLINE_LIMIT ? `${head}\n${tail}` : head;
+      } else {
+        content = previewContent(row.content);
+      }
       return {
         ...row,
-        content: previewContent(row.content),
+        content,
         contentOmitted: true,
         contentBytes: bytes,
         fileStat: name ? fileResultStat(name, resultAsText(row.content)) ?? undefined : undefined,
