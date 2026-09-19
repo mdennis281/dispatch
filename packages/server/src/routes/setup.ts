@@ -2,9 +2,10 @@
  * REST for the first-run setup wizard.
  *   GET  /api/setup          → SetupStatus (is the wizard still owed?)
  *   GET  /api/setup/github   → GhCliStatus, probed LIVE
+ *   GET  /api/setup/runtimes → RuntimeSetupStatus[], probed LIVE (installed AND logged in)
  *   POST /api/setup/complete → mark the wizard finished
  *
- * The github probe is deliberately uncached. Its entire purpose is the Re-check
+ * The github and runtime probes are deliberately uncached. Its entire purpose is the Re-check
  * button: you read "gh is not installed", you install it in another window, and
  * you press the button. A cached answer would tell you it still isn't — which is
  * worse than not checking, because it looks authoritative.
@@ -17,6 +18,7 @@
  */
 import type { FastifyInstance } from "fastify";
 import { completeSetup, readSetupState } from "../services/setup.js";
+import { probeRuntimeLogins } from "../services/runtime-login.js";
 
 export function registerSetupRoutes(app: FastifyInstance): void {
   const { store } = app.cm;
@@ -24,6 +26,13 @@ export function registerSetupRoutes(app: FastifyInstance): void {
   app.get("/api/setup", async () => readSetupState(store));
 
   app.get("/api/setup/github", async () => app.services.github.cliStatus());
+
+  app.get("/api/setup/runtimes", async () =>
+    probeRuntimeLogins(
+      app.services.harnesses.list(),
+      await store.getSettings().catch(() => null),
+    ),
+  );
 
   app.post("/api/setup/complete", async () => completeSetup(store));
 }

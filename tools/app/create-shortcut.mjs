@@ -179,7 +179,12 @@ for (const lnk of targets) {
     `$s = (New-Object -ComObject WScript.Shell).CreateShortcut(${psq(lnk)})`,
     `$s.TargetPath = ${psq(python)}`,
     // Quoted inside the argument string so a path with spaces stays one argv entry.
-    `$s.Arguments = ${psq(`"${launcher}"`)}`,
+    // `--target` is what pins the tile to THIS install. Without it, launch.py
+    // resolves the default root at click time, and a `--target` install (a
+    // second copy, a test root, anything not under %LOCALAPPDATA%) got a
+    // Start-menu tile that started the wrong Dispatch or none at all — which
+    // autostart.mjs already avoids for the login entry. Same fix, same reason.
+    `$s.Arguments = ${psq(`"${launcher}" --target "${paths.root}"`)}`,
     `$s.WorkingDirectory = ${psq(dirname(launcher))}`,
     `$s.Description = ${psq("Dispatch - local control plane for Claude Code agents")}`,
     ...(icon ? [`$s.IconLocation = ${psq(`${icon},0`)}`] : []),
