@@ -41,7 +41,9 @@ export function ToolDetailModal({
   response,
   responseLabel = "Received",
   language,
+  requestBody,
   responseBody,
+  lead,
 }: {
   open: boolean;
   onClose: () => void;
@@ -55,7 +57,14 @@ export function ToolDetailModal({
   response: string;
   responseLabel?: string;
   language?: string;
+  /** Replaces the raw request dump — for a call whose one argument that matters is prose. */
+  requestBody?: ReactNode;
   responseBody?: ReactNode;
+  /**
+   * Rendered above the request/response, for the thing the call is ABOUT when
+   * that is not obvious from either — the other chat a peer tool talks to.
+   */
+  lead?: ReactNode;
 }) {
   const tone = state === "failed" ? "danger" : state === "running" ? "accent" : state === "ok" ? "success" : "muted";
   const stateIcon = state === "running" ? <Spinner size={9} /> : state === "failed" ? <X /> : state === "stopped" ? <Circle /> : <Check />;
@@ -75,12 +84,17 @@ export function ToolDetailModal({
       description={description}
     >
       <div className="space-y-4">
+        {lead}
         <section>
           <div className="mb-1.5 flex items-center gap-2">
             <h3 className="text-2xs font-semibold uppercase tracking-[0.08em] text-faint">{requestLabel}</h3>
             <span className="ml-auto"><CopyAction text={request} /></span>
           </div>
-          {language ? (
+          {requestBody ? (
+            <div className="cm-scroll max-h-64 overflow-auto rounded-md border border-line bg-inset px-3 py-2.5">
+              {requestBody}
+            </div>
+          ) : language ? (
             <CodeBlock code={request} language={language} className="!my-0" />
           ) : (
             <pre className="cm-scroll max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md border border-line bg-inset px-3 py-2.5 cm-mono !text-xs text-secondary">{request}</pre>

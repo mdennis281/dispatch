@@ -659,6 +659,106 @@ export const MOCK_MESSAGES: Record<string, ChatMessage[]> = {
         askId: "ask_7f3a",
       },
     },
+    // The other direction: this chat talking TO its peers. One of each shape
+    // the card has to resolve — a spawn whose chat id is only in the RESULT, a
+    // send and an ask that name theirs in the arguments, and a wait still in
+    // flight. Every one should read as a chat title, never as an id.
+    {
+      kind: "tool_use",
+      id: "st5",
+      chatId: CHAT_STEAM,
+      ts: ago(0.9),
+      turn: 1,
+      toolUseId: "t_spawn",
+      name: "mcp__dispatch-chat__spawn_chat",
+      input: {
+        prompt:
+          "Migrate the cloud save slots to the v3 length-prefixed format. Land it through a reviewed PR.",
+        title: "**save**: cloud slot migration",
+        effort: "high",
+        reason: "The serializer change is a separable workstream.",
+      },
+    },
+    {
+      kind: "tool_result",
+      id: "st6",
+      chatId: CHAT_STEAM,
+      ts: ago(0.9),
+      turn: 1,
+      toolUseId: "t_spawn",
+      name: "mcp__dispatch-chat__spawn_chat",
+      ok: true,
+      durationMs: 1840,
+      content:
+        `Spawned chat "**save**: cloud slot migration" in Hivebreak and sent it the brief. It runs independently of this one — use wait_for_chat if you need to sequence behind it.\n` +
+        JSON.stringify({ approved: true, autoApproved: true, chatId: CHAT_SPAWN_SAVE, title: "**save**: cloud slot migration", projectId: "hivebreak" }),
+    },
+    {
+      kind: "tool_use",
+      id: "st7",
+      chatId: CHAT_STEAM,
+      ts: ago(0.8),
+      turn: 1,
+      toolUseId: "t_send",
+      name: "mcp__dispatch-chat__chat_send",
+      input: {
+        chatId: CHAT_SPAWN_UI,
+        message: "The slot picker should read the slot count from `SaveSlots.max`, not the hardcoded 3 — it changes with the v3 migration.",
+        delivery: "queue",
+      },
+    },
+    {
+      kind: "tool_result",
+      id: "st8",
+      chatId: CHAT_STEAM,
+      ts: ago(0.8),
+      turn: 1,
+      toolUseId: "t_send",
+      name: "mcp__dispatch-chat__chat_send",
+      ok: true,
+      durationMs: 96,
+      content:
+        `Sent to chat ${CHAT_SPAWN_UI}. It is mid-turn, so the message is queued and will be delivered the moment that turn ends.\n` +
+        JSON.stringify({ ok: true, chatId: CHAT_SPAWN_UI, held: true, interrupted: false, woke: false }),
+    },
+    {
+      kind: "tool_use",
+      id: "st9",
+      chatId: CHAT_STEAM,
+      ts: ago(0.6),
+      turn: 1,
+      toolUseId: "t_ask",
+      name: "mcp__dispatch-chat__chat_ask",
+      input: {
+        chatId: CHAT_SETTINGS,
+        question: "Did #214 change the slot header, or only the blob body?",
+        timeoutSeconds: 600,
+      },
+    },
+    {
+      kind: "tool_result",
+      id: "st10",
+      chatId: CHAT_STEAM,
+      ts: ago(0.5),
+      turn: 1,
+      toolUseId: "t_ask",
+      name: "mcp__dispatch-chat__chat_ask",
+      ok: true,
+      durationMs: 42_000,
+      content:
+        `Chat ${CHAT_SETTINGS} answered:\nOnly the blob body — the slot header is byte-identical to v2.\n` +
+        JSON.stringify({ answered: true, chatId: CHAT_SETTINGS }),
+    },
+    {
+      kind: "tool_use",
+      id: "st11",
+      chatId: CHAT_STEAM,
+      ts: ago(0.4),
+      turn: 1,
+      toolUseId: "t_waitchat",
+      name: "mcp__dispatch-chat__wait_for_chat",
+      input: { chatId: CHAT_SPAWN_SAVE, timeoutSeconds: 3600 },
+    },
   ],
 };
 

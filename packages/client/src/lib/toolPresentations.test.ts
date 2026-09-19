@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { LEGACY_MANAGER_TOOL_PREFIX, type ChatMessage, type ToolUseRow } from "@dispatch/shared";
-import { displayResultText, groupTranscriptRows, resultPreview, resultText, toolPresentation } from "./toolPresentations.js";
+import {
+  displayResultText,
+  groupTranscriptRows,
+  peerChatIdFromResult,
+  peerResultProse,
+  resultPreview,
+  resultText,
+  toolPresentation,
+} from "./toolPresentations.js";
 
 /** A tool name as it was recorded before the servers were split. Composed, not
  *  spelled, so `tools/verify/no-stale-tool-names.mjs` can stay exemption-free —
@@ -242,4 +250,29 @@ it("builds a compact first-line result preview", () => {
   expect(resultText([{ type: "image", data: "base64" }])).toBe("");
   expect(resultPreview([])).toBe("No output");
   expect(resultPreview(undefined)).toBe("No output");
+});
+
+describe("peer-chat tools", () => {
+  it("carry the other chat's id as peerChatId, not as the subject", () => {
+    const wait = toolPresentation(tool("mcp__dispatch-chat__wait_for_chat", { chatId: "y-abc", timeoutSeconds: 3600 }));
+    expect(wait).toMatchObject({ kind: "dispatch", category: "peer", peerChatId: "y-abc", title: "Wait for chat" });
+    expect((wait as { subject?: string }).subject).toBeUndefined();
+    expect(toolPresentation(tool("mcp__dispatch-chat__chat_send", { chatId: "y-abc", message: "go" }))).toMatchObject({
+      category: "peer",
+      peerChatId: "y-abc",
+      title: "Message chat",
+    });
+  });
+
+  it("read the chat id off a result's JSON trailer and strip that trailer from the prose", () => {
+    const content =
+      'Spawned chat "x" in P and sent it the brief.\n' +
+      JSON.stringify({ approved: true, chatId: "y-new", title: "x" });
+    expect(peerChatIdFromResult(content)).toBe("y-new");
+    expect(peerResultProse(content)).toBe('Spawned chat "x" in P and sent it the brief.');
+    // Results with no trailer, or whose only line is JSON-shaped, are left alone.
+    expect(peerChatIdFromResult("Unknown chatId — nothing to wait on.")).toBeUndefined();
+    expect(peerResultProse("plain prose")).toBe("plain prose");
+    expect(peerResultProse('{"chatId":"only-line"}')).toBe('{"chatId":"only-line"}');
+  });
 });
