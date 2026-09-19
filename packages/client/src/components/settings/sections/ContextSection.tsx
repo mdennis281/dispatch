@@ -1,8 +1,10 @@
 import {
+  COMPACT_FOCUS_MAX,
   DEFAULT_MAX_ACTIVE_SESSIONS,
   DEFAULT_IDLE_SESSION_MINUTES,
+  listProviders,
 } from "@dispatch/shared";
-import { Field, TextInput } from "../../sidebar/Modal.js";
+import { Field, TextArea, TextInput } from "../../sidebar/Modal.js";
 import { Switch } from "../../ui/Switch.js";
 import { positiveTokenLimit } from "../../../lib/harness.js";
 import { cn } from "../../../lib/cn.js";
@@ -16,8 +18,28 @@ function numberField(raw: string): number | undefined {
 }
 
 /** How many chats run at once, and what happens as their context windows fill. */
-export function ContextSection({ draft, patch, serverDefaults }: AppPaneProps) {
+export function ContextSection({ draft, patch, serverDefaults, catalogs }: AppPaneProps) {
   const ac = draft.autoCompact ?? {};
+  const perModel = ac.perModel ?? {};
+  const patchPerModel = (id: string, tokens: number | undefined) => {
+    // Delete rather than store `undefined`: an absent key is what "compact at
+    // this model's max" means on the server, and a `null`-ish value would fail
+    // the positive-integer schema on save.
+    const next = { ...perModel };
+    if (tokens) next[id] = tokens;
+    else delete next[id];
+    patch({ autoCompact: { ...ac, perModel: next } });
+  };
+  // Every catalog row except the `default` alias (it resolves to one of the
+  // others, and the broker matches on the resolved id), plus any id that only
+  // survives in settings — a model the catalog no longer lists would otherwise
+  // keep firing with no field left to clear it from.
+  const listedIds = new Set(
+    Object.values(catalogs)
+      .flat()
+      .map((m) => m?.value),
+  );
+  const orphans = Object.keys(perModel).filter((id) => !listedIds.has(id));
   const harness = draft.harness ?? {};
   const limits = harness.contextLimits ?? {};
   const enabled = ac.enabled ?? true;
@@ -124,6 +146,83 @@ export function ContextSection({ draft, patch, serverDefaults }: AppPaneProps) {
             placeholder="e.g. 20000"
           />
         </Field>
+      </div>
+
+      <div
+        className={cn(
+          "space-y-2 border-t border-line-soft pt-3 transition-opacity",
+          !enabled && "pointer-events-none opacity-45",
+        )}
+      >
+        <span className="text-xs font-medium text-secondary">Compact threshold by model</span>
+        <p className="text-xs leading-snug text-faint">
+          Compact a chat on this model once its context passes this many tokens. Blank
+          means the model's own maximum — the runtime compacts when the window actually
+          fills. A value here beats the per-chat limit above for that model, and applies
+          to Claude and Codex alike.
+        </p>
+        <div className="grid gap-2 sm:grid-cols-2">
+          {listProviders().map(({ id: kind, label }, index) => {
+            const rows = [
+              ...(catalogs[kind] ?? [])
+                .filter((m) => m.value !== "default")
+                .map((m) => ({ id: m.value, label: m.label })),
+              ...(index === 0 ? orphans.map((id) => ({ id, label: id })) : []),
+            ];
+            return (
+              <div key={kind} className="rounded-md border border-line bg-inset/40 p-2.5">
+                <div className="mb-2 text-xs font-medium text-secondary">{label}</div>
+                {rows.length === 0 ? (
+                  <p className="text-xs text-faint">No models listed yet.</p>
+                ) : (
+                  <div className="space-y-1.5">
+                    {rows.map((m) => (
+                      <div key={m.id} className="flex items-center gap-2">
+                        <span
+                          className="min-w-0 flex-1 truncate text-xs text-secondary"
+                          title={m.id}
+                        >
+                          {m.label}
+                        </span>
+                        {/* Fixed slot: the shared input is w-full and would
+                            otherwise squeeze the label to nothing. */}
+                        <div className="w-[7.5rem] shrink-0">
+                          <TextInput
+                            mono
+                            inputMode="numeric"
+                            value={perModel[m.id] != null ? String(perModel[m.id]) : ""}
+                            onChange={(e) => patchPerModel(m.id, numberField(e.target.value))}
+                            placeholder="max"
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="space-y-2 border-t border-line-soft pt-3">
+        <Field label="What every compaction should keep" hint="optional">
+          <TextArea
+            rows={3}
+            maxLength={COMPACT_FOCUS_MAX}
+            value={ac.instructions ?? ""}
+            onChange={(e) => patch({ autoCompact: { ...ac, instructions: e.target.value } })}
+            placeholder="e.g. The task and its acceptance criteria, decisions already made, the PR number and branch, file paths still being edited."
+          />
+        </Field>
+        <p className="text-xs leading-snug text-faint">
+          Standing instructions for the summary. Used whenever Dispatch compacts a chat
+          without a more specific focus — the meter's Compact button, an agent's
+          compact_context call, and the thresholds above — and handed to Claude Code as
+          its "Compact Instructions" so its own auto-compaction reads them too. A focus
+          typed on the button or passed by the agent replaces this for that one
+          compaction.
+        </p>
       </div>
     </div>
   );

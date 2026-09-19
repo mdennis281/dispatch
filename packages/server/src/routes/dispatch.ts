@@ -533,7 +533,7 @@ export async function dispatchClientAction(
 
       case "compact-context":
         await ensureSession(services, action.chatId);
-        broker.compact(action.chatId);
+        await broker.compact(action.chatId, action.focus);
         return;
 
       case "clear-context":

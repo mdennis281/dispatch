@@ -724,10 +724,18 @@ export const InterruptActionSchema = z.object({
   chatId: z.string(),
 });
 
-/** Compact the model's context in place (native SDK `/compact`). */
+/** Longest compaction focus the meter or an agent may hand over. */
+export const COMPACT_FOCUS_MAX = 2000;
+
+/**
+ * Compact the model's context in place (native SDK `/compact`). `focus` is
+ * what the summary must keep — `/compact <focus>` on Claude, an injected
+ * note on Codex. Absent, the app-wide default focus (if any) applies.
+ */
 export const CompactContextActionSchema = z.object({
   type: z.literal("compact-context"),
   chatId: z.string(),
+  focus: z.string().trim().max(COMPACT_FOCUS_MAX).optional(),
 });
 
 /** Clear the model's context (native SDK `/clear`); the transcript is kept. */

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Layers, Eraser, Loader2, AlertTriangle } from "lucide-react";
-import type { ContextUsage } from "@dispatch/shared";
+import { COMPACT_FOCUS_MAX, type ContextUsage } from "@dispatch/shared";
 import { useContextTokens, useContextWindow } from "../../stores/messages.js";
 import { compactTokens } from "../../lib/format.js";
 import { Tooltip } from "../ui/Tooltip.js";
@@ -8,6 +8,7 @@ import { Popover } from "../ui/Popover.js";
 import { api } from "../../lib/api.js";
 import { actions } from "../../lib/actions.js";
 import { cn } from "../../lib/cn.js";
+import { TextArea } from "../sidebar/Modal.js";
 
 /**
  * Fallback context windows by model id, used ONLY until a turn reports the SDK's
@@ -185,6 +186,11 @@ function ContextPanel({ chatId, fallbackTokens, fallbackWindow, close }: Context
   const [usage, setUsage] = useState<ContextUsage | null>(null);
   const [loading, setLoading] = useState(true);
   const [confirmClear, setConfirmClear] = useState(false);
+  // The compact row opens into a one-line "what to keep" field rather than
+  // firing on click: a bare compaction is where a half-finished plan gets
+  // summarized away, and the field is the only place a person can say so.
+  const [compactOpen, setCompactOpen] = useState(false);
+  const [focus, setFocus] = useState("");
 
   useEffect(() => {
     let alive = true;
@@ -209,7 +215,7 @@ function ContextPanel({ chatId, fallbackTokens, fallbackWindow, close }: Context
     .sort((a, b) => b.tokens - a.tokens);
 
   const doCompact = () => {
-    actions.compactContext(chatId);
+    actions.compactContext(chatId, focus);
     close();
   };
   const doClear = () => {
@@ -279,19 +285,65 @@ function ContextPanel({ chatId, fallbackTokens, fallbackWindow, close }: Context
 
       {/* actions */}
       <div className="flex flex-col gap-1 border-t border-line-soft p-1.5">
-        <button
-          type="button"
-          onClick={doCompact}
-          className="flex items-start gap-2 rounded-sm px-2 py-1.5 text-left transition-colors hover:bg-active"
-        >
-          <Layers className="mt-0.5 size-3.5 shrink-0 text-accent" />
-          <span className="leading-tight">
-            <span className="block text-sm text-secondary">Compact context</span>
-            <span className="block text-2xs text-faint">
-              Summarize the conversation, keep going smaller
+        {compactOpen ? (
+          <div className="flex flex-col gap-1.5 px-2 py-1.5">
+            <label className="flex items-center gap-2 text-xs text-secondary">
+              <Layers className="size-3.5 shrink-0 text-accent" />
+              What should the summary keep?
+            </label>
+            <TextArea
+              autoFocus
+              rows={2}
+              value={focus}
+              maxLength={COMPACT_FOCUS_MAX}
+              onChange={(e) => setFocus(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  doCompact();
+                } else if (e.key === "Escape") {
+                  e.stopPropagation();
+                  setCompactOpen(false);
+                }
+              }}
+              placeholder="Optional — e.g. the PR number, the failing test, decisions made"
+              className="!text-xs"
+            />
+            <div className="flex items-center justify-end gap-1">
+              <button
+                type="button"
+                onClick={() => setCompactOpen(false)}
+                className="rounded-sm px-1.5 py-0.5 text-xs text-muted hover:text-secondary"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={doCompact}
+                className="rounded-sm bg-accent/15 px-1.5 py-0.5 text-xs font-medium text-accent hover:bg-accent/25"
+              >
+                Compact
+              </button>
+            </div>
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => {
+              setConfirmClear(false);
+              setCompactOpen(true);
+            }}
+            className="flex items-start gap-2 rounded-sm px-2 py-1.5 text-left transition-colors hover:bg-active"
+          >
+            <Layers className="mt-0.5 size-3.5 shrink-0 text-accent" />
+            <span className="leading-tight">
+              <span className="block text-sm text-secondary">Compact context</span>
+              <span className="block text-2xs text-faint">
+                Summarize the conversation, keep going smaller
+              </span>
             </span>
-          </span>
-        </button>
+          </button>
+        )}
 
         {confirmClear ? (
           <div className="flex items-center gap-1 px-2 py-1">

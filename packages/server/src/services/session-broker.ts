@@ -51,6 +51,7 @@ import {
 } from "./media-types.js";
 import { identifyMedia } from "./media-sniff.js";
 import type { ChatInterruption } from "@dispatch/shared";
+import { compactCommand, normalizeCompactFocus, perModelThreshold } from "../harness/compact.js";
 import type {
   Options,
   Query,
@@ -122,7 +123,7 @@ import {
   type McpEnablementLayers,
   type MetricEvent,
 } from "@dispatch/shared";
-import type { Store } from "../store/index.js";
+import type { AppSettings, Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
 import type { ChatMessenger } from "./chat-messenger.js";
 import type { TerminalService } from "./terminal.js";
@@ -3099,27 +3100,82 @@ export class SessionBroker {
    * the existing subprocess; a notice marks it in the transcript. No-op guard is
    * unnecessary — an empty context compacts to nothing harmlessly.
    */
-  compact(chatId: string): void {
+  async compact(chatId: string, focus?: string): Promise<void> {
     const session = this.mustGet(chatId);
-    void this.emit(session, {
+    // An explicit focus wins; otherwise the app-wide standing one, so the meter
+    // button and an agent's bare `compact_context` both honour it.
+    const resolved = normalizeCompactFocus(focus) ?? (await this.defaultCompactFocus());
+    await this.emit(session, {
       kind: "notice",
       id: this.genId(),
       chatId,
       ts: this.now(),
       sessionId: session.sessionId,
       level: "info",
-      text: "Compacting context…",
+      text: resolved ? `Compacting context — keep: ${resolved}` : "Compacting context…",
     });
-    if (session.harnessSession) void session.harnessSession.compact();
+    if (session.harnessSession) void session.harnessSession.compact(resolved);
     else {
       session.outbox.push({
         id: this.genId(),
-        text: "/compact",
+        text: compactCommand(resolved),
         control: true,
         priority: "next",
       });
       this.schedule(session);
     }
+  }
+
+  /** The standing compaction focus from settings, or undefined when none is set. */
+  private async defaultCompactFocus(): Promise<string | undefined> {
+    const settings = await this.store.getSettings().catch(() => undefined);
+    return normalizeCompactFocus(settings?.autoCompact?.instructions);
+  }
+
+  /**
+   * The token count past which THIS session's context should be compacted at
+   * turn end, or undefined for "the model's own maximum". Per-model entries
+   * beat the global per-chat limit; the per-model key is matched the way the
+   * picker matches ids, so "opus[1m]" set in Settings still fires for a chat
+   * whose runtime reported "claude-opus-4-8[1m]".
+   */
+  private compactThreshold(
+    session: LiveSession,
+    settings: AppSettings | undefined,
+  ): number | undefined {
+    if ((settings?.autoCompact?.enabled ?? true) === false) return undefined;
+    const perModel = settings?.autoCompact?.perModel ?? {};
+    for (const id of [session.modelOverride, session.model]) {
+      if (!id) continue;
+      const hit = perModelThreshold(perModel, id);
+      if (hit) return hit;
+    }
+    return settings?.harness?.contextLimits?.perChatTokens;
+  }
+
+  /**
+   * Auto-compact when the last turn left the context past its threshold. The
+   * broker's own trigger, applied identically to every provider — Claude also
+   * has the SDK's native window-based trigger and Codex its
+   * `model_auto_compact_token_limit`; this is the one that reads Settings.
+   */
+  private async compactIfPastThreshold(session: LiveSession, ok: boolean): Promise<void> {
+    if (!ok) return;
+    const settings = await this.store.getSettings().catch(() => undefined);
+    const limit = this.compactThreshold(session, settings);
+    if (!limit || (session.lastContextTokens ?? 0) < limit) return;
+    const focus = normalizeCompactFocus(settings?.autoCompact?.instructions);
+    if (session.harnessSession) {
+      void session.harnessSession.compact(focus);
+      return;
+    }
+    session.outbox.push({
+      id: this.genId(),
+      text: compactCommand(focus),
+      control: true,
+      priority: "next",
+    });
+    this.flushOutbox(session);
   }
 
   /**
@@ -3886,7 +3942,7 @@ export class SessionBroker {
       const prompt = options.systemPrompt as { append?: string } | undefined;
       const selectedAgent = options.agent ? options.agents?.[options.agent] : undefined;
       const appSettings = await this.store.getSettings().catch(() => undefined);
-      const contextTokenLimit = appSettings?.harness?.contextLimits?.perChatTokens;
+      const contextTokenLimit = this.compactThreshold(session, appSettings);
       const spec: HarnessSessionSpec = {
         cwd: options.cwd,
         permissionMode: options.permissionMode ?? "default",
@@ -4358,6 +4414,7 @@ export class SessionBroker {
         });
         session.turn += 1;
         if (!event.ok) this.onTurnError?.(session.chatId, event.result ?? event.limit?.reason);
+        await this.compactIfPastThreshold(session, event.ok);
         if ((session.harnessSession?.pending() ?? 0) > 0 || session.outbox.length > 0) {
           session.turnOpen = true;
           this.setStatus(session, "running", { state: "thinking" });
@@ -4719,22 +4776,7 @@ export class SessionBroker {
         // Relearn the window off-loop for the next turn's row (cheap; the model
         // — hence window — can shift mid-session on a switch or fallback).
         void this.refreshContextWindow(session);
-        const limits = await this.store.getSettings().catch(() => undefined);
-        const perChatLimit = limits?.harness?.contextLimits?.perChatTokens;
-        if (
-          !isError &&
-          (limits?.autoCompact?.enabled ?? true) &&
-          perChatLimit &&
-          (session.lastContextTokens ?? 0) >= perChatLimit
-        ) {
-          session.outbox.push({
-            id: this.genId(),
-            text: "/compact",
-            control: true,
-            priority: "next",
-          });
-          this.flushOutbox(session);
-        }
+        await this.compactIfPastThreshold(session, !isError);
         // Chained turn buffered? Stay running; otherwise the turn is complete.
         if (session.input && session.input.pending() > 0) {
           session.turnOpen = true;
@@ -7255,6 +7297,12 @@ export class SessionBroker {
         projectServers: activeExternalNames.filter((name) => configuredNames.has(name)),
       }),
     );
+    // Claude Code's native auto-compaction honours a "Compact Instructions"
+    // section wherever it finds one in its instructions — the only way to
+    // steer a compaction the SDK starts on its own, since `/compact <focus>`
+    // only covers the ones WE start.
+    const standingFocus = normalizeCompactFocus(ac?.instructions);
+    if (standingFocus) appends.push(`# Compact Instructions\n\n${standingFocus}`);
     options.systemPrompt = {
       type: "preset",
       preset: "claude_code",

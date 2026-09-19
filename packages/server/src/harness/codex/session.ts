@@ -41,6 +41,7 @@ import type {
 import { CodexStreamDecoder, legacySubagentToolUseId, questionsOf } from "./stream.js";
 import { toCodexPosture, toDeveloperInstructions, clampEffort } from "./options.js";
 import { catchToolGuard } from "../guard.js";
+import { codexCompactNote, normalizeCompactFocus } from "../compact.js";
 import type { CodexConnection, RpcFrame, ServerRequest } from "./rpc.js";
 
 /** A server→client request we owe an answer to. */
@@ -652,8 +653,29 @@ export class CodexSession implements HarnessSession {
     }
   }
 
-  async compact(): Promise<void> {
+  async compact(focus?: string): Promise<void> {
     if (!this.threadId) return;
+    const f = normalizeCompactFocus(focus);
+    if (f) {
+      // `thread/compact/start` has no instructions field (protocol 0.147), so
+      // the focus is appended to model-visible history as a Responses-API user
+      // item first. Best-effort: an app-server that lacks `thread/inject_items`
+      // still compacts, just without the steer.
+      try {
+        await this.conn.call("thread/inject_items", {
+          threadId: this.threadId,
+          items: [
+            {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: codexCompactNote(f) }],
+            },
+          ],
+        });
+      } catch {
+        /* compact anyway */
+      }
+    }
     await this.conn.call("thread/compact/start", { threadId: this.threadId });
   }
 

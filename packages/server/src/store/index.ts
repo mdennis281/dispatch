@@ -186,6 +186,24 @@ export const AppSettingsSchema = z.object({
     .object({
       enabled: z.boolean().default(true),
       window: z.number().int().positive().optional(),
+      /**
+       * Per-model compaction thresholds (tokens), keyed by the picker id the
+       * chat was started with ("opus[1m]", "gpt-6-astra"). Unset for a model
+       * means "compact at its own maximum" — i.e. leave the runtime's native
+       * trigger alone. A set value overrides `harness.contextLimits.perChatTokens`
+       * for that model, and reaches both providers: Codex as
+       * `model_auto_compact_token_limit` on the thread, and every provider via
+       * the broker's own turn-end check.
+       */
+      perModel: z.record(z.string(), z.number().int().positive()).optional(),
+      /**
+       * Standing focus for every compaction Dispatch itself triggers (the
+       * meter button and `compact_context` when no focus is given, and the
+       * threshold check above). Also appended to a Claude session's system
+       * prompt as a "Compact Instructions" section, which is how Claude Code's
+       * NATIVE auto-compaction reads it — the SDK offers no other hook for it.
+       */
+      instructions: z.string().trim().max(2000).optional(),
     })
     .optional(),
   /**

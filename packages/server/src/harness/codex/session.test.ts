@@ -762,6 +762,43 @@ describe("CodexSession control", () => {
       method: "thread/compact/start",
       params: { threadId: "thread-1" },
     });
+    // No focus → no injected note; the summarizer runs on history as-is.
+    expect(fake.calls.some((c) => c.method === "thread/inject_items")).toBe(false);
+  });
+
+  it("injects a focus note into history before compacting, since compact/start takes none", async () => {
+    const { session, fake } = makeSession();
+    session.send({ text: "go" });
+    await fake.tick();
+    await session.compact("  the PR number and\n the failing test ");
+    const inject = fake.calls.findIndex((c) => c.method === "thread/inject_items");
+    const compact = fake.calls.findIndex((c) => c.method === "thread/compact/start");
+    expect(inject).toBeGreaterThan(-1);
+    expect(compact).toBeGreaterThan(inject);
+    const items = fake.calls[inject]!.params.items as Array<{
+      role: string;
+      content: Array<{ text: string }>;
+    }>;
+    expect(items[0]!.role).toBe("user");
+    // Whitespace collapsed, and phrased as guidance to the summary, not a task.
+    expect(items[0]!.content[0]!.text).toContain("the PR number and the failing test");
+    expect(items[0]!.content[0]!.text).toMatch(/not a new request/);
+  });
+
+  it("still compacts when the app-server lacks inject_items", async () => {
+    const { session, fake } = makeSession();
+    const underlying = fake.conn.call.bind(fake.conn);
+    (fake.conn as { call: unknown }).call = async (method: string, params: unknown) => {
+      if (method === "thread/inject_items") throw new Error("method not found");
+      return underlying(method, params);
+    };
+    session.send({ text: "go" });
+    await fake.tick();
+    await session.compact("keep the plan");
+    expect(fake.calls).toContainEqual({
+      method: "thread/compact/start",
+      params: { threadId: "thread-1" },
+    });
   });
 
   it("reports a failed open as a failed turn instead of throwing", async () => {

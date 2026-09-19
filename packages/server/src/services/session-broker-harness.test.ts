@@ -89,7 +89,10 @@ class FakeHarnessSession implements HarnessSession {
   async setPermissionMode() {}
   async setModel() {}
   async setEffort() {}
-  async compact() {}
+  readonly compactions: (string | undefined)[] = [];
+  async compact(focus?: string) {
+    this.compactions.push(focus);
+  }
   resolvePermission(_id: string, _resolution: HarnessPermissionResolution) {}
   resolveQuestion(_id: string, _answers: HarnessQuestionAnswer[]) {}
   async contextWindow() { return 1_000; }
@@ -604,6 +607,102 @@ describe("SessionBroker neutral harness path", () => {
         harnessHandoff: { from: "codex", to: "claude" },
       });
       expect(transfers).toHaveLength(0);
+    });
+  });
+
+  describe("compaction", () => {
+    const codexChat = (id: string, model?: string) =>
+      store.saveChat({
+        id,
+        projectId: "project-1",
+        title: "Codex",
+        modeId: "plan",
+        effort: "low",
+        harness: "codex",
+        ...(model ? { model } : {}),
+        worktrees: [],
+        prs: [],
+        createdAt: 1,
+      });
+
+    it("hands an explicit focus to the adapter and records it in the notice", async () => {
+      const chat = await codexChat("compact-focus");
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "hi");
+      await broker.waitFor(chat.id, "idle");
+      await broker.compact(chat.id, "  the PR\n number ");
+      expect(session.compactions).toEqual(["the PR number"]);
+      const notice = (await store.readMessages(chat.id)).find((r) => r.kind === "notice");
+      expect(notice?.text).toBe("Compacting context — keep: the PR number");
+    });
+
+    it("falls back to the app-wide standing focus when none is given", async () => {
+      await store.saveSettings({
+        ...(await store.getSettings()),
+        autoCompact: { enabled: true, instructions: "decisions made so far" },
+      });
+      const chat = await codexChat("compact-default");
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "hi");
+      await broker.waitFor(chat.id, "idle");
+      await broker.compact(chat.id);
+      expect(session.compactions).toEqual(["decisions made so far"]);
+    });
+
+    it("pins a per-model threshold on the Codex thread and matches it across an id suffix", async () => {
+      await store.saveSettings({
+        ...(await store.getSettings()),
+        harness: { defaultHarness: "claude", defaults: {}, contextLimits: { perChatTokens: 180_000 } },
+        autoCompact: { enabled: true, perModel: { "gpt-test[1m]": 90_000 } },
+      });
+      const chat = await codexChat("compact-per-model", "gpt-test");
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "hi");
+      await broker.waitFor(chat.id, "idle");
+      // The per-model row wins over the global per-chat limit.
+      expect(specs[0]!.contextTokenLimit).toBe(90_000);
+    });
+
+    it("leaves the threshold at the model's max when no row is set, keeping the global limit", async () => {
+      await store.saveSettings({
+        ...(await store.getSettings()),
+        harness: { defaultHarness: "claude", defaults: {}, contextLimits: { perChatTokens: 180_000 } },
+        autoCompact: { enabled: true, perModel: { "some-other-model": 90_000 } },
+      });
+      const chat = await codexChat("compact-unset", "gpt-test");
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "hi");
+      await broker.waitFor(chat.id, "idle");
+      expect(specs[0]!.contextTokenLimit).toBe(180_000);
+    });
+
+    it("compacts at turn end once the context passes the model's threshold, with the standing focus", async () => {
+      await store.saveSettings({
+        ...(await store.getSettings()),
+        autoCompact: {
+          enabled: true,
+          perModel: { "gpt-test": 40 },
+          instructions: "keep the plan",
+        },
+      });
+      const chat = await codexChat("compact-threshold", "gpt-test");
+      broker.create(chat);
+      // The fake reports 42 context tokens on every turn — past a threshold of 40.
+      await broker.sendMessage(chat.id, "hi");
+      await broker.waitFor(chat.id, "idle");
+      expect(session.compactions).toEqual(["keep the plan"]);
+    });
+
+    it("does not compact at turn end while under the threshold", async () => {
+      await store.saveSettings({
+        ...(await store.getSettings()),
+        autoCompact: { enabled: true, perModel: { "gpt-test": 1_000 } },
+      });
+      const chat = await codexChat("compact-under", "gpt-test");
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "hi");
+      await broker.waitFor(chat.id, "idle");
+      expect(session.compactions).toEqual([]);
     });
   });
 

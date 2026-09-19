@@ -159,6 +159,10 @@ export interface AppSettings {
     enabled?: boolean;
     /** Optional compaction reserve window (tokens); omit = SDK default. */
     window?: number;
+    /** Per-model compaction threshold (tokens) by picker id; unset = the model's max. */
+    perModel?: Record<string, number>;
+    /** Standing focus for compactions Dispatch triggers (what the summary must keep). */
+    instructions?: string;
   };
   /**
    * App-wide default for showing the context Dispatch attaches on your behalf
