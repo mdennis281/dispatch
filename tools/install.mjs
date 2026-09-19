@@ -52,6 +52,11 @@ const REQUIRED_PAYLOAD = [
   "packages/cli/dist/index.js",
   "tools/app/launch.py",
   "tools/app/autostart.mjs",
+  // Both are RUN by this installer a few lines after verifyPayload passes
+  // (autostart.mjs imports paths.mjs; the shortcut step spawns create-shortcut),
+  // so a payload without them used to verify clean and fail at the swap.
+  "tools/app/paths.mjs",
+  "tools/app/create-shortcut.mjs",
 ];
 
 function usage() {
@@ -471,11 +476,18 @@ function createPosixLauncher(root, python) {
   const target = join(bin, "dispatch");
   const launcher = join(root, "app", "tools", "app", "launch.py");
   mkdirSync(bin, { recursive: true });
-  const quoted = launcher.replace(/'/g, `'"'"'`);
-  const pythonCommand = [python.command, ...python.prefix]
-    .map((part) => `'${String(part).replace(/'/g, `'"'"'`)}'`)
-    .join(" ");
-  writeFileSync(target, `#!/usr/bin/env sh\nexec ${pythonCommand} '${quoted}' "$@"\n`);
+  const sq = (value) => `'${String(value).replace(/'/g, `'"'"'`)}'`;
+  const pythonCommand = [python.command, ...python.prefix].map(sq).join(" ");
+  // `--target` pins the shim to THIS install, before the user's own arguments so
+  // a `dispatch --target elsewhere` still wins. Without it the shim resolved the
+  // default root at run time, and a `--target` install (a second copy, a test
+  // root) got a `dispatch` command that reported "not running" for the instance
+  // it had just started — the login entry autostart.mjs writes never had this
+  // bug because it always carried the root.
+  writeFileSync(
+    target,
+    `#!/usr/bin/env sh\nexec ${pythonCommand} ${sq(launcher)} --target ${sq(root)} "$@"\n`,
+  );
   chmodSync(target, 0o755);
   console.log(`created ${target}`);
   if (!(process.env.PATH || "").split(":").includes(bin)) {

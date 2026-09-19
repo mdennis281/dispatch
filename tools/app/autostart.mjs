@@ -292,8 +292,20 @@ function defaultPythonCandidates() {
       ];
 }
 
+/**
+ * Is there a systemd USER manager this process can talk to — not merely a
+ * `systemctl` binary?
+ *
+ * `--version` was the probe here, and it answers yes on any box with systemd
+ * installed, including one with no user session bus: a headless server, an SSH
+ * login without `pam_systemd`, a CI runner. On those `systemctl --user enable`
+ * fails with "Failed to connect to bus", the install printed a warning, and
+ * the XDG fallback that would have worked was never tried. `show-environment`
+ * has to reach the user manager to answer, so it exits non-zero exactly when
+ * `enable` would.
+ */
 function hasSystemd() {
-  const probe = spawnSync("systemctl", ["--user", "--version"], {
+  const probe = spawnSync("systemctl", ["--user", "show-environment"], {
     stdio: "ignore",
     windowsHide: true,
   });

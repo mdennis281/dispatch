@@ -199,7 +199,7 @@ def supervise(paths: Paths, app: Path, port: int) -> int:
     """
     node = shutil.which("node")
     if not node:
-        raise SystemExit("node is not on PATH - install Node 20+ and retry")
+        raise SystemExit("node is not on PATH - install Node 24+ and retry")
 
     paths.data_dir.mkdir(parents=True, exist_ok=True)
     paths.config_dir.mkdir(parents=True, exist_ok=True)
