@@ -1975,6 +1975,22 @@ export interface ManagerMcpContext {
   exemptions?: ManagerMcpExemptions;
   /** The session's abort signal — cancels in-flight waits on stop/fork. */
   signal?: AbortSignal;
+  /**
+   * Subscribe to STEERING messages — a message the human (or a peer with
+   * `delivery: "interrupt"`) sent into this chat's open turn. Returns the
+   * unsubscribe.
+   *
+   * The runtime does not interrupt a running tool call to deliver a steering
+   * message; it lands after the tool returns. For `Bash` that is right. For a
+   * tool whose whole job is to block — `wait`, `wait_for_chat`, `watch_pr`,
+   * `chat_ask` — it meant "watch this PR" followed by "actually, stop and do X"
+   * left X unread for up to thirty minutes while the agent sat on CI. Those
+   * tools hang a listener here so the message ends the wait instead; nothing is
+   * lost, because a wait that ends early is simply called again.
+   *
+   * Omitted → waits ignore steering, exactly as before.
+   */
+  onSteer?: (listener: () => void) => () => void;
   now?: () => number;
 }
 
@@ -2003,6 +2019,42 @@ function combinedSignal(...signals: (AbortSignal | undefined)[]): AbortSignal | 
   const present = signals.filter((signal): signal is AbortSignal => signal instanceof AbortSignal);
   if (present.length < 2) return present[0];
   return AbortSignal.any(present);
+}
+
+/**
+ * A per-call abort that fires when a steering message lands on this chat, so a
+ * blocking wait can be ended by "the human said something" as well as by the
+ * session stopping. `steered` tells the tool WHICH happened — the two need
+ * different words: a cancelled session gets no result at all, while a steered
+ * wait must tell the agent the message is coming and the wait is unfinished.
+ *
+ * `dispose` MUST run once the wait settles: the listener lives on the session,
+ * and a `watch_pr` loop that leaked one per call would fire every stale
+ * controller on the next steer — harmless for the aborts, but a growing set of
+ * dead closures for the life of the subprocess.
+ */
+function steerInterrupt(ctx: ManagerMcpContext): {
+  signal: AbortSignal | undefined;
+  steered: () => boolean;
+  dispose: () => void;
+} {
+  if (!ctx.onSteer) return { signal: undefined, steered: () => false, dispose: () => {} };
+  const ac = new AbortController();
+  const off = ctx.onSteer(() => ac.abort());
+  return { signal: ac.signal, steered: () => ac.signal.aborted, dispose: off };
+}
+
+/**
+ * What a wait tool returns when a steering message ended it. The message
+ * itself arrives right after this result, so the agent has to be told two
+ * things: read that first, and this wait did NOT reach its condition.
+ */
+function steeredResult(what: string, resume: string): CallToolResult {
+  return textResult(
+    `${what} was interrupted by a new message from the user — it follows this result. ` +
+      `Read and act on it before anything else. The wait did NOT complete: ${resume}\n` +
+      JSON.stringify({ interrupted: true, done: false }),
+  );
 }
 
 function textResult(text: string, isError = false): CallToolResult {
@@ -3076,8 +3128,13 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         },
       });
 
-      const outcome = await sleep(seconds * 1000, [ctx.signal, extraSignal(extra)]);
+      const steer = steerInterrupt(ctx);
+      const outcome = await sleep(seconds * 1000, [ctx.signal, extraSignal(extra), steer.signal]);
+      steer.dispose();
       if (outcome === "aborted") {
+        if (steer.steered()) {
+          return steeredResult(`The ${seconds}s wait`, "call wait again if you still need to pause.");
+        }
         return textResult(`Wait cancelled after being interrupted (was ${seconds}s).`);
       }
       return textResult(
@@ -3127,11 +3184,21 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         },
       });
 
+      const steer = steerInterrupt(ctx);
       const outcome = await waitForChatState(ctx, chatId, timeoutMs, [
         ctx.signal,
         extraSignal(extra),
+        steer.signal,
       ]);
+      steer.dispose();
       if (outcome.aborted) {
+        if (steer.steered()) {
+          return steeredResult(
+            `Waiting for chat ${chatId}`,
+            `chat ${chatId} is still ${ctx.broker.getStatus(chatId) ?? "unknown"} — call ` +
+              "wait_for_chat again if you still need it to finish.",
+          );
+        }
         return textResult(
           `Wait for chat ${chatId} was cancelled after being interrupted.`,
         );
@@ -3292,10 +3359,11 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         },
       });
 
+      const steer = steerInterrupt(ctx);
       const outcome = await watchForPrActivity(ctx.github, number, repo, st, {
         intervalMs: PR_POLL_INTERVAL_MS,
         timeoutMs: timeoutSeconds * 1000,
-        signals: [ctx.signal, extraSignal(extra)],
+        signals: [ctx.signal, extraSignal(extra), steer.signal],
         now: ctx.now ?? (() => Date.now()),
         onPoll: () => void ctx.prRegistry?.noteWatched(number, repo).catch(() => {}),
         reviewRounds: async () =>
@@ -3308,10 +3376,27 @@ export function createManagerTools(ctx: ManagerMcpContext) {
           ),
       });
 
+      steer.dispose();
+
       /** The PR as it stands at the moment we answer — watch_pr's whole subject. */
       const snap = async (): Promise<PrSnapshot | null> =>
         (await ctx.prRegistry?.snapshot(number, repo).catch(() => null)) ?? null;
 
+      if (outcome.kind === "aborted" && steer.steered()) {
+        // Still a card (the snapshot is worth having), but the prose is the
+        // steered wording: the agent must know the message comes next and the
+        // watch is unfinished, or it reads "cancelled" as "stop watching".
+        const text = steeredResult(
+          `Watching PR #${number}`,
+          "call watch_pr again afterwards if the PR still needs watching.",
+        );
+        return prToolResult(
+          "watch_pr",
+          { summary: `Watch on PR #${number} interrupted by a new user message.`, ok: true, details: [] },
+          await snap(),
+          { text: text.content[0]?.type === "text" ? text.content[0].text : "" },
+        );
+      }
       if (outcome.kind === "aborted") {
         return prToolResult(
           "watch_pr",
@@ -6852,6 +6937,10 @@ ${look}` : "")
           clampSeconds(args.timeoutSeconds ?? WAIT_CAP_SECONDS, WAIT_CAP_SECONDS),
         ) * 1000;
 
+      // A steer ends the ask too. The answer isn't lost: `reply` on a withdrawn
+      // askId tells the target to `chat_send` it instead, so it still arrives —
+      // just not as this call's result.
+      const steer = steerInterrupt(ctx);
       const result = await ctx.messaging.ask({
         to,
         question,
@@ -6859,7 +6948,7 @@ ${look}` : "")
         // BOTH, the way `wait_for_chat` passes both to `waitForChatState`. With
         // `??` the session abort was dropped whenever the MCP call carried one
         // of its own, so stopping the chat left the ask running.
-        signals: [extraSignal(extra), ctx.signal],
+        signals: [extraSignal(extra), ctx.signal, steer.signal],
         // Advertise the wait the way `wait_for_chat` does, so a chat blocked on a
         // peer doesn't look like one that has hung — but only once the ask is
         // actually admitted. Published unconditionally up front, a refused call
@@ -6872,11 +6961,22 @@ ${look}` : "")
             activity: { state: "tool", label: `asking chat ${to}`, toolName: "chat_ask" },
           }),
       });
+      steer.dispose();
       if (!result.ok) return peerRefusalResult(result);
       if (result.answered) {
         return textResult(
           `Chat ${to} answered:\n${result.answer}\n` +
             JSON.stringify({ answered: true, chatId: to }),
+        );
+      }
+      if (result.reason === "cancelled" && steer.steered()) {
+        return steeredResult(
+          `Asking chat ${to}`,
+          `chat ${to} has not answered${
+            result.withdrawn
+              ? " and the question was withdrawn before it reached them"
+              : "; if they answer later it arrives as a chat_send"
+          }. Ask again only if the new message still calls for it.`,
         );
       }
       // NOT an error. A timeout means the other chat did not answer, which is a
