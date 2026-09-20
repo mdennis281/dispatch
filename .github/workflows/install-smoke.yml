@@ -143,10 +143,11 @@ jobs:
         if: github.event_name == 'pull_request'
         shell: bash
         run: |
-          {
-            # fix(terminal): POSIX shell backend — terminals were PowerShell-only.
-            echo 'SMOKE_EXPECT_UNRELEASED=--expect-unreleased "terminal runs a command in the project"'
-          } >> "$GITHUB_ENV"
+          # Nothing outstanding. When a PR fixes something the smoke checks,
+          # add a line here, e.g.:
+          #   echo 'SMOKE_EXPECT_UNRELEASED=--expect-unreleased "<check name>"' >> "$GITHUB_ENV"
+          # and delete it once the fix is in the channel head (the run says so).
+          echo 'SMOKE_EXPECT_UNRELEASED=' >> "$GITHUB_ENV"
 
       - name: Install, set up, exercise, update, restart, reinstall, stop
         shell: bash
