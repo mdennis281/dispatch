@@ -1874,6 +1874,14 @@ interface LiveSession {
   abortController?: AbortController;
   runLoop?: Promise<void>;
   outbox: OutboxItem[];
+  /**
+   * Who to tell when a STEERING message lands. The manager MCP's blocking
+   * waits (`watch_pr`, `wait_for_chat`, …) register here so the message ends
+   * the wait rather than sitting behind it — see `ManagerMcpContext.onSteer`.
+   * Per-session rather than a bus event so a listener can never hear another
+   * chat's steer.
+   */
+  steerListeners: Set<() => void>;
   pendingPermissions: Map<string, PendingPermission>;
   /**
    * Id shared by the in-flight MAIN-LOOP assistant message's token chunks AND
@@ -2199,6 +2207,7 @@ export class SessionBroker {
         // and that is the design. See the field's docblock.
         exemptions: [],
         outbox: [],
+        steerListeners: new Set(),
         pendingPermissions: new Map(),
         writeChain: Promise.resolve(),
         turn: 0,
@@ -2344,6 +2353,24 @@ export class SessionBroker {
       priority: o.priority ?? "next",
     });
     this.schedule(session);
+    // AFTER schedule: the message is in the runtime's input by now, so a wait
+    // that ends on this notification returns to a turn that already has the
+    // message queued behind the tool result — never to one still waiting on it.
+    if (steering) this.notifySteer(session);
+  }
+
+  /**
+   * Wake every blocking wait this session has open. Listeners are snapshotted
+   * first because a woken wait disposes its own registration synchronously.
+   */
+  private notifySteer(session: LiveSession): void {
+    for (const listener of [...session.steerListeners]) {
+      try {
+        listener();
+      } catch {
+        /* a wait's listener must not break the send that woke it */
+      }
+    }
   }
 
   /**
@@ -7393,6 +7420,10 @@ export class SessionBroker {
             }
           : undefined,
         signal: session.abortController?.signal,
+        onSteer: (listener) => {
+          session.steerListeners.add(listener);
+          return () => session.steerListeners.delete(listener);
+        },
         now: this.now,
       }),
     };

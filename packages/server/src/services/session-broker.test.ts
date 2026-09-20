@@ -8,7 +8,7 @@ import { EventBus } from "../bus.js";
 import type { WsServerEvent, Chat, Project } from "@dispatch/shared";
 import { EMPTY_REFRESH_REPORT, HUMAN_REVIEW_ANSWERS, SECRET_ANSWERS, isPrSettledIdle } from "@dispatch/shared";
 import { SecretsService, plainKeyProtector } from "./secrets.js";
-import { EXEMPTION_ANSWERS } from "./mcp/manager-mcp.js";
+import { EXEMPTION_ANSWERS, managerMcpContextOf } from "./mcp/manager-mcp.js";
 import {
   buildManagerToolsDirective,
   SessionBroker,
@@ -1761,6 +1761,54 @@ describe("SessionBroker — permissions", () => {
 });
 
 describe("SessionBroker — steering & concurrency", () => {
+  it("a mid-turn send wakes the MCP context's onSteer listeners; an idle send does not", async () => {
+    // The manager MCP's blocking waits (watch_pr, wait_for_chat, …) end on this
+    // notification, which is what lets a steering message reach the model
+    // instead of queueing behind a thirty-minute CI watch. It fires only for a
+    // STEER — a message that starts a turn has no wait to interrupt.
+    const gate = deferred();
+    const { fn, controllers } = makeFakeQuery(async () => {
+      await gate.promise;
+      return [assistantText("done"), resultMsg()];
+    });
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+
+    await broker.sendMessage("c1", "go");
+    await until(() => controllers.length === 1);
+    const servers = controllers[0]?.options?.mcpServers as Record<string, unknown> | undefined;
+    const ctx = Object.values(servers ?? {})
+      .map(managerMcpContextOf)
+      .find(Boolean);
+    const onSteer = ctx?.onSteer;
+    expect(onSteer).toBeTypeOf("function");
+    if (!onSteer) throw new Error("unreachable");
+
+    let fired = 0;
+    const off = onSteer(() => {
+      fired += 1;
+    });
+    await broker.sendMessage("c1", "actually, stop and do X");
+    expect(fired).toBe(1);
+
+    // Unsubscribed → silent, the way a settled wait must be.
+    off();
+    await broker.sendMessage("c1", "and Y");
+    expect(fired).toBe(1);
+
+    gate.resolve();
+    await broker.waitFor("c1", "idle").catch(() => {});
+    const again = onSteer(() => {
+      fired += 1;
+    });
+    // Idle: this send STARTS a turn rather than steering one.
+    await broker.sendMessage("c1", "fresh turn");
+    expect(fired).toBe(1);
+    again();
+    await broker.waitFor("c1", "idle").catch(() => {});
+  });
+
   it("funnels multiple messages through one live session in FIFO order", async () => {
     const { fn, controllers } = makeFakeQuery((text) => [assistantText(text), resultMsg()]);
     const broker = makeBroker(fn);

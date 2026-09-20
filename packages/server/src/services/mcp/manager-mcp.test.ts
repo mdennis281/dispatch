@@ -5083,3 +5083,157 @@ describe("manager-mcp — mode tools and chat posture", () => {
     );
   });
 });
+
+/* ------------------------------------------------------------- steering */
+
+/**
+ * A steering message must END a blocking wait, not queue behind it: the
+ * runtime delivers a mid-turn message only after the running tool returns, so
+ * a chat parked in `watch_pr` for thirty minutes would read "stop, do X" only
+ * when CI settled. Each wait tool subscribes via `ctx.onSteer` and returns a
+ * result that says the message comes next and the wait is unfinished.
+ */
+describe("manager-mcp — a steering message interrupts blocking waits", () => {
+  /** A `ctx.onSteer` the test can fire, with a count of live registrations. */
+  function steerHook() {
+    const listeners = new Set<() => void>();
+    return {
+      onSteer: (fn: () => void) => {
+        listeners.add(fn);
+        return () => listeners.delete(fn);
+      },
+      fire: () => {
+        for (const fn of [...listeners]) fn();
+      },
+      live: () => listeners.size,
+    };
+  }
+
+  it("wait: returns the steered result and unsubscribes", async () => {
+    const steer = steerHook();
+    const { wait } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      onSteer: steer.onSteer,
+    });
+    const p = wait.handler({ seconds: 100, reason: "CI" }, {});
+    expect(steer.live()).toBe(1);
+    steer.fire();
+    const res = await p;
+    expect(res.isError).toBeFalsy();
+    expect(resultText(res)).toContain("interrupted by a new message from the user");
+    expect(resultText(res)).toContain("did NOT complete");
+    expect(resultText(res)).toContain('"interrupted":true');
+    expect(steer.live()).toBe(0);
+  });
+
+  it("wait: a session abort is still reported as cancelled, not steered", async () => {
+    const steer = steerHook();
+    const ac = new AbortController();
+    const { wait } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      onSteer: steer.onSteer,
+      signal: ac.signal,
+    });
+    const p = wait.handler({ seconds: 100, reason: undefined }, {});
+    ac.abort();
+    const res = await p;
+    expect(resultText(res)).toContain("cancelled");
+    expect(resultText(res)).not.toContain("new message");
+    expect(steer.live()).toBe(0);
+  });
+
+  it("wait: a normal elapse also unsubscribes", async () => {
+    const steer = steerHook();
+    const { wait } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      onSteer: steer.onSteer,
+    });
+    await wait.handler({ seconds: 0.01, reason: undefined }, {});
+    expect(steer.live()).toBe(0);
+  });
+
+  it("wait_for_chat: names the target's current state so the agent can decide", async () => {
+    const steer = steerHook();
+    const { waitForChat } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({ c2: "running" }),
+      onSteer: steer.onSteer,
+    });
+    const p = waitForChat.handler({ chatId: "c2", timeoutSeconds: undefined }, {});
+    steer.fire();
+    const res = await p;
+    expect(resultText(res)).toContain("interrupted by a new message from the user");
+    expect(resultText(res)).toContain("chat c2 is still running");
+    expect(steer.live()).toBe(0);
+  });
+
+  it("chat_ask: a steer-cancelled ask says the answer may still arrive as a chat_send", async () => {
+    const steer = steerHook();
+    const binding: ManagerMcpMessaging = {
+      send: async () => ({ ok: true, held: false, woke: false }),
+      // Mirror the messenger: cancelled once any supplied signal aborts.
+      ask: ({ signals }) =>
+        new Promise((resolve) => {
+          for (const s of signals ?? []) {
+            s?.addEventListener("abort", () =>
+              resolve({ ok: true, answered: false, reason: "cancelled", askId: "a", withdrawn: false }),
+            );
+          }
+        }),
+      reply: () => ({ ok: true, askerChatId: "c2" }),
+      state: async () => null,
+      setMode: async () => ({ permissionMode: "plan" }),
+      setPersona: async () => {},
+    };
+    const { chatAsk } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({ c2: "running" }),
+      messaging: binding,
+      onSteer: steer.onSteer,
+    });
+    const p = chatAsk.handler({ chatId: "c2", question: "ready?", timeoutSeconds: undefined }, {});
+    await Promise.resolve();
+    steer.fire();
+    const res = await p;
+    expect(res.isError).toBeFalsy();
+    expect(resultText(res)).toContain("interrupted by a new message from the user");
+    expect(resultText(res)).toContain("arrives as a chat_send");
+    expect(steer.live()).toBe(0);
+  });
+
+  describe("watch_pr", () => {
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
+
+    it("returns a card whose prose is the steered wording, and clears its timers", async () => {
+      const steer = steerHook();
+      const gh = fakeGitHub([{ merge: OPEN, checks: [], threads: [] }]);
+      const { watchPr } = createManagerTools({
+        chatId: "c1",
+        bus,
+        broker: fakeBroker({}),
+        github: gh,
+        onSteer: steer.onSteer,
+      });
+      const p = watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: undefined }, {});
+      // Let the first poll land so the watch is in its sleep.
+      await vi.advanceTimersByTimeAsync(0);
+      steer.fire();
+      const res = await p;
+      expect(res.isError).toBeFalsy();
+      expect(resultText(res)).toContain("interrupted by a new message from the user");
+      expect(resultText(res)).toContain("call watch_pr again afterwards");
+      expect(decodePrToolPayload(resultText(res)).payload?.outcome.summary).toContain("interrupted by a new user message");
+      expect(vi.getTimerCount()).toBe(0);
+      expect(steer.live()).toBe(0);
+    });
+  });
+});
