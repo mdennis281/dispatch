@@ -1910,6 +1910,146 @@ describe("SessionBroker — steering & concurrency", () => {
     gate.resolve();
     await Promise.all(["c1", "c2"].map((id) => broker.waitFor(id, "idle").catch(() => {})));
   });
+
+  it("a chat blocked on CI gives its slot up, and a queued chat takes it", async () => {
+    // The case the cap was getting wrong: `watch_pr` parks on github.com for
+    // minutes at a time, spending nothing, while the whole app sat at its cap.
+    const gate = deferred();
+    let call = 0;
+    const { fn, controllers } = makeFakeQuery(async () => {
+      if (++call === 1) {
+        // c1 opens a PR watch and stays in it for the rest of the test.
+        return [toolUseMsg("mcp__dispatch-github__watch_pr", { pr: 7 }, "t-watch")];
+      }
+      await gate.promise;
+      return [assistantText("done"), resultMsg()];
+    });
+    const broker = makeBroker(fn, 1);
+    for (const id of ["c1", "c2"]) {
+      await store.saveChat(chatFor(id));
+      broker.create(chatFor(id));
+    }
+
+    await broker.sendMessage("c1", "watch the PR");
+    await broker.waitFor("c1", "waiting");
+    // Turn-live — it is mid-turn and a message would steer it — but not working.
+    expect(broker.getStatus("c1")).toBe("waiting");
+    expect(broker.activeCount()).toBe(0);
+
+    // …so c2 starts immediately, at a cap of 1, with c1 still watching.
+    const c2running = broker.waitFor("c2", "running");
+    await broker.sendMessage("c2", "go");
+    await c2running;
+    // `until`, not a bare length check: `startTurn` sets `running` and spawns
+    // the subprocess lazily, so the controller lands a tick after the status.
+    await until(() => controllers.length === 2);
+
+    gate.resolve();
+    await broker.waitFor("c2", "idle").catch(() => {});
+  });
+
+  it("blocking frees the slot for a chat ALREADY queued, with no turn settling", async () => {
+    // The pump used to hang exclusively off turn settlement, so a slot freed by
+    // a chat going blocked went unnoticed: c2 would sit queued behind a chat
+    // that was doing nothing until c1's whole turn ended.
+    const gate = deferred();
+    const reachWatch = deferred();
+    let call = 0;
+    const { fn } = makeFakeQuery(async () => {
+      if (++call === 1) {
+        // Stay generating — and holding the only slot — until released, so c2
+        // is definitely parked BEFORE the watch begins. No result row after it:
+        // the turn stays open, which is the whole point.
+        await reachWatch.promise;
+        return [toolUseMsg("mcp__dispatch-github__watch_pr", { pr: 7 }, "t-watch")];
+      }
+      await gate.promise;
+      return [assistantText("done"), resultMsg()];
+    });
+    const broker = makeBroker(fn, 1);
+    for (const id of ["c1", "c2"]) {
+      await store.saveChat(chatFor(id));
+      broker.create(chatFor(id));
+    }
+
+    // c2 queues first, while c1 is still generating and holding the only slot.
+    await broker.sendMessage("c1", "go");
+    await until(() => broker.getStatus("c1") === "running");
+    await broker.sendMessage("c2", "go");
+    expect(broker.getStatus("c2")).toBe("queued");
+
+    // c1 reaches its watch → the slot frees → c2 is promoted off the queue,
+    // with c1's turn still open and nothing having settled.
+    const c2running = broker.waitFor("c2", "running");
+    reachWatch.resolve();
+    await c2running;
+    expect(broker.getStatus("c1")).toBe("waiting");
+
+    gate.resolve();
+    await broker.waitFor("c2", "idle").catch(() => {});
+  });
+
+  it("a chat waiting on YOU for a permission does not hold the app at its cap", async () => {
+    // Six open question cards used to deadlock the app outright: nothing could
+    // start, and the only thing that would free a slot was the human who had
+    // walked away.
+    const gate = deferred();
+    let call = 0;
+    const { fn } = makeFakeQuery(async (_prompt, opts) => {
+      if (++call === 1) {
+        // Ask for permission and never get an answer. No `tool_use` row with
+        // it: the prompt is what happens INSTEAD of the tool running, and
+        // emitting the row too would re-occupy the slot with a shell span for
+        // a command that is still waiting to be allowed.
+        void opts?.canUseTool?.("Bash", { command: "rm -rf /" }, {} as never);
+        return [];
+      }
+      await gate.promise;
+      return [assistantText("done"), resultMsg()];
+    });
+    const broker = makeBroker(fn, 1);
+    for (const id of ["c1", "c2"]) {
+      await store.saveChat(chatFor(id));
+      broker.create(chatFor(id));
+    }
+
+    await broker.sendMessage("c1", "go");
+    await broker.waitFor("c1", "awaiting-input");
+    expect(broker.activeCount()).toBe(0);
+
+    const c2running = broker.waitFor("c2", "running");
+    await broker.sendMessage("c2", "go");
+    await c2running;
+
+    gate.resolve();
+    await broker.waitFor("c2", "idle").catch(() => {});
+  });
+
+  it("a chat driving a subagent KEEPS its slot — the subagent is its work", async () => {
+    // The trap in "stop counting waiting chats": a main loop blocked in `Task`
+    // is `waiting_agent`, but the subagent underneath it is generating in this
+    // very chat. Counting the status alone would give a fleet of ten agents a
+    // free pass and let a dozen more chats in behind it.
+    const { fn, controllers } = makeFakeQuery(async () => {
+      // The spawn and nothing after it: the main loop is now parked on the
+      // child, and the child's timeline opens at this same instant.
+      return [toolUseMsg("Task", { subagent_type: "Explore", prompt: "look" }, "toolu_sub1")];
+    });
+    const broker = makeBroker(fn, 1);
+    for (const id of ["c1", "c2"]) {
+      await store.saveChat(chatFor(id));
+      broker.create(chatFor(id));
+    }
+
+    await broker.sendMessage("c1", "go");
+    await broker.waitFor("c1", "waiting");
+    // Blocked by its own status — but the subagent underneath is generating, so
+    // the chat still costs a slot and c2 stays parked.
+    expect(broker.activeCount()).toBe(1);
+    await broker.sendMessage("c2", "go");
+    expect(broker.getStatus("c2")).toBe("queued");
+    expect(controllers).toHaveLength(1);
+  });
 });
 
 describe("SessionBroker — live controls", () => {

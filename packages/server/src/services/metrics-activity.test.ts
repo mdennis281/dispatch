@@ -96,6 +96,12 @@ describe("classifyActivity", () => {
     ["collaboration.wait_agent", undefined, "waiting_agent"],
     ["mcp__dispatch-confirm__ask_user", undefined, "waiting_human"],
     ["AskUserQuestion", undefined, "waiting_human"],
+    // Parks on a peer's answer for up to an hour at its default timeout.
+    ["mcp__dispatch-chat__chat_ask", undefined, "waiting_agent"],
+    // Raises a card and waits for the human to paste a key.
+    ["mcp__dispatch-secrets__secret_request", undefined, "waiting_human"],
+    // A poll-until-condition loop: the work it watches is somebody else's span.
+    ["Monitor", undefined, "sleeping"],
     ["mcp__dispatch-github__watch_pr", undefined, "waiting_remote"],
     ["WebFetch", undefined, "waiting_remote"],
     ["Read", undefined, "tool"],
@@ -144,6 +150,80 @@ describe("classifyActivity", () => {
     expect(chatStatusForActivity("generating")).toBe("running");
     expect(chatStatusForActivity("shell")).toBe("waiting");
     expect(chatStatusForActivity("waiting_remote")).toBe("waiting");
+  });
+});
+
+describe("ActivityTracker — occupied, the concurrency cap's question", () => {
+  it("is true while the chat works and false while it waits on someone else", () => {
+    sink.at(0);
+    expect(track.occupied).toBe(false);
+    track.turnStart();
+    expect(track.occupied).toBe(true); // generating
+
+    sink.at(10);
+    track.toolStart(MAIN_ACTOR, "t1", "Read");
+    expect(track.occupied).toBe(true); // local tool
+    sink.at(20);
+    track.toolEnd("t1");
+
+    sink.at(30);
+    track.toolStart(MAIN_ACTOR, "t2", "Bash");
+    expect(track.occupied).toBe(true); // a shell command IS work
+    sink.at(40);
+    track.toolEnd("t2");
+
+    // …and the four kinds of blocked, each of which now gives the slot back.
+    const blocked: Array<[string, Record<string, unknown> | undefined]> = [
+      ["mcp__dispatch-github__watch_pr", { pr: 1 }],
+      ["mcp__dispatch-chat__wait_for_chat", { chatId: "c9" }],
+      ["mcp__dispatch-confirm__ask_user", undefined],
+      ["mcp__dispatch-session__wait", undefined],
+    ];
+    let t = 50;
+    for (const [name, input] of blocked) {
+      sink.at(t);
+      track.toolStart(MAIN_ACTOR, `b-${name}`, name, input);
+      expect(track.occupied, `${name} should release the slot`).toBe(false);
+      sink.at((t += 10));
+      track.toolEnd(`b-${name}`);
+      expect(track.occupied, `${name} should take it back`).toBe(true);
+      t += 10;
+    }
+
+    sink.at(t);
+    track.turnEnd();
+    expect(track.occupied).toBe(false);
+  });
+
+  it("stays true while a SUBAGENT works under a blocked main loop", () => {
+    // The trap: the main loop's own state is `waiting_agent`, but the child it
+    // spawned is generating in this chat and burning its tokens. Reading the
+    // chat's status alone would hand a fleet of agents a free pass.
+    sink.at(0);
+    track.turnStart();
+    sink.at(10);
+    track.toolStart(MAIN_ACTOR, "task-1", "Task", { subagent_type: "Explore" });
+    expect(track.occupied).toBe(true);
+
+    // The child finishing is what actually ends the work.
+    sink.at(90);
+    track.toolEnd("task-1");
+    sink.at(90);
+    track.turnEnd();
+    expect(track.occupied).toBe(false);
+  });
+
+  it("is false for a queued chat and for one paused on a usage limit", () => {
+    sink.at(0);
+    track.queued();
+    expect(track.occupied).toBe(false);
+
+    track.turnStart();
+    expect(track.occupied).toBe(true);
+    sink.at(100);
+    track.turnEnd({ limit: true });
+    // The limit pause outlives the turn, and it is not work.
+    expect(track.occupied).toBe(false);
   });
 });
 

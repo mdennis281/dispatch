@@ -66,13 +66,14 @@ export function ContextSection({ draft, patch, serverDefaults, catalogs }: AppPa
           />
         </Field>
         <p className="text-xs leading-snug text-faint">
-          How many chats may be mid-turn at once. A chat holds a slot while it's running,
-          while it's blocked in a long tool call (watch_pr waiting on CI), and while it's
-          waiting on you for a permission or a question — idle chats cost nothing, and a PR
-          under review usually costs two: the reviewer and the chat that opened it. Past the
-          cap a turn shows as Queued and starts as soon as a slot frees, oldest first.
-          Raising this drains the queue immediately; lowering it never interrupts a chat
-          that's already running.
+          How many chats may be WORKING at once. A chat holds a slot while it's generating,
+          running a tool or running a shell command — and gives it back while it's blocked
+          on something else: waiting on CI, on a peer chat, on a sleep, or on you for a
+          permission or a question. A chat driving subagents still counts, because they're
+          working on its behalf. Past the cap a turn shows as Queued and starts as soon as a
+          slot frees, oldest first. Raising this drains the queue immediately; lowering it
+          never interrupts a chat that's already running, and a blocked chat resumes the
+          moment it's unblocked even if that briefly puts you over.
         </p>
       </div>
 

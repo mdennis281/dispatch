@@ -24,6 +24,7 @@
  * `runId` alone.
  */
 import {
+  activityClass,
   LEGACY_MANAGER_TOOL_PREFIX,
   isManagerServerOrLegacy,
   managerToolQualifiedName,
@@ -86,14 +87,22 @@ function isShell(n: string, tool: string | undefined): boolean {
   );
 }
 
-/** Tools that block on another agent — a spawned subagent or a peer chat. */
+/**
+ * Tools that block on another agent — a spawned subagent or a peer chat.
+ *
+ * `chat_ask` is here because it parks on a peer's answer for up to an HOUR at
+ * its default timeout (see chat-messenger's `pendingAsks`). Classified `tool`,
+ * that hour read as local work — the single longest stretch this file could
+ * misfile.
+ */
 function isAgentWait(n: string, tool: string | undefined): boolean {
   return (
     n === "task" ||
     n === "agent" ||
     n.endsWith("_wait_agent") ||
     n.includes("collaboration_wait_agent") ||
-    tool === "wait_for_chat"
+    tool === "wait_for_chat" ||
+    tool === "chat_ask"
   );
 }
 
@@ -111,7 +120,10 @@ function isHumanWait(n: string, tool: string | undefined): boolean {
     tool === "ask_user" ||
     tool === "request_exemption" ||
     tool === "request_human_review" ||
-    tool === "spawn_chat"
+    tool === "spawn_chat" ||
+    // Raises a card and waits for the human to paste a key — see
+    // secret-refresh.ts, which answers the call that is parked on it.
+    tool === "secret_request"
   );
 }
 
@@ -179,7 +191,10 @@ export function classifyActivity(name: string, input?: Record<string, unknown>):
   // Agent waits are tested BEFORE sleeps, because `wait_for_chat` is a peer it's
   // blocked on, not a nap.
   if (isAgentWait(n, tool)) return "waiting_agent";
-  if (n === "functions_wait" || tool === "wait") return "sleeping";
+  // `Monitor` is a poll-until-condition loop: the work it watches is somebody
+  // else's span (a background shell, a task), and the caller is doing nothing
+  // but waiting for it.
+  if (n === "functions_wait" || n === "monitor" || tool === "wait") return "sleeping";
   if (isHumanWait(n, tool)) return "waiting_human";
   if (isRemoteWait(n, tool)) return "waiting_remote";
   if (isShell(n, tool) || carried) return "shell";
@@ -259,6 +274,27 @@ export class ActivityTracker {
     let n = 0;
     for (const actor of this.actors.values()) if (actor.generating !== undefined) n++;
     return n + this.byId.size;
+  }
+
+  /**
+   * Is anything actually HAPPENING for this chat right now — as opposed to the
+   * chat sitting blocked on someone else?
+   *
+   * This is what the concurrency cap counts (see the broker's `holdsSlot`). The
+   * rollup is {@link activityClass}, not a second list of states, so "costs a
+   * slot" and "shows as Working on the chart" can never drift apart.
+   *
+   * ACROSS EVERY ACTOR, and that is the whole reason this lives on the tracker
+   * rather than being read off the chat's status. A main loop blocked in `Task`
+   * is `waiting_agent` — blocked — but the subagent it spawned is generating on
+   * its own actor, burning tokens in this very chat. Asking the actors gets that
+   * right for free; asking the status dot would hand a fleet of ten agents a
+   * free pass and let a dozen more chats in behind it.
+   */
+  get occupied(): boolean {
+    for (const actor of this.actors.values()) if (actor.generating !== undefined) return true;
+    for (const held of this.byId.values()) if (activityClass(held.state) !== "blocked") return true;
+    return false;
   }
 
   /* -------------------------------------------------------- turn lifecycle */

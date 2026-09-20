@@ -1978,6 +1978,8 @@ export class SessionBroker {
    *  setting you have to restart the server to apply is a restart, not a
    *  setting. */
   private cap: number;
+  /** True while `pump` is draining — see the guard there. */
+  private pumping = false;
   /** Boot value for the idle window (env/default), the fallback for a cleared setting. */
   private readonly defaultIdleMinutes: number;
   /** Idle window in force, in ms. 0 = the sweep is off. */
@@ -2284,7 +2286,7 @@ export class SessionBroker {
       );
     }
 
-    const steering = this.isActive(session);
+    const steering = this.isTurnLive(session);
     const id = this.genId();
 
     // Auto-surface the durable memories most relevant to THIS turn: a
@@ -3510,7 +3512,7 @@ export class SessionBroker {
   interruptionSnapshot(): InterruptionSnapshot[] {
     const out: InterruptionSnapshot[] = [];
     for (const session of this.sessions.values()) {
-      if (!this.isActive(session) && session.status !== "queued") continue;
+      if (!this.isTurnLive(session) && session.status !== "queued") continue;
       out.push({
         chatId: session.chatId,
         status: session.status,
@@ -3694,10 +3696,10 @@ export class SessionBroker {
       });
   }
 
-  /** Count of sessions holding an active slot (running or awaiting-input). */
+  /** Count of sessions holding an active slot — see {@link holdsSlot}. */
   activeCount(): number {
     let n = 0;
-    for (const s of this.sessions.values()) if (this.isActive(s)) n += 1;
+    for (const s of this.sessions.values()) if (this.holdsSlot(s)) n += 1;
     return n;
   }
 
@@ -3737,8 +3739,47 @@ export class SessionBroker {
 
   /* -------------------------------------------------------- scheduling */
 
-  private isActive(s: LiveSession): boolean {
+  /**
+   * Is this session's turn still OPEN — has it been handed work it hasn't
+   * finished?
+   *
+   * Says nothing about whether anything is happening. A chat parked in
+   * `watch_pr` for forty minutes is turn-live: its subprocess is up, its context
+   * is loaded, and a message sent to it must STEER the open turn rather than
+   * start a new one. That is what the three call sites here want, and why this
+   * must not be narrowed to "is busy" — see {@link holdsSlot} for that question.
+   */
+  private isTurnLive(s: LiveSession): boolean {
     return s.status === "running" || s.status === "waiting" || s.status === "awaiting-input";
+  }
+
+  /**
+   * Does this session cost one of the `maxActiveSessions` slots?
+   *
+   * THE DISTINCTION THIS DRAWS. The cap exists to bound how much is happening at
+   * once. Counting every turn-live chat bounded something else — how many chats
+   * are mid-task — and those diverge badly, because most of a long turn is spent
+   * blocked on someone else. Six chats each waiting on CI held the entire app at
+   * its cap while zero tokens were being spent, and six open question cards
+   * deadlocked it outright: nothing could start, and the only thing that would
+   * free a slot was the human who had walked away.
+   *
+   * So a slot is held while the chat is doing something — generating, running a
+   * tool, running a shell — and released while it is blocked on a human, a peer,
+   * a subprocess of GitHub's, or a deliberate sleep. {@link ActivityTracker.occupied}
+   * is the arbiter, over the same `activityClass` rollup the runtime chart uses.
+   *
+   * Gated on `isTurnLive` first so a settled chat can never hold a slot on the
+   * strength of a span the tracker failed to close.
+   *
+   * RELEASING IS ADMISSION-ONLY. A blocked chat's tool call cannot be paused, so
+   * when it unblocks it resumes immediately — possibly over the cap, if the slot
+   * it gave up was taken meanwhile. That burst is deliberate: the alternative is
+   * re-queueing a chat mid-tool-call, which is not a thing that can be done, and
+   * it matches the existing rule that lowering the cap never preempts.
+   */
+  private holdsSlot(s: LiveSession): boolean {
+    return this.isTurnLive(s) && s.activity.occupied;
   }
 
   private schedule(session: LiveSession): void {
@@ -3746,7 +3787,7 @@ export class SessionBroker {
     // instance reaches this one here rather than only at its next restart.
     this.refreshCap();
     // A turn is already active → inject the buffered message(s) as steering.
-    if (session.started && this.isActive(session)) {
+    if (session.started && this.isTurnLive(session)) {
       this.flushOutbox(session);
       // Re-publish the current status so the client's "N queued" chip reflects the
       // just-injected message immediately (it decrements again as the SDK consumes).
@@ -4028,6 +4069,27 @@ export class SessionBroker {
   }
 
   private pump(): void {
+    // Nothing parked → nothing to do, and this returns BEFORE `refreshCap` on
+    // purpose. `setStatus` pumps on every transition now (a chat going blocked
+    // frees a slot, and that is not a turn ending, so no other caller would
+    // notice), which makes this the hottest path in the broker; without the
+    // early-out every tool call in every chat would cost a settings-file read.
+    // With the queue empty there is also nothing a fresh cap could release.
+    if (this.queueOrder.length === 0) return;
+    // Re-entrancy guard: `startTurn` below calls `setStatus`, which pumps. The
+    // recursion terminates — each level shifts the queue — but a nested drain
+    // would run the outer loop's `activeCount` against a queue it no longer
+    // owns. One pump at a time; the outer loop sees every change anyway.
+    if (this.pumping) return;
+    this.pumping = true;
+    try {
+      this.drainQueue();
+    } finally {
+      this.pumping = false;
+    }
+  }
+
+  private drainQueue(): void {
     // The other half of the reconciliation: a slot just freed, so if the cap moved
     // under us this is the moment a parked chat should notice. `setCap` re-enters
     // `pump` on a raise, and a no-change `setCap` returns before it does — so this
@@ -4049,6 +4111,13 @@ export class SessionBroker {
    * Keep concurrently-running chats inside the app-level aggregate context
    * budget. Idle chats retain their native sessions but do not consume an active
    * execution slot; queued work is retried whenever another turn settles.
+   *
+   * `isTurnLive`, deliberately NOT {@link holdsSlot}, even though the two shared
+   * one predicate until the slot cap stopped counting blocked chats. These
+   * measure different things: a slot is "is work happening", and a chat parked
+   * in `watch_pr` is doing none — but its context is still loaded in a live
+   * subprocess and will be spent in full the moment CI answers. Letting it off
+   * the token budget would admit turns against memory that is already committed.
    */
   private async withinOverallContextBudget(session: LiveSession): Promise<boolean> {
     const settings = await this.store.getSettings().catch(() => undefined);
@@ -4056,7 +4125,7 @@ export class SessionBroker {
     if (!limit) return true;
     const perChatLimit = settings?.harness?.contextLimits?.perChatTokens;
     const active = [...this.sessions.values()]
-      .filter((candidate) => candidate.chatId !== session.chatId && this.isActive(candidate))
+      .filter((candidate) => candidate.chatId !== session.chatId && this.isTurnLive(candidate))
       .reduce(
         (sum, candidate) =>
           sum + (candidate.lastContextTokens ?? candidate.contextWindow ?? perChatLimit ?? 200_000),
@@ -5371,7 +5440,7 @@ export class SessionBroker {
     try {
       await this.sendMessage(chatId, composeMessageText(parts), {
         parts,
-        priority: this.isActive(session) ? "next" : undefined,
+        priority: this.isTurnLive(session) ? "next" : undefined,
         keepPendingQuestions: true,
       });
     } catch (err) {
@@ -6007,6 +6076,30 @@ export class SessionBroker {
       queued: this.queuedCount(session),
       prSettled: session.prWatchSettled || undefined,
     });
+    // A slot may have just freed WITHOUT a turn ending: the chat blocked on a
+    // human, a peer or the network, and {@link holdsSlot} stopped counting it.
+    // Every `pump` call elsewhere hangs off turn settlement, so none of them
+    // fires for that — a queued chat could sit behind six chats waiting on CI
+    // indefinitely. Every occupancy change passes through here (a tool start
+    // sets the status, and so does a permission prompt), which makes this the
+    // one place that sees all of them.
+    //
+    // Tested on the state this leaves behind, NOT on a before/after comparison
+    // around this method: the tracker is already updated by the time we are
+    // called (`toolStart` runs before the `setStatus` it derives its status
+    // from), so "was holding, now isn't" reads false for the very transitions
+    // this exists to catch.
+    //
+    // `isTurnLive` is what keeps it from spinning. A chat re-queued by
+    // `withinOverallContextBudget` is un-occupied too, but it is also back in
+    // `queueOrder` — pumping on it would hand it straight back to `startTurn`,
+    // which re-checks the same unchanged budget and re-queues it, forever. A
+    // queued chat is not turn-live, so it never reaches here; it waits for a
+    // settling turn to retry it, exactly as it did before.
+    //
+    // Cheap by construction: `pump` returns immediately when nothing is queued,
+    // which is the overwhelmingly common case.
+    if (this.isTurnLive(session) && !session.activity.occupied) this.pump();
   }
 
   /** Steering messages submitted but not yet consumed by the SDK (outbox + input). */
