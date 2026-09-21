@@ -1,5 +1,17 @@
+import { useEffect } from "react";
 import { useViewport } from "../../stores/viewport.js";
 import { LAYER } from "../../lib/layers.js";
+import { api } from "../../lib/api.js";
+import { Button } from "../ui/Button.js";
+import { copyToClipboard } from "../../lib/clipboard.js";
+import {
+  clearTrace,
+  formatEntry,
+  setTraceStatus,
+  snapshot,
+  startInteractionTrace,
+  useTrace,
+} from "../../lib/interactionTrace.js";
 
 /**
  * Every viewport number the browser will admit to, on screen, live.
@@ -46,8 +58,112 @@ export function ViewportDebug() {
     <>
       <ViewportReadout />
       <PaintRuler />
+      <InteractionTrace />
     </>
   ) : null;
+}
+
+/**
+ * The flight recorder, and the two ways to get a recording off the phone.
+ *
+ * The readout above is a snapshot; a scroll glitch is a sequence. While this
+ * is mounted — i.e. while the readout is on — `lib/interactionTrace` logs
+ * every touch, scroll, programmatic scroll, content resize, image load and
+ * viewport change with a timestamp. The tail is drawn here so the person
+ * holding the phone can see it is recording and what it last saw; the whole
+ * buffer goes out via `copy` (clipboard, to paste into a chat) or `send`
+ * (POST to the server, where `?trace` on a desktop renders it as a timeline
+ * and an agent can read the file). The finger trail is the other half of the
+ * picture: a screenshot with the trail on it shows WHERE the gesture was when
+ * the log says the transcript moved.
+ */
+function InteractionTrace() {
+  useEffect(() => startInteractionTrace(), []);
+  const count = useTrace((s) => s.count);
+  const tail = useTrace((s) => s.tail);
+  const trail = useTrace((s) => s.trail);
+  const status = useTrace((s) => s.status);
+
+  const copy = async () => {
+    const ok = await copyToClipboard(JSON.stringify(snapshot()));
+    setTraceStatus(ok ? "copied" : "copy failed");
+  };
+  const send = async () => {
+    try {
+      const { name } = await api.debugTrace.save(snapshot());
+      setTraceStatus(`sent ${name.slice(11, 19).replace(/-/g, ":")}`);
+    } catch (err) {
+      setTraceStatus(`send failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  return (
+    <>
+      {/* Finger trail. Newest point is brightest; a start is a ring, an end a
+          filled dot, a cancel amber — so a gesture iOS abandoned mid-way reads
+          differently from one that finished. */}
+      <div
+        style={{ zIndex: LAYER.shutdown + 1 }}
+        className="pointer-events-none fixed inset-0"
+        aria-hidden
+      >
+        {trail.map((pt, i) => {
+          const age = 1 - i / Math.max(trail.length, 1);
+          const ring = pt.p === "start";
+          const colour = pt.p === "cancel" ? "border-amber-300 bg-amber-300" : pt.p === "end" ? "border-red-400 bg-red-400" : "border-fuchsia-400 bg-fuchsia-400";
+          return (
+            <span
+              key={`${pt.t}-${i}`}
+              className={`absolute size-2.5 rounded-full border ${colour} ${ring ? "!bg-transparent" : ""}`}
+              style={{ left: pt.x - 5, top: pt.y - 5, opacity: 0.25 + 0.75 * (1 - age) }}
+            />
+          );
+        })}
+      </div>
+      <div
+        style={{ zIndex: LAYER.shutdown + 1 }}
+        // Bottom-left, above the nav; the readout has the top-left. `fixed` to
+        // the layout viewport like the readout, and the log itself lets touches
+        // through so the transcript under it stays scrollable — only the
+        // button row takes taps.
+        className="pointer-events-none fixed inset-x-1 bottom-[calc(var(--cm-safe-bottom,0px)+3.5rem+var(--cm-kb,0px))] max-w-[min(100vw-0.5rem,520px)] rounded border border-line-strong bg-black/80 px-1.5 py-1 font-mono text-2xs leading-tight text-white backdrop-blur-sm"
+      >
+        <div className="flex items-center gap-1.5">
+          <span className="text-white/45">trace</span>
+          <span className="text-white/90">{count}</span>
+          {status && <span className="truncate text-amber-300">{status}</span>}
+          <span className="flex-1" />
+          <TraceButton onClick={() => void copy()}>copy</TraceButton>
+          <TraceButton onClick={() => void send()}>send</TraceButton>
+          <TraceButton onClick={clearTrace}>clear</TraceButton>
+        </div>
+        <div className="mt-0.5 space-y-px">
+          {tail.map((e, i) => (
+            <div
+              key={`${e.t}-${i}`}
+              className={`truncate ${e.k === "set" || e.k === "size" || (e.k === "img" && e.above) ? "text-amber-300" : "text-white/80"}`}
+            >
+              {formatEntry(e)}
+            </div>
+          ))}
+        </div>
+      </div>
+    </>
+  );
+}
+
+function TraceButton({ onClick, children }: { onClick: () => void; children: string }) {
+  return (
+    <Button
+      variant="ghost"
+      onClick={onClick}
+      // Inverted on purpose: the panel is black glass over whatever theme is
+      // on, and the ghost variant's theme text would vanish against it.
+      className="pointer-events-auto !h-5 border border-white/30 !px-1.5 font-mono !text-2xs !text-white/90"
+    >
+      {children}
+    </Button>
+  );
 }
 
 /**

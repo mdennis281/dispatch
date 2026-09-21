@@ -87,7 +87,7 @@ export interface HealthReport {
  * resolvable sha is unusual, not unhealthy.
  */
 let cachedSha: string | null | undefined;
-function payloadSha(): string | undefined {
+export function payloadSha(): string | undefined {
   // Three states, not two: `undefined` is "not looked up yet", `null` is
   // "looked up, and there is no answer". Collapsing them would fork a `git`
   // process on every poll of a payload that has no sha to give — and the
