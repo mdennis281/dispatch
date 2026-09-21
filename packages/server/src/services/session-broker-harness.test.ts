@@ -853,6 +853,39 @@ describe("SessionBroker neutral harness path", () => {
       expect(broker.answerQuestion(askId, { answer: "Yes" })).toBe(true);
     });
 
+    it("delivers the verdict as a message when the turn ended with the call still running", async () => {
+      const chatId = await codexChat("chat-orphaned-review");
+      session.emit({ type: "tool-use", toolUseId: "review-3", name: REVIEW, input: review });
+      const reviewCard = nextCard();
+      const verdict = broker.requestHumanReview(chatId, review);
+      const reviewId = await reviewCard;
+
+      // Codex's exec cell backgrounded the call; the model gave up waiting on
+      // the cell and ended its turn. The call itself is still in flight, so no
+      // failed result ever arrives.
+      session.emit({
+        type: "turn-end",
+        ok: true,
+        subtype: "success",
+        result: "The review card is open.",
+      });
+      await waitUntil(async () =>
+        (await store.readMessages(chatId)).some((row) => row.kind === "result"),
+      );
+
+      expect(broker.answerQuestion(reviewId, { answer: "Approve", notes: "plain but fine" })).toBe(true);
+      await expect(verdict).resolves.toMatchObject({ status: "reviewed", verdict: "approve" });
+      // The bridge's answer completes Codex's item — successfully, into a dead turn.
+      session.emit({ type: "tool-result", toolUseId: "review-3", ok: true, content: "approved" });
+
+      await waitUntil(async () => (await briefs(chatId)).length > 0);
+      const [late] = await briefs(chatId);
+      expect(late).toMatchObject({ label: "Late review verdict" });
+      expect(late!.text).toContain("APPROVED");
+      expect(late!.text).toContain("plain but fine");
+      expect(session.sent.some((input) => input.text.includes("APPROVED"))).toBe(true);
+    });
+
     it("sends nothing extra when the call was still waiting for the answer", async () => {
       const chatId = await codexChat("chat-live-review");
       session.emit({ type: "tool-use", toolUseId: "review-2", name: REVIEW, input: review });

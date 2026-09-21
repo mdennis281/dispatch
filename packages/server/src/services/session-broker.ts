@@ -1735,7 +1735,8 @@ type ManagerCardTool = "ask_user" | "request_human_review";
  * withdraws a card never fires. The card stays answerable and the answer
  * resolves a call nobody reads. That is exactly how a review verdict vanished
  * on 2026-09-12. The one signal Dispatch does get is the failed tool result the
- * harness reports for that call, which is what sets this flag.
+ * harness reports for that call, which is what sets this flag — that, or the
+ * turn ending with the call still in flight (see `abandonOrphanedCards`).
  */
 interface ManagerCardCall {
   tool: ManagerCardTool;
@@ -4464,6 +4465,7 @@ export class SessionBroker {
         // the result row is being persisted is already too late to interrupt
         // this turn and must not suppress recovery in the next one.
         session.turnOpen = false;
+        this.abandonOrphanedCards(session);
         session.activity.turnEnd({ limit: !!event.limit }, base.ts);
         session.lastContextTokens = event.contextTokens ?? session.lastContextTokens;
         session.contextWindow = event.contextWindow ?? session.contextWindow;
@@ -5450,6 +5452,33 @@ export class SessionBroker {
     }
     for (const pending of session.pendingPermissions.values()) {
       if (pending.call?.tool === tool) pending.call.abandoned = true;
+    }
+  }
+
+  /**
+   * At turn end: every card call still in flight belongs to a turn nobody is
+   * reading any more, so its card is abandoned even though the call never
+   * failed.
+   *
+   * This is the second way a card's call goes away without the bridge hearing
+   * about it (the first is the deadline in {@link ManagerCardCall}). Codex's
+   * `exec` cell backgrounds a `tools/call` that runs past ~30s and hands the
+   * model "Script running with cell ID N" instead of a result; the model can
+   * `wait` on the cell, but it gives up after a few rounds and ends the turn
+   * with the card still up. When the human answered 12 minutes later
+   * (2026-09-21, PR #599's review card), the call SUCCEEDED — Codex completed
+   * the item `ok:true`, so {@link abandonCards} never ran — into a finished turn,
+   * and the next turn's model still believed it was waiting for a verdict.
+   *
+   * The in-flight ids are dropped here so that late success, when it does
+   * arrive, is not mistaken for a live call by the tool-result handler.
+   */
+  private abandonOrphanedCards(session: LiveSession): void {
+    if (!session.cardCalls.size) return;
+    const orphaned = new Set(session.cardCalls.values());
+    session.cardCalls.clear();
+    for (const pending of session.pendingPermissions.values()) {
+      if (pending.call && orphaned.has(pending.call.tool)) pending.call.abandoned = true;
     }
   }
 
