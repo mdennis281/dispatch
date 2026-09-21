@@ -291,13 +291,17 @@ function Timeline({ entries, from, to, shown, cursor, innerH, scroller, onPick, 
   const yFinger = (py: number) => PAD.t + (py / Math.max(innerH, 1)) * plotH;
 
   const touches = entries.filter((e) => e.k === "touch" && e.t >= from && e.t <= to);
-  // Touch spans: start → end/cancel.
+  // Touch spans: first finger down → last finger up. `n` is the number of
+  // fingers still on the glass after the event, so a second contact during a
+  // gesture extends the span rather than restarting it, and the span closes
+  // only when the last one lifts.
   const spans: Array<[number, number, string]> = [];
   let open: number | null = null;
   for (const e of entries) {
     if (e.k !== "touch") continue;
-    if (e.p === "start") open = e.t;
-    else if ((e.p === "end" || e.p === "cancel") && open !== null) {
+    if (e.p === "start") {
+      if (open === null) open = e.t;
+    } else if ((e.p === "end" || e.p === "cancel") && open !== null && (e.n as number) === 0) {
       spans.push([open, e.t, e.p as string]);
       open = null;
     }

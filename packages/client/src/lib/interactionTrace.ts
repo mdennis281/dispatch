@@ -337,6 +337,16 @@ export function startInteractionTrace(): () => void {
     typeof ResizeObserver === "function"
       ? new ResizeObserver((records) => {
           for (const r of records) {
+            // A removed row reports once more, at zero, and would otherwise
+            // stay retained by the observer for the rest of the recording:
+            // the scroller persists across chat switches (ChatView has no
+            // key), only its rows are swapped, so every chat visited while
+            // recording would pile up in here.
+            if (!r.target.isConnected) {
+              ro.unobserve(r.target);
+              heights.delete(r.target);
+              continue;
+            }
             const h = Math.round(r.contentRect.height);
             const prev = heights.get(r.target);
             heights.set(r.target, h);
