@@ -7,6 +7,7 @@ import {
   useChats,
 } from "./stores/index.js";
 import { ws } from "./lib/ws.js";
+import { TraceViewer } from "./components/debug/TraceViewer.js";
 import { RunnerLogWindow } from "./components/panels/RunnerLogWindow.js";
 import { capturePwaInstall } from "./lib/pwaInstall.js";
 import { useWebPush, startPresenceReporting } from "./lib/webPush.js";
@@ -34,6 +35,12 @@ syncThemeColor();
 // with `?logs=<runnerId>` — render only the read-only log terminal for it.
 const isLogWindow = new URLSearchParams(location.search).has("logs");
 
+// `?trace` renders the interaction-trace viewer — the desktop end of the
+// phone's viewport-readout recorder (lib/interactionTrace.ts). Standalone like
+// the log window: it only needs REST, and the app shell would fight it for
+// the page.
+const isTraceViewer = new URLSearchParams(location.search).has("trace");
+
 // A DEV-only design surface for the Mission ("workflows") proposal, reachable
 // at /mission-preview. The dev server's SPA fallback hands index.html to every
 // path, so a pathname check is all the routing this needs — and it is gated on
@@ -50,7 +57,7 @@ const isMissionPreview =
 // modes are NOT the same shape: the preview wants everything skipped, while the
 // log popup only ever wanted the PWA half skipped — it has always needed the
 // socket.
-const isShell = !isLogWindow && !isMissionPreview;
+const isShell = !isLogWindow && !isMissionPreview && !isTraceViewer;
 
 // Wire the reactive data spine (active chat → transcript, active project → panels)
 // then open the WS. The backend's `hello` triggers the REST hydrate, so live data
@@ -159,6 +166,14 @@ if (!el) throw new Error("#root not found");
 
 createRoot(el).render(
   <StrictMode>
-    {isLogWindow ? <RunnerLogWindow /> : isMissionPreview ? <MissionPreview /> : <App />}
+    {isLogWindow ? (
+      <RunnerLogWindow />
+    ) : isMissionPreview ? (
+      <MissionPreview />
+    ) : isTraceViewer ? (
+      <TraceViewer />
+    ) : (
+      <App />
+    )}
   </StrictMode>,
 );

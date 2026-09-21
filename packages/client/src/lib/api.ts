@@ -1395,6 +1395,15 @@ export const api = {
     dismiss: () => post<{ ok: boolean }>("/api/restart-resume/dismiss"),
   },
 
+  /* interaction traces recorded by the viewport readout's tracer — see
+   * lib/interactionTrace.ts. `body` is a TraceSnapshot; typed loosely here so
+   * the API file doesn't import a debug module. */
+  debugTrace: {
+    save: (body: unknown) => post<{ name: string }>("/api/debug/trace", body),
+    list: () => get<Array<{ name: string; size: number; savedAt: string }>>("/api/debug/trace"),
+    get: (name: string) => get<unknown>(`/api/debug/trace/${encodeURIComponent(name)}`),
+  },
+
   /* subscription usage (5h + weekly) for the header meter */
   usage: {
     /** One ACCOUNT's windows; a bare provider means that provider's default account. */
