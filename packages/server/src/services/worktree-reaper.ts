@@ -66,6 +66,7 @@ import {
   pathKey,
   realExec,
   samePath,
+  WorktreeLeftoverError,
   type ExecFn,
 } from "./worktree.js";
 import type { WorktreeService } from "./worktree.js";
@@ -553,21 +554,32 @@ export class WorktreeReaper {
     opts: ReapOptions,
   ): Promise<ReapOutcome> {
     const { path, branch } = candidate;
+    // A leftover is not a refusal: the worktree is gone from git and the
+    // registry, only files remain on disk (a dev server still holding one open,
+    // say). The branch's fate doesn't depend on those files, so it is deleted
+    // as it would have been — otherwise a landed branch survived exactly when
+    // its tree was hardest to remove. The orphan sweep retries the disk.
+    let leftover: WorktreeLeftoverError | undefined;
     try {
       await this.worktrees.remove(path, { chatId: opts.chatId ?? candidate.chatId });
-      let branchDeleted = false;
-      if (opts.deleteBranch && branch && candidate.branchDeletable) {
-        branchDeleted = await this.deleteBranch(candidate.projectId, branch);
-      }
-      return { path, branch, removed: true, branchDeleted };
     } catch (err) {
-      return {
-        path,
-        branch,
-        removed: false,
-        error: err instanceof Error ? err.message : String(err),
-      };
+      if (!(err instanceof WorktreeLeftoverError)) {
+        return {
+          path,
+          branch,
+          removed: false,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+      leftover = err;
     }
+    let branchDeleted = false;
+    if (opts.deleteBranch && branch && candidate.branchDeletable) {
+      branchDeleted = await this.deleteBranch(candidate.projectId, branch);
+    }
+    return leftover
+      ? { path, branch, removed: false, branchDeleted, error: leftover.message }
+      : { path, branch, removed: true, branchDeleted };
   }
 
   /**

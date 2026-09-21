@@ -398,6 +398,18 @@ describe("WorktreeService on a real temp repo", () => {
     expect(listed.some((w) => samePath(w.path, info.path))).toBe(true);
   });
 
+  it("never deletes a directory that was not a worktree to begin with", async () => {
+    // A path handed straight through from a request body: not a worktree,
+    // never was, no `.git` — and git's refusal must be the end of it.
+    const notATree = join(wtRoot, "someones-files");
+    await mkdir(notATree, { recursive: true });
+    await writeFile(join(notATree, "precious.txt"), "do not touch\n");
+
+    await expect(svc.remove(notATree)).rejects.toThrow(/worktree remove/);
+
+    expect(existsSync(join(notATree, "precious.txt"))).toBe(true);
+  });
+
   it("lists the husks under the worktree root, and nothing that still has a git identity", async () => {
     const live = await svc.create(project(), "feat/alive", { base: "main", noFetch: true });
     const husk = join(wtRoot, "feat-dead");

@@ -659,8 +659,18 @@ export class WorktreeService {
       ...(opts.force ? ["--force"] : []),
       worktreePath,
     ];
+    // The identity has to be there BEFORE git runs for its absence AFTERWARDS
+    // to mean anything. Without this, a path that never was a worktree — a
+    // typo, a stale `chat.worktrees` entry whose directory got reused for
+    // something else — fails git's "is not a working tree" check with the
+    // filesystem untouched, has no `.git` either, and would be handed to `rm`.
+    // `DELETE /api/worktrees` and the `remove-worktree` action pass the path
+    // straight through from the caller, so that is not a hypothetical.
+    const hadIdentity = hasGitIdentity(worktreePath);
     const r = await this.exec("git", args, { cwd });
-    if (r.exitCode !== 0 && hasGitIdentity(worktreePath)) {
+    const gitDiedMidRemoval =
+      r.exitCode !== 0 && hadIdentity && !hasGitIdentity(worktreePath);
+    if (r.exitCode !== 0 && !gitDiedMidRemoval) {
       throw new Error(
         `git ${args.join(" ")} failed (exit ${r.exitCode}): ${
           r.stderr.trim() || r.stdout.trim()
@@ -668,7 +678,7 @@ export class WorktreeService {
       );
     }
     const leftover = await finishDirectoryRemoval(worktreePath);
-    if (r.exitCode !== 0) {
+    if (gitDiedMidRemoval) {
       // Git gave up part-way, so its admin record may still point at the
       // directory just deleted. Best-effort: `list()` tolerates a stale entry
       // and git prunes on its own eventually.
@@ -702,7 +712,7 @@ export class WorktreeService {
     // and the registry are concerned, so the record, the chat link and the
     // port lease must not outlive it. What the caller learns is that the disk
     // hasn't been fully reclaimed — the orphan sweep will retry that.
-    if (leftover) throw leftover;
+    if (leftover) throw new WorktreeLeftoverError(worktreePath, leftover);
   }
 
   /**
@@ -1216,6 +1226,24 @@ export class WorktreeService {
     } catch {
       /* best-effort */
     }
+  }
+}
+
+/**
+ * `remove()` succeeded as far as git and the registry are concerned — the
+ * tree is deregistered, the chat detached, the ports released — but files are
+ * still on disk. Its own type so a caller can tell "the worktree is gone,
+ * the directory isn't yet" from "nothing happened", and act on the first
+ * (delete the branch, let the orphan sweep retry the disk) instead of
+ * treating it as a refusal.
+ */
+export class WorktreeLeftoverError extends Error {
+  constructor(
+    readonly path: string,
+    cause: Error,
+  ) {
+    super(cause.message);
+    this.name = "WorktreeLeftoverError";
   }
 }
 
