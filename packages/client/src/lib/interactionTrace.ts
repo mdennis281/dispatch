@@ -333,7 +333,7 @@ export function startInteractionTrace(): () => void {
     const rel = watched ? Math.round(el.getBoundingClientRect().top - watched.getBoundingClientRect().top) : 0;
     return `row[${i}/${rows.length}]@${rel}`;
   };
-  const ro =
+  const ro: ResizeObserver | null =
     typeof ResizeObserver === "function"
       ? new ResizeObserver((records) => {
           for (const r of records) {
@@ -343,7 +343,7 @@ export function startInteractionTrace(): () => void {
             // key), only its rows are swapped, so every chat visited while
             // recording would pile up in here.
             if (!r.target.isConnected) {
-              ro.unobserve(r.target);
+              ro?.unobserve(r.target);
               heights.delete(r.target);
               continue;
             }
