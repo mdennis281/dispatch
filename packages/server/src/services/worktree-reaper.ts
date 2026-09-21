@@ -47,7 +47,7 @@
  * instead: the agent finishes, and its landed worktree evaporates behind it.
  */
 import { existsSync } from "node:fs";
-import { sep } from "node:path";
+import { basename, sep } from "node:path";
 import {
   type Project,
   type ReapBlocker,
@@ -66,6 +66,7 @@ import {
   pathKey,
   realExec,
   samePath,
+  WorktreeLeftoverError,
   type ExecFn,
 } from "./worktree.js";
 import type { WorktreeService } from "./worktree.js";
@@ -553,21 +554,32 @@ export class WorktreeReaper {
     opts: ReapOptions,
   ): Promise<ReapOutcome> {
     const { path, branch } = candidate;
+    // A leftover is not a refusal: the worktree is gone from git and the
+    // registry, only files remain on disk (a dev server still holding one open,
+    // say). The branch's fate doesn't depend on those files, so it is deleted
+    // as it would have been — otherwise a landed branch survived exactly when
+    // its tree was hardest to remove. The orphan sweep retries the disk.
+    let leftover: WorktreeLeftoverError | undefined;
     try {
       await this.worktrees.remove(path, { chatId: opts.chatId ?? candidate.chatId });
-      let branchDeleted = false;
-      if (opts.deleteBranch && branch && candidate.branchDeletable) {
-        branchDeleted = await this.deleteBranch(candidate.projectId, branch);
-      }
-      return { path, branch, removed: true, branchDeleted };
     } catch (err) {
-      return {
-        path,
-        branch,
-        removed: false,
-        error: err instanceof Error ? err.message : String(err),
-      };
+      if (!(err instanceof WorktreeLeftoverError)) {
+        return {
+          path,
+          branch,
+          removed: false,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+      leftover = err;
     }
+    let branchDeleted = false;
+    if (opts.deleteBranch && branch && candidate.branchDeletable) {
+      branchDeleted = await this.deleteBranch(candidate.projectId, branch);
+    }
+    return leftover
+      ? { path, branch, removed: false, branchDeleted, error: leftover.message }
+      : { path, branch, removed: true, branchDeleted };
   }
 
   /**
@@ -607,15 +619,64 @@ export class WorktreeReaper {
       if (!policy.enabled) return { outcomes: [], removed: 0, failed: 0 };
       const plan = await this.plan({ projectId: opts.projectId });
       const ready = plan.candidates.filter((c) => c.blockers.length === 0 && c.probed);
-      if (ready.length === 0) return { outcomes: [], removed: 0, failed: 0 };
       // Straight to `reapJudged`: these were judged microseconds ago at full
       // depth, and re-judging would double the sweep's only real cost.
-      const result = await this.reapJudged(ready, {
-        deleteBranch: opts.deleteBranch ?? policy.deleteBranch,
-      });
+      const trees =
+        ready.length === 0
+          ? { outcomes: [], removed: 0, failed: 0 }
+          : await this.reapJudged(ready, {
+              deleteBranch: opts.deleteBranch ?? policy.deleteBranch,
+            });
+      const orphans = await this.sweepOrphans(opts.projectId);
+      const result = mergeResults(trees, orphans);
       this.announce(result);
       return result;
     });
+  }
+
+  /**
+   * Delete the directories a removal left behind: children of a project's
+   * worktree root that `git worktree list` does not report and that have no
+   * git identity of their own.
+   *
+   * These exist because `git worktree remove` on Windows destroys a tree's
+   * `.git` file and then dies on the first junction in `node_modules` (see
+   * `WorktreeService.remove`). Once git's admin record is pruned the directory
+   * is invisible to `plan()` — which enumerates through git — so a reaper that
+   * only judged worktrees would leave every one of them forever, at 200MB+
+   * apiece. There is no cleanliness probe here because there is nothing to
+   * probe: without a `.git` there is no index to compare against, and git's
+   * own refusal gate already ran, and passed, before it unlinked that file.
+   * The one check that matters — no `.git` — is re-done at deletion time.
+   */
+  private async sweepOrphans(projectId?: string): Promise<ReapResult> {
+    const outcomes: ReapOutcome[] = [];
+    for (const project of await this.projects(projectId)) {
+      let live: WorktreeInfo[];
+      try {
+        live = await this.worktrees.list(project);
+      } catch {
+        // No `git worktree list` means no idea what's live. Skip the project
+        // rather than treat every directory in its root as unclaimed.
+        continue;
+      }
+      const dirs = await this.worktrees.listOrphanDirectories(project, live).catch(() => []);
+      for (const path of dirs) {
+        try {
+          await this.worktrees.removeOrphanDirectory(path);
+          outcomes.push({ path, branch: "", removed: true });
+        } catch (err) {
+          outcomes.push({
+            path,
+            branch: "",
+            removed: false,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
+    const removed = outcomes.filter((o) => o.removed).length;
+    return { outcomes, removed, failed: outcomes.length - removed };
   }
 
   /**
@@ -804,27 +865,53 @@ export class WorktreeReaper {
 
   /** One notice per sweep that actually did something. Silence when it didn't. */
   private announce(result: ReapResult, chatId?: string): void {
-    if (result.removed === 0) return;
-    const branches = result.outcomes
-      .filter((o) => o.removed)
-      .map((o) => o.branch)
-      .filter(Boolean);
-    // The branches go in the TEXT, not a detail field — a `notice` has no detail,
-    // and "cleaned up 12 worktrees" without naming them is exactly the kind of
-    // unattended deletion nobody can audit after the fact.
-    this.bus?.publish({
-      type: "notice",
-      chatId,
-      level: "info",
-      text:
-        result.removed === 1
-          ? `Cleaned up merged worktree ${branches[0] ?? ""}`.trim()
-          : `Cleaned up ${result.removed} merged worktrees: ${branches.join(", ")}`,
-    });
+    if (result.removed > 0) {
+      // The names go in the TEXT, not a detail field — a `notice` has no detail,
+      // and "cleaned up 12 worktrees" without naming them is exactly the kind of
+      // unattended deletion nobody can audit after the fact. An orphan has no
+      // branch any more, so it is named by its directory.
+      const names = result.outcomes
+        .filter((o) => o.removed)
+        .map((o) => o.branch || basename(o.path));
+      this.bus?.publish({
+        type: "notice",
+        chatId,
+        level: "info",
+        text:
+          result.removed === 1
+            ? `Cleaned up merged worktree ${names[0]}`
+            : `Cleaned up ${result.removed} merged worktrees: ${names.join(", ")}`,
+      });
+    }
+    // A removal that git or the filesystem refused must be said out loud. The
+    // first version of this only spoke when something was removed, so a sweep
+    // that failed on every tree — which on Windows was every sweep — was silent,
+    // and ~100 dead trees accumulated with nothing to say why.
+    const failures = result.outcomes.filter((o) => !o.removed && !o.blockers);
+    if (failures.length > 0) {
+      const named = failures
+        .slice(0, 3)
+        .map((o) => `${o.branch || basename(o.path)}: ${o.error ?? "unknown"}`);
+      const more = failures.length > 3 ? ` (+${failures.length - 3} more)` : "";
+      this.bus?.publish({
+        type: "notice",
+        chatId,
+        level: "warn",
+        text: `Worktree cleanup could not remove ${failures.length === 1 ? "a tree" : `${failures.length} trees`} — ${named.join("; ")}${more}`,
+      });
+    }
   }
 }
 
 /* ------------------------------------------------------------- internals */
+
+function mergeResults(a: ReapResult, b: ReapResult): ReapResult {
+  return {
+    outcomes: [...a.outcomes, ...b.outcomes],
+    removed: a.removed + b.removed,
+    failed: a.failed + b.failed,
+  };
+}
 
 interface Liveness {
   busyChats: Set<string>;

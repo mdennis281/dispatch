@@ -22,7 +22,7 @@ import { join } from "node:path";
 import type { Chat, Project, TerminalInfo } from "@dispatch/shared";
 import { EventBus } from "../bus.js";
 import { Store } from "../store/index.js";
-import { WorktreeService, pathKey } from "./worktree.js";
+import { WorktreeService, WorktreeLeftoverError, pathKey } from "./worktree.js";
 import { WorktreeReaper, type WorktreeReaperDeps } from "./worktree-reaper.js";
 
 let root: string;
@@ -653,6 +653,78 @@ describe("WorktreeReaper.sweep", () => {
     expect(existsSync(order[2]!)).toBe(false);
     expect(existsSync(order[0]!)).toBe(true);
     expect(existsSync(order[1]!)).toBe(true);
+  });
+
+  gitIt("also takes the husks git no longer lists — a removal that died part-way", async () => {
+    const notices: string[] = [];
+    bus.subscribe((e) => {
+      if (e.type === "notice") notices.push(e.text);
+    });
+    // What `git worktree remove` leaves on Windows: no `.git`, a `node_modules`.
+    const husk = join(wtRoot, "feat-long-dead");
+    await mkdir(join(husk, "node_modules", "dep"), { recursive: true });
+    await writeFile(join(husk, "node_modules", "dep", "index.js"), "");
+    // A live tree in the same root must be untouched, whatever its state.
+    const wip = await makeBranchWorktree("feat/sweep-alongside");
+    await push(wip, "feat/sweep-alongside");
+
+    const result = await reaper.sweep();
+    expect(result.removed).toBe(1);
+    expect(existsSync(husk)).toBe(false);
+    expect(existsSync(wip)).toBe(true);
+    expect(notices.some((t) => t.includes("feat-long-dead"))).toBe(true);
+  });
+
+  gitIt("says so when a removal fails, instead of failing in silence", async () => {
+    const notices: Array<{ level: string; text: string }> = [];
+    bus.subscribe((e) => {
+      if (e.type === "notice") notices.push({ level: e.level, text: e.text });
+    });
+    const p = await makeBranchWorktree("feat/stuck");
+    await push(p, "feat/stuck");
+    await mergeToMain("feat/stuck");
+    const refusing = new WorktreeReaper({
+      store,
+      bus,
+      worktrees: Object.assign(Object.create(worktrees), {
+        remove: async () => {
+          throw new Error("EBUSY: resource busy or locked");
+        },
+      }) as WorktreeService,
+      graceMs: 0,
+    });
+
+    const result = await refusing.sweep();
+    expect(result.failed).toBe(1);
+    const warn = notices.find((n) => n.level === "warn");
+    expect(warn?.text).toContain("feat/stuck");
+    expect(warn?.text).toContain("EBUSY");
+  });
+
+  gitIt("still deletes the landed branch when only the directory is left behind", async () => {
+    const p = await makeBranchWorktree("feat/leftover");
+    await push(p, "feat/leftover");
+    await mergeToMain("feat/leftover");
+    const leaving = new WorktreeReaper({
+      store,
+      bus,
+      worktrees: Object.assign(Object.create(worktrees), {
+        // The real removal — git and registry both let go of the tree — and
+        // then the disk reports what a dev server holding a file would.
+        remove: async (path: string, opts?: Parameters<WorktreeService["remove"]>[1]) => {
+          await WorktreeService.prototype.remove.call(worktrees, path, opts);
+          throw new WorktreeLeftoverError(path, new Error("EBUSY: held by a dev server"));
+        },
+      }) as WorktreeService,
+      graceMs: 0,
+    });
+
+    const result = await leaving.sweep({ deleteBranch: true });
+    const outcome = result.outcomes.find((o) => o.branch === "feat/leftover");
+    expect(outcome?.removed).toBe(false);
+    expect(outcome?.branchDeleted).toBe(true);
+    const branches = await execa("git", ["branch", "--list", "feat/leftover"], { cwd: repo });
+    expect(branches.stdout.trim()).toBe("");
   });
 
   gitIt("does nothing, and says nothing, when there is nothing to do", async () => {

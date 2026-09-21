@@ -22,7 +22,13 @@
  */
 import { execBinary } from "./exec-binary.js";
 import { existsSync } from "node:fs";
-import { mkdir, readFile as fsReadFile, writeFile as fsWriteFile } from "node:fs/promises";
+import {
+  mkdir,
+  readdir,
+  readFile as fsReadFile,
+  rm,
+  writeFile as fsWriteFile,
+} from "node:fs/promises";
 import { basename, join, resolve, relative, isAbsolute, dirname } from "node:path";
 import {
   WorktreeInfoSchema,
@@ -245,11 +251,16 @@ export class WorktreeService {
     this.exec = deps.exec ?? realExec;
   }
 
+  /** Absolute directory this project's worktrees are cut into. */
+  worktreeRoot(project: Project): string {
+    // resolve() honors an absolute worktreeRoot and joins a relative one to repoPath.
+    return resolve(project.repoPath, project.worktreeRoot);
+  }
+
   /** Absolute path a worktree for `branch` would live at (slug flattens `/`→`-`). */
   worktreePath(project: Project, branch: string): string {
     const slug = branch.replace(/\//g, "-");
-    // resolve() honors an absolute worktreeRoot and joins a relative one to repoPath.
-    return join(resolve(project.repoPath, project.worktreeRoot), slug);
+    return join(this.worktreeRoot(project), slug);
   }
 
   /**
@@ -616,7 +627,25 @@ export class WorktreeService {
     return path;
   }
 
-  /** Remove a worktree. Runs from the primary checkout so the target can go away. */
+  /**
+   * Remove a worktree. Runs from the primary checkout so the target can go away.
+   *
+   * Git is asked first because it is the only thing that can REFUSE — a dirty
+   * tree, a locked one, a path that isn't a worktree at all — but on Windows it
+   * cannot be trusted to FINISH. `git worktree remove` unlinks the tree's `.git`
+   * file first and only then walks the directory, and that walk dies on the
+   * first pnpm junction in `node_modules` (git `unlink()`s a directory symlink;
+   * Windows refuses). It exits 128 having already destroyed the tree's identity,
+   * and the next `worktree prune` drops the admin record. What is left is a
+   * directory with no `.git`, invisible to `git worktree list` and therefore to
+   * every reaper built on it, still holding 200MB+ of `node_modules`. On this
+   * machine that was ~100 such directories.
+   *
+   * So a failure is read by what git left behind, not by its exit code: a tree
+   * that still has its `.git` was genuinely refused and the error propagates;
+   * one that has lost it is past the point of no return, and the delete is
+   * finished here, with Node's `rm` — which handles junctions.
+   */
   async remove(
     worktreePath: string,
     force: boolean | RemoveWorktreeOptions = false,
@@ -630,7 +659,31 @@ export class WorktreeService {
       ...(opts.force ? ["--force"] : []),
       worktreePath,
     ];
-    await this.git(args, cwd);
+    // The identity has to be there BEFORE git runs for its absence AFTERWARDS
+    // to mean anything. Without this, a path that never was a worktree — a
+    // typo, a stale `chat.worktrees` entry whose directory got reused for
+    // something else — fails git's "is not a working tree" check with the
+    // filesystem untouched, has no `.git` either, and would be handed to `rm`.
+    // `DELETE /api/worktrees` and the `remove-worktree` action pass the path
+    // straight through from the caller, so that is not a hypothetical.
+    const hadIdentity = hasGitIdentity(worktreePath);
+    const r = await this.exec("git", args, { cwd });
+    const gitDiedMidRemoval =
+      r.exitCode !== 0 && hadIdentity && !hasGitIdentity(worktreePath);
+    if (r.exitCode !== 0 && !gitDiedMidRemoval) {
+      throw new Error(
+        `git ${args.join(" ")} failed (exit ${r.exitCode}): ${
+          r.stderr.trim() || r.stdout.trim()
+        }`,
+      );
+    }
+    const leftover = await finishDirectoryRemoval(worktreePath);
+    if (gitDiedMidRemoval) {
+      // Git gave up part-way, so its admin record may still point at the
+      // directory just deleted. Best-effort: `list()` tolerates a stale entry
+      // and git prunes on its own eventually.
+      await this.git(["worktree", "prune"], cwd).catch(() => {});
+    }
     // Retire the checkpoints taken in it. Their refs pin commits git gc can never
     // collect, and with the directory gone `rollback` can no longer restore them
     // anyway. Run from `cwd` — the primary checkout, resolved BEFORE the removal
@@ -655,6 +708,59 @@ export class WorktreeService {
       level: "info",
       text: `Removed worktree ${worktreePath}`,
     });
+    // Thrown AFTER the bookkeeping on purpose: the tree is gone as far as git
+    // and the registry are concerned, so the record, the chat link and the
+    // port lease must not outlive it. What the caller learns is that the disk
+    // hasn't been fully reclaimed — the orphan sweep will retry that.
+    if (leftover) throw new WorktreeLeftoverError(worktreePath, leftover);
+  }
+
+  /**
+   * Delete a directory under a project's worktree root that git no longer
+   * lists — the residue of a `remove()` that died part-way (see the docblock
+   * there). This is the reaper's door for those; it refuses anything that has
+   * a git identity, at the moment of deletion rather than when the caller
+   * built its list, because in a multi-agent repo another chat can cut a real
+   * tree into that same root while a sweep is running.
+   */
+  async removeOrphanDirectory(dir: string): Promise<void> {
+    if (!(await isWorktreeHusk(dir))) {
+      throw new Error(`${dir} is not an orphaned worktree directory`);
+    }
+    const leftover = await finishDirectoryRemoval(dir);
+    if (leftover) throw leftover;
+  }
+
+  /**
+   * Directories under the project's worktree root that git does not list and
+   * that carry no git identity of their own: what `remove()` used to leave
+   * behind. `live` is the project's current `git worktree list`, passed in
+   * rather than fetched because every caller already has it.
+   */
+  async listOrphanDirectories(
+    project: Project,
+    live: Array<{ path: string }>,
+  ): Promise<string[]> {
+    const root = this.worktreeRoot(project);
+    let entries: string[];
+    try {
+      entries = (await readdir(root, { withFileTypes: true }))
+        .filter((e) => e.isDirectory() && !e.name.startsWith("."))
+        .map((e) => join(root, e.name));
+    } catch {
+      return [];
+    }
+    const liveKeys = new Set(live.map((w) => pathKey(w.path)));
+    const out: string[] = [];
+    for (const dir of entries) {
+      if (liveKeys.has(pathKey(dir))) continue;
+      // The root can be INSIDE the repo (`.worktrees`, the default) or the repo
+      // could conceivably sit inside the root; neither the checkout nor any
+      // ancestor of it is ever an orphan, whatever git says about it.
+      if (samePath(dir, project.repoPath) || isAncestorOf(dir, project.repoPath)) continue;
+      if (await isWorktreeHusk(dir)) out.push(dir);
+    }
+    return out;
   }
 
   /**
@@ -1120,6 +1226,89 @@ export class WorktreeService {
     } catch {
       /* best-effort */
     }
+  }
+}
+
+/**
+ * `remove()` succeeded as far as git and the registry are concerned — the
+ * tree is deregistered, the chat detached, the ports released — but files are
+ * still on disk. Its own type so a caller can tell "the worktree is gone,
+ * the directory isn't yet" from "nothing happened", and act on the first
+ * (delete the branch, let the orphan sweep retry the disk) instead of
+ * treating it as a refusal.
+ */
+export class WorktreeLeftoverError extends Error {
+  constructor(
+    readonly path: string,
+    cause: Error,
+  ) {
+    super(cause.message);
+    this.name = "WorktreeLeftoverError";
+  }
+}
+
+/* ============================================================ fs helpers */
+
+/** A `.git` entry — file (worktree) or directory (checkout) — is a git identity. */
+function hasGitIdentity(dir: string): boolean {
+  return existsSync(join(dir, ".git"));
+}
+
+function isAncestorOf(ancestor: string, path: string): boolean {
+  const rel = relative(ancestor, path);
+  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+}
+
+/**
+ * Is `dir` the residue of a worktree — present on disk, but with no git
+ * identity of its own AND none directly inside it?
+ *
+ * The second check is the one that matters when a worktree root is shared:
+ * with `worktreeRoot: ../.worktrees` and no per-project leaf, a sibling
+ * project's container directory (`.worktrees/other/`) has no `.git` of its own
+ * but is full of live trees that do. A directory like that is never a husk.
+ */
+async function isWorktreeHusk(dir: string): Promise<boolean> {
+  if (hasGitIdentity(dir)) return false;
+  let children: string[];
+  try {
+    children = (await readdir(dir, { withFileTypes: true }))
+      .filter((e) => e.isDirectory())
+      .map((e) => join(dir, e.name));
+  } catch {
+    // Vanished between listing and now, or unreadable: nothing to reap.
+    return false;
+  }
+  return !children.some(hasGitIdentity);
+}
+
+/**
+ * Delete whatever is still on disk at `dir`, tolerating the two ways Windows
+ * makes that hard: a file held open by a still-running dev server (retried,
+ * then reported) and an EMPTY directory pinned as some shell's cwd (ignored —
+ * it costs nothing and clears when that shell exits; refusing here would fail
+ * a removal that has in every meaningful sense succeeded).
+ *
+ * Returns the error to report rather than throwing, so a caller can finish
+ * its own bookkeeping first and decide what the failure means to it.
+ */
+async function finishDirectoryRemoval(dir: string): Promise<Error | null> {
+  if (!existsSync(dir)) return null;
+  try {
+    await rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 250 });
+    return null;
+  } catch (err) {
+    if (!existsSync(dir)) return null;
+    try {
+      if ((await readdir(dir)).length === 0) return null;
+    } catch {
+      /* fall through: report it */
+    }
+    return new Error(
+      `removed worktree ${dir} but could not delete what it left on disk: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
   }
 }
 
