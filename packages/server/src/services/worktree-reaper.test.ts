@@ -655,6 +655,52 @@ describe("WorktreeReaper.sweep", () => {
     expect(existsSync(order[1]!)).toBe(true);
   });
 
+  gitIt("also takes the husks git no longer lists — a removal that died part-way", async () => {
+    const notices: string[] = [];
+    bus.subscribe((e) => {
+      if (e.type === "notice") notices.push(e.text);
+    });
+    // What `git worktree remove` leaves on Windows: no `.git`, a `node_modules`.
+    const husk = join(wtRoot, "feat-long-dead");
+    await mkdir(join(husk, "node_modules", "dep"), { recursive: true });
+    await writeFile(join(husk, "node_modules", "dep", "index.js"), "");
+    // A live tree in the same root must be untouched, whatever its state.
+    const wip = await makeBranchWorktree("feat/sweep-alongside");
+    await push(wip, "feat/sweep-alongside");
+
+    const result = await reaper.sweep();
+    expect(result.removed).toBe(1);
+    expect(existsSync(husk)).toBe(false);
+    expect(existsSync(wip)).toBe(true);
+    expect(notices.some((t) => t.includes("feat-long-dead"))).toBe(true);
+  });
+
+  gitIt("says so when a removal fails, instead of failing in silence", async () => {
+    const notices: Array<{ level: string; text: string }> = [];
+    bus.subscribe((e) => {
+      if (e.type === "notice") notices.push({ level: e.level, text: e.text });
+    });
+    const p = await makeBranchWorktree("feat/stuck");
+    await push(p, "feat/stuck");
+    await mergeToMain("feat/stuck");
+    const refusing = new WorktreeReaper({
+      store,
+      bus,
+      worktrees: Object.assign(Object.create(worktrees), {
+        remove: async () => {
+          throw new Error("EBUSY: resource busy or locked");
+        },
+      }) as WorktreeService,
+      graceMs: 0,
+    });
+
+    const result = await refusing.sweep();
+    expect(result.failed).toBe(1);
+    const warn = notices.find((n) => n.level === "warn");
+    expect(warn?.text).toContain("feat/stuck");
+    expect(warn?.text).toContain("EBUSY");
+  });
+
   gitIt("does nothing, and says nothing, when there is nothing to do", async () => {
     const notices: string[] = [];
     bus.subscribe((e) => {

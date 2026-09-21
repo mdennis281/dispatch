@@ -347,6 +347,86 @@ describe("WorktreeService on a real temp repo", () => {
     expect(calls).toEqual([]);
   });
 
+  /**
+   * `git worktree remove` the way it actually behaves on Windows: unlink the
+   * tree's `.git` file, choke on a junction in `node_modules`, exit 128. A
+   * fake exec is the only honest way to get this on every platform — the
+   * real failure needs a pnpm-shaped `node_modules` and a Windows `unlink`.
+   */
+  function execThatDiesMidRemove(): ExecFn {
+    return async (file, args, opts) => {
+      if (args[0] === "worktree" && args[1] === "remove") {
+        const target = args[args.length - 1]!;
+        await rm(join(target, ".git"), { force: true });
+        return {
+          stdout: "",
+          stderr: `fatal: failed to delete '${target}': Directory not empty`,
+          exitCode: 128,
+        };
+      }
+      const { realExec } = await import("./worktree.js");
+      return realExec(file, args, opts);
+    };
+  }
+
+  it("finishes the delete itself when git destroys the tree's identity and then gives up", async () => {
+    const info = await svc.create(project(), "feat/husk", { base: "main", noFetch: true });
+    // The thing git trips over, standing in for 200MB of pnpm junctions.
+    await mkdir(join(info.path, "node_modules", "dep"), { recursive: true });
+    await writeFile(join(info.path, "node_modules", "dep", "index.js"), "");
+
+    const dying = new WorktreeService({ bus, exec: execThatDiesMidRemove() });
+    await dying.remove(info.path);
+
+    expect(existsSync(info.path)).toBe(false);
+    // And git has been told, so the admin record does not outlive the directory.
+    const listed = await svc.list(project());
+    expect(listed.some((w) => samePath(w.path, info.path))).toBe(false);
+    expect(events.some((e) => e.type === "notice" && e.text.includes("Removed worktree"))).toBe(true);
+  });
+
+  it("still propagates a refusal that left the tree intact", async () => {
+    const info = await svc.create(project(), "feat/refused", { base: "main", noFetch: true });
+    await writeFile(join(info.path, "keep.txt"), "uncommitted\n");
+
+    await expect(svc.remove(info.path)).rejects.toThrow(/worktree remove/);
+
+    // The tree is exactly as it was: identity, contents, registration.
+    expect(existsSync(join(info.path, ".git"))).toBe(true);
+    expect(existsSync(join(info.path, "keep.txt"))).toBe(true);
+    const listed = await svc.list(project());
+    expect(listed.some((w) => samePath(w.path, info.path))).toBe(true);
+  });
+
+  it("lists the husks under the worktree root, and nothing that still has a git identity", async () => {
+    const live = await svc.create(project(), "feat/alive", { base: "main", noFetch: true });
+    const husk = join(wtRoot, "feat-dead");
+    await mkdir(join(husk, "node_modules"), { recursive: true });
+    // A container of someone else's live trees: no `.git` of its own, one inside.
+    const container = join(wtRoot, "other-project");
+    await mkdir(join(container, "their-tree", ".git"), { recursive: true });
+    // Dotfiles in the root are never candidates.
+    await mkdir(join(wtRoot, ".cache"), { recursive: true });
+
+    const listed = await svc.list(project());
+    const orphans = await svc.listOrphanDirectories(project(), listed);
+
+    expect(orphans.map((o) => o.toLowerCase())).toEqual([husk.toLowerCase()]);
+    expect(orphans.some((o) => samePath(o, live.path))).toBe(false);
+  });
+
+  it("refuses to remove a directory that grew a git identity since it was listed", async () => {
+    const husk = join(wtRoot, "feat-reborn");
+    await mkdir(husk, { recursive: true });
+    const listed = await svc.list(project());
+    expect(await svc.listOrphanDirectories(project(), listed)).toHaveLength(1);
+    // Another chat cut a real tree into that path in the meantime.
+    await writeFile(join(husk, ".git"), "gitdir: elsewhere\n");
+
+    await expect(svc.removeOrphanDirectory(husk)).rejects.toThrow(/not an orphaned/);
+    expect(existsSync(husk)).toBe(true);
+  });
+
   it("surfaces untracked (newly-created) files as added entries", async () => {
     const info = await svc.create(project(), "feat/untracked", {
       base: "main",
