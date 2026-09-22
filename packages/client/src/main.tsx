@@ -19,6 +19,7 @@ import type { AuthSessionResponse } from "@dispatch/shared";
 import { startLiveApp } from "./lib/live.js";
 import { MissionPreview } from "./preview/mission/MissionPreview.js";
 import { AppErrorBoundary } from "./components/ErrorBoundary.js";
+import { applyScrollAnchoring } from "./lib/scrollAnchoring.js";
 
 // The palette itself was applied by the inline script in index.html (before the
 // first paint); this only subscribes to later OS changes, which matters solely
@@ -31,6 +32,14 @@ watchSystemTheme();
 // this covers the load. Runs after `./index.css` above (imports are evaluated
 // first), so the palette it reads from is present.
 syncThemeColor();
+
+// Decide whether transcript rows may use `content-visibility` — which is only
+// safe where the engine really performs scroll anchoring, and WebKit lies to
+// `@supports` about that. MEASURED, synchronously, and deliberately BEFORE the
+// first render: switching it on after rows have laid out at their real heights
+// would collapse the off-screen ones back to the placeholder, which is the very
+// jolt this prevents. See lib/scrollAnchoring.ts.
+applyScrollAnchoring();
 
 // A detached log window (opened via openRunnerLogWindow) loads this same bundle
 // with `?logs=<runnerId>` — render only the read-only log terminal for it.
