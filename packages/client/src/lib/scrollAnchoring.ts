@@ -34,20 +34,12 @@
  * sitting in, and every engine reported "no anchoring" — a false negative that
  * would have quietly disabled the optimization everywhere.
  *
- * Verified against real engines via Playwright (Chromium 141, WebKit 26.5):
- * both report anchored 3/3. iOS 18.7, which does not anchor, is the case this
- * exists to catch and is covered by the trace evidence above.
+ * Verified against real engines by `e2e/scroll-anchoring.spec.ts`, which runs
+ * THIS function in Chromium and WebKit — asserting it answers true where the
+ * engine anchors, and false when anchoring is suppressed. iOS 18.7, which does
+ * not anchor, is the case this exists to catch and is covered by the trace
+ * evidence above.
  */
-
-/** Viewport of the probe scroller. */
-const VIEW = 100;
-/** Content above the anchor, and how much it grows by. */
-const ABOVE = 300;
-const GROWTH = 100;
-/** The anchor element: taller than the viewport so it alone fills it. */
-const ANCHOR = 600;
-/** Scroll offset that puts the viewport wholly inside the anchor. */
-const OFFSET = 400;
 
 /**
  * True when the engine compensated for content growing above the reader.
@@ -55,8 +47,23 @@ const OFFSET = 400;
  * Any failure answers `false`, which is the SAFE direction: the caller then
  * leaves `content-visibility` off, costing an optimization rather than
  * reintroducing the shove.
+ *
+ * SELF-CONTAINED on purpose — every constant is declared inside the body and it
+ * closes over nothing. That is what lets `e2e/scroll-anchoring.spec.ts` hand
+ * this exact function to `page.evaluate` in Chromium and WebKit and assert on
+ * what it really answers, rather than testing a copy of it that can drift.
  */
 export function probeScrollAnchoring(): boolean {
+  /** Viewport of the probe scroller. */
+  const VIEW = 100;
+  /** Content above the anchor, and how much it grows by. */
+  const ABOVE = 300;
+  const GROWTH = 100;
+  /** The anchor element: taller than the viewport so it alone fills it. */
+  const ANCHOR = 600;
+  /** Scroll offset that puts the viewport wholly inside the anchor. */
+  const OFFSET = 400;
+
   if (typeof document === "undefined" || !document.body) return false;
   const host = document.createElement("div");
   // Rendered but invisible and inert. NOT `position: absolute; top: -10000px`
