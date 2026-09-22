@@ -245,7 +245,7 @@ export const MessageList = memo(function MessageList({ chatId, messages }: Messa
           const first = item.rows[0]!;
           return (
             <div key={`files:${first.id}`} className="cm-row-cv">
-              <RowErrorBoundary rowId={first.id}>
+              <RowErrorBoundary rowId={first.id} resetKey={`${first.id}:${item.rows.length}`}>
                 <FileRunGroup
                   entries={item.rows.map((use) => {
                     const result = resultsByUse.get(use.toolUseId);
@@ -260,7 +260,7 @@ export const MessageList = memo(function MessageList({ chatId, messages }: Messa
           const first = item.rows[0]!;
           return (
             <div key={`pr:${first.id}`} className="cm-row-cv">
-              <RowErrorBoundary rowId={first.id}>
+              <RowErrorBoundary rowId={first.id} resetKey={`${first.id}:${item.rows.length}`}>
                 <PrRunGroup
                   entries={item.rows.map((use) => {
                     const result = resultsByUse.get(use.toolUseId);
@@ -275,7 +275,7 @@ export const MessageList = memo(function MessageList({ chatId, messages }: Messa
           const first = item.rows[0]!;
           return (
             <div key={`issue:${first.id}`} className="cm-row-cv">
-              <RowErrorBoundary rowId={first.id}>
+              <RowErrorBoundary rowId={first.id} resetKey={`${first.id}:${item.rows.length}`}>
                 <IssueRunGroup
                   entries={item.rows.map((use) => {
                     const result = resultsByUse.get(use.toolUseId);
@@ -290,7 +290,7 @@ export const MessageList = memo(function MessageList({ chatId, messages }: Messa
           const first = item.rows[0]!;
           return (
             <div key={`thinking:${first.id}`} className="cm-row-cv">
-              <RowErrorBoundary rowId={first.id}>
+              <RowErrorBoundary rowId={first.id} resetKey={`${first.id}:${item.rows.length}`}>
                 <ThinkingGroup rows={item.rows} />
               </RowErrorBoundary>
             </div>
@@ -300,7 +300,7 @@ export const MessageList = memo(function MessageList({ chatId, messages }: Messa
           const first = item.rows[0]!;
           return (
             <div key={`shell:${first.id}`} className="cm-row-cv">
-              <RowErrorBoundary rowId={first.id}>
+              <RowErrorBoundary rowId={first.id} resetKey={`${first.id}:${item.rows.length}`}>
                 <ShellRunGroup
                   active={itemIndex === transcriptItems.length - 1}
                   entries={item.rows.map((use) => {

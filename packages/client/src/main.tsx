@@ -172,7 +172,10 @@ createRoot(el).render(
         when nothing catches, which is what every "the screen went blank and the
         console says Minified React error" report has been. It wraps all four
         entry points — the log popup and the trace viewer fail the same way. */}
-    <AppErrorBoundary>
+    {/* `canClearViewState={isShell}` — the clear-localStorage button must not
+        be offered by the detached log popup, which shares this origin's storage
+        with the main window but none of its state. */}
+    <AppErrorBoundary canClearViewState={isShell}>
       {isLogWindow ? (
         <RunnerLogWindow />
       ) : isMissionPreview ? (

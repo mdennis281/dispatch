@@ -122,8 +122,22 @@ function clearViewState(): void {
   location.reload();
 }
 
-/** The whole-window fallback: the error in full, and the two things that fix it. */
-export function AppErrorBoundary({ children }: { children: ReactNode }) {
+/**
+ * The whole-window fallback: the error in full, and the things that fix it.
+ *
+ * `canClearViewState` is NOT decoration. localStorage is per-ORIGIN, not per
+ * window, and the detached runner-log popup (`/?logs=…`) is the same origin
+ * wrapped in this same boundary — so that button, offered there, would silently
+ * reset the MAIN window's remembered project and layout to unstick a popup that
+ * has no `cm:` state of its own. `main.tsx` passes its `isShell`.
+ */
+export function AppErrorBoundary({
+  children,
+  canClearViewState = true,
+}: {
+  children: ReactNode;
+  canClearViewState?: boolean;
+}) {
   return (
     <Boundary
       scope="app"
@@ -138,8 +152,10 @@ export function AppErrorBoundary({ children }: { children: ReactNode }) {
           <p className="text-lg font-medium">Dispatch hit a rendering error</p>
           <p className="mt-1 max-w-[520px] text-center text-sm leading-relaxed text-muted">
             The interface stopped, but nothing on the server was affected — your chats and
-            projects are intact. Reload to try again; if it happens every time on the same
-            project, clear this browser&rsquo;s saved view state so Dispatch opens elsewhere.
+            projects are intact. Reload to try again
+            {canClearViewState
+              ? "; if it happens every time on the same project, clear this browser's saved view state so Dispatch opens elsewhere."
+              : "."}
           </p>
           <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
             <Button variant="primary" leftIcon={<RotateCw />} onClick={() => location.reload()}>
@@ -148,9 +164,11 @@ export function AppErrorBoundary({ children }: { children: ReactNode }) {
             <Button leftIcon={<Copy />} onClick={() => copyReport("app", caught)}>
               Copy error details
             </Button>
-            <Button leftIcon={<Trash2 />} onClick={clearViewState}>
-              Clear saved view state
-            </Button>
+            {canClearViewState && (
+              <Button leftIcon={<Trash2 />} onClick={clearViewState}>
+                Clear saved view state
+              </Button>
+            )}
           </div>
           <pre className="cm-mono mt-5 w-full max-w-[900px] overflow-x-auto whitespace-pre-wrap rounded-lg border border-line bg-inset p-3 text-2xs leading-relaxed text-secondary">
             {errorReport("app", caught)}
@@ -217,19 +235,40 @@ export function RegionErrorBoundary({
  * One transcript row. Small on purpose: a row Dispatch cannot render becomes a
  * one-line marker in the transcript naming the row id, and the conversation
  * around it reads normally.
+ *
+ * `resetKey` matters here more than it looks. Several of the things this wraps
+ * are GROUPS — consecutive shell/file/PR tool calls fold into one run that keeps
+ * the id of its first row while the agent appends to it (`groupTranscriptRows`).
+ * Keyed on that id alone, a throw on the second command in a run would latch the
+ * fallback over the whole run for the rest of the turn, so every later command
+ * lands behind a marker that claims to be one failed message. `MessageList`
+ * therefore keys the group boundaries on the run's SIZE as well, and the
+ * fallback carries a Retry for the case where new content is not what recovers
+ * it — the point of a row boundary is that it can only ever cost you a row.
  */
-export function RowErrorBoundary({ children, rowId }: { children: ReactNode; rowId: string }) {
+export function RowErrorBoundary({
+  children,
+  rowId,
+  resetKey,
+}: {
+  children: ReactNode;
+  rowId: string;
+  resetKey?: string | number;
+}) {
   const scope = `row ${rowId}`;
   return (
     <Boundary
       scope={scope}
-      resetKey={rowId}
-      render={(caught) => (
+      resetKey={resetKey ?? rowId}
+      render={(caught, retry) => (
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2 text-2xs text-muted">
           <span className="cm-mono text-danger">
             This message could not be rendered — {caught.error.name}: {caught.error.message}
           </span>
           <span className="cm-mono text-faint">row {rowId}</span>
+          <Button size="sm" variant="link" onClick={retry}>
+            Retry
+          </Button>
           <Button size="sm" variant="link" onClick={() => copyReport(scope, caught)}>
             Copy details
           </Button>
