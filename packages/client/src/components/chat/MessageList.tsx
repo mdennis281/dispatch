@@ -15,6 +15,9 @@ import { SubagentCard } from "./rows/SubagentCard.js";
 import { ThinkingGroup } from "./rows/ThinkingGroup.js";
 import { PermissionCard } from "./rows/PermissionCard.js";
 import { ErrorSettleRow, NoticeRowView, ResultRowView, SystemRowView } from "./rows/MiscRows.js";
+// Per-row, not per-transcript: a row this build can't render should cost you
+// that row and name itself, rather than unmounting the app (see ErrorBoundary).
+import { RowErrorBoundary } from "../ErrorBoundary.js";
 import { LimitPausedCard } from "./rows/LimitPausedCard.js";
 import { actions } from "../../lib/actions.js";
 import {
@@ -242,12 +245,14 @@ export const MessageList = memo(function MessageList({ chatId, messages }: Messa
           const first = item.rows[0]!;
           return (
             <div key={`files:${first.id}`} className="cm-row-cv">
-              <FileRunGroup
-                entries={item.rows.map((use) => {
-                  const result = resultsByUse.get(use.toolUseId);
-                  return { use, result, task: findTaskStatus(taskStatus, use.toolUseId, result) };
-                })}
-              />
+              <RowErrorBoundary rowId={first.id} resetKey={`${first.id}:${item.rows.length}`}>
+                <FileRunGroup
+                  entries={item.rows.map((use) => {
+                    const result = resultsByUse.get(use.toolUseId);
+                    return { use, result, task: findTaskStatus(taskStatus, use.toolUseId, result) };
+                  })}
+                />
+              </RowErrorBoundary>
             </div>
           );
         }
@@ -255,12 +260,14 @@ export const MessageList = memo(function MessageList({ chatId, messages }: Messa
           const first = item.rows[0]!;
           return (
             <div key={`pr:${first.id}`} className="cm-row-cv">
-              <PrRunGroup
-                entries={item.rows.map((use) => {
-                  const result = resultsByUse.get(use.toolUseId);
-                  return { use, result, task: findTaskStatus(taskStatus, use.toolUseId, result) };
-                })}
-              />
+              <RowErrorBoundary rowId={first.id} resetKey={`${first.id}:${item.rows.length}`}>
+                <PrRunGroup
+                  entries={item.rows.map((use) => {
+                    const result = resultsByUse.get(use.toolUseId);
+                    return { use, result, task: findTaskStatus(taskStatus, use.toolUseId, result) };
+                  })}
+                />
+              </RowErrorBoundary>
             </div>
           );
         }
@@ -268,12 +275,14 @@ export const MessageList = memo(function MessageList({ chatId, messages }: Messa
           const first = item.rows[0]!;
           return (
             <div key={`issue:${first.id}`} className="cm-row-cv">
-              <IssueRunGroup
-                entries={item.rows.map((use) => {
-                  const result = resultsByUse.get(use.toolUseId);
-                  return { use, result, task: findTaskStatus(taskStatus, use.toolUseId, result) };
-                })}
-              />
+              <RowErrorBoundary rowId={first.id} resetKey={`${first.id}:${item.rows.length}`}>
+                <IssueRunGroup
+                  entries={item.rows.map((use) => {
+                    const result = resultsByUse.get(use.toolUseId);
+                    return { use, result, task: findTaskStatus(taskStatus, use.toolUseId, result) };
+                  })}
+                />
+              </RowErrorBoundary>
             </div>
           );
         }
@@ -281,7 +290,9 @@ export const MessageList = memo(function MessageList({ chatId, messages }: Messa
           const first = item.rows[0]!;
           return (
             <div key={`thinking:${first.id}`} className="cm-row-cv">
-              <ThinkingGroup rows={item.rows} />
+              <RowErrorBoundary rowId={first.id} resetKey={`${first.id}:${item.rows.length}`}>
+                <ThinkingGroup rows={item.rows} />
+              </RowErrorBoundary>
             </div>
           );
         }
@@ -289,17 +300,19 @@ export const MessageList = memo(function MessageList({ chatId, messages }: Messa
           const first = item.rows[0]!;
           return (
             <div key={`shell:${first.id}`} className="cm-row-cv">
-              <ShellRunGroup
-                active={itemIndex === transcriptItems.length - 1}
-                entries={item.rows.map((use) => {
-                  const result = resultsByUse.get(use.toolUseId);
-                  return {
-                    use,
-                    result,
-                    task: findTaskStatus(taskStatus, use.toolUseId, result),
-                  };
-                })}
-              />
+              <RowErrorBoundary rowId={first.id} resetKey={`${first.id}:${item.rows.length}`}>
+                <ShellRunGroup
+                  active={itemIndex === transcriptItems.length - 1}
+                  entries={item.rows.map((use) => {
+                    const result = resultsByUse.get(use.toolUseId);
+                    return {
+                      use,
+                      result,
+                      task: findTaskStatus(taskStatus, use.toolUseId, result),
+                    };
+                  })}
+                />
+              </RowErrorBoundary>
             </div>
           );
         }
@@ -315,7 +328,7 @@ export const MessageList = memo(function MessageList({ chatId, messages }: Messa
         // what's on screen. Native scroll/anchoring/find-in-page all still work.
         return (
           <div key={row.id} data-row-id={row.id} className="cm-row-cv">
-            {node}
+            <RowErrorBoundary rowId={row.id}>{node}</RowErrorBoundary>
           </div>
         );
       })}

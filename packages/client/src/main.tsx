@@ -18,6 +18,7 @@ import { initializeAuth, useAuth } from "./stores/auth.js";
 import type { AuthSessionResponse } from "@dispatch/shared";
 import { startLiveApp } from "./lib/live.js";
 import { MissionPreview } from "./preview/mission/MissionPreview.js";
+import { AppErrorBoundary } from "./components/ErrorBoundary.js";
 
 // The palette itself was applied by the inline script in index.html (before the
 // first paint); this only subscribes to later OS changes, which matters solely
@@ -166,14 +167,24 @@ if (!el) throw new Error("#root not found");
 
 createRoot(el).render(
   <StrictMode>
-    {isLogWindow ? (
-      <RunnerLogWindow />
-    ) : isMissionPreview ? (
-      <MissionPreview />
-    ) : isTraceViewer ? (
-      <TraceViewer />
-    ) : (
-      <App />
-    )}
+    {/* The outermost boundary, and the reason a render error is now a page you
+        can read instead of a black rectangle: React tears the whole root down
+        when nothing catches, which is what every "the screen went blank and the
+        console says Minified React error" report has been. It wraps all four
+        entry points — the log popup and the trace viewer fail the same way. */}
+    {/* `canClearViewState={isShell}` — the clear-localStorage button must not
+        be offered by the detached log popup, which shares this origin's storage
+        with the main window but none of its state. */}
+    <AppErrorBoundary canClearViewState={isShell}>
+      {isLogWindow ? (
+        <RunnerLogWindow />
+      ) : isMissionPreview ? (
+        <MissionPreview />
+      ) : isTraceViewer ? (
+        <TraceViewer />
+      ) : (
+        <App />
+      )}
+    </AppErrorBoundary>
   </StrictMode>,
 );
