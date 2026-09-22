@@ -29,6 +29,12 @@ export default defineConfig({
   build: {
     outDir: "dist",
     emptyOutDir: true,
-    sourcemap: false,
+    // ON. A minified stack is unreadable, and this app's users ARE its
+    // developers — "Minified React error #310" with four one-letter frames is
+    // the entire content of most bug reports we get. The maps are separate
+    // `.map` files the browser only fetches when devtools are open, so the
+    // shell that loads on a phone is byte-identical; the cost is disk in the
+    // payload. Nothing here is closed source — there is nothing to obscure.
+    sourcemap: true,
   },
 });

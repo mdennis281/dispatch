@@ -37,6 +37,7 @@ import { useSetup, shouldProbeSetup } from "./stores/setup.js";
 import { ViewportDebug } from "./components/layout/ViewportDebug.js";
 import { startViewportTracking } from "./stores/viewport.js";
 import { cn } from "./lib/cn.js";
+import { RegionErrorBoundary } from "./components/ErrorBoundary.js";
 
 /**
  * Empty state when no chat is open — including right after a project switch,
@@ -257,10 +258,21 @@ export default function App() {
             label="Chats and projects"
             className="w-[86vw] max-w-[320px] cm-safe-x"
           >
-            <Sidebar />
+            {/* Region-scoped so a sidebar that throws costs you the sidebar,
+                not the window. Keyed on the project: switching project is the
+                cheapest way out of a row this list can't render. */}
+            <RegionErrorBoundary scope="sidebar" resetKey={activeProjectId}>
+              <Sidebar />
+            </RegionErrorBoundary>
           </Drawer>
         )}
         <main className="flex min-w-0 flex-1">
+          {/* The main area is where the reported blank screen came from: hydrate
+              auto-opens the remembered project's most recent chat a beat after
+              the sidebar fills, so a transcript this build can't render used to
+              take the whole app down. Keyed on view + chat so navigating away
+              from the thing that threw clears it without a reload. */}
+          <RegionErrorBoundary scope={`main:${view}`} resetKey={`${view}:${chat?.id ?? ""}`}>
           {view === "new-project" ? (
             <NewProjectView />
           ) : view === "memory" ? (
@@ -297,12 +309,18 @@ export default function App() {
                 label="Ship and run"
                 className={cn("cm-safe-x", mode === "sm" ? "w-full" : "w-[360px] max-w-full")}
               >
-                <RightPanel chat={chat} />
+                {/* Its own boundary: the worktree/PR panel reads `git` and `gh`
+                    output, so it has the widest shape surface in the app, and
+                    it must not be able to take the transcript with it. */}
+                <RegionErrorBoundary scope="right panel" resetKey={chat.id}>
+                  <RightPanel chat={chat} />
+                </RegionErrorBoundary>
               </Drawer>
             </>
           ) : (
             <NoChat />
           )}
+          </RegionErrorBoundary>
         </main>
       </div>
       {/* Outside `<main>`, and outside the `<aside>`s: it switches between all
