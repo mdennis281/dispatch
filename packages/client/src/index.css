@@ -427,43 +427,35 @@
   }
 
   /*
-   * Transcript row virtualization, done by the browser.
+   * Transcript row virtualization, done by the browser — where it is safe.
    *
    * A long chat keeps hundreds of rows in the DOM (markdown bodies, tool cards,
    * code blocks). `content-visibility: auto` lets the engine skip layout, style
    * and paint for rows scrolled out of view, so scroll cost tracks what's ON
    * SCREEN rather than how long the chat is — without a windowing library, and
-   * keeping native scroll anchoring, Ctrl+F and text selection intact.
+   * keeping Ctrl+F and text selection intact. `contain-intrinsic-size: auto
+   * <fallback>` keeps the scrollbar honest: `auto` remembers each row's real
+   * height once rendered, and the fallback is the guess for a row never shown.
    *
-   * `contain-intrinsic-size: auto <fallback>` is what makes the scrollbar honest:
-   * `auto` remembers each row's real height once it has been rendered, and the
-   * fallback is only the first-paint guess for a row never yet shown.
+   * The catch is that a row nobody has looked at yet IS that 90px guess, and it
+   * becomes its real height as you scroll up into it — ABOVE what you are
+   * reading. Only scroll anchoring absorbs that. So this is OPT-IN, keyed on an
+   * attribute `lib/scrollAnchoring.ts` sets before the first render after
+   * MEASURING whether the engine actually anchors. No attribute means a plain
+   * row with no placeholder: a browser that cannot anchor never gets the shove,
+   * even if the probe never runs at all.
+   *
+   * It was `@supports not (overflow-anchor: auto)` (PR #218), and that never
+   * fired on the devices it was written for — `@supports` asks whether a
+   * declaration PARSES, and WebKit parses `overflow-anchor` without older iOS
+   * acting on it. The interaction tracer caught it on iOS 18.7: 97 of 98 row
+   * resizes came from exactly the 90px placeholder, 63 of them above the
+   * reader, 5,796px of uncompensated shift in 42 seconds. Do not go back to a
+   * feature query here — only behaviour can answer this.
    */
-  .cm-row-cv {
+  :root[data-cm-anchor="native"] .cm-row-cv {
     content-visibility: auto;
     contain-intrinsic-size: auto 90px;
-  }
-
-  /*
-   * ...except where the browser can't anchor, which is iOS Safari before 27.
-   *
-   * A row nobody has looked at yet is a 90px placeholder, and it becomes its
-   * real height as you scroll up to it — ABOVE what you're reading. Chrome's
-   * scroll anchoring absorbs that; WebKit didn't ship scroll anchoring until
-   * Safari 27, so on an iPhone every row you scrolled up into shoved the
-   * transcript by the difference, and it only went smooth once every row had
-   * been seen once and `auto` had its real size to remember. Paying for layout
-   * of rows off screen is the lesser cost: the window is bounded, and iOS
-   * scrolls on the compositor either way.
-   *
-   * Keyed on the anchoring feature itself rather than on a user agent, so
-   * Safari 27 gets the skipping back the moment it can absorb it.
-   */
-  @supports not (overflow-anchor: auto) {
-    .cm-row-cv {
-      content-visibility: visible;
-      contain-intrinsic-size: none;
-    }
   }
 
   .cm-panel {
