@@ -4049,6 +4049,7 @@ export class SessionBroker {
         autoCompact: appSettings?.autoCompact?.enabled ?? true,
         autoCompactWindow: appSettings?.autoCompact?.window,
         contextTokenLimit,
+        contextWindow: session.contextWindow,
         abortSignal: session.abortController.signal,
         account: session.account,
         toolGuard: (toolName, input) => {
@@ -6986,7 +6987,24 @@ export class SessionBroker {
       app: appSettings?.mcpEnabled,
       project: projectId ? this.projectConfig?.getMcpEnabled?.(projectId) : undefined,
     };
+    // What this model will actually be served, when the provider can find out
+    // (only the local-model one can). Resolved BEFORE the MCP surface is built
+    // because it decides part of it: on a 32k window the bundled browser
+    // servers are ~11k of tool schema, and a goose chat was rejected outright
+    // at 36,191 tokens before the model read a word of the task.
+    const contextWindow = await (this.harnesses
+      ?.find(session.harnessKind)
+      ?.contextWindow?.({
+        model: options.model ?? session.model,
+        account: session.account,
+      })
+      .catch(() => undefined) ?? Promise.resolve(undefined));
+    // Seeds the SAME field the composer meter divides by. For Claude that is
+    // refreshed from the SDK after init; for a local model nothing upstream
+    // ever supplies a true one, so this is it.
+    if (contextWindow !== undefined) session.contextWindow = contextWindow;
     const browserMcp = buildBrowserMcpServers({
+      contextWindow,
       config: projectId ? this.projectConfig?.getBrowserConfig?.(projectId) : undefined,
       // Config-first, but see `effectiveSubApps` for why this can't be a `??`
       // chain: a cold config cache answers `[]`, and the session would come up

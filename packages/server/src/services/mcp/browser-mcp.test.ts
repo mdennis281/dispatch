@@ -52,6 +52,42 @@ describe("selectBrowserServers", () => {
     expect(selectBrowserServers(cfg({ servers: "off" }), [webApp])).toEqual([]);
   });
 
+  it("keeps 53 tools out of a context window that cannot afford them", () => {
+    // Measured, not hypothetical: a goose chat on Ollama's default 32k had its
+    // FIRST prompt rejected at 36,191 tokens against a 32,768 window — the
+    // session could never start, and the two browser servers are ~11k of that.
+    expect(selectBrowserServers(cfg(), [webApp], undefined, 32_768)).toEqual([]);
+  });
+
+  it("keeps them when the window has room, and when the window is unknown", () => {
+    // Unknown must stay permissive: every provider but the local-model one
+    // reports nothing, and dropping their browser tools over a number we
+    // failed to look up would be a far worse bug than the one this fixes.
+    expect(selectBrowserServers(cfg(), [webApp], undefined, 200_000)).toEqual([
+      "playwright",
+      "chrome-devtools",
+    ]);
+    expect(selectBrowserServers(cfg(), [webApp], undefined, undefined)).toEqual([
+      "playwright",
+      "chrome-devtools",
+    ]);
+  });
+
+  it("is only a DEFAULT — an explicit pin still gets a browser on a small model", () => {
+    // Someone who wants a browser on a 32k model may have a reason; this
+    // decides what happens when nobody said, not what they are allowed.
+    expect(selectBrowserServers(cfg({ servers: ["playwright"] }), [webApp], undefined, 32_768))
+      .toEqual(["playwright"]);
+    expect(
+      selectBrowserServers(
+        cfg(),
+        [webApp],
+        { app: { playwright: true } } as never,
+        32_768,
+      ),
+    ).toEqual(["playwright"]);
+  });
+
   it("dedupes a repeated entry", () => {
     expect(selectBrowserServers(cfg({ servers: ["playwright", "playwright"] }), [])).toEqual([
       "playwright",

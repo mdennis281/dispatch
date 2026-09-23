@@ -175,21 +175,66 @@ export function browserServerDefault(
   server: BrowserMcpServer,
   config: BrowserMcpConfig | undefined,
   subApps: readonly SubApp[],
+  contextWindow?: number,
 ): boolean {
   const cfg = config ?? BrowserMcpConfigSchema.parse({});
   if (cfg.servers === "off") return false;
   if (Array.isArray(cfg.servers)) return cfg.servers.includes(server);
+  if (!fitsBrowserTools(contextWindow)) return false;
   return hasWebSubApp(subApps);
+}
+
+/**
+ * Tokens the two bundled browser servers cost just by being attached.
+ *
+ * Measured from the cached `tools/list` manifests, not estimated:
+ * chrome-devtools is 29 tools / 24,426 bytes and playwright 24 / 19,478 —
+ * ~11k tokens of schema before the agent has read a word of the task.
+ */
+export const BROWSER_TOOLS_APPROX_TOKENS = 11_000;
+
+/**
+ * The window below which the browsers are not worth their seat.
+ *
+ * A local model on Ollama's default 32k had its FIRST prompt rejected at
+ * 36,191 tokens — the session could never start, and the browsers were a
+ * third of the overhead. Four times their cost is the bar: at 44k they are an
+ * affordable quarter of the window, below it they are crowding out the task.
+ *
+ * Only ever applied as a DEFAULT, so a project that genuinely wants a browser
+ * on a small model still gets one by pinning `mcpEnabled` — this decides what
+ * happens when nobody said, and the old answer ("attach them, always") was a
+ * bad default for a 32k window rather than a decision anyone made.
+ */
+export const MIN_CONTEXT_FOR_BROWSER_TOOLS = BROWSER_TOOLS_APPROX_TOKENS * 4;
+
+/**
+ * Whether a context window has room to spare for the browser tool schemas.
+ *
+ * An unknown window is treated as roomy: every provider except the local-model
+ * one reports nothing here, and silently dropping their browser tools over a
+ * number Dispatch failed to look up would be a far worse bug than the one this
+ * is fixing.
+ */
+export function fitsBrowserTools(contextWindow?: number): boolean {
+  return contextWindow === undefined || contextWindow >= MIN_CONTEXT_FOR_BROWSER_TOOLS;
 }
 
 /** Human-readable reason for {@link browserServerDefault}'s verdict. */
 export function browserServerDefaultReason(
   config: BrowserMcpConfig | undefined,
   subApps: readonly SubApp[],
+  contextWindow?: number,
 ): string {
   const cfg = config ?? BrowserMcpConfigSchema.parse({});
   if (cfg.servers === "off") return "project.yaml sets browser: off";
   if (Array.isArray(cfg.servers)) return "project.yaml lists browser servers explicitly";
+  if (!fitsBrowserTools(contextWindow)) {
+    return (
+      `off automatically — their tools are ~${BROWSER_TOOLS_APPROX_TOKENS.toLocaleString()} ` +
+      `tokens and this model's context is only ${contextWindow?.toLocaleString()}`
+    );
+  }
   return hasWebSubApp(subApps)
     ? "on automatically — this project has a sub-app with a url"
     : "off automatically — no sub-app declares a url to point a browser at";
@@ -203,11 +248,15 @@ export function selectBrowserServers(
   config: BrowserMcpConfig | undefined,
   subApps: readonly SubApp[],
   enablement?: McpEnablementLayers,
+  contextWindow?: number,
 ): BrowserMcpServer[] {
   return BROWSER_MCP_SERVERS.filter(
     (name) =>
-      resolveMcpEnablement(name, enablement, browserServerDefault(name, config, subApps))
-        .effective,
+      resolveMcpEnablement(
+        name,
+        enablement,
+        browserServerDefault(name, config, subApps, contextWindow),
+      ).effective,
   );
 }
 
@@ -223,6 +272,12 @@ export interface BrowserMcpBuildOptions {
    * to switch on something the builder already filtered away.
    */
   servers?: readonly BrowserMcpServer[];
+  /**
+   * The session model's real context window, when known. Below
+   * {@link MIN_CONTEXT_FOR_BROWSER_TOOLS} these servers default OFF, because
+   * their schemas would crowd out the task. Ignored when `servers` is given.
+   */
+  contextWindow?: number;
   /**
    * Namespaces the output dir. The broker always passes the session's chat id,
    * so in practice every chat writes somewhere of its own; it is optional only
@@ -255,7 +310,8 @@ export function buildBrowserMcpServers(
 ): Record<string, McpServerConfig> {
   const cfg = opts.config ?? BrowserMcpConfigSchema.parse({});
   const selected =
-    opts.servers ?? selectBrowserServers(opts.config, opts.subApps ?? [], opts.enablement);
+    opts.servers ??
+    selectBrowserServers(opts.config, opts.subApps ?? [], opts.enablement, opts.contextWindow);
   const out: Record<string, McpServerConfig> = {};
 
   for (const name of selected) {
