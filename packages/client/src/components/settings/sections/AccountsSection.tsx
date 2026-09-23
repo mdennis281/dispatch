@@ -1,5 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
-import { CheckCircle2, CircleDashed, FolderX, KeyRound, Plus, Save, Trash2, Undo2 } from "lucide-react";
+import {
+  CheckCircle2,
+  CircleDashed,
+  FolderX,
+  KeyRound,
+  Plus,
+  Save,
+  Server,
+  Trash2,
+  Undo2,
+} from "lucide-react";
 import {
   PROVIDER_IDS,
   SubscriptionListSchema,
@@ -41,7 +51,13 @@ export function AccountsSection() {
     () =>
       statuses
         .filter((s) => !s.implicit)
-        .map(({ id, name, provider, configDir }) => ({ id, name, provider, configDir })),
+        .map(({ id, name, provider, configDir, host }) => ({
+          id,
+          name,
+          provider,
+          configDir,
+          host,
+        })),
     [statuses],
   );
   const [rows, setRows] = useState<Subscription[]>(stored);
@@ -71,12 +87,17 @@ export function AccountsSection() {
       let n = cur.filter((r) => r.provider === provider).length + 1;
       while (taken.has(`${provider}${n}`)) n += 1;
       const id = `${provider}${n}`;
-      return [...cur, { id, name: id, provider, configDir: "" }];
+      return [...cur, { id, name: id, provider, configDir: "", host: "" }];
     });
 
   const submit = async () => {
-    // A blank dir means "the provider's default", which the schema spells as absent.
-    const list = rows.map((r) => ({ ...r, configDir: r.configDir?.trim() || undefined }));
+    // A blank dir or host means "the provider's default", which the schema
+    // spells as absent.
+    const list = rows.map((r) => ({
+      ...r,
+      configDir: r.configDir?.trim() || undefined,
+      host: r.host?.trim() || undefined,
+    }));
     const parsed = SubscriptionListSchema.safeParse(list);
     if (!parsed.success) {
       setError(parsed.error.issues[0]?.message ?? "Invalid account list");
@@ -141,25 +162,48 @@ export function AccountsSection() {
                       <Trash2 />
                     </IconButton>
                   </div>
-                  <div className="mt-2 flex items-center gap-2">
-                    <TextInput
-                      mono
-                      aria-label="Config directory"
-                      placeholder={`default (~/${account.defaultConfigDir})`}
-                      value={row.configDir ?? ""}
-                      onChange={(e) => patchRow(i, { configDir: e.target.value })}
-                      className="!h-7 min-w-0 flex-1"
-                    />
-                    <LoginBadge status={status} />
-                  </div>
-                  {status && !status.loggedIn && (
-                    <p className="mt-1.5 text-2xs leading-snug text-faint">
-                      Log in with the provider&rsquo;s own CLI, pointed at this directory:{" "}
-                      <span className="cm-mono">
-                        {account.configDirEnv}={status.resolvedConfigDir}
-                      </span>
-                      . Dispatch never sees the token.
-                    </p>
+                  {/*
+                    An endpoint provider's account is a MACHINE, not a login —
+                    goose runs local models, so there is no token, no config dir
+                    worth editing and nothing for a login badge to report. What
+                    distinguishes two goose accounts is which Ollama serves them,
+                    so that is the only field this row offers.
+                  */}
+                  {account.endpointEnv ? (
+                    <div className="mt-2 flex items-center gap-2">
+                      <Server className="size-3.5 shrink-0 text-muted" />
+                      <TextInput
+                        mono
+                        aria-label={account.endpointLabel ?? "Endpoint"}
+                        placeholder={`default (${account.defaultEndpoint})`}
+                        value={row.host ?? ""}
+                        onChange={(e) => patchRow(i, { host: e.target.value })}
+                        className="!h-7 min-w-0 flex-1"
+                      />
+                    </div>
+                  ) : (
+                    <>
+                      <div className="mt-2 flex items-center gap-2">
+                        <TextInput
+                          mono
+                          aria-label="Config directory"
+                          placeholder={`default (~/${account.defaultConfigDir})`}
+                          value={row.configDir ?? ""}
+                          onChange={(e) => patchRow(i, { configDir: e.target.value })}
+                          className="!h-7 min-w-0 flex-1"
+                        />
+                        <LoginBadge status={status} />
+                      </div>
+                      {status && !status.loggedIn && (
+                        <p className="mt-1.5 text-2xs leading-snug text-faint">
+                          Log in with the provider&rsquo;s own CLI, pointed at this directory:{" "}
+                          <span className="cm-mono">
+                            {account.configDirEnv}={status.resolvedConfigDir}
+                          </span>
+                          . Dispatch never sees the token.
+                        </p>
+                      )}
+                    </>
                   )}
                 </div>
               );
@@ -206,20 +250,38 @@ export function AccountsSection() {
 
       {implicit.length > 0 && (
         <div className="border-t border-line-soft pt-3">
-          <SectionLabel className="mb-1.5 px-0">Default logins</SectionLabel>
+          <SectionLabel className="mb-1.5 px-0">Defaults</SectionLabel>
           <p className="mb-2 text-2xs leading-snug text-faint">
-            Providers with no account listed run on their default login directory.
+            Providers with no account listed run on their default.
           </p>
           <div className="space-y-1">
-            {implicit.map((s) => (
-              <div key={s.id} className="flex items-center gap-2 text-xs text-secondary">
-                <span className="w-24 shrink-0">{providerFor(s.provider).label}</span>
-                <span className="cm-mono min-w-0 flex-1 truncate text-2xs text-faint">
-                  {s.resolvedConfigDir}
-                </span>
-                <LoginBadge status={s} />
-              </div>
-            ))}
+            {implicit.map((s) => {
+              const { account } = providerFor(s.provider);
+              return (
+                <div key={s.id} className="flex items-center gap-2 text-xs text-secondary">
+                  <span className="w-24 shrink-0">{providerFor(s.provider).label}</span>
+                  {/*
+                    An endpoint provider's default is a HOST, and it has no login
+                    to badge. Showing its config dir listed a directory goose
+                    does not use on Windows and flagged it "no such directory" in
+                    red — a warning about nothing, next to the one fact that
+                    actually matters here.
+                  */}
+                  {account.endpointEnv ? (
+                    <span className="cm-mono min-w-0 flex-1 truncate text-2xs text-faint">
+                      {account.defaultEndpoint}
+                    </span>
+                  ) : (
+                    <>
+                      <span className="cm-mono min-w-0 flex-1 truncate text-2xs text-faint">
+                        {s.resolvedConfigDir}
+                      </span>
+                      <LoginBadge status={s} />
+                    </>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
       )}

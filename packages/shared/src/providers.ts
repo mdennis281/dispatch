@@ -70,6 +70,25 @@ export interface ProviderDescriptor {
      * checked for EXISTENCE by the settings pane — never read for display.
      */
     loginFile: string;
+    /**
+     * Set when an account for this provider selects an ENDPOINT rather than a
+     * login directory — and the env var that carries it.
+     *
+     * The hosted providers keep one login per config dir, so "which account"
+     * and "which directory" are the same question. A local-model provider has
+     * no login at all; what actually distinguishes one goose account from
+     * another is WHICH MACHINE IS SERVING THE MODELS. A laptop's own Ollama and
+     * the workstation with the 3090 in it are different accounts in every sense
+     * that matters — different model lists, different speed, different cost —
+     * and nothing about a config dir can express that.
+     *
+     * Absent for claude and codex, whose endpoint is not the user's to choose.
+     */
+    endpointEnv?: string;
+    /** Where that provider looks when no account names a host. */
+    defaultEndpoint?: string;
+    /** Field label in the accounts pane, e.g. "Ollama host". */
+    endpointLabel?: string;
   };
 }
 
@@ -210,13 +229,24 @@ export const PROVIDERS = {
       // honours no override env var (probed: GOOSE_CONFIG_DIR, GOOSE_HOME and
       // XDG_CONFIG_HOME all leave `goose info` pointing at the default). The
       // var below is therefore inert, which is harmless: a local model needs no
-      // login, so there is nothing for a second subscription to select.
+      // login, so a directory is not what a second goose account selects.
+      //
+      // The ENDPOINT is. See `endpointEnv` below: one account is the Ollama on
+      // this machine, another is the box with the big GPU, and a chat picks
+      // between them exactly the way it picks between two Claude logins.
       configDirEnv: "GOOSE_CONFIG_DIR",
       // Correct on Linux/macOS. Windows keeps it under
       // `AppData/Roaming/Block/goose/config`; the only thing that reads this is
       // the settings pane's "is there a login" dot, which is cosmetic here.
       defaultConfigDir: ".config/goose",
       loginFile: "config.yaml",
+      endpointEnv: "OLLAMA_HOST",
+      // Ollama's own default. Note this is the SERVER's loopback, not the
+      // user's: an install that never sets a host talks to whatever is running
+      // beside Dispatch, which is very often not the machine holding the
+      // models they meant. That silent mismatch is what accounts fix.
+      defaultEndpoint: "http://127.0.0.1:11434",
+      endpointLabel: "Ollama host",
     },
   },
 } as const satisfies Record<HarnessKind, ProviderDescriptor>;

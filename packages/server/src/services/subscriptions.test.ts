@@ -43,6 +43,42 @@ describe("accountOf", () => {
     );
     expect(explicit.env).toEqual({});
   });
+
+  it("carries a goose account's Ollama host as OLLAMA_HOST", () => {
+    // What distinguishes two goose accounts is the MACHINE serving the models,
+    // not a login directory — goose has no login to put in one.
+    const account = accountOf(
+      { id: "gpu", name: "3090 box", provider: "goose", host: "192.0.2.10:11434" },
+      { env: {}, home },
+    );
+    // Stored as Ollama's own bare `host:port` spelling, handed over as an origin.
+    expect(account.env.OLLAMA_HOST).toBe("http://192.0.2.10:11434");
+  });
+
+  it("overlays a goose host even when it equals the default, unlike a config dir", () => {
+    // Not the same case as a dir that happens to match: a dir equal to the
+    // default was never chosen, a host equal to it was. Falling back would let
+    // the server's ambient OLLAMA_HOST override a deliberate choice.
+    const account = accountOf(
+      { id: "local", name: "this box", provider: "goose", host: "http://127.0.0.1:11434" },
+      { env: { OLLAMA_HOST: "http://192.0.2.10:11434" }, home },
+    );
+    expect(account.env.OLLAMA_HOST).toBe("http://127.0.0.1:11434");
+  });
+
+  it("leaves a goose account with no host alone, so it inherits the server's", () => {
+    const account = accountOf({ id: "g", name: "g", provider: "goose" }, { env: {}, home });
+    expect(account.env.OLLAMA_HOST).toBeUndefined();
+  });
+
+  it("ignores a host on a provider that has no endpoint", () => {
+    // `host` is meaningless for a hosted provider; it must not leak into the env.
+    const account = accountOf(
+      { id: "claude1", name: "one", provider: "claude", host: "192.0.2.10:11434" },
+      { env: {}, home },
+    );
+    expect(account.env.OLLAMA_HOST).toBeUndefined();
+  });
 });
 
 describe("chatSubscription", () => {
@@ -51,6 +87,24 @@ describe("chatSubscription", () => {
       { id: "claude2", name: "two", provider: "claude" as const, configDir: join(home, ".claude2") },
       { id: "claude1", name: "one", provider: "claude" as const, configDir: join(home, ".claude") },
     ],
+  });
+
+  it("honours the chosen default for goose, where every account shares one directory", () => {
+    // Two goose accounts, neither with a configDir — the pane does not offer
+    // one, because GOOSE_CONFIG_DIR is inert. So both resolve to the SAME
+    // default path, and the directory rule would always take the first in the
+    // list, silently outranking the default set under Chat. An unpinned chat
+    // would then run against loopback instead of the GPU box.
+    const settings = {
+      subscriptions: [
+        { id: "goose1", name: "this box", provider: "goose" as const },
+        { id: "goose2", name: "3090 box", provider: "goose" as const, host: "192.0.2.10:11434" },
+      ],
+      harness: { defaults: { goose: { subscriptionId: "goose2" } } },
+    };
+    const sub = chatSubscription(settings, { harness: "goose" }, { env: {}, home });
+    expect(sub.id).toBe("goose2");
+    expect(accountOf(sub, { env: {}, home }).env.OLLAMA_HOST).toBe("http://192.0.2.10:11434");
   });
 
   it("keeps an unpinned legacy chat on the default DIRECTORY, not the default account", () => {

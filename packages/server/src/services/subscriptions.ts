@@ -16,6 +16,7 @@ import { cp, mkdir, readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import {
+  endpointOrigin,
   providerFor,
   resolveSubscriptions,
   subscriptionFor,
@@ -79,10 +80,21 @@ function sameDir(a: string, b: string): boolean {
 export function accountOf(sub: ResolvedSubscription, machine: MachineEnv = {}): HarnessAccount {
   const configDir = configDirOf(sub, machine);
   const isDefault = sameDir(configDir, defaultConfigDir(sub.provider, machine));
+  const { configDirEnv, endpointEnv } = providerFor(sub.provider).account;
   return {
     subscriptionId: sub.id,
     configDir,
-    env: isDefault ? {} : { [providerFor(sub.provider).account.configDirEnv]: configDir },
+    env: {
+      ...(isDefault ? {} : { [configDirEnv]: configDir }),
+      // An endpoint provider's account IS its host, so unlike the config dir
+      // this is overlaid whenever the subscription names one — including when
+      // it happens to match the default. The two are not the same case: a dir
+      // equal to the default was never chosen, while a host equal to the
+      // default was, and a user who typed their loopback in deliberately
+      // should not have it silently fall back to the server's ambient
+      // `OLLAMA_HOST` if one is ever set.
+      ...(endpointEnv && sub.host ? { [endpointEnv]: endpointOrigin(sub.host) } : {}),
+    },
   };
 }
 
@@ -106,9 +118,22 @@ export function chatSubscription(
   const mine = resolveSubscriptions(settings).filter((s) => s.provider === chat.harness);
   const pinned = chat.subscriptionId ? mine.find((s) => s.id === chat.subscriptionId) : undefined;
   if (pinned) return pinned;
-  const home = defaultConfigDir(chat.harness, machine);
-  const legacy = mine.find((s) => sameDir(configDirOf(s, machine), home));
-  return legacy ?? subscriptionFor(settings, chat.harness);
+  // THE DIRECTORY RULE ONLY APPLIES WHERE AN ACCOUNT IS A DIRECTORY. For an
+  // endpoint provider it protects nothing and actively does harm: goose
+  // accounts never set `configDir` — the pane does not offer it, because
+  // `GOOSE_CONFIG_DIR` is inert — so `configDirOf` returns the SAME default
+  // path for every one of them and the match below would always take whichever
+  // is first in the stored list. That silently outranks the default the user
+  // chose under Chat, and an unpinned chat would run against the wrong
+  // machine's Ollama: wrong models offered, and `assertModelAvailable`
+  // validating against the wrong host's list. Nothing is stranded by skipping
+  // it, because goose keeps ONE config dir for every account.
+  if (!providerFor(chat.harness).account.endpointEnv) {
+    const home = defaultConfigDir(chat.harness, machine);
+    const legacy = mine.find((s) => sameDir(configDirOf(s, machine), home));
+    if (legacy) return legacy;
+  }
+  return subscriptionFor(settings, chat.harness);
 }
 
 /** Every subscription with what the disk says about it, for the settings pane. */

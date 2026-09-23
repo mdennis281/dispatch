@@ -35,6 +35,17 @@ export const SubscriptionSchema = z.object({
    * else `~/<defaultConfigDir>`), which is what the implicit subscriptions use.
    */
   configDir: z.string().trim().min(1).optional(),
+  /**
+   * The endpoint this account serves models from, for a provider whose
+   * `account.endpointEnv` says it has one (goose → `OLLAMA_HOST`). Absent means
+   * that provider's default endpoint, which is what the implicit subscriptions
+   * use. Meaningless — and ignored — for a provider without one.
+   *
+   * Stored as written. Ollama's own convention allows a bare `host:port`, so
+   * demanding a scheme here would reject the exact string a user copies out of
+   * their own Ollama config; normalising to an origin is the reader's job.
+   */
+  host: z.string().trim().min(1).max(200).optional(),
 });
 export type Subscription = z.infer<typeof SubscriptionSchema>;
 
@@ -47,6 +58,31 @@ export const SubscriptionListSchema = z
   .array(SubscriptionSchema)
   .max(32)
   .refine((list) => new Set(list.map((s) => s.id)).size === list.length, "duplicate subscription id");
+
+/**
+ * A stored `host` as an absolute origin, with no trailing slash.
+ *
+ * Shared because the value travels: `accountOf` writes it into the env a
+ * runtime is spawned with, and the harness reads it back to decide which
+ * Ollama to list models from. Two normalisers would eventually disagree about
+ * a trailing slash and the model list would silently belong to a cache key
+ * nobody looks up.
+ *
+ * A bare `host:port` is Ollama's own spelling — it is what `OLLAMA_HOST` is set
+ * to in the service's config — so it is what a user copies, and rejecting it
+ * for lacking a scheme would be pedantry at their expense.
+ */
+export function endpointOrigin(raw: string): string {
+  const trimmed = raw.trim();
+  const absolute = /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
+  // Scanned rather than `replace(/\/+$/, "")`: an anchored `+` backtracks over
+  // a long run of slashes, which CodeQL flags as polynomial. The schema caps a
+  // STORED host at 200 chars, but this also normalises `OLLAMA_HOST` straight
+  // out of the environment, where nothing caps anything.
+  let end = absolute.length;
+  while (end > 0 && absolute[end - 1] === "/") end -= 1;
+  return absolute.slice(0, end);
+}
 
 /** A subscription as the rest of the app sees it: explicit or implicit. */
 export interface ResolvedSubscription extends Subscription {
@@ -155,6 +191,13 @@ export interface SubscriptionStatus extends ResolvedSubscription {
  * Pinned → that account while it is still one of the chat's provider's. Unpinned,
  * or a pin that no longer resolves → the account at the default dir, else the
  * provider default.
+ *
+ * The default-dir step is SKIPPED for an endpoint provider, matching the same
+ * carve-out in the server's `chatSubscription`. Every goose account sits at the
+ * same default dir — none of them sets `configDir` — so `atDefaultDir` is true
+ * for all of them and this would never reach `isDefault`, showing the wrong
+ * account as active in the composer and usage meter for exactly the chats the
+ * server also resolves by default.
  */
 export function chatAccountOf(
   statuses: readonly SubscriptionStatus[],
@@ -163,7 +206,10 @@ export function chatAccountOf(
 ): SubscriptionStatus | undefined {
   const mine = statuses.filter((s) => s.provider === provider);
   const pinned = chat.subscriptionId ? mine.find((s) => s.id === chat.subscriptionId) : undefined;
-  return pinned ?? mine.find((s) => s.atDefaultDir) ?? mine.find((s) => s.isDefault) ?? mine[0];
+  const byDir = providerFor(provider).account.endpointEnv
+    ? undefined
+    : mine.find((s) => s.atDefaultDir);
+  return pinned ?? byDir ?? mine.find((s) => s.isDefault) ?? mine[0];
 }
 
 /**

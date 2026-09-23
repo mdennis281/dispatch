@@ -61,7 +61,7 @@ describe("ollamaHost", () => {
   it("accepts Ollama's own bare host:port convention", () => {
     // `OLLAMA_HOST=0.0.0.0:11434` is what the service itself is configured
     // with, so it is what a user is most likely to copy.
-    expect(ollamaHost({ OLLAMA_HOST: "10.0.0.77:11434" })).toBe("http://10.0.0.77:11434");
+    expect(ollamaHost({ OLLAMA_HOST: "192.0.2.10:11434" })).toBe("http://192.0.2.10:11434");
   });
 
   it("leaves an explicit URL alone but trims a trailing slash", () => {
@@ -137,13 +137,46 @@ describe("AcpHarness.createSession", () => {
     const harness = installed(async () => toModelOptions([tag("llama3.1:8b", 4_920_753_328)]));
     await harness.listModels();
     expect(() => harness.createSession(spec("qwen3-coder:30b"))).toThrow(/llama3\.1:8b/);
-    expect(() => harness.createSession(spec("qwen3-coder:30b"))).toThrow(/OLLAMA_HOST/);
+    // And says which host, since with accounts there is more than one candidate.
+    expect(() => harness.createSession(spec("qwen3-coder:30b"))).toThrow(/127\.0\.0\.1:11434/);
   });
 
   it("allows a model that IS there", async () => {
     const harness = installed(async () => toModelOptions([tag("llama3.1:8b", 4_920_753_328)]));
     await harness.listModels();
     expect(() => harness.createSession(spec("llama3.1:8b"))).not.toThrow();
+  });
+
+  it("validates against the ACCOUNT's host, not the ambient one", async () => {
+    // Two boxes, different models pulled. The 30B exists on the GPU host and
+    // nowhere else; a chat on that account must open, and the same model on
+    // the local account must not.
+    const byHost: Record<string, ReturnType<typeof toModelOptions>> = {
+      "http://127.0.0.1:11434": toModelOptions([tag("gemma4:latest", 9_608_350_718)]),
+      "http://192.0.2.10:11434": toModelOptions([tag("qwen3-coder:30b", 18_556_700_761)]),
+    };
+    const harness = new AcpHarness({
+      runtime: { kind: "goose", source: "installed", available: true, path: "/x/goose" },
+      fetchModels: async (origin) => byHost[origin] ?? [],
+      connect: () => ({ ready: async () => ({}) }) as never,
+    });
+
+    const gpu = { subscriptionId: "gpu", configDir: "/x", env: { OLLAMA_HOST: "192.0.2.10:11434" } };
+    const local = { subscriptionId: "local", configDir: "/x", env: {} };
+
+    expect((await harness.listModels({ account: gpu })).map((m) => m.value)).toEqual([
+      "qwen3-coder:30b",
+    ]);
+    expect((await harness.listModels({ account: local })).map((m) => m.value)).toEqual([
+      "gemma4:latest",
+    ]);
+
+    expect(() =>
+      harness.createSession({ ...spec("qwen3-coder:30b"), account: gpu }),
+    ).not.toThrow();
+    expect(() => harness.createSession({ ...spec("qwen3-coder:30b"), account: local })).toThrow(
+      /gemma4:latest/,
+    );
   });
 
   it("does not refuse anything when the probe failed — a seed cannot know what is pulled", async () => {

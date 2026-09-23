@@ -58,10 +58,11 @@ export const APP_SECTIONS: AppSectionDef[] = [
     id: "accounts",
     icon: KeyRound,
     label: "Accounts",
-    blurb: "Several logins per provider",
+    blurb: "Several accounts per provider",
     explainer:
-      "Each account is a provider config directory holding a login made by that provider's " +
-      "own CLI. A chat runs under one account, picked from its composer; switching keeps the " +
+      "For a hosted provider an account is a config directory holding a login made by that " +
+      "provider's own CLI; for a local-model provider it is the machine serving the models. " +
+      "A chat runs under one account, picked from its composer; switching keeps the " +
       "conversation. Which account a new chat starts on is set per provider under Chat.",
   },
   {
