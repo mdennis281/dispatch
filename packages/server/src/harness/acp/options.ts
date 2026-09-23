@@ -168,8 +168,13 @@ export function toEnvironmentBlock(
         " tools; `/c/...` and `~/...` do not.",
     );
   } else {
+    // Degrade to the raw platform string rather than guessing "Linux". The
+    // whole point of this block is to stop the agent being told false things
+    // about its box, so calling a `freebsd` host Linux would be the exact bug
+    // it exists to prevent — and worse than vague, because it is specific.
+    const name = platform === "darwin" ? "macOS" : platform === "linux" ? "Linux" : platform;
     lines.push(
-      `Operating system: ${platform === "darwin" ? "macOS" : "Linux"}.`,
+      `Operating system: ${name}.`,
       "Shell: a POSIX shell, with the usual coreutils available.",
     );
   }

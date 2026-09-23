@@ -130,6 +130,17 @@ describe("toEnvironmentBlock", () => {
     expect(toEnvironmentBlock("linux")).toMatch(/Linux/);
   });
 
+  it("names an unusual platform honestly instead of calling it Linux", () => {
+    // The block exists to stop the agent being told false things about its
+    // box, so a confident wrong "Linux" on a BSD would be the exact bug it is
+    // meant to prevent — and worse than vague, because it is specific.
+    for (const platform of ["freebsd", "openbsd", "sunos", "aix"] as const) {
+      const block = toEnvironmentBlock(platform);
+      expect(block).toMatch(new RegExp(`Operating system: ${platform}\\.`));
+      expect(block).not.toMatch(/Linux/);
+    }
+  });
+
   it("carries the working directory when there is one, and omits the line when not", () => {
     expect(toEnvironmentBlock("linux", "/srv/repo")).toMatch(/Working directory: \/srv\/repo/);
     expect(toEnvironmentBlock("linux")).not.toMatch(/Working directory/);
