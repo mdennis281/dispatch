@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { PassThrough } from "node:stream";
 import { AcpConnection, type AcpProcess } from "./rpc.js";
 import { AcpSession, toAcpMcpServers, toSlashCommands, splitPermissionTitle } from "./session.js";
+import { toEnvironmentBlock } from "./options.js";
 import type { HarnessEvent, HarnessSessionSpec } from "../types.js";
 
 /**
@@ -178,11 +179,39 @@ describe("AcpSession", () => {
     expect(sentPrompts).toHaveLength(2);
     const first = (sentPrompts[0]!.params as { prompt: { text: string }[] }).prompt;
     const second = (sentPrompts[1]!.params as { prompt: { text: string }[] }).prompt;
-    expect(first.map((b) => b.text)).toEqual(["POLICY", "one"]);
-    // Re-sending the policy every turn would re-pay its tokens on a context
+    // The environment block leads, because it is the frame the policy is read
+    // in — "run the suite" means something different on a box with no `grep`.
+    expect(first.map((b) => b.text)).toEqual([
+      toEnvironmentBlock(process.platform, "/work"),
+      "POLICY",
+      "one",
+    ]);
+    // Re-sending either every turn would re-pay their tokens on a context
     // window a local model can ill afford.
     expect(second.map((b) => b.text)).toEqual(["two"]);
     expect(prompts).toBe(2);
+  });
+
+  it("tells the agent what machine it is on, even with no project instructions", async () => {
+    // The gap this closes: Claude Code and Codex CLI each build their own
+    // system prompt and put the OS in it. An ACP agent gets only what we send,
+    // and we sent nothing — so on Windows a goose chat ran `grep` three times,
+    // was told "'grep' is not recognized" three times, and gave up on the task.
+    // A session with no `systemPromptAppends` is the common case, so the block
+    // must not be conditional on there being any.
+    const { agent, session, drain } = build({ systemPromptAppends: [] });
+    agent.onRequest = (method, _p, id) => {
+      if (method !== "session/prompt") return undefined;
+      setTimeout(() => agent.reply(id, { stopReason: "end_turn" }), 1);
+      return undefined;
+    };
+    session.send({ text: "go" });
+    await drain();
+
+    const prompt = (agent.frameFor("session/prompt")!.params as { prompt: { text: string }[] })
+      .prompt;
+    expect(prompt[0]!.text).toBe(toEnvironmentBlock(process.platform, "/work"));
+    expect(prompt.map((b) => b.text)).toContain("go");
   });
 
   it("turns a streamed turn into transcript events ending in turn-end", async () => {

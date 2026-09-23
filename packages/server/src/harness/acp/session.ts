@@ -40,7 +40,12 @@ import { readFileSync } from "node:fs";
 import type { ImageRef, SlashCommandInfo } from "@dispatch/shared";
 import type { AcpConnection, AgentRequest, RpcFrame } from "./rpc.js";
 import { AcpStreamDecoder, turnEndOf, toolNameOf, remapInput } from "./stream.js";
-import { toAcpMode, toInstructionBlock, pickPermissionOption } from "./options.js";
+import {
+  toAcpMode,
+  toEnvironmentBlock,
+  toInstructionBlock,
+  pickPermissionOption,
+} from "./options.js";
 
 /** A permission request waiting on the human. */
 interface PendingAsk {
@@ -239,6 +244,14 @@ export class AcpSession implements HarnessSession {
   private promptBlocks(input: HarnessInput): unknown[] {
     const blocks: unknown[] = [];
     if (!this.instructionsSent) {
+      // BEFORE the project's own instructions, because it is the frame they are
+      // read in: "run the test suite" means something different on a box with
+      // no `grep`. Every other provider states this in a system prompt it
+      // builds itself; ACP has no system-prompt slot, so it rides here.
+      blocks.push({
+        type: "text",
+        text: toEnvironmentBlock(process.platform, this.spec.cwd),
+      });
       const instructions = toInstructionBlock(this.spec.systemPromptAppends);
       if (instructions) blocks.push({ type: "text", text: instructions });
       this.instructionsSent = true;

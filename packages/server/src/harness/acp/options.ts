@@ -129,6 +129,56 @@ export function toInstructionBlock(appends: string[]): string | undefined {
 }
 
 /**
+ * What machine the agent is standing on — the one thing every other provider
+ * says for itself and an ACP agent is never told.
+ *
+ * Claude Code and Codex CLI each build their own system prompt and put the OS
+ * and shell in it. goose over ACP gets ONLY what Dispatch sends, and Dispatch
+ * sent nothing, so on Windows a model defaults to the Unix it saw most in
+ * training. Measured, not guessed: a goose chat asked to search this repo ran
+ * `find … | head`, then `grep` three times in a row, got
+ * `'grep' is not recognized as an internal or external command` every time,
+ * and gave up on the task.
+ *
+ * Deliberately short. This is prepended to the first prompt of every ACP
+ * session, and it is spending the context window of a local model that may
+ * only have 32k of it — so it names the traps that actually fired rather than
+ * describing the platform in general.
+ *
+ * Only states what is true regardless of how the box is configured. Git Bash
+ * and the WSL coreutils both exist on plenty of Windows machines, but neither
+ * is reachable from the shell the agent is handed, which is what the agent
+ * needs to know.
+ */
+export function toEnvironmentBlock(
+  platform: NodeJS.Platform = process.platform,
+  cwd?: string,
+): string {
+  const lines = ["<environment>"];
+  if (platform === "win32") {
+    lines.push(
+      "Operating system: Windows.",
+      "Shell: PowerShell. POSIX tools are NOT installed — `grep`, `find`, `xargs`," +
+        " `head`, `tail`, `sed` and `awk` all fail with" +
+        ' "is not recognized as an internal or external command".',
+      "Search and read files with your own file tools where you have them, or with" +
+        " PowerShell: `Select-String -Pattern x -Path y`, `Get-ChildItem -Recurse -Filter *.ts`," +
+        " `Get-Content file -TotalCount 20`.",
+      "Paths use backslashes and drive letters (C:\\...). Forward slashes work in most" +
+        " tools; `/c/...` and `~/...` do not.",
+    );
+  } else {
+    lines.push(
+      `Operating system: ${platform === "darwin" ? "macOS" : "Linux"}.`,
+      "Shell: a POSIX shell, with the usual coreutils available.",
+    );
+  }
+  if (cwd) lines.push(`Working directory: ${cwd}`);
+  lines.push("</environment>");
+  return lines.join("\n");
+}
+
+/**
  * ACP has no reasoning-effort concept.
  *
  * There is no field for it on `initialize`, `session/new` or `session/prompt`,
