@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  chatAccountOf,
   endpointOrigin,
   resolveSubscriptions,
   subscriptionFor,
@@ -37,6 +38,50 @@ describe("resolveSubscriptions", () => {
       subscriptions: [{ id: "codex", name: "a Claude login named codex", provider: "claude" }],
     });
     expect(all.find((s) => s.provider === "codex")?.id).toBe("codex-2");
+  });
+});
+
+describe("chatAccountOf", () => {
+  /** A status row as the server sends it. */
+  const status = (
+    id: string,
+    provider: "claude" | "goose",
+    extra: { atDefaultDir?: boolean; isDefault?: boolean } = {},
+  ) => ({
+    id,
+    name: id,
+    provider,
+    resolvedConfigDir: "/home/.config",
+    dirExists: true,
+    loggedIn: true,
+    isDefault: false,
+    atDefaultDir: true,
+    ...extra,
+  });
+
+  it("falls through to the chosen default for goose, whose accounts share a directory", () => {
+    // Mirrors the server's `chatSubscription`. Every goose account is at the
+    // default dir, so matching on that would never reach `isDefault` and the
+    // composer would show the wrong account as active.
+    const statuses = [
+      status("goose1", "goose"),
+      status("goose2", "goose", { isDefault: true }),
+    ];
+    expect(chatAccountOf(statuses, {}, "goose")?.id).toBe("goose2");
+  });
+
+  it("still prefers the default DIRECTORY for a provider whose account is one", () => {
+    const statuses = [
+      status("claude1", "claude", { atDefaultDir: false }),
+      status("claude2", "claude", { atDefaultDir: true }),
+      status("claude3", "claude", { atDefaultDir: false, isDefault: true }),
+    ];
+    expect(chatAccountOf(statuses, {}, "claude")?.id).toBe("claude2");
+  });
+
+  it("always prefers an explicit pin", () => {
+    const statuses = [status("goose1", "goose"), status("goose2", "goose", { isDefault: true })];
+    expect(chatAccountOf(statuses, { subscriptionId: "goose1" }, "goose")?.id).toBe("goose1");
   });
 });
 

@@ -191,6 +191,13 @@ export interface SubscriptionStatus extends ResolvedSubscription {
  * Pinned → that account while it is still one of the chat's provider's. Unpinned,
  * or a pin that no longer resolves → the account at the default dir, else the
  * provider default.
+ *
+ * The default-dir step is SKIPPED for an endpoint provider, matching the same
+ * carve-out in the server's `chatSubscription`. Every goose account sits at the
+ * same default dir — none of them sets `configDir` — so `atDefaultDir` is true
+ * for all of them and this would never reach `isDefault`, showing the wrong
+ * account as active in the composer and usage meter for exactly the chats the
+ * server also resolves by default.
  */
 export function chatAccountOf(
   statuses: readonly SubscriptionStatus[],
@@ -199,7 +206,10 @@ export function chatAccountOf(
 ): SubscriptionStatus | undefined {
   const mine = statuses.filter((s) => s.provider === provider);
   const pinned = chat.subscriptionId ? mine.find((s) => s.id === chat.subscriptionId) : undefined;
-  return pinned ?? mine.find((s) => s.atDefaultDir) ?? mine.find((s) => s.isDefault) ?? mine[0];
+  const byDir = providerFor(provider).account.endpointEnv
+    ? undefined
+    : mine.find((s) => s.atDefaultDir);
+  return pinned ?? byDir ?? mine.find((s) => s.isDefault) ?? mine[0];
 }
 
 /**

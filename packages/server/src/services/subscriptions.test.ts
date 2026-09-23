@@ -89,6 +89,24 @@ describe("chatSubscription", () => {
     ],
   });
 
+  it("honours the chosen default for goose, where every account shares one directory", () => {
+    // Two goose accounts, neither with a configDir — the pane does not offer
+    // one, because GOOSE_CONFIG_DIR is inert. So both resolve to the SAME
+    // default path, and the directory rule would always take the first in the
+    // list, silently outranking the default set under Chat. An unpinned chat
+    // would then run against loopback instead of the GPU box.
+    const settings = {
+      subscriptions: [
+        { id: "goose1", name: "this box", provider: "goose" as const },
+        { id: "goose2", name: "3090 box", provider: "goose" as const, host: "10.0.0.77:11434" },
+      ],
+      harness: { defaults: { goose: { subscriptionId: "goose2" } } },
+    };
+    const sub = chatSubscription(settings, { harness: "goose" }, { env: {}, home });
+    expect(sub.id).toBe("goose2");
+    expect(accountOf(sub, { env: {}, home }).env.OLLAMA_HOST).toBe("http://10.0.0.77:11434");
+  });
+
   it("keeps an unpinned legacy chat on the default DIRECTORY, not the default account", () => {
     // claude2 is listed first, so it is the provider default — but every session
     // an unpinned chat has was written under ~/.claude.
