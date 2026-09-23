@@ -33,9 +33,12 @@
  * index.html): the mark assembles, collapses into its three nodes, and the nodes
  * orbit — and the ORBIT is the only open-ended part. A fast boot lifts off it
  * early, a slow one watches it keep accelerating, and neither has to invent a
- * progress bar for a number nobody has. `MAX_MS` is also what sizes the ramp
- * over there: the rotation accelerates for 5.2s, which is the longest orbit a
- * 6s cap can produce, so it never has to run away to fill an unbounded wait.
+ * progress bar for a number nobody has.
+ *
+ * `MIN_MS` and the ramp over there are set against each other, not separately:
+ * the ramp is sized to the window `MIN_MS` actually leaves on the ring, because
+ * sizing it to the 6s worst case meant a normal boot only ever saw the flat
+ * first fifth of a quadratic and the acceleration was invisible.
  *
  * `MAX_MS` is the cap that keeps a promise from becoming a hang: past it we
  * uncover whatever is there, which is `ConnectingScreen` or a placeholder — both
@@ -45,15 +48,21 @@ import { useAuth } from "../stores/auth.js";
 import { useSetup } from "../stores/setup.js";
 
 /**
- * Long enough to reach the part that loops.
+ * Long enough to SEE the ring accelerate.
  *
  * The mark draws (~0.9s), collapses into its three dots (~1.2s) and gathers onto
- * the ring (~1.4s) — and only then is there something a slow boot can sit in.
- * Lifting before that cuts the transformation off mid-sentence, so this clears
- * the gather with most of a revolution to spare. It is the one number here worth
- * arguing about: it is the floor on every reload.
+ * the ring (~1.46s) — and only then does the part that loops begin. Clearing the
+ * gather is not enough, though, and that was the mistake in the 2.4s version:
+ * it left under a second of orbit, which is not long enough for a ramp to read
+ * as a ramp. You saw a constant spin and then a jerk as the exit took over.
+ *
+ * ~2s of orbit is what it takes for "slowly getting faster" to be legible, and
+ * that is what this buys. It is the one number here worth arguing about — it is
+ * the floor on every single reload — and it is deliberately the largest thing in
+ * this file, because the animation is the point rather than an apology for a
+ * wait that was going to happen anyway.
  */
-export const BOOT_SPLASH_MIN_MS = 2_400;
+export const BOOT_SPLASH_MIN_MS = 3_400;
 /** Never hold the app hostage to a boot that isn't coming. */
 export const BOOT_SPLASH_MAX_MS = 6_000;
 /** Must outlast the exit in index.html — the 900ms fling-and-expand, and the
