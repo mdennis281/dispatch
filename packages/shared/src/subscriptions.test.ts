@@ -49,6 +49,19 @@ describe("endpointOrigin", () => {
     expect(endpointOrigin("https://box:443/")).toBe("https://box:443");
     expect(endpointOrigin("  http://box:11434//  ")).toBe("http://box:11434");
   });
+
+  it("stays fast on a long run of trailing slashes", () => {
+    // CodeQL flagged the anchored `/\/+$/` this replaced as polynomial. The
+    // stored field is capped at 200 chars, but this also normalises
+    // `OLLAMA_HOST` out of the environment, where nothing is capped.
+    const started = Date.now();
+    expect(endpointOrigin(`http://box:11434${"/".repeat(50_000)}`)).toBe("http://box:11434");
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it("does not invent a host out of a string that is only slashes", () => {
+    expect(endpointOrigin("///")).toBe("http:");
+  });
 });
 
 describe("subscriptionFor", () => {

@@ -75,7 +75,13 @@ export const SubscriptionListSchema = z
 export function endpointOrigin(raw: string): string {
   const trimmed = raw.trim();
   const absolute = /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
-  return absolute.replace(/\/+$/, "");
+  // Scanned rather than `replace(/\/+$/, "")`: an anchored `+` backtracks over
+  // a long run of slashes, which CodeQL flags as polynomial. The schema caps a
+  // STORED host at 200 chars, but this also normalises `OLLAMA_HOST` straight
+  // out of the environment, where nothing caps anything.
+  let end = absolute.length;
+  while (end > 0 && absolute[end - 1] === "/") end -= 1;
+  return absolute.slice(0, end);
 }
 
 /** A subscription as the rest of the app sees it: explicit or implicit. */
