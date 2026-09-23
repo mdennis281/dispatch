@@ -158,6 +158,33 @@ describe("subscriptionStatuses", () => {
       loggedIn: false,
     });
   });
+
+  it("reports a goose account as usable — it has no login to be missing", () => {
+    // Regression: `loggedIn` is what the composer disables an account on, and
+    // goose was probed for `~/.config/goose/config.yaml` — a path that does not
+    // exist on Windows, where goose keeps config under AppData. Every goose
+    // account therefore rendered greyed out and "not logged in", so an account
+    // the user had just added could not be selected for a chat.
+    const statuses = subscriptionStatuses(
+      {
+        subscriptions: [
+          { id: "gpu", name: "3090 box", provider: "goose", host: "192.0.2.10:11434" },
+        ],
+      },
+      { env: {}, home },
+    );
+    expect(statuses.find((s) => s.id === "gpu")).toMatchObject({ loggedIn: true });
+  });
+
+  it("still reports a real missing login for a provider that has one", () => {
+    // The carve-out must not spill: a Claude account with no credentials file
+    // is genuinely unusable and has to keep saying so.
+    const statuses = subscriptionStatuses(
+      { subscriptions: [{ id: "c", name: "c", provider: "claude", configDir: join(home, "x") }] },
+      { env: {}, home },
+    );
+    expect(statuses.find((s) => s.id === "c")).toMatchObject({ loggedIn: false });
+  });
 });
 
 describe("transferClaudeSession", () => {

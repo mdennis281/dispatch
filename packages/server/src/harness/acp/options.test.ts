@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { toAcpMode, pickPermissionOption, toInstructionBlock, toAcpEffort } from "./options.js";
+import {
+  toAcpMode,
+  pickPermissionOption,
+  toInstructionBlock,
+  toEnvironmentBlock,
+  toAcpEffort,
+} from "./options.js";
 import { resolveGooseRuntime, gooseCandidates } from "./runtime.js";
 
 /** The four options goose 1.51.0 actually offers, captured from a live run. */
@@ -93,6 +99,64 @@ describe("toInstructionBlock", () => {
   it("returns undefined rather than an empty block", () => {
     expect(toInstructionBlock([])).toBeUndefined();
     expect(toInstructionBlock(["", "  "])).toBeUndefined();
+  });
+});
+
+describe("toEnvironmentBlock", () => {
+  it("names the POSIX tools that are absent on Windows, by name", () => {
+    // Not decoration. Measured on a real goose chat: asked to search this repo
+    // it ran `find … | head`, then `grep` THREE times, got "'grep' is not
+    // recognized as an internal or external command" every time, and abandoned
+    // the task. The model has to be told before its first command, not after.
+    const block = toEnvironmentBlock("win32");
+    expect(block).toMatch(/Windows/);
+    expect(block).toMatch(/PowerShell/);
+    for (const tool of ["grep", "find", "xargs", "head", "tail", "sed", "awk"]) {
+      expect(block).toContain(`\`${tool}\``);
+    }
+    // And says what to reach for instead — naming the absence alone leaves the
+    // model to guess the replacement.
+    expect(block).toMatch(/Select-String/);
+    expect(block).toMatch(/Get-ChildItem/);
+  });
+
+  it("does not claim POSIX tools are missing on a POSIX box", () => {
+    for (const platform of ["linux", "darwin"] as const) {
+      const block = toEnvironmentBlock(platform);
+      expect(block).not.toMatch(/PowerShell/);
+      expect(block).not.toMatch(/NOT installed/);
+    }
+    expect(toEnvironmentBlock("darwin")).toMatch(/macOS/);
+    expect(toEnvironmentBlock("linux")).toMatch(/Linux/);
+  });
+
+  it("names an unusual platform honestly instead of calling it Linux", () => {
+    // The block exists to stop the agent being told false things about its
+    // box, so a confident wrong "Linux" on a BSD would be the exact bug it is
+    // meant to prevent — and worse than vague, because it is specific.
+    for (const platform of ["freebsd", "openbsd", "sunos", "aix"] as const) {
+      const block = toEnvironmentBlock(platform);
+      expect(block).toMatch(new RegExp(`Operating system: ${platform}\\.`));
+      expect(block).not.toMatch(/Linux/);
+    }
+  });
+
+  it("carries the working directory when there is one, and omits the line when not", () => {
+    expect(toEnvironmentBlock("linux", "/srv/repo")).toMatch(/Working directory: \/srv\/repo/);
+    expect(toEnvironmentBlock("linux")).not.toMatch(/Working directory/);
+  });
+
+  it("stays small — it is spending a local model's context window", () => {
+    // A 32k window is normal for the models this provider exists to drive, and
+    // this is prepended to every session. Cheap guard against it growing into
+    // a platform essay.
+    expect(toEnvironmentBlock("win32", "C:\\repo").length).toBeLessThan(800);
+  });
+
+  it("is a single delimited block, so it reads as context and not as the task", () => {
+    const block = toEnvironmentBlock("win32");
+    expect(block.startsWith("<environment>")).toBe(true);
+    expect(block.trimEnd().endsWith("</environment>")).toBe(true);
   });
 });
 
