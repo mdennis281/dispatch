@@ -428,14 +428,27 @@ const BOOT_RETRACT = { trunk: 1.06, upper: -1.06, lower: -1.06 };
  * The motion trail: ghost copies of the trio, each held this many degrees behind
  * it and drawn at this opacity. Nearest first, so the tail thins out.
  *
- * The offsets are small on purpose. At `BOOT_ORBIT_R` a 4° step is ~1.7 units of
- * arc against a 7-unit dot, so consecutive ghosts overlap into one smear; space
- * them much further and the trail reads as more dots instead.
+ * Two constraints fix these numbers, and they pull against each other.
+ *
+ * The STEP has to keep consecutive ghosts overlapping, or the trail stops being
+ * a smear and becomes more dots — and it has to do that at both ends of the
+ * orbit, which widens by 3× while this spins. 3° is ~1.3 units of arc at
+ * `BOOT_ORBIT_R` and ~3.8 at full width, against a 7-unit dot: overlapping
+ * throughout. It was 4/9/15° when the radius was fixed, and those separate
+ * visibly once it is not.
+ *
+ * The COUNT then sets how long the tail can get, since length is count × step.
+ * Six is what it takes to still read as a comet at the small step above. The
+ * tail does not need to be animated to grow: the offsets are angular and the
+ * radius is climbing underneath them, so the arc lengthens on its own.
  */
 const BOOT_TRAIL = [
-  { deg: -4, opacity: 0.5 },
-  { deg: -9, opacity: 0.3 },
-  { deg: -15, opacity: 0.14 },
+  { deg: -3, opacity: 0.5 },
+  { deg: -6, opacity: 0.38 },
+  { deg: -9, opacity: 0.27 },
+  { deg: -12, opacity: 0.18 },
+  { deg: -15, opacity: 0.11 },
+  { deg: -18, opacity: 0.06 },
 ];
 
 const BOOT_ORBIT_R = 24;

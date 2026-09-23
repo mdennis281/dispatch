@@ -128,9 +128,11 @@
                   the tips land — the logo assembling itself;
         collapse  every stroke RETRACTS into the node it feeds, leaving the
                   three dots alone on screen — the graph reduced to its commits;
-        orbit     the three dots swing onto a ring and turn, breathing, for as
-                  long as the app takes to load. This is the spinner, and it is
-                  made of the logo rather than placed next to it;
+        orbit     the three dots swing onto a ring and turn for as long as the
+                  app takes to load — steadily faster, steadily wider, trailing
+                  further behind themselves as they go, because all three of
+                  those are the same fact about speed. This is the spinner, and
+                  it is made of the logo rather than placed next to it;
         fling     the ring spins up hard and the dots fly apart with it, off the
                   edges of the screen as they fade, and the app is behind them.
 
@@ -160,6 +162,33 @@
       nodes that are moving.
     -->
     <style>
+      /*
+       * The orbit's radius, as two multipliers on the dots' seats.
+       *
+       * REGISTERED, because that is the only way to animate a custom property:
+       * an unregistered one is treated as a discrete string and jumps from start
+       * to end at the halfway point. `syntax: "<number>"` makes it interpolable,
+       * and `inherits: true` lets a single animation on an ancestor drive all
+       * twenty-one dots instead of twenty-one copies of the same animation.
+       *
+       * TWO of them, multiplied together, because the wait and the exit both
+       * grow the radius and neither may cancel the other: a second animation on
+       * one property would start from its own keyframe and snap the ring back to
+       * whatever size it happened to declare. Composed, `--fling-r` accelerates
+       * away from wherever `--orbit-r` had got to — the same reason the three
+       * rotations are nested rather than swapped.
+       */
+      @property --orbit-r {
+        syntax: "<number>";
+        inherits: true;
+        initial-value: 1;
+      }
+      @property --fling-r {
+        syntax: "<number>";
+        inherits: true;
+        initial-value: 1;
+      }
+
       #boot-splash {
         /* Above LAYER.shutdown (600, src/lib/layers.ts) — the app has not
            started yet, so nothing it can raise belongs over this. */
@@ -195,7 +224,21 @@
          dots read as specks rather than as the logo having come apart, which is
          the one thing the sequence has to communicate. `overflow: visible` so
          the ring can grow past the box on the way out. */
-      .boot-splash__mark { display: block; width: 116px; height: 116px; overflow: visible; }
+      .boot-splash__mark {
+        display: block;
+        width: 116px;
+        height: 116px;
+        overflow: visible;
+        /* The ring widens as it speeds up — LINEAR, like the speed it tracks.
+           Angular velocity under constant acceleration is linear in time, so a
+           linear radius is the one that stays proportional to it; anything eased
+           would visibly lead or lag the spin. Parked on the <svg> rather than on
+           #boot-splash because the exit rule replaces that element's `animation`
+           wholesale, which would stop the widening exactly when it should be at
+           its most obvious. */
+        animation: boot-splash-widen 4500ms linear 1460ms forwards;
+      }
+      @keyframes boot-splash-widen { to { --orbit-r: 3; } }
 
       /*
        * THE STROKES — draw on, then retract.
@@ -263,8 +306,18 @@
       @keyframes boot-splash-dot-in {
         to { opacity: 1; transform: translate(var(--mx), var(--my)) scale(1); }
       }
+      /* The seat is a VECTOR from the centre, so the radius is just a scalar on
+         it — "further out, same size", with no transform to cancel. Because the
+         multipliers are registered custom properties, this `to` value re-resolves
+         as they animate: the keyframe is written once and the dot keeps moving
+         outward for as long as either is still climbing. */
       @keyframes boot-splash-dot-orbit {
-        to { transform: translate(var(--ox), var(--oy)) scale(1); }
+        to {
+          transform: translate(
+            calc(var(--ox) * var(--orbit-r) * var(--fling-r)),
+            calc(var(--oy) * var(--orbit-r) * var(--fling-r))
+          );
+        }
       }
       /*
        * THE ROTATION — three nested turns, not one.
@@ -336,75 +389,63 @@
        * describes the ANGLE, which under constant acceleration is quadratic; the
        * speed that angle implies is its derivative, which is LINEAR. Riding the
        * quadratic left the trail at 7% opacity at the moment the ring was going
-       * six times its starting speed. The 2s window is the orbit a typical boot
-       * actually shows (see MIN_MS), so the trail is at full strength by the
-       * time the fling takes over, and simply stays there on a slower one.
+       * six times its starting speed.
+       *
+       * It comes up to half strength in the first fifth of that window rather
+       * than from nothing, which is a deliberate lie: at the speed the ring
+       * starts at, a real camera would capture ~2° of smear and you would see
+       * nothing at all for the first second. The tail wants to be legible as
+       * soon as there is a ring to have one.
+       *
+       * Their LENGTH needs no animation. The offsets are angular and the radius
+       * is growing underneath them, so the same 3° is a longer arc every frame —
+       * the trail stretches as the ring widens, for free and in proportion.
        */
       .boot-splash__trail {
         transform-box: view-box;
         transform-origin: center;
         transform: rotate(var(--ta));
         opacity: 0;
-        animation: boot-splash-trail 2000ms linear 1460ms forwards;
+        animation: boot-splash-trail 1600ms linear 1400ms forwards;
       }
-      @keyframes boot-splash-trail { to { opacity: var(--to); } }
+      @keyframes boot-splash-trail {
+        0% { opacity: 0; }
+        20% { opacity: calc(var(--to) * 0.5); }
+        100% { opacity: var(--to); }
+      }
 
       /* ── THE EXIT ───────────────────────────────────────────────────────── */
 
-      /* Two more turns, on the SAME curve as the ramp above and the spread
-         below, so the exit is one continuous gesture rather than three
+      /* Two more turns, and the radius blow-out below, both on the SAME curve as
+         the ramp above — so the exit is one continuous gesture rather than three
          animations that happen to overlap. */
       #boot-splash[data-done] .boot-splash__fling {
         animation: boot-splash-fling 900ms cubic-bezier(0.11, 0, 0.5, 0) forwards;
       }
-      @keyframes boot-splash-fling { to { transform: rotate(900deg); } }
-
-      /* The dots fly apart — and ONLY apart.
-       *
-       * This used to be `transform: scale()` on the whole <svg>, which grew the
-       * orbit and the dots together: by the end they were dinner plates, and the
-       * thing leaving did not look like the thing that had been spinning. So the
-       * growth lives on each dot's own translation instead. Its seat on the ring
-       * is already a vector from the centre (`--ox/--oy`), so multiplying that
-       * vector is exactly "further out, same size" with no second transform to
-       * cancel — and 16× a 24-unit radius clears a 1280px viewport.
-       *
-       * The opacity holds to 65%. It faded from 30% first, and because the curve
-       * puts almost all of the travel in the last third, the dots were already
-       * transparent by the time they got fast — every bit of the acceleration
-       * happened where you could not see it. */
-      #boot-splash[data-done] .boot-splash__dot {
-        animation: boot-splash-spread 900ms cubic-bezier(0.11, 0, 0.5, 0) forwards;
-      }
-
-      /* The trail is at its longest here — this is the fastest the ring ever
-         goes — so it holds rather than fades, and only lets go at the end with
-         everything else. The rotation is re-stated in every keyframe because a
-         keyframe that sets transform at all replaces the whole property, and
-         dropping it would unwind the static offset that IS the trail. */
-      #boot-splash[data-done] .boot-splash__trail {
-        animation: boot-splash-trail-out 900ms cubic-bezier(0.11, 0, 0.5, 0) forwards;
-      }
-      @keyframes boot-splash-trail-out {
-        0% { opacity: var(--to); transform: rotate(var(--ta)); }
-        55% { opacity: var(--to); transform: rotate(var(--ta)); }
-        100% { opacity: 0; transform: rotate(var(--ta)); }
-      }
-      @keyframes boot-splash-spread {
-        0% { transform: translate(var(--ox), var(--oy)); opacity: 1; }
-        65% { opacity: 1; }
-        100% {
-          transform: translate(calc(var(--ox) * 16), calc(var(--oy) * 16));
-          opacity: 0;
-        }
+      /* The fade rides on the group rather than on each dot, so it reaches the
+         ghosts too and — more to the point — so the dots' own `animation` list is
+         left alone. Replacing it to add a fade would drop the orbit animation
+         holding them out at radius, and they would snap home to the mark on the
+         first frame of the exit. */
+      @keyframes boot-splash-fling {
+        0% { transform: rotate(0deg); opacity: 1; }
+        60% { opacity: 1; }
+        100% { transform: rotate(900deg); opacity: 0; }
       }
 
       /* Delayed, so the plate is still under the dots while they accelerate —
          the fling happens ON the splash, and only then is the splash lifted. */
+      /* Two animations: the plate fading, and the radius blow-out. The blow-out
+         MULTIPLIES whatever --orbit-r has reached rather than replacing it — see
+         the note on the two registered properties at the top of this block — so
+         the ring keeps widening out of the size it had, at the speed it had. */
       #boot-splash[data-done] {
         pointer-events: none;
-        animation: boot-splash-out 380ms cubic-bezier(0.4, 0, 0.2, 1) 480ms forwards;
+        animation:
+          boot-splash-out 380ms cubic-bezier(0.4, 0, 0.2, 1) 480ms forwards,
+          boot-splash-blowout 900ms cubic-bezier(0.11, 0, 0.5, 0) forwards;
       }
+      @keyframes boot-splash-blowout { to { --fling-r: 8; } }
       @keyframes boot-splash-out { to { opacity: 0; } }
 
       /* Added to #root only at the moment of dismissal (bootSplash.ts), never
@@ -422,6 +463,7 @@
            bootSplash.ts drops MIN_MS to 0 to match, so this is a brief cover
            for the load rather than a pose anybody has to sit through. */
         #boot-splash .boot-splash__branch,
+        #boot-splash .boot-splash__mark,
         #boot-splash .boot-splash__dot,
         #boot-splash .boot-splash__spin,
         #boot-splash .boot-splash__ramp,
@@ -457,17 +499,32 @@
           <g class="boot-splash__spin">
             <g class="boot-splash__ramp">
               <g class="boot-splash__fling">
-                <g class="boot-splash__trail" style="--ta: -4deg; --to: 0.5">
+                <g class="boot-splash__trail" style="--ta: -3deg; --to: 0.5">
                   <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 0ms; --mx: -20px; --my: 0px; --ox: 0px; --oy: -24px" />
                   <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 700ms; --mx: 20px; --my: -12px; --ox: 20.78px; --oy: 12px" />
                   <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 820ms; --mx: 20px; --my: 12px; --ox: -20.78px; --oy: 12px" />
                 </g>
-                <g class="boot-splash__trail" style="--ta: -9deg; --to: 0.3">
+                <g class="boot-splash__trail" style="--ta: -6deg; --to: 0.38">
                   <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 0ms; --mx: -20px; --my: 0px; --ox: 0px; --oy: -24px" />
                   <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 700ms; --mx: 20px; --my: -12px; --ox: 20.78px; --oy: 12px" />
                   <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 820ms; --mx: 20px; --my: 12px; --ox: -20.78px; --oy: 12px" />
                 </g>
-                <g class="boot-splash__trail" style="--ta: -15deg; --to: 0.14">
+                <g class="boot-splash__trail" style="--ta: -9deg; --to: 0.27">
+                  <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 0ms; --mx: -20px; --my: 0px; --ox: 0px; --oy: -24px" />
+                  <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 700ms; --mx: 20px; --my: -12px; --ox: 20.78px; --oy: 12px" />
+                  <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 820ms; --mx: 20px; --my: 12px; --ox: -20.78px; --oy: 12px" />
+                </g>
+                <g class="boot-splash__trail" style="--ta: -12deg; --to: 0.18">
+                  <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 0ms; --mx: -20px; --my: 0px; --ox: 0px; --oy: -24px" />
+                  <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 700ms; --mx: 20px; --my: -12px; --ox: 20.78px; --oy: 12px" />
+                  <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 820ms; --mx: 20px; --my: 12px; --ox: -20.78px; --oy: 12px" />
+                </g>
+                <g class="boot-splash__trail" style="--ta: -15deg; --to: 0.11">
+                  <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 0ms; --mx: -20px; --my: 0px; --ox: 0px; --oy: -24px" />
+                  <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 700ms; --mx: 20px; --my: -12px; --ox: 20.78px; --oy: 12px" />
+                  <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 820ms; --mx: 20px; --my: 12px; --ox: -20.78px; --oy: 12px" />
+                </g>
+                <g class="boot-splash__trail" style="--ta: -18deg; --to: 0.06">
                   <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 0ms; --mx: -20px; --my: 0px; --ox: 0px; --oy: -24px" />
                   <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 700ms; --mx: 20px; --my: -12px; --ox: 20.78px; --oy: 12px" />
                   <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 820ms; --mx: 20px; --my: 12px; --ox: -20.78px; --oy: 12px" />
