@@ -374,7 +374,12 @@ export function ChatHeaderBadges({
               {primary && (
                 <span className="flex items-center gap-1">
                   <Chip
-                    tone={primary.merged ? "success" : "info"}
+                    // `muted` for the removed-and-unlanded case, which is
+                    // reachable (a chat whose only worktree was cleaned up
+                    // before its branch landed) and which a solid blue chip
+                    // would report as live work you could go and open. The
+                    // compact glyph and the roster's hint both already fade it.
+                    tone={primary.merged ? "success" : primary.live ? "info" : "muted"}
                     icon={primary.merged ? <GitMerge /> : <GitBranch />}
                     mono
                   >

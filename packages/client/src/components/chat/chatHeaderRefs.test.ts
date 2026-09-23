@@ -108,6 +108,32 @@ describe("chatPrRefs", () => {
     expect(chatPrRefs(c, [pr(9, { state: "merged" })])[0]?.state).toBe("merged");
   });
 
+  // PR numbers restart at 1 per repo, so a chat that shipped to two of them can
+  // hold two #3s — and a number-only match hands both rows the same catalog PR.
+  it("matches on repo#number when both sides name a repo", () => {
+    const c = chat({
+      prs: [
+        { number: 3, url: "u", branch: "b", repo: "org/a", state: "open" },
+        { number: 3, url: "u", branch: "b", repo: "org/b", state: "open" },
+      ],
+    });
+    const refs = chatPrRefs(c, [
+      pr(3, { repo: "org/b", state: "merged", title: "b's" }),
+      pr(3, { repo: "org/a", state: "closed", title: "a's" }),
+    ]);
+    expect(refs.map((p) => p.state)).toEqual(["closed", "merged"]);
+  });
+
+  it("leaves a PR alone when only the other repo's same number is tracked", () => {
+    const c = chat({ prs: [{ number: 3, url: "u", branch: "b", repo: "org/a", state: "open" }] });
+    expect(chatPrRefs(c, [pr(3, { repo: "org/b", state: "merged" })])[0]?.state).toBe("open");
+  });
+
+  it("still refreshes when either side has no repo to match on", () => {
+    const c = chat({ prs: [{ number: 3, url: "u", branch: "b", state: "open" }] });
+    expect(chatPrRefs(c, [pr(3, { repo: "org/a", state: "merged" })])[0]?.state).toBe("merged");
+  });
+
   it("fills a missing title from the catalog and keeps its own when it has one", () => {
     const c = chat({
       prs: [

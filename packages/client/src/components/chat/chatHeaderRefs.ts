@@ -71,10 +71,16 @@ export function chatWorktreeRefs(
  */
 export function chatPrRefs(chat: Chat, live: PRInfo[]): PRRef[] {
   return chat.prs.map((pr) => {
-    // By number alone: `live` is this chat's project, and a PRInfo's `repo` is
-    // optional, so requiring it to match would drop the refresh on every row
-    // that simply didn't carry one.
-    const tracked = live.find((p) => p.number === pr.number);
+    // On `repo#number` when both sides name a repo, never on the number alone:
+    // PR numbers restart at 1 per repository, and a chat CAN ship to more than
+    // one (`create_pr` resolves the repo from the cwd it was called in). Two
+    // rows numbered #3 would both take the first #3 in the catalog, and one of
+    // them would silently wear the other's state and title. Falls back to the
+    // number when either side has no repo — a `PRRef`'s and a `PRInfo`'s are
+    // both optional, and a missing one shouldn't cost the refresh entirely.
+    const tracked =
+      live.find((p) => p.number === pr.number && p.repo && pr.repo && p.repo === pr.repo) ??
+      live.find((p) => p.number === pr.number && (!p.repo || !pr.repo));
     return tracked ? { ...pr, state: tracked.state, title: pr.title ?? tracked.title } : pr;
   });
 }
