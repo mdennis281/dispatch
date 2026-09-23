@@ -31,9 +31,11 @@
  *
  * The sequence is built for exactly that (see the docblock over the `<style>` in
  * index.html): the mark assembles, collapses into its three nodes, and the nodes
- * orbit — and the ORBIT is the only part that loops. A fast boot sees a fraction
- * of one revolution, a slow one sees several, and neither has to invent a
- * progress bar for a number nobody has.
+ * orbit — and the ORBIT is the only open-ended part. A fast boot lifts off it
+ * early, a slow one watches it keep accelerating, and neither has to invent a
+ * progress bar for a number nobody has. `MAX_MS` is also what sizes the ramp
+ * over there: the rotation accelerates for 5.2s, which is the longest orbit a
+ * 6s cap can produce, so it never has to run away to fill an unbounded wait.
  *
  * `MAX_MS` is the cap that keeps a promise from becoming a hang: past it we
  * uncover whatever is there, which is `ConnectingScreen` or a placeholder — both
@@ -54,9 +56,9 @@ import { useSetup } from "../stores/setup.js";
 export const BOOT_SPLASH_MIN_MS = 2_400;
 /** Never hold the app hostage to a boot that isn't coming. */
 export const BOOT_SPLASH_MAX_MS = 6_000;
-/** Must outlast the exit in index.html — the 760ms fling, and the plate fading
- *  420ms behind it — before we unmount. */
-export const BOOT_SPLASH_EXIT_MS = 880;
+/** Must outlast the exit in index.html — the 900ms fling-and-expand, and the
+ *  plate fading 480ms behind it — before we unmount. */
+export const BOOT_SPLASH_EXIT_MS = 1_000;
 
 export interface BootState {
   /** `/api/auth/status` has answered, or been guessed at. */
