@@ -489,6 +489,16 @@ function loginCommand(kind: HarnessKind): string {
  * run (an older runtime with no `auth status`), not that the login is absent.
  */
 function LoginLine({ kind, login }: { kind: HarnessKind; login: RuntimeLoginStatus }) {
+  // A local-model runtime has no account to report. Saying "no sign-in needed"
+  // is the honest line; rendering it as a green "Logged in" would invent a
+  // credential, and rendering the probe error read as breakage.
+  if (login.notRequired) {
+    return (
+      <span className="mt-1 block text-2xs text-faint">
+        No sign-in needed — runs a local model.
+      </span>
+    );
+  }
   if (!login.checked) {
     return (
       <span className="mt-1 block text-2xs text-faint">
