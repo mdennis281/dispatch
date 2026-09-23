@@ -954,4 +954,107 @@ describe("SessionBroker neutral harness path", () => {
       expect(late!.text).toContain("Skate");
     });
   });
+
+  describe("context window on a harness that fell back", () => {
+    /** A harness that answers `contextWindow` but whose runtime is missing. */
+    function unavailableLocalHarness(probed: () => void): Harness {
+      return {
+        kind: "goose",
+        capabilities: {
+          toolPermissions: true,
+          questions: false,
+          subagents: false,
+          skills: true,
+          compaction: false,
+          fork: false,
+          usageLimits: false,
+          liveModelSwitch: false,
+          livePermissionSwitch: true,
+          efforts: [],
+          preToolGuard: true,
+          managerTransport: "http",
+        },
+        // The CLI is NOT installed — this is what makes the broker fall back.
+        runtime: () => ({ kind: "goose", source: "missing", available: false }),
+        listModels: async () => [],
+        readLimits: async () => null,
+        generateText: async () => "title",
+        // Ollama does not care that the goose CLI is absent, so this would
+        // happily answer for a session that is about to run on Claude.
+        contextWindow: async () => {
+          probed();
+          return 32_768;
+        },
+        createSession: (spec: HarnessSessionSpec) => {
+          specs.push(spec);
+          return session;
+        },
+      };
+    }
+
+    it("asks the harness that will RUN, not the one that was configured", async () => {
+      // Regression: this was resolved with `find(session.harnessKind)` before
+      // `startHarnessSession` had a chance to fall back. A chat configured for
+      // goose on a box without the goose CLI runs on Claude — but the goose
+      // probe still succeeded against a reachable Ollama, so a ~200k Claude
+      // session came up with its meter seeded to 32768 and, more persistently,
+      // its browser MCP tools silently gated off as unaffordable.
+      let probes = 0;
+      const claude: Harness = {
+        kind: "claude",
+        capabilities: {
+          toolPermissions: true,
+          questions: true,
+          subagents: true,
+          skills: true,
+          compaction: true,
+          fork: true,
+          usageLimits: true,
+          liveModelSwitch: true,
+          livePermissionSwitch: true,
+          efforts: ["low", "medium", "high"],
+          preToolGuard: true,
+          managerTransport: "in-process",
+        },
+        runtime: () => ({ kind: "claude", source: "installed", available: true }),
+        listModels: async () => [],
+        readLimits: async () => null,
+        generateText: async () => "title",
+        createSession: (spec: HarnessSessionSpec) => {
+          specs.push(spec);
+          return session;
+        },
+      };
+      broker = new SessionBroker({
+        store,
+        bus: (bus = new EventBus()),
+        harnesses: new HarnessRegistry({
+          harnesses: { claude, goose: unavailableLocalHarness(() => (probes += 1)) },
+        }),
+        authored: new AuthoredConfigService({ globalRoot: join(dir, "global") }),
+        deps: { stopTimeoutMs: 5 },
+      });
+
+      const chat = await store.saveChat({
+        id: "fellback",
+        projectId: "p1",
+        title: "t",
+        modeId: "plan",
+        effort: "low",
+        harness: "goose",
+        worktrees: [],
+        prs: [],
+        createdAt: 1,
+      });
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "go");
+      await broker.waitFor(chat.id, "idle");
+
+      // Claude implements no `contextWindow`, so the honest answer is "unknown"
+      // — which leaves the meter and the MCP surface exactly as they were.
+      expect(specs[0]!.contextWindow).toBeUndefined();
+      // And the absent runtime was never consulted about a session it is not running.
+      expect(probes).toBe(0);
+    });
+  });
 });

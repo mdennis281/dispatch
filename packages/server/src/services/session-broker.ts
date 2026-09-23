@@ -6992,9 +6992,19 @@ export class SessionBroker {
     // because it decides part of it: on a 32k window the bundled browser
     // servers are ~11k of tool schema, and a goose chat was rejected outright
     // at 36,191 tokens before the model read a word of the task.
+    //
+    // `resolve`, NOT `find`: the configured kind is not necessarily the kind
+    // that runs. `startHarnessSession` calls this, THEN resolves the harness
+    // and falls back to Claude when the wanted runtime is missing — so asking
+    // the configured harness here would consult goose for a session about to
+    // be created on Claude. Ollama answers perfectly well (it does not care
+    // that the goose CLI is absent), and a ~200k Claude session would come up
+    // with its meter seeded to 32768 and its browser tools silently gated off.
+    // `resolve` is a pure lookup, so calling it early is free and its answer
+    // is still true after the fallback.
     const contextWindow = await (this.harnesses
-      ?.find(session.harnessKind)
-      ?.contextWindow?.({
+      ?.resolve(session.harnessKind)
+      .harness.contextWindow?.({
         model: options.model ?? session.model,
         account: session.account,
       })
