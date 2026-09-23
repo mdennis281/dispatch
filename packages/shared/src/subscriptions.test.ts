@@ -87,7 +87,11 @@ describe("chatAccountOf", () => {
 
 describe("endpointOrigin", () => {
   it("accepts Ollama's own bare host:port, which is what a user copies", () => {
-    expect(endpointOrigin("10.0.0.77:11434")).toBe("http://10.0.0.77:11434");
+    // 192.0.2.0/24 is RFC 5737 documentation space — reserved precisely so a
+    // fixture cannot name someone's real machine. Keep it that way: a real
+    // address here would publish a LAN's topology in a public repo, and a
+    // routable one risks a test one day actually dialling it.
+    expect(endpointOrigin("192.0.2.10:11434")).toBe("http://192.0.2.10:11434");
   });
 
   it("leaves an explicit scheme alone and strips trailing slashes", () => {

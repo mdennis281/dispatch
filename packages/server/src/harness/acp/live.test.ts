@@ -15,7 +15,7 @@ import type { HarnessEvent } from "../types.js";
  * that the frames we think goose emits are the frames goose emits.
  *
  * Run it with, e.g.:
- *   DISPATCH_ACP_LIVE=1 OLLAMA_HOST=http://10.0.0.77:11434 \
+ *   DISPATCH_ACP_LIVE=1 OLLAMA_HOST=http://<your-ollama-host>:11434 \
  *     pnpm --filter @dispatch/server exec vitest run src/harness/acp/live.test.ts
  */
 const LIVE = process.env.DISPATCH_ACP_LIVE === "1";

@@ -48,11 +48,11 @@ describe("accountOf", () => {
     // What distinguishes two goose accounts is the MACHINE serving the models,
     // not a login directory — goose has no login to put in one.
     const account = accountOf(
-      { id: "gpu", name: "3090 box", provider: "goose", host: "10.0.0.77:11434" },
+      { id: "gpu", name: "3090 box", provider: "goose", host: "192.0.2.10:11434" },
       { env: {}, home },
     );
     // Stored as Ollama's own bare `host:port` spelling, handed over as an origin.
-    expect(account.env.OLLAMA_HOST).toBe("http://10.0.0.77:11434");
+    expect(account.env.OLLAMA_HOST).toBe("http://192.0.2.10:11434");
   });
 
   it("overlays a goose host even when it equals the default, unlike a config dir", () => {
@@ -61,7 +61,7 @@ describe("accountOf", () => {
     // the server's ambient OLLAMA_HOST override a deliberate choice.
     const account = accountOf(
       { id: "local", name: "this box", provider: "goose", host: "http://127.0.0.1:11434" },
-      { env: { OLLAMA_HOST: "http://10.0.0.77:11434" }, home },
+      { env: { OLLAMA_HOST: "http://192.0.2.10:11434" }, home },
     );
     expect(account.env.OLLAMA_HOST).toBe("http://127.0.0.1:11434");
   });
@@ -74,7 +74,7 @@ describe("accountOf", () => {
   it("ignores a host on a provider that has no endpoint", () => {
     // `host` is meaningless for a hosted provider; it must not leak into the env.
     const account = accountOf(
-      { id: "claude1", name: "one", provider: "claude", host: "10.0.0.77:11434" },
+      { id: "claude1", name: "one", provider: "claude", host: "192.0.2.10:11434" },
       { env: {}, home },
     );
     expect(account.env.OLLAMA_HOST).toBeUndefined();
@@ -98,13 +98,13 @@ describe("chatSubscription", () => {
     const settings = {
       subscriptions: [
         { id: "goose1", name: "this box", provider: "goose" as const },
-        { id: "goose2", name: "3090 box", provider: "goose" as const, host: "10.0.0.77:11434" },
+        { id: "goose2", name: "3090 box", provider: "goose" as const, host: "192.0.2.10:11434" },
       ],
       harness: { defaults: { goose: { subscriptionId: "goose2" } } },
     };
     const sub = chatSubscription(settings, { harness: "goose" }, { env: {}, home });
     expect(sub.id).toBe("goose2");
-    expect(accountOf(sub, { env: {}, home }).env.OLLAMA_HOST).toBe("http://10.0.0.77:11434");
+    expect(accountOf(sub, { env: {}, home }).env.OLLAMA_HOST).toBe("http://192.0.2.10:11434");
   });
 
   it("keeps an unpinned legacy chat on the default DIRECTORY, not the default account", () => {
