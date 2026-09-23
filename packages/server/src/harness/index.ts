@@ -15,12 +15,14 @@ import { DEFAULT_HARNESS, PROVIDER_IDS, type HarnessKind } from "@dispatch/share
 import type { Harness, HarnessRuntimeInfo } from "./types.js";
 import { ClaudeHarness } from "./claude/index.js";
 import { CodexHarness } from "./codex/index.js";
+import { AcpHarness } from "./acp/index.js";
 import { disposeSharedCodexConnection } from "./codex/rpc.js";
 
 export * from "./types.js";
 export * from "./guard.js";
 export { ClaudeHarness, CLAUDE_CAPABILITIES, parseClaudeLimitHit } from "./claude/index.js";
 export { CodexHarness, CODEX_CAPABILITIES } from "./codex/index.js";
+export { AcpHarness, ACP_CAPABILITIES } from "./acp/index.js";
 
 export interface HarnessRegistryOpts {
   /** Injectable harnesses (tests, and the E2E fake SDK). */
@@ -35,6 +37,7 @@ export interface HarnessRegistryOpts {
 const HARNESS_FACTORIES: Record<HarnessKind, () => Harness> = {
   claude: () => new ClaudeHarness(),
   codex: () => new CodexHarness(),
+  goose: () => new AcpHarness(),
 };
 
 export class HarnessRegistry {
