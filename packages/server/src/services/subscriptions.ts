@@ -143,11 +143,19 @@ export function subscriptionStatuses(
 ): SubscriptionStatus[] {
   return resolveSubscriptions(settings).map((sub) => {
     const dir = configDirOf(sub, machine);
+    const { loginFile, endpointEnv } = providerFor(sub.provider).account;
     return {
       ...sub,
       resolvedConfigDir: dir,
       dirExists: existsSync(dir),
-      loggedIn: existsSync(join(dir, providerFor(sub.provider).account.loginFile)),
+      // `loggedIn` is read as "is this account usable" — the composer DISABLES
+      // an account that reports false. An endpoint provider has no login to
+      // have, so probing for a login file answers a question that was never
+      // asked and answers it wrongly: goose's nominal `~/.config/goose` does
+      // not exist on Windows (its config lives under AppData), so every goose
+      // account rendered greyed out and "not logged in", and a user who had
+      // just added one could not select it.
+      loggedIn: endpointEnv ? true : existsSync(join(dir, loginFile)),
       isDefault: subscriptionFor(settings, sub.provider).id === sub.id,
       atDefaultDir: sameDir(dir, defaultConfigDir(sub.provider, machine)),
     };
