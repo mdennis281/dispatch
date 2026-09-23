@@ -413,16 +413,20 @@ const BOOT_DOT_STAGGER = { root: 0, "upper-tip": 160, "lower-tip": 320 };
 const BOOT_RETRACT = { trunk: 1, upper: -1, lower: -1 };
 
 /**
- * Where each dot sits once the mark has collapsed and the three of them gather
+ * Where each dot sits once the mark has collapsed and the three of them swing
  * onto a ring: 120° apart, `BOOT_ORBIT_R` from the centre of the view box.
  *
- * The phases are not arbitrary — they are the nearest third to where each node
- * already was (root left, tips upper- and lower-right), so the gather reads as
- * the mark opening out rather than as three dots teleporting. `root` in fact
- * does not move at all: it is exactly 20 units left of centre already.
+ * Every one of them has to TRAVEL. The obvious assignment — give each node the
+ * seat nearest where it already is — was the first version, and it failed: the
+ * ring sits almost exactly where the mark put its nodes, so root did not move at
+ * all and the two tips shifted a couple of pixels. What you saw was a spinner
+ * with two leftover pieces of the logo parked beside it. Rotating the
+ * assignment a third of a turn (root to the top, tips to the two lower seats)
+ * costs nothing and makes the collapse legible: three dots visibly leaving the
+ * shape they were holding.
  */
-const BOOT_ORBIT_R = 20;
-const BOOT_ORBIT_PHASE = { root: 180, "upper-tip": -60, "lower-tip": 60 };
+const BOOT_ORBIT_R = 24;
+const BOOT_ORBIT_PHASE = { root: 270, "upper-tip": 30, "lower-tip": 150 };
 
 /** Two decimals is under a thousandth of a px at any size this renders at. */
 const round2 = (n) => Number(n.toFixed(2));
@@ -481,9 +485,6 @@ function bootSplashLines() {
     ...DISPATCH_MARK_NODES.map(dot),
     `            </g>`,
     `          </g>`,
-    // The ring that flares out of the merged dots on the way out. Outside the
-    // rotating groups: it is radial, so spinning it would do nothing but cost.
-    `          <circle class="boot-splash__flash" cx="${cx}" cy="${cy}" r="${DISPATCH_MARK_NODES[0].radius}" />`,
     `        </svg>`,
     `        <div class="boot-splash__word">Dispatch</div>`,
     `      </div>`,

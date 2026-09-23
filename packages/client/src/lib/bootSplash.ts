@@ -54,8 +54,9 @@ import { useSetup } from "../stores/setup.js";
 export const BOOT_SPLASH_MIN_MS = 2_400;
 /** Never hold the app hostage to a boot that isn't coming. */
 export const BOOT_SPLASH_MAX_MS = 6_000;
-/** Must outlast the exit in index.html (300ms delay + 520ms) before we unmount. */
-export const BOOT_SPLASH_EXIT_MS = 900;
+/** Must outlast the exit in index.html — the 760ms fling, and the plate fading
+ *  420ms behind it — before we unmount. */
+export const BOOT_SPLASH_EXIT_MS = 880;
 
 export interface BootState {
   /** `/api/auth/status` has answered, or been guessed at. */
@@ -109,8 +110,8 @@ function element(): HTMLElement | null {
 }
 
 /**
- * Play the exit: the lockup squashes, zooms through the viewport and fades,
- * while the app cross-fades up underneath it.
+ * Play the exit: the orbiting ring spins up hard and expands past the edges of
+ * the screen as it fades, while the app cross-fades up underneath it.
  *
  * The `boot-reveal` class is added to `#root` at THIS moment rather than being
  * on it from the start, so a bundle that throws before reaching this line
