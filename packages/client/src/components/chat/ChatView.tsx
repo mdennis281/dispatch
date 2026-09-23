@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   MoreHorizontal,
   Activity,
@@ -18,7 +18,6 @@ import type {
   AgentActivity,
   Chat,
   WorkflowExemption,
-  WorktreeInfo,
 } from "@dispatch/shared";
 import { ScrollArea } from "../ui/ScrollArea.js";
 import { IconButton } from "../ui/IconButton.js";
@@ -27,6 +26,7 @@ import { StatusDot, statusMeta } from "../ui/StatusDot.js";
 import { TitleText } from "../ui/TitleText.js";
 import { Spinner } from "../ui/Spinner.js";
 import { ChatHeaderBadges } from "./ChatHeaderBadges.js";
+import { chatPrRefs, chatWorktreeRefs } from "./chatHeaderRefs.js";
 import { MessageList } from "./MessageList.js";
 import { StreamingTail } from "./StreamingTail.js";
 import { clampSelectionToMessage } from "../../lib/transcriptCopy.js";
@@ -42,7 +42,6 @@ import { useChats } from "../../stores/chats.js";
 import { useProjects } from "../../stores/projects.js";
 import { usePanels } from "../../stores/panels.js";
 import { useLayoutMode } from "../../stores/layout.js";
-import { worktreeMatchesChat, samePath } from "../panels/panelBus.js";
 import { useNotices } from "../../stores/notices.js";
 import { useChatProcessPids, useProcesses } from "../../stores/processes.js";
 import { openOverlay } from "../../stores/view.js";
@@ -54,24 +53,6 @@ import {
   useInjectedContext,
   injectedContextSourceLabel,
 } from "../../lib/injectedContext.js";
-
-function branchName(path: string | undefined): string | null {
-  if (!path) return null;
-  const leaf = path.split(/[\\/]/).pop() ?? path;
-  return leaf.replace(/^[a-z]+-/, (m) => `${m.slice(0, -1)}/`);
-}
-
-/**
- * The "primary" worktree for the header: the first whose branch isn't merged, so
- * a merged primary auto-promotes the next live worktree to the front. Falls back
- * to the first when every worktree is merged (nothing live left to show).
- */
-function pickPrimary(
-  wts: WorktreeInfo[],
-  isMerged: (branch: string) => boolean,
-): WorktreeInfo | undefined {
-  return wts.find((w) => !isMerged(w.branch)) ?? wts[0];
-}
 
 /** A human "what is the agent doing" label from the live activity state. */
 function workingLabelFor(a: AgentActivity | undefined): string {
@@ -265,24 +246,15 @@ export function ChatView({ chat }: { chat: Chat }) {
 
   const meta = statusMeta(chat.status, prSettled);
   const running = chat.status === "running" || chat.status === "waiting";
-  const pr = chat.prs[0];
-
-  // Header worktree chip: primary branch + a "+N" for the rest, promoting the next
-  // live worktree when the current primary's PR merges.
-  const mineWts = worktrees.filter((w) => worktreeMatchesChat(w, chat));
+  // The header's roster: every worktree this chat has cut and every PR it has
+  // opened, not just the live ones. See `chatHeaderRefs` for the ordering.
   const isMerged = (b: string) => prs.some((p) => p.branch === b && p.state === "merged");
-  const primaryWt = pickPrimary(mineWts, isMerged);
-  const pendingWtPaths = chat.worktrees.filter((p) => !mineWts.some((w) => samePath(w.path, p)));
-  const primaryBranch = primaryWt?.branch ?? branchName(chat.worktrees[0]);
-  const primaryMerged = primaryWt ? isMerged(primaryWt.branch) : false;
-  // `slice(1)` when the primary came from the FALLBACK: with no matching live
-  // worktree the chip's branch is derived from `chat.worktrees[0]`, which is
-  // also still in `pendingWtPaths` — so a chat with exactly one worktree was
-  // showing its branch and a "+1" counting that same branch again.
-  const extraBranches = [
-    ...mineWts.filter((w) => w.path !== primaryWt?.path).map((w) => w.branch),
-    ...(primaryWt ? pendingWtPaths : pendingWtPaths.slice(1)).map((p) => branchName(p) ?? p),
-  ];
+  const headerWorktrees = useMemo(
+    () => chatWorktreeRefs(chat, worktrees, isMerged),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `isMerged` closes over `prs`
+    [chat, worktrees, prs],
+  );
+  const headerPrs = useMemo(() => chatPrRefs(chat, prs), [chat, prs]);
 
   const workingLabel = workingLabelFor(activity);
 
@@ -517,10 +489,8 @@ export function ChatView({ chat }: { chat: Chat }) {
           <div className="ml-auto flex shrink-0 items-center gap-1.5">
             <ChatHeaderBadges
               compact={compact}
-              primaryBranch={primaryBranch}
-              primaryMerged={primaryMerged}
-              extraBranches={extraBranches}
-              pr={pr}
+              worktrees={headerWorktrees}
+              prs={headerPrs}
               exemptions={exemptions}
               onRevokeExemption={revokeExemption}
             />
