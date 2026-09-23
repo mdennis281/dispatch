@@ -230,6 +230,12 @@ export interface HarnessSessionSpec {
   /** Model id from this harness's own picker, or undefined for its default. */
   model?: string;
   /**
+   * The real context window, when the broker could resolve one — see
+   * {@link Harness.contextWindow}. Preferred over whatever the runtime
+   * volunteers mid-turn, which for goose is a constant unrelated to the model.
+   */
+  contextWindow?: number;
+  /**
    * Blocks appended to the runtime's stock system prompt, in order. The broker
    * builds these (manager tools, workflow contract, mode overlay, project
    * instructions, memory) with no idea which runtime receives them.
@@ -607,6 +613,20 @@ export interface Harness {
    * account, because which models a login may use is a fact about its plan.
    */
   listModels(opts?: { refresh?: boolean; account?: HarnessAccount }): Promise<ModelOption[]>;
+  /**
+   * The context window the model will ACTUALLY be served, in tokens.
+   *
+   * Optional because only a provider that can ask gets to answer. It exists
+   * because the number a runtime volunteers can be fiction: goose reports
+   * `size: 128000` in every `usage_update` regardless of the model, while the
+   * Ollama behind it was serving 32768 — so the meter showed plenty of room
+   * right up until the request was rejected outright.
+   *
+   * Worth knowing BEFORE the session starts, not just for the meter: what
+   * Dispatch attaches has a token price, and on a small window the bundled
+   * browser servers alone are a third of it.
+   */
+  contextWindow?(opts?: { model?: string; account?: HarnessAccount }): Promise<number | undefined>;
   /** Account usage state, or null when this harness can't report it. */
   readLimits(account?: HarnessAccount): Promise<HarnessLimits | null>;
   /**

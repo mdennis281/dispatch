@@ -91,8 +91,8 @@ export interface AcpAgentSpec {
   args: string[];
   /** Resolve the binary. */
   runtime: () => HarnessRuntimeInfo;
-  /** Env that points the agent at a provider and model. */
-  env: (model: string | undefined) => Record<string, string>;
+  /** Env that points the agent at a provider, a model, and its real limits. */
+  env: (model: string | undefined, contextWindow?: number) => Record<string, string>;
 }
 
 /** goose: `goose acp`, configured through `GOOSE_*` / `OLLAMA_HOST`. */
@@ -100,10 +100,21 @@ export const GOOSE_AGENT: AcpAgentSpec = {
   kind: "goose",
   args: ["acp"],
   runtime: gooseRuntime,
-  env: (model) => ({
+  env: (model, contextWindow) => ({
     GOOSE_PROVIDER: process.env.GOOSE_PROVIDER ?? "ollama",
     ...(model ? { GOOSE_MODEL: model } : {}),
     OLLAMA_HOST: ollamaHost(),
+    // THE NUMBER GOOSE BUDGETS AGAINST. Unset, goose assumes a limit of its
+    // own — it reports `size: 128000` in every `usage_update` whatever is
+    // loaded — so its auto-compaction and tool-pair summarisation are managing
+    // a window four times the real one and never fire. The result is not a
+    // degraded answer but a hard stop: Ollama rejected a first prompt at
+    // 36,191 tokens against a served 32,768, and the chat died before reading
+    // the task.
+    //
+    // Only set when Dispatch actually resolved the window from Ollama. A
+    // guess here would be worse than the omission it replaces.
+    ...(contextWindow ? { GOOSE_CONTEXT_LIMIT: String(contextWindow) } : {}),
   }),
 };
 
@@ -134,6 +145,8 @@ export interface AcpHarnessOpts {
   }) => AcpConnection;
   /** Injectable model probe (tests). */
   fetchModels?: (origin: string) => Promise<ModelOption[] | null>;
+  /** Injectable context-window probe (tests). */
+  fetchContextWindow?: (origin: string, model: string) => Promise<number | undefined>;
   genId?: () => string;
   now?: () => number;
   onStderr?: (line: string) => void;
@@ -160,6 +173,8 @@ export class AcpHarness implements Harness {
   private readonly modelCache = new Map<string, { at: number; models: ModelOption[] }>();
   /** In-flight probes, also per host, so two chats on one box share one fetch. */
   private readonly modelProbes = new Map<string, Promise<ModelOption[] | null>>();
+  /** Served context window, by host + model. */
+  private readonly windowCache = new Map<string, { at: number; window: number }>();
 
   constructor(opts: AcpHarnessOpts = {}) {
     this.opts = opts;
@@ -213,6 +228,44 @@ export class AcpHarness implements Harness {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * What Ollama will actually serve this model, in tokens.
+   *
+   * TWO different numbers exist and only one of them matters. `/api/show`
+   * reports what the WEIGHTS support — 262144 for qwen3-coder — while
+   * `/api/ps` reports what the running instance was LOADED with, which is
+   * Ollama's own default (32768 here) unless someone set `OLLAMA_CONTEXT_LENGTH`
+   * or passed `num_ctx`. A prompt is rejected against the second, so the
+   * second is what this returns.
+   *
+   * `/api/ps` only knows about a model that is resident, so a cold model
+   * answers nothing rather than guessing: `/api/show`'s number would be wrong
+   * by 8x in exactly the direction that hurts, promising room that does not
+   * exist. Undefined leaves every caller on its existing behaviour.
+   */
+  async contextWindow(
+    opts: { model?: string; account?: HarnessAccount } = {},
+  ): Promise<number | undefined> {
+    const model = opts.model;
+    if (!model) return undefined;
+    const host = this.hostFor(opts.account);
+    const key = `${host} ${model}`;
+    const hit = this.windowCache.get(key);
+    if (hit && this.now() - hit.at < CACHE_TTL_MS) return hit.window;
+
+    const probe = this.opts.fetchContextWindow ?? fetchOllamaContextWindow;
+    let window: number | undefined;
+    try {
+      window = await probe(host, model);
+    } catch {
+      // Same contract as the model probe: an unreachable Ollama is not this
+      // call's problem to report, and a wrong number is worse than none.
+      window = undefined;
+    }
+    if (window !== undefined) this.windowCache.set(key, { at: this.now(), window });
+    return window;
   }
 
   /**
@@ -315,7 +368,10 @@ export class AcpHarness implements Harness {
       exePath: rt.path,
       args: this.agent.args,
       ...(spec.cwd ? { cwd: spec.cwd } : {}),
-      env: { ...this.agent.env(spec.model), ...(spec.account?.env ?? {}) },
+      env: {
+        ...this.agent.env(spec.model, spec.contextWindow),
+        ...(spec.account?.env ?? {}),
+      },
     });
     return new AcpSession({ spec, conn, genId: this.genId });
   }
@@ -388,6 +444,39 @@ export async function fetchOllamaModels(origin: string): Promise<ModelOption[] |
     return toModelOptions(body.models ?? []);
   } catch {
     return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * The context length a RESIDENT model was loaded with, from `/api/ps`.
+ *
+ * Deliberately not `/api/show`: that reports what the weights support, which
+ * here is 262144 against a served 32768. Answering with the larger number
+ * would promise room that does not exist, and the caller would spend it.
+ *
+ * A model that is not loaded yields undefined — Ollama has not decided its
+ * context yet, so there is no true answer to give.
+ */
+export async function fetchOllamaContextWindow(
+  origin: string,
+  model: string,
+): Promise<number | undefined> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
+  (timer as unknown as { unref?: () => void }).unref?.();
+  try {
+    const res = await fetch(`${origin}/api/ps`, { signal: controller.signal });
+    if (!res.ok) return undefined;
+    const body = (await res.json()) as {
+      models?: { name?: string; model?: string; context_length?: number }[];
+    };
+    const row = (body.models ?? []).find((m) => m.name === model || m.model === model);
+    const len = row?.context_length;
+    return typeof len === "number" && len > 0 ? len : undefined;
+  } catch {
+    return undefined;
   } finally {
     clearTimeout(timer);
   }

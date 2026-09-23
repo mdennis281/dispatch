@@ -189,6 +189,89 @@ describe("AcpHarness.createSession", () => {
   });
 });
 
+describe("AcpHarness.contextWindow", () => {
+  const harness = (fetchContextWindow: (o: string, m: string) => Promise<number | undefined>) =>
+    new AcpHarness({
+      runtime: { kind: "goose", source: "installed", available: true, path: "/x/goose" },
+      fetchContextWindow,
+    });
+
+  it("reports what Ollama SERVES, which is not what the weights support", async () => {
+    // The distinction is the whole point. /api/show says qwen3-coder supports
+    // 262144; /api/ps says the running instance was loaded with 32768. A
+    // prompt is rejected against the second, so answering with the first would
+    // promise 8x the room that exists — in the direction that hurts.
+    const h = harness(async () => 32_768);
+    expect(await h.contextWindow({ model: "qwen3-coder:30b" })).toBe(32_768);
+  });
+
+  it("asks the account's host, not the ambient one", async () => {
+    const seen: string[] = [];
+    const h = harness(async (origin) => {
+      seen.push(origin);
+      return 8_192;
+    });
+    await h.contextWindow({
+      model: "m",
+      account: { subscriptionId: "gpu", configDir: "/x", env: { OLLAMA_HOST: "192.0.2.10:11434" } },
+    });
+    expect(seen).toEqual(["http://192.0.2.10:11434"]);
+  });
+
+  it("answers nothing for a model that is not loaded, rather than guessing", async () => {
+    // Ollama has not decided that model's context yet, so there is no true
+    // answer — and undefined leaves every caller on its previous behaviour.
+    expect(await harness(async () => undefined).contextWindow({ model: "cold:7b" })).toBeUndefined();
+  });
+
+  it("answers nothing when no model is named", async () => {
+    let called = false;
+    const h = harness(async () => {
+      called = true;
+      return 32_768;
+    });
+    expect(await h.contextWindow({})).toBeUndefined();
+    expect(called).toBe(false);
+  });
+
+  it("survives an unreachable Ollama", async () => {
+    const h = harness(async () => {
+      throw new Error("ECONNREFUSED");
+    });
+    expect(await h.contextWindow({ model: "m" })).toBeUndefined();
+  });
+
+  it("caches per host and model", async () => {
+    let calls = 0;
+    const h = harness(async () => {
+      calls += 1;
+      return 32_768;
+    });
+    await h.contextWindow({ model: "a" });
+    await h.contextWindow({ model: "a" });
+    expect(calls).toBe(1);
+    await h.contextWindow({ model: "b" });
+    expect(calls).toBe(2);
+  });
+});
+
+describe("GOOSE_AGENT.env", () => {
+  it("tells goose the real limit, so its own compaction works on the truth", async () => {
+    // Unset, goose assumes a limit of its own (it reports size: 128000 in
+    // every usage_update whatever is loaded), so auto-compaction manages a
+    // window four times the real one and never fires — and Ollama rejects the
+    // prompt outright instead.
+    const { GOOSE_AGENT } = await import("./index.js");
+    expect(GOOSE_AGENT.env("qwen3-coder:30b", 32_768).GOOSE_CONTEXT_LIMIT).toBe("32768");
+  });
+
+  it("says nothing when the window is unknown — a guess is worse than silence", async () => {
+    const { GOOSE_AGENT } = await import("./index.js");
+    expect(GOOSE_AGENT.env("m", undefined).GOOSE_CONTEXT_LIMIT).toBeUndefined();
+    expect(GOOSE_AGENT.env("m").GOOSE_CONTEXT_LIMIT).toBeUndefined();
+  });
+});
+
 describe("AcpHarness.readLimits", () => {
   it("returns null, so the usage meter hides instead of showing an empty gauge", async () => {
     expect(await new AcpHarness().readLimits()).toBeNull();

@@ -4049,6 +4049,7 @@ export class SessionBroker {
         autoCompact: appSettings?.autoCompact?.enabled ?? true,
         autoCompactWindow: appSettings?.autoCompact?.window,
         contextTokenLimit,
+        contextWindow: session.contextWindow,
         abortSignal: session.abortController.signal,
         account: session.account,
         toolGuard: (toolName, input) => {
@@ -6986,7 +6987,34 @@ export class SessionBroker {
       app: appSettings?.mcpEnabled,
       project: projectId ? this.projectConfig?.getMcpEnabled?.(projectId) : undefined,
     };
+    // What this model will actually be served, when the provider can find out
+    // (only the local-model one can). Resolved BEFORE the MCP surface is built
+    // because it decides part of it: on a 32k window the bundled browser
+    // servers are ~11k of tool schema, and a goose chat was rejected outright
+    // at 36,191 tokens before the model read a word of the task.
+    //
+    // `resolve`, NOT `find`: the configured kind is not necessarily the kind
+    // that runs. `startHarnessSession` calls this, THEN resolves the harness
+    // and falls back to Claude when the wanted runtime is missing — so asking
+    // the configured harness here would consult goose for a session about to
+    // be created on Claude. Ollama answers perfectly well (it does not care
+    // that the goose CLI is absent), and a ~200k Claude session would come up
+    // with its meter seeded to 32768 and its browser tools silently gated off.
+    // `resolve` is a pure lookup, so calling it early is free and its answer
+    // is still true after the fallback.
+    const contextWindow = await (this.harnesses
+      ?.resolve(session.harnessKind)
+      .harness.contextWindow?.({
+        model: options.model ?? session.model,
+        account: session.account,
+      })
+      .catch(() => undefined) ?? Promise.resolve(undefined));
+    // Seeds the SAME field the composer meter divides by. For Claude that is
+    // refreshed from the SDK after init; for a local model nothing upstream
+    // ever supplies a true one, so this is it.
+    if (contextWindow !== undefined) session.contextWindow = contextWindow;
     const browserMcp = buildBrowserMcpServers({
+      contextWindow,
       config: projectId ? this.projectConfig?.getBrowserConfig?.(projectId) : undefined,
       // Config-first, but see `effectiveSubApps` for why this can't be a `??`
       // chain: a cold config cache answers `[]`, and the session would come up

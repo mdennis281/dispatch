@@ -194,9 +194,7 @@ export class AcpSession implements HarnessSession {
       sessionId: this.sessionId,
       ...(this.model ? { model: this.model } : {}),
       permissionMode: this.mode,
-      ...(this.decoder.contextWindow() !== undefined
-        ? { contextWindow: this.decoder.contextWindow() }
-        : {}),
+      ...(this.window() !== undefined ? { contextWindow: this.window() } : {}),
     });
 
     await this.flush();
@@ -224,7 +222,7 @@ export class AcpSession implements HarnessSession {
       this.emit(
         turnEndOf(result, {
           contextTokens: this.decoder.contextTokens(),
-          contextWindow: this.decoder.contextWindow(),
+          contextWindow: this.window(),
         }),
       );
     } finally {
@@ -391,7 +389,20 @@ export class AcpSession implements HarnessSession {
   }
 
   async contextWindow(): Promise<number | undefined> {
-    return this.decoder.contextWindow();
+    return this.window();
+  }
+
+  /**
+   * The context window to report — the resolved one, never the agent's.
+   *
+   * goose sends `size: 128000` in every `usage_update` whatever model is
+   * loaded. The Ollama behind it was serving 32768, so the meter read 28% full
+   * at the moment a 36,191-token request was rejected for not fitting. The
+   * broker resolves the real number from Ollama and puts it on the spec; the
+   * decoder's value is the fallback for when it could not.
+   */
+  private window(): number | undefined {
+    return this.spec.contextWindow ?? this.decoder.contextWindow();
   }
 
   /** Commands the agent announced via `available_commands_update`. */
