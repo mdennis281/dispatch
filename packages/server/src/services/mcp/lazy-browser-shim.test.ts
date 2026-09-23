@@ -297,4 +297,42 @@ describe("lazy-browser-shim", () => {
     expect(called.result).toBeTruthy();
     expect((called.result as Record<string, unknown>).serverInfo).toBeUndefined();
   });
+
+  it("refuses an unknown method sent BEFORE initialize instead of deadlocking on it", async () => {
+    // Regression, and the whole reason this block exists. goose opens an ACP
+    // session with a `server/discover` probe from a newer MCP draft, roughly
+    // ten seconds ahead of its `initialize`. That frame used to fall through to
+    // "something needs the real server", which handshook the real server with
+    // `params: null` — never answered — so `ready` stayed false and EVERY later
+    // frame queued behind it forever. Three goose chats sat at "running" with
+    // an empty transcript, no error and no timeout.
+    const client = startShim();
+
+    const probe = await client.request(0, "server/discover", {});
+    expect((probe.error as { code: number }).code).toBe(-32601);
+    // The refusal has to be free: spawning to say "no" is the bug wearing a
+    // different hat, and on a warm manifest it also costs a browser process.
+    expect(await spawned()).toBe(false);
+
+    // THE ASSERTION THAT WAS FAILING: the session still works afterwards. This
+    // is what hung — not the probe itself, which goose ignores, but everything
+    // that came after it.
+    const init = await client.request(1, "initialize", { protocolVersion: "2024-11-05" });
+    expect((init.result as { serverInfo: { name: string } }).serverInfo.name).toBe("fake");
+    client.notify("notifications/initialized");
+
+    const tools = await client.request(2, "tools/list");
+    expect((tools.result as { tools: { name: string }[] }).tools[0]!.name).toBe("look");
+
+    const called = await client.request(3, "tools/call", { name: "look" });
+    expect((called.result as { content: { text: string }[] }).content[0]!.text).toBe("called look");
+  });
+
+  it("answers a pre-initialize ping, which the spec does allow at any time", async () => {
+    const client = startShim();
+    const pong = await client.request(0, "ping", {});
+    expect(pong.result).toEqual({});
+    expect(pong.error).toBeUndefined();
+    expect(await spawned()).toBe(false);
+  });
 });

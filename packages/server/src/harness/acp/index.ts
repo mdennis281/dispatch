@@ -233,6 +233,33 @@ export class AcpHarness implements Harness {
     }
   }
 
+  /**
+   * Refuse a model the configured Ollama does not actually have.
+   *
+   * `OLLAMA_HOST` is read from the SERVER's environment, so an install that
+   * never sets it silently resolves to loopback — and a box can easily be
+   * running a second, smaller Ollama there while the models a user means live
+   * on another machine. Handing that host a model it has never pulled produced
+   * no useful error: the picker had offered a different list, the session
+   * opened, and the failure only surfaced deep inside the agent.
+   *
+   * Only the LIVE list can refuse. {@link listModels} falls back to a static
+   * seed when the probe fails, and a seed knows nothing about what is pulled —
+   * validating against it would reject working models whenever the probe
+   * happened to be down. Silence there is correct: unreachable is a different
+   * error, and it arrives on its own.
+   */
+  private assertModelAvailable(model: string | undefined): void {
+    if (!model || !this.modelCache?.models.length) return;
+    const have = this.modelCache.models.map((m) => m.value);
+    if (have.includes(model)) return;
+    throw new Error(
+      `${this.kind}: model "${model}" is not available at ${ollamaHost()}. ` +
+        `That host has: ${have.join(", ")}. ` +
+        `Pull it there, pick one of those, or point OLLAMA_HOST at the machine that has it.`,
+    );
+  }
+
   createSession(spec: HarnessSessionSpec): HarnessSession {
     const rt = this.runtime();
     if (!rt.available || !rt.path) {
@@ -240,6 +267,7 @@ export class AcpHarness implements Harness {
         "goose is not installed. Install the goose CLI, or set DISPATCH_GOOSE_PATH to its binary.",
       );
     }
+    this.assertModelAvailable(spec.model);
     const connect =
       this.opts.connect ??
       ((o): AcpConnection => new AcpConnection({ ...o, onStderr: this.opts.onStderr }));
