@@ -1,0 +1,121 @@
+import { describe, it, expect } from "vitest";
+import { toModelOptions, ollamaHost, AcpHarness } from "./index.js";
+
+/** A `/api/tags` row, shaped as Ollama really returns it. */
+const tag = (name: string, size: number, parameter_size?: string) => ({
+  name,
+  model: name,
+  size,
+  details: { parameter_size, quantization_level: "Q4_K_M" },
+});
+
+describe("toModelOptions", () => {
+  it("keeps the pulled tag as both value and label", () => {
+    // Prettifying would make the picker disagree with `ollama list`.
+    expect(toModelOptions([tag("qwen3-coder:30b", 18_556_700_761, "30.5B")])[0]).toMatchObject({
+      value: "qwen3-coder:30b",
+      label: "qwen3-coder:30b",
+      description: "30.5B · Q4_K_M",
+    });
+  });
+
+  it("marks the SMALLEST model fast, so title generation picks a cheap one", () => {
+    // Regression: the `fast` hint was only ever set on the static seed, so with
+    // Ollama reachable nothing matched and generateText fell through to
+    // models[0] — whatever order /api/tags returned. A box with a 70B pulled
+    // alongside a small model could spend the 70B on a one-line chat title.
+    const models = toModelOptions([
+      tag("qwen3-coder:30b", 18_556_700_761, "30.5B"),
+      tag("llama3.1:8b", 4_920_753_328, "8.0B"),
+      tag("gemma4:26b", 17_987_581_215, "26B"),
+    ]);
+    expect(models.find((m) => m.hint === "fast")?.value).toBe("llama3.1:8b");
+    // Exactly one row is hinted.
+    expect(models.filter((m) => m.hint === "fast")).toHaveLength(1);
+  });
+
+  it("does not label a sole model fast — that says nothing", () => {
+    const models = toModelOptions([tag("only:7b", 100)]);
+    expect(models[0]!.hint).toBeUndefined();
+  });
+
+  it("ignores a row with no size rather than treating it as smallest", () => {
+    const models = toModelOptions([
+      { name: "unknown:size" },
+      tag("small:1b", 500),
+      tag("big:70b", 40_000_000_000),
+    ]);
+    expect(models.find((m) => m.hint === "fast")?.value).toBe("small:1b");
+  });
+
+  it("skips a row with no name at all", () => {
+    expect(toModelOptions([{ size: 5 }])).toEqual([]);
+  });
+});
+
+describe("ollamaHost", () => {
+  it("defaults to loopback", () => {
+    expect(ollamaHost({})).toBe("http://127.0.0.1:11434");
+  });
+
+  it("accepts Ollama's own bare host:port convention", () => {
+    // `OLLAMA_HOST=0.0.0.0:11434` is what the service itself is configured
+    // with, so it is what a user is most likely to copy.
+    expect(ollamaHost({ OLLAMA_HOST: "10.0.0.77:11434" })).toBe("http://10.0.0.77:11434");
+  });
+
+  it("leaves an explicit URL alone but trims a trailing slash", () => {
+    expect(ollamaHost({ OLLAMA_HOST: "http://box:11434/" })).toBe("http://box:11434");
+    expect(ollamaHost({ OLLAMA_HOST: "https://box:443" })).toBe("https://box:443");
+  });
+});
+
+describe("AcpHarness.listModels", () => {
+  const harness = (fetchModels: () => Promise<ReturnType<typeof toModelOptions> | null>) =>
+    new AcpHarness({
+      runtime: { kind: "goose", source: "installed", available: true, path: "/x/goose" },
+      fetchModels,
+    });
+
+  it("falls back to the seed rather than erroring when Ollama is unreachable", async () => {
+    // A picker with a stale list beats a picker that threw.
+    const models = await harness(async () => null).listModels();
+    expect(models.length).toBeGreaterThan(0);
+    expect(models[0]!.value).toBe("qwen3-coder:30b");
+  });
+
+  it("survives a probe that rejects", async () => {
+    const models = await harness(async () => {
+      throw new Error("ECONNREFUSED");
+    }).listModels();
+    expect(models.length).toBeGreaterThan(0);
+  });
+
+  it("prefers the live list once it answers", async () => {
+    const live = toModelOptions([tag("mine:1b", 10)]);
+    expect(await harness(async () => live).listModels()).toEqual(live);
+  });
+});
+
+describe("AcpHarness.createSession", () => {
+  it("refuses with an actionable message when goose is absent", () => {
+    const harness = new AcpHarness({
+      runtime: { kind: "goose", source: "missing", available: false },
+    });
+    expect(() =>
+      harness.createSession({
+        permissionMode: "default",
+        effort: "medium",
+        systemPromptAppends: [],
+        mcpServers: {},
+        skills: [],
+      }),
+    ).toThrow(/DISPATCH_GOOSE_PATH/);
+  });
+});
+
+describe("AcpHarness.readLimits", () => {
+  it("returns null, so the usage meter hides instead of showing an empty gauge", async () => {
+    expect(await new AcpHarness().readLimits()).toBeNull();
+  });
+});

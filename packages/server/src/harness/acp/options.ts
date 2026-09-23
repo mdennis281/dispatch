@@ -85,13 +85,29 @@ export function pickPermissionOption(
   options: AcpPermissionOption[],
   decision: "allow" | "deny",
 ): string | undefined {
-  const want = decision === "allow" ? "allow" : "reject";
+  const allowWords = new Set(["allow", "approve", "accept", "yes"]);
+  const denyWords = new Set(["reject", "deny", "disallow", "decline", "no"]);
+  const want = decision === "allow" ? allowWords : denyWords;
+
   const scored = options.filter((o) => {
-    const k = `${o.kind ?? ""} ${o.optionId ?? ""}`.toLowerCase();
-    return k.includes(want) || (want === "reject" && k.includes("deny"));
+    const t = words(o);
+    // A whole-word test, not a substring one: "allow" is a substring of
+    // "disallow", so `includes("allow")` answers an ALLOW decision with a
+    // DENY option for any agent that spells its deny kind that way. goose's
+    // four kinds never hit it, but this function exists to generalise to the
+    // next ACP agent, and silently inverting a permission answer is the worst
+    // possible way to find that out.
+    return t.some((w) => want.has(w));
   });
-  const once = scored.find((o) => `${o.kind ?? ""} ${o.optionId ?? ""}`.toLowerCase().includes("once"));
+  // `_once`, never `_always`: a standing grant would outlive the decision the
+  // human actually made, and Dispatch would never see the following calls.
+  const once = scored.find((o) => words(o).includes("once"));
   return (once ?? scored[0] ?? options[0])?.optionId;
+}
+
+/** An option's kind and id, split into lowercase words. */
+function words(o: AcpPermissionOption): string[] {
+  return `${o.kind ?? ""} ${o.optionId ?? ""}`.toLowerCase().split(/[^a-z]+/).filter(Boolean);
 }
 
 /**

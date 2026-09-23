@@ -54,6 +54,29 @@ describe("pickPermissionOption", () => {
     expect(pickPermissionOption(opts, "deny")).toBe("d");
   });
 
+  it("does not read 'disallow' as an allow", () => {
+    // Regression: matching was a bare substring test, and "allow" is a
+    // substring of "disallow" — so an ALLOW decision was answered with the
+    // DENY option. goose's own four kinds never hit this, but the function
+    // exists to generalise to the next ACP agent, and silently inverting a
+    // permission answer is the worst possible way to discover that.
+    const opts = [
+      { optionId: "x1", kind: "disallow_once" },
+      { optionId: "x2", kind: "allow_once" },
+    ];
+    expect(pickPermissionOption(opts, "allow")).toBe("x2");
+    expect(pickPermissionOption(opts, "deny")).toBe("x1");
+  });
+
+  it("understands other agents' vocabularies", () => {
+    const opts = [
+      { optionId: "y", kind: "approve_once" },
+      { optionId: "n", kind: "decline_once" },
+    ];
+    expect(pickPermissionOption(opts, "allow")).toBe("y");
+    expect(pickPermissionOption(opts, "deny")).toBe("n");
+  });
+
   it("falls back to an option rather than returning nothing", () => {
     // An unanswered permission request hangs the turn forever, so any answer
     // beats no answer.

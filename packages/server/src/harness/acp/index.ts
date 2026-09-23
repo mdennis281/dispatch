@@ -202,7 +202,9 @@ export class AcpHarness implements Harness {
    */
   async generateText(request: HarnessTextRequest): Promise<string> {
     const models = await this.listModels();
-    // Prefer the explicitly cheap row, else whatever is first.
+    // The cheap row, which `toModelOptions` marks as the smallest model on
+    // disk. Falling through to `models[0]` only happens for a single-model box
+    // or the static seed, where there is nothing cheaper to choose.
     const model = (models.find((m) => m.hint === "fast") ?? models[0])?.value;
     if (!model) throw new Error("no local model available to generate text");
 
@@ -256,6 +258,8 @@ export class AcpHarness implements Harness {
 interface OllamaTag {
   name?: string;
   model?: string;
+  /** On-disk size in bytes. */
+  size?: number;
   details?: { parameter_size?: string; quantization_level?: string };
 }
 
@@ -266,18 +270,42 @@ interface OllamaTag {
  * they will recognise, so prettifying it would only make the picker disagree
  * with `ollama list`. The parameter size and quantisation go in the
  * description, which is where a picker row has space for them.
+ *
+ * THE `fast` HINT IS LOAD-BEARING, not decoration. {@link AcpHarness.generateText}
+ * picks the cheap model by it, and before this the hint was only ever set on
+ * the STATIC seed — so with Ollama reachable (the normal case) nothing matched
+ * and chat titles fell through to `models[0]`, i.e. whatever order `/api/tags`
+ * happened to return. A box with a 70B pulled alongside a small model could
+ * therefore spend the 70B on a one-line title.
+ *
+ * Smallest on disk is the proxy for cheapest. It is not a benchmark, but for
+ * local GGUFs it tracks load time and tokens/sec closely enough to be the right
+ * default, and it is the only cost signal `/api/tags` offers. Only applied when
+ * there is more than one model, because labelling the sole option "fast" says
+ * nothing.
  */
 export function toModelOptions(tags: OllamaTag[]): ModelOption[] {
-  const out: ModelOption[] = [];
+  const rows: { option: ModelOption; size: number }[] = [];
   for (const tag of tags) {
     const value = tag.name ?? tag.model;
     if (!value) continue;
-    const size = tag.details?.parameter_size;
+    const params = tag.details?.parameter_size;
     const quant = tag.details?.quantization_level;
-    const description = [size, quant].filter(Boolean).join(" · ");
-    out.push({ value, label: value, ...(description ? { description } : {}) });
+    const description = [params, quant].filter(Boolean).join(" · ");
+    rows.push({
+      option: { value, label: value, ...(description ? { description } : {}) },
+      size: typeof tag.size === "number" ? tag.size : Number.POSITIVE_INFINITY,
+    });
   }
-  return out;
+
+  if (rows.length > 1) {
+    let cheapest: { option: ModelOption; size: number } | undefined;
+    for (const row of rows) {
+      if (Number.isFinite(row.size) && (!cheapest || row.size < cheapest.size)) cheapest = row;
+    }
+    if (cheapest) cheapest.option.hint = "fast";
+  }
+  return rows.map((r) => r.option);
 }
 
 /** Ask Ollama what it has pulled. Returns null when it can't be reached. */
