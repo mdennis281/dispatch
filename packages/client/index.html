@@ -11,7 +11,20 @@
          `env(safe-area-inset-*)` is 0 in that layout, so the home-indicator
          clearance comes from `--cm-home-indicator` (stores/viewport.ts) instead.
          See docs/ios-pwa-viewport-findings.md. -->
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+         `user-scalable=no` / `maximum-scale=1`: this is an app shell, not a
+         document. Every pane scrolls itself and the layout already tracks the
+         live viewport, so a browser zoom has nothing sensible to do — it
+         magnifies a fixed box, strands the top bar off-screen and there is no
+         document scroll to bring it back. iOS honours both keys in the
+         INSTALLED app; a Safari tab ignores them, which is what the
+         `gesturestart` guard in `lib/pageZoom.ts` is for.
+         Pinch still works where it means something — the image viewer and the
+         annotator, which zoom over pointer events of their own. -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
+    />
     <meta name="color-scheme" content="dark light" />
     <title>Dispatch</title>
     <!--

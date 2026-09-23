@@ -20,6 +20,7 @@ import { startLiveApp } from "./lib/live.js";
 import { MissionPreview } from "./preview/mission/MissionPreview.js";
 import { AppErrorBoundary } from "./components/ErrorBoundary.js";
 import { applyScrollAnchoring } from "./lib/scrollAnchoring.js";
+import { lockPageZoom } from "./lib/pageZoom.js";
 
 // The palette itself was applied by the inline script in index.html (before the
 // first paint); this only subscribes to later OS changes, which matters solely
@@ -40,6 +41,11 @@ syncThemeColor();
 // would collapse the off-screen ones back to the placeholder, which is the very
 // jolt this prevents. See lib/scrollAnchoring.ts.
 applyScrollAnchoring();
+
+// Pinch-to-zoom the PAGE is never what you meant in here. Unconditional — it
+// applies to the log popup and the trace viewer too, which are the same kind of
+// fixed shell. See lib/pageZoom.ts.
+lockPageZoom();
 
 // A detached log window (opened via openRunnerLogWindow) loads this same bundle
 // with `?logs=<runnerId>` — render only the read-only log terminal for it.
