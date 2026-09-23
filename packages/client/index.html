@@ -111,9 +111,340 @@
     <link rel="apple-touch-startup-image" media="(device-width: 834px) and (device-height: 1194px) and (-webkit-device-pixel-ratio: 2) and (orientation: landscape)" href="/icons/splash-834x1194@2x-landscape.png" />
     <link rel="apple-touch-startup-image" media="(device-width: 1024px) and (device-height: 1366px) and (-webkit-device-pixel-ratio: 2) and (orientation: portrait)" href="/icons/splash-1024x1366@2x-portrait.png" />
     <link rel="apple-touch-startup-image" media="(device-width: 1024px) and (device-height: 1366px) and (-webkit-device-pixel-ratio: 2) and (orientation: landscape)" href="/icons/splash-1024x1366@2x-landscape.png" />
-<!-- brand:generated:end -->
+<!-- brand:generated:end -->    <!--
+      The boot splash — the Dispatch mark, centred, for the first beat of every
+      load. Deliberately here rather than in a React component: this has to paint
+      on the FIRST frame, before the bundle is fetched, or it would cover the
+      wrong second of the load and add a transition instead of removing one.
+      `src/lib/bootSplash.ts` owns the lifetime; this owns the look. The markup
+      it styles is the generated block at the top of <body>.
+
+      ── THE TRANSFORMATION ──────────────────────────────────────────────────
+
+      The mark is a source-control graph, so the splash animates it as one:
+
+        draw      the trunk grows out of the root dot, the two branches sprout,
+                  the tips land — the logo assembling itself;
+        collapse  every stroke RETRACTS into the node it feeds, leaving the
+                  three dots alone on screen — the graph reduced to its commits;
+        orbit     the three dots gather onto a ring and turn, breathing, for as
+                  long as the app takes to load. This is the spinner, and it is
+                  made of the logo rather than placed next to it;
+        bloom     they spiral inward, accelerating, merge at the centre, and a
+                  ring flares outward through the viewport as the app fades up.
+
+      The orbit is the only part that loops, which is what makes the length
+      honest: a fast boot sees a fraction of one revolution, a slow one sees
+      several, and neither has to fake a progress bar.
+
+      A note on the finish, since it constrains the rest: the dots converge on
+      the CENTRE rather than reassembling the mark. Reassembly needs the ring's
+      angle at the moment the data lands, and that angle is whatever it happens
+      to be — the logo would snap back together rotated by a random amount, or
+      jerk to zero first. Converging is rotation-invariant, so it is clean from
+      every angle the wait can end on.
+    -->
+    <style>
+      #boot-splash {
+        /* Above LAYER.shutdown (600, src/lib/layers.ts) — the app has not
+           started yet, so nothing it can raise belongs over this. */
+        position: fixed;
+        inset: 0;
+        z-index: 700;
+        display: grid;
+        place-items: center;
+        /* Not the theme variables: this paints before the stylesheet arrives,
+           which is the whole point of it being here. Kept level with `--p-app`
+           of each theme in src/theme/*.css by hand. */
+        --boot-bg: #0b0d10;
+        --boot-ink: #e7eaee;
+        --boot-amber: #e5a33c;
+        --boot-spark: #ffd9a3;
+        --boot-bloom: rgba(229, 163, 60, 0.13);
+        background:
+          /* Tight on purpose. A wide, faint wash of this over 1280px banded into
+             visible concentric rings on an 8-bit display; a smaller, slightly
+             stronger bloom reads as light coming OFF the mark and never gets
+             large enough for the steps to show. */
+          radial-gradient(32% 26% at 50% 45%, var(--boot-bloom), transparent 70%),
+          var(--boot-bg);
+      }
+      html[data-theme="dim"] #boot-splash { --boot-bg: #25292e; }
+      /* Amber on a light plate reads as a smudge rather than as light, so the
+         bloom inverts: white lifting the centre off the grey, which is what a
+         glow does on paper. */
+      html[data-theme="light"] #boot-splash {
+        --boot-bg: #e9edf2;
+        --boot-ink: #1b2027;
+        --boot-bloom: rgba(255, 255, 255, 0.75);
+      }
+
+      /* Slightly above true centre, like every OS launch screen: optical centre
+         sits high of geometric centre, and a lockup pinned to the middle of the
+         glass reads as having sagged. */
+      .boot-splash__stage {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 20px;
+        margin-bottom: 6vh;
+        will-change: transform, opacity;
+      }
+
+      /* `overflow: visible` so the closing ring can flare past the 96px box. */
+      /* Bigger than the mark ever appears in the app. At 96px the three orbiting
+         dots read as specks rather than as the logo having come apart, which is
+         the one thing the sequence has to communicate. */
+      .boot-splash__mark { display: block; width: 116px; height: 116px; overflow: visible; }
+
+      /*
+       * THE STROKES — draw on, then retract.
+       *
+       * `pathLength="1"` on every branch (see generate-brand.mjs) normalises the
+       * dash maths, so both halves take the same time on the short branches as
+       * on the long trunk — a graph growing and collapsing at one speed, not
+       * three.
+       *
+       * `--retract` is which END the stroke disappears into, and it is not the
+       * same for all three: the trunk's dot (`root`) sits at its START, so it
+       * retracts to +1 and shrinks leftward; the branches' dots are at their
+       * ENDS, so they retract to -1 and shrink outward to the tips. Getting the
+       * sign wrong is not subtle — the stroke crawls away from its own dot.
+       */
+      .boot-splash__branch {
+        fill: none;
+        stroke: var(--boot-amber);
+        stroke-width: var(--bsw, 4.5);
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        stroke-dasharray: 1;
+        stroke-dashoffset: 1;
+        animation:
+          boot-splash-grow 560ms cubic-bezier(0.32, 0.72, 0.25, 1) var(--bd, 0ms) forwards,
+          boot-splash-retract 300ms cubic-bezier(0.55, 0, 0.75, 0.2) 900ms forwards;
+      }
+      @keyframes boot-splash-grow { to { stroke-dashoffset: 0; } }
+      @keyframes boot-splash-retract { to { stroke-dashoffset: var(--retract, 1); } }
+
+      /*
+       * THE DOTS — land, gather, breathe.
+       *
+       * Every dot is authored at the centre of the view box and placed by
+       * transform, so `--mx/--my` (its seat in the mark) and `--ox/--oy` (its
+       * seat on the ring) are two plain translations the browser can interpolate
+       * between without decomposing a matrix. Both pairs come from the shared
+       * geometry — see generate-brand.mjs.
+       *
+       * Four animations, in cascade order: each later one takes the transform
+       * over from the one before as its delay expires, which is why `forwards`
+       * on the earlier ones is safe.
+       */
+      .boot-splash__dot {
+        fill: var(--boot-amber);
+        transform-box: view-box;
+        transform-origin: center;
+        opacity: 0;
+        transform: translate(var(--mx), var(--my)) scale(0.25);
+        animation:
+          boot-splash-dot-in 300ms cubic-bezier(0.22, 1.6, 0.4, 1) var(--bd, 0ms) forwards,
+          boot-splash-dot-orbit 340ms cubic-bezier(0.6, 0, 0.2, 1) 1060ms forwards,
+          boot-splash-dot-breathe 1200ms ease-in-out calc(1400ms + var(--pd, 0ms)) infinite;
+        /* Enough bloom that a 7px dot still reads as lit rather than as a
+           rendering artifact once it is alone on a dark plate. */
+        filter: drop-shadow(0 0 4px rgba(229, 163, 60, 0.55));
+      }
+      @keyframes boot-splash-dot-in {
+        to { opacity: 1; transform: translate(var(--mx), var(--my)) scale(1); }
+      }
+      @keyframes boot-splash-dot-orbit {
+        to { transform: translate(var(--ox), var(--oy)) scale(1); }
+      }
+      /* Staggered by `--pd`, so the ring has a travelling swell rather than
+         three dots pumping in unison. */
+      @keyframes boot-splash-dot-breathe {
+        0%, 100% { transform: translate(var(--ox), var(--oy)) scale(1); }
+        50% { transform: translate(var(--ox), var(--oy)) scale(1.34); }
+      }
+
+      /* The ring's own rotation. It starts as the last dot reaches its seat, and
+         runs until the app is ready — this is the entire loading indicator. */
+      .boot-splash__spin {
+        transform-box: view-box;
+        transform-origin: center;
+        animation: boot-splash-spin 1800ms linear 1340ms infinite;
+      }
+      @keyframes boot-splash-spin { to { transform: rotate(360deg); } }
+
+      /* A second rotation, nested inside the first and idle until the exit, so
+         the spin-up composes with the steady turn instead of fighting it for the
+         same property. */
+      .boot-splash__burst {
+        transform-box: view-box;
+        transform-origin: center;
+      }
+
+      /* The path the dots are on, barely there. Without it the rotation is only
+         legible from the dots themselves, and three points moving on an implied
+         circle read as drift; with it they read as orbiting something.
+
+         SOLID, not dashed. A dashed ring at this radius puts a row of 2px marks
+         exactly where the dots are, at the same colour — the eye counts five or
+         six travellers instead of three, and the one thing the sequence has to
+         say is that the mark came apart into ITS three nodes. */
+      .boot-splash__ring {
+        fill: none;
+        stroke: var(--boot-amber);
+        stroke-width: 0.9;
+        transform-box: view-box;
+        transform-origin: center;
+        opacity: 0;
+        animation: boot-splash-ring-in 420ms ease-out 1200ms forwards;
+      }
+      @keyframes boot-splash-ring-in { to { opacity: 0.22; } }
+      #boot-splash[data-done] .boot-splash__ring {
+        animation: boot-splash-ring-out 300ms ease-in forwards;
+      }
+      @keyframes boot-splash-ring-out { to { opacity: 0; transform: scale(0.6); } }
+
+      .boot-splash__flash {
+        fill: none;
+        stroke: var(--boot-spark);
+        transform-box: view-box;
+        transform-origin: center;
+        opacity: 0;
+      }
+
+      .boot-splash__word {
+        font:
+          600 21px/1 ui-sans-serif,
+          system-ui,
+          -apple-system,
+          "Segoe UI",
+          sans-serif;
+        letter-spacing: -0.01em;
+        color: var(--boot-ink);
+        opacity: 0;
+        transform: translateY(8px);
+        animation: boot-splash-word-in 520ms cubic-bezier(0.22, 0.8, 0.3, 1) 620ms forwards;
+      }
+      @keyframes boot-splash-word-in { to { opacity: 1; transform: none; } }
+
+      /* ── THE EXIT ───────────────────────────────────────────────────────── */
+
+      /* The dots spiral in and merge. `cubic-bezier(.5,0,.85,.2)` is a hard
+         ease-IN on both this and the burst: the ring appears to be pulled into
+         the centre rather than to drift there, which is what makes the flare
+         land as a release. */
+      #boot-splash[data-done] .boot-splash__burst {
+        animation: boot-splash-burst 560ms cubic-bezier(0.5, 0, 0.85, 0.2) forwards;
+      }
+      @keyframes boot-splash-burst { to { transform: rotate(520deg); } }
+
+      #boot-splash[data-done] .boot-splash__dot {
+        animation: boot-splash-dot-home 460ms cubic-bezier(0.5, 0, 0.85, 0.2) forwards;
+      }
+      @keyframes boot-splash-dot-home {
+        0% { transform: translate(var(--ox), var(--oy)) scale(1); opacity: 1; }
+        /* 1.15, not 1.5: all three land on the same point, so whatever scale
+           they arrive at is effectively tripled by the overlap plus their glow —
+           at 1.5 the merge was a heavy blob rather than a point of light. */
+        62% { transform: translate(0px, 0px) scale(1.15); opacity: 1; }
+        100% { transform: translate(0px, 0px) scale(0); opacity: 0; }
+      }
+
+      #boot-splash[data-done] .boot-splash__flash {
+        animation: boot-splash-flash 520ms cubic-bezier(0.2, 0.7, 0.3, 1) 260ms forwards;
+      }
+      @keyframes boot-splash-flash {
+        0% { transform: scale(0.4); opacity: 0; stroke-width: 6; }
+        18% { opacity: 0.95; }
+        100% { transform: scale(9); opacity: 0; stroke-width: 0.6; }
+      }
+
+      /* The wordmark leaves FIRST and on its own. Carried into the zoom it read
+         as a second, competing subject during the one beat the flare owns. */
+      #boot-splash[data-done] .boot-splash__word {
+        animation: boot-splash-word-out 240ms ease-in forwards;
+      }
+      @keyframes boot-splash-word-out { to { opacity: 0; transform: translateY(-4px); } }
+
+      /* Delayed by 300ms so the plate is still there while the dots converge —
+         the flare happens ON the splash, and only then is the splash lifted. */
+      #boot-splash[data-done] {
+        pointer-events: none;
+        animation: boot-splash-out 520ms cubic-bezier(0.4, 0, 0.2, 1) 300ms forwards;
+      }
+      #boot-splash[data-done] .boot-splash__stage {
+        animation: boot-splash-stage-out 520ms cubic-bezier(0.4, 0, 0.2, 1) 300ms forwards;
+      }
+      @keyframes boot-splash-out { to { opacity: 0; } }
+      @keyframes boot-splash-stage-out { to { transform: scale(1.18); } }
+
+      /* Added to #root only at the moment of dismissal (bootSplash.ts), never
+         before — a bundle that dies on the way here must leave the app opaque,
+         not stranded at zero under a splash that will never lift. Opacity only:
+         a transform here would become the containing block for the shell's
+         `position: fixed` children. */
+      #root.boot-reveal { animation: boot-splash-reveal 460ms 260ms ease-out both; }
+      @keyframes boot-splash-reveal { from { opacity: 0; } to { opacity: 1; } }
+
+      @media (prefers-reduced-motion: reduce) {
+        /* No assembly, no collapse, no orbit — the whole point of the sequence
+           is movement, and there is no quieter version of it that still means
+           anything. What is left is the mark, held, while the app loads; and
+           bootSplash.ts drops MIN_MS to 0 to match, so this is a brief cover
+           for the load rather than a pose anybody has to sit through. */
+        #boot-splash .boot-splash__branch,
+        #boot-splash .boot-splash__dot,
+        #boot-splash .boot-splash__spin,
+        #boot-splash .boot-splash__word,
+        #boot-splash .boot-splash__ring,
+        #boot-splash[data-done] .boot-splash__ring,
+        #boot-splash[data-done] .boot-splash__burst,
+        #boot-splash[data-done] .boot-splash__dot,
+        #boot-splash[data-done] .boot-splash__flash,
+        #boot-splash[data-done] .boot-splash__word,
+        #boot-splash[data-done] .boot-splash__stage,
+        #root.boot-reveal {
+          animation: none;
+        }
+        #boot-splash .boot-splash__branch { stroke-dashoffset: 0; }
+        #boot-splash .boot-splash__dot {
+          opacity: 1;
+          transform: translate(var(--mx), var(--my));
+        }
+        #boot-splash .boot-splash__word { opacity: 1; transform: none; }
+        #boot-splash .boot-splash__ring { opacity: 0; }
+        #boot-splash[data-done] { animation-duration: 200ms; animation-delay: 0ms; }
+      }
+    </style>
+
   </head>
   <body>
+    <!-- boot-splash:generated:start -->
+    <!-- Generated by scripts/generate-brand.mjs — do not edit by hand.
+         Styled by the #boot-splash rules in <head>, lifted by src/lib/bootSplash.ts. -->
+    <div id="boot-splash" aria-hidden="true">
+      <div class="boot-splash__stage">
+        <svg class="boot-splash__mark" viewBox="0 0 64 64" aria-hidden="true" style="--bsw: 4.5">
+          <path class="boot-splash__branch" d="M12 32L36 32" pathLength="1" style="--bd: 0ms; --retract: 1" />
+          <path class="boot-splash__branch" d="M36 32C42 32 43 22 52 20" pathLength="1" style="--bd: 180ms; --retract: -1" />
+          <path class="boot-splash__branch" d="M36 32C42 32 43 42 52 44" pathLength="1" style="--bd: 300ms; --retract: -1" />
+          <g class="boot-splash__spin">
+            <circle class="boot-splash__ring" cx="32" cy="32" r="20" />
+            <g class="boot-splash__burst">
+            <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 0ms; --pd: 0ms; --mx: -20px; --my: 0px; --ox: -20px; --oy: 0px" />
+            <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 700ms; --pd: 160ms; --mx: 20px; --my: -12px; --ox: 10px; --oy: -17.32px" />
+            <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 820ms; --pd: 320ms; --mx: 20px; --my: 12px; --ox: 10px; --oy: 17.32px" />
+            </g>
+          </g>
+          <circle class="boot-splash__flash" cx="32" cy="32" r="3.5" />
+        </svg>
+        <div class="boot-splash__word">Dispatch</div>
+      </div>
+    </div>
+<!-- boot-splash:generated:end -->
+
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
