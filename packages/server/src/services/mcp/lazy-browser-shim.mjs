@@ -235,6 +235,21 @@ let ready = false;
  */
 const HANDSHAKE_ID = "dispatch-lazy-init";
 
+/**
+ * How long the real server gets to answer our replayed handshake.
+ *
+ * Belt and braces behind the pre-`initialize` guard above. Everything the shim
+ * owes the client is queued behind `ready`, so a handshake that never lands is
+ * an unbounded silent hang — the single worst failure this process can have,
+ * and the one it actually shipped with. Generous, because a cold browser
+ * server on a loaded machine is slow; finite, because "slow" and "never" have
+ * to be distinguishable from outside.
+ */
+const HANDSHAKE_TIMEOUT_MS = 30_000;
+
+/** Cleared the moment the real server answers; fires only if it never does. */
+let handshakeTimer = null;
+
 function spawnReal() {
   if (child) return;
   if (ownerDir) mkdirSync(ownerDir, { recursive: true });
@@ -274,6 +289,8 @@ function spawnReal() {
     // made.
     if (msg.id === HANDSHAKE_ID) {
       ready = true;
+      if (handshakeTimer) clearTimeout(handshakeTimer);
+      handshakeTimer = null;
       if (msg.result) captureInitialize(msg.result);
       // COLD: this reply is the client's too — it asked, and the manifest had
       // nothing to answer with. Re-addressed to the id it used, because the one
@@ -290,6 +307,18 @@ function spawnReal() {
     if (!manifest) captureTools(msg);
     writeOut(enrichScreenshotResult(msg));
   });
+
+  handshakeTimer = setTimeout(() => {
+    if (ready) return;
+    // Same contract as `child.on("error")`: answer everything outstanding and
+    // go, so the client sees a dead server instead of a thinking one.
+    for (const frame of pending) {
+      failFrame(frame, "browser server did not answer its handshake");
+    }
+    pending = [];
+    process.exit(1);
+  }, HANDSHAKE_TIMEOUT_MS);
+  handshakeTimer.unref?.();
 
   child.stdin.write(
     JSON.stringify({
@@ -334,9 +363,9 @@ function maybeWriteManifest() {
 
 /* ----------------------------------------------------------- client side */
 
-function failFrame(frame, message) {
+function failFrame(frame, message, code = -32000) {
   if (frame.id === undefined) return; // a notification expects no answer
-  writeOut({ jsonrpc: "2.0", id: frame.id, error: { code: -32000, message } });
+  writeOut({ jsonrpc: "2.0", id: frame.id, error: { code, message } });
 }
 
 /**
@@ -383,6 +412,33 @@ createLineReader(process.stdin, (line) => {
   // Remember the handshake params whatever else happens — a cold start needs
   // them to spawn with, and a warm one needs them the moment something does.
   if (msg.method === "initialize") clientInitialize = msg.params;
+
+  // NOTHING MAY SPAWN THE REAL SERVER BEFORE `initialize` ARRIVES, because
+  // spawning replays the client's handshake params and before `initialize`
+  // there are none. goose opens an ACP session with a `server/discover` probe
+  // from a newer MCP draft, ~10s AHEAD of its `initialize`. That one frame
+  // used to fall through to `pending.push(); spawnReal()`, which handshook the
+  // real server with `params: null` — a request it never answers, so `ready`
+  // stayed false forever and every later frame queued behind it, INCLUDING the
+  // client's own `initialize` and `tools/list` that the manifest could have
+  // answered instantly. No timeout anywhere: the session hung silently and
+  // permanently, which is how three goose chats sat at "running" with an empty
+  // transcript and no error.
+  //
+  // `-32601` is not a workaround, it is the right answer twice over: MCP
+  // forbids requests before `initialize`, and it is verbatim what the real
+  // server replies to `server/discover` when asked directly.
+  if (!clientInitialize && msg.method !== "initialize") {
+    // `ping` is the one call the spec does allow at any time, and the shim can
+    // answer it without a process.
+    if (msg.method === "ping") {
+      if (msg.id !== undefined) writeOut({ jsonrpc: "2.0", id: msg.id, result: {} });
+      return;
+    }
+    failFrame(msg, `method not found: ${msg.method}`, -32601);
+    return;
+  }
+
   msg = prepareToolCall(msg);
 
   if (child) {

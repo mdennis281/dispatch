@@ -112,6 +112,48 @@ describe("AcpHarness.createSession", () => {
       }),
     ).toThrow(/DISPATCH_GOOSE_PATH/);
   });
+
+  const spec = (model?: string) => ({
+    permissionMode: "default" as const,
+    effort: "medium" as const,
+    systemPromptAppends: [],
+    mcpServers: {},
+    skills: [],
+    ...(model ? { model } : {}),
+  });
+
+  const installed = (fetchModels: () => Promise<ReturnType<typeof toModelOptions> | null>) =>
+    new AcpHarness({
+      runtime: { kind: "goose", source: "installed", available: true, path: "/x/goose" },
+      fetchModels,
+      connect: () => ({ ready: async () => ({}) }) as never,
+    });
+
+  it("refuses a model the configured host has never pulled, and names what it does have", async () => {
+    // The failure this prevents: OLLAMA_HOST unset resolves to loopback, a
+    // second small Ollama answers there, and the 30B the user meant lives on
+    // another box. Before this the session opened anyway and failed later,
+    // somewhere far less legible.
+    const harness = installed(async () => toModelOptions([tag("llama3.1:8b", 4_920_753_328)]));
+    await harness.listModels();
+    expect(() => harness.createSession(spec("qwen3-coder:30b"))).toThrow(/llama3\.1:8b/);
+    expect(() => harness.createSession(spec("qwen3-coder:30b"))).toThrow(/OLLAMA_HOST/);
+  });
+
+  it("allows a model that IS there", async () => {
+    const harness = installed(async () => toModelOptions([tag("llama3.1:8b", 4_920_753_328)]));
+    await harness.listModels();
+    expect(() => harness.createSession(spec("llama3.1:8b"))).not.toThrow();
+  });
+
+  it("does not refuse anything when the probe failed — a seed cannot know what is pulled", async () => {
+    // listModels() falls back to a static seed when Ollama is unreachable.
+    // Validating against that would reject working models every time the probe
+    // happened to be down; unreachable is a different error and arrives on its own.
+    const harness = installed(async () => null);
+    await harness.listModels();
+    expect(() => harness.createSession(spec("anything-at-all:70b"))).not.toThrow();
+  });
 });
 
 describe("AcpHarness.readLimits", () => {
