@@ -1,5 +1,6 @@
 import {
   SHELL_TRANSCRIPT_CATEGORIES,
+  layerSourceLabel,
   resolveLayered,
   type LayerSource,
   type ShellTranscriptCategory,
@@ -92,6 +93,16 @@ export function useShellFilter(chatId: string): ResolvedShellFilter {
     source: r.source,
     projectId,
   };
+}
+
+/**
+ * Where the filter a chat is actually using was set. The `default` case says
+ * "everything" rather than "built-in default" because that IS the observable
+ * difference — nobody filtering a transcript cares which layer stayed silent,
+ * they care whether anything is being hidden from them.
+ */
+export function shellFilterSourceLabel(source: LayerSource): string {
+  return layerSourceLabel(source, "showing everything by default");
 }
 
 export function normalizedShellFilter(value: readonly ShellTranscriptCategory[]): ShellTranscriptFilter {

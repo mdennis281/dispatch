@@ -75,9 +75,10 @@ export const SECTIONS: SectionDef[] = [
     blurb: "What a new chat here starts as",
     explainer:
       "The project layer of the chat settings: provider, model, effort, mode, whether sent " +
-      "context is shown, and whether spawned chats need your approval. Each one is inherited " +
-      "from your app settings until this repo pins it, and every chat can still override it " +
-      "for itself. Committed with the repo, so the whole team's chats start the same way.",
+      "context is shown, which tool exchanges stay in the transcript, and whether spawned chats " +
+      "need your approval. Each one is inherited from your app settings until this repo pins it, " +
+      "and every chat can still override it for itself. Committed with the repo, so the whole " +
+      "team's chats start the same way.",
     noun: "default",
     countable: false,
   },

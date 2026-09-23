@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { Cpu } from "lucide-react";
 import {
   AGENT_TASKS,
@@ -17,6 +18,8 @@ import { modeLabel } from "../../chat/ModeControl.js";
 import { EFFORT_OPTIONS } from "../../../lib/efforts.js";
 import { useProjects } from "../../../stores/projects.js";
 import { useSubscriptions } from "../../../stores/subscriptions.js";
+import { useView } from "../../../stores/view.js";
+import { Button } from "../../ui/Button.js";
 import type { AppPaneProps } from "./types.js";
 
 /**
@@ -45,6 +48,25 @@ export function ChatSection({ draft, patch, harnesses, catalogs }: AppPaneProps)
   const modes = useProjects((s) => s.modes);
   const accounts = useSubscriptions((s) => s.list);
   const harness = draft.harness ?? {};
+  // Every project that pins its own transcript filter — i.e. every project for
+  // which the panel below is NOT the answer.
+  //
+  // The filter is a `useMemo`, NOT part of the selector: a selector that builds
+  // an array returns a new identity on every store read, which zustand reads as
+  // "changed" and re-renders into — "Maximum update depth exceeded", the whole
+  // settings panel replaced by the error boundary.
+  const projects = useProjects((s) => s.projects);
+  const overriding = useMemo(
+    () => projects.filter((p) => p.shellFilter !== undefined),
+    [projects],
+  );
+  const openProjectFilter = (projectId: string) => {
+    // The project-settings view reads the ACTIVE project, so getting there is a
+    // project switch, not just a route change.
+    useProjects.getState().setActiveProject(projectId);
+    useView.getState().setProjectSection("chat");
+    useView.getState().setView("project-settings");
+  };
 
   const patchHarnessDefault = (kind: HarnessKind, p: HarnessDefaults) =>
     patch({
@@ -247,6 +269,35 @@ export function ChatSection({ draft, patch, harnesses, catalogs }: AppPaneProps)
               patch({ shellFilter: shellFilter ?? [...SHELL_TRANSCRIPT_CATEGORIES] })
             }
           />
+          {/* The panel above is the BOTTOM of the chain, and a project pin is
+              invisible from here — so a category switched back on could save
+              correctly and change nothing in the chats the user was looking at,
+              with no surface anywhere admitting why. Naming the projects that
+              outrank this is the whole fix; the link is just the shortcut. */}
+          {overriding.length > 0 && (
+            <div className="mt-2 rounded-md border border-warn-line bg-warn-ghost px-2.5 py-2">
+              <p className="text-2xs leading-snug text-secondary">
+                {overriding.length === 1
+                  ? "One project pins its own filter and ignores these defaults:"
+                  : `${overriding.length} projects pin their own filter and ignore these defaults:`}
+              </p>
+              <div className="mt-1.5 flex flex-wrap gap-1.5">
+                {overriding.map((p) => (
+                  <Button
+                    key={p.id}
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => openProjectFilter(p.id)}
+                  >
+                    {p.name}
+                    <span className="ml-1 text-faint">
+                      {p.shellFilter!.length}/{SHELL_TRANSCRIPT_CATEGORIES.length}
+                    </span>
+                  </Button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       </div>
 

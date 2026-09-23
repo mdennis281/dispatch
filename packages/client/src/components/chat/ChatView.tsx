@@ -13,6 +13,7 @@ import {
   EyeOff,
   Search,
   RotateCcw,
+  SlidersHorizontal,
 } from "lucide-react";
 import type {
   AgentActivity,
@@ -35,6 +36,12 @@ import { tracePage } from "../../lib/interactionTrace.js";
 import { TodosStrip } from "./TodosStrip.js";
 import { Composer } from "./Composer.js";
 import { DeleteChatDialog } from "./DeleteChatDialog.js";
+import { ShellFilterModal } from "./ShellFilterModal.js";
+import {
+  SHELL_FILTER_OPTIONS,
+  shellFilterSourceLabel,
+  useShellFilter,
+} from "../../lib/shellFilter.js";
 import { TranscriptSearch } from "./TranscriptSearch.js";
 import { useChatRename } from "./useChatRename.js";
 import { useChatMessages, useChatPage, useMessages } from "../../stores/messages.js";
@@ -191,6 +198,13 @@ export function ChatView({ chat }: { chat: Chat }) {
   // so a chat renames and deletes the same way wherever you reach for it.
   const rename = useChatRename(chat);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  // The transcript filter's only other door is the sliders icon in a shell or
+  // thinking group header — and that header lives INSIDE the element the filter
+  // collapses. Hide both categories and the control disappears with the content
+  // it hid, leaving no way back from inside the chat. This entry is outside the
+  // transcript, so it survives whatever the filter is set to.
+  const shellFilter = useShellFilter(chat.id);
+  const [filterOpen, setFilterOpen] = useState(false);
   // What this chat still has running — its live shells plus every listener that
   // descends from them. Read here so the menu can put the COUNT on the item:
   // "kill the processes" with no number is a click nobody can calibrate.
@@ -606,6 +620,16 @@ export function ChatView({ chat }: { chat: Chat }) {
                       Inherit context visibility ({injected.inherited ? "shown" : "hidden"})
                     </MenuItem>
                   )}
+                  <MenuItem
+                    icon={<SlidersHorizontal />}
+                    title={`${shellFilter.enabled.length} of ${SHELL_FILTER_OPTIONS.length} categories shown, set by ${shellFilterSourceLabel(shellFilter.source)}`}
+                    onClick={() => {
+                      setFilterOpen(true);
+                      close();
+                    }}
+                  >
+                    Transcript visibility ({shellFilter.enabled.length}/{SHELL_FILTER_OPTIONS.length})
+                  </MenuItem>
                   <div className="my-1 h-px bg-line" />
                   {/* A long chat can be holding several dev servers by now, on
                       ports nothing else in the UI mentions. The roster is the
@@ -746,6 +770,13 @@ export function ChatView({ chat }: { chat: Chat }) {
         title={chat.title}
         open={confirmDelete}
         onClose={() => setConfirmDelete(false)}
+      />
+
+      <ShellFilterModal
+        open={filterOpen}
+        onClose={() => setFilterOpen(false)}
+        chatId={chat.id}
+        resolved={shellFilter}
       />
     </div>
   );

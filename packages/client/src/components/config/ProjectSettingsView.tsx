@@ -44,6 +44,7 @@ import {
   Undo2,
   FolderInput,
   FolderOutput,
+  SlidersHorizontal,
 } from "lucide-react";
 import {
   ARCHIVE_EXT,
@@ -458,9 +459,9 @@ export function ProjectSettingsView() {
         // Marking only Workflow meant reviewer edits looked saved from the
         // rail — the section you were just editing was the one not flagged.
         dirty:
-          (s.id === "workflow" && (workflowDirty || filterDirty)) ||
+          (s.id === "workflow" && workflowDirty) ||
           (s.id === "reviewer" && workflowDirty) ||
-          (s.id === "chat" && chatDirty),
+          (s.id === "chat" && (chatDirty || filterDirty)),
       }))}
       active={section}
       onSelect={setSection}
@@ -627,10 +628,40 @@ export function ProjectSettingsView() {
                   inRepo={inRepo}
                   disabled={saving}
                 />
-                <div className="border-t border-line-soft pt-3">
-                  <div className="mb-1 text-xs font-medium text-secondary">Transcript visibility</div>
+              </div>
+            )}
+
+            {/* The project layer of the chat settings. Its own draft, saved
+                through the same bar — the manifest write is a separate patch
+                because these keys are manifest-only where the workflow block
+                has a `.data` fallback. */}
+            {activeSection.id === "chat" && project && (
+              <div className="space-y-4">
+                <ChatDefaultsSection
+                  value={chatDefaults}
+                  onChange={setChatDraft}
+                  hasDir={hasDir}
+                  disabled={saving}
+                />
+                {/* Next to "Show sent context", the other setting that only
+                    changes what the transcript RENDERS. It lived under Workflow
+                    — a section about how change ships — where nobody looking for
+                    a missing shell block would think to look, and a project pin
+                    is invisible from app settings, so the app panel appeared to
+                    save and do nothing.
+
+                    Its own draft and its own save call, unlike everything in
+                    `ChatDefaultsSection`: the filter has a `.data` fallback, so
+                    it is the one setting on this pane that a project with no
+                    config dir can still keep. Hence no `hasDir` gate. */}
+                <div className="rounded-md border border-line bg-panel-2/40 px-3 py-2.5">
+                  <div className="mb-1 flex items-center gap-1.5 text-xs font-medium text-secondary [&_svg]:size-3.5">
+                    <SlidersHorizontal /> Transcript visibility
+                  </div>
                   <p className="mb-2 text-2xs leading-snug text-faint">
-                    Project visibility defaults. Chats inherit this filter until they override it.
+                    Which tool exchanges and reasoning stay in the transcript for chats in this
+                    repo. Pinned here, this wins over your app settings; chats can still override
+                    it for themselves.
                   </p>
                   <ShellFilterPanel
                     value={shellFilter}
@@ -640,19 +671,6 @@ export function ProjectSettingsView() {
                   />
                 </div>
               </div>
-            )}
-
-            {/* The project layer of the chat settings. Its own draft, saved
-                through the same bar — the manifest write is a separate patch
-                because these keys are manifest-only where the workflow block
-                has a `.data` fallback. */}
-            {activeSection.id === "chat" && project && (
-              <ChatDefaultsSection
-                value={chatDefaults}
-                onChange={setChatDraft}
-                hasDir={hasDir}
-                disabled={saving}
-              />
             )}
 
             {/* Reads and writes the SAME workflow draft as the section above —
