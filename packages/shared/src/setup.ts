@@ -77,6 +77,16 @@ export interface RuntimeLoginStatus {
   /** False when the runtime is absent or the probe could not run at all. */
   checked: boolean;
   loggedIn: boolean;
+  /**
+   * True when this runtime HAS no login to check — it runs a local model, so
+   * there is no account, no plan and no credential.
+   *
+   * Distinct from `checked: false`, which means a probe was attempted and
+   * failed. Without this, a provider with no `auth` subcommand renders its
+   * CLI's own usage error on the setup card, which reads as breakage rather
+   * than as "nothing to log into".
+   */
+  notRequired?: boolean;
   /** How it is logged in, in the runtime's own words (`claude.ai`, `api-key`, `chatgpt`). */
   method?: string;
   /** Plan or tier, when the runtime says (`max`, `pro`, `team`). */

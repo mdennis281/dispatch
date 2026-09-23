@@ -69,7 +69,7 @@ export type ShellTranscriptFilter = z.infer<typeof ShellTranscriptFilterSchema>;
  * at creation is what lets the project default change without stranding chats
  * that are already running.
  */
-export const HarnessKindSchema = z.enum(["claude", "codex"]);
+export const HarnessKindSchema = z.enum(["claude", "codex", "goose"]);
 export type HarnessKind = z.infer<typeof HarnessKindSchema>;
 
 /** The harness a project gets when it has never said otherwise. */

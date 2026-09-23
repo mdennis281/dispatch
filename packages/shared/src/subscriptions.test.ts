@@ -1,24 +1,30 @@
 import { describe, it, expect } from "vitest";
 import { resolveSubscriptions, subscriptionFor, SubscriptionListSchema } from "./subscriptions.js";
+import { PROVIDER_IDS } from "./providers.js";
 
 describe("resolveSubscriptions", () => {
   it("gives an install with no list one implicit account per provider", () => {
     const all = resolveSubscriptions({});
-    expect(all.map((s) => [s.id, s.provider, s.implicit])).toEqual([
-      ["claude", "claude", true],
-      ["codex", "codex", true],
-    ]);
+    // Derived from the registry rather than spelled out, so registering a new
+    // provider does not fail a test about the mechanism.
+    expect(all.map((s) => [s.id, s.provider, s.implicit])).toEqual(
+      PROVIDER_IDS.map((id) => [id, id, true]),
+    );
   });
 
   it("fills in only the providers the stored list says nothing about", () => {
-    // Listing two Claude logins must not make Codex unusable.
+    // Listing two Claude logins must not make the other providers unusable.
     const all = resolveSubscriptions({
       subscriptions: [
         { id: "claude1", name: "one", provider: "claude" },
         { id: "claude2", name: "two", provider: "claude", configDir: "/x/.claude2" },
       ],
     });
-    expect(all.map((s) => s.id)).toEqual(["claude1", "claude2", "codex"]);
+    expect(all.map((s) => s.id)).toEqual([
+      "claude1",
+      "claude2",
+      ...PROVIDER_IDS.filter((id) => id !== "claude"),
+    ]);
   });
 
   it("never lets an implicit id collide with a stored one", () => {

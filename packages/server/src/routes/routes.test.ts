@@ -19,7 +19,7 @@ import { EventBus } from "../bus.js";
 import { Store } from "../store/index.js";
 import { SessionBroker, type QueryFn } from "../services/session-broker.js";
 import { GitHubService, type ExecaLike } from "../services/github.js";
-import type { WsServerEvent } from "@dispatch/shared";
+import { PROVIDER_IDS, type WsServerEvent } from "@dispatch/shared";
 
 /* --------------------------------------------------------------- scripted SDK */
 
@@ -318,8 +318,13 @@ describe("routes — REST CRUD", () => {
       },
     });
     expect(put.statusCode).toBe(200);
-    // The stored account plus an implicit one for the provider it didn't mention.
-    expect(put.json().map((s: { id: string }) => s.id)).toEqual(["claude2", "codex"]);
+    // The stored account plus an implicit one for every provider it didn't
+    // mention — derived from the registry so a new provider doesn't fail a test
+    // about subscription plumbing.
+    expect(put.json().map((s: { id: string }) => s.id)).toEqual([
+      "claude2",
+      ...PROVIDER_IDS.filter((id) => id !== "claude"),
+    ]);
     expect(put.json()[0]).toMatchObject({ loggedIn: false, dirExists: false, isDefault: true });
 
     // A settings draft loaded before the account existed must not delete it.

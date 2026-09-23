@@ -93,8 +93,31 @@ describe("probeCodexLogin", () => {
 });
 
 describe("probeRuntimeLogins", () => {
-  const harness = (kind: "claude" | "codex", runtime: Partial<ReturnType<Harness["runtime"]>>) =>
+  const harness = (
+    kind: "claude" | "codex" | "goose",
+    runtime: Partial<ReturnType<Harness["runtime"]>>,
+  ) =>
     ({ kind, runtime: () => ({ kind, source: "installed", available: true, ...runtime }) }) as unknown as Harness;
+
+  it("does not run a login probe for a local-model runtime", async () => {
+    // Regression: the dispatcher was `kind === "codex" ? codex : claude`, so a
+    // third provider fell through to `claude auth status`. goose has no `auth`
+    // subcommand, so its CLI usage error was rendered onto the setup card as
+    // "Login not checked — error: unrecognized subcommand 'auth'".
+    let ranAnything = false;
+    const run: RunProbe = async () => {
+      ranAnything = true;
+      return { code: 1, stdout: "", stderr: "error: unrecognized subcommand 'auth'" };
+    };
+    const [status] = await probeRuntimeLogins(
+      [harness("goose", { path: "/x/goose", version: "1.51.0" })],
+      null,
+      { run, env: {} },
+    );
+    expect(ranAnything).toBe(false);
+    expect(status!.login).toMatchObject({ checked: true, notRequired: true });
+    expect(status!.login.error).toBeUndefined();
+  });
 
   it("probes the bundled Claude binary when nothing newer is installed", async () => {
     const asked: string[] = [];

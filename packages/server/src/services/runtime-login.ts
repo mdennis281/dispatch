@@ -22,6 +22,7 @@
 import { execFile } from "node:child_process";
 import {
   subscriptionFor,
+  type HarnessKind,
   type RuntimeLoginStatus,
   type RuntimeSetupStatus,
   type SubscriptionSettings,
@@ -128,6 +129,39 @@ export async function probeCodexLogin(
   };
 }
 
+/**
+ * The login probe for a provider.
+ *
+ * An exhaustive switch rather than a ternary defaulting to Claude. The previous
+ * shape — `kind === "codex" ? codex : claude` — was correct for two providers
+ * and silently wrong for a third: `goose` fell through to `claude auth status`,
+ * which shelled out to a binary with no `auth` subcommand and printed its usage
+ * error onto the setup card. Exactly the failure `providers.ts` warns about.
+ */
+async function probeLogin(
+  kind: HarnessKind,
+  exe: string,
+  env: NodeJS.ProcessEnv,
+  run: RunProbe,
+): Promise<RuntimeLoginStatus> {
+  switch (kind) {
+    case "codex":
+      return probeCodexLogin(exe, env, run);
+    case "goose":
+      // Nothing to probe: a local model has no account, no plan and no
+      // credential. Asking anyway is what produced the usage-error card.
+      return {
+        checked: true,
+        loggedIn: true,
+        notRequired: true,
+        method: "local model",
+      };
+    case "claude":
+    default:
+      return probeClaudeLogin(exe, env, run);
+  }
+}
+
 export interface RuntimeLoginDeps {
   run?: RunProbe;
   /** Where the bundled Claude binary lives; injectable so tests never resolve the SDK. */
@@ -175,9 +209,7 @@ export async function probeRuntimeLogins(
         };
       }
       const env = { ...baseEnv, ...accountOf(subscriptionFor(settings, rt.kind)).env };
-      const login =
-        rt.kind === "codex" ? await probeCodexLogin(exe, env, run) : await probeClaudeLogin(exe, env, run);
-      return { ...base, login };
+      return { ...base, login: await probeLogin(rt.kind, exe, env, run) };
     }),
   );
 }
