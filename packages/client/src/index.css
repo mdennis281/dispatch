@@ -320,6 +320,14 @@
   body {
     overflow: hidden;
     overscroll-behavior: none;
+    /*
+     * Kills double-tap-to-zoom (and the 300ms click delay that comes with
+     * waiting to find out whether a tap was one). A pinch has a cancellable
+     * event and is handled in lib/pageZoom.ts; a double tap does not, so this
+     * is the only place to say no to it. Not inherited, so the image viewer's
+     * `touch-action: none` still wins where it is set.
+     */
+    touch-action: manipulation;
   }
 
   html {
