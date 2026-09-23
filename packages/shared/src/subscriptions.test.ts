@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { resolveSubscriptions, subscriptionFor, SubscriptionListSchema } from "./subscriptions.js";
+import {
+  endpointOrigin,
+  resolveSubscriptions,
+  subscriptionFor,
+  SubscriptionListSchema,
+} from "./subscriptions.js";
 import { PROVIDER_IDS } from "./providers.js";
 
 describe("resolveSubscriptions", () => {
@@ -32,6 +37,17 @@ describe("resolveSubscriptions", () => {
       subscriptions: [{ id: "codex", name: "a Claude login named codex", provider: "claude" }],
     });
     expect(all.find((s) => s.provider === "codex")?.id).toBe("codex-2");
+  });
+});
+
+describe("endpointOrigin", () => {
+  it("accepts Ollama's own bare host:port, which is what a user copies", () => {
+    expect(endpointOrigin("10.0.0.77:11434")).toBe("http://10.0.0.77:11434");
+  });
+
+  it("leaves an explicit scheme alone and strips trailing slashes", () => {
+    expect(endpointOrigin("https://box:443/")).toBe("https://box:443");
+    expect(endpointOrigin("  http://box:11434//  ")).toBe("http://box:11434");
   });
 });
 

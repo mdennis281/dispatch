@@ -21,7 +21,7 @@
  * back to the static seed rather than erroring, on the same principle as the
  * other two harnesses: a stale list beats a broken picker.
  */
-import { fallbackModels, type ModelOption } from "@dispatch/shared";
+import { endpointOrigin, fallbackModels, providerFor, type ModelOption } from "@dispatch/shared";
 import type {
   Harness,
   HarnessAccount,
@@ -107,12 +107,17 @@ export const GOOSE_AGENT: AcpAgentSpec = {
   }),
 };
 
-/** The Ollama endpoint in effect, normalised to an absolute origin. */
+/**
+ * The AMBIENT Ollama endpoint — the server's own `OLLAMA_HOST`, or loopback.
+ *
+ * This is the fallback, not the answer. An account that names a host wins over
+ * it (see {@link AcpHarness.hostFor}), which is the whole point of endpoint
+ * accounts: the machine Dispatch runs on is frequently not the machine the
+ * models are on.
+ */
 export function ollamaHost(env: NodeJS.ProcessEnv = process.env): string {
   const raw = env.OLLAMA_HOST?.trim();
-  if (!raw) return DEFAULT_OLLAMA_HOST;
-  // Ollama's own convention allows a bare `host:port`, which is not a URL.
-  return /^https?:\/\//.test(raw) ? raw.replace(/\/$/, "") : `http://${raw}`;
+  return raw ? endpointOrigin(raw) : DEFAULT_OLLAMA_HOST;
 }
 
 export interface AcpHarnessOpts {
@@ -143,8 +148,18 @@ export class AcpHarness implements Harness {
   private readonly genId: () => string;
   private readonly now: () => number;
 
-  private modelCache?: { at: number; models: ModelOption[] };
-  private modelProbe?: Promise<ModelOption[] | null>;
+  /**
+   * Cached `/api/tags`, KEYED BY HOST.
+   *
+   * Not one cache, because two goose accounts are two different machines with
+   * different models pulled on them. A single cache would answer the picker
+   * for account B with whatever account A last saw — and since the cache also
+   * backs {@link assertModelAvailable}, it would reject a model that really is
+   * there, or admit one that is not.
+   */
+  private readonly modelCache = new Map<string, { at: number; models: ModelOption[] }>();
+  /** In-flight probes, also per host, so two chats on one box share one fetch. */
+  private readonly modelProbes = new Map<string, Promise<ModelOption[] | null>>();
 
   constructor(opts: AcpHarnessOpts = {}) {
     this.opts = opts;
@@ -158,24 +173,43 @@ export class AcpHarness implements Harness {
     return this.opts.runtime ?? this.agent.runtime();
   }
 
-  async listModels(opts: { refresh?: boolean } = {}): Promise<ModelOption[]> {
-    if (!opts.refresh && this.modelCache && this.now() - this.modelCache.at < CACHE_TTL_MS) {
-      return this.modelCache.models;
+  /**
+   * The endpoint an account serves models from.
+   *
+   * An account's own host wins over the server's ambient `OLLAMA_HOST`, which
+   * wins over loopback. Read through the provider descriptor rather than a
+   * literal `"OLLAMA_HOST"` so the env var is declared in exactly one place —
+   * the same place `accountOf` writes it from.
+   */
+  private hostFor(account?: HarnessAccount): string {
+    const key = providerFor(this.kind).account.endpointEnv;
+    const named = key ? account?.env[key]?.trim() : undefined;
+    return named ? endpointOrigin(named) : ollamaHost();
+  }
+
+  async listModels(opts: { refresh?: boolean; account?: HarnessAccount } = {}): Promise<
+    ModelOption[]
+  > {
+    const host = this.hostFor(opts.account);
+    const cached = this.modelCache.get(host);
+    if (!opts.refresh && cached && this.now() - cached.at < CACHE_TTL_MS) return cached.models;
+
+    let probe = this.modelProbes.get(host);
+    if (!probe) {
+      probe = this.probeModels(host).finally(() => this.modelProbes.delete(host));
+      this.modelProbes.set(host, probe);
     }
-    this.modelProbe ??= this.probeModels().finally(() => {
-      this.modelProbe = undefined;
-    });
-    const models = await this.modelProbe;
+    const models = await probe;
     // Never throw: a picker with a stale list beats a picker that errored.
-    if (!models?.length) return this.modelCache?.models ?? fallbackModels(this.kind);
-    this.modelCache = { at: this.now(), models };
+    if (!models?.length) return cached?.models ?? fallbackModels(this.kind);
+    this.modelCache.set(host, { at: this.now(), models });
     return models;
   }
 
-  private async probeModels(): Promise<ModelOption[] | null> {
+  private async probeModels(host: string): Promise<ModelOption[] | null> {
     const probe = this.opts.fetchModels ?? fetchOllamaModels;
     try {
-      return await probe(ollamaHost());
+      return await probe(host);
     } catch {
       return null;
     }
@@ -201,7 +235,12 @@ export class AcpHarness implements Harness {
    * {@link HarnessTextRequest} seam exists to give a provider.
    */
   async generateText(request: HarnessTextRequest): Promise<string> {
-    const models = await this.listModels();
+    // The account's own Ollama, not the ambient one — a title generated on the
+    // wrong box is a title generated by a model the chat is not even using.
+    const host = this.hostFor(request.account);
+    const models = await this.listModels({
+      ...(request.account ? { account: request.account } : {}),
+    });
     // The cheap row, which `toModelOptions` marks as the smallest model on
     // disk. Falling through to `models[0]` only happens for a single-model box
     // or the static seed, where there is nothing cheaper to choose.
@@ -212,7 +251,7 @@ export class AcpHarness implements Harness {
     const timer = setTimeout(() => controller.abort(), request.timeoutMs ?? 60_000);
     (timer as unknown as { unref?: () => void }).unref?.();
     try {
-      const res = await fetch(`${ollamaHost()}/api/generate`, {
+      const res = await fetch(`${host}/api/generate`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -249,14 +288,15 @@ export class AcpHarness implements Harness {
    * happened to be down. Silence there is correct: unreachable is a different
    * error, and it arrives on its own.
    */
-  private assertModelAvailable(model: string | undefined): void {
-    if (!model || !this.modelCache?.models.length) return;
-    const have = this.modelCache.models.map((m) => m.value);
+  private assertModelAvailable(model: string | undefined, host: string): void {
+    const cached = this.modelCache.get(host);
+    if (!model || !cached?.models.length) return;
+    const have = cached.models.map((m) => m.value);
     if (have.includes(model)) return;
     throw new Error(
-      `${this.kind}: model "${model}" is not available at ${ollamaHost()}. ` +
+      `${this.kind}: model "${model}" is not available at ${host}. ` +
         `That host has: ${have.join(", ")}. ` +
-        `Pull it there, pick one of those, or point OLLAMA_HOST at the machine that has it.`,
+        `Pull it there, pick one of those, or select an account pointing at the machine that has it.`,
     );
   }
 
@@ -267,7 +307,7 @@ export class AcpHarness implements Harness {
         "goose is not installed. Install the goose CLI, or set DISPATCH_GOOSE_PATH to its binary.",
       );
     }
-    this.assertModelAvailable(spec.model);
+    this.assertModelAvailable(spec.model, this.hostFor(spec.account));
     const connect =
       this.opts.connect ??
       ((o): AcpConnection => new AcpConnection({ ...o, onStderr: this.opts.onStderr }));

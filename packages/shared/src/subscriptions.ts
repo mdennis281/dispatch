@@ -35,6 +35,17 @@ export const SubscriptionSchema = z.object({
    * else `~/<defaultConfigDir>`), which is what the implicit subscriptions use.
    */
   configDir: z.string().trim().min(1).optional(),
+  /**
+   * The endpoint this account serves models from, for a provider whose
+   * `account.endpointEnv` says it has one (goose → `OLLAMA_HOST`). Absent means
+   * that provider's default endpoint, which is what the implicit subscriptions
+   * use. Meaningless — and ignored — for a provider without one.
+   *
+   * Stored as written. Ollama's own convention allows a bare `host:port`, so
+   * demanding a scheme here would reject the exact string a user copies out of
+   * their own Ollama config; normalising to an origin is the reader's job.
+   */
+  host: z.string().trim().min(1).max(200).optional(),
 });
 export type Subscription = z.infer<typeof SubscriptionSchema>;
 
@@ -47,6 +58,25 @@ export const SubscriptionListSchema = z
   .array(SubscriptionSchema)
   .max(32)
   .refine((list) => new Set(list.map((s) => s.id)).size === list.length, "duplicate subscription id");
+
+/**
+ * A stored `host` as an absolute origin, with no trailing slash.
+ *
+ * Shared because the value travels: `accountOf` writes it into the env a
+ * runtime is spawned with, and the harness reads it back to decide which
+ * Ollama to list models from. Two normalisers would eventually disagree about
+ * a trailing slash and the model list would silently belong to a cache key
+ * nobody looks up.
+ *
+ * A bare `host:port` is Ollama's own spelling — it is what `OLLAMA_HOST` is set
+ * to in the service's config — so it is what a user copies, and rejecting it
+ * for lacking a scheme would be pedantry at their expense.
+ */
+export function endpointOrigin(raw: string): string {
+  const trimmed = raw.trim();
+  const absolute = /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
+  return absolute.replace(/\/+$/, "");
+}
 
 /** A subscription as the rest of the app sees it: explicit or implicit. */
 export interface ResolvedSubscription extends Subscription {

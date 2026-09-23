@@ -16,6 +16,7 @@ import { cp, mkdir, readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import {
+  endpointOrigin,
   providerFor,
   resolveSubscriptions,
   subscriptionFor,
@@ -79,10 +80,21 @@ function sameDir(a: string, b: string): boolean {
 export function accountOf(sub: ResolvedSubscription, machine: MachineEnv = {}): HarnessAccount {
   const configDir = configDirOf(sub, machine);
   const isDefault = sameDir(configDir, defaultConfigDir(sub.provider, machine));
+  const { configDirEnv, endpointEnv } = providerFor(sub.provider).account;
   return {
     subscriptionId: sub.id,
     configDir,
-    env: isDefault ? {} : { [providerFor(sub.provider).account.configDirEnv]: configDir },
+    env: {
+      ...(isDefault ? {} : { [configDirEnv]: configDir }),
+      // An endpoint provider's account IS its host, so unlike the config dir
+      // this is overlaid whenever the subscription names one — including when
+      // it happens to match the default. The two are not the same case: a dir
+      // equal to the default was never chosen, while a host equal to the
+      // default was, and a user who typed their loopback in deliberately
+      // should not have it silently fall back to the server's ambient
+      // `OLLAMA_HOST` if one is ever set.
+      ...(endpointEnv && sub.host ? { [endpointEnv]: endpointOrigin(sub.host) } : {}),
+    },
   };
 }
 
