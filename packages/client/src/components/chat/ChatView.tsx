@@ -31,6 +31,7 @@ import { MessageList } from "./MessageList.js";
 import { StreamingTail } from "./StreamingTail.js";
 import { clampSelectionToMessage } from "../../lib/transcriptCopy.js";
 import { measurePageAnchor, restoredScrollTop, type PageAnchor } from "./pageAnchor.js";
+import { tracePage } from "../../lib/interactionTrace.js";
 import { TodosStrip } from "./TodosStrip.js";
 import { Composer } from "./Composer.js";
 import { DeleteChatDialog } from "./DeleteChatDialog.js";
@@ -384,6 +385,15 @@ export function ChatView({ chat }: { chat: Chat }) {
     const page = useMessages.getState().pages[chat.id];
     if (!page?.hasMore || page.loadingOlder) return;
     autoChainRef.current += 1;
+    // Diagnostic only (no-op unless the viewport readout is recording). The
+    // chain counter is the number that matters here: a device trace showed
+    // seven pages landing in 1.6s, each one leaving the reader back at the top
+    // and so qualifying the next. See lib/interactionTrace.ts.
+    tracePage("request", {
+      chain: autoChainRef.current,
+      top: Math.round(el.scrollTop),
+      h: el.scrollHeight,
+    });
     // Captured only when a load will really happen, so the restore below can't
     // act on metrics from a scroll that fetched nothing.
     anchorRef.current = measurePageAnchor(el, transcriptRef.current?.firstElementChild ?? null);
@@ -439,12 +449,23 @@ export function ChatView({ chat }: { chat: Chat }) {
     anchorRef.current = null;
     if (!el || !anchor) return;
     const row = anchor.row?.isConnected ? anchor.row : null;
-    el.scrollTop = restoredScrollTop(anchor, {
+    const next = restoredScrollTop(anchor, {
       rowTop: row ? row.getBoundingClientRect().top - el.getBoundingClientRect().top : null,
       scrollTop: el.scrollTop,
       scrollHeight: el.scrollHeight,
       clientHeight: el.clientHeight,
     });
+    // What the restore BELIEVED, next to what it was working from. The `set`
+    // entry that follows records whether the write survived.
+    tracePage("restore", {
+      to: Math.round(next),
+      from: Math.round(el.scrollTop),
+      rowAlive: !!row,
+      h: el.scrollHeight,
+      c: el.clientHeight,
+      rows: messages.length,
+    });
+    el.scrollTop = next;
   }, [messages, loadingOlder]);
 
   // A chat switch re-anchors: the new transcript's first row isn't a "prepend".

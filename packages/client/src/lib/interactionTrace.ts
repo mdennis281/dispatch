@@ -24,6 +24,7 @@
  */
 import { create } from "zustand";
 import { useViewport } from "../stores/viewport.js";
+import { probeScrollAnchoring } from "./scrollAnchoring.js";
 
 /** One recorded moment. `t` is ms since the recorder started. */
 export interface TraceEntry {
@@ -36,6 +37,9 @@ export interface TraceEntry {
 
 export type TraceKind =
   | "touch"
+  | "poll"
+  | "dom"
+  | "page"
   | "pcancel"
   | "scroll"
   | "set"
@@ -57,12 +61,22 @@ export interface TraceSnapshot {
     dpr: number;
     /** What the recorder was watching for `size` — the last scroller touched. */
     scroller?: string;
+    /**
+     * Is row virtualization actually live on THIS device, and why?
+     *
+     * `content-visibility` is gated on a measured probe (lib/scrollAnchoring),
+     * and the first device trace after that shipped still showed 127 of 129 row
+     * resizes coming from the 90px placeholder — i.e. the gate was open on a
+     * phone that visibly does not anchor. Inferring that from resize values is
+     * two steps removed; this records the answer itself.
+     */
+    anchor?: { attr: string | null; rowCv: string | null; probe: boolean | null };
   };
   entries: TraceEntry[];
 }
 
 /** Oldest entries fall off first. A 2s drag is ~120 touchmoves, so this is minutes. */
-const CAPACITY = 4000;
+const CAPACITY = 8000;
 /** How many entries the overlay tail shows. */
 const TAIL = 8;
 /** How many touch points the on-screen finger trail keeps. */
@@ -116,6 +130,21 @@ function push(e: Omit<TraceEntry, "t">): void {
   publish();
 }
 
+/**
+ * An app-level paging marker — recorded only while a trace is running.
+ *
+ * The recorder can see a scroll and a DOM mutation, but not the DECISION that
+ * produced them: that an older page was requested, whether it was the automatic
+ * chain or a tap, what anchor was captured, and what the restore computed. The
+ * paging cascade in the 2026-09-23 trace is a loop between those decisions and
+ * the scroll position, so both halves have to be on the same timeline.
+ *
+ * A no-op with the readout off, so the paging path pays nothing in normal use.
+ */
+export function tracePage(phase: string, detail: Record<string, unknown> = {}): void {
+  if (t0) push({ k: "page", phase, ...detail });
+}
+
 /** A free-text marker, so the person holding the phone can label what they just did. */
 export function traceNote(text: string): void {
   if (t0) push({ k: "note", text });
@@ -163,6 +192,30 @@ function caller(): string {
     .slice(0, 90);
 }
 
+/**
+ * What the row-virtualization gate is ACTUALLY doing right now.
+ *
+ * `attr` is the flag `lib/scrollAnchoring` set before first render, `rowCv` is
+ * what a real transcript row computes to, and `probe` re-runs the measurement
+ * live. Disagreement between them is the interesting case: a `probe` of true on
+ * a phone whose transcript visibly shoves means the probe's synthetic scroller
+ * is not asking the same question the transcript does.
+ */
+function anchorState(): TraceSnapshot["meta"]["anchor"] {
+  let probe: boolean | null = null;
+  try {
+    probe = probeScrollAnchoring();
+  } catch {
+    probe = null;
+  }
+  const row = document.querySelector(".cm-row-cv");
+  return {
+    attr: document.documentElement.dataset.cmAnchor ?? null,
+    rowCv: row ? getComputedStyle(row).contentVisibility : null,
+    probe,
+  };
+}
+
 export function snapshot(): TraceSnapshot {
   const nav = navigator as Navigator & { standalone?: boolean };
   return {
@@ -174,6 +227,7 @@ export function snapshot(): TraceSnapshot {
       inner: { w: innerWidth, h: innerHeight },
       dpr: devicePixelRatio,
       scroller: scrollerName,
+      anchor: anchorState(),
     },
     entries: entries.slice(),
   };
@@ -227,6 +281,7 @@ export function startInteractionTrace(): () => void {
     }
     if (e.defaultPrevented) entry.prevented = true;
     push(entry);
+    if (p === "start" || p === "end") samplePoll(p === "end" ? 1200 : 400);
   };
   on("touchstart", touch("start"));
   on("touchmove", touch("move"));
@@ -251,8 +306,24 @@ export function startInteractionTrace(): () => void {
       get: orig.get,
       set(this: Element, v: number) {
         programmatic++;
-        push({ k: "set", how: "scrollTop=", el: describe(this), v: Math.round(v), by: caller() });
         orig.set!.call(this, v);
+        // Read STRAIGHT back. The browser clamps a write that overshoots the
+        // current scrollHeight, and a restore silently clamped to 0 is
+        // indistinguishable at the next scroll event from one that took and was
+        // then undone. `got` separates them at the source.
+        const got = Math.round(orig.get!.call(this) as number);
+        push({
+          k: "set",
+          how: "scrollTop=",
+          el: describe(this),
+          v: Math.round(v),
+          got,
+          stuck: Math.abs(got - Math.round(v)) <= 1,
+          h: (this as Element).scrollHeight,
+          c: (this as Element).clientHeight,
+          by: caller(),
+        });
+        samplePoll();
       },
     });
     disposers.push(() => Object.defineProperty(Element.prototype, "scrollTop", orig));
@@ -269,8 +340,18 @@ export function startInteractionTrace(): () => void {
           : a && typeof a === "object"
             ? JSON.stringify(a).slice(0, 40)
             : String(a ?? "");
-      push({ k: "set", how, el: describe(this as EventTarget), v, by: caller() });
-      return orig.apply(this, args);
+      const out = orig.apply(this, args);
+      const self = this as Element;
+      push({
+        k: "set",
+        how,
+        el: describe(this as EventTarget),
+        v,
+        got: typeof self?.scrollTop === "number" ? Math.round(self.scrollTop) : undefined,
+        by: caller(),
+      });
+      samplePoll();
+      return out;
     };
     disposers.push(() => {
       (obj as Record<K, unknown>)[key] = orig;
@@ -375,11 +456,13 @@ export function startInteractionTrace(): () => void {
     }
   }
   function watchScroller(el: Element | null): void {
-    if (!ro || !el || el === watched) return;
+    if (!el || el === watched) return;
     // Only vertical scrollers with something to scroll — a code block's
     // horizontal `.cm-scroll-x` is not the one whose growth moves the reader.
     if (el.scrollHeight <= el.clientHeight + 1) return;
-    ro.disconnect();
+    // `ro` may be absent (no ResizeObserver); the MutationObserver half below
+    // still works and is what the paging diagnosis needs.
+    ro?.disconnect();
     // Fresh map: `observeRows` skips anything already measured, and the old
     // scroller's rows must not count as measured when it becomes the watched
     // one again.
@@ -388,9 +471,102 @@ export function startInteractionTrace(): () => void {
     watched = el;
     scrollerName = describe(el);
     observeRows();
+    // Watch the scroller AND the box its rows actually live in: a prepend lands
+    // in the inner container, not in the scroller itself.
+    mo?.disconnect();
+    mo?.observe(el, { childList: true, subtree: true });
+    samplePoll();
   }
-  watchScroller(document.querySelector("[data-transcript]"));
   disposers.push(() => ro?.disconnect());
+
+  // ---- the frame sampler --------------------------------------------------
+  /**
+   * Scroll events are not enough, and the first paging trace proved it.
+   *
+   * There, a restore wrote `scrollTop = 6046` and 84ms later the SAME element
+   * (it still had a `dy`, so it was never remounted) reported `top = 19` — with
+   * a `scrollHeight` of 61280, which makes 6046 a perfectly legal offset. No
+   * hooked setter ran in between. So either the height collapsed and recovered
+   * between two scroll events, or something moved it that leaves no JS trace;
+   * sampling only when the browser chooses to fire `scroll` cannot tell those
+   * apart, because the whole event is over inside that gap.
+   *
+   * This samples `scrollTop`/`scrollHeight`/`clientHeight` EVERY FRAME for a
+   * while after anything that could move the reader — a programmatic scroll,
+   * DOM churn, a finger down. A transient collapse shows up as an `h` that dips
+   * and recovers; a silent reposition shows up as `top` moving while `h` holds.
+   * Identical consecutive samples are dropped, so a quiet scroller costs one
+   * entry rather than 60 a second.
+   */
+  let pollUntil = 0;
+  let pollFrame = 0;
+  let lastPoll = "";
+  const poll = () => {
+    pollFrame = 0;
+    const el = watched;
+    if (el) {
+      const top = Math.round(el.scrollTop);
+      const h = el.scrollHeight;
+      const c = el.clientHeight;
+      const key = `${top}|${h}|${c}`;
+      if (key !== lastPoll) {
+        lastPoll = key;
+        // `max` is the highest legal offset. A `top` pinned to it IS a clamp,
+        // and that is the difference between "something scrolled us" and "the
+        // content got shorter underneath us".
+        push({ k: "poll", top, h, c, max: Math.max(0, h - c) });
+      }
+    }
+    if (performance.now() < pollUntil) pollFrame = requestAnimationFrame(poll);
+  };
+  const samplePoll = (ms = 800) => {
+    pollUntil = performance.now() + ms;
+    if (!pollFrame) pollFrame = requestAnimationFrame(poll);
+  };
+  disposers.push(() => {
+    if (pollFrame) cancelAnimationFrame(pollFrame);
+    pollFrame = 0;
+    pollUntil = 0;
+  });
+
+  // ---- DOM churn in the transcript ---------------------------------------
+  /**
+   * Which rows came and went, and WHERE.
+   *
+   * A page of older messages is a PREPEND, and a prepend is the one mutation
+   * that moves everything the reader is looking at. If instead the list is
+   * being replaced wholesale — every child removed and re-added — then the
+   * scroller's content is momentarily nothing, and a browser clamps `scrollTop`
+   * to a `scrollHeight` that no longer reaches it. Those two produce the same
+   * "I'm at the top again" and have completely different fixes, so the counts
+   * and the insertion index are recorded rather than inferred.
+   */
+  const mo =
+    typeof MutationObserver === "function"
+      ? new MutationObserver((records) => {
+          for (const r of records) {
+            if (r.type !== "childList") continue;
+            const added = r.addedNodes.length;
+            const removed = r.removedNodes.length;
+            if (!added && !removed) continue;
+            const parent = r.target instanceof Element ? r.target : null;
+            push({
+              k: "dom",
+              el: parent ? describe(parent) : "?",
+              add: added,
+              rm: removed,
+              n: parent ? parent.childElementCount : -1,
+              // Null previousSibling means it went in at the FRONT — a prepend,
+              // which is the shape an older page has.
+              front: added > 0 && r.previousSibling === null,
+              top: watched ? Math.round(watched.scrollTop) : undefined,
+              h: watched ? watched.scrollHeight : undefined,
+            });
+            samplePoll();
+          }
+        })
+      : null;
+  disposers.push(() => mo?.disconnect());
 
   // ---- images -------------------------------------------------------------
   // `load`/`error` don't bubble either; capture catches them. `above` is the
@@ -443,6 +619,10 @@ export function startInteractionTrace(): () => void {
     /* not supported — Safari */
   }
 
+  // Last: `watchScroller` touches `mo` and `samplePoll`, which are declared
+  // above but only initialized by the time setup reaches here.
+  watchScroller(document.querySelector("[data-transcript]"));
+
   push({ k: "note", text: "trace started" });
 
   return () => {
@@ -464,7 +644,7 @@ export function formatEntry(e: TraceEntry): string {
     case "scroll":
       return `${s} scroll ${e.el} top=${e.top}${e.dy !== undefined ? ` dy=${e.dy}` : ""} h=${e.h}${e.fin ? " finger" : ""}${e.prog ? " PROG" : ""}`;
     case "set":
-      return `${s} SET ${e.how} ${e.el} → ${e.v} by ${e.by}`;
+      return `${s} SET ${e.how} ${e.el} → ${e.v}${e.got !== undefined ? ` got=${e.got}` : ""}${e.stuck === false ? " CLAMPED" : ""} by ${e.by}`;
     case "size":
       return `${s} size ${e.el} ${(e.dh as number) > 0 ? "+" : ""}${e.dh} → ${e.h} @top=${e.top}${e.fin ? " finger" : ""}`;
     case "img":
@@ -476,6 +656,12 @@ export function formatEntry(e: TraceEntry): string {
       return `${s} vv kb=${e.kb} h=${e.h} off=${e.off} inner=${e.inner}`;
     case "shift":
       return `${s} layout-shift ${e.v}`;
+    case "poll":
+      return `${s} poll top=${e.top} h=${e.h} c=${e.c} max=${e.max}${e.top === e.max ? " ATMAX" : ""}`;
+    case "dom":
+      return `${s} dom ${e.el} +${e.add}/-${e.rm} → ${e.n}${e.front ? " FRONT" : ""} top=${e.top} h=${e.h}`;
+    case "page":
+      return `${s} PAGE ${e.phase} ${JSON.stringify({ ...e, k: undefined, t: undefined, phase: undefined })}`;
     case "note":
       return `${s} — ${e.text}`;
     default:
