@@ -21,6 +21,7 @@ import { MissionPreview } from "./preview/mission/MissionPreview.js";
 import { AppErrorBoundary } from "./components/ErrorBoundary.js";
 import { applyScrollAnchoring } from "./lib/scrollAnchoring.js";
 import { lockPageZoom } from "./lib/pageZoom.js";
+import { dismissBootSplashNow, startBootSplash } from "./lib/bootSplash.js";
 
 // The palette itself was applied by the inline script in index.html (before the
 // first paint); this only subscribes to later OS changes, which matters solely
@@ -74,6 +75,23 @@ const isMissionPreview =
 // log popup only ever wanted the PWA half skipped — it has always needed the
 // socket.
 const isShell = !isLogWindow && !isMissionPreview && !isTraceViewer;
+
+// The splash - the Dispatch mark, centred - is ALREADY on screen: index.html
+// paints it before this bundle exists, which is the whole reason it is not a
+// React component (see lib/bootSplash.ts). All that happens here is deciding
+// when it lifts.
+//
+// First thing after the mode is known, because the clock it measures its
+// minimum against starts HERE: everything queued in front of it is time the
+// entrance has already spent on screen rather than time added to the load.
+// In particular it must precede the auth/hydrate kickoff below, which is the
+// work it is covering.
+//
+// The standalone renders get no splash. They load this same index.html so they
+// inherit the markup, but a detached log window is a tool window, not the app
+// booting: there is nothing to wait for and nothing to make an entrance about.
+if (isShell) startBootSplash();
+else dismissBootSplashNow();
 
 // Wire the reactive data spine (active chat → transcript, active project → panels)
 // then open the WS. The backend's `hello` triggers the REST hydrate, so live data

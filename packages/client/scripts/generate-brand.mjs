@@ -41,6 +41,7 @@ import {
   DISPATCH_MARK_BRANCHES,
   DISPATCH_MARK_NODES,
   DISPATCH_MARK_STROKE_WIDTH,
+  dispatchBranchPath,
 } from "../src/brand/dispatchMark.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -385,20 +386,172 @@ function splashTargets() {
 const START = "<!-- brand:generated:start -->";
 const END = "<!-- brand:generated:end -->";
 
+const BOOT_START = "<!-- boot-splash:generated:start -->";
+const BOOT_END = "<!-- boot-splash:generated:end -->";
+
 /**
- * Rewrite the generated <link> block in index.html.
+ * The four beats, in ms from first paint. Held level with the stylesheet in
+ * index.html, which is where the durations live — these are only the offsets
+ * that depend on WHICH branch or node, and so have to come from the geometry.
+ */
+/** Draw-on. The root lands with the trunk's first frame so the graph grows OUT
+ *  of a dot; each tip lands as its own branch finishes. */
+const BOOT_BRANCH_DELAY = { trunk: 0, upper: 180, lower: 300 };
+const BOOT_NODE_DELAY = { root: 0, "upper-tip": 700, "lower-tip": 820 };
+
+/**
+ * Which end each stroke retracts INTO when the mark collapses to dots.
+ *
+ * Not a constant, and not guessable: `root` sits at the trunk's START, so the
+ * trunk shrinks toward offset +1 (leftward, into the root); both tips sit at
+ * their branch's END, so those shrink toward -1 (outward, into the tips). Get
+ * a sign wrong and the stroke crawls away from its own dot. The magnitude is
+ * 1.06 rather than 1 so the dash clears the path end entirely -- see the
+ * stroke-dasharray note in index.html for the round-linecap dot that leaves.
+ */
+const BOOT_RETRACT = { trunk: 1.06, upper: -1.06, lower: -1.06 };
+
+/**
+ * Where each dot sits once the mark has collapsed and the three of them swing
+ * onto a ring: 120° apart, `BOOT_ORBIT_R` from the centre of the view box.
+ *
+ * Every one of them has to TRAVEL. The obvious assignment — give each node the
+ * seat nearest where it already is — was the first version, and it failed: the
+ * ring sits almost exactly where the mark put its nodes, so root did not move at
+ * all and the two tips shifted a couple of pixels. What you saw was a spinner
+ * with two leftover pieces of the logo parked beside it. Rotating the
+ * assignment a third of a turn (root to the top, tips to the two lower seats)
+ * costs nothing and makes the collapse legible: three dots visibly leaving the
+ * shape they were holding.
+ */
+/**
+ * The motion trail: ghost copies of the trio, each held this many degrees behind
+ * it and drawn at this opacity. Nearest first, so the tail thins out.
+ *
+ * Two constraints fix these numbers, and they pull against each other.
+ *
+ * The STEP has to keep consecutive ghosts overlapping, or the trail stops being
+ * a smear and becomes more dots — and it has to do that at both ends of the
+ * orbit, which widens by 3× while this spins. 3° is ~1.3 units of arc at
+ * `BOOT_ORBIT_R` and ~3.8 at full width, against a 7-unit dot: overlapping
+ * throughout. It was 4/9/15° when the radius was fixed, and those separate
+ * visibly once it is not.
+ *
+ * The COUNT then sets how long the tail can get, since length is count × step.
+ * Six is what it takes to still read as a comet at the small step above. The
+ * tail does not need to be animated to grow: the offsets are angular and the
+ * radius is climbing underneath them, so the arc lengthens on its own.
+ */
+const BOOT_TRAIL = [
+  { deg: -3, opacity: 0.5 },
+  { deg: -6, opacity: 0.38 },
+  { deg: -9, opacity: 0.27 },
+  { deg: -12, opacity: 0.18 },
+  { deg: -15, opacity: 0.11 },
+  { deg: -18, opacity: 0.06 },
+];
+
+const BOOT_ORBIT_R = 24;
+const BOOT_ORBIT_PHASE = { root: 270, "upper-tip": 30, "lower-tip": 150 };
+
+/** Two decimals is under a thousandth of a px at any size this renders at. */
+const round2 = (n) => Number(n.toFixed(2));
+
+/**
+ * The boot splash's markup, for the block at the top of <body>.
+ *
+ * Generated for the same reason the icons are: this is the mark, and the mark
+ * has exactly one definition. Hand-copying three path `d` strings into
+ * index.html would mean a geometry edit silently leaves the FIRST thing anyone
+ * sees on the old shape — the one surface nobody would think to check. The
+ * orbit coordinates make that sharper still: they are DERIVED from the node
+ * positions, so a node that moves takes its seat on the ring with it.
+ *
+ * Every dot is authored at the centre of the view box and placed by transform,
+ * so its seat in the mark (`--mx/--my`) and its seat on the ring (`--ox/--oy`)
+ * are two plain translations CSS can interpolate between cleanly.
+ *
+ * Static HTML rather than a React component because it has to paint on the
+ * first frame, before the bundle exists. See `src/lib/bootSplash.ts`.
+ */
+function bootSplashLines() {
+  const cx = 32;
+  const cy = 32;
+  const dot = (n, pad) => {
+    const phase = (BOOT_ORBIT_PHASE[n.id] * Math.PI) / 180;
+    const vars = [
+      `--bd: ${BOOT_NODE_DELAY[n.id]}ms`,
+      `--mx: ${round2(n.cx - cx)}px`,
+      `--my: ${round2(n.cy - cy)}px`,
+      `--ox: ${round2(Math.cos(phase) * BOOT_ORBIT_R)}px`,
+      `--oy: ${round2(Math.sin(phase) * BOOT_ORBIT_R)}px`,
+    ].join("; ");
+    return `${pad}<circle class="boot-splash__dot" cx="${cx}" cy="${cy}" r="${n.radius}" style="${vars}" />`;
+  };
+  const trio = (pad) => DISPATCH_MARK_NODES.map((n) => dot(n, pad));
+  return [
+    `    <!-- Generated by scripts/generate-brand.mjs — do not edit by hand.`,
+    `         Styled by the #boot-splash rules in <head>, lifted by src/lib/bootSplash.ts. -->`,
+    `    <div id="boot-splash" aria-hidden="true">`,
+    `      <div class="boot-splash__stage">`,
+    `        <svg class="boot-splash__mark" viewBox="0 0 64 64" aria-hidden="true" style="--bsw: ${DISPATCH_MARK_STROKE_WIDTH}">`,
+    ...DISPATCH_MARK_BRANCHES.map(
+      (b) =>
+        `          <path class="boot-splash__branch" d="${dispatchBranchPath(b)}" pathLength="1" style="--bd: ${BOOT_BRANCH_DELAY[b.id]}ms; --retract: ${BOOT_RETRACT[b.id]}" />`,
+    ),
+    // Three nested groups, all rotating about the view box centre: a constant
+    // floor, a ramp that accelerates across the whole wait, and a fling that is
+    // idle until the exit. Separate elements because CSS will not composite two
+    // animations of the same property on one element — see the rotation note in
+    // index.html.
+    `          <g class="boot-splash__spin">`,
+    `            <g class="boot-splash__ramp">`,
+    `              <g class="boot-splash__fling">`,
+    // Ghosts first, so the real trio draws over its own tail.
+    ...BOOT_TRAIL.flatMap((t) => [
+      `                <g class="boot-splash__trail" style="--ta: ${t.deg}deg; --to: ${t.opacity}">`,
+      ...trio("                  "),
+      `                </g>`,
+    ]),
+    ...trio("                "),
+    `              </g>`,
+    `            </g>`,
+    `          </g>`,
+    `        </svg>`,
+    `      </div>`,
+    `    </div>`,
+  ];
+}
+/** Swap everything between one marker pair for `lines`. */
+function replaceBlock(html, start, end, lines) {
+  const from = html.indexOf(start);
+  const to = html.indexOf(end);
+  if (from === -1 || to === -1) {
+    throw new Error(`index.html is missing the ${start} / ${end} markers`);
+  }
+  return html.slice(0, from + start.length) + "\n" + lines.join("\n") + "\n" + html.slice(to);
+}
+
+/**
+ * Rewrite the generated blocks in index.html.
  *
  * The splash matrix is ~36 tags that must match the files on disk exactly, so
  * hand-maintaining it guarantees drift. Generating it into the committed HTML
  * keeps the source readable and costs nothing at runtime.
  */
 function writeIndexHtml(splashes) {
-  const html = readFileSync(indexHtml, "utf8");
-  const from = html.indexOf(START);
-  const to = html.indexOf(END);
-  if (from === -1 || to === -1) {
-    throw new Error(`index.html is missing the ${START} / ${END} markers`);
-  }
+  // NORMALISED TO LF up front, and not only for the blocks below.
+  //
+  // `core.autocrlf=true` — the Windows default, and what this repo is developed
+  // under — hands out a CRLF working copy, while every block this function
+  // writes is joined with a bare LF. So a Windows build left the file mixed: LF
+  // inside the generated markers, CRLF everywhere else. That much was
+  // survivable; what was not is that the CRLF then reached the committed blob
+  // (autocrlf did not normalise it back), which turned a 300-line addition into
+  // a 436-line diff that rewrote every untouched line — and would have gone on
+  // doing that to `git blame`. The file is LF in the repo; keep it that way.
+  const original = readFileSync(indexHtml, "utf8");
+  const html = original.replace(/\r\n/g, "\n");
 
   const lines = [
     `    <!-- Generated by scripts/generate-brand.mjs — do not edit by hand. -->`,
@@ -421,9 +574,13 @@ function writeIndexHtml(splashes) {
     ),
   ];
 
-  const next = html.slice(0, from + START.length) + "\n" + lines.join("\n") + "\n" + html.slice(to);
-  if (next !== html) writeFileSync(indexHtml, next);
-  return next !== html;
+  let next = replaceBlock(html, START, END, lines);
+  next = replaceBlock(next, BOOT_START, BOOT_END, bootSplashLines());
+  // Compared against ORIGINAL, not `html`: `html` is already normalised, so a
+  // file whose only problem was its line endings would compare equal to itself
+  // and the normalisation would never be written.
+  if (next !== original) writeFileSync(indexHtml, next);
+  return next !== original;
 }
 
 /* ------------------------------------------------------------------- driver */
