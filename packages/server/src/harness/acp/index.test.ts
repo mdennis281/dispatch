@@ -315,6 +315,40 @@ describe("GOOSE_AGENT.env", () => {
     expect(GOOSE_AGENT.env("m", undefined).GOOSE_CONTEXT_LIMIT).toBeUndefined();
     expect(GOOSE_AGENT.env("m").GOOSE_CONTEXT_LIMIT).toBeUndefined();
   });
+
+  it("pins a tool-calling temperature, which goose otherwise never sends", async () => {
+    // goose POSTs model/messages/tools and nothing else, so sampling falls
+    // through to the model card — and a card that sets none lands on Ollama's
+    // default 0.8. Measured against goose's own system prompt and its 18
+    // tools, that cost devstral 3 of 10 first tool calls and llama3.1:8b ALL
+    // of them; 0.15 was 10/10 for every model tried.
+    const { GOOSE_AGENT } = await import("./index.js");
+    expect(GOOSE_AGENT.env("qwen3-coder:30b", 32_768).GOOSE_TEMPERATURE).toBe("0.15");
+  });
+
+  it("gives goose the shell the environment block promises the model", async () => {
+    // toEnvironmentBlock says "Shell: PowerShell" and steers onto Select-String
+    // and Get-ChildItem; goose's shell tool runs cmd.exe, so those came back
+    // "is not recognized as an internal or external command" and a chat asked
+    // to read ONE file burned four calls failing before losing the thread.
+    const { GOOSE_AGENT } = await import("./index.js");
+    const env = GOOSE_AGENT.env("m");
+    if (process.platform === "win32") expect(env.GOOSE_SHELL).toBe("powershell");
+    // Elsewhere goose's default already matches the POSIX branch of the block.
+    else expect(env.GOOSE_SHELL).toBeUndefined();
+  });
+
+  it("lets the operator override the temperature from the server environment", async () => {
+    const prev = process.env.GOOSE_TEMPERATURE;
+    process.env.GOOSE_TEMPERATURE = "0.4";
+    try {
+      const { GOOSE_AGENT } = await import("./index.js");
+      expect(GOOSE_AGENT.env("m").GOOSE_TEMPERATURE).toBe("0.4");
+    } finally {
+      if (prev === undefined) delete process.env.GOOSE_TEMPERATURE;
+      else process.env.GOOSE_TEMPERATURE = prev;
+    }
+  });
 });
 
 describe("AcpHarness.readLimits", () => {
