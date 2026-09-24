@@ -115,8 +115,54 @@ export const GOOSE_AGENT: AcpAgentSpec = {
     // Only set when Dispatch actually resolved the window from Ollama. A
     // guess here would be worse than the omission it replaces.
     ...(contextWindow ? { GOOSE_CONTEXT_LIMIT: String(contextWindow) } : {}),
+    // THE SAMPLING TEMPERATURE, WHICH GOOSE OTHERWISE NEVER SENDS.
+    //
+    // Its request to Ollama carries `model`, `messages`, `tools` and nothing
+    // else, so sampling falls through to whatever the model card sets — and a
+    // card that sets none (devstral) lands on Ollama's default of 0.8. That is
+    // a creative-writing temperature being used to choose whether to emit a
+    // tool call, and it shows: measured against goose's real system prompt and
+    // its 18 built-in tools, first-call compliance was 7/10 for devstral and
+    // 8/10 for qwen3-coder at the default, and 10/10 for both at 0.15. It
+    // holds at Dispatch's scale too (58 and 98 tools).
+    //
+    // End to end on a read-a-file-and-report task, qwen3-coder went from 3.2
+    // tool calls and 29s to 1.8 calls and 5s with no loss of accuracy — the
+    // default was not just less reliable, it was paying for redundant calls.
+    // llama3.1:8b went from emitting NO tool calls at all to solving the task.
+    //
+    // 0.15 is Mistral's own recommendation for Devstral and sits in the flat
+    // part of the curve we measured (0.0 and 0.3 behave the same); it is not
+    // 0 so that a model which stalls on a repeated token can still escape.
+    GOOSE_TEMPERATURE: process.env.GOOSE_TEMPERATURE ?? TOOL_CALLING_TEMPERATURE,
+    // MAKE THE SHELL THE ONE WE ALREADY TELL THE MODEL IT HAS.
+    //
+    // `toEnvironmentBlock` states "Shell: PowerShell" on Windows and spends
+    // three lines steering the agent onto `Select-String` / `Get-ChildItem` /
+    // `Get-Content`. goose's shell tool runs cmd.exe, so every one of those
+    // came back "'Get-ChildItem' is not recognized as an internal or external
+    // command" — Dispatch was teaching the model a shell it had not been
+    // given. Observed live: a chat asked to read one file burned its first
+    // four tool calls on Test-Path, Get-ChildItem, ls and Get-ChildItem
+    // again, all rejected, then lost the thread and spent 20 calls describing
+    // a different package.
+    //
+    // goose reads GOOSE_SHELL, so the cheap fix is to make the claim true
+    // rather than to water it down: PowerShell is also what the rest of this
+    // repo's tooling assumes. Windows only — elsewhere goose's default shell
+    // already matches the POSIX branch of the block.
+    ...(process.platform === "win32"
+      ? { GOOSE_SHELL: process.env.GOOSE_SHELL ?? "powershell" }
+      : {}),
   }),
 };
+
+/**
+ * Sampling temperature for an agent whose job is choosing tool calls.
+ *
+ * See {@link GOOSE_AGENT.env} for the measurements behind the number.
+ */
+const TOOL_CALLING_TEMPERATURE = "0.15";
 
 /**
  * The AMBIENT Ollama endpoint — the server's own `OLLAMA_HOST`, or loopback.
