@@ -256,6 +256,7 @@ jobs:
           src/routes/fs.test.ts
           src/services/fs-explorer.test.ts
           src/services/mcp/manager-mcp.integration.test.ts
+          src/harness/acp/index.test.ts
 
       - name: Test release installer (Windows)
         run: node --test tools/install.test.mjs

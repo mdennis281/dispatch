@@ -331,11 +331,15 @@ describe("GOOSE_AGENT.env", () => {
     // and Get-ChildItem; goose's shell tool runs cmd.exe, so those came back
     // "is not recognized as an internal or external command" and a chat asked
     // to read ONE file burned four calls failing before losing the thread.
+    //
+    // Asserted on BOTH platforms rather than skipping off-Windows: CI runs the
+    // full suite on Linux, so a win32-only assertion here would never execute
+    // there and a regression in the value — or an inverted condition — would
+    // sail through. `src/harness/acp/index.test.ts` is also listed in the
+    // windows-sensitive job in ci.yml so the win32 arm runs for real.
     const { GOOSE_AGENT } = await import("./index.js");
     const env = GOOSE_AGENT.env("m");
-    if (process.platform === "win32") expect(env.GOOSE_SHELL).toBe("powershell");
-    // Elsewhere goose's default already matches the POSIX branch of the block.
-    else expect(env.GOOSE_SHELL).toBeUndefined();
+    expect(env.GOOSE_SHELL).toBe(process.platform === "win32" ? "powershell" : undefined);
   });
 
   it("lets the operator override the temperature from the server environment", async () => {
