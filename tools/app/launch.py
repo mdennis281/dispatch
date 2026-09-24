@@ -60,6 +60,15 @@ DEFAULT_PORT = 4318
 PORT_SCAN = 10
 #: How long to wait for the server to answer before calling the start failed.
 START_TIMEOUT_S = 60
+#: How much longer than the SUPERVISOR's deadline the parent waits.
+#:
+#: The two waits used to be the same 60s, started a fraction of a second apart —
+#: so the parent's always expired FIRST. A boot that answered at 59.9s was
+#: therefore reported as a failure by the parent while the supervisor went on to
+#: write runtime.json and serve happily, and the installer rolled back a healthy
+#: install over it. The parent must outlive the child it is waiting on; it now
+#: learns of a failure from `Paths.boot_failure` rather than from a clock.
+START_GRACE_S = 15
 #: How long to give the server to tear down before we stop waiting on it.
 #: Matches SHUTDOWN_GRACE_MS in packages/server/src/shutdown.ts, plus slack.
 STOP_TIMEOUT_S = 25
@@ -97,6 +106,37 @@ class Paths:
         #: file is crude, but it is the one channel that works across detached
         #: processes on Windows without opening a control port on localhost.
         self.stop_request = root / "shutdown.request"
+    # Both of the files below are keyed BY PORT, and that is load-bearing rather
+    # than decorative. Two starts can overlap against one root — the liveness
+    # check in `main` is not atomic, so a double-clicked shortcut can have two
+    # instances get as far as `start()` on different ports — and a single shared
+    # pair of files makes them lie to each other in both directions: one
+    # instance's failure report is read by the other as its own, and the other's
+    # pre-spawn cleanup deletes a genuine report before its owner has read it.
+    # A port is the one thing that distinguishes the two, and every caller
+    # already has it. The count is bounded by PORT_SCAN.
+
+    def boot_log(self, port: int) -> Path:
+        """
+        The server's own stdout/stderr, for THIS boot on THIS port.
+
+        The supervisor runs detached under pythonw and owns no console, so
+        everything node printed used to go to the void — including the
+        `[Dispatch] failed to start:` line that says why a boot died. Five
+        installs on one machine failed with nothing but a 60s timeout to show
+        for it. Truncated per boot, so it never accumulates across runs.
+        """
+        return self.root / f"boot-{port}.log"
+
+    def boot_failure(self, port: int) -> Path:
+        """
+        How a DETACHED supervisor reports a failure to the parent that spawned it.
+
+        The parent has no pipe to it and no exit code from it; without this file
+        its only evidence is a clock running out, which is indistinguishable
+        from a slow boot and reads as the wrong diagnosis.
+        """
+        return self.root / f"boot-failure-{port}.json"
 
 
 # ---------------------------------------------------------------- probes
@@ -188,6 +228,46 @@ def _missing_payload_remedy(paths: Paths, app: Path) -> str:
 # ---------------------------------------------------------------- supervise
 
 
+def tail_boot_log(paths: Paths, port: int, limit: int = 40) -> list[str]:
+    """The last few lines the server printed, for a failure report."""
+    try:
+        lines = paths.boot_log(port).read_text("utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    return [line for line in lines if line.strip()][-limit:]
+
+
+def report_boot_failure(paths: Paths, port: int, reason: str, exit_code: int | None) -> None:
+    """
+    Leave the parent something better than a stopwatch.
+
+    Best-effort by design: this runs on the failure path, and a supervisor that
+    cannot write its own postmortem must still exit rather than raise over it.
+    The parent falls back to the timeout message it has always printed.
+    """
+    try:
+        paths.root.mkdir(parents=True, exist_ok=True)
+        paths.boot_failure(port).write_text(
+            json.dumps(
+                {
+                    "supervisor": os.getpid(),
+                    # Also checked by the reader. The filename already separates
+                    # two concurrent starts; this catches the case the name
+                    # cannot — a file left by an older layout, or hand-copied.
+                    "port": port,
+                    "reason": reason,
+                    "exitCode": exit_code,
+                    "failedAt": int(time.time() * 1000),
+                    "log": tail_boot_log(paths, port),
+                },
+                indent=2,
+            ),
+            "utf-8",
+        )
+    except OSError:
+        pass
+
+
 def supervise(paths: Paths, app: Path, port: int) -> int:
     """
     Run the server as a child and hold its stdin, so shutdown can be graceful.
@@ -230,31 +310,64 @@ def supervise(paths: Paths, app: Path, port: int) -> int:
         # be fixed at the supervisor: it is node, not python, that Windows is
         # allocating the console for.
         #
-        # Nothing is lost. stdout/stderr were already going nowhere here (see
-        # below), so this only stops Windows from drawing the void.
+        # Nothing is lost — see the boot log below for where the output goes.
         # The constants only exist on Windows, which is what the guard buys us.
         node_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
 
-    proc = subprocess.Popen(
-        [node, "dist/index.js"],
-        cwd=str(app / "packages" / "server"),
-        env=env,
-        stdin=subprocess.PIPE,
-        # stdout/stderr are inherited: under pythonw there is no console, so
-        # they go nowhere, and the server's own log files remain the record.
-        **node_kwargs,
-    )
+    # Capture node's stdout/stderr to a FILE rather than inheriting them.
+    #
+    # Inheriting was the same as discarding: this process is detached under
+    # pythonw and has no console, so a boot that threw printed its reason into
+    # the void and the only surviving evidence was the parent's timeout. A
+    # server that dies on `app.listen` says exactly why on stderr — that line is
+    # the whole diagnosis, and it was being thrown away.
+    #
+    # "w", so each boot replaces the last rather than growing a log nobody
+    # rotates. The failure report below copies the tail out before anyone can
+    # overwrite it.
+    try:
+        paths.root.mkdir(parents=True, exist_ok=True)
+        boot_log = paths.boot_log(port).open("w", encoding="utf-8", errors="replace")
+    except OSError:
+        # An unwritable root must not be the reason the app won't start. Fall
+        # back to the old behaviour: no log, but still a server.
+        boot_log = None
+
+    try:
+        proc = subprocess.Popen(
+            [node, "dist/index.js"],
+            cwd=str(app / "packages" / "server"),
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=boot_log or subprocess.DEVNULL,
+            stderr=subprocess.STDOUT if boot_log else subprocess.DEVNULL,
+            **node_kwargs,
+        )
+    finally:
+        # The child holds its own duplicate of the handle; ours would otherwise
+        # keep the file open for the entire life of the app.
+        if boot_log is not None:
+            boot_log.close()
+
+    # This boot gets to speak for itself: a report left by a PREVIOUS failed
+    # start on this port must not be read as this one's.
+    paths.boot_failure(port).unlink(missing_ok=True)
 
     url = f"http://127.0.0.1:{port}"
     deadline = time.monotonic() + START_TIMEOUT_S
     while time.monotonic() < deadline:
         if proc.poll() is not None:
-            return proc.returncode or 1
+            code = proc.returncode or 1
+            report_boot_failure(paths, port, "the server exited during boot", code)
+            return code
         if port_alive(port, timeout=0.5):
             break
         time.sleep(0.25)
     else:
         proc.kill()
+        report_boot_failure(
+            paths, port, f"the server did not answer on {port} within {START_TIMEOUT_S}s", None
+        )
         raise SystemExit(f"server did not answer on {port} within {START_TIMEOUT_S}s")
 
     paths.root.mkdir(parents=True, exist_ok=True)
@@ -418,6 +531,31 @@ def _ask_to_stop(proc: subprocess.Popen) -> None:
 # ---------------------------------------------------------------- commands
 
 
+def boot_failure_message(paths: Paths, port: int) -> str | None:
+    """This start's postmortem, rendered for a terminal — or None if there isn't one."""
+    report = read_json(paths.boot_failure(port))
+    if report is None:
+        return None
+    # Belt and braces over the per-port filename: a report that does not name
+    # OUR port is not ours, and aborting this start over another instance's
+    # failure would be a worse lie than the timeout this replaced.
+    if report.get("port") != port:
+        return None
+    reason = report.get("reason") or "the server failed to start"
+    code = report.get("exitCode")
+    head = f"Dispatch failed to start on {port}: {reason}"
+    if isinstance(code, int):
+        head += f" (exit code {code})"
+    lines = [head]
+    log = report.get("log")
+    if isinstance(log, list) and log:
+        lines.append("  the server's last words:")
+        lines += [f"    {str(line)}" for line in log]
+    else:
+        lines.append(f"  the server printed nothing. Full output: {paths.boot_log(port)}")
+    return "\n".join(lines)
+
+
 def start(paths: Paths, app: Path, port: int) -> None:
     """Re-launch this script detached, as the supervisor, and wait for the port."""
     interpreter = sys.executable
@@ -460,18 +598,39 @@ def start(paths: Paths, app: Path, port: int) -> None:
         kwargs["stdout"] = subprocess.DEVNULL
         kwargs["stderr"] = subprocess.DEVNULL
 
+    # Clear the last start's postmortem BEFORE spawning, so a stale one can
+    # never be mistaken for this boot's — the supervisor clears it too, but only
+    # once it gets as far as spawning node, and everything before that (a
+    # missing payload, no node on PATH) would leave the old file standing.
+    paths.boot_failure(port).unlink(missing_ok=True)
+
     subprocess.Popen(argv, **kwargs)
 
     # Wait for runtime.json, NOT merely for the port. Both processes are
     # watching the same port, so returning on that alone lets this one win the
     # race and hand back an instance that `--stop` and `--status` — which read
     # runtime.json — would report as not running.
-    deadline = time.monotonic() + START_TIMEOUT_S
+    #
+    # START_GRACE_S longer than the supervisor's own deadline: see the constant.
+    # A deadline that expires first turns every marginal boot into a phantom
+    # failure over a server that is about to come up.
+    deadline = time.monotonic() + START_TIMEOUT_S + START_GRACE_S
     while time.monotonic() < deadline:
         if read_runtime(paths):
             return
+        # The supervisor is detached — this file is the only way it can tell us
+        # it has given up, and it is why the wait above can afford to be
+        # generous. A real failure is reported the moment it happens, with the
+        # server's own reason, instead of being sat out to the deadline and
+        # reported as a timeout it wasn't.
+        failure = boot_failure_message(paths, port)
+        if failure:
+            raise SystemExit(failure)
         time.sleep(0.25)
-    raise SystemExit(f"server did not come up on {port} within {START_TIMEOUT_S}s")
+    raise SystemExit(
+        f"server did not come up on {port} within {START_TIMEOUT_S + START_GRACE_S}s.\n"
+        f"  The supervisor never reported why — check {paths.boot_log(port)}"
+    )
 
 
 def open_window(url: str) -> None:
@@ -575,8 +734,19 @@ def main() -> int:
         return stop(paths)
 
     if args.supervise:
-        app = resolve_app_dir(paths, args.app_dir)
-        return supervise(paths, app, args.port or DEFAULT_PORT)
+        port = args.port or DEFAULT_PORT
+        # A supervisor that dies BEFORE it spawns node — no node on PATH, no
+        # payload to run — has no console to complain to and no report written
+        # yet, so the parent would sit out its whole deadline and then blame a
+        # timeout for what was a one-line, immediately-fixable problem.
+        try:
+            app = resolve_app_dir(paths, args.app_dir)
+            return supervise(paths, app, port)
+        except SystemExit as exit_error:
+            reason = str(exit_error.code) if exit_error.code not in (None, 0) else ""
+            if reason:
+                report_boot_failure(paths, port, reason, None)
+            raise
 
     running = read_runtime(paths)
     if running:
