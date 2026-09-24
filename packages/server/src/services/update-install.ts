@@ -48,6 +48,12 @@ export interface LaunchUpdateOptions {
   tag: string;
   /** The running payload directory (`<root>/app`). */
   appDir: string;
+  /**
+   * Channel `tag` was resolved from. Passed on so the installer can re-resolve
+   * that channel's head at its own start and install THAT when a newer release
+   * has landed since — see `DISPATCH_INSTALL_PREFER_HEAD` below.
+   */
+  channel?: "stable" | "unstable";
   repo?: string;
   env?: NodeJS.ProcessEnv;
   fetchImpl?: typeof fetch;
@@ -183,6 +189,21 @@ export async function launchUpdate(opts: LaunchUpdateOptions): Promise<LaunchUpd
           // one, but a future installer that consults it must not be pointed
           // back inside app/.
           DISPATCH_INSTALL_CWD: workDir,
+          // Re-resolve the channel head at the START of the install and take it
+          // over `tag` when it is newer. The head was already re-resolved when
+          // Update was clicked (`routes/update.ts`), but what follows that click
+          // is minutes of downloading, `pnpm install` and the swap — and on
+          // unstable a merge landing inside that window leaves the user on a
+          // build that is stale the moment it starts, with a fresh nudge
+          // waiting. Env vars, not flags, for the reason above: the installer
+          // may be an older one that would reject `--prefer-head` outright.
+          //
+          // Set to "" rather than omitted when there is no channel to re-check:
+          // the installer STARTS the server it installed, so this process's own
+          // environment is the last installer's, and an inherited "1" would
+          // otherwise outlive the call that meant it.
+          DISPATCH_INSTALL_PREFER_HEAD: opts.channel ? "1" : "",
+          ...(opts.channel ? { DISPATCH_INSTALL_CHANNEL: opts.channel } : {}),
         },
       },
     );

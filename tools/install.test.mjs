@@ -425,3 +425,85 @@ test("pruneBackups honours a wider keep, for a caller that wants more history", 
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("--prefer-head is off by default and DISPATCH_INSTALL_PREFER_HEAD turns it on", () => {
+  assert.equal(parseArgs([]).preferHead, false);
+  assert.equal(parseArgs(["--prefer-head"]).preferHead, true);
+
+  const previous = process.env.DISPATCH_INSTALL_PREFER_HEAD;
+  const previousChannel = process.env.DISPATCH_INSTALL_CHANNEL;
+  process.env.DISPATCH_INSTALL_PREFER_HEAD = "1";
+  process.env.DISPATCH_INSTALL_CHANNEL = "unstable";
+  try {
+    // Env rather than flags is how a self-update asks for this: an installer
+    // from an older release ignores the variables instead of failing the update
+    // on an unknown argument.
+    assert.equal(parseArgs([]).preferHead, true);
+    assert.equal(parseArgs([]).channel, "unstable");
+  } finally {
+    if (previous === undefined) delete process.env.DISPATCH_INSTALL_PREFER_HEAD;
+    else process.env.DISPATCH_INSTALL_PREFER_HEAD = previous;
+    if (previousChannel === undefined) delete process.env.DISPATCH_INSTALL_CHANNEL;
+    else process.env.DISPATCH_INSTALL_CHANNEL = previousChannel;
+  }
+});
+
+test("--prefer-head installs a release that landed after the tag was chosen", async () => {
+  const page = [
+    release("v2026.08.16.63367", { prerelease: true }),
+    release("v2026.08.17.10000", { prerelease: true }),
+  ];
+  await withFetch({ "/releases?per_page=": page }, async (asked) => {
+    const { release: picked } = await resolveRelease(
+      "o/r",
+      "v2026.08.16.63367",
+      "unstable",
+      true,
+    );
+    assert.equal(picked.tag_name, "v2026.08.17.10000");
+    // The named tag is never fetched: the head answered for it.
+    assert.equal(asked.length, 1);
+  });
+});
+
+test("--prefer-head leaves the named tag alone when the head has not moved", async () => {
+  const tag = "v2026.08.16.63367";
+  await withFetch(
+    { "/releases/latest": release(tag), "/releases/tags/": release(tag) },
+    async () => {
+      const { release: picked } = await resolveRelease("o/r", tag, "stable", true);
+      assert.equal(picked.tag_name, tag);
+    },
+  );
+  // And a deliberate step-back to an older tag is not dragged forward either.
+  await withFetch(
+    {
+      "/releases/latest": release("v2026.08.17.10000"),
+      "/releases/tags/": release("v2026.08.16.63367"),
+    },
+    async () => {
+      const { release: picked } = await resolveRelease("o/r", "v2026.08.16.63367", "stable");
+      assert.equal(picked.tag_name, "v2026.08.16.63367");
+    },
+  );
+});
+
+test("a head that cannot be reached or installed never fails the update", async () => {
+  const tag = "v2026.08.16.63367";
+  // GitHub 404s the channel lookup: install what we were asked for.
+  await withFetch({ "/releases/tags/": release(tag) }, async () => {
+    const { release: picked } = await resolveRelease("o/r", tag, "stable", true);
+    assert.equal(picked.tag_name, tag);
+  });
+  // A newer release whose assets are still uploading is exactly what a check
+  // this eager catches — and it is a reason to install the named tag, not to
+  // strand the user with no update at all.
+  const bare = { tag_name: "v2026.08.17.10000", assets: [] };
+  await withFetch(
+    { "/releases/latest": bare, "/releases/tags/": release(tag) },
+    async () => {
+      const { release: picked } = await resolveRelease("o/r", tag, "stable", true);
+      assert.equal(picked.tag_name, tag);
+    },
+  );
+});
