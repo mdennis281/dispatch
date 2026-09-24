@@ -67,7 +67,7 @@ START_TIMEOUT_S = 60
 #: therefore reported as a failure by the parent while the supervisor went on to
 #: write runtime.json and serve happily, and the installer rolled back a healthy
 #: install over it. The parent must outlive the child it is waiting on; it now
-#: learns of a failure from BOOT_FAILURE rather than by guessing from a clock.
+#: learns of a failure from `Paths.boot_failure` rather than from a clock.
 START_GRACE_S = 15
 #: How long to give the server to tear down before we stop waiting on it.
 #: Matches SHUTDOWN_GRACE_MS in packages/server/src/shutdown.ts, plus slack.
@@ -106,19 +106,37 @@ class Paths:
         #: file is crude, but it is the one channel that works across detached
         #: processes on Windows without opening a control port on localhost.
         self.stop_request = root / "shutdown.request"
-        #: The server's own stdout/stderr, for THIS boot.
-        #:
-        #: The supervisor runs detached under pythonw and owns no console, so
-        #: everything node printed used to go to the void — including the
-        #: `[Dispatch] failed to start:` line that says why a boot died. Five
-        #: installs on one machine failed with nothing but a 60s timeout to show
-        #: for it. Truncated per boot, so it never accumulates across runs.
-        self.boot_log = root / "boot.log"
-        #: How a DETACHED supervisor reports a failure to the parent that
-        #: spawned it. The parent has no pipe to it and no exit code from it;
-        #: without this file its only evidence is a clock running out, which is
-        #: indistinguishable from a slow boot and reads as the wrong diagnosis.
-        self.boot_failure = root / "boot-failure.json"
+    # Both of the files below are keyed BY PORT, and that is load-bearing rather
+    # than decorative. Two starts can overlap against one root — the liveness
+    # check in `main` is not atomic, so a double-clicked shortcut can have two
+    # instances get as far as `start()` on different ports — and a single shared
+    # pair of files makes them lie to each other in both directions: one
+    # instance's failure report is read by the other as its own, and the other's
+    # pre-spawn cleanup deletes a genuine report before its owner has read it.
+    # A port is the one thing that distinguishes the two, and every caller
+    # already has it. The count is bounded by PORT_SCAN.
+
+    def boot_log(self, port: int) -> Path:
+        """
+        The server's own stdout/stderr, for THIS boot on THIS port.
+
+        The supervisor runs detached under pythonw and owns no console, so
+        everything node printed used to go to the void — including the
+        `[Dispatch] failed to start:` line that says why a boot died. Five
+        installs on one machine failed with nothing but a 60s timeout to show
+        for it. Truncated per boot, so it never accumulates across runs.
+        """
+        return self.root / f"boot-{port}.log"
+
+    def boot_failure(self, port: int) -> Path:
+        """
+        How a DETACHED supervisor reports a failure to the parent that spawned it.
+
+        The parent has no pipe to it and no exit code from it; without this file
+        its only evidence is a clock running out, which is indistinguishable
+        from a slow boot and reads as the wrong diagnosis.
+        """
+        return self.root / f"boot-failure-{port}.json"
 
 
 # ---------------------------------------------------------------- probes
@@ -210,10 +228,10 @@ def _missing_payload_remedy(paths: Paths, app: Path) -> str:
 # ---------------------------------------------------------------- supervise
 
 
-def tail_boot_log(paths: Paths, limit: int = 40) -> list[str]:
+def tail_boot_log(paths: Paths, port: int, limit: int = 40) -> list[str]:
     """The last few lines the server printed, for a failure report."""
     try:
-        lines = paths.boot_log.read_text("utf-8", errors="replace").splitlines()
+        lines = paths.boot_log(port).read_text("utf-8", errors="replace").splitlines()
     except OSError:
         return []
     return [line for line in lines if line.strip()][-limit:]
@@ -229,15 +247,18 @@ def report_boot_failure(paths: Paths, port: int, reason: str, exit_code: int | N
     """
     try:
         paths.root.mkdir(parents=True, exist_ok=True)
-        paths.boot_failure.write_text(
+        paths.boot_failure(port).write_text(
             json.dumps(
                 {
                     "supervisor": os.getpid(),
+                    # Also checked by the reader. The filename already separates
+                    # two concurrent starts; this catches the case the name
+                    # cannot — a file left by an older layout, or hand-copied.
                     "port": port,
                     "reason": reason,
                     "exitCode": exit_code,
                     "failedAt": int(time.time() * 1000),
-                    "log": tail_boot_log(paths),
+                    "log": tail_boot_log(paths, port),
                 },
                 indent=2,
             ),
@@ -306,7 +327,7 @@ def supervise(paths: Paths, app: Path, port: int) -> int:
     # overwrite it.
     try:
         paths.root.mkdir(parents=True, exist_ok=True)
-        boot_log = paths.boot_log.open("w", encoding="utf-8", errors="replace")
+        boot_log = paths.boot_log(port).open("w", encoding="utf-8", errors="replace")
     except OSError:
         # An unwritable root must not be the reason the app won't start. Fall
         # back to the old behaviour: no log, but still a server.
@@ -329,8 +350,8 @@ def supervise(paths: Paths, app: Path, port: int) -> int:
             boot_log.close()
 
     # This boot gets to speak for itself: a report left by a PREVIOUS failed
-    # start must not be read as this one's.
-    paths.boot_failure.unlink(missing_ok=True)
+    # start on this port must not be read as this one's.
+    paths.boot_failure(port).unlink(missing_ok=True)
 
     url = f"http://127.0.0.1:{port}"
     deadline = time.monotonic() + START_TIMEOUT_S
@@ -512,8 +533,13 @@ def _ask_to_stop(proc: subprocess.Popen) -> None:
 
 def boot_failure_message(paths: Paths, port: int) -> str | None:
     """This start's postmortem, rendered for a terminal — or None if there isn't one."""
-    report = read_json(paths.boot_failure)
+    report = read_json(paths.boot_failure(port))
     if report is None:
+        return None
+    # Belt and braces over the per-port filename: a report that does not name
+    # OUR port is not ours, and aborting this start over another instance's
+    # failure would be a worse lie than the timeout this replaced.
+    if report.get("port") != port:
         return None
     reason = report.get("reason") or "the server failed to start"
     code = report.get("exitCode")
@@ -526,7 +552,7 @@ def boot_failure_message(paths: Paths, port: int) -> str | None:
         lines.append("  the server's last words:")
         lines += [f"    {str(line)}" for line in log]
     else:
-        lines.append(f"  the server printed nothing. Full output: {paths.boot_log}")
+        lines.append(f"  the server printed nothing. Full output: {paths.boot_log(port)}")
     return "\n".join(lines)
 
 
@@ -576,7 +602,7 @@ def start(paths: Paths, app: Path, port: int) -> None:
     # never be mistaken for this boot's — the supervisor clears it too, but only
     # once it gets as far as spawning node, and everything before that (a
     # missing payload, no node on PATH) would leave the old file standing.
-    paths.boot_failure.unlink(missing_ok=True)
+    paths.boot_failure(port).unlink(missing_ok=True)
 
     subprocess.Popen(argv, **kwargs)
 
@@ -603,7 +629,7 @@ def start(paths: Paths, app: Path, port: int) -> None:
         time.sleep(0.25)
     raise SystemExit(
         f"server did not come up on {port} within {START_TIMEOUT_S + START_GRACE_S}s.\n"
-        f"  The supervisor never reported why — check {paths.boot_log}"
+        f"  The supervisor never reported why — check {paths.boot_log(port)}"
     )
 
 
