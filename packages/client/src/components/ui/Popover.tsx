@@ -10,6 +10,7 @@ import {
 import { createPortal } from "react-dom";
 import { cn } from "../../lib/cn.js";
 import { LAYER } from "../../lib/layers.js";
+import { useViewport } from "../../stores/viewport.js";
 
 export interface PopoverProps {
   /** Render-prop trigger; receives the current open state + a toggle. */
@@ -57,6 +58,30 @@ type PopoverStyle = CSSProperties & {
   "--cm-popover-animation-from"?: string;
 };
 
+/**
+ * The vertical band a menu is allowed to occupy, in the coordinates
+ * `position: fixed` resolves against.
+ *
+ * Not simply `0 .. clientHeight`: iOS leaves the LAYOUT viewport at full height
+ * when the soft keyboard comes up, and scrolls the visible band down the window
+ * to chase the caret. A menu placed against `clientHeight` therefore lands
+ * underneath the keyboard — which is what happened to the context-window dropup
+ * the moment its Compact row opened an auto-focusing field and summoned one.
+ *
+ * `inset` is how much of the bottom is covered and `offsetTop` how far the band
+ * has been pushed down; both are 0 on a desktop, so this is the identity there.
+ */
+export function visibleBand(
+  clientHeight: number,
+  inset: number,
+  offsetTop: number,
+): { top: number; bottom: number } {
+  const top = Math.max(0, offsetTop);
+  // A band shorter than the floor would make every clamp below fight itself.
+  const bottom = Math.max(top + MIN_MENU_H, clientHeight - Math.max(0, inset));
+  return { top, bottom };
+}
+
 /** Pure seam for the fit decision; kept exported so width regressions stay cheap to test. */
 export function fitsToRight(
   boundaryRight: number,
@@ -92,6 +117,13 @@ export function Popover({
   const menuRef = useRef<HTMLDivElement>(null);
   const afterCloseRef = useRef<(() => void) | null>(null);
   const [placement, setPlacement] = useState<Placement | null>(null);
+  // Keyboard-aware bounds. `stores/viewport` already samples the visual viewport
+  // every frame for 600ms after a focus change — iOS fires `resize` once, early,
+  // with a height that is stale before the keyboard finishes sliding — so taking
+  // both the numbers AND the re-render cadence from there is what makes the menu
+  // settle above the keyboard instead of behind it.
+  const kbInset = useViewport((s) => s.inset);
+  const kbOffsetTop = useViewport((s) => s.vvOffsetTop);
   const [animationFrom, setAnimationFrom] = useState<string | null>(null);
   const mounted = open || closing;
 
@@ -153,7 +185,7 @@ export function Popover({
 
     const t = trigEl.getBoundingClientRect();
     const vw = document.documentElement.clientWidth;
-    const vh = document.documentElement.clientHeight;
+    const band = visibleBand(document.documentElement.clientHeight, kbInset, kbOffsetTop);
 
     // width: explicit prop else natural content; never below the trigger,
     // never wider than the viewport safe-area.
@@ -171,9 +203,12 @@ export function Popover({
     const boundaryRight = boundaryEl?.getBoundingClientRect().right ?? t.right;
     if (side === "right" && fitsToRight(boundaryRight, menuW, vw)) {
       const needed = menuEl.scrollHeight;
-      const maxHeight = Math.max(MIN_MENU_H, vh - MARGIN * 2);
+      const maxHeight = Math.max(MIN_MENU_H, band.bottom - band.top - MARGIN * 2);
       const usedH = Math.min(needed, maxHeight);
-      const top = Math.max(MARGIN, Math.min(t.top, vh - usedH - MARGIN));
+      const top = Math.max(
+        band.top + MARGIN,
+        Math.min(t.top, band.bottom - usedH - MARGIN),
+      );
       const left = boundaryRight + GAP;
 
       setPlacement((prev) =>
@@ -191,8 +226,8 @@ export function Popover({
 
     // Ordinary dropdown placement + flip toward the roomier vertical side.
     // `right` deliberately falls through here on a phone or cramped desktop.
-    const spaceBelow = vh - t.bottom - GAP - MARGIN;
-    const spaceAbove = t.top - GAP - MARGIN;
+    const spaceBelow = band.bottom - t.bottom - GAP - MARGIN;
+    const spaceAbove = t.top - band.top - GAP - MARGIN;
     const needed = menuEl.scrollHeight;
     let resolved: "top" | "bottom" = side === "right" ? "bottom" : side;
     if (resolved === "bottom" && needed > spaceBelow && spaceAbove > spaceBelow) {
@@ -205,7 +240,7 @@ export function Popover({
     const usedH = Math.min(needed, maxHeight);
 
     let top = resolved === "bottom" ? t.bottom + GAP : t.top - GAP - usedH;
-    top = Math.max(MARGIN, Math.min(top, vh - usedH - MARGIN));
+    top = Math.max(band.top + MARGIN, Math.min(top, band.bottom - usedH - MARGIN));
 
     // horizontal align + clamp into the viewport.
     let left =
@@ -226,7 +261,7 @@ export function Popover({
         ? prev
         : { left, top, width: menuW, maxHeight, side: resolved },
     );
-  }, [align, side, width]);
+  }, [align, side, width, kbInset, kbOffsetTop]);
 
   // Position synchronously before paint so there's no flash at the wrong spot.
   useLayoutEffect(() => {
