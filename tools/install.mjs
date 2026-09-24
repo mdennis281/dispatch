@@ -65,7 +65,9 @@ function usage() {
 Usage: node install.mjs [options]
 
   --version <tag>     install a release tag instead of the channel head
-  --channel <name>    stable (default) or unstable; ignored with --version
+  --channel <name>    stable (default) or unstable
+  --prefer-head       with --version, install the channel head instead when a
+                      newer one was published since the tag was chosen
   --repo <owner/name> release repository (default: ${DEFAULT_REPO})
   --target <path>     installation root (default: the platform user-data dir)
   --no-start          install without starting Dispatch
@@ -83,7 +85,14 @@ Rerun the same command later to update to the newest release.`);
 export function parseArgs(argv) {
   const out = {
     repo: process.env.DISPATCH_INSTALL_REPO || DEFAULT_REPO,
-    channel: "stable",
+    // Env as well as flag for the same reason `open` has one: a self-update runs
+    // whichever install.mjs it could get hold of — the target release's, or the
+    // OLDER copy bundled in the payload when that download fails — and an
+    // unknown flag there is a hard `unknown argument` failure that takes the
+    // whole update down. An unknown env var is ignored, so an old installer
+    // degrades to today's behaviour instead of refusing to run.
+    channel: process.env.DISPATCH_INSTALL_CHANNEL === "unstable" ? "unstable" : "stable",
+    preferHead: process.env.DISPATCH_INSTALL_PREFER_HEAD === "1",
     start: true,
     // A self-update is the one caller that must NOT open a browser: the tab
     // that asked for it is already sitting on the updating screen waiting to
@@ -111,6 +120,7 @@ export function parseArgs(argv) {
     else if (arg === "--no-autostart") out.autostart = false;
     else if (arg === "--autostart") out.autostart = true;
     else if (arg === "--dry-run") out.dryRun = true;
+    else if (arg === "--prefer-head") out.preferHead = true;
     else if (arg === "--version") out.version = requiredValue(argv, ++i, arg);
     else if (arg === "--channel") out.channel = requiredValue(argv, ++i, arg);
     else if (arg === "--repo") out.repo = requiredValue(argv, ++i, arg);
@@ -226,25 +236,18 @@ async function resolveChannelHead(repo, channel) {
   return best;
 }
 
-export async function resolveRelease(repo, requestedVersion, channel = "stable") {
-  const tag = requestedVersion
-    ? requestedVersion.startsWith("v")
-      ? requestedVersion
-      : `v${requestedVersion}`
-    : null;
-  const release = tag
-    ? await (
-        await fetchOk(
-          `https://api.github.com/repos/${repo}/releases/tags/${encodeURIComponent(tag)}`,
-        )
-      ).json()
-    : await resolveChannelHead(repo, channel);
+/**
+ * The assets an install needs, or a throw naming what the release is missing.
+ * Split out so the `--prefer-head` path can TRY a release and fall back rather
+ * than taking the whole update down with it.
+ */
+function selectAssets(release, fromChannel, channel) {
   // A DRAFT is refused however it was reached: its assets may not be uploaded,
   // so this would fail later and messier. A PRERELEASE is only refused when it
   // arrived by channel resolution — an explicitly named tag is the unstable
   // channel's whole install path, and the in-app updater always names one.
   if (release.draft) throw new Error(`refusing draft ${release.tag_name}`);
-  if (release.prerelease && !tag && channel !== "unstable") {
+  if (release.prerelease && fromChannel && channel !== "unstable") {
     throw new Error(`refusing prerelease ${release.tag_name} on the stable channel`);
   }
   const archiveName = `dispatch-${release.tag_name}.tar.gz`;
@@ -256,6 +259,67 @@ export async function resolveRelease(repo, requestedVersion, channel = "stable")
     );
   }
   return { release, archive, checksums };
+}
+
+/**
+ * With `--prefer-head`, the named tag is the caller's BELIEF about the channel
+ * head, not a pin — so ask the channel what its head is now and take that when
+ * it is newer.
+ *
+ * This exists because of a real and routine outcome: the server re-resolves the
+ * head when Update is clicked (`routes/update.ts`), but the install that follows
+ * takes minutes — downloading the tarball, a full `pnpm install`, the swap — and
+ * on the unstable channel a merge landing in that window means the user arrives
+ * on a build that is already stale, with a fresh update nudge waiting for them.
+ * Re-resolving here moves the decision as late as it can go.
+ *
+ * Every failure falls back to the named tag and says so. A head we cannot reach,
+ * cannot order (a semver tag), or that has no assets yet — a release whose
+ * upload is still in flight is exactly what a check this eager will catch — is a
+ * reason to install what we were asked for, never a reason to fail the update.
+ */
+async function newerChannelHead(repo, channel, tag) {
+  let head;
+  try {
+    head = await resolveChannelHead(repo, channel);
+  } catch (err) {
+    console.log(`could not re-check the ${channel} channel (${err.message}); installing ${tag}`);
+    return null;
+  }
+  if (typeof head?.tag_name !== "string") return null;
+  // `-1` means the named tag is OLDER than the head. Anything else — equal (the
+  // usual case), newer (a step-back the caller asked for), or unorderable —
+  // leaves the named tag alone.
+  if (compareStamps(tag, head.tag_name) !== -1) return null;
+  let selected;
+  try {
+    selected = selectAssets(head, true, channel);
+  } catch (err) {
+    console.log(`${head.tag_name} is newer but not installable (${err.message}); installing ${tag}`);
+    return null;
+  }
+  console.log(`superseded: ${tag} is no longer the ${channel} head; installing ${head.tag_name}`);
+  return selected;
+}
+
+export async function resolveRelease(repo, requestedVersion, channel = "stable", preferHead = false) {
+  const tag = requestedVersion
+    ? requestedVersion.startsWith("v")
+      ? requestedVersion
+      : `v${requestedVersion}`
+    : null;
+  if (tag && preferHead) {
+    const head = await newerChannelHead(repo, channel, tag);
+    if (head) return head;
+  }
+  const release = tag
+    ? await (
+        await fetchOk(
+          `https://api.github.com/repos/${repo}/releases/tags/${encodeURIComponent(tag)}`,
+        )
+      ).json()
+    : await resolveChannelHead(repo, channel);
+  return selectAssets(release, !tag, channel);
 }
 
 async function download(url, path) {
@@ -619,9 +683,15 @@ async function main() {
   const root = desktopRoot(args.target);
   assertSafeRoot(root);
   console.log(
-    `Resolving ${args.version || `the ${args.channel} channel head`} from ${args.repo}...`,
+    `Resolving ${
+      args.version
+        ? args.preferHead
+          ? `${args.version} or a newer ${args.channel} release`
+          : args.version
+        : `the ${args.channel} channel head`
+    } from ${args.repo}...`,
   );
-  const selected = await resolveRelease(args.repo, args.version, args.channel);
+  const selected = await resolveRelease(args.repo, args.version, args.channel, args.preferHead);
   const filename = selected.archive.name;
   console.log(`release: ${selected.release.tag_name}`);
   console.log(`target : ${root}`);

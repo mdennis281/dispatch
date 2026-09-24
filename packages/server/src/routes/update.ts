@@ -9,7 +9,10 @@
  * deliberately narrow: the ONLY tag it will ever install is the head of the
  * subscribed channel, which the server resolved itself — and re-resolves on the
  * way in, so the build installed is the newest one, not the newest one the last
- * poll happened to see. A caller may name the head explicitly — that is how the
+ * poll happened to see. The channel rides along to the installer, which checks
+ * once more at its own start: the install that follows this click takes minutes,
+ * and a release landing inside that window would otherwise leave the user on a
+ * build that was stale before it finished starting. A caller may name the head explicitly — that is how the
  * unstable → stable step-back works, since a downgrade is by definition not
  * `available` — but naming any OTHER tag is refused, so this cannot be talked
  * into fetching a build from somewhere else.
@@ -163,7 +166,7 @@ export function registerUpdateRoutes(app: FastifyInstance): void {
 
     reply.raw.once("finish", () => {
       setTimeout(() => {
-        void launchUpdate({ tag, appDir: payloadAppDir() }).catch((err: unknown) => {
+        void launchUpdate({ tag, appDir: payloadAppDir(), channel: status.channel }).catch((err: unknown) => {
           // The latch has to come off: nothing was spawned, so this server is
           // staying up, and leaving `installing: true` set would strand the UI
           // on a restart that is never coming with no way to retry but a

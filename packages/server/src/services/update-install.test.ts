@@ -96,6 +96,43 @@ describe("launchUpdate", () => {
     expect(args).not.toContain("--no-open");
   });
 
+  it("hands the installer its channel so it can re-check the head before it starts", async () => {
+    const appDir = await payload();
+    const spawnImpl = fakeSpawn();
+    await launchUpdate({
+      tag: "v2026.08.14.85068",
+      appDir,
+      channel: "unstable",
+      env: {},
+      fetchImpl: vi.fn(async () => textResponse(OK_INSTALLER)) as unknown as typeof fetch,
+      spawnImpl: spawnImpl.impl,
+    });
+
+    const [, args, options] = spawnImpl.calls()[0] as [string, string[], Record<string, unknown>];
+    const env = options.env as Record<string, string>;
+    expect(env.DISPATCH_INSTALL_PREFER_HEAD).toBe("1");
+    expect(env.DISPATCH_INSTALL_CHANNEL).toBe("unstable");
+    // Env, not `--prefer-head`, for the same reason as `--no-open` above.
+    expect(args).not.toContain("--prefer-head");
+  });
+
+  it("does not let an inherited prefer-head outlive the call that meant it", async () => {
+    const appDir = await payload();
+    const spawnImpl = fakeSpawn();
+    // The installer starts the server it installs, so the server's own env is
+    // the last installer's — including whatever that update was told.
+    await launchUpdate({
+      tag: "v2026.08.14.85068",
+      appDir,
+      env: { DISPATCH_INSTALL_PREFER_HEAD: "1", DISPATCH_INSTALL_CHANNEL: "unstable" },
+      fetchImpl: vi.fn(async () => textResponse(OK_INSTALLER)) as unknown as typeof fetch,
+      spawnImpl: spawnImpl.impl,
+    });
+
+    const [, , options] = spawnImpl.calls()[0] as [string, string[], Record<string, unknown>];
+    expect((options.env as Record<string, string>).DISPATCH_INSTALL_PREFER_HEAD).toBe("");
+  });
+
   it("captures installer output to update.log, not to a console that is about to die", async () => {
     const appDir = await payload();
     const spawnImpl = fakeSpawn();
