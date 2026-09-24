@@ -148,6 +148,25 @@ UPDATE metric_span
 const SPAN_HEARTBEAT_KEY = "span.heartbeat";
 
 /**
+ * `metric_meta` key recording that {@link MetricsService.migrateLegacyManagerDetail}
+ * has finished on this database.
+ *
+ * It is a watermark rather than "the WHERE matches nothing the second time"
+ * because those two are only the same when the WHERE is cheap to evaluate, and
+ * for `metric_span` it is not: `identifier` carries no index, so each of the 62
+ * per-tool UPDATEs is a full scan of the table. On a 367k-row `metric_span`
+ * that measured 5.7 SECONDS of synchronous, event-loop-blocking work — paid on
+ * EVERY boot, before `app.listen()`, and growing with the metric history. It
+ * was a large part of installs timing out at `launch.py`'s 60s start deadline.
+ *
+ * Once-only is safe because nothing writes the legacy spellings any more:
+ * `classifyTool` forward-maps the old name at ingest, and the transcript
+ * backfill that could import historical rows is itself watermarked by
+ * `BACKFILL_VERSION` and never re-runs where it has already completed.
+ */
+const MANAGER_DETAIL_MIGRATION_KEY = "migration.managerDetail";
+
+/**
  * Span dimensions the filter UI does NOT offer as a pick-list — unbounded sets
  * the UI narrows by typing instead. Same three reasons as {@link UNFACETED},
  * plus `runId`: there is one value per subagent run ever spawned.
@@ -535,12 +554,17 @@ export class MetricsService {
    * Their real category is genuinely unknown, so they get an honest label rather
    * than a guessed one.
    *
-   * Idempotent: the WHERE only matches rows still carrying the retired server
-   * name, and a migrated row no longer does. Cheap on every boot after the first
-   * (it matches nothing, against an index-covered equality). Returns how many
-   * rows moved ACROSS BOTH TABLES, for the boot log.
+   * Runs AT MOST ONCE per database, gated on {@link MANAGER_DETAIL_MIGRATION_KEY}.
+   * The statements are still individually idempotent — the WHEREs only match
+   * rows carrying the retired spellings, and a migrated row no longer does — but
+   * idempotent is not the same as free, and re-proving it cost seconds of a
+   * blocked event loop on every boot. See the watermark for the measurement.
+   *
+   * Returns how many rows moved ACROSS BOTH TABLES, for the boot log; 0 once the
+   * watermark is set, which is also what a clean re-run would have returned.
    */
   migrateLegacyManagerDetail(): number {
+    if (this.getMeta(MANAGER_DETAIL_MIGRATION_KEY)) return 0;
     // One statement, so a row is classified exactly once: a per-tool loop plus a
     // catch-all pass would re-read rows the loop had just rewritten.
     const cases = MANAGER_TOOL_NAMES.map(
@@ -554,7 +578,12 @@ export class MetricsService {
             WHERE category = 'manager' AND detail = ?`,
         )
         .run(LEGACY_MANAGER_SERVER);
-      return Number(res.changes ?? 0) + this.migrateLegacySpanIdentifiers();
+      const moved = Number(res.changes ?? 0) + this.migrateLegacySpanIdentifiers();
+      // INSIDE the transaction: a crash between the UPDATEs and the watermark
+      // would otherwise leave the rows migrated and the work scheduled forever,
+      // or — worse the other way — the watermark set over a rolled-back update.
+      this.setMeta(MANAGER_DETAIL_MIGRATION_KEY, String(this.now()));
+      return moved;
     });
   }
 
@@ -573,7 +602,10 @@ export class MetricsService {
    * the old value named a server that is gone; here it names the call that was
    * actually made, which stays true.
    *
-   * Runs inside the caller's transaction.
+   * Runs inside the caller's transaction, and only behind the caller's
+   * watermark: `metric_span.identifier` has no index, so every one of these
+   * per-tool UPDATEs is a full table scan. 62 tools × a 367k-row table measured
+   * 5.7s. That is affordable exactly once.
    */
   private migrateLegacySpanIdentifiers(): number {
     const update = this.db.prepare(`UPDATE metric_span SET identifier = ? WHERE identifier = ?`);
