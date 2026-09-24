@@ -179,6 +179,51 @@ describe("AcpHarness.createSession", () => {
     );
   });
 
+  it("does not refuse on a list older than the TTL — a model pulled since is real", async () => {
+    // The bug: this read went straight to the cache map and never applied the
+    // TTL that listModels() applies, and only the model picker ever refreshed
+    // that map. Pull a model, start a chat on it, and it was refused forever
+    // while /api/tags had it all along. Past the TTL we decline to judge.
+    let clock = 0;
+    let pulled = [tag("llama3.1:8b", 4_920_753_328)];
+    const harness = new AcpHarness({
+      runtime: { kind: "goose", source: "installed", available: true, path: "/x/goose" },
+      fetchModels: async () => toModelOptions(pulled),
+      connect: () => ({ ready: async () => ({}) }) as never,
+      now: () => clock,
+    });
+
+    await harness.listModels();
+    // Fresh list: the refusal still stands, which is the behaviour worth keeping.
+    expect(() => harness.createSession(spec("devstral:latest"))).toThrow(/llama3\.1:8b/);
+
+    pulled = [...pulled, tag("devstral:latest", 14_333_909_728)];
+    clock += 5 * 60 * 1000;
+    expect(() => harness.createSession(spec("devstral:latest"))).not.toThrow();
+  });
+
+  it("re-probes on the stale path, so the next attempt judges against the truth", async () => {
+    let clock = 0;
+    let probes = 0;
+    const harness = new AcpHarness({
+      runtime: { kind: "goose", source: "installed", available: true, path: "/x/goose" },
+      fetchModels: async () => {
+        probes += 1;
+        return toModelOptions([tag("llama3.1:8b", 4_920_753_328)]);
+      },
+      connect: () => ({ ready: async () => ({}) }) as never,
+      now: () => clock,
+    });
+
+    await harness.listModels();
+    expect(probes).toBe(1);
+
+    clock += 5 * 60 * 1000;
+    harness.createSession(spec("devstral:latest"));
+    await new Promise((r) => setImmediate(r));
+    expect(probes).toBe(2);
+  });
+
   it("does not refuse anything when the probe failed — a seed cannot know what is pulled", async () => {
     // listModels() falls back to a static seed when Ollama is unreachable.
     // Validating against that would reject working models every time the probe
