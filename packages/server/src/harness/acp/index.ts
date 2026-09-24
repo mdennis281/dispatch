@@ -209,15 +209,27 @@ export class AcpHarness implements Harness {
     const cached = this.modelCache.get(host);
     if (!opts.refresh && cached && this.now() - cached.at < CACHE_TTL_MS) return cached.models;
 
+    const models = await this.refreshModels(host);
+    // Never throw: a picker with a stale list beats a picker that errored.
+    if (!models?.length) return cached?.models ?? fallbackModels(this.kind);
+    return models;
+  }
+
+  /**
+   * Re-probe ONE host and store what it answers.
+   *
+   * Keyed by host rather than by account because {@link assertModelAvailable}
+   * has already resolved the host and has no account to resolve it from again.
+   * Shares `modelProbes` so concurrent callers await one request.
+   */
+  private async refreshModels(host: string): Promise<ModelOption[] | null> {
     let probe = this.modelProbes.get(host);
     if (!probe) {
       probe = this.probeModels(host).finally(() => this.modelProbes.delete(host));
       this.modelProbes.set(host, probe);
     }
     const models = await probe;
-    // Never throw: a picker with a stale list beats a picker that errored.
-    if (!models?.length) return cached?.models ?? fallbackModels(this.kind);
-    this.modelCache.set(host, { at: this.now(), models });
+    if (models?.length) this.modelCache.set(host, { at: this.now(), models });
     return models;
   }
 
@@ -340,10 +352,20 @@ export class AcpHarness implements Harness {
    * validating against it would reject working models whenever the probe
    * happened to be down. Silence there is correct: unreachable is a different
    * error, and it arrives on its own.
+   *
+   * A STALE entry is not a live list either, and this read bypasses the TTL
+   * that {@link listModels} applies — only the model picker ever refreshed the
+   * map, so a model pulled after the last probe was refused indefinitely while
+   * the host had it all along. Past the TTL, decline to judge and kick off a
+   * re-probe so the next attempt sees the truth.
    */
   private assertModelAvailable(model: string | undefined, host: string): void {
     const cached = this.modelCache.get(host);
     if (!model || !cached?.models.length) return;
+    if (this.now() - cached.at >= CACHE_TTL_MS) {
+      void this.refreshModels(host).catch(() => {});
+      return;
+    }
     const have = cached.models.map((m) => m.value);
     if (have.includes(model)) return;
     throw new Error(
