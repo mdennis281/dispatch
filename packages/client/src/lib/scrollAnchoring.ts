@@ -184,11 +184,20 @@ export function probeScrollAnchoring(): boolean {
  * with the Chrome/Chromium exclusions rather than a bare "Safari" match.
  */
 export function isWebKitEngine(ua: string): boolean {
-  // Every Chromium UA also says "AppleWebKit" and "Safari", so the exclusions
-  // carry the whole test. Playwright's WebKit build on Windows reports a
-  // Chrome UA outright, which is why this is unit-tested against real strings
-  // rather than asserted in a browser.
-  return /AppleWebKit/.test(ua) && !/(Chrome|Chromium|CriOS|Edg|OPR|Android)/.test(ua);
+  // EVERY browser on iOS and iPadOS is WKWebView, whatever it is branded as:
+  // Chrome (`CriOS`), Edge (`EdgiOS`) and Firefox (`FxiOS`) all render with the
+  // same engine as Mobile Safari and share the behaviour this routes around.
+  // So the device decides, not the brand — checking the brand first would let
+  // all three through on the very platform the evidence came from.
+  if (/iPhone|iPad|iPod/.test(ua)) return true;
+  // Desktop. Chromium claims "AppleWebKit" and "Safari" too, so it is the
+  // Chromium/Opera brands that distinguish it from real Safari. iPadOS asking
+  // for the desktop site lands here looking like Mac Safari, which is the
+  // answer we want for it anyway.
+  //
+  // Playwright's WebKit build on Windows reports a Chrome UA outright, which is
+  // why this is unit-tested against real strings rather than in a browser.
+  return /AppleWebKit/.test(ua) && !/(Chrome|Chromium|Edg|OPR)\//.test(ua);
 }
 
 export function applyScrollAnchoring(): void {
