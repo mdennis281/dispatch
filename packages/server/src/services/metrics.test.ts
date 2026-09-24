@@ -841,6 +841,23 @@ describe("migrateLegacyManagerDetail", () => {
     expect(metrics.migrateLegacyManagerDetail()).toBe(0);
   });
 
+  it("does not re-run once watermarked, however the table looks after", async () => {
+    metrics.record(legacyRow("create_pr"));
+    await metrics.flush();
+    expect(metrics.migrateLegacyManagerDetail()).toBe(1);
+
+    // A legacy row arriving AFTER the migration completed is deliberately not
+    // picked up. This is the point of the watermark, not a gap in it: re-proving
+    // "nothing matches" costs a full scan of `metric_span` per manager tool —
+    // seconds of blocked event loop on a real history, on every boot, before the
+    // server listens. Nothing writes these spellings any more, so the only way
+    // to get one is to forge it, exactly as this test does.
+    metrics.record(legacyRow("terminal"));
+    await metrics.flush();
+    expect(metrics.migrateLegacyManagerDetail()).toBe(0);
+    expect(detailsById().get("terminal")).toBe(LEGACY_MANAGER_SERVER);
+  });
+
   it("leaves an already-migrated row alone", async () => {
     metrics.record({
       ...legacyRow("create_pr"),
