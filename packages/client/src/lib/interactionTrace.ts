@@ -24,7 +24,7 @@
  */
 import { create } from "zustand";
 import { useViewport } from "../stores/viewport.js";
-import { probeScrollAnchoring } from "./scrollAnchoring.js";
+import { lastProbeReading, probeScrollAnchoring } from "./scrollAnchoring.js";
 
 /** One recorded moment. `t` is ms since the recorder started. */
 export interface TraceEntry {
@@ -70,7 +70,13 @@ export interface TraceSnapshot {
      * phone that visibly does not anchor. Inferring that from resize values is
      * two steps removed; this records the answer itself.
      */
-    anchor?: { attr: string | null; rowCv: string | null; probe: boolean | null };
+    anchor?: {
+      attr: string | null;
+      rowCv: string | null;
+      probe: boolean | null;
+      /** The probe's raw numbers — a wrong answer has to explain itself. */
+      reading?: unknown;
+    };
   };
   entries: TraceEntry[];
 }
@@ -213,6 +219,7 @@ function anchorState(): TraceSnapshot["meta"]["anchor"] {
     attr: document.documentElement.dataset.cmAnchor ?? null,
     rowCv: row ? getComputedStyle(row).contentVisibility : null,
     probe,
+    reading: lastProbeReading(),
   };
 }
 

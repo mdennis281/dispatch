@@ -53,6 +53,26 @@
  * this exact function to `page.evaluate` in Chromium and WebKit and assert on
  * what it really answers, rather than testing a copy of it that can drift.
  */
+/** What the last probe actually saw — recorded into traces so a wrong answer explains itself. */
+export interface ProbeReading {
+  anchored: boolean;
+  /** `scrollTop` after the setup scroll. Must equal the offset we asked for. */
+  before: number;
+  /** `scrollTop` after growing the content above the anchor. */
+  after: number;
+  /** `after - before`. A real compensation is the growth, to the pixel. */
+  delta: number;
+  /** Why it answered the way it did. */
+  why: string;
+}
+
+let lastReading: ProbeReading | null = null;
+
+/** The last probe's raw numbers, for `interactionTrace`'s meta. */
+export function lastProbeReading(): ProbeReading | null {
+  return lastReading;
+}
+
 export function probeScrollAnchoring(): boolean {
   /** Viewport of the probe scroller. */
   const VIEW = 100;
@@ -97,10 +117,35 @@ export function probeScrollAnchoring(): boolean {
     // the same amount to scrollTop so the anchor stays put on screen.
     above.style.height = `${ABOVE + GROWTH}px`;
     void host.offsetHeight;
-    // Half the growth is a wide margin either way: a real adjustment is the
-    // full 100px, and an engine that does nothing leaves it at 0.
-    return host.scrollTop - before >= GROWTH / 2;
-  } catch {
+    const after = host.scrollTop;
+    const delta = after - before;
+
+    // TWO checks, both strict, because the loose version of this shipped a
+    // false positive. On Michael's iPhone (iOS 18.7) it answered TRUE while
+    // per-frame sampling of the real transcript showed scrollTop not moving by
+    // so much as a pixel when a row above the reader changed height.
+    //
+    // 1. The SETUP must have taken. `before` has to be the offset we asked for;
+    //    if the engine reports something else, the scroll has not been applied
+    //    yet and every number after it describes a different moment. A stale
+    //    `before` of 0 followed by an `after` that picks up the requested 400
+    //    reads as a 400px "compensation" that never happened — and `>= 50`
+    //    waved it straight through.
+    // 2. The delta must be the growth we CAUSED, to within a rounding pixel —
+    //    not merely "big enough". A real adjustment is exactly GROWTH; anything
+    //    else is some other movement being counted as one.
+    //
+    // Either way out answers false, which only costs the optimization.
+    if (before !== OFFSET) {
+      lastReading = { anchored: false, before, after, delta, why: `setup scroll did not take (${before} != ${OFFSET})` };
+    } else if (Math.abs(delta - GROWTH) > 2) {
+      lastReading = { anchored: false, before, after, delta, why: `delta ${delta} is not the ${GROWTH}px grown` };
+    } else {
+      lastReading = { anchored: true, before, after, delta, why: "compensated by exactly the growth" };
+    }
+    return lastReading.anchored;
+  } catch (err) {
+    lastReading = { anchored: false, before: -1, after: -1, delta: 0, why: `threw: ${String(err).slice(0, 60)}` };
     return false;
   } finally {
     host.remove();
@@ -118,8 +163,38 @@ export function probeScrollAnchoring(): boolean {
  * laid out at their real heights would itself collapse the off-screen ones to
  * the placeholder, which is the very jolt being prevented.
  */
+/**
+ * WebKit is excluded outright, on device evidence rather than on principle.
+ *
+ * The probe above answers TRUE on Michael's iPhone (iOS 18.7, installed PWA) —
+ * recorded in the trace meta as `probe: true, attr: native, rowCv: auto` — while
+ * per-frame sampling of the REAL transcript in that same session showed
+ * `scrollTop` not moving by a single pixel as 55 rows changed height above the
+ * reader, for 3,776px of uncompensated shift. Two rounds of feature detection
+ * have now claimed this engine anchors when the transcript plainly shows it does
+ * not, so the engine no longer gets a vote.
+ *
+ * This is the UA keying that the original `@supports` note refused on principle.
+ * The principle cost three shipped attempts; a Safari that anchors correctly
+ * loses an optimization, which is the cheap side of the trade. Re-including
+ * WebKit needs DEVICE evidence — a trace whose row resizes no longer come from
+ * the 90px placeholder — not a better synthetic probe.
+ *
+ * Chromium on macOS reports "Safari" in its UA too, hence the AppleWebKit test
+ * with the Chrome/Chromium exclusions rather than a bare "Safari" match.
+ */
+export function isWebKitEngine(ua: string): boolean {
+  // Every Chromium UA also says "AppleWebKit" and "Safari", so the exclusions
+  // carry the whole test. Playwright's WebKit build on Windows reports a
+  // Chrome UA outright, which is why this is unit-tested against real strings
+  // rather than asserted in a browser.
+  return /AppleWebKit/.test(ua) && !/(Chrome|Chromium|CriOS|Edg|OPR|Android)/.test(ua);
+}
+
 export function applyScrollAnchoring(): void {
+  if (isWebKitEngine(navigator.userAgent)) return;
   if (probeScrollAnchoring()) {
     document.documentElement.dataset.cmAnchor = "native";
   }
 }
+
