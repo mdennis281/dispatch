@@ -2920,6 +2920,23 @@ export class SessionBroker {
           detail: err instanceof Error ? err.message : String(err),
         });
       });
+      // A PROVIDER THAT CANNOT SWITCH LIVE HAS ONLY RECORDED THE CHOICE.
+      //
+      // goose resolves its model from `GOOSE_MODEL` when the process spawns and
+      // has no way to change it afterwards, so `AcpSession.setModel` just stores
+      // it — while `chat.model` was already persisted and the picker already
+      // shows the new name. Measured on the wire: pick a different model
+      // mid-chat and EVERY subsequent request still goes out as the old one,
+      // with the UI naming the new one. A model picker that silently does not
+      // change the model is worse than one that refuses.
+      //
+      // So retire the native session the way `/clear` does and let the next
+      // message spawn a fresh one — that one reads the new model. Dispatch's
+      // transcript is the durable record either way, and the handoff is the
+      // path the provider already supports.
+      if (!this.harnesses?.resolve(session.harnessKind).harness.capabilities.liveModelSwitch) {
+        this.retireNativeSession(session, `switching to ${next}`);
+      }
     }
     if (session.query) {
       try {
@@ -3295,21 +3312,7 @@ export class SessionBroker {
       // Codex has native compaction but no in-thread `/clear`: retire the native
       // thread and let the next user message create a fresh one. Dispatch's
       // transcript remains the durable conversation record.
-      const live = session.harnessSession;
-      session.switching = true;
-      session.harnessSession = undefined;
-      session.started = false;
-      session.sessionId = undefined;
-      // The baseline belongs to the thread being retired — the fresh one starts
-      // its own `total_cost_usd` from zero, and measuring against a dead
-      // session's total would understate the first turn back.
-      session.lastCostUsd = undefined;
-      session.costBaselineUnknown = false;
-      session.managerGrant?.revoke();
-      session.managerGrant = undefined;
-      void live.dispose();
-      void this.patchChat(chatId, { sessionId: undefined, costBaselineUsd: undefined });
-      this.onTurnEnd(session);
+      this.retireNativeSession(session);
     } else {
       session.outbox.push({
         id: this.genId(),
@@ -3319,6 +3322,55 @@ export class SessionBroker {
       });
       this.schedule(session);
     }
+  }
+
+  /**
+   * Retire the NATIVE session, keeping the Dispatch chat.
+   *
+   * The next user message spawns a fresh one, which is the only way a change
+   * the provider cannot apply in place (a model on ACP) actually takes effect.
+   * Dispatch's transcript is the durable conversation record, so nothing the
+   * user can see is lost; what goes is the provider-side thread and the cost
+   * baseline that belonged to it — measuring a fresh thread's `total_cost_usd`
+   * against a dead one's total would understate its first turn.
+   *
+   * `clearContext` calls this too, so there is ONE implementation of "retire
+   * the thread" rather than two copies that can drift.
+   */
+  private retireNativeSession(session: LiveSession, why?: string): void {
+    const live = session.harnessSession;
+    if (!live) return;
+    // DELIBERATELY NOT `switching = true`. That flag exists for `onDone` to
+    // consume — it is what makes a stop during a harness/account switch settle
+    // quietly instead of publishing a `done` attention item and a push. This
+    // path never reaches `onDone`: the consumer only calls it while
+    // `session.harnessSession === live` (see the stream loop), and the line
+    // below clears that first. So the flag would never be read, would sit
+    // `true` on a session object that outlives the turn, and would silently
+    // swallow the NEXT genuine session-end notification for that chat.
+    session.harnessSession = undefined;
+    session.started = false;
+    session.sessionId = undefined;
+    session.lastCostUsd = undefined;
+    session.costBaselineUnknown = false;
+    session.managerGrant?.revoke();
+    session.managerGrant = undefined;
+    void live.dispose();
+    void this.patchChat(session.chatId, { sessionId: undefined, costBaselineUsd: undefined });
+    // Said out loud, because a silently restarted session looks like a chat
+    // that forgot what it was doing. `clearContext` emits its own notice before
+    // calling here, so it passes no reason and gets no second one.
+    if (why) {
+      void this.emit(session, {
+        kind: "notice",
+        id: this.genId(),
+        chatId: session.chatId,
+        ts: this.now(),
+        level: "info",
+        text: `Restarted the agent (${why}) — this provider cannot change it on a live session.`,
+      });
+    }
+    this.onTurnEnd(session);
   }
 
   /**

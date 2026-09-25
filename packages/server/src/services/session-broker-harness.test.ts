@@ -955,6 +955,146 @@ describe("SessionBroker neutral harness path", () => {
     });
   });
 
+  describe("model switch on a provider that cannot do it live", () => {
+    /** goose-shaped: everything works except changing the model in place. */
+    function noLiveSwitchHarness(): Harness {
+      return {
+        kind: "goose",
+        capabilities: {
+          toolPermissions: true,
+          questions: false,
+          subagents: false,
+          skills: true,
+          compaction: false,
+          fork: false,
+          usageLimits: false,
+          liveModelSwitch: false,
+          livePermissionSwitch: true,
+          efforts: [],
+          preToolGuard: true,
+          managerTransport: "http",
+        },
+        runtime: () => ({ kind: "goose", source: "installed", available: true }),
+        listModels: async () => [],
+        readLimits: async () => null,
+        generateText: async () => "title",
+        createSession: (spec: HarnessSessionSpec) => {
+          specs.push(spec);
+          return session;
+        },
+      };
+    }
+
+    it("restarts the agent, so the next turn runs on the model that was picked", async () => {
+      // The bug, measured on the wire: goose reads GOOSE_MODEL when the process
+      // spawns and cannot change it afterwards, so `setModel` only recorded the
+      // choice — while `chat.model` was persisted and the picker showed the new
+      // name. Every request after the switch still went out as the OLD model.
+      broker = new SessionBroker({
+        store,
+        bus: (bus = new EventBus()),
+        harnesses: new HarnessRegistry({ harnesses: { goose: noLiveSwitchHarness() } }),
+        authored: new AuthoredConfigService({ globalRoot: join(dir, "global") }),
+        deps: { stopTimeoutMs: 5 },
+      });
+      const chat = await store.saveChat({
+        id: "chat-model-switch",
+        projectId: "project-1",
+        title: "Switch",
+        modeId: "plan",
+        effort: "low",
+        harness: "goose",
+        model: "qwen3-coder:30b",
+        worktrees: [],
+        prs: [],
+        createdAt: 1,
+      });
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "one");
+      await broker.waitFor(chat.id, "idle");
+      expect(specs).toHaveLength(1);
+      expect(specs[0]!.model).toBe("qwen3-coder:30b");
+
+      await broker.setModel(chat.id, "llama3.1:8b");
+      await broker.sendMessage(chat.id, "two");
+      await broker.waitFor(chat.id, "idle");
+
+      // A SECOND spawn, carrying the new model — not a reused process still
+      // holding the old GOOSE_MODEL.
+      expect(specs).toHaveLength(2);
+      expect(specs[1]!.model).toBe("llama3.1:8b");
+    });
+
+    it("leaves the NEXT genuine session-end still able to announce itself", async () => {
+      // `switching` is consumed only by `onDone`, and that is what makes a stop
+      // settle quietly — no `done` attention item, no push. Retiring a session
+      // never reaches `onDone` (the stream loop calls it only while
+      // `harnessSession === live`, and retiring clears that first), so setting
+      // the flag here would leave it `true` on a session that outlives the
+      // turn and silently swallow the next real session-end notification.
+      broker = new SessionBroker({
+        store,
+        bus: (bus = new EventBus()),
+        harnesses: new HarnessRegistry({ harnesses: { goose: noLiveSwitchHarness() } }),
+        authored: new AuthoredConfigService({ globalRoot: join(dir, "global") }),
+        deps: { stopTimeoutMs: 5 },
+      });
+      const chat = await store.saveChat({
+        id: "chat-switch-then-stop",
+        projectId: "project-1",
+        title: "Switch then stop",
+        modeId: "plan",
+        effort: "low",
+        harness: "goose",
+        model: "qwen3-coder:30b",
+        worktrees: [],
+        prs: [],
+        createdAt: 1,
+      });
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "one");
+      await broker.waitFor(chat.id, "idle");
+      await broker.setModel(chat.id, "llama3.1:8b");
+
+      await broker.sendMessage(chat.id, "two");
+      await broker.waitFor(chat.id, "idle");
+
+      // Watch ONLY for the "Session ended" item the quiet branch skips.
+      const ended: string[] = [];
+      bus.subscribe((e) => {
+        if (e.type === "attention-add" && e.item.kind === "done") ended.push(e.item.chatId);
+      });
+      await broker.stop(chat.id);
+
+      // With the flag leaked, `onDone` takes the quiet branch and this is empty.
+      expect(ended).toEqual([chat.id]);
+    });
+
+    it("does not restart a provider that CAN switch in place", async () => {
+      // Codex advertises liveModelSwitch, so tearing its thread down would
+      // throw away context for no reason.
+      const chat = await store.saveChat({
+        id: "chat-live-switch",
+        projectId: "project-1",
+        title: "Live",
+        modeId: "plan",
+        effort: "low",
+        harness: "codex",
+        model: "gpt-test",
+        worktrees: [],
+        prs: [],
+        createdAt: 1,
+      });
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "one");
+      await broker.waitFor(chat.id, "idle");
+      await broker.setModel(chat.id, "gpt-other");
+      await broker.sendMessage(chat.id, "two");
+      await broker.waitFor(chat.id, "idle");
+      expect(specs).toHaveLength(1);
+    });
+  });
+
   describe("context window on a harness that fell back", () => {
     /** A harness that answers `contextWindow` but whose runtime is missing. */
     function unavailableLocalHarness(probed: () => void): Harness {
