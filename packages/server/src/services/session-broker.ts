@@ -110,6 +110,7 @@ import {
   DEFAULT_IDLE_SESSION_MINUTES,
   EffortSchema,
   applyMcpEnablement,
+  harnessEnablementLayers,
   classifyWorkflowViolation,
   describeExemptionScope,
   HTTP_URL_RE,
@@ -5807,6 +5808,13 @@ export class SessionBroker {
         {
           app: appSettings?.mcpEnabled,
           project: this.projectConfig.getMcpEnabled?.(projectId),
+          // Also on the LIVE-RELOAD path, or a manifest edit would hand a
+          // running session back a server its model pin had switched off.
+          ...harnessEnablementLayers(
+            appSettings?.mcpEnabledFor,
+            session.harnessKind,
+            session.model,
+          ),
         },
       );
       if (!Object.keys(enabled).length) continue;
@@ -6986,6 +6994,16 @@ export class SessionBroker {
     const mcpEnablement: McpEnablementLayers = {
       app: appSettings?.mcpEnabled,
       project: projectId ? this.projectConfig?.getMcpEnabled?.(projectId) : undefined,
+      // And the runtime layers on top — "not on goose", or "not on this model".
+      // `session.harnessKind` is the CONFIGURED kind, which is what the human
+      // picked and therefore what they pinned against; the fallback to Claude
+      // below can change what runs, but a pin written for goose should not
+      // silently start applying to the Claude session that replaced it.
+      ...harnessEnablementLayers(
+        appSettings?.mcpEnabledFor,
+        session.harnessKind,
+        options.model ?? session.model,
+      ),
     };
     // What this model will actually be served, when the provider can find out
     // (only the local-model one can). Resolved BEFORE the MCP surface is built

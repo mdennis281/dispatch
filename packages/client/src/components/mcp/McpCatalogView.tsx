@@ -44,16 +44,22 @@ import {
   RotateCcw,
 } from "lucide-react";
 import type {
+  HarnessKind,
   McpEnablementScope,
   McpServerCatalogEntry,
   McpServerStatus,
   McpToolInfo,
+  ModelOption,
 } from "@dispatch/shared";
+import { DEFAULT_HARNESS } from "@dispatch/shared";
+import { api } from "../../lib/api.js";
+import { useHarnesses } from "../../stores/harnesses.js";
 import { Modal, InlineError } from "../sidebar/Modal.js";
 import { Button } from "../ui/Button.js";
 import { Chip } from "../ui/Chip.js";
 import { IconButton } from "../ui/IconButton.js";
 import { SegmentedControl } from "../ui/SegmentedControl.js";
+import { Select } from "../ui/Select.js";
 import { Spinner } from "../ui/Spinner.js";
 import { StatusDot, type DotTone } from "../ui/StatusDot.js";
 import { Switch } from "../ui/Switch.js";
@@ -80,7 +86,29 @@ const STATUS_META: Record<McpServerStatus, { tone: DotTone; label: string }> = {
 const SCOPE_LABEL: Record<McpEnablementScope, string> = {
   app: "this install",
   project: "this repo",
+  harness: "this provider",
+  model: "this model",
 };
+
+/** A provider+model pair a runtime-scoped toggle writes against. */
+export interface McpRuntimeScope {
+  harness?: string;
+  model?: string;
+}
+
+/** Which of the four pins this scope reads and writes. */
+function pinAt(
+  scope: McpEnablementScope,
+  enablement: McpServerCatalogEntry["enablement"],
+): boolean | undefined {
+  return scope === "app"
+    ? enablement.app
+    : scope === "project"
+      ? enablement.project
+      : scope === "harness"
+        ? enablement.harness
+        : enablement.model;
+}
 
 /** Where a server's resolved state came from, as a sentence fragment. */
 function sourceLabel(server: McpServerCatalogEntry): string {
@@ -102,16 +130,18 @@ function ServerToggle({
   projectId,
   server,
   scope,
+  runtime,
   compact,
 }: {
   projectId: string;
   server: McpServerCatalogEntry;
   scope: McpEnablementScope;
+  runtime?: McpRuntimeScope;
   compact?: boolean;
 }) {
   const pending = useMcpTogglePending(projectId, server.name);
   const { enablement } = server;
-  const pinned = scope === "app" ? enablement.app : enablement.project;
+  const pinned = pinAt(scope, enablement);
 
   if (enablement.alwaysOn) {
     return (
@@ -124,7 +154,7 @@ function ServerToggle({
   }
 
   const set = (enabled: boolean | null) =>
-    void useMcp.getState().setEnabled(projectId, server.name, scope, enabled);
+    void useMcp.getState().setEnabled(projectId, server.name, scope, enabled, runtime);
 
   return (
     <span
@@ -166,13 +196,27 @@ function EnablementPanel({
   projectId,
   server,
   scope,
+  runtime,
 }: {
   projectId: string;
   server: McpServerCatalogEntry;
   scope: McpEnablementScope;
+  runtime?: McpRuntimeScope;
 }) {
   const { enablement } = server;
+  // Most specific FIRST, so the list reads in the order the resolver consults
+  // it — the row that won is always the topmost one with a pin.
   const rows: Array<{ label: string; value: string; won: boolean }> = [
+    {
+      label: runtime?.model ? `Model · ${runtime.model}` : "Model",
+      value: pinText(enablement.model),
+      won: enablement.source === "model",
+    },
+    {
+      label: runtime?.harness ? `Provider · ${runtime.harness}` : "Provider",
+      value: pinText(enablement.harness),
+      won: enablement.source === "harness",
+    },
     {
       label: "Project",
       value: pinText(enablement.project),
@@ -193,7 +237,7 @@ function EnablementPanel({
             ? "Running in every session in this project"
             : "Not handed to any session — its tools cost nothing"}
         </span>
-        <ServerToggle projectId={projectId} server={server} scope={scope} />
+        <ServerToggle projectId={projectId} server={server} scope={scope} runtime={runtime} />
       </div>
       {!enablement.alwaysOn && (
         <>
@@ -358,12 +402,14 @@ function ServerButton({
   server,
   active,
   scope,
+  runtime,
   onSelect,
 }: {
   projectId: string;
   server: McpServerCatalogEntry;
   active: boolean;
   scope: McpEnablementScope;
+  runtime?: McpRuntimeScope;
   onSelect: () => void;
 }) {
   const meta = STATUS_META[server.status];
@@ -400,7 +446,7 @@ function ServerButton({
           </span>
         </span>
       </button>
-      <ServerToggle projectId={projectId} server={server} scope={scope} compact />
+      <ServerToggle projectId={projectId} server={server} scope={scope} runtime={runtime} compact />
     </div>
   );
 }
@@ -412,6 +458,7 @@ function ServerGroup({
   servers,
   selected,
   scope,
+  runtime,
   onSelect,
 }: {
   projectId: string;
@@ -420,6 +467,7 @@ function ServerGroup({
   servers: McpServerCatalogEntry[];
   selected: string | null;
   scope: McpEnablementScope;
+  runtime?: McpRuntimeScope;
   onSelect: (name: string) => void;
 }) {
   if (servers.length === 0) return null;
@@ -436,6 +484,7 @@ function ServerGroup({
           server={s}
           active={selected === s.name}
           scope={scope}
+          runtime={runtime}
           onSelect={() => onSelect(s.name)}
         />
       ))}
@@ -456,12 +505,55 @@ export function McpCatalogView() {
   // that belongs to the repo should be the one you make without thinking. App
   // scope is the deliberate step, because it silently changes every project.
   const [scope, setScope] = useState<McpEnablementScope>("project");
+  // Which runtime the two runtime scopes write against. Held even while another
+  // scope is selected, so switching to "Provider" and back does not lose the
+  // model you picked.
+  const harnesses = useHarnesses((s) => s.harnesses);
+  const [harness, setHarness] = useState<string>(DEFAULT_HARNESS);
+  const [model, setModel] = useState<string>("");
+  const [harnessModels, setHarnessModels] = useState<ModelOption[]>([]);
+
+  // Only the runtime scopes carry a runtime; the project and app views ask for
+  // the surface with no runtime pin applied, which is what they are about.
+  const runtime = useMemo<McpRuntimeScope | undefined>(
+    () =>
+      scope === "harness"
+        ? { harness }
+        : scope === "model"
+          ? { harness, ...(model ? { model } : {}) }
+          : undefined,
+    [scope, harness, model],
+  );
+
+  // The chosen provider's models, for the model picker. Fetched rather than read
+  // from the composer's store because that one only holds the ACTIVE provider's
+  // list, and this picker is routinely pointed at a different one.
+  useEffect(() => {
+    if (scope !== "model") return;
+    let live = true;
+    void api.models
+      .list(harness as HarnessKind)
+      .then((m) => {
+        if (!live) return;
+        setHarnessModels(m);
+        // Default to the provider's first model rather than leaving the pin
+        // unwritable: a `model` scope with no model is a scope that can only
+        // error when you click it.
+        setModel((cur) => (cur && m.some((o) => o.value === cur) ? cur : (m[0]?.value ?? "")));
+      })
+      .catch(() => {
+        if (live) setHarnessModels([]);
+      });
+    return () => {
+      live = false;
+    };
+  }, [scope, harness]);
 
   const load = useCallback(
     (fresh?: boolean) => {
-      if (projectId) void useMcp.getState().load(projectId, { fresh });
+      if (projectId) void useMcp.getState().load(projectId, { ...(fresh ? { fresh } : {}), ...runtime });
     },
-    [projectId],
+    [projectId, runtime],
   );
 
   // (Re)fetch whenever the overlay opens or the active project changes while open.
@@ -545,17 +637,50 @@ export function McpCatalogView() {
               </div>
               <SegmentedControl
                 segments={[
-                  { value: "project", label: "Project" },
+                  { value: "project", label: "Repo" },
                   { value: "app", label: "App" },
+                  { value: "harness", label: "Provider" },
+                  { value: "model", label: "Model" },
                 ]}
                 value={scope}
                 onChange={setScope}
                 className="w-full [&>button]:flex-1"
               />
+              {(scope === "harness" || scope === "model") && (
+                <div className="space-y-1 pt-1">
+                  <Select
+                    value={harness}
+                    onChange={setHarness}
+                    label="Provider"
+                    className="w-full"
+                    options={(harnesses.length
+                      ? harnesses.map((h) => h.kind)
+                      : [DEFAULT_HARNESS]
+                    ).map((k) => ({ value: k, label: k }))}
+                  />
+                  {scope === "model" && (
+                    <Select
+                      value={model}
+                      onChange={setModel}
+                      label="Model"
+                      className="w-full"
+                      options={
+                        harnessModels.length
+                          ? harnessModels.map((m) => ({ value: m.value, label: m.label }))
+                          : [{ value: "", label: "no models found" }]
+                      }
+                    />
+                  )}
+                </div>
+              )}
               <p className="text-2xs leading-snug text-faint">
                 {scope === "project"
                   ? "Committed to .dispatch/project.yaml — everyone on this repo."
-                  : "Saved to this install only, across every project. Never committed."}
+                  : scope === "app"
+                    ? "Saved to this install only, across every project. Never committed."
+                    : scope === "harness"
+                      ? `Every ${harness} chat, whatever the model. Never committed — a provider's surface is a fact about the runtime, not the repo.`
+                      : `Only ${harness} running ${harnessModels.find((m) => m.value === model)?.label ?? model ?? "this model"}. Beats the repo and provider pins — it is the narrowest claim.`}
               </p>
             </div>
             <ServerGroup
@@ -565,6 +690,7 @@ export function McpCatalogView() {
               servers={custom}
               selected={selected}
               scope={scope}
+              runtime={runtime}
               onSelect={setSelected}
             />
             <ServerGroup
@@ -574,6 +700,7 @@ export function McpCatalogView() {
               servers={bundled}
               selected={selected}
               scope={scope}
+              runtime={runtime}
               onSelect={setSelected}
             />
             <ServerGroup
@@ -583,6 +710,7 @@ export function McpCatalogView() {
               servers={external}
               selected={selected}
               scope={scope}
+              runtime={runtime}
               onSelect={setSelected}
             />
             {external.length === 0 && (
@@ -611,7 +739,12 @@ export function McpCatalogView() {
             {!activeServer ? (
               <div className="pt-16 text-center text-sm text-muted">Select a server.</div>
             ) : (
-              <EnablementPanel projectId={projectId} server={activeServer} scope={scope} />
+              <EnablementPanel
+                  projectId={projectId}
+                  server={activeServer}
+                  scope={scope}
+                  runtime={runtime}
+                />
             )}
             {!activeServer ? null : activeServer.status === "disabled" ? (
               <div className="rounded-md border border-dashed border-line px-3 py-8 text-center">

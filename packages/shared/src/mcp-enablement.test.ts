@@ -1,5 +1,5 @@
 /**
- * Tests for the two-layer MCP enablement resolver.
+ * Tests for the layered MCP enablement resolver.
  *
  * The behaviours worth pinning are the ones a disabled-LIST design would get
  * wrong: a project re-enabling what the app switched off, an absent key meaning
@@ -8,7 +8,9 @@
 import { describe, it, expect } from "vitest";
 import {
   applyMcpEnablement,
+  harnessEnablementLayers,
   isAlwaysOnMcpServer,
+  mcpEnablementKeys,
   resolveMcpEnablement,
   MCP_ALWAYS_ON,
 } from "./mcp-enablement.js";
@@ -112,5 +114,95 @@ describe("applyMcpEnablement", () => {
     const off = Object.fromEntries(MANAGER_SERVER_NAMES.map((n) => [n, false]));
     const out = applyMcpEnablement({ ...servers, ...withManager }, { project: off });
     for (const name of MANAGER_SERVER_NAMES) expect(out).toHaveProperty(name);
+  });
+
+  it("lets a model pin drop a server the project asked for", () => {
+    // The ordering choice this design turns on: a project pin says "this repo
+    // does not use that", a model pin says "this model cannot afford it". When
+    // both are set the second decides, because it is about whether the session
+    // can function at all — and it is never committed, so it cannot impose one
+    // person's setup on a checkout.
+    const out = applyMcpEnablement(servers, {
+      project: { sentry: true },
+      model: { sentry: false },
+    });
+    expect(Object.keys(out)).toEqual(["ripgrep"]);
+  });
+
+  it("lets a model pin re-enable what the provider switched off", () => {
+    const out = applyMcpEnablement(servers, {
+      harness: { sentry: false },
+      model: { sentry: true },
+    });
+    expect(Object.keys(out).sort()).toEqual(["ripgrep", "sentry"]);
+  });
+
+  it("still drops nothing when only runtime layers are present and empty", () => {
+    expect(applyMcpEnablement(servers, { harness: {}, model: {} })).not.toBe(servers);
+    expect(Object.keys(applyMcpEnablement(servers, { harness: {}, model: {} })).sort()).toEqual(
+      ["ripgrep", "sentry"],
+    );
+  });
+
+  it("never drops a Dispatch server for a model either", () => {
+    const withManager = Object.fromEntries(
+      MANAGER_SERVER_NAMES.map((n) => [n, { command: "n/a" }]),
+    );
+    const off = Object.fromEntries(MANAGER_SERVER_NAMES.map((n) => [n, false]));
+    const out = applyMcpEnablement({ ...servers, ...withManager }, { model: off });
+    for (const name of MANAGER_SERVER_NAMES) expect(out).toHaveProperty(name);
+  });
+});
+
+describe("runtime enablement keys", () => {
+  it("answers to the provider and to provider/model, least specific first", () => {
+    expect(mcpEnablementKeys("goose", "qwen3-coder:30b")).toEqual([
+      "goose",
+      "goose/qwen3-coder:30b",
+    ]);
+  });
+
+  it("has no model key when the session has no model yet", () => {
+    expect(mcpEnablementKeys("goose")).toEqual(["goose"]);
+  });
+
+  it("reports which layer decided, so the UI can say why", () => {
+    const r = resolveMcpEnablement("sentry", {
+      app: { sentry: true },
+      harness: { sentry: false },
+    });
+    expect(r).toMatchObject({ effective: false, source: "harness", app: true, harness: false });
+  });
+
+  describe("harnessEnablementLayers", () => {
+    const byKey = {
+      goose: { playwright: false },
+      "goose/qwen3-coder:30b": { sentry: false },
+      claude: { playwright: true },
+    };
+
+    it("picks up both the provider and the model record", () => {
+      expect(harnessEnablementLayers(byKey, "goose", "qwen3-coder:30b")).toEqual({
+        harness: { playwright: false },
+        model: { sentry: false },
+      });
+    });
+
+    it("omits a layer with nothing pinned, so absent still means inherit", () => {
+      // An empty object here would read as a layer that exists and pins
+      // nothing, which is the same answer — but it would also make
+      // applyMcpEnablement rebuild the record for no reason.
+      expect(harnessEnablementLayers(byKey, "goose", "some-other-model")).toEqual({
+        harness: { playwright: false },
+      });
+      expect(harnessEnablementLayers(byKey, "codex", "gpt-6")).toEqual({});
+      expect(harnessEnablementLayers(undefined, "goose", "m")).toEqual({});
+    });
+
+    it("does not leak one provider's pins onto another", () => {
+      expect(harnessEnablementLayers(byKey, "claude", "opus")).toEqual({
+        harness: { playwright: true },
+      });
+    });
   });
 });
