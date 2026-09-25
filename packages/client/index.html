@@ -60,6 +60,130 @@
         }
       })();
     </script>
+    <!--
+      The splash's colours, picked before the first paint.
+
+      Every road the splash draws is a different colour, and the dots it lands on
+      wear the colour of the road that reached them. The first is the brand
+      yellow; after that it deals from the accent set at random. So the opening
+      mark is all one colour and every one after it has a dot that does not match
+      the other two — the graph carrying where it has been.
+
+      HERE, AND NOT IN THE STYLESHEET, for the same reason the theme script above
+      is: this has to be decided in the same parse pass that paints the mark. And
+      not in the bundle, which arrives long after the first road is down.
+
+      A SHUFFLED BAG, not `random()` per pick. Five colours dealt from a shuffled
+      copy, reshuffled when empty, and the first of a new deal is swapped away if
+      it matches the last of the old one. That gives random ORDER with no repeat
+      and no colour skipped — where independent picks would happily show blue
+      twice running, or never get to green at all in the three or four draws a
+      boot actually has time for.
+
+      The palettes are the app's own, by hand, per theme: `--p-accent` for the
+      yellow and `--p-cat-{7,4,2,1,5}` for the rotation — which are chosen for
+      even hue spacing at MATCHED LIGHTNESS, so no road in the sequence shouts
+      louder than the one before it. Keep them level with src/theme/*.css.
+    -->
+    <script>
+      (function () {
+        var root = document.documentElement;
+        var PALETTES = {
+          /*        yellow     orange     red        green      blue       purple */
+          dark:  ["#e5a33c", "#ff9e64", "#f7768e", "#9ece6a", "#7aa2f7", "#bb9af7"],
+          dim:   ["#f0b45b", "#ffad79", "#ff98aa", "#afe083", "#8bb4ff", "#cbb1ff"],
+          light: ["#9a5b00", "#b75415", "#c03755", "#3f7d22", "#2c5fbf", "#6e43c0"],
+        };
+        var palette = PALETTES[root.getAttribute("data-theme")] || PALETTES.dark;
+        var rotate = palette.slice(1);
+        var bag = [];
+        var last = null;
+
+        function next() {
+          if (!bag.length) {
+            bag = rotate.slice();
+            for (var i = bag.length - 1; i > 0; i--) {
+              var j = (Math.random() * (i + 1)) | 0;
+              var swap = bag[i];
+              bag[i] = bag[j];
+              bag[j] = swap;
+            }
+            // Dealt from the end, so this is the one about to come out.
+            if (bag[bag.length - 1] === last) bag.unshift(bag.pop());
+          }
+          last = bag.pop();
+          return last;
+        }
+
+        function set(name, value) {
+          root.style.setProperty(name, value);
+        }
+
+        // Segment one opens on the brand yellow; segment two already knows what
+        // it will be, because it is drawn half a cycle later and the dots that
+        // receive it have to be dyed before it gets there.
+        var segment1 = palette[0];
+        var segment2 = next();
+        set("--c-s1", segment1);
+        set("--c-s2", segment2);
+        set("--c-a", segment1);
+        set("--c-b", segment1);
+        set("--c-c", segment2);
+
+        // With reduced motion the loop never runs: one mark, held, in yellow.
+        if (typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+
+        /*
+         * Re-dyeing, and WHEN it is safe.
+         *
+         * A variable can only change while nothing wearing it is on screen, or
+         * the recolour happens in front of you. Against the 2100ms schedule in
+         * the stylesheet, the dark windows are: segment one 1050-2100, segment
+         * two 2100-3150, dot A 777-2100, dot B 1827-2532, dot C 0-1533.
+         *
+         * Two ticks cover all five with room to spare. The one at 1200ms sets up
+         * the NEXT cycle's segment one and its dot A; the one at 2400ms sets the
+         * dot B that cycle will land on, and the segment two it will draw after.
+         * Both are hundreds of ms clear of every edge, which is what absorbs the
+         * drift between this timer and the CSS clock (they start a paint apart).
+         *
+         * DOT A IS THE PREVIOUS CYCLE'S SEGMENT-TWO COLOUR, and that is the one
+         * assignment that is not free. At the seam the loop swaps dot C for dot
+         * A on the same pixel; give them different colours and the seam that the
+         * whole strip is built around becomes a visible flash of the wrong hue.
+         */
+        var PERIOD = 2100;
+        var live = function () {
+          var el = document.getElementById("boot-splash");
+          return el && !el.hasAttribute("data-done");
+        };
+        var every = function (delay, fn) {
+          setTimeout(function () {
+            if (!live()) return;
+            fn();
+            var id = setInterval(function () {
+              if (!live()) return clearInterval(id);
+              fn();
+            }, PERIOD);
+          }, delay);
+        };
+
+        every(1200, function () {
+          set("--c-a", segment2);
+          segment1 = next();
+          set("--c-s1", segment1);
+        });
+        // First fires at 2400ms, a cycle in: the values for cycle zero were set
+        // above, and calling next() here any earlier would burn segment two's
+        // colour before it had been drawn once.
+        every(2400, function () {
+          set("--c-b", segment1);
+          segment2 = next();
+          set("--c-s2", segment2);
+          set("--c-c", segment2);
+        });
+      })();
+    </script>
     <!-- brand:generated:start -->
     <!-- Generated by scripts/generate-brand.mjs — do not edit by hand. -->
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
@@ -120,75 +244,105 @@
       `src/lib/bootSplash.ts` owns the lifetime; this owns the look. The markup
       it styles is the generated block at the top of <body>.
 
-      ── THE TRANSFORMATION ──────────────────────────────────────────────────
+      ── WHAT IT DOES ────────────────────────────────────────────────────────
 
-      The mark is a source-control graph, so the splash animates it as one:
+      The mark does not animate in place. It EXTENDS, and the frame follows it.
 
-        draw      the trunk grows out of the root dot, the two branches sprout,
-                  the tips land — the logo assembling itself;
-        collapse  every stroke RETRACTS into the node it feeds, leaving the
-                  three dots alone on screen — the graph reduced to its commits;
-        orbit     the three dots swing onto a ring and turn for as long as the
-                  app takes to load — steadily faster, steadily wider, trailing
-                  further behind themselves as they go, because all three of
-                  those are the same fact about speed. This is the spinner, and
-                  it is made of the logo rather than placed next to it;
-        fling     the ring spins up hard and the dots fly apart with it, off the
-                  edges of the screen as they fade, and the app is behind them.
+      A fork is the mark. A merge is the mark mirrored. So the splash lays them
+      end to end and walks along the chain: the roads behind the leading dots
+      undraw INTO them, the frame slides so those dots are now the leading edge
+      from the left, and new roads draw OUT of their right — arriving at new
+      leading dots, which are one where there were two, or two where there was
+      one. One, two, one, two, and every pose is the mark, mirrored from the last.
 
-      The orbit is the only part that loops, which is what makes the length
-      honest: a fast boot sees a fraction of one revolution, a slow one sees
-      several, and neither has to fake a progress bar.
+      Nothing here fades or cross-dissolves between two states. What you are
+      watching is a source-control graph branching and merging, which is what
+      the mark means; drawing it is the only honest way to show it happening.
 
-      Two things the sequence learned by being wrong first:
+      ── THE CYCLE, AS PERCENTAGES OF ONE PERIOD ─────────────────────────────
 
-      - The gather has to MOVE all three dots. With the ring seated where the
-        nodes already were, the two tips travelled a couple of pixels and read
-        as leftovers of the logo sitting next to a spinner, rather than as the
-        logo having become one. Their seats are a third of a turn from where
-        they start now — see BOOT_ORBIT_PHASE in generate-brand.mjs.
-      - The exit accelerates. It used to converge on the centre and flash, and a
-        flare at the middle of the screen is a second subject competing with the
-        thing you actually built. Spinning up while expanding keeps ONE subject:
-        the ring you have been watching, leaving.
+        0%         A alone on the centre line. The pen is on it
+        0 → 9.30%   the trunk draws from A to the junction. The frame slides with
+                   it, keeping the half-drawn shape centred the whole way
+        9.30 → 20.57%  both branches draw on from the junction to the tips,
+                   frame still tracking; B lands as they arrive
+        20.57 → 32%  HELD. This is the mark: one dot, two dots, dead centre.
+        32 → 40.14%  the trunk retracts into the junction and A goes with its
+                   tail; the frame tracks the shrinking shape
+        40.14 → 50%  the branches retract into the tips. The frame arrives with
+                   them: B alone, on the centre line, pen on it
+        50 → 100%  the same again, mirrored — branches out to the junction, trunk
+                   on to C, held, then retracted the same way, landing on C alone
+                   on the centre line, which is where A was at 0%
+
+      THE FRAME IS ALWAYS CENTRED ON THE INK, and that one rule replaces every
+      schedule this went through to get here. The camera is not a sequence of
+      moves between poses; it is a function of what is drawn. At any instant the
+      visible shape runs from the leftmost live end to the rightmost, and the pan
+      is whatever puts the middle of that on the centre line — so the mark grows
+      out of the centre, sits in the centre, and shrinks back into the centre.
+
+      Which makes it continuous for free, and continuity is the thing this was
+      missing. Earlier versions moved the frame BETWEEN segments, in one lurch or
+      two, and no amount of easing hides a camera that waits for a gap: the shape
+      drifts off centre as it draws, snaps back, drifts again. Tracking the pen
+      means the frame is already where it needs to be at every frame, and the
+      only times it is still are the holds — when the pen is still too, so they
+      stop together and that reads as arrival rather than as a stop.
+
+      The pan keyframes are the pen's x at each phase boundary, turned into
+      `32 − midpoint`: +20 with the pen on A at x=12, +8 at the junction, 0 at
+      the tips, and so on down to −60. They are LINEAR between, because the pen
+      is, and because the two have to be the same function or the tracking is
+      only true at the corners. Every one of those numbers is derived — change
+      the geometry or a phase split and they all move.
+
+      IT NEVER REVERSES. 20, 8, 0, 0, −12, −20, −28, −40, −40, −48, −60: the graph
+      is going one way, and a frame that slid back to recentre would say it was
+      not.
+
+      THE DOTS ARE THE PEN'S ENDS. One lands as the stroke reaches it and one
+      leaves with the tail that passes it — nothing appears or disappears on its
+      own schedule, which is what made an earlier pass read as two motions, a
+      dot going and then a dot coming.
+
+      THE SEAM IS AT THE LAST LINE and it is the reason two segments is enough.
+      At 100% the only thing on screen is C, dead centre, at the size and colour
+      A's dot has at 0%. So the loop restarts on an identical
+      frame: C goes dark and A lights up on the same pixel in the same tick, and
+      the 80 units of accumulated slide reset under cover of that. Change any
+      number in the last three rows and check this still holds, or the splash
+      develops a visible hitch once a cycle.
+
+      ── THE EXIT ────────────────────────────────────────────────────────────
+
+      Whatever pose is on screen shrinks into the centre, and the plate clears
+      behind it. Nothing is left standing and nothing is handed over — the app is
+      simply there.
+
+      It has to be a SCALE and not the dots converging, the way a fixed logo's
+      exit could be: the pose depends on where in the loop it was interrupted,
+      and so does how far the frame has slid. Scaling the whole group about the
+      view box's centre is the one gesture that is correct from every phase,
+      mid-draw included.
+
+      There WAS a `.boot-splash__seed` here — a dot outside the collapsing group
+      that sprang up as the mark went down, so the sequence resolved onto a
+      single node in the brand colour. It resolved nicely and it was wrong: it
+      put one more thing on screen to wait for at the exact moment the app had
+      finished loading, which is the one moment the splash's only job is to get
+      out of the way. If it ever comes back, the reason it sat outside the group
+      is that a uniform scale takes three dots to three smaller dots and never
+      to one.
 
       No glow anywhere — no wash behind the mark, no bloom on the dots. Flat
       amber on a flat plate. Every soft-light version of this read as a smudge
       at the centre of the screen rather than as light.
 
-      And nothing else on screen: no wordmark, no drawn orbit. The caption made
-      the transformation an illustration with a label under it, and a circle
-      drawn through the dots made it a diagram of an orbit rather than three
-      nodes that are moving.
+      And nothing else on screen: no wordmark, no caption. The caption made the
+      whole thing an illustration with a label under it.
     -->
     <style>
-      /*
-       * The orbit's radius, as two multipliers on the dots' seats.
-       *
-       * REGISTERED, because that is the only way to animate a custom property:
-       * an unregistered one is treated as a discrete string and jumps from start
-       * to end at the halfway point. `syntax: "<number>"` makes it interpolable,
-       * and `inherits: true` lets a single animation on an ancestor drive all
-       * twenty-one dots instead of twenty-one copies of the same animation.
-       *
-       * TWO of them, multiplied together, because the wait and the exit both
-       * grow the radius and neither may cancel the other: a second animation on
-       * one property would start from its own keyframe and snap the ring back to
-       * whatever size it happened to declare. Composed, `--fling-r` accelerates
-       * away from wherever `--orbit-r` had got to — the same reason the three
-       * rotations are nested rather than swapped.
-       */
-      @property --orbit-r {
-        syntax: "<number>";
-        inherits: true;
-        initial-value: 1;
-      }
-      @property --fling-r {
-        syntax: "<number>";
-        inherits: true;
-        initial-value: 1;
-      }
-
       #boot-splash {
         /* Above LAYER.shutdown (600, src/lib/layers.ts) — the app has not
            started yet, so nothing it can raise belongs over this. */
@@ -199,17 +353,26 @@
         place-items: center;
         /* Not the theme variables: this paints before the stylesheet arrives,
            which is the whole point of it being here. Kept level with `--p-app`
-           of each theme in src/theme/*.css by hand. */
+           and `--p-accent` of each theme in src/theme/*.css by hand.
+
+           `--boot-amber` is the brand yellow the sequence opens on. The five it
+           rotates through live in
+           the script in <head>, because they are chosen at random and only JS
+           can do that. This is the fallback for all of them: if that script is
+           blocked, every road and dot is amber and the splash is exactly what it
+           was before it had colours. */
         --boot-bg: #0b0d10;
         --boot-amber: #e5a33c;
+        /* One period of the loop — two beats, one for each pose. Everything
+           below is a percentage of this, so it is the only speed control, and
+           `BOOT_SPLASH_MIN_MS` is derived against it. It was 1800ms, which put
+           44.6 units of road down in 288ms and was too quick to follow the pen. */
+        --boot-beat: 2100ms;
         background: var(--boot-bg);
       }
-      html[data-theme="dim"] #boot-splash { --boot-bg: #25292e; }
-      html[data-theme="light"] #boot-splash { --boot-bg: #e9edf2; }
+      html[data-theme="dim"] #boot-splash { --boot-bg: #25292e; --boot-amber: #f0b45b; }
+      html[data-theme="light"] #boot-splash { --boot-bg: #e9edf2; --boot-amber: #9a5b00; }
 
-      /* Slightly above true centre, like every OS launch screen: optical centre
-         sits high of geometric centre, and a lockup pinned to the middle of the
-         glass reads as having sagged. */
       /* Still a little above true centre — optical centre sits high of
          geometric centre — but only just, now that the mark is alone: the 6vh
          that balanced a wordmark underneath reads as the logo having drifted. */
@@ -220,232 +383,280 @@
         will-change: transform, opacity;
       }
 
-      /* Bigger than the mark ever appears in the app: at 96px the three orbiting
-         dots read as specks rather than as the logo having come apart, which is
-         the one thing the sequence has to communicate. `overflow: visible` so
-         the ring can grow past the box on the way out. */
+      /* Bigger than the mark ever appears in the app. `overflow: visible` is
+         load-bearing rather than defensive: the strip is 80 units longer than
+         the view box, and the segment that is not currently centred hangs off
+         the right of it. Everything out there is undrawn or at zero opacity, so
+         it costs nothing — but clip it and the roads would be cut off mid-slide
+         at the frame's edge instead of arriving. */
       .boot-splash__mark {
         display: block;
         width: 116px;
         height: 116px;
         overflow: visible;
-        /* The ring widens as it speeds up — LINEAR, like the speed it tracks.
-           Angular velocity under constant acceleration is linear in time, so a
-           linear radius is the one that stays proportional to it; anything eased
-           would visibly lead or lag the spin. Parked on the <svg> rather than on
-           #boot-splash because the exit rule replaces that element's `animation`
-           wholesale, which would stop the widening exactly when it should be at
-           its most obvious. */
-        animation: boot-splash-widen 4500ms linear 1460ms forwards;
       }
-      @keyframes boot-splash-widen { to { --orbit-r: 3; } }
 
       /*
-       * THE STROKES — draw on, then retract.
+       * THE FRAME SLIDE — the pen's x, centred.
        *
-       * `pathLength="1"` on every branch (see generate-brand.mjs) normalises the
-       * dash maths, so both halves take the same time on the short branches as
-       * on the long trunk — a graph growing and collapsing at one speed, not
-       * three.
+       * Every value here is `32 − (leftEnd + rightEnd) / 2` at a phase boundary,
+       * in view-box units: the pen starts on A at x=12 against a left end of 12,
+       * so +20; it reaches the junction at 36 for +8; the tips at 52 for 0. The
+       * retract does the same from the other side as the left end walks right.
+       * See the docblock above — these are derived, not chosen.
        *
-       * `--retract` is which END the stroke disappears into, and it is not the
-       * same for all three: the trunk's dot (`root`) sits at its START, so it
-       * retracts to +1 and shrinks leftward; the branches' dots are at their
-       * ENDS, so they retract to -1 and shrink outward to the tips. Getting the
-       * sign wrong is not subtle — the stroke crawls away from its own dot.
+       * LINEAR, and it has to be: the roads draw at a constant rate, so anything
+       * else here would only be centred at the corners and drifting in between.
+       * The branch phases approximate slightly — a cubic's x does not advance
+       * quite linearly with its arc length — but measured against the real path
+       * the worst error is 0.66 units, about a pixel at the size this renders.
+       *
+       * It never reverses, and the flat stretches are the held poses: nothing is
+       * being drawn, so the middle of the shape is not moving either.
        */
-      .boot-splash__branch {
+      .boot-splash__pan {
+        transform-box: view-box;
+        animation: boot-splash-pan var(--boot-beat) linear infinite;
+      }
+      @keyframes boot-splash-pan {
+        0% { transform: translateX(20px); }
+        9.3% { transform: translateX(8px); }
+        20.57%,
+        32% { transform: translateX(0); }
+        40.14% { transform: translateX(-12px); }
+        50% { transform: translateX(-20px); }
+        61.27% { transform: translateX(-28px); }
+        70.57%,
+        82% { transform: translateX(-40px); }
+        91.86% { transform: translateX(-48px); }
+        100% { transform: translateX(-60px); }
+      }
+
+      /*
+       * THE ROADS — draw out of one anchor, retract into the next.
+       *
+       * `pathLength="1"` on every path (see generate-brand.mjs) normalises the
+       * dash maths, so a short branch takes the same time as the long trunk — a
+       * graph growing at one speed, not three.
+       *
+       * Offset +1.06 is "not yet drawn", 0 is "drawn", -1.06 is "retracted into
+       * my END" — one direction for every stroke in the strip, because a path's
+       * point order already says which way it runs. That is the invariant
+       * `mirrorBranch` in generate-brand.mjs reverses its points to maintain.
+       *
+       * The ±1.06 overshoot, and `1 3` rather than `1`: with `stroke-dasharray:
+       * 1` a fully retracted stroke settles at exactly ±1, where the dash
+       * boundary lands ON the path end — a ZERO-LENGTH dash, which
+       * `stroke-linecap: round` faithfully paints as a filled 4.5px circle, so
+       * the mark appears to keep a dot it has just retracted past. Overshooting
+       * alone is not enough: at offset 1.06 against a gap of 1 the NEXT dash
+       * reappears at 0.94 and redraws the tail. The gap has to outrun the
+       * overshoot.
+       *
+       * Four animations rather than two: each segment is drawn in two phases
+       * through its junction (see BOOT_ROAD_PHASE), so `--1a` is the fork's
+       * trunk, `--1b` its two branches, `--2a` the merge's two branches and
+       * `--2b` its trunk. Nothing is staggered within a phase — the branches of
+       * a fork split at the same instant, because they are one event.
+       */
+      .boot-splash__road {
         fill: none;
+        /* Fallback all the way down to the amber, so a blocked inline script
+           costs the colours and nothing else. */
         stroke: var(--boot-amber);
         stroke-width: var(--bsw, 4.5);
         stroke-linecap: round;
         stroke-linejoin: round;
-        /* `1 3`, and the offsets overshoot to ±1.06, because of a trap that is
-           invisible until you look for it: with `stroke-dasharray: 1` the
-           retracted stroke settles at offset ±1, where the dash boundary lands
-           exactly ON the path end — a ZERO-LENGTH dash, which `stroke-linecap:
-           round` faithfully paints as a filled 4.5px circle. Both branch tips
-           were leaving one of those behind at (52,20) and (52,44), so the logo
-           appeared to keep two of its dots while three others orbited.
-
-           Overshooting alone is not enough: at offset 1.06 with a gap of 1 the
-           NEXT dash reappears at 0.94 and redraws the tail of the stroke. The
-           gap has to outrun the overshoot, hence `1 3`. */
         stroke-dasharray: 1 3;
         stroke-dashoffset: 1.06;
-        animation:
-          boot-splash-grow 560ms cubic-bezier(0.32, 0.72, 0.25, 1) var(--bd, 0ms) forwards,
-          boot-splash-retract 300ms cubic-bezier(0.55, 0, 0.75, 0.2) 900ms forwards;
+        animation-duration: var(--boot-beat);
+        animation-iteration-count: infinite;
       }
-      @keyframes boot-splash-grow { to { stroke-dashoffset: 0; } }
-      @keyframes boot-splash-retract { to { stroke-dashoffset: var(--retract, 1); } }
+      .boot-splash__road--1a,
+      .boot-splash__road--1b { stroke: var(--c-s1, var(--boot-amber)); }
+      .boot-splash__road--2a,
+      .boot-splash__road--2b { stroke: var(--c-s2, var(--boot-amber)); }
+      .boot-splash__road--1a { animation-name: boot-splash-road-1a; }
+      .boot-splash__road--1b { animation-name: boot-splash-road-1b; }
+      .boot-splash__road--2a { animation-name: boot-splash-road-2a; }
+      .boot-splash__road--2b { animation-name: boot-splash-road-2b; }
+
+      /* THE SPLIT IS 45.2 / 54.8, AND IT IS NOT THE ARC LENGTHS. Those are 24
+         units of trunk against 20.6 of branch, which would be 53.8/46.2 — and
+         that is what this was, because it makes the pen measurably constant:
+         one stroke advancing along itself at one rate through the junction.
+
+         It does not LOOK constant, and the reason is that a fork has two
+         branches drawing at the same time. Hold the per-pen rate and twice as
+         much ink appears per second after the junction as before it, which reads
+         as the branches whipping out. Hold the total ink rate instead and each
+         branch pen crawls at half the trunk's speed, which reads as the pen
+         stalling at the fork. Both are "equal" and neither looks it.
+
+         So the branch phase is weighted by its length times √2 — 29.15 against
+         the trunk's 24 — which lands exactly between the two: the ink rate goes
+         up by √2 across the junction and the per-pen rate down by the same
+         factor. √2 because perceived rate of a simultaneous event scales with
+         about the square root of how many of them there are, not linearly.
+
+         Note it lands differently on a fork and a merge, since the trunk is the
+         FIRST phase of one and the second of the other.
+
+         LINEAR within a phase, still, and that part is not negotiable: an
+         ease-in/ease-out pair across the boundary does not hand off, stepping
+         from 6.3 to 4.2 units of ink per unit of time right at the join. What
+         punctuates an arrival is the dot's spring, not a decelerating stroke.
+
+         The draw window is 20.57 points of the period and the retract 18, so the
+         retract is a little quicker — deliberately. A shape that comes apart at
+         exactly the speed it assembled reads as the animation played backwards.
+         Both were widened by half again, and the period with them, when the draw
+         turned out to be too quick to watch; the HOLDS were not, so the mark
+         spends proportionally less of the loop sitting still and more of it
+         being made, which is the part worth looking at. */
+      @keyframes boot-splash-road-1a {
+        0% { stroke-dashoffset: 1.06; animation-timing-function: linear; }
+        9.3% { stroke-dashoffset: 0; }
+        32% { stroke-dashoffset: 0; animation-timing-function: linear; }
+        40.14%,
+        100% { stroke-dashoffset: -1.06; }
+      }
+      @keyframes boot-splash-road-1b {
+        0%,
+        9.3% { stroke-dashoffset: 1.06; animation-timing-function: linear; }
+        20.57% { stroke-dashoffset: 0; }
+        40.14% { stroke-dashoffset: 0; animation-timing-function: linear; }
+        50%,
+        100% { stroke-dashoffset: -1.06; }
+      }
+      @keyframes boot-splash-road-2a {
+        0%,
+        50% { stroke-dashoffset: 1.06; animation-timing-function: linear; }
+        61.27% { stroke-dashoffset: 0; }
+        82% { stroke-dashoffset: 0; animation-timing-function: linear; }
+        91.86%,
+        100% { stroke-dashoffset: -1.06; }
+      }
+      @keyframes boot-splash-road-2b {
+        0%,
+        61.27% { stroke-dashoffset: 1.06; animation-timing-function: linear; }
+        70.57% { stroke-dashoffset: 0; }
+        91.86% { stroke-dashoffset: 0; animation-timing-function: linear; }
+        100% { stroke-dashoffset: -1.06; }
+      }
 
       /*
-       * THE DOTS — land, swing out, and eventually leave.
+       * THE DOTS.
        *
-       * Every dot is authored at the centre of the view box and placed by
-       * transform, so `--mx/--my` (its seat in the mark) and `--ox/--oy` (its
-       * seat on the ring) are two plain translations the browser can interpolate
-       * between without decomposing a matrix. Both pairs come from the shared
-       * geometry — see generate-brand.mjs.
+       * Placed by their own `cx`/`cy` — no transform trickery, because nothing
+       * has to interpolate between two seats any more. `transform-box: fill-box`
+       * makes the only transform they carry, the pop, scale each circle about
+       * itself wherever it sits on the strip.
        *
-       * Two animations, in cascade order: the later one takes the transform over
-       * from the earlier as its delay expires, which is why `forwards` on the
-       * first is safe. The exit adds a third, from the `[data-done]` rule below.
+       * The scale rides along with the opacity — a dot springs open as the
+       * stroke lands on it and collapses as the tail leaves. That spring is the
+       * only non-linear easing left anywhere in the loop, and it carries all the
+       * punctuation, which is why the strokes themselves can afford to be
+       * perfectly flat.
+       *
+       * Every window straddles a moment the PEN defines, and that is the whole
+       * of the tuning: B lands across 20.57%, where the branches reach it; A
+       * leaves at 32%, where the trunk's tail lets go of it; C lands across
+       * 70.57%.
+       * A dot is an end of a stroke, so it appears and disappears when a stroke
+       * gets there.
+       *
+       * B is the long one — segment one's destination and segment two's origin,
+       * so it is lit for seven tenths of the cycle while the others take about
+       * four each.
        */
       .boot-splash__dot {
         fill: var(--boot-amber);
-        transform-box: view-box;
+        transform-box: fill-box;
         transform-origin: center;
-        opacity: 0;
-        transform: translate(var(--mx), var(--my)) scale(0.25);
-        animation:
-          boot-splash-dot-in 300ms cubic-bezier(0.22, 1.6, 0.4, 1) var(--bd, 0ms) forwards,
-          boot-splash-dot-orbit 420ms cubic-bezier(0.5, 0, 0.2, 1) 1040ms forwards;
+        animation-duration: var(--boot-beat);
+        animation-iteration-count: infinite;
       }
-      @keyframes boot-splash-dot-in {
-        to { opacity: 1; transform: translate(var(--mx), var(--my)) scale(1); }
-      }
-      /* The seat is a VECTOR from the centre, so the radius is just a scalar on
-         it — "further out, same size", with no transform to cancel. Because the
-         multipliers are registered custom properties, this `to` value re-resolves
-         as they animate: the keyframe is written once and the dot keeps moving
-         outward for as long as either is still climbing. */
-      @keyframes boot-splash-dot-orbit {
-        to {
-          transform: translate(
-            calc(var(--ox) * var(--orbit-r) * var(--fling-r)),
-            calc(var(--oy) * var(--orbit-r) * var(--fling-r))
-          );
-        }
-      }
-      /*
-       * THE ROTATION — three nested turns, not one.
-       *
-       * The ring has to start slow and get consistently faster for as long as
-       * the wait lasts, then fling. No single animation does that: an
-       * `infinite` one is by definition constant, and a one-shot ramp cannot
-       * know how long the wait is going to be.
-       *
-       * So the angle is a SUM, and each term needs its own element, because CSS
-       * will not composite two animations of the same property on one element:
-       *
-       *   __spin   a constant floor, looping. The speed the ring has the moment
-       *            it forms, and never drops below.
-       *   __ramp   one quadratic ease-in — constant angular ACCELERATION, the
-       *            smoothest "faster and faster" there is — starting at zero
-       *            velocity so it joins the floor with no kink.
-       *   __fling  idle until the exit, then a third ramp on the same curve, so
-       *            the release accelerates away from whatever speed the wait had
-       *            reached instead of restarting from one the eye has to
-       *            re-learn.
-       *
-       * THE RAMP'S HORIZON IS THE WHOLE TRICK, and getting it wrong is what made
-       * the first two attempts read as "constant, then a jerk at the end". It
-       * was sized at 5.2s — the longest orbit `MAX_MS` can produce — which is
-       * right for the worst case and wrong for every real one: a normal boot
-       * shows the ring for under a second, so all you ever saw was the first
-       * 18% of a quadratic, which is the flattest part of it. Sized to the
-       * TYPICAL window instead (`MIN_MS` is 3.4s, the ring forms at ~1.46s, so
-       * roughly two seconds are actually watched) the same curve climbs from
-       * ~110°/s to ~630°/s in front of you. A slow boot just keeps climbing to
-       * the 4.5s horizon and then holds, rather than running away.
-       *
-       * Composed, never swapped: nothing here discards the angle already turned,
-       * which is what made the earlier single-animation exit visibly jump.
-       */
-      .boot-splash__spin,
-      .boot-splash__ramp,
-      .boot-splash__fling {
-        transform-box: view-box;
-        transform-origin: center;
-      }
-      .boot-splash__spin {
-        animation: boot-splash-spin 3200ms linear 1400ms infinite;
-      }
-      @keyframes boot-splash-spin { to { transform: rotate(360deg); } }
+      /* A dot is dyed by the road that LANDED on it, which is why these are
+         three slots and not one: B wears the segment that drew into it while C
+         already wears the next, and that is the whole point — after the opening
+         mark, one of the three dots on screen never matches the other two. A is
+         the odd one, wearing the previous cycle's segment two, because at the
+         seam it IS the dot C of the cycle before. */
+      .boot-splash__dot--a { fill: var(--c-a, var(--boot-amber)); animation-name: boot-splash-dot-a; }
+      .boot-splash__dot--b { fill: var(--c-b, var(--boot-amber)); animation-name: boot-splash-dot-b; }
+      .boot-splash__dot--c { fill: var(--c-c, var(--boot-amber)); animation-name: boot-splash-dot-c; }
 
-      .boot-splash__ramp {
-        animation: boot-splash-ramp 4500ms cubic-bezier(0.11, 0, 0.5, 0) 1400ms forwards;
+      /* At the seam, 100% has C alone on the centre line and 0% has A alone on
+         it — both a single dot at full size and the same colour, so the two
+         frames are identical and two strides of pan reset under them. Do not
+         give either of those ends a pop. */
+      @keyframes boot-splash-dot-a {
+        0%,
+        32% { opacity: 1; transform: scale(1); animation-timing-function: cubic-bezier(0.55, 0, 0.75, 0.2); }
+        37%,
+        100% { opacity: 0; transform: scale(0.35); }
       }
-      @keyframes boot-splash-ramp { to { transform: rotate(2700deg); } }
-
-      /*
-       * MOTION TRAIL.
-       *
-       * Three ghost copies of the whole trio, held a few degrees behind it by a
-       * static rotation, under the real dots. At 24 units of orbit radius a 4°
-       * offset is 1.7 units of arc against a 7-unit dot, so they overlap into a
-       * tail rather than reading as more dots — the check to make if these are
-       * ever re-spaced.
-       *
-       * Their opacity tracks SPEED, which is what makes this a cue rather than
-       * decoration: invisible while the ring is slow, a smear once it is fast,
-       * and the transition between the two IS the acceleration. CSS cannot blur
-       * along an arc; this is the honest version of doing so.
-       *
-       * Hence `linear`, and a shorter window than the ramp beside it — the two
-       * are not the same shape and sharing a curve was the bug. The ramp
-       * describes the ANGLE, which under constant acceleration is quadratic; the
-       * speed that angle implies is its derivative, which is LINEAR. Riding the
-       * quadratic left the trail at 7% opacity at the moment the ring was going
-       * six times its starting speed.
-       *
-       * It comes up to half strength in the first fifth of that window rather
-       * than from nothing, which is a deliberate lie: at the speed the ring
-       * starts at, a real camera would capture ~2° of smear and you would see
-       * nothing at all for the first second. The tail wants to be legible as
-       * soon as there is a ring to have one.
-       *
-       * Their LENGTH needs no animation. The offsets are angular and the radius
-       * is growing underneath them, so the same 3° is a longer arc every frame —
-       * the trail stretches as the ring widens, for free and in proportion.
-       */
-      .boot-splash__trail {
-        transform-box: view-box;
-        transform-origin: center;
-        transform: rotate(var(--ta));
-        opacity: 0;
-        animation: boot-splash-trail 1600ms linear 1400ms forwards;
+      @keyframes boot-splash-dot-b {
+        0%,
+        17% { opacity: 0; transform: scale(0.35); animation-timing-function: cubic-bezier(0.22, 1.6, 0.4, 1); }
+        23%,
+        82% { opacity: 1; transform: scale(1); animation-timing-function: cubic-bezier(0.55, 0, 0.75, 0.2); }
+        87%,
+        100% { opacity: 0; transform: scale(0.35); }
       }
-      @keyframes boot-splash-trail {
-        0% { opacity: 0; }
-        20% { opacity: calc(var(--to) * 0.5); }
-        100% { opacity: var(--to); }
+      @keyframes boot-splash-dot-c {
+        0%,
+        67% { opacity: 0; transform: scale(0.35); animation-timing-function: cubic-bezier(0.22, 1.6, 0.4, 1); }
+        73%,
+        100% { opacity: 1; transform: scale(1); }
       }
 
       /* ── THE EXIT ───────────────────────────────────────────────────────── */
 
-      /* Two more turns, and the radius blow-out below, both on the SAME curve as
-         the ramp above — so the exit is one continuous gesture rather than three
-         animations that happen to overlap. */
-      #boot-splash[data-done] .boot-splash__fling {
-        animation: boot-splash-fling 900ms cubic-bezier(0.11, 0, 0.5, 0) forwards;
+      /*
+       * The pose shrinks into the centre of the view box and the plate goes with
+       * it — see the exit note in the docblock above for why it is a scale
+       * rather than the dots converging.
+       *
+       * ACCELERATING (`0.5, 0, 0.75, 0.15`), so it leaves rather than settles.
+       * The opacity is held near full for the first two thirds and only then
+       * dropped, which keeps the mark legible for most of the shrink instead of
+       * dissolving the moment it starts: what this should look like is the logo
+       * going, not the logo fading.
+       *
+       * The plate waits for it. Not for feel — for a real artefact: the plate is
+       * what the mark is drawn ON, so clearing them together meant a half-sized
+       * logo hanging over the app that had already faded up underneath. Measured
+       * on the overlapping version, at 300ms the mark was still at 0.68 scale
+       * and the plate was down to 0.11. So the shrink gets 320ms to itself and
+       * the plate goes at 300ms, 20ms of overlap being enough to bind them
+       * without ever showing the mark against anything but its own background.
+       *
+       * It is all over in 560ms and #root is up at 660 — the app is READY by
+       * now, and every millisecond past that is the splash holding the door.
+       *
+       * The loop keeps running underneath. Stopping it would freeze the pan
+       * mid-slide on a slow boot, which is a worse-looking frame than any the
+       * loop produces on its own.
+       */
+      .boot-splash__collapse {
+        transform-box: view-box;
+        transform-origin: center;
       }
-      /* The fade rides on the group rather than on each dot, so it reaches the
-         ghosts too and — more to the point — so the dots' own `animation` list is
-         left alone. Replacing it to add a fade would drop the orbit animation
-         holding them out at radius, and they would snap home to the mark on the
-         first frame of the exit. */
-      @keyframes boot-splash-fling {
-        0% { transform: rotate(0deg); opacity: 1; }
-        60% { opacity: 1; }
-        100% { transform: rotate(900deg); opacity: 0; }
+      #boot-splash[data-done] .boot-splash__collapse {
+        animation: boot-splash-collapse 320ms cubic-bezier(0.5, 0, 0.75, 0.15) forwards;
+      }
+      @keyframes boot-splash-collapse {
+        0% { transform: scale(1); opacity: 1; }
+        70% { opacity: 0.9; }
+        100% { transform: scale(0.02); opacity: 0; }
       }
 
-      /* Delayed, so the plate is still under the dots while they accelerate —
-         the fling happens ON the splash, and only then is the splash lifted. */
-      /* Two animations: the plate fading, and the radius blow-out. The blow-out
-         MULTIPLIES whatever --orbit-r has reached rather than replacing it — see
-         the note on the two registered properties at the top of this block — so
-         the ring keeps widening out of the size it had, at the speed it had. */
       #boot-splash[data-done] {
         pointer-events: none;
-        animation:
-          boot-splash-out 380ms cubic-bezier(0.4, 0, 0.2, 1) 480ms forwards,
-          boot-splash-blowout 900ms cubic-bezier(0.11, 0, 0.5, 0) forwards;
+        animation: boot-splash-out 260ms cubic-bezier(0.4, 0, 0.2, 1) 300ms forwards;
       }
-      @keyframes boot-splash-blowout { to { --fling-r: 8; } }
       @keyframes boot-splash-out { to { opacity: 0; } }
 
       /* Added to #root only at the moment of dismissal (bootSplash.ts), never
@@ -453,34 +664,33 @@
          not stranded at zero under a splash that will never lift. Opacity only:
          a transform here would become the containing block for the shell's
          `position: fixed` children. */
-      #root.boot-reveal { animation: boot-splash-reveal 440ms 460ms ease-out both; }
+      #root.boot-reveal { animation: boot-splash-reveal 340ms 320ms ease-out both; }
       @keyframes boot-splash-reveal { from { opacity: 0; } to { opacity: 1; } }
 
       @media (prefers-reduced-motion: reduce) {
-        /* No assembly, no collapse, no orbit — the whole point of the sequence
-           is movement, and there is no quieter version of it that still means
-           anything. What is left is the mark, held, while the app loads; and
-           bootSplash.ts drops MIN_MS to 0 to match, so this is a brief cover
-           for the load rather than a pose anybody has to sit through. */
-        #boot-splash .boot-splash__branch,
-        #boot-splash .boot-splash__mark,
+        /* No drawing, no slide, no collapse — the whole point of the sequence is
+           movement, and there is no quieter version of it that still means
+           anything. What is left is the mark, held on its first pose, while the
+           app loads; and bootSplash.ts drops MIN_MS to 0 to match, so this is a
+           brief cover for the load rather than a pose anybody has to sit
+           through. Everything downstream of segment one stays hidden — the
+           strip only makes sense in motion. */
+        #boot-splash .boot-splash__pan,
+        #boot-splash .boot-splash__road,
         #boot-splash .boot-splash__dot,
-        #boot-splash .boot-splash__spin,
-        #boot-splash .boot-splash__ramp,
-        #boot-splash .boot-splash__trail,
-        #boot-splash[data-done] .boot-splash__fling,
-        #boot-splash[data-done] .boot-splash__dot,
-        #boot-splash[data-done] .boot-splash__trail,
+        #boot-splash[data-done] .boot-splash__collapse,
         #root.boot-reveal {
           animation: none;
         }
-        /* Nothing is moving, so a motion trail is just nine stray dots. */
-        #boot-splash .boot-splash__trail { display: none; }
-        #boot-splash .boot-splash__branch { stroke-dashoffset: 0; }
-        #boot-splash .boot-splash__dot {
-          opacity: 1;
-          transform: translate(var(--mx), var(--my));
+        #boot-splash .boot-splash__road--1a,
+        #boot-splash .boot-splash__road--1b { stroke-dashoffset: 0; }
+        #boot-splash .boot-splash__road--2a,
+        #boot-splash .boot-splash__road--2b,
+        #boot-splash .boot-splash__dot--c {
+          display: none;
         }
+        #boot-splash .boot-splash__dot--a,
+        #boot-splash .boot-splash__dot--b { opacity: 1; }
         #boot-splash[data-done] { animation-duration: 200ms; animation-delay: 0ms; }
       }
     </style>
@@ -493,46 +703,18 @@
     <div id="boot-splash" aria-hidden="true">
       <div class="boot-splash__stage">
         <svg class="boot-splash__mark" viewBox="0 0 64 64" aria-hidden="true" style="--bsw: 4.5">
-          <path class="boot-splash__branch" d="M12 32L36 32" pathLength="1" style="--bd: 0ms; --retract: 1.06" />
-          <path class="boot-splash__branch" d="M36 32C42 32 43 22 52 20" pathLength="1" style="--bd: 180ms; --retract: -1.06" />
-          <path class="boot-splash__branch" d="M36 32C42 32 43 42 52 44" pathLength="1" style="--bd: 300ms; --retract: -1.06" />
-          <g class="boot-splash__spin">
-            <g class="boot-splash__ramp">
-              <g class="boot-splash__fling">
-                <g class="boot-splash__trail" style="--ta: -3deg; --to: 0.5">
-                  <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 0ms; --mx: -20px; --my: 0px; --ox: 0px; --oy: -24px" />
-                  <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 700ms; --mx: 20px; --my: -12px; --ox: 20.78px; --oy: 12px" />
-                  <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 820ms; --mx: 20px; --my: 12px; --ox: -20.78px; --oy: 12px" />
-                </g>
-                <g class="boot-splash__trail" style="--ta: -6deg; --to: 0.38">
-                  <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 0ms; --mx: -20px; --my: 0px; --ox: 0px; --oy: -24px" />
-                  <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 700ms; --mx: 20px; --my: -12px; --ox: 20.78px; --oy: 12px" />
-                  <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 820ms; --mx: 20px; --my: 12px; --ox: -20.78px; --oy: 12px" />
-                </g>
-                <g class="boot-splash__trail" style="--ta: -9deg; --to: 0.27">
-                  <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 0ms; --mx: -20px; --my: 0px; --ox: 0px; --oy: -24px" />
-                  <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 700ms; --mx: 20px; --my: -12px; --ox: 20.78px; --oy: 12px" />
-                  <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 820ms; --mx: 20px; --my: 12px; --ox: -20.78px; --oy: 12px" />
-                </g>
-                <g class="boot-splash__trail" style="--ta: -12deg; --to: 0.18">
-                  <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 0ms; --mx: -20px; --my: 0px; --ox: 0px; --oy: -24px" />
-                  <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 700ms; --mx: 20px; --my: -12px; --ox: 20.78px; --oy: 12px" />
-                  <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 820ms; --mx: 20px; --my: 12px; --ox: -20.78px; --oy: 12px" />
-                </g>
-                <g class="boot-splash__trail" style="--ta: -15deg; --to: 0.11">
-                  <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 0ms; --mx: -20px; --my: 0px; --ox: 0px; --oy: -24px" />
-                  <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 700ms; --mx: 20px; --my: -12px; --ox: 20.78px; --oy: 12px" />
-                  <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 820ms; --mx: 20px; --my: 12px; --ox: -20.78px; --oy: 12px" />
-                </g>
-                <g class="boot-splash__trail" style="--ta: -18deg; --to: 0.06">
-                  <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 0ms; --mx: -20px; --my: 0px; --ox: 0px; --oy: -24px" />
-                  <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 700ms; --mx: 20px; --my: -12px; --ox: 20.78px; --oy: 12px" />
-                  <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 820ms; --mx: 20px; --my: 12px; --ox: -20.78px; --oy: 12px" />
-                </g>
-                <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 0ms; --mx: -20px; --my: 0px; --ox: 0px; --oy: -24px" />
-                <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 700ms; --mx: 20px; --my: -12px; --ox: 20.78px; --oy: 12px" />
-                <circle class="boot-splash__dot" cx="32" cy="32" r="3.5" style="--bd: 820ms; --mx: 20px; --my: 12px; --ox: -20.78px; --oy: 12px" />
-              </g>
+          <g class="boot-splash__collapse">
+            <g class="boot-splash__pan">
+              <path class="boot-splash__road boot-splash__road--1a" d="M12 32L36 32" pathLength="1" />
+              <path class="boot-splash__road boot-splash__road--1b" d="M36 32C42 32 43 22 52 20" pathLength="1" />
+              <path class="boot-splash__road boot-splash__road--1b" d="M36 32C42 32 43 42 52 44" pathLength="1" />
+              <path class="boot-splash__road boot-splash__road--2b" d="M68 32L92 32" pathLength="1" />
+              <path class="boot-splash__road boot-splash__road--2a" d="M52 20C61 22 62 32 68 32" pathLength="1" />
+              <path class="boot-splash__road boot-splash__road--2a" d="M52 44C61 42 62 32 68 32" pathLength="1" />
+              <circle class="boot-splash__dot boot-splash__dot--a" cx="12" cy="32" r="3.5" />
+              <circle class="boot-splash__dot boot-splash__dot--b" cx="52" cy="20" r="3.5" />
+              <circle class="boot-splash__dot boot-splash__dot--b" cx="52" cy="44" r="3.5" />
+              <circle class="boot-splash__dot boot-splash__dot--c" cx="92" cy="32" r="3.5" />
             </g>
           </g>
         </svg>
