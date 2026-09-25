@@ -20,27 +20,21 @@ An all-in-one agent CLI harness that replaces how you work with your LLMs. I bui
     
 </details>
 
-
-
-
 ## What it does
 
-- Runs concurrent, steerable agent chats with all the bells and whistles you've grown used to.
-- Supports custom, project-level MCPs, Skills, Modes, Agents & Instructions —
-  authored by hand, or by the agent itself through `mcp__dispatch-config__*`.
-  Skills and instructions come in three scopes: committed in the repo, global to
+- Concurrent, steerable agent chats across your authenticated agent CLIs.
+- Per-project MCP servers, skills, modes, agents and instructions — authored by
+  hand or by the agent itself. Three scopes: committed in the repo, global to
   your machine, or shipped with Dispatch (most specific wins).
-- Cutting-edge chat interface, with a `/` command menu over every skill and
-  built-in the session can actually run.
-- Robust, per-project memory system.
-- Elegant Github integration with various CICD workflow presets (worktrees recommended).
-- AI assisted project-level custom MCP builder
+- A `/` command menu over every skill and built-in the session can actually run.
+- Per-project memory.
+- GitHub integration with worktree/PR workflow presets.
+- AI-assisted builder for project-level MCP servers.
 
-## Install the latest release
+## Install
 
-Prerequisites: Node.js 24+, Python 3.10+, and at least one authenticated agent CLI
-(`claude` or `codex`). Git and GitHub CLI are needed for Git/PR features, but a
-Git clone of Dispatch is not.
+Prerequisites: Node.js 24+, Python 3.10+, and at least one authenticated agent
+CLI (`claude` or `codex`). Git and the GitHub CLI are needed for Git/PR features.
 
 Windows PowerShell:
 
@@ -54,43 +48,17 @@ macOS or Linux:
 curl -fsSL https://github.com/mdennis281/dispatch/releases/latest/download/install.sh | sh
 ```
 
-The bootstrap downloads the latest GitHub Release, verifies its SHA-256 checksum,
-installs runtime dependencies, and starts Dispatch at
-`http://127.0.0.1:4318` (also reachable at `http://<lan-ip>:4318`). Run the same
-command again to update. Existing chats and
-configuration live outside the app payload and survive updates.
+This downloads the latest release, verifies its checksum, installs dependencies,
+registers Dispatch to start at login, and serves it at `http://127.0.0.1:4318`
+(also reachable at `http://<lan-ip>:4318`). Run the same command again to update;
+chats and configuration live outside the app payload and survive updates. An
+installed Dispatch also offers updates from inside the app, under Settings.
 
-It also registers Dispatch to **start when you log in** — a Startup shortcut on
-Windows, a LaunchAgent on macOS, a systemd *user* unit (or an XDG autostart
-entry) on Linux. That starts the server only; no window opens. Everything is
-per-user rather than a machine service, because Dispatch runs your agent CLIs
-with your credentials, so on a headless box you want
-`loginctl enable-linger $USER` to bring it up at boot rather than at first login.
-`--no-autostart` skips it, and removes it if a previous install set it up. See
-[RUNNING.md](./RUNNING.md#start-at-login).
-
-**Updating from a build older than the SQLite store:** per-instance state
-(checkpoints, PRs, worktrees, runners, terminals) moved out of JSON files into
-`data/state.db`, and the server refuses to start on a store that still has the old
-files and no *finished* migration rather than migrating it silently behind your back. Stop it,
-run `pnpm app:migrate-store -- --source "<your data dir>"`, and start it again. The
-old files are copied, never modified, and stay put as the rollback path. See
-[RUNNING.md](./RUNNING.md#install) for the full walkthrough.
-
-An installed Dispatch checks for newer releases itself and offers to install one
-from a dismissable card; the same offer, plus the running build and a manual
-check, lives at the top of Settings. Choosing to update runs this installer
-detached, so it survives the shutdown it performs on the way through. A Dispatch
-run from a source checkout has no release to compare against and shows none of
-this.
-
-Every successful build of `main` is automatically tagged and published using the
-UTC build version displayed in the app (`vyyyy.mm.dd.sssss`). Re-running the
-release workflow for the same commit safely refreshes that release's assets.
-
-Use `--version v2026.08.13.12345`, `--no-start`, `--no-open`, `--no-shortcut`,
-`--no-autostart`, or `--target <path>` when running a downloaded copy of the
-script. Set `GITHUB_TOKEN` while the repository is private.
+Flags: `--version <tag>`, `--no-start`, `--no-open`, `--no-shortcut`,
+`--no-autostart`, `--target <path>`. See
+[RUNNING.md](./RUNNING.md#install) for the operator guide — autostart per
+platform, host mode, and the one-time store migration required when upgrading
+from a build older than `data/state.db`.
 
 ## Develop from source
 
@@ -103,9 +71,8 @@ pnpm test
 pnpm dev
 ```
 
-The development server uses `http://127.0.0.1:4319`, so it can run beside the
-installed release on port 4318. See [RUNNING.md](./RUNNING.md) for the full
-developer and operator guide.
+The dev server uses `http://127.0.0.1:4319`, so it runs beside an installed
+release on 4318. See [RUNNING.md](./RUNNING.md) for the full developer guide.
 
 ## Repository layout
 
@@ -120,11 +87,7 @@ developer and operator guide.
 
 ## Security
 
-Development and direct server launches bind to loopback by default; the installed
-launcher explicitly uses host mode for LAN access. Optional authentication is off after an
-upgrade and can be configured in Settings; enable it before exposing the installed
-app outside a trusted network. See
-[SECURITY.md](./SECURITY.md) for credential handling and reporting guidance.
-
-The onboarding and in-app release update work is mapped in
-[docs/ROADMAP.md](./docs/ROADMAP.md).
+Development and direct server launches bind to loopback; the installed launcher
+uses host mode for LAN access. Authentication is optional and off by default —
+enable it in Settings before exposing the app outside a trusted network. See
+[SECURITY.md](./SECURITY.md).
