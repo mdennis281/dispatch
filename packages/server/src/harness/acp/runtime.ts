@@ -44,6 +44,41 @@ function fromPath(env: NodeJS.ProcessEnv): string | undefined {
 }
 
 /**
+ * The PowerShell goose should run on Windows: pwsh 7 if it is installed,
+ * else Windows PowerShell 5.1.
+ *
+ * `GOOSE_SHELL=powershell` resolves to `powershell.exe`, which is 5.1 — and
+ * 5.1 has no `&&`. A goose chat handed the shell Dispatch promises it spent
+ * two tool calls on
+ *
+ *   The token '&&' is not a valid statement separator in this version.
+ *
+ * before giving up on the command, because `cmd1 && cmd2` is the first thing
+ * anything trained on a POSIX shell reaches for. pwsh 7 accepts it, ships in
+ * `C:\Program Files\PowerShell\7`, and is what the rest of this repo's
+ * tooling assumes.
+ *
+ * Resolved off PATH rather than assumed, because a box without pwsh must still
+ * get a working shell rather than a name that fails to spawn.
+ */
+export function windowsShell(
+  env: NodeJS.ProcessEnv = process.env,
+  // Injected the same way `gooseRuntime` takes its `exists`, so BOTH arms are
+  // testable on a runner that has pwsh and on one that does not.
+  exists: (path: string) => boolean = (path) => existsSync(path) && statSync(path).isFile(),
+): "pwsh" | "powershell" {
+  for (const dir of (env.PATH ?? env.Path ?? "").split(delimiter)) {
+    if (!dir) continue;
+    try {
+      if (exists(join(dir, "pwsh.exe"))) return "pwsh";
+    } catch {
+      /* unreadable PATH entry — skip */
+    }
+  }
+  return "powershell";
+}
+
+/**
  * Every place a goose binary is known to live, most-canonical first.
  *
  * `~/.local/bin` is where `download_cli.sh` puts it on every platform including

@@ -326,6 +326,31 @@ describe("GOOSE_AGENT.env", () => {
     expect(GOOSE_AGENT.env("qwen3-coder:30b", 32_768).GOOSE_TEMPERATURE).toBe("0.15");
   });
 
+  it("prefers pwsh 7, which has `&&`, over Windows PowerShell 5.1 which does not", async () => {
+    // GOOSE_SHELL=powershell resolves to powershell.exe — 5.1 — and 5.1 parses
+    // `cmd1 && cmd2` as an error. A live chat lost two tool calls to "The
+    // token '&&' is not a valid statement separator in this version" before
+    // abandoning the command. Driven off a fake PATH rather than the runner's
+    // real one so BOTH arms run everywhere, including a CI box with no pwsh.
+    const { windowsShell } = await import("./runtime.js");
+    const { delimiter, join } = await import("node:path");
+    const PATH = ["/usr/bin", "/opt/ps7"].join(delimiter);
+    const hasPwsh = (f: string) => f === join("/opt/ps7", "pwsh.exe");
+
+    expect(windowsShell({ PATH }, hasPwsh)).toBe("pwsh");
+    // No pwsh anywhere on PATH — fall back rather than name a binary that
+    // cannot spawn.
+    expect(windowsShell({ PATH }, () => false)).toBe("powershell");
+    expect(windowsShell({}, hasPwsh)).toBe("powershell");
+    // An unreadable PATH entry is skipped, not fatal.
+    expect(
+      windowsShell({ PATH }, (f) => {
+        if (f.includes("usr")) throw new Error("EACCES");
+        return f === join("/opt/ps7", "pwsh.exe");
+      }),
+    ).toBe("pwsh");
+  });
+
   it("gives goose the shell the environment block promises the model", async () => {
     // toEnvironmentBlock says "Shell: PowerShell" and steers onto Select-String
     // and Get-ChildItem; goose's shell tool runs cmd.exe, so those came back
@@ -338,8 +363,12 @@ describe("GOOSE_AGENT.env", () => {
     // sail through. `src/harness/acp/index.test.ts` is also listed in the
     // windows-sensitive job in ci.yml so the win32 arm runs for real.
     const { GOOSE_AGENT } = await import("./index.js");
+    const { windowsShell } = await import("./runtime.js");
     const env = GOOSE_AGENT.env("m");
-    expect(env.GOOSE_SHELL).toBe(process.platform === "win32" ? "powershell" : undefined);
+    // Against the resolver, not a literal: which PowerShell is correct depends
+    // on whether pwsh 7 is installed, and pinning one name here would fail on
+    // whichever kind of box the assertion was not written on.
+    expect(env.GOOSE_SHELL).toBe(process.platform === "win32" ? windowsShell() : undefined);
   });
 
   it("lets the operator override the temperature from the server environment", async () => {
