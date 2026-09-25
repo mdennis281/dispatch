@@ -208,9 +208,22 @@ function element(): HTMLElement | null {
  *
  * Costs ~32ms on top of a 3.6s minimum, which is nothing, and it is what stops
  * the very last thing you see being the shell popping in.
+ *
+ * NOT WHILE THE DOCUMENT IS HIDDEN. `rAF` is SUSPENDED in a background tab
+ * rather than throttled the way `setTimeout` is — there is no repaint to
+ * schedule a callback against, so the two hops here simply never run. Boot
+ * Dispatch in a tab that never gets focus (a restored session, a middle-clicked
+ * link) and the splash would sit there indefinitely, straight through the
+ * `MAX_MS` cap that exists to make exactly that impossible.
+ *
+ * So a hidden document skips the wait outright, which is also the honest answer:
+ * the reason to wait is that somebody is about to watch the aperture open, and
+ * nobody is. The exit still plays, off its own timers, whenever the tab comes
+ * back — or it has long since finished and been removed.
  */
 function afterPaint(fn: () => void): void {
   if (typeof requestAnimationFrame !== "function") return fn();
+  if (typeof document !== "undefined" && document.hidden) return fn();
   requestAnimationFrame(() => requestAnimationFrame(fn));
 }
 
