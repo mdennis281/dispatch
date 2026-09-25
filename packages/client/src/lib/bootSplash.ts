@@ -29,6 +29,21 @@
  * is finished rather than mid-hydrate — and a fast local boot still pays only
  * the animation, because the data is long since in.
  *
+ * "SOMETHING HONEST TO SHOW" USED TO MEAN LESS THAN IT DOES. It was: auth has
+ * answered, and `/api/setup` has answered. Both are true a long way before the
+ * shell has any content — the sidebar's projects, its chats, the attention
+ * queue and the runner roster all arrive on the REST snapshot that the WS
+ * `hello` triggers, which is a whole round trip later. So the splash lifted onto
+ * an empty frame and the app assembled itself in front of you, which is the one
+ * thing it exists to prevent. `hydrated` (stores/connection.ts) closes that: it
+ * is set at the END of `hydrateFromServer`, once every gating store is filled.
+ *
+ * Required only where the shell is what comes next. The sign-in form, the
+ * unreachable-server diagnosis and the first-run wizard are all finished screens
+ * with no snapshot coming — two of them because the socket is not even open —
+ * so waiting on one there would wait for `MAX_MS` and then uncover the same
+ * screen anyway.
+ *
  * The sequence is built for exactly that (see the docblock over the `<style>` in
  * index.html): the mark EXTENDS — a fork's roads undraw into its two leading
  * dots, the frame slides on, and new roads draw out of them into a merge, which
@@ -45,6 +60,27 @@
  */
 import { useAuth } from "../stores/auth.js";
 import { useSetup } from "../stores/setup.js";
+import { useConnection } from "../stores/connection.js";
+
+declare global {
+  interface Window {
+    /**
+     * The splash's colour rotation, set up by the inline script in index.html's
+     * <head> — see the comment over it. Declared here rather than next to its
+     * only other caller because this module owns the splash's lifetime, and
+     * `releaseSplash` is a thing only this module may call.
+     *
+     * Optional at runtime and typed as such: it is inline in the document and so
+     * is always there in a real page, but a vitest render has no <head> at all.
+     */
+    __dispatchBootMark?: {
+      /** Keep the rotation turning until the returned function is called. */
+      hold: () => () => void;
+      /** Give back the hold the splash itself took when the document was parsed. */
+      releaseSplash: () => void;
+    };
+  }
+}
 
 /**
  * Long enough to count to four, and TUNED TO LAND ON A HELD POSE.
@@ -61,29 +97,38 @@ import { useSetup } from "../stores/setup.js";
  * splash held for, so the floor on a reload is not new — but it is the number to
  * challenge first if this ever feels long.
  *
- * That alignment is what the exact figure is for. The exit
- * collapses whatever is on screen into a single dot, and a pose is a much better
- * thing to collapse than a road half-drawn or a frame mid-slide.
+ * That alignment is what the exact figure is for. The exit molds whatever is on
+ * screen into a ball, and a pose is a much better thing to mold than a road
+ * half-drawn or a frame mid-slide.
  *
  * The hold's leading edge rather than its middle, deliberately, because the
  * error here is ONE-SIDED. The CSS clock starts when the splash first paints;
  * this timer starts when the bundle gets as far as `startBootSplash()`, which is
- * always LATER and never earlier. So the real dismissal is 3.05s of animation
+ * always LATER and never earlier. So the real dismissal is 3.6s of animation
  * plus however long that took, and sitting early in the hold leaves the rest of
  * it as budget for that rather than half. Past that the strip is drawing
  * again — still perfectly watchable, just not the frame this was aimed at.
  *
  * So: move this number and re-derive it against the schedule in index.html.
  *
- * It is also the floor on every single reload, which is the other reason to keep
- * it honest: three seconds is already the largest thing in this file.
+ * It is the floor on every reload, but no longer the thing that usually decides:
+ * on a real boot the REST snapshot is what the splash is waiting for, and that
+ * lands after this does.
  */
 export const BOOT_SPLASH_MIN_MS = 3_600;
-/** Never hold the app hostage to a boot that isn't coming. */
-export const BOOT_SPLASH_MAX_MS = 6_000;
-/** Must outlast the exit in index.html — the 320ms shrink, the plate cleared
- *  behind it by 560ms, and #root faded up at 660ms. */
-export const BOOT_SPLASH_EXIT_MS = 700;
+/**
+ * Never hold the app hostage to a boot that isn't coming.
+ *
+ * Raised from 6s with the readiness gate: the splash now waits for the REST
+ * snapshot rather than for two probes, and 6s was inside the range a cold boot
+ * of a large install legitimately takes. The cap is meant to catch a boot that
+ * is BROKEN, and firing it on one that is merely slow uncovers a shell that is
+ * still filling in — which is what this change is fixing.
+ */
+export const BOOT_SPLASH_MAX_MS = 9_000;
+/** Must outlast the exit in index.html: the 420ms mold, the aperture open that
+ *  follows it, and the corners of the plate gone by 1000ms. */
+export const BOOT_SPLASH_EXIT_MS = 1_080;
 
 export interface BootState {
   /** `/api/auth/status` has answered, or been guessed at. */
@@ -96,6 +141,10 @@ export interface BootState {
   signedIn: boolean;
   /** `/api/setup` has answered. null = not asked yet. */
   setupPending: boolean | null;
+  /** The REST snapshot has landed, so the shell has rows to render. */
+  hydrated: boolean;
+  /** Dev-only: the offline mock was seeded instead, which is also real content. */
+  mockSeeded: boolean;
 }
 
 /**
@@ -112,23 +161,34 @@ export interface BootState {
  *                      `shouldProbeSetup`) would wait forever.
  *   - ConnectingScreen — the server is unreachable. Same trap: the setup probe
  *                      is suppressed, so `setupPending` stays null.
- *   - wizard or shell — `/api/setup` has answered.
+ *   - first-run wizard — `/api/setup` said this install has never been set up.
+ *                      There is no snapshot coming that would change what it
+ *                      looks like; the wizard IS the finished screen.
+ *   - the shell      — and this is the one that has to wait for its data. See
+ *                      the note in the module docblock: auth and setup both
+ *                      answer a full round trip before the sidebar has anything
+ *                      in it.
  */
 export function isBootReady(s: BootState): boolean {
   if (!s.authReady) return false;
   if (s.authEnabled && !s.signedIn) return true;
   if (s.unreachable) return true;
-  return s.setupPending !== null;
+  if (s.setupPending === null) return false;
+  if (s.setupPending) return true;
+  return s.hydrated || s.mockSeeded;
 }
 
 function readBootState(): BootState {
   const auth = useAuth.getState();
+  const conn = useConnection.getState();
   return {
     authReady: auth.ready,
     unreachable: auth.unreachable,
     authEnabled: !!auth.status?.enabled,
     signedIn: !!auth.user,
     setupPending: useSetup.getState().pending,
+    hydrated: conn.hydrated,
+    mockSeeded: conn.mockSeeded,
   };
 }
 
@@ -137,20 +197,44 @@ function element(): HTMLElement | null {
 }
 
 /**
- * Play the exit: whatever pose the strip is holding shrinks into the centre of
- * the view box, and then the plate clears behind it and the app is there. See
- * `.boot-splash__collapse` in index.html — it is a scale rather than anything
- * converging, because the pose and the frame's offset both depend on where in
- * the loop this interrupted.
+ * Run `fn` once the browser has painted a frame with the current DOM in it.
+ *
+ * TWO FRAMES, not one, and that is the whole point. The store update that makes
+ * `isBootReady` true is synchronous; React's render of it is not. One `rAF`
+ * lands in the frame that is about to be composited — before React has even
+ * committed — so the aperture would open on the previous frame's contents. The
+ * second fires after that commit has been painted, which is the first moment
+ * "the app is on screen behind this" is a true statement.
+ *
+ * Costs ~32ms on top of a 3.6s minimum, which is nothing, and it is what stops
+ * the very last thing you see being the shell popping in.
+ */
+function afterPaint(fn: () => void): void {
+  if (typeof requestAnimationFrame !== "function") return fn();
+  requestAnimationFrame(() => requestAnimationFrame(fn));
+}
+
+/**
+ * Play the exit: whatever pose the strip is holding molds into a ball, and the
+ * ball opens into an aperture that the app is behind. See the exit note in the
+ * docblock over the `<style>` in index.html — the mold is a scale rather than
+ * the dots converging, because the pose and the frame's offset both depend on
+ * where in the loop this interrupted.
  *
  * The `boot-reveal` class is added to `#root` at THIS moment rather than being
  * on it from the start, so a bundle that throws before reaching this line
  * leaves the app fully opaque behind the splash instead of permanently
  * invisible under one that never lifts.
+ *
+ * The colour rotation's hold goes back here too. It is what keeps `--c-ball`
+ * moving, and the ball is dyed from whatever it last held — so this must come
+ * AFTER `data-done` is set, or the ticks get one more turn and the ball can wear
+ * a colour the strip never drew.
  */
 function dismiss(el: HTMLElement): void {
   if (el.hasAttribute("data-done")) return;
   el.setAttribute("data-done", "");
+  window.__dispatchBootMark?.releaseSplash();
   document.getElementById("root")?.classList.add("boot-reveal");
   setTimeout(() => {
     el.remove();
@@ -167,6 +251,7 @@ function dismiss(el: HTMLElement): void {
  * wait for and nothing to make an entrance about.
  */
 export function dismissBootSplashNow(): void {
+  window.__dispatchBootMark?.releaseSplash();
   element()?.remove();
 }
 
@@ -194,14 +279,21 @@ export function startBootSplash(): void {
     scheduled = true;
     unsubscribe();
     clearTimeout(cap);
-    setTimeout(() => dismiss(el), Math.max(0, minMs - (performance.now() - startedAt)));
+    setTimeout(
+      () => afterPaint(() => dismiss(el)),
+      Math.max(0, minMs - (performance.now() - startedAt)),
+    );
   };
 
   const check = () => {
     if (isBootReady(readBootState())) lift();
   };
 
-  const stops = [useAuth.subscribe(check), useSetup.subscribe(check)];
+  // `useConnection` is in here because the REST snapshot is now part of the
+  // answer — see `isBootReady`. Without it the splash would sit until `MAX_MS`
+  // on every load that got its hydrate after the setup probe, which is all of
+  // them.
+  const stops = [useAuth.subscribe(check), useSetup.subscribe(check), useConnection.subscribe(check)];
   const unsubscribe = () => {
     for (const stop of stops) stop();
   };

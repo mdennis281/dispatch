@@ -73,6 +73,13 @@
       is: this has to be decided in the same parse pass that paints the mark. And
       not in the bundle, which arrives long after the first road is down.
 
+      IT OUTLIVES THE SPLASH. The connecting and updating screens render the
+      same looping mark (components/brand/BootMark.tsx), so what this sets up is
+      a DRIVER with holds taken on it, not a timer tied to one element's life. It
+      ticks while anything on screen is wearing the mark and stops when nothing
+      is; a consumer that mounts an hour later phase-aligns to the CSS clock,
+      which has been running since the document was parsed.
+
       A SHUFFLED BAG, not `random()` per pick. Five colours dealt from a shuffled
       copy, reshuffled when empty, and the first of a new deal is swapped away if
       it matches the last of the old one. That gives random ORDER with no repeat
@@ -129,6 +136,34 @@
         set("--c-a", segment1);
         set("--c-b", segment1);
         set("--c-c", segment2);
+        /*
+         * The colour the EXIT's ball wears — "whatever it last was".
+         *
+         * Unlike the five above, this one has no dark window to respect: it is
+         * read exactly once, at the instant of dismissal, and by then the ticks
+         * have stopped. So it is not scheduled around visibility but around
+         * TRUTH — it is set the moment a segment finishes drawing, so at any
+         * instant it holds the colour of the road most recently completed, which
+         * is also the colour of the dots that road has just landed on.
+         *
+         * Seeded here so a dismissal inside the first 432ms still has one.
+         */
+        set("--c-ball", segment1);
+
+        /*
+         * The rotation is a shared driver, and this is its handle.
+         *
+         * Defined BEFORE the reduced-motion return, as no-ops, so a consumer can
+         * call `hold()` unconditionally: with reduced motion there is no loop to
+         * drive and nothing to stop, but there is still a mark on screen.
+         */
+        var api = {
+          hold: function () {
+            return function () {};
+          },
+          releaseSplash: function () {},
+        };
+        window.__dispatchBootMark = api;
 
         // With reduced motion the loop never runs: one mark, held, in yellow.
         if (typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches) return;
@@ -162,35 +197,98 @@
          * whole strip is built around becomes a visible flash of the wrong hue.
          */
         var PERIOD = 2100;
-        var live = function () {
-          var el = document.getElementById("boot-splash");
-          return el && !el.hasAttribute("data-done");
-        };
-        var every = function (delay, fn) {
-          setTimeout(function () {
-            if (!live()) return;
-            fn();
-            var id = setInterval(function () {
-              if (!live()) return clearInterval(id);
-              fn();
-            }, PERIOD);
-          }, delay);
+        var TICKS = [
+          // Segment one is fully drawn at 20.57% of the cycle. Nothing is being
+          // recoloured here — the ball is not on screen — so this one is placed
+          // on the truth rather than on a dark window.
+          {
+            at: 432,
+            fn: function () {
+              set("--c-ball", segment1);
+            },
+          },
+          {
+            at: 1200,
+            fn: function () {
+              set("--c-a", segment2);
+              segment1 = next();
+              set("--c-s1", segment1);
+            },
+          },
+          // Segment two is fully drawn at 70.57%.
+          {
+            at: 1482,
+            fn: function () {
+              set("--c-ball", segment2);
+            },
+          },
+          // 2400 rather than 300: a cycle in, on the FIRST start. The values for
+          // cycle zero were set above, and calling next() any earlier would burn
+          // segment two's colour before it had been drawn once. On a later start
+          // there is no cycle zero to protect and it phase-aligns like the rest.
+          {
+            at: 2400,
+            fn: function () {
+              set("--c-b", segment1);
+              segment2 = next();
+              set("--c-s2", segment2);
+              set("--c-c", segment2);
+            },
+          },
+        ];
+
+        var timers = [];
+        var holds = 0;
+        var startedOnce = false;
+
+        function startTicks() {
+          if (timers.length) return;
+          // `performance.now()` is ms since navigation and the CSS animations
+          // are `infinite` with no delay, so the loop's phase right now is
+          // `now % PERIOD` — which is what a tick starting late has to land on.
+          // On the first start `now` is a paint or two, so this is a no-op and
+          // the authored offsets stand as written.
+          var now = performance.now();
+          for (var i = 0; i < TICKS.length; i++) {
+            (function (tick) {
+              var delay = startedOnce ? (((tick.at - now) % PERIOD) + PERIOD) % PERIOD : tick.at;
+              timers.push(
+                setTimeout(function () {
+                  tick.fn();
+                  timers.push(setInterval(tick.fn, PERIOD));
+                }, delay),
+              );
+            })(TICKS[i]);
+          }
+          startedOnce = true;
+        }
+
+        function stopTicks() {
+          for (var i = 0; i < timers.length; i++) {
+            clearTimeout(timers[i]);
+            clearInterval(timers[i]);
+          }
+          timers = [];
+        }
+
+        api.hold = function () {
+          holds++;
+          startTicks();
+          var released = false;
+          return function () {
+            if (released) return;
+            released = true;
+            if (--holds <= 0) stopTicks();
+          };
         };
 
-        every(1200, function () {
-          set("--c-a", segment2);
-          segment1 = next();
-          set("--c-s1", segment1);
-        });
-        // First fires at 2400ms, a cycle in: the values for cycle zero were set
-        // above, and calling next() here any earlier would burn segment two's
-        // colour before it had been drawn once.
-        every(2400, function () {
-          set("--c-b", segment1);
-          segment2 = next();
-          set("--c-s2", segment2);
-          set("--c-c", segment2);
-        });
+        // The splash's own hold. Released by `dismiss()` in bootSplash.ts rather
+        // than by watching the element, so that a bundle which never arrives —
+        // and therefore a splash which never lifts — keeps its colours turning.
+        var splashRelease = api.hold();
+        api.releaseSplash = function () {
+          splashRelease();
+        };
       })();
     </script>
     <!-- brand:generated:start -->
@@ -323,26 +421,57 @@
       number in the last three rows and check this still holds, or the splash
       develops a visible hitch once a cycle.
 
-      ── THE EXIT ────────────────────────────────────────────────────────────
+      ── THE EXIT: MOLD, THEN OPEN ───────────────────────────────────────────
 
-      Whatever pose is on screen shrinks into the centre, and the plate clears
-      behind it. Nothing is left standing and nothing is handed over — the app is
-      simply there.
+      Two movements, and the join between them is the whole idea: the mark
+      becomes a ball, and then the ball becomes the window the app is behind.
+
+      MOLD (0 → 420ms). Whatever pose is on screen shrinks into the centre while
+      a ball swells up underneath it, wearing `--c-ball` — the colour of the last
+      road the loop finished drawing, so the thing left standing is the colour
+      the thing that was there had just become.
 
       It has to be a SCALE and not the dots converging, the way a fixed logo's
       exit could be: the pose depends on where in the loop it was interrupted,
       and so does how far the frame has slid. Scaling the whole group about the
       view box's centre is the one gesture that is correct from every phase,
-      mid-draw included.
+      mid-draw included. And the BALL cannot come from that group for the
+      complementary reason: a uniform scale takes three dots to three smaller
+      dots and never to one, so it can only reach a dot by reaching zero, and
+      zero is not a dot.
 
-      There WAS a `.boot-splash__seed` here — a dot outside the collapsing group
-      that sprang up as the mark went down, so the sequence resolved onto a
-      single node in the brand colour. It resolved nicely and it was wrong: it
-      put one more thing on screen to wait for at the exact moment the app had
-      finished loading, which is the one moment the splash's only job is to get
-      out of the way. If it ever comes back, the reason it sat outside the group
-      is that a uniform scale takes three dots to three smaller dots and never
-      to one.
+      The stage slides its 2vh of optical lift off over the same 420ms. Up there
+      it is the right place for a logo; down here the ball is about to become a
+      full-screen aperture, and an aperture that opens 1vh above the middle of
+      the screen is just wrong.
+
+      OPEN (420 → 1000ms). The ball's fill drops out, its edge lights up as a
+      ring, and the ring expands past the corners — with the plate gone from
+      inside it the whole way, so what fills the ring is the app. The last thing
+      on screen is four corners of plate, which fade.
+
+      IT IS A HOLE, NOT A REVEAL, and that is why the plate is an SVG `<rect>`
+      with a `<mask>` on it rather than the `background` it used to be. The two
+      obvious ways to do this are both wrong here: `clip-path: circle()` keeps
+      the INSIDE, and inverting it onto #root instead would make #root a
+      containing block for every `position: fixed` child the shell has — the
+      whole app would jump for the length of the animation, which is precisely
+      the complaint this change exists to fix. A `<mask>` of "white rect minus
+      black circle" inverts natively and costs one flat fill a frame.
+
+      The hole and the ring are separate elements with IDENTICAL `r` keyframes,
+      the same duration, delay and easing. They have to be, or the ring drifts
+      off the edge it is supposed to be the edge of. `r` is animated directly —
+      not a `transform: scale`, which would magnify a small rasterisation of that
+      edge sixty times over and show it.
+
+      The far radius is `71vmax`, and it is the tightest number that is correct
+      on every screen. Half the viewport diagonal is `0.5·√(w² + h²)`, which on a
+      square window is `0.707·vmax` and falls from there as the window gets
+      wider — so 71vmax clears the corners at between 76% and 99.6% of its travel
+      across every aspect ratio there is. The obvious `56vw + 56vh` also always
+      clears, but on a 16:10 window the corner went by at 65% of the radius and
+      the last third of the animation happened entirely off-screen.
 
       No glow anywhere — no wash behind the mark, no bloom on the dots. Flat
       amber on a flat plate. Every soft-light version of this read as a smudge
@@ -352,24 +481,21 @@
       whole thing an illustration with a label under it.
     -->
     <style>
-      #boot-splash {
-        /* Above LAYER.shutdown (600, src/lib/layers.ts) — the app has not
-           started yet, so nothing it can raise belongs over this. */
-        position: fixed;
-        inset: 0;
-        z-index: 700;
-        display: grid;
-        place-items: center;
-        /* Not the theme variables: this paints before the stylesheet arrives,
-           which is the whole point of it being here. Kept level with `--p-app`
-           and `--p-accent` of each theme in src/theme/*.css by hand.
+      /* ON :root, NOT ON #boot-splash, because the splash is no longer the only
+         thing wearing the mark — `ConnectingScreen` and `UpdatingScreen` render
+         the same loop through components/brand/BootMark.tsx, from inside the
+         app, where there is no #boot-splash to inherit from.
 
-           `--boot-amber` is the brand yellow the sequence opens on. The five it
-           rotates through live in
-           the script in <head>, because they are chosen at random and only JS
-           can do that. This is the fallback for all of them: if that script is
-           blocked, every road and dot is amber and the splash is exactly what it
-           was before it had colours. */
+         Not the theme variables either: this paints before the stylesheet
+         arrives, which is the whole point of it being here. Kept level with
+         `--p-app` and `--p-accent` of each theme in src/theme/*.css by hand.
+
+         `--boot-amber` is the brand yellow the sequence opens on. The five it
+         rotates through live in the script in <head>, because they are chosen at
+         random and only JS can do that. This is the fallback for all of them: if
+         that script is blocked, every road and dot is amber and the splash is
+         exactly what it was before it had colours. */
+      :root {
         --boot-bg: #0b0d10;
         --boot-amber: #e5a33c;
         /* One period of the loop — two beats, one for each pose. Everything
@@ -382,15 +508,27 @@
 
              - `BOOT_SPLASH_MIN_MS` in src/lib/bootSplash.ts, which is aimed at a
                held pose so the exit does not interrupt a draw;
-             - `PERIOD` and the 1200/2400 tick delays in the colour script in
-               <head>, which recolours the roads and dots during the windows in
-               which they are NOT on screen. Retune this and leave those, and a
-               tick lands mid-draw and recolours a road in front of you. */
+             - `PERIOD` and the tick offsets in the colour script in <head>,
+               which recolours the roads and dots during the windows in which
+               they are NOT on screen. Retune this and leave those, and a tick
+               lands mid-draw and recolours a road in front of you. */
         --boot-beat: 2100ms;
-        background: var(--boot-bg);
       }
-      html[data-theme="dim"] #boot-splash { --boot-bg: #25292e; --boot-amber: #f0b45b; }
-      html[data-theme="light"] #boot-splash { --boot-bg: #e9edf2; --boot-amber: #9a5b00; }
+      html[data-theme="dim"] { --boot-bg: #25292e; --boot-amber: #f0b45b; }
+      html[data-theme="light"] { --boot-bg: #e9edf2; --boot-amber: #9a5b00; }
+
+      #boot-splash {
+        /* Above LAYER.shutdown (600, src/lib/layers.ts) — the app has not
+           started yet, so nothing it can raise belongs over this. */
+        position: fixed;
+        inset: 0;
+        z-index: 700;
+        display: grid;
+        place-items: center;
+        /* NO `background` here. The plate is the `<rect>` inside
+           `.boot-splash__iris` below, because the exit has to punch a hole in it
+           and only the SVG can be masked. */
+      }
 
       /* Still a little above true centre — optical centre sits high of
          geometric centre — but only just, now that the mark is alone: the 6vh
@@ -410,8 +548,8 @@
          at the frame's edge instead of arriving. */
       .boot-splash__mark {
         display: block;
-        width: 116px;
-        height: 116px;
+        width: var(--boot-mark-size, 116px);
+        height: var(--boot-mark-size, 116px);
         overflow: visible;
       }
 
@@ -633,27 +771,46 @@
 
       /* ── THE EXIT ───────────────────────────────────────────────────────── */
 
+      /* THE PLATE. Full-viewport, behind everything else in the splash, and
+         masked so the exit can open a hole in it — see the docblock. While the
+         loop runs the hole is `r: 0` and this is simply a flat background.
+
+         `pointer-events: none` because the plate is a sibling of the mark now
+         rather than its parent, and the parent is what takes the clicks. */
+      .boot-splash__iris {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+      }
+      .boot-splash__iris-plate { fill: var(--boot-bg); }
+      .boot-splash__iris-hole { r: 0; }
+      /* The ball and the ring are ONE circle: it arrives as a filled dot and
+         leaves as an outline, which is the only way the two movements read as
+         one thing rather than a dot being swapped for a ring. `--c-ball` is the
+         colour of the last road the loop drew (see the script in <head>). */
+      .boot-splash__iris-ring {
+        r: 0;
+        fill: var(--c-ball, var(--boot-amber));
+        stroke: var(--c-ball, var(--boot-amber));
+        stroke-width: 3;
+        fill-opacity: 0;
+        stroke-opacity: 0;
+      }
+
       /*
-       * The pose shrinks into the centre of the view box and the plate goes with
-       * it — see the exit note in the docblock above for why it is a scale
-       * rather than the dots converging.
+       * MOLD — the pose shrinks into the centre of the view box while the ball
+       * swells up under it. See the exit note in the docblock above.
        *
-       * ACCELERATING (`0.5, 0, 0.75, 0.15`), so it leaves rather than settles.
-       * The opacity is held near full for the first two thirds and only then
-       * dropped, which keeps the mark legible for most of the shrink instead of
-       * dissolving the moment it starts: what this should look like is the logo
-       * going, not the logo fading.
+       * ACCELERATING (`0.55, 0, 0.85, 0.35`), so the mark leaves rather than
+       * settles, and its opacity is held near full for the first half so that
+       * what you see is the logo going rather than the logo fading.
        *
-       * The plate waits for it. Not for feel — for a real artefact: the plate is
-       * what the mark is drawn ON, so clearing them together meant a half-sized
-       * logo hanging over the app that had already faded up underneath. Measured
-       * on the overlapping version, at 300ms the mark was still at 0.68 scale
-       * and the plate was down to 0.11. So the shrink gets 320ms to itself and
-       * the plate goes at 300ms, 20ms of overlap being enough to bind them
-       * without ever showing the mark against anything but its own background.
-       *
-       * It is all over in 560ms and #root is up at 660 — the app is READY by
-       * now, and every millisecond past that is the splash holding the door.
+       * The ball is deliberately LATE — it starts at 160ms, when the mark is
+       * already small — and springs (`0.22, 1.5, 0.4, 1`). Starting them
+       * together read as a cross-fade between two objects; starting the ball
+       * late reads as the mark condensing into it.
        *
        * The loop keeps running underneath. Stopping it would freeze the pan
        * mid-slide on a slow boot, which is a worse-looking frame than any the
@@ -664,26 +821,91 @@
         transform-origin: center;
       }
       #boot-splash[data-done] .boot-splash__collapse {
-        animation: boot-splash-collapse 320ms cubic-bezier(0.5, 0, 0.75, 0.15) forwards;
+        animation: boot-splash-mold 400ms cubic-bezier(0.55, 0, 0.85, 0.35) forwards;
       }
-      @keyframes boot-splash-collapse {
+      @keyframes boot-splash-mold {
         0% { transform: scale(1); opacity: 1; }
-        70% { opacity: 0.9; }
-        100% { transform: scale(0.02); opacity: 0; }
+        55% { opacity: 0.92; }
+        100% { transform: scale(0.06); opacity: 0; }
       }
 
-      #boot-splash[data-done] {
-        pointer-events: none;
-        animation: boot-splash-out 260ms cubic-bezier(0.4, 0, 0.2, 1) 300ms forwards;
+      /* The optical lift comes off, so the aperture opens on the true centre of
+         the screen rather than 1vh above it. Matched to the mold's duration: by
+         the time there is a ball, the ball is where the hole will be. */
+      #boot-splash[data-done] .boot-splash__stage {
+        animation: boot-splash-settle 420ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
       }
-      @keyframes boot-splash-out { to { opacity: 0; } }
+      @keyframes boot-splash-settle { to { transform: translateY(1vh); } }
+
+      /*
+       * OPEN — the ball becomes the aperture.
+       *
+       * TWO ANIMATIONS ON ONE ELEMENT, HANDING OVER AT 420ms. The first is
+       * `both`, so `r` is pinned at 0 through its delay and holds 13px after;
+       * the second is `forwards` and NOT `both`, which is the load-bearing part:
+       * `both` would apply its 13px from-value during its own delay and stamp
+       * out the ball's spring underneath it. As written, the open contributes
+       * nothing until it starts and then picks up at exactly the radius the
+       * spring settled on.
+       *
+       * The fill goes first and fast — by 22% of the open there is no ball left,
+       * only a ring with the app inside it — and the stroke comes up to meet it
+       * over the first 10%. That crossover IS the moment, so both are inside the
+       * same keyframes rather than left to two animations to agree on.
+       *
+       * `boot-splash-hole` must stay a character-for-character match on `r`,
+       * duration, delay and easing. It is the same circle, cut out of the plate.
+       */
+      #boot-splash[data-done] .boot-splash__iris-ring {
+        animation:
+          boot-splash-ball 260ms cubic-bezier(0.22, 1.5, 0.4, 1) 160ms both,
+          boot-splash-open 580ms cubic-bezier(0.5, 0, 0.35, 1) 420ms forwards;
+      }
+      @keyframes boot-splash-ball {
+        from { r: 0; fill-opacity: 1; stroke-opacity: 0; }
+        to { r: 13px; fill-opacity: 1; stroke-opacity: 0; }
+      }
+      @keyframes boot-splash-open {
+        /* `stroke-width` grows with the radius. A 3px ring is the right weight
+           around a 26px ball and a hairline around a 1400px one — the edge has
+           to keep the presence it starts with or the aperture stops having one.
+           It is a stroke, so it straddles: the outer half overhangs the hole by
+           `width / 2`, which is 3px at the end and invisible. */
+        0% { r: 13px; stroke-width: 3; fill-opacity: 1; stroke-opacity: 0; }
+        10% { fill-opacity: 0.5; stroke-opacity: 1; }
+        22% { fill-opacity: 0; }
+        78% { stroke-opacity: 1; }
+        100% { r: 71vmax; stroke-width: 6; fill-opacity: 0; stroke-opacity: 0; }
+      }
+      #boot-splash[data-done] .boot-splash__iris-hole {
+        animation: boot-splash-hole 580ms cubic-bezier(0.5, 0, 0.35, 1) 420ms forwards;
+      }
+      @keyframes boot-splash-hole {
+        from { r: 13px; }
+        to { r: 71vmax; }
+      }
+
+      /* The corners. Once the hole is past the short edges the plate is four
+         slivers and nothing else, and they are better dissolved than left to be
+         overtaken — which is also what "fades out of the corners" means. Timed
+         to land WITH the ring rather than before it: on a 16:10 window the ring
+         crosses the corner at about 870ms, and this is 700→1000. */
+      #boot-splash[data-done] .boot-splash__iris-plate {
+        animation: boot-splash-corners 300ms linear 700ms forwards;
+      }
+      @keyframes boot-splash-corners { to { fill-opacity: 0; } }
+
+      #boot-splash[data-done] { pointer-events: none; }
 
       /* Added to #root only at the moment of dismissal (bootSplash.ts), never
          before — a bundle that dies on the way here must leave the app opaque,
-         not stranded at zero under a splash that will never lift. Opacity only:
-         a transform here would become the containing block for the shell's
-         `position: fixed` children. */
-      #root.boot-reveal { animation: boot-splash-reveal 340ms 320ms ease-out both; }
+         not stranded at zero under a splash that will never lift.
+
+         NO DELAY, and done before the hole opens: the aperture is the reveal, so
+         the app has to be fully painted behind the plate by the time there is
+         anything to see through. Opacity only — a transform here would become
+         the containing block for the shell's `position: fixed` children. */
+      #root.boot-reveal { animation: boot-splash-reveal 260ms ease-out both; }
       @keyframes boot-splash-reveal { from { opacity: 0; } to { opacity: 1; } }
 
       @media (prefers-reduced-motion: reduce) {
@@ -694,23 +916,33 @@
            brief cover for the load rather than a pose anybody has to sit
            through. Everything downstream of segment one stays hidden — the
            strip only makes sense in motion. */
-        #boot-splash .boot-splash__pan,
-        #boot-splash .boot-splash__road,
-        #boot-splash .boot-splash__dot,
+        .boot-splash__pan,
+        .boot-splash__road,
+        .boot-splash__dot,
         #boot-splash[data-done] .boot-splash__collapse,
+        #boot-splash[data-done] .boot-splash__stage,
+        #boot-splash[data-done] .boot-splash__iris-ring,
+        #boot-splash[data-done] .boot-splash__iris-hole,
+        #boot-splash[data-done] .boot-splash__iris-plate,
         #root.boot-reveal {
           animation: none;
         }
-        #boot-splash .boot-splash__road--1a,
-        #boot-splash .boot-splash__road--1b { stroke-dashoffset: 0; }
-        #boot-splash .boot-splash__road--2a,
-        #boot-splash .boot-splash__road--2b,
-        #boot-splash .boot-splash__dot--c {
+        .boot-splash__road--1a,
+        .boot-splash__road--1b { stroke-dashoffset: 0; }
+        .boot-splash__road--2a,
+        .boot-splash__road--2b,
+        .boot-splash__dot--c {
           display: none;
         }
-        #boot-splash .boot-splash__dot--a,
-        #boot-splash .boot-splash__dot--b { opacity: 1; }
-        #boot-splash[data-done] { animation-duration: 200ms; animation-delay: 0ms; }
+        .boot-splash__dot--a,
+        .boot-splash__dot--b { opacity: 1; }
+        /* No ball and no aperture — an iris opening across the whole screen is
+           the single largest movement in the app, and there is no gentler
+           version of it that is still one. What is left is a fade. */
+        #boot-splash[data-done] {
+          animation: boot-splash-out 200ms linear forwards;
+        }
+        @keyframes boot-splash-out { to { opacity: 0; } }
       }
     </style>
 
@@ -720,6 +952,16 @@
     <!-- Generated by scripts/generate-brand.mjs — do not edit by hand.
          Styled by the #boot-splash rules in <head>, lifted by src/lib/bootSplash.ts. -->
     <div id="boot-splash" aria-hidden="true">
+      <svg class="boot-splash__iris" aria-hidden="true">
+        <defs>
+          <mask id="boot-splash-aperture" maskUnits="userSpaceOnUse">
+            <rect width="100%" height="100%" fill="#fff" />
+            <circle class="boot-splash__iris-hole" cx="50%" cy="50%" />
+          </mask>
+        </defs>
+        <rect class="boot-splash__iris-plate" width="100%" height="100%" mask="url(#boot-splash-aperture)" />
+        <circle class="boot-splash__iris-ring" cx="50%" cy="50%" />
+      </svg>
       <div class="boot-splash__stage">
         <svg class="boot-splash__mark" viewBox="0 0 64 64" aria-hidden="true" style="--bsw: 4.5">
           <g class="boot-splash__collapse">
