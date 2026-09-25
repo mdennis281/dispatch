@@ -26,8 +26,14 @@ import {
   toolPresentation,
   type TranscriptItem,
 } from "../../lib/toolPresentations.js";
-import { continuedAssistantIds, isLimitSentence, stackThinkingAcrossHidden } from "../../lib/messageGrouping.js";
+import {
+  continuedAssistantIds,
+  isLimitSentence,
+  stackThinkingAcrossHidden,
+  undividedItemIndices,
+} from "../../lib/messageGrouping.js";
 import { presentationFilterCategory, useShellFilter } from "../../lib/shellFilter.js";
+import { cn } from "../../lib/cn.js";
 import { useChats } from "../../stores/chats.js";
 
 /**
@@ -139,6 +145,13 @@ export const MessageList = memo(function MessageList({ chatId, messages }: Messa
     [transcriptItems, isHidden],
   );
 
+  // A continuation has no header, so it must have no hairline above it either:
+  // the divider alone is enough to read two halves of one turn as two turns.
+  const undivided = useMemo(
+    () => undividedItemIndices(transcriptItems, continued, isHidden),
+    [transcriptItems, continued, isHidden],
+  );
+
   // The "Clear" control goes on the row that explains the CURRENT error, and
   // only while the chat is actually in that state — an old error row in a chat
   // that has long since moved on gets no button. Read off the status, not the
@@ -241,10 +254,13 @@ export const MessageList = memo(function MessageList({ chatId, messages }: Messa
   return (
     <>
       {transcriptItems.map((item, itemIndex) => {
+        // The parent's `divide-y` is a border-BOTTOM on every row but the last, so
+        // suppressing the rule above a continuation means dropping it here.
+        const rowClass = cn("cm-row-cv", undivided.has(itemIndex) && "border-b-0");
         if (item.kind === "files") {
           const first = item.rows[0]!;
           return (
-            <div key={`files:${first.id}`} className="cm-row-cv">
+            <div key={`files:${first.id}`} className={rowClass}>
               <RowErrorBoundary rowId={first.id} resetKey={`${first.id}:${item.rows.length}`}>
                 <FileRunGroup
                   entries={item.rows.map((use) => {
@@ -259,7 +275,7 @@ export const MessageList = memo(function MessageList({ chatId, messages }: Messa
         if (item.kind === "pr") {
           const first = item.rows[0]!;
           return (
-            <div key={`pr:${first.id}`} className="cm-row-cv">
+            <div key={`pr:${first.id}`} className={rowClass}>
               <RowErrorBoundary rowId={first.id} resetKey={`${first.id}:${item.rows.length}`}>
                 <PrRunGroup
                   entries={item.rows.map((use) => {
@@ -274,7 +290,7 @@ export const MessageList = memo(function MessageList({ chatId, messages }: Messa
         if (item.kind === "issue") {
           const first = item.rows[0]!;
           return (
-            <div key={`issue:${first.id}`} className="cm-row-cv">
+            <div key={`issue:${first.id}`} className={rowClass}>
               <RowErrorBoundary rowId={first.id} resetKey={`${first.id}:${item.rows.length}`}>
                 <IssueRunGroup
                   entries={item.rows.map((use) => {
@@ -289,7 +305,7 @@ export const MessageList = memo(function MessageList({ chatId, messages }: Messa
         if (item.kind === "thinking") {
           const first = item.rows[0]!;
           return (
-            <div key={`thinking:${first.id}`} className="cm-row-cv">
+            <div key={`thinking:${first.id}`} className={rowClass}>
               <RowErrorBoundary rowId={first.id} resetKey={`${first.id}:${item.rows.length}`}>
                 <ThinkingGroup rows={item.rows} />
               </RowErrorBoundary>
@@ -299,7 +315,7 @@ export const MessageList = memo(function MessageList({ chatId, messages }: Messa
         if (item.kind === "shell") {
           const first = item.rows[0]!;
           return (
-            <div key={`shell:${first.id}`} className="cm-row-cv">
+            <div key={`shell:${first.id}`} className={rowClass}>
               <RowErrorBoundary rowId={first.id} resetKey={`${first.id}:${item.rows.length}`}>
                 <ShellRunGroup
                   active={itemIndex === transcriptItems.length - 1}
@@ -327,7 +343,7 @@ export const MessageList = memo(function MessageList({ chatId, messages }: Messa
         // DOM; without this, scroll cost grows with history rather than with
         // what's on screen. Native scroll/anchoring/find-in-page all still work.
         return (
-          <div key={row.id} data-row-id={row.id} className="cm-row-cv">
+          <div key={row.id} data-row-id={row.id} className={rowClass}>
             <RowErrorBoundary rowId={row.id}>{node}</RowErrorBoundary>
           </div>
         );

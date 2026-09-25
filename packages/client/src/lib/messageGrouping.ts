@@ -95,3 +95,35 @@ export function stackThinkingAcrossHidden(
   }
   return out;
 }
+
+/**
+ * The transcript positions that must NOT draw their bottom hairline: the item
+ * directly above a continued assistant row. `continued` already drops that
+ * row's avatar and header so the pair reads as one message — leaving the
+ * divider in puts the seam back louder than the header ever was, which is how
+ * a single turn ended up looking like six rules stacked down the page.
+ *
+ * Items the reader cannot see are walked THROUGH, not stopped at: the same
+ * adjacency {@link continuedAssistantIds} judged by. Their own hairline goes
+ * too, or a collapsed run would leave behind the rule it was hiding under.
+ */
+export function undividedItemIndices(
+  items: TranscriptItem[],
+  continued: Set<string>,
+  isHidden: (item: TranscriptItem) => boolean = () => false,
+): Set<number> {
+  const out = new Set<number>();
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i]!;
+    if (item.kind !== "row" || item.row.kind !== "assistant") continue;
+    if (!continued.has(item.row.id)) continue;
+    for (let j = i - 1; j >= 0; j--) {
+      out.add(j);
+      const above = items[j]!;
+      const dropped =
+        above.kind === "row" && above.row.kind === "assistant" && isLimitSentence(above.row.text);
+      if (!isHidden(above) && !dropped) break;
+    }
+  }
+  return out;
+}
