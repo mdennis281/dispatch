@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { AssistantMessageRow, ChatMessage } from "@dispatch/shared";
-import { continuedAssistantIds, stackThinkingAcrossHidden } from "./messageGrouping.js";
+import {
+  continuedAssistantIds,
+  stackThinkingAcrossHidden,
+  undividedItemIndices,
+} from "./messageGrouping.js";
 import type { TranscriptItem, TranscriptThinkingItem } from "./toolPresentations.js";
 
 function say(id: string, over: Partial<AssistantMessageRow> = {}): AssistantMessageRow {
@@ -102,5 +106,31 @@ describe("stackThinkingAcrossHidden", () => {
   it("stops at anything visible", () => {
     const out = stackThinkingAcrossHidden([think("a"), hiddenShell, item(say("x")), think("b")], isHidden);
     expect(out).toEqual([think("a"), hiddenShell, item(say("x")), think("b")]);
+  });
+});
+
+describe("undividedItemIndices", () => {
+  const continued = (items: TranscriptItem[], isHidden?: (i: TranscriptItem) => boolean) =>
+    undividedItemIndices(items, continuedAssistantIds(items, isHidden), isHidden);
+
+  it("drops the rule above every continuation, but keeps the one below the run", () => {
+    const items = [item(say("a")), item(say("b")), item(say("c")), item({ id: "u", chatId: "c", ts: 0, kind: "user", text: "next" })];
+    // a and b are followed by a continuation; c is followed by the user, which
+    // is a different speaker and keeps its separator.
+    expect([...continued(items)].sort()).toEqual([0, 1]);
+  });
+
+  it("leaves a real item between two messages divided", () => {
+    const items = [item(say("a")), shell, item(say("b"))];
+    expect([...continued(items)]).toEqual([]);
+  });
+
+  it("also drops the rule on the invisible items a continuation was grouped across", () => {
+    const hiddenShell: TranscriptItem = { ...shell };
+    const isHidden = (i: TranscriptItem) => i === hiddenShell;
+    const items = [item(say("a")), hiddenShell, item(say("b"))];
+    // Both the message above and the collapsed run itself: a hidden run takes
+    // up no space, so its hairline would read as a divider between a and b.
+    expect([...continued(items, isHidden)].sort()).toEqual([0, 1]);
   });
 });
