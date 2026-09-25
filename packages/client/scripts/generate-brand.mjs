@@ -390,131 +390,127 @@ const BOOT_START = "<!-- boot-splash:generated:start -->";
 const BOOT_END = "<!-- boot-splash:generated:end -->";
 
 /**
- * The four beats, in ms from first paint. Held level with the stylesheet in
- * index.html, which is where the durations live — these are only the offsets
- * that depend on WHICH branch or node, and so have to come from the geometry.
+ * ── THE STRIP ───────────────────────────────────────────────────────────────
+ *
+ * The splash is not the mark animated in place; it is the mark EXTENDING. Read
+ * left to right it is a chain of anchors joined by segments, alternating:
+ *
+ *   A ──fork──▶ B ──merge──▶ C
+ *  (1 dot)    (2 dots)      (1 dot)
+ *
+ * A fork is the mark. A merge is the mark mirrored. So every time a segment is
+ * drawn the picture becomes the mirror of what it just was — one dot, two dots,
+ * one dot, two dots — and the thing doing it is a source-control graph branching
+ * and merging, which is what the mark means in the first place.
+ *
+ * `STRIDE` is the gap between anchors, and it is not a free parameter: it is the
+ * mark's own width, so a segment drawn onto the strip is the mark at exactly the
+ * size the mark is.
+ *
+ * TWO segments and THREE anchors is all that is authored, because the chain
+ * repeats with period two: a segment is drawn out of one anchor and later
+ * retracted into the next, so the last frame of the cycle is a lone dot with
+ * nothing attached — which is exactly the first frame. index.html wraps the loop
+ * there, resetting two strides of accumulated pan under a dot that does not
+ * move. A third segment would buy nothing and cost a frame with two on screen.
  */
-/** Draw-on. The root lands with the trunk's first frame so the graph grows OUT
- *  of a dot; each tip lands as its own branch finishes. */
-const BOOT_BRANCH_DELAY = { trunk: 0, upper: 180, lower: 300 };
-const BOOT_NODE_DELAY = { root: 0, "upper-tip": 700, "lower-tip": 820 };
+const BOOT_STRIDE = 40;
+
+/** x ↦ its mirror about the centre of the view box. */
+const mirrorX = (x) => 64 - x;
 
 /**
- * Which end each stroke retracts INTO when the mark collapses to dots.
+ * Segment two: segment one, mirrored, reversed, and pushed one stride right.
  *
- * Not a constant, and not guessable: `root` sits at the trunk's START, so the
- * trunk shrinks toward offset +1 (leftward, into the root); both tips sit at
- * their branch's END, so those shrink toward -1 (outward, into the tips). Get
- * a sign wrong and the stroke crawls away from its own dot. The magnitude is
- * 1.06 rather than 1 so the dash clears the path end entirely -- see the
- * stroke-dasharray note in index.html for the round-linecap dot that leaves.
+ * REVERSED is the part that is easy to miss and impossible to see in a static
+ * render. Every stroke in the splash draws from its START and retracts into its
+ * END, which is the whole reason the stylesheet needs no per-path direction
+ * flags — so a path's point order IS its animation. Mirroring alone would leave
+ * segment two pointing back at the anchor it is supposed to grow out of, and it
+ * would draw itself backwards into the frame.
  */
-const BOOT_RETRACT = { trunk: 1.06, upper: -1.06, lower: -1.06 };
+function mirrorBranch(branch) {
+  const points = branch.points.map(([x, y]) => [mirrorX(x) + BOOT_STRIDE, y]);
+  points.reverse();
+  return { ...branch, points };
+}
 
 /**
- * Where each dot sits once the mark has collapsed and the three of them swing
- * onto a ring: 120° apart, `BOOT_ORBIT_R` from the centre of the view box.
+ * A segment is drawn in TWO PHASES, and this is which phase a stroke is in.
  *
- * Every one of them has to TRAVEL. The obvious assignment — give each node the
- * seat nearest where it already is — was the first version, and it failed: the
- * ring sits almost exactly where the mark put its nodes, so root did not move at
- * all and the two tips shifted a couple of pixels. What you saw was a spinner
- * with two leftover pieces of the logo parked beside it. Rotating the
- * assignment a third of a turn (root to the top, tips to the two lower seats)
- * costs nothing and makes the collapse legible: three dots visibly leaving the
- * shape they were holding.
+ * `a` is everything between the anchor the segment starts at and the junction;
+ * `b` is everything between the junction and the anchor it ends at. A fork is
+ * therefore trunk-then-branches and a merge is branches-then-trunk — both of
+ * them "in to the intersection, then out the other side", which is the only
+ * order that looks like one pen drawing one shape.
+ *
+ * It was all three at once, staggered by a few tens of ms. That is wrong twice
+ * over, and both are visible: a branch started before the trunk it grows out of
+ * had arrived, and — because `pathLength="1"` normalises every stroke to the
+ * same DURATION — the 20.6-unit branches drew slower than the 24-unit trunk. So
+ * the mark assembled at three speeds with its pieces overlapping.
+ *
+ * The phases in index.html are sized against that, but NOT by plain arc length:
+ * see the note over the road keyframes for why the branch phase is given more
+ * time than its length alone would earn it.
+ *
+ * Nothing is staggered WITHIN a phase, and that is deliberate too — the two
+ * branches of a fork are one event. They split together or the mark grows a
+ * limp.
  */
-/**
- * The motion trail: ghost copies of the trio, each held this many degrees behind
- * it and drawn at this opacity. Nearest first, so the tail thins out.
- *
- * Two constraints fix these numbers, and they pull against each other.
- *
- * The STEP has to keep consecutive ghosts overlapping, or the trail stops being
- * a smear and becomes more dots — and it has to do that at both ends of the
- * orbit, which widens by 3× while this spins. 3° is ~1.3 units of arc at
- * `BOOT_ORBIT_R` and ~3.8 at full width, against a 7-unit dot: overlapping
- * throughout. It was 4/9/15° when the radius was fixed, and those separate
- * visibly once it is not.
- *
- * The COUNT then sets how long the tail can get, since length is count × step.
- * Six is what it takes to still read as a comet at the small step above. The
- * tail does not need to be animated to grow: the offsets are angular and the
- * radius is climbing underneath them, so the arc lengthens on its own.
- */
-const BOOT_TRAIL = [
-  { deg: -3, opacity: 0.5 },
-  { deg: -6, opacity: 0.38 },
-  { deg: -9, opacity: 0.27 },
-  { deg: -12, opacity: 0.18 },
-  { deg: -15, opacity: 0.11 },
-  { deg: -18, opacity: 0.06 },
-];
-
-const BOOT_ORBIT_R = 24;
-const BOOT_ORBIT_PHASE = { root: 270, "upper-tip": 30, "lower-tip": 150 };
-
-/** Two decimals is under a thousandth of a px at any size this renders at. */
-const round2 = (n) => Number(n.toFixed(2));
+const BOOT_ROAD_PHASE = {
+  // The fork runs anchor → junction → tips, so its trunk is the first half.
+  1: (id) => (id === "trunk" ? "a" : "b"),
+  // The merge is the mirror: the branches arrive at the junction, the trunk leaves it.
+  2: (id) => (id === "trunk" ? "b" : "a"),
+};
 
 /**
  * The boot splash's markup, for the block at the top of <body>.
  *
  * Generated for the same reason the icons are: this is the mark, and the mark
- * has exactly one definition. Hand-copying three path `d` strings into
- * index.html would mean a geometry edit silently leaves the FIRST thing anyone
- * sees on the old shape — the one surface nobody would think to check. The
- * orbit coordinates make that sharper still: they are DERIVED from the node
- * positions, so a node that moves takes its seat on the ring with it.
+ * has exactly one definition. Hand-copying path `d` strings into index.html
+ * would mean a geometry edit silently leaves the FIRST thing anyone sees on the
+ * old shape — the one surface nobody would think to check. Here it is sharper
+ * still, because segment two is DERIVED from segment one: move a tip and both
+ * halves of the loop move with it, and the mirror stays a mirror.
  *
- * Every dot is authored at the centre of the view box and placed by transform,
- * so its seat in the mark (`--mx/--my`) and its seat on the ring (`--ox/--oy`)
- * are two plain translations CSS can interpolate between cleanly.
- *
- * Static HTML rather than a React component because it has to paint on the
- * first frame, before the bundle exists. See `src/lib/bootSplash.ts`.
+ * Static HTML rather than a React component because it has to paint on the first
+ * frame, before the bundle exists. See `src/lib/bootSplash.ts`.
  */
 function bootSplashLines() {
-  const cx = 32;
-  const cy = 32;
-  const dot = (n, pad) => {
-    const phase = (BOOT_ORBIT_PHASE[n.id] * Math.PI) / 180;
-    const vars = [
-      `--bd: ${BOOT_NODE_DELAY[n.id]}ms`,
-      `--mx: ${round2(n.cx - cx)}px`,
-      `--my: ${round2(n.cy - cy)}px`,
-      `--ox: ${round2(Math.cos(phase) * BOOT_ORBIT_R)}px`,
-      `--oy: ${round2(Math.sin(phase) * BOOT_ORBIT_R)}px`,
-    ].join("; ");
-    return `${pad}<circle class="boot-splash__dot" cx="${cx}" cy="${cy}" r="${n.radius}" style="${vars}" />`;
-  };
-  const trio = (pad) => DISPATCH_MARK_NODES.map((n) => dot(n, pad));
+  const road = (branch, segment) =>
+    `              <path class="boot-splash__road boot-splash__road--${segment}${BOOT_ROAD_PHASE[segment](branch.id)}"` +
+    ` d="${dispatchBranchPath(branch)}" pathLength="1" />`;
+  const dot = (cx, cy, r, anchor) =>
+    `              <circle class="boot-splash__dot boot-splash__dot--${anchor}" cx="${cx}" cy="${cy}" r="${r}" />`;
+
+  const root = DISPATCH_MARK_NODES.find((n) => n.id === "root");
+  const tips = DISPATCH_MARK_NODES.filter((n) => n.id !== "root");
+  // Anchors, in chain order: a lone dot, a pair, a lone dot. Each is one stride
+  // on from the last, and the lone ones are the root mirrored into place.
+  const anchors = [
+    [root].map((n) => [n.cx, n.cy, "a"]),
+    tips.map((n) => [n.cx, n.cy, "b"]),
+    [root].map((n) => [mirrorX(n.cx) + BOOT_STRIDE, n.cy, "c"]),
+  ].flat();
+
   return [
     `    <!-- Generated by scripts/generate-brand.mjs — do not edit by hand.`,
     `         Styled by the #boot-splash rules in <head>, lifted by src/lib/bootSplash.ts. -->`,
     `    <div id="boot-splash" aria-hidden="true">`,
     `      <div class="boot-splash__stage">`,
     `        <svg class="boot-splash__mark" viewBox="0 0 64 64" aria-hidden="true" style="--bsw: ${DISPATCH_MARK_STROKE_WIDTH}">`,
-    ...DISPATCH_MARK_BRANCHES.map(
-      (b) =>
-        `          <path class="boot-splash__branch" d="${dispatchBranchPath(b)}" pathLength="1" style="--bd: ${BOOT_BRANCH_DELAY[b.id]}ms; --retract: ${BOOT_RETRACT[b.id]}" />`,
-    ),
-    // Three nested groups, all rotating about the view box centre: a constant
-    // floor, a ramp that accelerates across the whole wait, and a fling that is
-    // idle until the exit. Separate elements because CSS will not composite two
-    // animations of the same property on one element — see the rotation note in
-    // index.html.
-    `          <g class="boot-splash__spin">`,
-    `            <g class="boot-splash__ramp">`,
-    `              <g class="boot-splash__fling">`,
-    // Ghosts first, so the real trio draws over its own tail.
-    ...BOOT_TRAIL.flatMap((t) => [
-      `                <g class="boot-splash__trail" style="--ta: ${t.deg}deg; --to: ${t.opacity}">`,
-      ...trio("                  "),
-      `                </g>`,
-    ]),
-    ...trio("                "),
-    `              </g>`,
+    `          <g class="boot-splash__collapse">`,
+    `            <g class="boot-splash__pan">`,
+    // Segment one: the mark as authored — a fork, drawn left to right.
+    ...DISPATCH_MARK_BRANCHES.map((b) => road(b, 1)),
+    // Segment two: the same thing mirrored — a merge — one stride further on.
+    ...DISPATCH_MARK_BRANCHES.map((b) => road(mirrorBranch(b), 2)),
+    // A: the lone dot the cycle opens on and the pen starts from. B: the two
+    // tips, segment one's end and segment two's start. C: the lone dot segment
+    // two arrives at, and the one the loop hands back to A at the seam.
+    ...anchors.map(([cx, cy, id]) => dot(cx, cy, root.radius, id)),
     `            </g>`,
     `          </g>`,
     `        </svg>`,
@@ -522,6 +518,7 @@ function bootSplashLines() {
     `    </div>`,
   ];
 }
+
 /** Swap everything between one marker pair for `lines`. */
 function replaceBlock(html, start, end, lines) {
   const from = html.indexOf(start);

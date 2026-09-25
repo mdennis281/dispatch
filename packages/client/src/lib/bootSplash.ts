@@ -30,15 +30,14 @@
  * the animation, because the data is long since in.
  *
  * The sequence is built for exactly that (see the docblock over the `<style>` in
- * index.html): the mark assembles, collapses into its three nodes, and the nodes
- * orbit — and the ORBIT is the only open-ended part. A fast boot lifts off it
- * early, a slow one watches it keep accelerating, and neither has to invent a
- * progress bar for a number nobody has.
+ * index.html): the mark EXTENDS — a fork's roads undraw into its two leading
+ * dots, the frame slides on, and new roads draw out of them into a merge, which
+ * is the mark mirrored. One — two — one — two, and it loops, so it is the only
+ * open-ended part. A fast boot sees a couple of poses, a slow one keeps
+ * counting, and neither has to invent a progress bar for a number nobody has.
  *
- * `MIN_MS` and the ramp over there are set against each other, not separately:
- * the ramp is sized to the window `MIN_MS` actually leaves on the ring, because
- * sizing it to the 6s worst case meant a normal boot only ever saw the flat
- * first fifth of a quadratic and the acceleration was invisible.
+ * `MIN_MS` and the loop's period over there are set against each other, not
+ * separately — see the note on the constant below.
  *
  * `MAX_MS` is the cap that keeps a promise from becoming a hang: past it we
  * uncover whatever is there, which is `ConnectingScreen` or a placeholder — both
@@ -48,26 +47,43 @@ import { useAuth } from "../stores/auth.js";
 import { useSetup } from "../stores/setup.js";
 
 /**
- * Long enough to SEE the ring accelerate.
+ * Long enough to count to four, and TUNED TO LAND ON A HELD POSE.
  *
- * The mark draws (~0.9s), collapses into its three dots (~1.2s) and gathers onto
- * the ring (~1.46s) — and only then does the part that loops begin. Clearing the
- * gather is not enough, though, and that was the mistake in the 2.4s version:
- * it left under a second of orbit, which is not long enough for a ramp to read
- * as a ramp. You saw a constant spin and then a jerk as the exit took over.
+ * The loop in index.html is 2100ms and holds a pose twice per cycle — 20.57–32%
+ * and 70.57–82% — so a pose is fully drawn and the frame has stopped at 432ms
+ * (one), 1482ms (two), 2532ms (one) and 3582ms (two). 3.6s puts the dismissal
+ * 18ms into that fourth one, with 222ms of it still to run. One, two, one, two,
+ * and then it leaves — the whole shape of the thing, seen once.
  *
- * ~2s of orbit is what it takes for "slowly getting faster" to be legible, and
- * that is what this buys. It is the one number here worth arguing about — it is
- * the floor on every single reload — and it is deliberately the largest thing in
- * this file, because the animation is the point rather than an apology for a
- * wait that was going to happen anyway.
+ * This went UP, from 3.05s, when the draw was slowed by half: four poses take
+ * as long as they take, and the alternative was to cut the sequence at three
+ * and never show the second mirror. It is a shade over the 3.4s the previous
+ * splash held for, so the floor on a reload is not new — but it is the number to
+ * challenge first if this ever feels long.
+ *
+ * That alignment is what the exact figure is for. The exit
+ * collapses whatever is on screen into a single dot, and a pose is a much better
+ * thing to collapse than a road half-drawn or a frame mid-slide.
+ *
+ * The hold's leading edge rather than its middle, deliberately, because the
+ * error here is ONE-SIDED. The CSS clock starts when the splash first paints;
+ * this timer starts when the bundle gets as far as `startBootSplash()`, which is
+ * always LATER and never earlier. So the real dismissal is 3.05s of animation
+ * plus however long that took, and sitting early in the hold leaves the rest of
+ * it as budget for that rather than half. Past that the strip is drawing
+ * again — still perfectly watchable, just not the frame this was aimed at.
+ *
+ * So: move this number and re-derive it against the schedule in index.html.
+ *
+ * It is also the floor on every single reload, which is the other reason to keep
+ * it honest: three seconds is already the largest thing in this file.
  */
-export const BOOT_SPLASH_MIN_MS = 3_400;
+export const BOOT_SPLASH_MIN_MS = 3_600;
 /** Never hold the app hostage to a boot that isn't coming. */
 export const BOOT_SPLASH_MAX_MS = 6_000;
-/** Must outlast the exit in index.html — the 900ms fling-and-expand, and the
- *  plate fading 480ms behind it — before we unmount. */
-export const BOOT_SPLASH_EXIT_MS = 1_000;
+/** Must outlast the exit in index.html — the 320ms shrink, the plate cleared
+ *  behind it by 560ms, and #root faded up at 660ms. */
+export const BOOT_SPLASH_EXIT_MS = 700;
 
 export interface BootState {
   /** `/api/auth/status` has answered, or been guessed at. */
@@ -121,8 +137,11 @@ function element(): HTMLElement | null {
 }
 
 /**
- * Play the exit: the orbiting ring spins up hard and expands past the edges of
- * the screen as it fades, while the app cross-fades up underneath it.
+ * Play the exit: whatever pose the strip is holding shrinks into the centre of
+ * the view box, and then the plate clears behind it and the app is there. See
+ * `.boot-splash__collapse` in index.html — it is a scale rather than anything
+ * converging, because the pose and the frame's offset both depend on where in
+ * the loop this interrupted.
  *
  * The `boot-reveal` class is added to `#root` at THIS moment rather than being
  * on it from the start, so a bundle that throws before reaching this line
