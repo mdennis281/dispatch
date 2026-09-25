@@ -58,6 +58,37 @@ export function registerMcpRoutes(app: FastifyInstance): void {
   const cache = new Map<string, { at: number; catalog: McpCatalog }>();
 
   /**
+   * The cache key for one project, optionally AS a runtime sees it.
+   *
+   * A plain project id for the unscoped view, so the common case stays a bare
+   * string; a JSON tuple once a runtime is named, because a model id may
+   * contain anything and a hand-rolled separator would let two different pairs
+   * collide on one entry.
+   */
+  function cacheKey(projectId: string, runtime?: { harness?: string; model?: string }): string {
+    return runtime?.harness
+      ? JSON.stringify(["mcp", projectId, runtime.harness, runtime.model ?? null])
+      : projectId;
+  }
+
+  /**
+   * Drop EVERY cached catalog for a project — the plain one and every
+   * runtime-keyed one.
+   *
+   * A write at any scope can change what a runtime-scoped view resolves to (an
+   * app pin is a layer under the runtime ones), so invalidating only the plain
+   * key left every runtime view serving the pre-write answer for the rest of
+   * the TTL.
+   */
+  function dropCached(projectId: string): void {
+    for (const key of [...cache.keys()]) {
+      if (key === projectId || key.startsWith(`["mcp",${JSON.stringify(projectId)},`)) {
+        cache.delete(key);
+      }
+    }
+  }
+
+  /**
    * The bundled browser servers as catalog inputs — ALL of them, switched off or
    * not, because a toggle you can't see is a toggle you can't undo. Their
    * enablement is resolved downstream; what's computed here is the DEFAULT each
@@ -226,8 +257,7 @@ export function registerMcpRoutes(app: FastifyInstance): void {
     // "what would goose get?" would answer every later plain one from the same
     // entry, and the project view would show a surface trimmed for a runtime
     // nobody selected.
-    const key = harness ? JSON.stringify(["mcp", req.params.projectId, harness, model ?? null])
-      : req.params.projectId;
+    const key = cacheKey(req.params.projectId, harness ? { harness, model } : undefined);
     const hit = cache.get(key);
     if (!fresh && hit && now - hit.at < CACHE_TTL_MS) return hit.catalog;
 
@@ -348,10 +378,18 @@ export function registerMcpRoutes(app: FastifyInstance): void {
         .send({ error: err instanceof Error ? err.message : String(err) });
     }
 
-    cache.delete(projectId);
-    const catalog = await buildCatalog(projectId);
+    dropCached(projectId);
+    // Rebuilt AS THE RUNTIME THAT WAS JUST PINNED, not unscoped. The client
+    // stores this response straight into its catalog, so an unscoped rebuild
+    // would come back with the runtime layers absent and the switch the user
+    // just flipped would visibly snap back to "inherited" until the next load.
+    const runtime =
+      scope === "harness" || scope === "model"
+        ? { harness: harness!, ...(model ? { model } : {}) }
+        : undefined;
+    const catalog = await buildCatalog(projectId, runtime);
     if (!catalog) return reply.code(404).send({ error: "project not found" });
-    cache.set(projectId, { at: Date.now(), catalog });
+    cache.set(cacheKey(projectId, runtime), { at: Date.now(), catalog });
     return catalog;
   });
 }
