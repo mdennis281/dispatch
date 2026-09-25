@@ -235,6 +235,21 @@ export const AppSettingsSchema = z.object({
    */
   mcpEnabled: McpEnabledMapSchema.optional(),
   /**
+   * The same pins, narrowed to a RUNTIME — keyed by `"goose"` for every chat on
+   * a provider, or `"goose/qwen3-coder:30b"` for one model.
+   *
+   * Flat keys rather than a nested record because the provider-wide pin and the
+   * model pin are the same kind of statement; nesting would make the common
+   * case ("none of goose") the awkward one to write.
+   *
+   * Never committed, for the reason `mcpEnabled` isn't: "this model can't carry
+   * the browser tools" is a fact about the box and the weights, not the repo.
+   *
+   * Optional for the same reason as `mcpEnabled` — unset and `{}` both mean
+   * nothing pinned.
+   */
+  mcpEnabledFor: z.record(z.string(), McpEnabledMapSchema).optional(),
+  /**
    * Which release stream this install follows. Lives here rather than in the
    * payload because `config/` is the one directory install and upgrade never
    * touch — a subscription that reset on every update would be no subscription.

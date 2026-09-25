@@ -26,7 +26,13 @@ import type {
   McpServerConfig,
   SubApp,
 } from "@dispatch/shared";
-import { BROWSER_MCP_SERVERS, isAlwaysOnMcpServer, resolveWorkflow } from "@dispatch/shared";
+import {
+  BROWSER_MCP_SERVERS,
+  harnessEnablementLayers,
+  isAlwaysOnMcpServer,
+  mcpEnablementKeys,
+  resolveWorkflow,
+} from "@dispatch/shared";
 import {
   buildProjectMcpCatalog,
   type BundledCatalogServer,
@@ -50,6 +56,37 @@ export function registerMcpRoutes(app: FastifyInstance): void {
   const { store } = app.cm;
   const services = app.services;
   const cache = new Map<string, { at: number; catalog: McpCatalog }>();
+
+  /**
+   * The cache key for one project, optionally AS a runtime sees it.
+   *
+   * A plain project id for the unscoped view, so the common case stays a bare
+   * string; a JSON tuple once a runtime is named, because a model id may
+   * contain anything and a hand-rolled separator would let two different pairs
+   * collide on one entry.
+   */
+  function cacheKey(projectId: string, runtime?: { harness?: string; model?: string }): string {
+    return runtime?.harness
+      ? JSON.stringify(["mcp", projectId, runtime.harness, runtime.model ?? null])
+      : projectId;
+  }
+
+  /**
+   * Drop EVERY cached catalog for a project — the plain one and every
+   * runtime-keyed one.
+   *
+   * A write at any scope can change what a runtime-scoped view resolves to (an
+   * app pin is a layer under the runtime ones), so invalidating only the plain
+   * key left every runtime view serving the pre-write answer for the rest of
+   * the TTL.
+   */
+  function dropCached(projectId: string): void {
+    for (const key of [...cache.keys()]) {
+      if (key === projectId || key.startsWith(`["mcp",${JSON.stringify(projectId)},`)) {
+        cache.delete(key);
+      }
+    }
+  }
 
   /**
    * The bundled browser servers as catalog inputs — ALL of them, switched off or
@@ -85,16 +122,33 @@ export function registerMcpRoutes(app: FastifyInstance): void {
     }));
   }
 
-  /** The app + project `mcpEnabled` layers for one project. */
-  async function enablementLayers(projectId: string): Promise<McpEnablementLayers> {
+  /**
+   * The enablement layers for one project, optionally AS A GIVEN RUNTIME sees
+   * them.
+   *
+   * The catalog is project-scoped and a project has no single provider, so the
+   * runtime layers only apply when the caller names one — that is how the view
+   * answers "what would a goose chat on qwen3-coder actually get?" without
+   * inventing a runtime for the plain project view.
+   */
+  async function enablementLayers(
+    projectId: string,
+    runtime?: { harness?: string; model?: string },
+  ): Promise<McpEnablementLayers> {
     const settings = await store.getSettings().catch(() => undefined);
     return {
       app: settings?.mcpEnabled,
       project: services.projectConfig?.getMcpEnabled?.(projectId),
+      ...(runtime?.harness
+        ? harnessEnablementLayers(settings?.mcpEnabledFor, runtime.harness, runtime.model)
+        : {}),
     };
   }
 
-  async function buildCatalog(projectId: string): Promise<McpCatalog | null> {
+  async function buildCatalog(
+    projectId: string,
+    runtime?: { harness?: string; model?: string },
+  ): Promise<McpCatalog | null> {
     const project = await store.getProject(projectId).catch(() => null);
     if (!project) return null;
 
@@ -188,24 +242,33 @@ export function registerMcpRoutes(app: FastifyInstance): void {
       bindings,
       mcpServers,
       bundled: bundledServers(project.id, subApps),
-      enablement: await enablementLayers(project.id),
+      enablement: await enablementLayers(project.id, runtime),
     });
   }
 
-  app.get<{ Params: { projectId: string }; Querystring: { fresh?: string } }>(
-    "/api/projects/:projectId/mcp",
-    async (req, reply) => {
-      const fresh = req.query.fresh === "1" || req.query.fresh === "true";
-      const now = Date.now();
-      const hit = cache.get(req.params.projectId);
-      if (!fresh && hit && now - hit.at < CACHE_TTL_MS) return hit.catalog;
+  app.get<{
+    Params: { projectId: string };
+    Querystring: { fresh?: string; harness?: string; model?: string };
+  }>("/api/projects/:projectId/mcp", async (req, reply) => {
+    const fresh = req.query.fresh === "1" || req.query.fresh === "true";
+    const now = Date.now();
+    const { harness, model } = req.query;
+    // The cache key carries the runtime. Without it the first request to ask
+    // "what would goose get?" would answer every later plain one from the same
+    // entry, and the project view would show a surface trimmed for a runtime
+    // nobody selected.
+    const key = cacheKey(req.params.projectId, harness ? { harness, model } : undefined);
+    const hit = cache.get(key);
+    if (!fresh && hit && now - hit.at < CACHE_TTL_MS) return hit.catalog;
 
-      const catalog = await buildCatalog(req.params.projectId);
-      if (!catalog) return reply.code(404).send({ error: "project not found" });
-      cache.set(req.params.projectId, { at: now, catalog });
-      return catalog;
-    },
-  );
+    const catalog = await buildCatalog(
+      req.params.projectId,
+      harness ? { harness, ...(model ? { model } : {}) } : undefined,
+    );
+    if (!catalog) return reply.code(404).send({ error: "project not found" });
+    cache.set(key, { at: now, catalog });
+    return catalog;
+  });
 
   /**
    * Pin one server on or off, at one of the two scopes.
@@ -221,15 +284,27 @@ export function registerMcpRoutes(app: FastifyInstance): void {
    */
   app.put<{
     Params: { projectId: string; name: string };
-    Body: { scope?: string; enabled?: boolean | null };
+    Body: { scope?: string; enabled?: boolean | null; harness?: string; model?: string };
   }>("/api/projects/:projectId/mcp/:name/enabled", async (req, reply) => {
     const { projectId, name } = req.params;
     const project = await store.getProject(projectId).catch(() => null);
     if (!project) return reply.code(404).send({ error: "project not found" });
 
     const scope = req.body?.scope;
-    if (scope !== "app" && scope !== "project") {
-      return reply.code(400).send({ error: 'scope must be "app" or "project"' });
+    if (scope !== "app" && scope !== "project" && scope !== "harness" && scope !== "model") {
+      return reply
+        .code(400)
+        .send({ error: 'scope must be "app", "project", "harness" or "model"' });
+    }
+    // A runtime scope is meaningless without the runtime it pins, and a `model`
+    // scope needs both halves — `goose/` would key a record nothing reads.
+    const harness = req.body?.harness;
+    const model = req.body?.model;
+    if ((scope === "harness" || scope === "model") && !harness) {
+      return reply.code(400).send({ error: `scope "${scope}" requires a harness` });
+    }
+    if (scope === "model" && !model) {
+      return reply.code(400).send({ error: 'scope "model" requires a model' });
     }
     const enabled = req.body?.enabled ?? null;
     if (enabled !== null && typeof enabled !== "boolean") {
@@ -243,7 +318,25 @@ export function registerMcpRoutes(app: FastifyInstance): void {
     }
 
     try {
-      if (scope === "app") {
+      if (scope === "harness" || scope === "model") {
+        // Keyed the same way the resolver reads them, through the same helper,
+        // so a pin written here cannot end up under a key nothing consults.
+        const [harnessKey, modelKey] = mcpEnablementKeys(harness!, model);
+        const key = scope === "model" ? modelKey! : harnessKey!;
+        const settings = await store.getSettings();
+        const all = { ...(settings.mcpEnabledFor ?? {}) };
+        const next = { ...(all[key] ?? {}) };
+        if (enabled === null) delete next[name];
+        else next[name] = enabled;
+        // Drop the whole record when its last pin goes, so clearing a toggle
+        // leaves no empty object behind for the next reader to interpret.
+        if (Object.keys(next).length) all[key] = next;
+        else delete all[key];
+        await store.saveSettings({
+          ...settings,
+          ...(Object.keys(all).length ? { mcpEnabledFor: all } : { mcpEnabledFor: undefined }),
+        });
+      } else if (scope === "app") {
         const settings = await store.getSettings();
         const next = { ...(settings.mcpEnabled ?? {}) };
         if (enabled === null) delete next[name];
@@ -285,10 +378,18 @@ export function registerMcpRoutes(app: FastifyInstance): void {
         .send({ error: err instanceof Error ? err.message : String(err) });
     }
 
-    cache.delete(projectId);
-    const catalog = await buildCatalog(projectId);
+    dropCached(projectId);
+    // Rebuilt AS THE RUNTIME THAT WAS JUST PINNED, not unscoped. The client
+    // stores this response straight into its catalog, so an unscoped rebuild
+    // would come back with the runtime layers absent and the switch the user
+    // just flipped would visibly snap back to "inherited" until the next load.
+    const runtime =
+      scope === "harness" || scope === "model"
+        ? { harness: harness!, ...(model ? { model } : {}) }
+        : undefined;
+    const catalog = await buildCatalog(projectId, runtime);
     if (!catalog) return reply.code(404).send({ error: "project not found" });
-    cache.set(projectId, { at: Date.now(), catalog });
+    cache.set(cacheKey(projectId, runtime), { at: Date.now(), catalog });
     return catalog;
   });
 }

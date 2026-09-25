@@ -833,8 +833,20 @@ export const api = {
 
   /* MCP catalog — every tool endpoint (custom manager + external) per project */
   mcp: {
-    catalog: (projectId: string, opts?: { fresh?: boolean }) =>
-      get<McpCatalog>(`/api/projects/${projectId}/mcp${qs({ fresh: opts?.fresh ? 1 : undefined })}`),
+    catalog: (
+      projectId: string,
+      opts?: { fresh?: boolean; harness?: string; model?: string },
+    ) =>
+      get<McpCatalog>(
+        `/api/projects/${projectId}/mcp${qs({
+          fresh: opts?.fresh ? 1 : undefined,
+          // Naming a runtime asks what THAT runtime would actually be handed —
+          // the project view omits both and sees the surface with no runtime pin
+          // applied.
+          harness: opts?.harness,
+          model: opts?.model,
+        })}`,
+      ),
     /**
      * Pin one server on/off at a scope, or `null` to clear the pin and inherit.
      * Returns the rebuilt catalog, so the switch settles on what the server
@@ -845,10 +857,14 @@ export const api = {
       name: string,
       scope: McpEnablementScope,
       enabled: boolean | null,
+      /** Required by the `harness` and `model` scopes; ignored by the others. */
+      runtime?: { harness?: string; model?: string },
     ) =>
       put<McpCatalog>(`/api/projects/${projectId}/mcp/${encodeURIComponent(name)}/enabled`, {
         scope,
         enabled,
+        ...(runtime?.harness ? { harness: runtime.harness } : {}),
+        ...(runtime?.model ? { model: runtime.model } : {}),
       }),
   },
 

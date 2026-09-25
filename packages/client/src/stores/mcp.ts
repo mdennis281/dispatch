@@ -14,7 +14,10 @@ interface McpStore {
   pending: Record<string, boolean>;
 
   /** Fetch (or re-fetch with `fresh`) a project's catalog into the store. */
-  load: (projectId: string, opts?: { fresh?: boolean }) => Promise<void>;
+  load: (
+    projectId: string,
+    opts?: { fresh?: boolean; harness?: string; model?: string },
+  ) => Promise<void>;
   /**
    * Pin a server on/off at a scope (`null` clears the pin). The response IS the
    * rebuilt catalog, so the row settles on the server's resolution — including
@@ -25,6 +28,7 @@ interface McpStore {
     name: string,
     scope: McpEnablementScope,
     enabled: boolean | null,
+    runtime?: { harness?: string; model?: string },
   ) => Promise<void>;
   /** Drop all cached catalogs (reconnect reset). */
   reset: () => void;
@@ -61,7 +65,7 @@ export const useMcp = create<McpStore>((set, get) => ({
     }
   },
 
-  setEnabled: async (projectId, name, scope, enabled) => {
+  setEnabled: async (projectId, name, scope, enabled, runtime) => {
     const key = `${projectId}:${name}`;
     if (get().pending[key]) return;
     set((s) => ({
@@ -69,7 +73,7 @@ export const useMcp = create<McpStore>((set, get) => ({
       error: { ...s.error, [projectId]: null },
     }));
     try {
-      const catalog = await api.mcp.setEnabled(projectId, name, scope, enabled);
+      const catalog = await api.mcp.setEnabled(projectId, name, scope, enabled, runtime);
       set((s) => ({ byProject: { ...s.byProject, [projectId]: catalog } }));
     } catch (err) {
       set((s) => ({
