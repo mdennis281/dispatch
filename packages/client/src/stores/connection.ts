@@ -110,6 +110,16 @@ interface ConnectionStore {
    * simply hasn't been logged into.
    */
   liveStarted: boolean;
+  /**
+   * The authoritative REST snapshot has landed at least once, so every store the
+   * shell renders from has real rows in it.
+   *
+   * ONE-WAY, and deliberately not cleared on a disconnect: this answers "has
+   * this tab ever had the app's data" — which is what the boot splash waits for
+   * — and not "is that data fresh", which is what `state` and `downSince` are
+   * for. Clearing it on a drop would put the splash back up on a reconnect.
+   */
+  hydrated: boolean;
   setState: (s: ConnState) => void;
   noteAttempt: () => void;
   setNextRetry: (at?: number) => void;
@@ -117,6 +127,7 @@ interface ConnectionStore {
   noteBadFrame: (type: string) => void;
   setProbe: (probe: ServerProbe) => void;
   setOnline: (online: boolean) => void;
+  noteHydrated: () => void;
   noteMockSeeded: () => void;
   noteLiveStarted: () => void;
   noteLiveStopped: () => void;
@@ -140,6 +151,7 @@ export const useConnection = create<ConnectionStore>((set) => ({
   badFrames: 0,
   badFrameTypes: [],
   online: typeof navigator === "undefined" ? true : navigator.onLine,
+  hydrated: false,
   mockSeeded: false,
   liveStarted: false,
   stopped: false,
@@ -161,6 +173,7 @@ export const useConnection = create<ConnectionStore>((set) => ({
     })),
   setProbe: (probe) => set({ probe }),
   setOnline: (online) => set({ online }),
+  noteHydrated: () => set({ hydrated: true }),
   noteMockSeeded: () => set({ mockSeeded: true }),
   noteLiveStarted: () => set({ liveStarted: true }),
   noteLiveStopped: () => set({ liveStarted: false }),

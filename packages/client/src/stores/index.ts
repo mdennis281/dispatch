@@ -526,6 +526,13 @@ export async function hydrateFromServer(): Promise<boolean> {
   // above (see {@link restorePendingPermissions}).
   void restorePendingPermissions();
 
+  // The shell now has real rows in it, which is what the boot splash waits for.
+  // Set at the END, after every gating store has been filled: the point of the
+  // flag is that uncovering the app here shows a finished screen rather than a
+  // sidebar mid-populate. The best-effort loads kicked off above are deliberately
+  // NOT waited on — they are the ones that may never answer.
+  useConnection.getState().noteHydrated();
+
   return true;
 }
 

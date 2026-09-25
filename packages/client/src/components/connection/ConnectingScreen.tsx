@@ -30,7 +30,8 @@
  * feature of it.
  */
 import { useEffect, useState } from "react";
-import { PlugZap, RotateCw, ServerCrash, ShieldAlert, Unplug, WifiOff } from "lucide-react";
+import { RotateCw, ShieldAlert } from "lucide-react";
+import { BootMark } from "../brand/BootMark.js";
 import { Button } from "../ui/Button.js";
 import { StatusDot, type DotTone } from "../ui/StatusDot.js";
 import { useConnection } from "../../stores/connection.js";
@@ -81,32 +82,30 @@ function CheckRow({ check }: { check: Check }) {
   );
 }
 
+/**
+ * The boot mark, because this screen is WAITING and the mark is what waiting
+ * looks like here.
+ *
+ * It replaced a set of five diagnostic glyphs (WifiOff, ServerCrash, Unplug…),
+ * and that is a deliberate trade rather than an oversight: the checklist below
+ * already names the failing check, in words, with a coloured dot beside it —
+ * the glyph was a second, coarser rendering of the same fact. What it was not
+ * showing, and what the mark does, is that the page is still retrying. A static
+ * fault icon over a screen that re-probes every four seconds reads as stopped.
+ *
+ * The exception is the one diagnosis that is NOT "wait": an expired session is
+ * fixed by signing in, and nothing this screen does will fix it on its own. That
+ * keeps its shield.
+ */
 function HeadIcon({ diagnosis }: { diagnosis: Diagnosis }) {
-  const failing = diagnosis.checks.find((c) => c.state === "fail");
-  const icon =
-    diagnosis.action === "sign-in" ? (
-      <ShieldAlert />
-    ) : failing?.id === "network" ? (
-      <WifiOff />
-    ) : failing?.id === "server" ? (
-      <ServerCrash />
-    ) : failing?.id === "protocol" ? (
-      <RotateCw />
-    ) : failing?.id === "socket" ? (
-      <Unplug />
-    ) : (
-      <PlugZap className="cm-anim-pulse" />
+  if (diagnosis.action === "sign-in") {
+    return (
+      <span className="mb-3.5 flex size-12 items-center justify-center rounded-xl border border-danger-line bg-panel-2 text-danger [&_svg]:size-5">
+        <ShieldAlert />
+      </span>
     );
-  const tone = failing
-    ? "border-danger-line text-danger"
-    : "border-accent-line text-accent-hi";
-  return (
-    <span
-      className={`mb-3.5 flex size-12 items-center justify-center rounded-xl border bg-panel-2 [&_svg]:size-5 ${tone}`}
-    >
-      {icon}
-    </span>
-  );
+  }
+  return <BootMark />;
 }
 
 /**

@@ -43,12 +43,13 @@
  * to a server it no longer matches.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AlertTriangle, ArrowUpCircle, Check, ChevronDown, RotateCw } from "lucide-react";
+import { AlertTriangle, Check, ChevronDown, RotateCw } from "lucide-react";
 import type { UpdatePhase } from "@dispatch/shared";
 import { Button } from "../ui/Button.js";
 import { useUpdate } from "../../stores/update.js";
 import type { UpdateFlight } from "../../lib/updatePrefs.js";
 import { LAYER } from "../../lib/layers.js";
+import { BootMark } from "../brand/BootMark.js";
 import { isNewProcess, probeHealth, probeProgress, probeReady } from "../../lib/updateProbe.js";
 
 /** Fast enough to feel live, slow enough to be free — the probe is two stats. */
@@ -256,15 +257,21 @@ function Attempt({ flight }: { flight: UpdateFlight }) {
     >
       <div className="w-full max-w-[440px]">
         <div className="flex flex-col items-center text-center">
-          <span
-            className={
-              stage === "failed"
-                ? "mb-3.5 flex size-12 items-center justify-center rounded-xl border border-danger-line bg-panel-2 text-danger [&_svg]:size-5"
-                : "mb-3.5 flex size-12 items-center justify-center rounded-xl border border-accent-line bg-panel-2 text-accent-hi [&_svg]:size-5"
-            }
-          >
-            {stage === "failed" ? <AlertTriangle /> : <ArrowUpCircle className="cm-anim-pulse" />}
-          </span>
+          {/* The boot mark while it is working — the same loop the splash runs,
+              and for the same reason: this is a wait of unknown length with a
+              progress bar that can sit on one phase for minutes. A pulsing arrow
+              said "an update" where the mark says "and it is still going".
+
+              A FAILED update keeps its warning triangle. It is over, there is
+              nothing left running, and an animation that implies otherwise is
+              the one thing this screen must never do. */}
+          {stage === "failed" ? (
+            <span className="mb-3.5 flex size-12 items-center justify-center rounded-xl border border-danger-line bg-panel-2 text-danger [&_svg]:size-5">
+              <AlertTriangle />
+            </span>
+          ) : (
+            <BootMark />
+          )}
           <p className="text-lg font-medium text-primary">
             {stage === "failed"
               ? "Update failed"
