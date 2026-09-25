@@ -32,7 +32,7 @@ import type {
   HarnessSessionSpec,
   HarnessTextRequest,
 } from "../types.js";
-import { gooseRuntime } from "./runtime.js";
+import { gooseRuntime, windowsShell } from "./runtime.js";
 import { AcpConnection } from "./rpc.js";
 import { AcpSession } from "./session.js";
 
@@ -151,8 +151,14 @@ export const GOOSE_AGENT: AcpAgentSpec = {
     // rather than to water it down: PowerShell is also what the rest of this
     // repo's tooling assumes. Windows only — elsewhere goose's default shell
     // already matches the POSIX branch of the block.
+    //
+    // `powershell` is 5.1, which has no `&&` — a chat handed it spent two tool
+    // calls on "The token '&&' is not a valid statement separator in this
+    // version" before abandoning the command, because `cmd1 && cmd2` is the
+    // first thing anything trained on a POSIX shell reaches for. pwsh 7 takes
+    // it, so prefer that wherever it is installed.
     ...(process.platform === "win32"
-      ? { GOOSE_SHELL: process.env.GOOSE_SHELL ?? "powershell" }
+      ? { GOOSE_SHELL: process.env.GOOSE_SHELL ?? windowsShell() }
       : {}),
   }),
 };
