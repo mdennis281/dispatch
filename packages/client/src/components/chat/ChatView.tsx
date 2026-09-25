@@ -690,6 +690,7 @@ export function ChatView({ chat }: { chat: Chat }) {
       <TranscriptSearch
         open={searchOpen}
         rootRef={transcriptRef}
+        scrollRef={scrollRef}
         revision={messages}
         loadingHistory={loadingSearchHistory}
         onClose={() => setSearchOpen(false)}
