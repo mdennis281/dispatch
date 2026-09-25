@@ -3312,21 +3312,7 @@ export class SessionBroker {
       // Codex has native compaction but no in-thread `/clear`: retire the native
       // thread and let the next user message create a fresh one. Dispatch's
       // transcript remains the durable conversation record.
-      const live = session.harnessSession;
-      session.switching = true;
-      session.harnessSession = undefined;
-      session.started = false;
-      session.sessionId = undefined;
-      // The baseline belongs to the thread being retired — the fresh one starts
-      // its own `total_cost_usd` from zero, and measuring against a dead
-      // session's total would understate the first turn back.
-      session.lastCostUsd = undefined;
-      session.costBaselineUnknown = false;
-      session.managerGrant?.revoke();
-      session.managerGrant = undefined;
-      void live.dispose();
-      void this.patchChat(chatId, { sessionId: undefined, costBaselineUsd: undefined });
-      this.onTurnEnd(session);
+      this.retireNativeSession(session);
     } else {
       session.outbox.push({
         id: this.genId(),
@@ -3348,13 +3334,20 @@ export class SessionBroker {
    * baseline that belonged to it — measuring a fresh thread's `total_cost_usd`
    * against a dead one's total would understate its first turn.
    *
-   * Extracted from the `/clear` path so both spellings of "retire the thread"
-   * cannot drift apart.
+   * `clearContext` calls this too, so there is ONE implementation of "retire
+   * the thread" rather than two copies that can drift.
    */
-  private retireNativeSession(session: LiveSession, why: string): void {
+  private retireNativeSession(session: LiveSession, why?: string): void {
     const live = session.harnessSession;
     if (!live) return;
-    session.switching = true;
+    // DELIBERATELY NOT `switching = true`. That flag exists for `onDone` to
+    // consume — it is what makes a stop during a harness/account switch settle
+    // quietly instead of publishing a `done` attention item and a push. This
+    // path never reaches `onDone`: the consumer only calls it while
+    // `session.harnessSession === live` (see the stream loop), and the line
+    // below clears that first. So the flag would never be read, would sit
+    // `true` on a session object that outlives the turn, and would silently
+    // swallow the NEXT genuine session-end notification for that chat.
     session.harnessSession = undefined;
     session.started = false;
     session.sessionId = undefined;
@@ -3365,15 +3358,18 @@ export class SessionBroker {
     void live.dispose();
     void this.patchChat(session.chatId, { sessionId: undefined, costBaselineUsd: undefined });
     // Said out loud, because a silently restarted session looks like a chat
-    // that forgot what it was doing.
-    void this.emit(session, {
-      kind: "notice",
-      id: this.genId(),
-      chatId: session.chatId,
-      ts: this.now(),
-      level: "info",
-      text: `Restarted the agent (${why}) — this provider cannot change it on a live session.`,
-    });
+    // that forgot what it was doing. `clearContext` emits its own notice before
+    // calling here, so it passes no reason and gets no second one.
+    if (why) {
+      void this.emit(session, {
+        kind: "notice",
+        id: this.genId(),
+        chatId: session.chatId,
+        ts: this.now(),
+        level: "info",
+        text: `Restarted the agent (${why}) — this provider cannot change it on a live session.`,
+      });
+    }
     this.onTurnEnd(session);
   }
 

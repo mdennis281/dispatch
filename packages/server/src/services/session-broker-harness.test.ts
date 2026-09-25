@@ -1025,6 +1025,51 @@ describe("SessionBroker neutral harness path", () => {
       expect(specs[1]!.model).toBe("llama3.1:8b");
     });
 
+    it("leaves the NEXT genuine session-end still able to announce itself", async () => {
+      // `switching` is consumed only by `onDone`, and that is what makes a stop
+      // settle quietly — no `done` attention item, no push. Retiring a session
+      // never reaches `onDone` (the stream loop calls it only while
+      // `harnessSession === live`, and retiring clears that first), so setting
+      // the flag here would leave it `true` on a session that outlives the
+      // turn and silently swallow the next real session-end notification.
+      broker = new SessionBroker({
+        store,
+        bus: (bus = new EventBus()),
+        harnesses: new HarnessRegistry({ harnesses: { goose: noLiveSwitchHarness() } }),
+        authored: new AuthoredConfigService({ globalRoot: join(dir, "global") }),
+        deps: { stopTimeoutMs: 5 },
+      });
+      const chat = await store.saveChat({
+        id: "chat-switch-then-stop",
+        projectId: "project-1",
+        title: "Switch then stop",
+        modeId: "plan",
+        effort: "low",
+        harness: "goose",
+        model: "qwen3-coder:30b",
+        worktrees: [],
+        prs: [],
+        createdAt: 1,
+      });
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "one");
+      await broker.waitFor(chat.id, "idle");
+      await broker.setModel(chat.id, "llama3.1:8b");
+
+      await broker.sendMessage(chat.id, "two");
+      await broker.waitFor(chat.id, "idle");
+
+      // Watch ONLY for the "Session ended" item the quiet branch skips.
+      const ended: string[] = [];
+      bus.subscribe((e) => {
+        if (e.type === "attention-add" && e.item.kind === "done") ended.push(e.item.chatId);
+      });
+      await broker.stop(chat.id);
+
+      // With the flag leaked, `onDone` takes the quiet branch and this is empty.
+      expect(ended).toEqual([chat.id]);
+    });
+
     it("does not restart a provider that CAN switch in place", async () => {
       // Codex advertises liveModelSwitch, so tearing its thread down would
       // throw away context for no reason.
