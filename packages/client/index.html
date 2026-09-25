@@ -147,6 +147,15 @@
          * Both are hundreds of ms clear of every edge, which is what absorbs the
          * drift between this timer and the CSS clock (they start a paint apart).
          *
+         * ALL THREE NUMBERS BELONG TO `--boot-beat`, which is the period they
+         * are read against and which lives in the stylesheet, where a script
+         * running before it cannot see it. This is the one genuine duplicate in
+         * the splash and it cannot be removed — so retune `--boot-beat` and
+         * these move with it, or the ticks drift out of the dark windows above
+         * and into the lit ones, and a road changes colour while you are looking
+         * at it. The declaration over there says the same thing in the other
+         * direction.
+         *
          * DOT A IS THE PREVIOUS CYCLE'S SEGMENT-TWO COLOUR, and that is the one
          * assignment that is not free. At the seam the loop swaps dot C for dot
          * A on the same pixel; give them different colours and the seam that the
@@ -364,9 +373,19 @@
         --boot-bg: #0b0d10;
         --boot-amber: #e5a33c;
         /* One period of the loop — two beats, one for each pose. Everything
-           below is a percentage of this, so it is the only speed control, and
-           `BOOT_SPLASH_MIN_MS` is derived against it. It was 1800ms, which put
-           44.6 units of road down in 288ms and was too quick to follow the pen. */
+           below is a percentage of this, so it is the only speed control. It was
+           1800ms, which put 44.6 units of road down in 288ms and was too quick
+           to follow the pen.
+
+           TWO THINGS OUTSIDE THIS STYLESHEET ARE DERIVED FROM IT and neither can
+           read it, so both have to be moved by hand if this changes:
+
+             - `BOOT_SPLASH_MIN_MS` in src/lib/bootSplash.ts, which is aimed at a
+               held pose so the exit does not interrupt a draw;
+             - `PERIOD` and the 1200/2400 tick delays in the colour script in
+               <head>, which recolours the roads and dots during the windows in
+               which they are NOT on screen. Retune this and leave those, and a
+               tick lands mid-draw and recolours a road in front of you. */
         --boot-beat: 2100ms;
         background: var(--boot-bg);
       }

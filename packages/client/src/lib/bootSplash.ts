@@ -137,8 +137,11 @@ function element(): HTMLElement | null {
 }
 
 /**
- * Play the exit: the orbiting ring spins up hard and expands past the edges of
- * the screen as it fades, while the app cross-fades up underneath it.
+ * Play the exit: whatever pose the strip is holding shrinks into the centre of
+ * the view box, and then the plate clears behind it and the app is there. See
+ * `.boot-splash__collapse` in index.html — it is a scale rather than anything
+ * converging, because the pose and the frame's offset both depend on where in
+ * the loop this interrupted.
  *
  * The `boot-reveal` class is added to `#root` at THIS moment rather than being
  * on it from the start, so a bundle that throws before reaching this line
