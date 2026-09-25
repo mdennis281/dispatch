@@ -2920,6 +2920,23 @@ export class SessionBroker {
           detail: err instanceof Error ? err.message : String(err),
         });
       });
+      // A PROVIDER THAT CANNOT SWITCH LIVE HAS ONLY RECORDED THE CHOICE.
+      //
+      // goose resolves its model from `GOOSE_MODEL` when the process spawns and
+      // has no way to change it afterwards, so `AcpSession.setModel` just stores
+      // it — while `chat.model` was already persisted and the picker already
+      // shows the new name. Measured on the wire: pick a different model
+      // mid-chat and EVERY subsequent request still goes out as the old one,
+      // with the UI naming the new one. A model picker that silently does not
+      // change the model is worse than one that refuses.
+      //
+      // So retire the native session the way `/clear` does and let the next
+      // message spawn a fresh one — that one reads the new model. Dispatch's
+      // transcript is the durable record either way, and the handoff is the
+      // path the provider already supports.
+      if (!this.harnesses?.resolve(session.harnessKind).harness.capabilities.liveModelSwitch) {
+        this.retireNativeSession(session, `switching to ${next}`);
+      }
     }
     if (session.query) {
       try {
@@ -3319,6 +3336,45 @@ export class SessionBroker {
       });
       this.schedule(session);
     }
+  }
+
+  /**
+   * Retire the NATIVE session, keeping the Dispatch chat.
+   *
+   * The next user message spawns a fresh one, which is the only way a change
+   * the provider cannot apply in place (a model on ACP) actually takes effect.
+   * Dispatch's transcript is the durable conversation record, so nothing the
+   * user can see is lost; what goes is the provider-side thread and the cost
+   * baseline that belonged to it — measuring a fresh thread's `total_cost_usd`
+   * against a dead one's total would understate its first turn.
+   *
+   * Extracted from the `/clear` path so both spellings of "retire the thread"
+   * cannot drift apart.
+   */
+  private retireNativeSession(session: LiveSession, why: string): void {
+    const live = session.harnessSession;
+    if (!live) return;
+    session.switching = true;
+    session.harnessSession = undefined;
+    session.started = false;
+    session.sessionId = undefined;
+    session.lastCostUsd = undefined;
+    session.costBaselineUnknown = false;
+    session.managerGrant?.revoke();
+    session.managerGrant = undefined;
+    void live.dispose();
+    void this.patchChat(session.chatId, { sessionId: undefined, costBaselineUsd: undefined });
+    // Said out loud, because a silently restarted session looks like a chat
+    // that forgot what it was doing.
+    void this.emit(session, {
+      kind: "notice",
+      id: this.genId(),
+      chatId: session.chatId,
+      ts: this.now(),
+      level: "info",
+      text: `Restarted the agent (${why}) — this provider cannot change it on a live session.`,
+    });
+    this.onTurnEnd(session);
   }
 
   /**
