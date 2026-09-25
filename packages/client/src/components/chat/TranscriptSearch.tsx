@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronUp, LoaderCircle, Search, X } from "lucide-react";
 import { IconButton } from "../ui/IconButton.js";
-import { findTranscriptMatches, type TranscriptMatch } from "./transcriptMatches.js";
+import { findTranscriptMatches, indexOfMatch, type TranscriptMatch } from "./transcriptMatches.js";
+import { scrollMatchIntoView } from "./scrollMatchIntoView.js";
 
 const ALL_MATCHES = "dispatch-transcript-search";
 const CURRENT_MATCH = "dispatch-transcript-search-current";
@@ -32,18 +33,27 @@ function clearHighlights() {
 export function TranscriptSearch({
   open,
   rootRef,
+  scrollRef,
   revision,
   loadingHistory,
   onClose,
 }: {
   open: boolean;
   rootRef: React.RefObject<HTMLDivElement>;
+  /** The transcript's scrollport — what a match has to be brought into. */
+  scrollRef: React.RefObject<HTMLDivElement>;
   revision: unknown;
   loadingHistory: boolean;
   onClose: () => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const matchesRef = useRef<TranscriptMatch[]>([]);
+  // Which OCCURRENCE is current, by stable identity rather than by index. Two
+  // things renumber the list under the reader while they are looking at it:
+  // older history paging in above (every index shifts), and a running agent
+  // streaming into the newest row. Holding an identity means neither one
+  // silently changes which hit "3 of 76" refers to.
+  const anchorRef = useRef<{ rowId: string; start: number } | null>(null);
   const [query, setQuery] = useState("");
   const [count, setCount] = useState(0);
   const [current, setCurrent] = useState(0);
@@ -75,7 +85,10 @@ export function TranscriptSearch({
     const matches = findTranscriptMatches(rootRef.current, query);
     matchesRef.current = matches;
     setCount(matches.length);
-    setCurrent((index) => (matches.length ? Math.min(index, matches.length - 1) : 0));
+    const kept = indexOfMatch(matches, anchorRef.current);
+    setCurrent((index) =>
+      kept >= 0 ? kept : matches.length ? Math.min(index, matches.length - 1) : 0,
+    );
     setMatchRevision((value) => value + 1);
     const registry = highlightRegistry();
     if (registry && matches.length) {
@@ -89,11 +102,23 @@ export function TranscriptSearch({
     const match = matchesRef.current[current];
     const registry = highlightRegistry();
     registry?.delete(CURRENT_MATCH);
-    if (!match) return;
+    if (!match) {
+      anchorRef.current = null;
+      return;
+    }
     const highlight = makeHighlight([match.range]);
     if (registry && highlight) registry.set(CURRENT_MATCH, highlight);
-    match.row.scrollIntoView({ block: "center", behavior: "smooth" });
-  }, [count, current, matchRevision]);
+
+    // Re-running because the TRANSCRIPT changed — a page of history landing, a
+    // token streaming in — must not move the page. Only an actual change of
+    // which occurrence is current earns a scroll; without this guard the view
+    // is yanked back to the current hit on every render while paging the full
+    // history in, which is most of the time right after the bar opens.
+    const previous = anchorRef.current;
+    anchorRef.current = { rowId: match.rowId, start: match.start };
+    if (previous && previous.rowId === match.rowId && previous.start === match.start) return;
+    if (scrollRef.current) scrollMatchIntoView(scrollRef.current, match);
+  }, [current, matchRevision, scrollRef]);
 
   useEffect(() => clearHighlights, []);
 
@@ -120,6 +145,10 @@ export function TranscriptSearch({
           value={query}
           onChange={(event) => {
             setQuery(event.target.value);
+            // Drop the anchor: the hits for a new query are different
+            // occurrences, so there is nothing to hold the reader's place on,
+            // and keeping it would suppress the scroll to the first hit.
+            anchorRef.current = null;
             setCurrent(0);
           }}
           onKeyDown={(event) => {
@@ -137,16 +166,22 @@ export function TranscriptSearch({
           className="min-w-0 flex-1 bg-transparent text-primary outline-none placeholder:text-faint"
         />
         <span className="min-w-[4.5rem] text-right text-xs tabular-nums text-faint" aria-live="polite">
-          {loadingHistory ? (
-            <span className="inline-flex items-center gap-1">
-              <LoaderCircle className="size-3 cm-anim-spin" />
-              Loading
-            </span>
-          ) : query.trim() ? (
-            count ? `${current + 1} of ${count}` : "No results"
-          ) : (
-            ""
-          )}
+          {/* The count is shown WHILE history pages in, not replaced by the
+              spinner: the hits found so far are real and navigable, and hiding
+              the total behind "Loading" makes a search that already works look
+              broken for as long as the paging takes. */}
+          <span className="inline-flex items-center gap-1">
+            {loadingHistory && <LoaderCircle className="size-3 shrink-0 cm-anim-spin" />}
+            {query.trim()
+              ? count
+                ? `${current + 1} of ${count}`
+                : loadingHistory
+                  ? "Searching"
+                  : "No results"
+              : loadingHistory
+                ? "Loading"
+                : ""}
+          </span>
         </span>
       </div>
       <IconButton tip="Previous match" onClick={() => move(-1)} disabled={!count}>

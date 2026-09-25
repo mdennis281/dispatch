@@ -1,6 +1,18 @@
 export interface TranscriptMatch {
   range: Range;
   row: HTMLElement;
+  /**
+   * Stable identity of this occurrence, so a match survives a re-scan.
+   *
+   * The ranges themselves cannot: every re-render replaces the text nodes they
+   * point at, and paging older history in ABOVE shifts every index down. Keying
+   * on (row, character offset within that row) instead means "the 3rd match"
+   * can be re-found as the SAME occurrence after the DOM underneath it changed,
+   * rather than silently becoming whatever now sits at index 3.
+   */
+  rowId: string;
+  /** Character offset of the match within the row's concatenated text. */
+  start: number;
 }
 
 interface TextSegment {
@@ -19,6 +31,7 @@ export function findTranscriptMatches(root: HTMLElement, query: string): Transcr
 
   const matches: TranscriptMatch[] = [];
   for (const row of root.querySelectorAll<HTMLElement>("[data-row-id]")) {
+    const rowId = row.dataset?.rowId ?? "";
     const segments: TextSegment[] = [];
     let text = "";
     const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT, {
@@ -56,10 +69,23 @@ export function findTranscriptMatches(root: HTMLElement, query: string): Transcr
         const range = document.createRange();
         range.setStart(first.node, at - first.start);
         range.setEnd(last.node, end - last.start);
-        matches.push({ range, row });
+        matches.push({ range, row, rowId, start: at });
       }
       from = at + Math.max(needle.length, 1);
     }
   }
   return matches;
+}
+
+/**
+ * Where a previously-current occurrence ended up in a freshly-scanned list, or
+ * -1 if it is gone (its row scrolled out of the loaded window, or the text it
+ * matched was edited away).
+ */
+export function indexOfMatch(
+  matches: TranscriptMatch[],
+  anchor: { rowId: string; start: number } | null,
+): number {
+  if (!anchor) return -1;
+  return matches.findIndex((m) => m.rowId === anchor.rowId && m.start === anchor.start);
 }
