@@ -1373,6 +1373,27 @@
           worker.postMessage({ type: "colour", name: name, value: value });
         });
 
+        /*
+          * The worker's rAF loop is the only thing here that outlives the
+          * splash, so there has to be a way to end it that is not "play the
+          * exit animation".
+          *
+          * THREE WINDOWS NEVER PLAY ONE. The detached log window, the trace
+          * viewer and the mission preview load this same index.html — they
+          * inherit the markup and therefore this script, which cannot see the
+          * `isShell` check that decides their fate because that is computed in
+          * the bundle from the URL. They call `dismissBootSplashNow()`, which
+          * takes the splash down with no animation at all. Without this they
+          * would each leave a worker redrawing an orphaned canvas, at 60fps,
+          * for as long as the window stayed open.
+          */
+        function stopWorker() {
+          if (!worker) return;
+          worker.terminate();
+          worker = null;
+        }
+        api.stopCanvas = stopWorker;
+
         worker.onmessage = function (e) {
           if (blobUrl) {
             // Not synchronously after `new Worker()`: the script fetch may still
@@ -1385,7 +1406,11 @@
             // The one flip. Until it happens the SVG is what you are watching.
             splash.setAttribute("data-canvas", "");
           } else if (e.data.type === "exit-done") {
+            // The mold has played out and `frame()` has already stopped
+            // scheduling itself; this gives the thread back rather than leaving
+            // an idle worker alive until the tab closes.
             canvas.style.opacity = "0";
+            stopWorker();
           }
         };
         worker.onerror = function (err) {
@@ -1425,7 +1450,7 @@
         // bootSplash.ts sets `data-done`; the mold is the worker's half of the
         // exit, and the aperture underneath it is still pure CSS on the iris.
         api.onExit = function () {
-          worker.postMessage({ type: "exit" });
+          if (worker) worker.postMessage({ type: "exit" });
         };
       })();
     </script>

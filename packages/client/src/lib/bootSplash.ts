@@ -89,6 +89,16 @@ declare global {
        * optionally and nothing branches on it.
        */
       onExit?: () => void;
+      /**
+       * Terminate the canvas renderer outright, with no animation.
+       *
+       * Separate from `onExit` because the two answer different questions:
+       * `onExit` plays the mold and the worker stops itself when it finishes,
+       * while this is for every path that takes the splash down WITHOUT an
+       * exit — where nothing would otherwise ever stop the worker's render
+       * loop. Absent unless the worker started; see `onExit`.
+       */
+      stopCanvas?: () => void;
     };
   }
 }
@@ -266,6 +276,10 @@ function dismiss(el: HTMLElement): void {
   setTimeout(() => {
     el.remove();
     document.getElementById("root")?.classList.remove("boot-reveal");
+    // Belt and braces: the worker ends its own loop when the mold finishes, so
+    // this only bites if the exit never got that far — a `data-done` that raced
+    // the worker's startup, say.
+    window.__dispatchBootMark?.stopCanvas?.();
   }, BOOT_SPLASH_EXIT_MS);
 }
 
@@ -279,6 +293,11 @@ function dismiss(el: HTMLElement): void {
  */
 export function dismissBootSplashNow(): void {
   window.__dispatchBootMark?.releaseSplash();
+  // There is no exit here, so nothing else will ever stop the canvas renderer.
+  // These windows keep the document open for hours — a log popup is the whole
+  // point of the detached window — and an orphaned worker would go on drawing a
+  // removed canvas at 60fps for every one of them.
+  window.__dispatchBootMark?.stopCanvas?.();
   element()?.remove();
 }
 
