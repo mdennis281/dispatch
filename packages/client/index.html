@@ -271,14 +271,41 @@
           timers = [];
         }
 
+        /*
+         * A hidden tab does not keep this timer honest.
+         *
+         * Chrome throttles `setInterval` to once a second while the tab is in
+         * the background, and to once a MINUTE after five minutes hidden. The
+         * CSS animations don't care — they run off the document timeline, which
+         * is wall-clock — so the two clocks come apart. Leave a connecting or
+         * updating screen open in a background tab, come back, and the ticks are
+         * arbitrarily far out of phase: they now land anywhere in the cycle,
+         * including the lit windows, and you watch a road change colour.
+         *
+         * Restarting is the whole fix, because `startTicks` re-derives the phase
+         * from `performance.now()`. It has to be stop-THEN-start: `startTicks`
+         * returns early while timers are live, so calling it alone does nothing.
+         */
+        function realign() {
+          if (document.visibilityState !== "visible" || !holds) return;
+          stopTicks();
+          startTicks();
+        }
+
         api.hold = function () {
           holds++;
+          // Attached with the first hold and dropped with the last, so nothing
+          // is listening once the mark is off screen and the ticks have stopped.
+          if (holds === 1) document.addEventListener("visibilitychange", realign);
           startTicks();
           var released = false;
           return function () {
             if (released) return;
             released = true;
-            if (--holds <= 0) stopTicks();
+            if (--holds <= 0) {
+              document.removeEventListener("visibilitychange", realign);
+              stopTicks();
+            }
           };
         };
 
