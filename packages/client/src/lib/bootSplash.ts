@@ -78,6 +78,17 @@ declare global {
       hold: () => () => void;
       /** Give back the hold the splash itself took when the document was parsed. */
       releaseSplash: () => void;
+      /** Subscribe to colour changes. Set by the rotation; used by the canvas renderer. */
+      onColour: (fn: (name: string, value: string) => void) => void;
+      /**
+       * Tell the canvas renderer to play the mold.
+       *
+       * Absent unless the worker actually started — no `OffscreenCanvas`, no
+       * worker, reduced motion — in which case the SVG is still on screen and
+       * the CSS plays the mold, which is why this is only ever called
+       * optionally and nothing branches on it.
+       */
+      onExit?: () => void;
     };
   }
 }
@@ -247,6 +258,9 @@ function afterPaint(fn: () => void): void {
 function dismiss(el: HTMLElement): void {
   if (el.hasAttribute("data-done")) return;
   el.setAttribute("data-done", "");
+  // Before the hold is released, so the mold is drawn in the colours the loop
+  // was actually wearing rather than whatever the last tick left behind.
+  window.__dispatchBootMark?.onExit?.();
   window.__dispatchBootMark?.releaseSplash();
   document.getElementById("root")?.classList.add("boot-reveal");
   setTimeout(() => {

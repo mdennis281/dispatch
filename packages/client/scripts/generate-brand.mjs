@@ -544,6 +544,11 @@ function bootSplashLines() {
     `        <svg class="boot-splash__mark" viewBox="0 0 64 64" aria-hidden="true" style="--bsw: ${DISPATCH_MARK_STROKE_WIDTH}">`,
     ...bootMarkLines({ indent: 10, attr: "class" }),
     `        </svg>`,
+    // The same loop, drawn by a worker — see the OFF THE MAIN THREAD note in the
+    // docblock over the <style>. Empty and invisible until that worker has a
+    // frame up; if it never does, this element is never shown and the SVG above
+    // is what you watch, exactly as before.
+    `        <canvas class="boot-splash__canvas" width="0" height="0" aria-hidden="true"></canvas>`,
     `      </div>`,
     `    </div>`,
   ];
