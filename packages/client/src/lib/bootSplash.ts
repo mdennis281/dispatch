@@ -78,6 +78,27 @@ declare global {
       hold: () => () => void;
       /** Give back the hold the splash itself took when the document was parsed. */
       releaseSplash: () => void;
+      /** Subscribe to colour changes. Set by the rotation; used by the canvas renderer. */
+      onColour: (fn: (name: string, value: string) => void) => void;
+      /**
+       * Tell the canvas renderer to play the mold.
+       *
+       * Absent unless the worker actually started — no `OffscreenCanvas`, no
+       * worker, reduced motion — in which case the SVG is still on screen and
+       * the CSS plays the mold, which is why this is only ever called
+       * optionally and nothing branches on it.
+       */
+      onExit?: () => void;
+      /**
+       * Terminate the canvas renderer outright, with no animation.
+       *
+       * Separate from `onExit` because the two answer different questions:
+       * `onExit` plays the mold and the worker stops itself when it finishes,
+       * while this is for every path that takes the splash down WITHOUT an
+       * exit — where nothing would otherwise ever stop the worker's render
+       * loop. Absent unless the worker started; see `onExit`.
+       */
+      stopCanvas?: () => void;
     };
   }
 }
@@ -247,11 +268,18 @@ function afterPaint(fn: () => void): void {
 function dismiss(el: HTMLElement): void {
   if (el.hasAttribute("data-done")) return;
   el.setAttribute("data-done", "");
+  // Before the hold is released, so the mold is drawn in the colours the loop
+  // was actually wearing rather than whatever the last tick left behind.
+  window.__dispatchBootMark?.onExit?.();
   window.__dispatchBootMark?.releaseSplash();
   document.getElementById("root")?.classList.add("boot-reveal");
   setTimeout(() => {
     el.remove();
     document.getElementById("root")?.classList.remove("boot-reveal");
+    // Belt and braces: the worker ends its own loop when the mold finishes, so
+    // this only bites if the exit never got that far — a `data-done` that raced
+    // the worker's startup, say.
+    window.__dispatchBootMark?.stopCanvas?.();
   }, BOOT_SPLASH_EXIT_MS);
 }
 
@@ -265,6 +293,11 @@ function dismiss(el: HTMLElement): void {
  */
 export function dismissBootSplashNow(): void {
   window.__dispatchBootMark?.releaseSplash();
+  // There is no exit here, so nothing else will ever stop the canvas renderer.
+  // These windows keep the document open for hours — a log popup is the whole
+  // point of the detached window — and an orphaned worker would go on drawing a
+  // removed canvas at 60fps for every one of them.
+  window.__dispatchBootMark?.stopCanvas?.();
   element()?.remove();
 }
 
