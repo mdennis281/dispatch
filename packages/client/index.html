@@ -183,13 +183,21 @@
          * A variable can only change while nothing wearing it is on screen, or
          * the recolour happens in front of you. Against the 2100ms schedule in
          * the stylesheet, the dark windows are: segment one 1050-2100, segment
-         * two 2100-3150, dot A 777-2100, dot B 1827-2532, dot C 0-1533.
+         * two 2100-3150, dot A 777-2100, dot B 1827-2457, dot C 0-1533.
          *
-         * Two ticks cover all five with room to spare. The one at 1200ms sets up
-         * the NEXT cycle's segment one and its dot A; the one at 2400ms sets the
-         * dot B that cycle will land on, and the segment two it will draw after.
-         * Both are hundreds of ms clear of every edge, which is what absorbs the
-         * drift between this timer and the CSS clock (they start a paint apart).
+         * DOT B'S WINDOW CLOSES AT 2457, AND THAT NUMBER USED TO READ 2532 —
+         * which is where this went wrong for a while. 2532 is 20.57%, when the
+         * branches LAND on dot B. But the dot does not wait to be landed on: it
+         * springs open from 17%, which is 2457. So the tick that dyed it sat at
+         * 2400, a claimed 132ms clear of the edge and really 57ms, and the
+         * measured lateness of a timer during boot is 131-362ms. It missed every
+         * cycle, and you saw the previous colour for the frames it took to
+         * arrive — on the two dots, always, right as they were drawn.
+         *
+         * So dot B gets its own tick, as early in its dark window as the fade
+         * allows rather than as late as it fits: 1950 is 123ms after the dot is
+         * fully out and 507ms before it starts coming back. Every other variable
+         * already had 750ms or more, which is why only these two ever flickered.
          *
          * ALL THREE NUMBERS BELONG TO `--boot-beat`, which is the period they
          * are read against and which lives in the stylesheet, where a script
@@ -231,6 +239,16 @@
               set("--c-ball", segment2);
             },
           },
+          // Dot B, dyed the moment it is safely out of sight rather than at the
+          // last moment it fits. `segment1` is already the NEXT cycle's colour
+          // here, assigned by the 1200 tick above — which is also why this
+          // cannot simply ride along with that one: at 1200 dot B is still lit.
+          {
+            at: 1950,
+            fn: function () {
+              set("--c-b", segment1);
+            },
+          },
           // 2400 rather than 300: a cycle in, on the FIRST start. The values for
           // cycle zero were set above, and calling next() any earlier would burn
           // segment two's colour before it had been drawn once. On a later start
@@ -238,7 +256,6 @@
           {
             at: 2400,
             fn: function () {
-              set("--c-b", segment1);
               segment2 = next();
               set("--c-s2", segment2);
               set("--c-c", segment2);
@@ -249,34 +266,59 @@
         var timers = [];
         var holds = 0;
         var startedOnce = false;
+        // Bumped by `stopTicks`, so a callback that was already in flight when
+        // the last hold went away cannot re-arm itself into a stopped rotation.
+        var generation = 0;
 
+        /*
+         * RE-ANCHORED EVERY TIME, rather than a `setInterval`.
+         *
+         * An interval repeats from when it last FIRED, so every millisecond it
+         * ran late is carried into the next one and never given back. Measured
+         * on an idle page that is about 3ms a cycle — dot B's tick creeping
+         * 317, 321, 326, 327 — which is nothing across the 3.6s of a boot and a
+         * great deal across a `ConnectingScreen` left open for ten minutes,
+         * where it is 285 cycles and most of a second of drift. Long before
+         * that, every tick has walked out of the dark window it was placed in.
+         *
+         * Computing the next delay from `performance.now()` each time means a
+         * late tick is late once. It costs one extra `setTimeout` per tick per
+         * cycle, which is four timers every 2.1 seconds.
+         */
         function startTicks() {
           if (timers.length) return;
-          // `performance.now()` is ms since navigation and the CSS animations
-          // are `infinite` with no delay, so the loop's phase right now is
-          // `now % PERIOD` — which is what a tick starting late has to land on.
-          // On the first start `now` is a paint or two, so this is a no-op and
-          // the authored offsets stand as written.
-          var now = performance.now();
+          var gen = ++generation;
           for (var i = 0; i < TICKS.length; i++) {
-            (function (tick) {
-              var delay = startedOnce ? (((tick.at - now) % PERIOD) + PERIOD) % PERIOD : tick.at;
-              timers.push(
-                setTimeout(function () {
+            (function (tick, slot) {
+              function arm(first) {
+                // `performance.now()` is ms since navigation and the CSS
+                // animations are `infinite` with no delay, so the loop's phase
+                // right now is `now % PERIOD` — which is what a tick has to land
+                // on. On the very first start `now` is a paint or two, so the
+                // authored offsets stand as written.
+                var delay = first;
+                if (delay == null) {
+                  var now = performance.now();
+                  delay = (((tick.at - now) % PERIOD) + PERIOD) % PERIOD;
+                  // Dead on the phase: wait a whole cycle rather than firing
+                  // twice in a row and burning a colour early.
+                  if (delay < 1) delay = PERIOD;
+                }
+                timers[slot] = setTimeout(function () {
+                  if (gen !== generation) return;
                   tick.fn();
-                  timers.push(setInterval(tick.fn, PERIOD));
-                }, delay),
-              );
-            })(TICKS[i]);
+                  arm(null);
+                }, delay);
+              }
+              arm(startedOnce ? null : tick.at);
+            })(TICKS[i], i);
           }
           startedOnce = true;
         }
 
         function stopTicks() {
-          for (var i = 0; i < timers.length; i++) {
-            clearTimeout(timers[i]);
-            clearInterval(timers[i]);
-          }
+          generation++;
+          for (var i = 0; i < timers.length; i++) clearTimeout(timers[i]);
           timers = [];
         }
 
