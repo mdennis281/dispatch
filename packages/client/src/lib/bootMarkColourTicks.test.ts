@@ -29,11 +29,18 @@ const PERIOD = Number(/--boot-beat: (\d+)ms/.exec(html)![1]);
  * How much room a tick must leave before whatever it dyes comes back.
  *
  * Measured: with the ticks re-anchored to the clock each cycle they land 0-5ms
- * late once running, but the FIRST one after a start can be ~400ms late if it
- * was armed just before a long task. This is set above that and well above the
- * 57ms that shipped the bug.
+ * late once running, but the FIRST one after a start can be ~414ms late if it
+ * was armed just before a long task. So the threshold has to clear THAT, not
+ * merely beat the 57ms that shipped the bug — a tick placed with 300ms of room
+ * would look fine here and still fire on screen during a slow first boot, which
+ * is the whole failure this file exists to catch.
+ *
+ * The tightest margin in the loop is dot B's 507ms, which clears this by 57ms.
+ * That is deliberate rather than lucky: dot B's dark window is only 630ms wide,
+ * so if a future change needs more room than this allows, the answer is to move
+ * the KEYFRAMES rather than to lower the bar.
  */
-const MIN_MARGIN_MS = 250;
+const MIN_MARGIN_MS = 450;
 
 /** Which keyframes wear each custom property. */
 const WORN_BY: Record<string, string[]> = {
