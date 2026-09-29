@@ -6,6 +6,10 @@ import { Badge, Chip, type Tone } from "../ui/Chip.js";
 import { Popover, MenuItem } from "../ui/Popover.js";
 import { Button } from "../ui/Button.js";
 import { openWorkspace } from "../../stores/workspace.js";
+// Value import back into the module that type-imports `ChatWorktreeRef` from
+// here; that side is `import type` and erased, so the cycle never exists at
+// runtime.
+import { rosterRows } from "./chatHeaderRefs.js";
 import { cn } from "../../lib/cn.js";
 
 /** One worktree this chat has ever owned — including ones since cleaned up. */
@@ -170,6 +174,32 @@ function worktreeHint(w: ChatWorktreeRef): string | undefined {
   return w.live ? undefined : "removed";
 }
 
+/** One PR row — the same row whether it hangs off a branch or stands alone. */
+function PrRow({ pr, close }: { pr: PRRef; close: () => void }) {
+  const state = pr.state ?? "open";
+  return (
+    <MenuItem
+      dense={false}
+      title={pr.title}
+      hint={state}
+      icon={
+        state === "merged" ? (
+          <GitMerge className={PR_INK.merged} />
+        ) : (
+          <GitPullRequest className={PR_INK[state]} />
+        )
+      }
+      onClick={() => {
+        openWorkspace("prs");
+        close();
+      }}
+    >
+      <span className="cm-mono !text-xs">#{pr.number}</span>
+      {pr.title && <span className="ml-2 text-xs text-muted">{pr.title}</span>}
+    </MenuItem>
+  );
+}
+
 /**
  * The full roster: every worktree this chat has cut and every PR it has opened.
  *
@@ -179,6 +209,12 @@ function worktreeHint(w: ChatWorktreeRef): string | undefined {
  * What a chat actually produced is the most interesting thing this header
  * knows; it simply wasn't being asked for. Both are already persisted on the
  * chat (`Chat.worktrees`, `Chat.prs`), so none of this costs a fetch.
+ *
+ * A PR sits UNDER the branch it came from rather than in a section of its own.
+ * Nearly every chat's PR was cut from a worktree in the list directly above it,
+ * so the old second section spent a heading and a count restating a link the
+ * reader had to make by matching two truncated branch names. Only a PR with no
+ * worktree row to hang off still gets a section.
  */
 function Roster({
   worktrees,
@@ -189,72 +225,61 @@ function Roster({
   prs: PRRef[];
   close: () => void;
 }) {
+  const { rows, orphans } = rosterRows(worktrees, prs);
   return (
     <div className="flex flex-col">
-      {worktrees.length > 0 && (
+      {rows.length > 0 && (
         <>
-          <SectionHead
-            label={worktrees.length > 1 ? "Worktrees" : "Worktree"}
-            count={worktrees.length}
-          />
-          {worktrees.map((w) => (
-            <MenuItem
-              key={w.path}
-              dense={false}
-              title={w.path}
-              hint={worktreeHint(w)}
-              icon={
-                w.merged ? (
-                  <GitMerge className="text-success" />
-                ) : (
-                  <GitBranch className={w.live ? "text-info-hi" : "text-faint"} />
-                )
-              }
-              className={cn("cm-mono !text-xs", !w.live && "text-muted")}
-              onClick={() => {
-                openWorkspace("worktrees");
-                close();
-              }}
-            >
-              {w.branch}
-            </MenuItem>
-          ))}
-        </>
-      )}
-      {prs.length > 0 && (
-        <>
-          <SectionHead
-            label={prs.length > 1 ? "Pull requests" : "Pull request"}
-            count={prs.length}
-          />
-          {prs.map((pr) => {
-            const state = pr.state ?? "open";
-            return (
+          <SectionHead label={rows.length > 1 ? "Worktrees" : "Worktree"} count={rows.length} />
+          {rows.map(({ worktree: w, prs: own }) => (
+            <div key={w.path} className="flex flex-col">
               <MenuItem
-                // Keyed by repo too: PR numbers restart at 1 per repository, so
-                // the bare number is not unique on a chat that has shipped to
-                // more than one of them.
-                key={`${pr.repo ?? ""}#${pr.number}`}
                 dense={false}
-                title={pr.title}
-                hint={state}
+                title={w.path}
+                hint={worktreeHint(w)}
                 icon={
-                  state === "merged" ? (
-                    <GitMerge className={PR_INK.merged} />
+                  w.merged ? (
+                    <GitMerge className="text-success" />
                   ) : (
-                    <GitPullRequest className={PR_INK[state]} />
+                    <GitBranch className={w.live ? "text-info-hi" : "text-faint"} />
                   )
                 }
+                className={cn("cm-mono !text-xs", !w.live && "text-muted")}
                 onClick={() => {
-                  openWorkspace("prs");
+                  openWorkspace("worktrees");
                   close();
                 }}
               >
-                <span className="cm-mono !text-xs">#{pr.number}</span>
-                {pr.title && <span className="ml-2 text-xs text-muted">{pr.title}</span>}
+                {w.branch}
               </MenuItem>
-            );
-          })}
+              {own.length > 0 && (
+                // The rule lands under the branch glyph above it (12px of row
+                // padding + half of a 14px icon), so it reads as descending
+                // from that branch rather than as a second column. The rows
+                // keep their full 44px height — nested or not, a thumb still
+                // has to hit them.
+                <div className="ml-[19px] border-l border-line pl-1">
+                  {own.map((pr) => (
+                    // Keyed by repo too: PR numbers restart at 1 per
+                    // repository, so the bare number is not unique on a chat
+                    // that has shipped to more than one of them.
+                    <PrRow key={`${pr.repo ?? ""}#${pr.number}`} pr={pr} close={close} />
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </>
+      )}
+      {orphans.length > 0 && (
+        <>
+          <SectionHead
+            label={orphans.length > 1 ? "Pull requests" : "Pull request"}
+            count={orphans.length}
+          />
+          {orphans.map((pr) => (
+            <PrRow key={`${pr.repo ?? ""}#${pr.number}`} pr={pr} close={close} />
+          ))}
         </>
       )}
     </div>

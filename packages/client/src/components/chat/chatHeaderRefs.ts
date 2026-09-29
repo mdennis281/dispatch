@@ -84,3 +84,40 @@ export function chatPrRefs(chat: Chat, live: PRInfo[]): PRRef[] {
     return tracked ? { ...pr, state: tracked.state, title: pr.title ?? tracked.title } : pr;
   });
 }
+
+/** One worktree with the PRs cut from its branch hanging off it. */
+export interface RosterRow {
+  worktree: ChatWorktreeRef;
+  prs: PRRef[];
+}
+
+/**
+ * The roster as it is read: a PR belongs UNDER the branch it was opened from,
+ * not in a list of its own.
+ *
+ * A chat's PR almost always comes from a worktree the same chat cut, so a
+ * separate "Pull request — 1" section was restating a relationship the reader
+ * already had to infer from two identical branch names. Attaching it removes
+ * the whole section in the common case.
+ *
+ * A PR whose branch has no worktree row still has to appear — a worktree can be
+ * cleaned up before the chat's record of it is written, and `create_pr` can be
+ * called on a branch this chat never cut — so those fall through to `orphans`
+ * and keep their own section.
+ */
+export function rosterRows(
+  worktrees: ChatWorktreeRef[],
+  prs: PRRef[],
+): { rows: RosterRow[]; orphans: PRRef[] } {
+  const rows: RosterRow[] = worktrees.map((worktree) => ({ worktree, prs: [] }));
+  const orphans: PRRef[] = [];
+  for (const pr of prs) {
+    // First match, not every match: two worktrees can sit on one branch, and a
+    // PR listed under both would be the same double-count the header already
+    // had once with its "+1".
+    const row = rows.find((r) => r.worktree.branch === pr.branch);
+    if (row) row.prs.push(pr);
+    else orphans.push(pr);
+  }
+  return { rows, orphans };
+}
