@@ -29,12 +29,12 @@ export function WorkingRow({ label }: { label?: string }) {
   return (
     <RowShell
       gutter={
-        <span className="flex size-6 items-center justify-center rounded-md bg-accent-ghost text-accent-hi ring-1 ring-accent-line [&_svg]:size-3.5">
+        <span className="flex size-6 items-center justify-center rounded-md bg-accent-ghost text-accent-hi [&_svg]:size-3.5">
           <Sparkles />
         </span>
       }
     >
-      <div className="inline-flex items-center gap-2.5 rounded-md border border-accent-line/60 bg-accent-ghost/40 px-2.5 py-1.5">
+      <div className="inline-flex items-center gap-2.5 rounded-md bg-accent-ghost/40 px-2.5 py-1.5">
         <TypingPulse />
         <span className="text-sm font-medium text-accent-hi">{label ?? "Working…"}</span>
       </div>
@@ -69,7 +69,7 @@ export function StreamingRow({
       continued={continued}
       who={provider}
       gutter={
-        <span className="flex size-6 items-center justify-center rounded-md bg-accent-ghost text-accent-hi ring-1 ring-accent-line [&_svg]:size-3.5">
+        <span className="flex size-6 items-center justify-center rounded-md bg-accent-ghost text-accent-hi [&_svg]:size-3.5">
           <Sparkles />
         </span>
       }

@@ -33,7 +33,7 @@ export function InstallCard() {
       className="pointer-events-auto cursor-pointer rounded-lg border border-accent-line/70 bg-overlay px-3 py-2.5 text-left shadow-[var(--shadow-pop)] transition-colors cm-anim-rise hover:border-accent-line hover:bg-elevated"
     >
       <div className="flex items-start gap-2.5">
-        <span className="mt-px flex size-5 shrink-0 items-center justify-center rounded-md text-accent-hi ring-1 ring-accent-line [&_svg]:size-3.5">
+        <span className="mt-px flex size-5 shrink-0 items-center justify-center rounded-md text-accent-hi [&_svg]:size-3.5">
           <Download />
         </span>
         <div className="min-w-0 flex-1">
