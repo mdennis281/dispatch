@@ -18,9 +18,12 @@ import type { Chat } from "@dispatch/shared";
 import { Drawer } from "./Drawer.js";
 import { Button } from "../ui/Button.js";
 import { Badge } from "../ui/Chip.js";
-import { AttentionPopover } from "../attention/AttentionPopover.js";
 import { usePanelCounts } from "../panels/usePanelCounts.js";
-import { useLayout, dismissLeftDrawer, type Pane } from "../../stores/layout.js";
+import {
+  useLayout,
+  dismissLeftDrawer,
+  type Pane,
+} from "../../stores/layout.js";
 import { useView, openOverlay, type AppView } from "../../stores/view.js";
 import { openWorkspace } from "../../stores/workspace.js";
 import { useAttention } from "../../stores/attention.js";
@@ -181,7 +184,9 @@ function useTextEntryFocused(): boolean {
 
     const isTextEntry = (el: EventTarget | null): boolean =>
       el instanceof HTMLElement &&
-      (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);
+      (el.tagName === "INPUT" ||
+        el.tagName === "TEXTAREA" ||
+        el.isContentEditable);
     const onIn = (e: FocusEvent) => setTyping(isTextEntry(e.target));
     const onOut = () => setTyping(false);
     document.addEventListener("focusin", onIn);
@@ -225,7 +230,9 @@ export function BottomNav({ chat }: { chat: Chat | null }) {
   // the whole point of the badge is to be readable while the sidebar is
   // off-canvas.
   const attention = useAttention(
-    (s) => s.items.filter((i) => i.kind === "permission" || i.kind === "question").length,
+    (s) =>
+      s.items.filter((i) => i.kind === "permission" || i.kind === "question")
+        .length,
   );
 
   /** Where the whole shell is, in the four bits the two rules below read. */
@@ -333,7 +340,11 @@ export function BottomNav({ chat }: { chat: Chat | null }) {
           // composer into the gesture area for the ~250ms before the keyboard
           // lands. The condition is deliberately the SAME `typing` the strip
           // reads, so "strip hidden" and "full inset" cannot come apart.
-          kb > 0 ? "pb-0" : typing ? "cm-safe-b" : "pb-[var(--cm-bottom-nav-clear)]",
+          kb > 0
+            ? "pb-0"
+            : typing
+              ? "cm-safe-b"
+              : "pb-[var(--cm-bottom-nav-clear)]",
           !typing && "border-t border-line",
         )}
       >
@@ -449,7 +460,11 @@ export function BottomNav({ chat }: { chat: Chat | null }) {
               setMoreOpen(false);
             }}
           />
-          <SheetRow icon={<Blocks />} label="MCP tools" onClick={() => goOverlay("mcp")} />
+          <SheetRow
+            icon={<Blocks />}
+            label="MCP tools"
+            onClick={() => goOverlay("mcp")}
+          />
           {/* Both settings surfaces are pages now, so they go through `goView`
               with the rest of the destinations rather than `goOverlay` — which
               is also what makes them toggle back to the transcript on a second
@@ -457,12 +472,16 @@ export function BottomNav({ chat }: { chat: Chat | null }) {
           <SheetRow
             icon={<FileCog />}
             label="Project config"
-            onClick={() => goView(view === "project-settings" ? "chat" : "project-settings")}
+            onClick={() =>
+              goView(view === "project-settings" ? "chat" : "project-settings")
+            }
           />
           <SheetRow
             icon={<Settings />}
             label="Settings"
-            onClick={() => goView(view === "app-settings" ? "chat" : "app-settings")}
+            onClick={() =>
+              goView(view === "app-settings" ? "chat" : "app-settings")
+            }
           />
           <div className="my-1 h-px bg-line-soft" />
           {/* An iPhone can't be inspected remotely from Windows, and the shell
@@ -474,13 +493,6 @@ export function BottomNav({ chat }: { chat: Chat | null }) {
             label={debug ? "Hide viewport readout" : "Viewport readout"}
             onClick={toggleDebug}
           />
-
-          <div className="my-1 h-px bg-line-soft" />
-          {/* The attention queue is a triage LIST, not a destination, so it keeps
-              its popover rather than becoming a row that opens another sheet. */}
-          <div className="px-3 py-2">
-            <AttentionPopover />
-          </div>
         </div>
       </Drawer>
     </>
