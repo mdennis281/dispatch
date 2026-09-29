@@ -29,7 +29,7 @@ export function UpdateCard() {
   return (
     <div className="pointer-events-auto rounded-lg border border-accent-line/70 bg-overlay px-3 py-2.5 text-left shadow-[var(--shadow-pop)] cm-anim-rise">
       <div className="flex items-start gap-2.5">
-        <span className="mt-px flex size-5 shrink-0 items-center justify-center rounded-md text-accent-hi ring-1 ring-accent-line [&_svg]:size-3.5">
+        <span className="mt-px flex size-5 shrink-0 items-center justify-center rounded-md text-accent-hi [&_svg]:size-3.5">
           <ArrowUpCircle />
         </span>
         <div className="min-w-0 flex-1">

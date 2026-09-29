@@ -945,7 +945,7 @@ function Editor({ chatId, alt, base: initialBase, onCancel, onApply }: ImageAnno
   return (
     <>
       <header className="flex items-center gap-2.5 px-3 py-2.5 cm-hairline-b sm:px-4 sm:py-3">
-        <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-accent-ghost text-accent ring-1 ring-accent-line [&_svg]:size-3.5">
+        <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-accent-ghost text-accent [&_svg]:size-3.5">
           {mode === "crop" ? <CropIcon /> : <Check />}
         </span>
         <div className="min-w-0 flex-1">

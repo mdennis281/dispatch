@@ -81,7 +81,7 @@ export function Modal({
       >
         <header className="flex items-center gap-2.5 px-4 py-3 cm-hairline-b">
           {icon && (
-            <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-accent-ghost text-accent ring-1 ring-accent-line [&_svg]:size-3.5">
+            <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-accent-ghost text-accent [&_svg]:size-3.5">
               {icon}
             </span>
           )}
