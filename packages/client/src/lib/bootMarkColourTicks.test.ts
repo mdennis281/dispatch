@@ -47,8 +47,10 @@ const WORN_BY: Record<string, string[]> = {
   "--c-a": ["boot-splash-dot-a"],
   "--c-b": ["boot-splash-dot-b"],
   "--c-c": ["boot-splash-dot-c"],
-  "--c-s1": ["boot-splash-road-1a", "boot-splash-road-1b"],
-  "--c-s2": ["boot-splash-road-2a", "boot-splash-road-2b"],
+  "--c-d": ["boot-splash-dot-d"],
+  "--c-s1": ["boot-splash-road-s1-trunk", "boot-splash-road-s1-branch"],
+  "--c-s2": ["boot-splash-road-s2-trunk", "boot-splash-road-s2-branch"],
+  "--c-s3": ["boot-splash-road-s3-trunk", "boot-splash-road-s3-branch"],
   // `--c-ball` is read once, at dismissal, by which time the ticks have stopped.
   // There is no window to respect and nothing wearing it during the loop.
 };
@@ -174,13 +176,15 @@ describe("splash colour ticks land while nothing is wearing the colour", () => {
     });
   }
 
-  it("dyes dot B from the colour segment one is about to be drawn in", () => {
-    // The ordering that makes the whole thing work: `segment1` is reassigned at
-    // 1200 and dot B is dyed AFTER that, so it is already wearing the next
-    // cycle's colour when the branches arrive. Swap the two and the dot is a
-    // cycle behind for ever, which no margin would fix.
+  it("prepares the seam from a colour that has already been chosen", () => {
+    // The ordering that makes the whole thing work. At the seam segment three
+    // becomes segment one and dot D becomes dot B, so both have to be dyed from
+    // `segment3` — which means AFTER the tick that picks it. Reverse either and
+    // the mark is a cycle behind for ever, which no margin would fix.
+    const s3 = all.find((t) => t.sets.includes("--c-s3"))!;
     const s1 = all.find((t) => t.sets.includes("--c-s1"))!;
     const b = all.find((t) => t.sets.includes("--c-b"))!;
-    expect(b.at).toBeGreaterThan(s1.at);
+    expect(s1.at).toBeGreaterThan(s3.at);
+    expect(b.at).toBeGreaterThan(s3.at);
   });
 });

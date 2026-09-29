@@ -20,16 +20,21 @@ export function BootMarkArt(props: { className?: string; style?: CSSProperties }
     >
       <g className="boot-splash__collapse">
         <g className="boot-splash__pan">
-          <path className="boot-splash__road boot-splash__road--1a" d="M12 32L36 32" pathLength="1" />
-          <path className="boot-splash__road boot-splash__road--1b" d="M36 32C42 32 43 22 52 20" pathLength="1" />
-          <path className="boot-splash__road boot-splash__road--1b" d="M36 32C42 32 43 42 52 44" pathLength="1" />
-          <path className="boot-splash__road boot-splash__road--2b" d="M68 32L92 32" pathLength="1" />
-          <path className="boot-splash__road boot-splash__road--2a" d="M52 20C61 22 62 32 68 32" pathLength="1" />
-          <path className="boot-splash__road boot-splash__road--2a" d="M52 44C61 42 62 32 68 32" pathLength="1" />
+          <path className="boot-splash__road boot-splash__road--s1-trunk" d="M12 32L36 32" pathLength="1" />
+          <path className="boot-splash__road boot-splash__road--s1-branch" d="M36 32C42 32 43 22 52 20" pathLength="1" />
+          <path className="boot-splash__road boot-splash__road--s1-branch" d="M36 32C42 32 43 42 52 44" pathLength="1" />
+          <path className="boot-splash__road boot-splash__road--s2-trunk" d="M68 32L92 32" pathLength="1" />
+          <path className="boot-splash__road boot-splash__road--s2-branch" d="M52 20C61 22 62 32 68 32" pathLength="1" />
+          <path className="boot-splash__road boot-splash__road--s2-branch" d="M52 44C61 42 62 32 68 32" pathLength="1" />
+          <path className="boot-splash__road boot-splash__road--s3-trunk" d="M92 32L116 32" pathLength="1" />
+          <path className="boot-splash__road boot-splash__road--s3-branch" d="M116 32C122 32 123 22 132 20" pathLength="1" />
+          <path className="boot-splash__road boot-splash__road--s3-branch" d="M116 32C122 32 123 42 132 44" pathLength="1" />
           <circle className="boot-splash__dot boot-splash__dot--a" cx="12" cy="32" r="3.5" />
           <circle className="boot-splash__dot boot-splash__dot--b" cx="52" cy="20" r="3.5" />
           <circle className="boot-splash__dot boot-splash__dot--b" cx="52" cy="44" r="3.5" />
           <circle className="boot-splash__dot boot-splash__dot--c" cx="92" cy="32" r="3.5" />
+          <circle className="boot-splash__dot boot-splash__dot--d" cx="132" cy="20" r="3.5" />
+          <circle className="boot-splash__dot boot-splash__dot--d" cx="132" cy="44" r="3.5" />
         </g>
       </g>
     </svg>
