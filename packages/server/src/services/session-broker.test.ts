@@ -1684,6 +1684,16 @@ describe("SessionBroker — permissions", () => {
         },
       },
     });
+
+    // The RESOLVED row carries the same map, so the transcript card can show
+    // each answer under its own question instead of splitting the one-line
+    // summary — which no separator can do, since an answer may contain any.
+    const rows = await store.readMessages("c1");
+    const resolved = rows.find((r) => r.kind === "permission" && r.decision === "allow");
+    expect(resolved && "input" in resolved ? resolved.input.answers : undefined).toEqual({
+      "Which language do you prefer?": "TypeScript — additional instructions: strict mode, no any",
+      "Which region should I deploy to?": "US",
+    });
   });
 
   it("carries notes on the single-question shape too", async () => {
