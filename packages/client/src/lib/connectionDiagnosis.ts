@@ -30,8 +30,18 @@ export interface Diagnosis {
   /** What to do about it, when there's something to do. */
   hint?: string;
   checks: Check[];
-  /** An action worth putting a button on, beyond the always-present retry. */
+  /** An action worth putting a button on, when reconnecting isn't the answer. */
   action?: "reload" | "sign-in";
+  /**
+   * Can reopening the socket plausibly fix this?
+   *
+   * False for the faults a retry provably cannot clear — a bundle that disagrees
+   * with the server speaks the same wrong protocol on every new connection, and a
+   * session the server has rejected gets rejected again. Offering "Retry now"
+   * there is a button that is guaranteed to do nothing, next to the one that
+   * works.
+   */
+  retry: boolean;
 }
 
 export interface DiagnosisInput {
@@ -199,7 +209,13 @@ export function diagnose(input: DiagnosisInput): Diagnosis {
     protocolCheck(input),
   ];
 
-  const withChecks = (d: Omit<Diagnosis, "checks">): Diagnosis => ({ ...d, checks });
+  // Retry defaults to true: most of these faults are something outside the tab
+  // that comes back, and reopening the socket is exactly what fixes them.
+  const withChecks = (d: Omit<Diagnosis, "checks" | "retry"> & { retry?: boolean }): Diagnosis => ({
+    ...d,
+    retry: d.retry ?? true,
+    checks,
+  });
 
   // Protocol first, ahead of everything. A stale bundle is the one failure that
   // presents as full health — green dot, live socket, frames quietly dropped —
@@ -210,6 +226,7 @@ export function diagnose(input: DiagnosisInput): Diagnosis {
       detail: `The page was built as ${input.clientVersion} and the server is ${input.serverVersion}. They no longer agree on the protocol, so updates are being dropped.`,
       hint: "Reload to pick up the current build. If it comes straight back, the service worker is holding a cached copy — a hard reload clears it.",
       action: "reload",
+      retry: false,
     });
   }
 
@@ -299,6 +316,7 @@ export function diagnose(input: DiagnosisInput): Diagnosis {
         "The server is fine, but this tab has no valid session — so the live connection is being refused before it opens.",
       hint: "Reload to get the sign-in screen.",
       action: "sign-in",
+      retry: false,
     });
   }
 
@@ -308,6 +326,7 @@ export function diagnose(input: DiagnosisInput): Diagnosis {
       detail: `The server closed the connection: ${describeClose(input.lastClose)}.`,
       hint: "Reload to sign in again.",
       action: "sign-in",
+      retry: false,
     });
   }
 
@@ -318,6 +337,7 @@ export function diagnose(input: DiagnosisInput): Diagnosis {
       detail: `${input.badFrames} frames were rejected${types.length ? ` (${types.join(", ")})` : ""}. They're being dropped, which is why the app can look connected while it has stopped updating.`,
       hint: "Reload to pick up a matching build.",
       action: "reload",
+      retry: false,
     });
   }
 
