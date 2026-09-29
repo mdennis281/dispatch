@@ -1474,6 +1474,17 @@ function pickStr(v: unknown): string | undefined {
   return typeof v === "string" && v.trim() ? v.trim() : undefined;
 }
 
+/** The `answers` map off a resolved AskUserQuestion input, if it carries one. */
+function answersOf(input: Record<string, unknown> | undefined): Record<string, string> | undefined {
+  const raw = input?.answers;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof v === "string") out[k] = v;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
 /** Resolve one answer's chosen value against its question's options. */
 function resolveAnswerValue(
   question: Record<string, unknown> | undefined,
@@ -2660,6 +2671,7 @@ export class SessionBroker {
         pending,
         resolution.decision,
         resolution.message,
+        answersOf(resolution.updatedInput),
       );
       return true;
     }
@@ -2672,6 +2684,14 @@ export class SessionBroker {
     pending: PendingPermission,
     decision: PermissionDecision,
     message?: string,
+    /**
+     * The `answers` map (question text → chosen value) an AskUserQuestion was
+     * resolved with. Merged onto the PERSISTED input so the transcript card can
+     * show each answer under the question it belongs to. `message` is a single
+     * ` · `-joined line built for a one-line summary — the answers themselves
+     * can contain that separator, so it can't be split back apart.
+     */
+    answers?: Record<string, string>,
   ): void {
       void this.emit(session, {
         kind: "permission",
@@ -2681,7 +2701,7 @@ export class SessionBroker {
         sessionId: session.sessionId,
         requestId,
         toolName: pending.toolName,
-        input: pending.input,
+        input: answers ? { ...pending.input, answers } : pending.input,
         decision,
         displayName: pending.request.displayName,
         title: pending.request.title,
@@ -2751,7 +2771,22 @@ export class SessionBroker {
         });
         session.pendingPermissions.delete(requestId);
         pending.harnessSession.resolveQuestion(requestId, answers);
-        this.recordResolvedPermission(session, requestId, pending, "allow", answer.answer);
+        // The harness owns the wire shape, but the transcript row still needs
+        // the per-question answers — keyed exactly as the non-harness path keys
+        // them, by question text, so the card looks them up the same way.
+        const byQuestion: Record<string, string> = {};
+        for (const a of answers) {
+          const q = pending.questions?.find((x) => x.id === a.questionId);
+          if (q?.question) byQuestion[q.question] = withNotes(a.selected.join(", "), a.notes);
+        }
+        this.recordResolvedPermission(
+          session,
+          requestId,
+          pending,
+          "allow",
+          answer.answer,
+          Object.keys(byQuestion).length ? byQuestion : undefined,
+        );
         return true;
       }
       const { updatedInput, message } = buildQuestionAnswer(pending.input, answer);

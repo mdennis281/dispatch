@@ -1,6 +1,11 @@
 import { forwardRef, useEffect, useLayoutEffect, useRef, useState, type TextareaHTMLAttributes } from "react";
 import { MessageCircleQuestion, CornerDownLeft, Check, Undo2 } from "lucide-react";
-import { composeMessageText, type MessagePart, type PermissionRow } from "@dispatch/shared";
+import {
+  composeMessageText,
+  QUESTION_NOTES_SEPARATOR,
+  type MessagePart,
+  type PermissionRow,
+} from "@dispatch/shared";
 import { RowShell } from "./RowShell.js";
 import { Button } from "../../ui/Button.js";
 import { Chip } from "../../ui/Chip.js";
@@ -71,6 +76,46 @@ function parseQuestions(input: Record<string, unknown>): ParsedQuestion[] {
       ? (input.questions as unknown[])
       : [input];
   return list.map((q) => parseOne((q ?? {}) as Record<string, unknown>, input));
+}
+
+interface GivenAnswer {
+  value: string;
+  notes?: string;
+}
+
+/**
+ * What the human actually picked, per question, off a RESOLVED card.
+ *
+ * The server merges the `answers` map it sent the model (question text → chosen
+ * value, notes appended after {@link QUESTION_NOTES_SEPARATOR}) onto the
+ * persisted input, so each answer can be shown under the question it answers.
+ * `row.message` can't serve here: it's the ` · `-joined one-liner, and an answer
+ * is free to contain that separator itself.
+ *
+ * Keyed by question text, matching the server. Rows persisted before the map
+ * existed have none — the caller falls back to the summary line.
+ */
+function parseGiven(input: Record<string, unknown>, questions: ParsedQuestion[]): (GivenAnswer | null)[] {
+  const raw = input.answers;
+  const map =
+    raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+  const keys = Object.keys(map);
+  return questions.map((q, qi) => {
+    // Positional fallback for the ask whose text the two sides derive
+    // differently (the client also reads `text`, the server also reads
+    // `header`) — safe only when the map lines up one-for-one.
+    const key =
+      q.question in map ? q.question : keys.length === questions.length ? keys[qi] : undefined;
+    const text = key === undefined ? undefined : str(map[key]);
+    if (!text) return null;
+    const cut = text.indexOf(QUESTION_NOTES_SEPARATOR);
+    return cut < 0
+      ? { value: text }
+      : {
+          value: text.slice(0, cut),
+          notes: text.slice(cut + QUESTION_NOTES_SEPARATOR.length).trim() || undefined,
+        };
+  });
 }
 
 /**
@@ -432,6 +477,28 @@ export function QuestionCard({ row }: QuestionCardProps) {
       ? `Submit answers (${answeredCount}/${questions.length})`
       : "Send answer";
 
+  /**
+   * A resolved card shows each answer UNDER its question rather than as one
+   * run-on line in the footer — with three questions that line was a paragraph
+   * you had to re-read the card to decode, and the question it belonged to was
+   * three scroll-lengths above it.
+   *
+   * A correction reads off the live selection instead: it never went through the
+   * permission channel, so the persisted map still holds the answer it replaced.
+   */
+  const shownAnswers: (GivenAnswer | null)[] =
+    pending || declined
+      ? questions.map(() => null)
+      : corrected
+        ? questions.map((_, qi) => {
+            const v = valueFor(qi);
+            return v?.answer ? { value: v.answer, notes: v.notes } : null;
+          })
+        : parseGiven(row.input, questions);
+  // Only drop the footer summary once EVERY question is accounted for above;
+  // otherwise it's the sole record of what was answered.
+  const allShown = shownAnswers.every(Boolean);
+
   return (
     <RowShell
       gutter={
@@ -525,6 +592,28 @@ export function QuestionCard({ row }: QuestionCardProps) {
                   </p>
                 )}
               </div>
+
+              {/* The answer, in the shape of the option row that produced it —
+                  same marker, same indent — so a resolved card reads as the
+                  live one with everything but the choice taken away. */}
+              {shownAnswers[qi] && (
+                <div className="border-t border-line-soft bg-inset/60 px-3 py-2.5">
+                  <div className="flex items-start gap-2">
+                    <Marker checked multi={questions[qi]!.multiSelect} />
+                    <div className="min-w-0 flex-1">
+                      <p className="whitespace-pre-wrap break-words text-sm font-medium text-primary">
+                        {shownAnswers[qi]!.value}
+                      </p>
+                      {shownAnswers[qi]!.notes && (
+                        <p className="mt-1 whitespace-pre-wrap break-words text-xs text-muted">
+                          <span className="text-secondary">Also: </span>
+                          {shownAnswers[qi]!.notes}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {pending && (
                 <div className="flex flex-col gap-1.5 border-t border-line-soft bg-inset/60 px-3 py-2.5">
@@ -704,7 +793,11 @@ export function QuestionCard({ row }: QuestionCardProps) {
                 ? "Correction sent — the agent was stopped and told your real answer."
                 : declined
                   ? "You declined this question."
-                  : `You answered: ${row.message}`}
+                  : allShown
+                    ? multi
+                      ? "Your answers were sent to the agent."
+                      : "Your answer was sent to the agent."
+                    : `You answered: ${row.message}`}
             </p>
             {/* Escape hatch for the misclick: stop the work the wrong answer
                 started and ask again. */}
