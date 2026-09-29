@@ -486,15 +486,17 @@ export function QuestionCard({ row }: QuestionCardProps) {
    * A correction reads off the live selection instead: it never went through the
    * permission channel, so the persisted map still holds the answer it replaced.
    */
-  const shownAnswers: (GivenAnswer | null)[] =
-    pending || declined
+  // `corrected` is tested FIRST because `declined` never goes false — it reads
+  // the immutable row decision — so a declined question that was then corrected
+  // has a live answer to show even though it is still, on the record, a deny.
+  const shownAnswers: (GivenAnswer | null)[] = corrected
+    ? questions.map((_, qi) => {
+        const v = valueFor(qi);
+        return v?.answer ? { value: v.answer, notes: v.notes } : null;
+      })
+    : pending || declined
       ? questions.map(() => null)
-      : corrected
-        ? questions.map((_, qi) => {
-            const v = valueFor(qi);
-            return v?.answer ? { value: v.answer, notes: v.notes } : null;
-          })
-        : parseGiven(row.input, questions);
+      : parseGiven(row.input, questions);
   // Only drop the footer summary once EVERY question is accounted for above;
   // otherwise it's the sole record of what was answered.
   const allShown = shownAnswers.every(Boolean);
