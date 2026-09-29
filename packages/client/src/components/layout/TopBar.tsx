@@ -1,5 +1,12 @@
 import { useState } from "react";
-import { Search, Settings, GitPullRequest, Blocks, FileCog, FolderGit2 } from "lucide-react";
+import {
+  Search,
+  Settings,
+  GitPullRequest,
+  Blocks,
+  FileCog,
+  FolderGit2,
+} from "lucide-react";
 import { AttentionPopover } from "../attention/AttentionPopover.js";
 import { UsageMeter } from "./UsageMeter.js";
 import { ResourceMeter } from "./ResourceMeter.js";
@@ -7,7 +14,11 @@ import { BrandLockup } from "./BrandLockup.js";
 import { GaugeSep } from "./Gauge.js";
 import { CommandPalette } from "../command/CommandPalette.js";
 import { IconButton } from "../ui/IconButton.js";
-import { openOverlay, openAppSettings, openProjectSettings } from "../../stores/view.js";
+import {
+  openOverlay,
+  openAppSettings,
+  openProjectSettings,
+} from "../../stores/view.js";
 import { openWorkspace } from "../../stores/workspace.js";
 import { useLayout } from "../../stores/layout.js";
 import { useWindowControlsOverlay } from "../../lib/windowControls.js";
@@ -116,7 +127,11 @@ function TitleBar({ compact, onSearch }: BarProps) {
       <div className="cm-topbar-slab flex shrink-0 flex-col pr-3">
         <div aria-hidden className="h-(--tb-l1)" />
         <div className="flex flex-1 items-center justify-end">
-          <Actions compact={compact} onSearch={onSearch} attention={false} />
+          <Actions
+            compact={compact}
+            onSearch={onSearch}
+            attention={compact ? "icon" : false}
+          />
         </div>
       </div>
     </header>
@@ -150,7 +165,11 @@ function SlimBar({ compact, onSearch }: BarProps) {
           </div>
         )}
         <UsageMeter layout="inline" />
-        <Actions compact={compact} onSearch={onSearch} attention={!compact} />
+        <Actions
+          compact={compact}
+          onSearch={onSearch}
+          attention={compact ? "icon" : "pill"}
+        />
       </div>
     </header>
   );
@@ -166,18 +185,27 @@ function SlimBar({ compact, onSearch }: BarProps) {
  * tooltip.
  *
  * The attention queue leads the icons in a single row; in the title bar it has a
- * line of its own under usage instead. On a phone it and the destinations move
- * into the bottom nav's More sheet (layout/BottomNav): seven occasional destinations fit a sheet
- * better than a row of unlabelled 24px icons.
+ * line of its own under usage instead. On a phone it leads them too, as the
+ * GLYPH with its count pinned on — the labelled pill would eat a third of a
+ * 390px row, but the right half of that row was empty beside the search icon,
+ * and "is anything waiting on me" is worth more there than the sheet trip it
+ * used to cost. The destinations still move into the bottom nav's More sheet
+ * (layout/BottomNav): seven occasional destinations fit a sheet better than a
+ * row of unlabelled 24px icons. The queue does not, because it is not a
+ * destination — it is a number you want without opening anything.
  */
-function Actions({ compact, onSearch, attention }: BarProps & { attention: boolean }) {
+function Actions({
+  compact,
+  onSearch,
+  attention,
+}: BarProps & { attention: false | "pill" | "icon" }) {
   return (
     <div className="flex shrink-0 items-center gap-1">
-      {attention && <AttentionPopover />}
+      {attention && <AttentionPopover variant={attention} />}
       <IconButton
         tip="Search or run a command (⌘K)"
         onClick={onSearch}
-        className={attention ? "ml-1.5" : undefined}
+        className={attention === "pill" ? "ml-1.5" : undefined}
       >
         <Search />
       </IconButton>
@@ -187,10 +215,16 @@ function Actions({ compact, onSearch, attention }: BarProps & { attention: boole
               stores/view). They keep their slot here because from the bar
               they're the same gesture: what you were doing stays put, and you
               come back to it. */}
-          <IconButton tip="Workspace — worktrees, terminals, PRs" onClick={() => openOverlay("workspace")}>
+          <IconButton
+            tip="Workspace — worktrees, terminals, PRs"
+            onClick={() => openOverlay("workspace")}
+          >
             <FolderGit2 />
           </IconButton>
-          <IconButton tip="Project config" onClick={() => openProjectSettings()}>
+          <IconButton
+            tip="Project config"
+            onClick={() => openProjectSettings()}
+          >
             <FileCog />
           </IconButton>
           <IconButton tip="MCP tools" onClick={() => openOverlay("mcp")}>
