@@ -1092,10 +1092,25 @@
        * is by then full size. What you should see is the logo compacting, not
        * the logo dissolving.
        *
-       * ACCELERATING (`0.55, 0, 0.85, 0.35`), so it rushes the last of the way
-       * in. And the ball no longer springs: an overshoot is a POP, which is the
-       * one thing a mark condensing into a dot must not do. It swells on an
-       * ease-out and the two land together.
+       * DECELERATING (`0.32, 0.58, 0.38, 1`), and that is the whole difference
+       * between this reading as a shrink and not reading at all. It used to
+       * ACCELERATE, which sounds right — a thing collapsing under its own weight
+       * — and is wrong here, because an ease-in spends its first half barely
+       * moving: at the midpoint the mark was still at 0.84 of full size. So the
+       * ball came up beside a logo that had not visibly changed, and the logo
+       * then vanished in the last few frames. Two things swapping again, by a
+       * different route.
+       *
+       * Ease-OUT puts the size change where it can be seen. The mark is at 0.65
+       * a quarter of the way in and 0.42 at the midpoint, so by the time the
+       * ball appears at 250ms the shrink is most of the way done and the ball is
+       * landing on something already small.
+       *
+       * Which is also why the ball is LATE and the opacity holds to 78%: the
+       * mark is at 0.35 by then, a hair above the ball's own size, so what fades
+       * out is a mark that has already arrived rather than one still travelling.
+       * And the ball does not spring — an overshoot is a POP, which is the one
+       * thing a mark condensing into a dot must not do.
        *
        * The loop keeps running underneath. Stopping it would freeze the pan
        * mid-slide on a slow boot, which is a worse-looking frame than any the
@@ -1106,11 +1121,11 @@
         transform-origin: center;
       }
       #boot-splash[data-done] .boot-splash__collapse {
-        animation: boot-splash-mold 420ms cubic-bezier(0.55, 0, 0.85, 0.35) forwards;
+        animation: boot-splash-mold 480ms cubic-bezier(0.32, 0.58, 0.38, 1) forwards;
       }
       @keyframes boot-splash-mold {
         0% { transform: scale(1); opacity: 1; }
-        70% { opacity: 1; }
+        78% { opacity: 1; }
         100% { transform: scale(0.3); opacity: 0; }
       }
 
@@ -1143,8 +1158,8 @@
        */
       #boot-splash[data-done] .boot-splash__iris-ring {
         animation:
-          boot-splash-ball 230ms cubic-bezier(0.2, 0.7, 0.4, 1) 190ms both,
-          boot-splash-open 580ms cubic-bezier(0.5, 0, 0.35, 1) 420ms forwards;
+          boot-splash-ball 230ms cubic-bezier(0.2, 0.7, 0.4, 1) 250ms both,
+          boot-splash-open 580ms cubic-bezier(0.5, 0, 0.35, 1) 480ms forwards;
       }
       @keyframes boot-splash-ball {
         from { r: 0; fill-opacity: 1; stroke-opacity: 0; }
@@ -1163,7 +1178,7 @@
         100% { r: 71vmax; stroke-width: 6; fill-opacity: 0; stroke-opacity: 0; }
       }
       #boot-splash[data-done] .boot-splash__iris-hole {
-        animation: boot-splash-hole 580ms cubic-bezier(0.5, 0, 0.35, 1) 420ms forwards;
+        animation: boot-splash-hole 580ms cubic-bezier(0.5, 0, 0.35, 1) 480ms forwards;
       }
       @keyframes boot-splash-hole {
         from { r: 13px; }
@@ -1176,7 +1191,7 @@
          to land WITH the ring rather than before it: on a 16:10 window the ring
          crosses the corner at about 870ms, and this is 700→1000. */
       #boot-splash[data-done] .boot-splash__iris-plate {
-        animation: boot-splash-corners 300ms linear 700ms forwards;
+        animation: boot-splash-corners 300ms linear 760ms forwards;
       }
       @keyframes boot-splash-corners { to { fill-opacity: 0; } }
 
@@ -1383,7 +1398,9 @@
           // pan ramp too, but theirs is baked into their stops — see the note on
           // `.boot-splash__road` — so they interpolate straight.
           var EASE = bezier(0.42, 0, 0.58, 1);
-          var LEAVE = bezier(0.55, 0, 0.85, 0.35);
+          // The mold's curve. Decelerating, so the shrink is visible early —
+          // see the exit note in the <style>.
+          var LEAVE = bezier(0.32, 0.58, 0.38, 1);
 
           /* A stop is [atPercent, [values...], easingForTheSegmentThatSTARTSHere].
              That is how CSS reads `animation-timing-function` inside a keyframe:
@@ -1428,7 +1445,7 @@
              while opacity breaks in the middle. Fold them into one track and the
              mark starts fading noticeably earlier than it does today. */
           var MOLD_SCALE = [[0, [1], LEAVE], [100, [0.3]]];
-          var MOLD_ALPHA = [[0, [1], LEAVE], [70, [1], LEAVE], [100, [0]]];
+          var MOLD_ALPHA = [[0, [1], LEAVE], [78, [1], LEAVE], [100, [0]]];
 
           var tmp = [0, 0];
           var tmp2 = [0, 0];
@@ -1658,7 +1675,7 @@
             docTime: document.timeline ? document.timeline.currentTime : performance.now(),
             cfg: {
               period: 2400,
-              moldMs: 420,
+              moldMs: 480,
               strokeWidth: parseFloat(css.getPropertyValue("--bsw")) || 4.5,
               amber: rootCss.getPropertyValue("--boot-amber").trim() || "#e5a33c",
               dashSign: 1,

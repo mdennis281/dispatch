@@ -148,9 +148,9 @@ export const BOOT_SPLASH_MIN_MS = 3_660;
  * still filling in — which is what this change is fixing.
  */
 export const BOOT_SPLASH_MAX_MS = 9_000;
-/** Must outlast the exit in index.html: the 420ms mold, the aperture open that
- *  follows it, and the corners of the plate gone by 1000ms. */
-export const BOOT_SPLASH_EXIT_MS = 1_080;
+/** Must outlast the exit in index.html: the 480ms mold, the aperture open that
+ *  follows it, and the corners of the plate gone by 1060ms. */
+export const BOOT_SPLASH_EXIT_MS = 1_140;
 
 export interface BootState {
   /** `/api/auth/status` has answered, or been guessed at. */
