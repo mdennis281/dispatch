@@ -408,12 +408,22 @@ const BOOT_END = "<!-- boot-splash:generated:end -->";
  * mark's own width, so a segment drawn onto the strip is the mark at exactly the
  * size the mark is.
  *
- * TWO segments and THREE anchors is all that is authored, because the chain
- * repeats with period two: a segment is drawn out of one anchor and later
- * retracted into the next, so the last frame of the cycle is a lone dot with
- * nothing attached — which is exactly the first frame. index.html wraps the loop
- * there, resetting two strides of accumulated pan under a dot that does not
- * move. A third segment would buy nothing and cost a frame with two on screen.
+ * THREE segments and FOUR anchors, and the count follows from the one rule the
+ * loop is built on: a segment is retracted AT THE SAME TIME as the next one is
+ * drawn, so the mark keeps its width instead of growing out of a dot and
+ * shrinking back into one.
+ *
+ * That means two segments are partly on screen at every instant — the one being
+ * eaten from behind and the one being laid down in front — joined at the anchor
+ * they share, so what you watch is one shape of constant span travelling right.
+ * The live ink is always one stride wide; over a full cycle it travels two.
+ *
+ * So the cycle needs geometry from the first anchor to two strides past it, and
+ * it has to WRAP on a fork rather than a merge, because a merge is the mark
+ * mirrored and would hand back a different shape. Three segments — fork, merge,
+ * fork — is the shortest chain that ends the way it began. index.html wraps
+ * there, resetting two strides of accumulated pan under a picture that does not
+ * change: segment three at the far end IS segment one at the near end.
  */
 const BOOT_STRIDE = 40;
 
@@ -437,34 +447,31 @@ function mirrorBranch(branch) {
 }
 
 /**
- * A segment is drawn in TWO PHASES, and this is which phase a stroke is in.
+ * Every stroke is either a trunk or a branch, and index.html times the two
+ * separately. This only has to say which it is; the schedule over there says
+ * when.
  *
- * `a` is everything between the anchor the segment starts at and the junction;
- * `b` is everything between the junction and the anchor it ends at. A fork is
- * therefore trunk-then-branches and a merge is branches-then-trunk — both of
- * them "in to the intersection, then out the other side", which is the only
- * order that looks like one pen drawing one shape.
+ * WHY THEY ARE TIMED SEPARATELY, and by x rather than by arc length. The shape's
+ * width is the gap between the retracting segment's front and the drawing
+ * segment's front, so the width only holds still if those two fronts advance in
+ * X at the same rate. They are on opposite parts of their segments at any given
+ * moment — one segment is losing its trunk while the other is growing its
+ * branches — so a single schedule shared by both would have one front on 24
+ * units of straight trunk while the other crawls along 16 units of branch, and
+ * the mark would breathe in and out by about a ninth of its width.
  *
- * It was all three at once, staggered by a few tens of ms. That is wrong twice
- * over, and both are visible: a branch started before the trunk it grows out of
- * had arrived, and — because `pathLength="1"` normalises every stroke to the
- * same DURATION — the 20.6-unit branches drew slower than the 24-unit trunk. So
- * the mark assembled at three speeds with its pieces overlapping.
+ * Giving each part the share of the time its X-EXTENT earns (24 units of trunk
+ * against 16 of branch, so 60/40) takes that out. What is left is the curve
+ * itself: x does not advance quite linearly along a bezier, so the width still
+ * wobbles by about a unit in forty. That one is inherent and small.
  *
- * The phases in index.html are sized against that, but NOT by plain arc length:
- * see the note over the road keyframes for why the branch phase is given more
- * time than its length alone would earn it.
- *
- * Nothing is staggered WITHIN a phase, and that is deliberate too — the two
- * branches of a fork are one event. They split together or the mark grows a
- * limp.
+ * Note the two run in opposite orders. A fork is trunk-then-branches and a merge
+ * is branches-then-trunk — both of them "in to the intersection, then out the
+ * other side", which is the only order that looks like one pen drawing one
+ * shape. Nothing is staggered WITHIN a part: the two branches of a fork are one
+ * event, and they split together or the mark grows a limp.
  */
-const BOOT_ROAD_PHASE = {
-  // The fork runs anchor → junction → tips, so its trunk is the first half.
-  1: (id) => (id === "trunk" ? "a" : "b"),
-  // The merge is the mirror: the branches arrive at the junction, the trunk leaves it.
-  2: (id) => (id === "trunk" ? "b" : "a"),
-};
+const BOOT_ROAD_PART = (branch) => (branch.id === "trunk" ? "trunk" : "branch");
 
 /**
  * The looping mark itself — the `<svg>`, and nothing around it.
@@ -482,34 +489,43 @@ const BOOT_ROAD_PHASE = {
  * need a React component because they live inside it. Same strip, same classes,
  * same stylesheet — the only difference is `class` versus `className`.
  */
+/** The same branch, two strides further along the chain. */
+function shiftBranch(branch, dx) {
+  return { ...branch, points: branch.points.map(([x, y]) => [x + dx, y]) };
+}
+
 function bootMarkLines({ indent, attr }) {
   const pad = " ".repeat(indent);
   const road = (branch, segment) =>
-    `${pad}    <path ${attr}="boot-splash__road boot-splash__road--${segment}${BOOT_ROAD_PHASE[segment](branch.id)}"` +
+    `${pad}    <path ${attr}="boot-splash__road boot-splash__road--s${segment}-${BOOT_ROAD_PART(branch)}"` +
     ` d="${dispatchBranchPath(branch)}" pathLength="1" />`;
   const dot = (cx, cy, r, anchor) =>
     `${pad}    <circle ${attr}="boot-splash__dot boot-splash__dot--${anchor}" cx="${cx}" cy="${cy}" r="${r}" />`;
 
   const root = DISPATCH_MARK_NODES.find((n) => n.id === "root");
   const tips = DISPATCH_MARK_NODES.filter((n) => n.id !== "root");
-  // Anchors, in chain order: a lone dot, a pair, a lone dot. Each is one stride
-  // on from the last, and the lone ones are the root mirrored into place.
+  // Anchors, in chain order: lone, pair, lone, pair. Each is one stride on from
+  // the last; the lone ones are the root mirrored into place and the pairs are
+  // the tips. The seam hands C back to A and D back to B, which is why the
+  // chain has to end on the same KIND of anchor it started on.
   const anchors = [
     [root].map((n) => [n.cx, n.cy, "a"]),
     tips.map((n) => [n.cx, n.cy, "b"]),
     [root].map((n) => [mirrorX(n.cx) + BOOT_STRIDE, n.cy, "c"]),
+    tips.map((n) => [n.cx + 2 * BOOT_STRIDE, n.cy, "d"]),
   ].flat();
 
   return [
     `${pad}<g ${attr}="boot-splash__collapse">`,
     `${pad}  <g ${attr}="boot-splash__pan">`,
-    // Segment one: the mark as authored — a fork, drawn left to right.
+    // Segment one: the mark as authored — a fork, A to B.
     ...DISPATCH_MARK_BRANCHES.map((b) => road(b, 1)),
-    // Segment two: the same thing mirrored — a merge — one stride further on.
+    // Segment two: the same thing mirrored — a merge — one stride on, B to C.
     ...DISPATCH_MARK_BRANCHES.map((b) => road(mirrorBranch(b), 2)),
-    // A: the lone dot the cycle opens on and the pen starts from. B: the two
-    // tips, segment one's end and segment two's start. C: the lone dot segment
-    // two arrives at, and the one the loop hands back to A at the seam.
+    // Segment three: segment one again, two strides on, C to D. It is what the
+    // seam hands back to segment one, so it must be the same shape and not the
+    // mirror — see the note over BOOT_STRIDE.
+    ...DISPATCH_MARK_BRANCHES.map((b) => road(shiftBranch(b, 2 * BOOT_STRIDE), 3)),
     ...anchors.map(([cx, cy, id]) => dot(cx, cy, root.radius, id)),
     `${pad}  </g>`,
     `${pad}</g>`,

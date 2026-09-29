@@ -136,11 +136,17 @@
         // receive it have to be dyed before it gets there.
         var segment1 = palette[0];
         var segment2 = next();
+        var segment3 = next();
         set("--c-s1", segment1);
         set("--c-s2", segment2);
+        set("--c-s3", segment3);
+        // A is the dot the opening fork grows OUT of, so it wears the colour of
+        // the segment before this one — which does not exist yet on the first
+        // cycle, so it opens on the brand yellow with everything else.
         set("--c-a", segment1);
         set("--c-b", segment1);
         set("--c-c", segment2);
+        set("--c-d", segment3);
         /*
          * The colour the EXIT's ball wears — "whatever it last was".
          *
@@ -181,84 +187,99 @@
          * Re-dyeing, and WHEN it is safe.
          *
          * A variable can only change while nothing wearing it is on screen, or
-         * the recolour happens in front of you. Against the 2100ms schedule in
-         * the stylesheet, the dark windows are: segment one 1050-2100, segment
-         * two 2100-3150, dot A 777-2100, dot B 1827-2457, dot C 0-1533.
+         * the recolour happens in front of you. Against the 2400ms schedule in
+         * the stylesheet, the dark windows are: segment one 1200-2400, segment
+         * two 0-552, segment three 0-1752, dot A 672-2400, dot B 1872-2400,
+         * dot C 0-1080, dot D 0-2280.
          *
-         * DOT B'S WINDOW CLOSES AT 2457, AND THAT NUMBER USED TO READ 2532 —
-         * which is where this went wrong for a while. 2532 is 20.57%, when the
-         * branches LAND on dot B. But the dot does not wait to be landed on: it
-         * springs open from 17%, which is 2457. So the tick that dyed it sat at
-         * 2400, a claimed 132ms clear of the edge and really 57ms, and the
-         * measured lateness of a timer during boot is 131-362ms. It missed every
-         * cycle, and you saw the previous colour for the frames it took to
-         * arrive — on the two dots, always, right as they were drawn.
+         * SEGMENT TWO IS THE TIGHT ONE, AND IT SETS THE PERIOD. Because the
+         * exchange eats one segment while laying down the next, two are lit at
+         * every instant and segment two is lit from 23% all the way to the seam.
+         * Its only dark stretch is the first hold — so the hold has to be long
+         * enough to re-dye it in, and that is why `--boot-beat` is 2400ms rather
+         * than 2100. Shorten the hold and this is what breaks first.
          *
-         * So dot B gets its own tick, as early in its dark window as the fade
-         * allows rather than as late as it fits: 1950 is 123ms after the dot is
-         * fully out and 507ms before it starts coming back. Every other variable
-         * already had 750ms or more, which is why only these two ever flickered.
-         *
-         * ALL THREE NUMBERS BELONG TO `--boot-beat`, which is the period they
-         * are read against and which lives in the stylesheet, where a script
-         * running before it cannot see it. This is the one genuine duplicate in
-         * the splash and it cannot be removed — so retune `--boot-beat` and
-         * these move with it, or the ticks drift out of the dark windows above
-         * and into the lit ones, and a road changes colour while you are looking
-         * at it. The declaration over there says the same thing in the other
-         * direction.
+         * THE EDGE OF A WINDOW IS WHERE THE FADE STARTS, not where the pen
+         * arrives, and getting that wrong is exactly how this broke once before:
+         * dot B's window was written down as closing when the branches LAND on
+         * it when the dot in fact springs open five percent earlier, which left
+         * its tick 57ms of room against a boot-time timer that is routinely
+         * 131-362ms late. Every tick here is placed at the START of its window
+         * rather than the last moment it fits, and bootMarkColourTicks.test.ts
+         * computes these windows from the keyframes rather than trusting this
+         * comment to have done the arithmetic.
          *
          * DOT A IS THE PREVIOUS CYCLE'S SEGMENT-TWO COLOUR, and that is the one
          * assignment that is not free. At the seam the loop swaps dot C for dot
          * A on the same pixel; give them different colours and the seam that the
          * whole strip is built around becomes a visible flash of the wrong hue.
          */
-        var PERIOD = 2100;
+        var PERIOD = 2400;
         var TICKS = [
-          // Segment one is fully drawn at 20.57% of the cycle. Nothing is being
-          // recoloured here — the ball is not on screen — so this one is placed
-          // on the truth rather than on a dark window.
+          // The opening fork is complete from the first frame, so `--c-ball`
+          // starts as its road's colour. It is read once, at dismissal, and has
+          // no window to respect — only the truth to tell.
           {
-            at: 432,
+            at: 60,
             fn: function () {
               set("--c-ball", segment1);
             },
           },
+          // Segment two, dyed inside the first hold — the ONE stretch of the
+          // cycle where it is off screen, which is why that hold is as long as
+          // it is. C goes with it: C is the dot segment two lands on, so it
+          // wears the same colour, and its own window is far wider.
           {
-            at: 1200,
-            fn: function () {
-              set("--c-a", segment2);
-              segment1 = next();
-              set("--c-s1", segment1);
-            },
-          },
-          // Segment two is fully drawn at 70.57%.
-          {
-            at: 1482,
-            fn: function () {
-              set("--c-ball", segment2);
-            },
-          },
-          // Dot B, dyed the moment it is safely out of sight rather than at the
-          // last moment it fits. `segment1` is already the NEXT cycle's colour
-          // here, assigned by the 1200 tick above — which is also why this
-          // cannot simply ride along with that one: at 1200 dot B is still lit.
-          {
-            at: 1950,
-            fn: function () {
-              set("--c-b", segment1);
-            },
-          },
-          // 2400 rather than 300: a cycle in, on the FIRST start. The values for
-          // cycle zero were set above, and calling next() any earlier would burn
-          // segment two's colour before it had been drawn once. On a later start
-          // there is no cycle zero to protect and it phase-aligns like the rest.
-          {
-            at: 2400,
+            at: 40,
             fn: function () {
               segment2 = next();
               set("--c-s2", segment2);
               set("--c-c", segment2);
+            },
+          },
+          // Segment three does not start drawing until 73%, so it has most of
+          // the cycle to be dyed in. D is the dot it lands on.
+          {
+            at: 600,
+            fn: function () {
+              segment3 = next();
+              set("--c-s3", segment3);
+              set("--c-d", segment3);
+            },
+          },
+          // The merge is complete at 50%, so from here the newest road on
+          // screen is segment two's.
+          {
+            at: 1240,
+            fn: function () {
+              set("--c-ball", segment2);
+            },
+          },
+          /*
+           * THE SEAM, PREPARED HALF A CYCLE EARLY.
+           *
+           * At 100% segment three is complete with C and D lit, and at 0% that
+           * same picture is segment one with A and B lit. So the next cycle's
+           * segment one has to BE this cycle's segment three, and the next
+           * cycle's A has to be this cycle's C — which is segment two's colour.
+           * Both are set here, at 60%, because segment one has been off screen
+           * since 50% and A since 28%.
+           */
+          {
+            at: 1440,
+            fn: function () {
+              segment1 = segment3;
+              set("--c-s1", segment1);
+              set("--c-a", segment2);
+            },
+          },
+          // B is the last to go dark (78%), so it is dyed last. It becomes the
+          // dot the next cycle's segment one has landed on, which is segment
+          // three's colour — the same one segment one just took.
+          {
+            at: 1880,
+            fn: function () {
+              set("--c-b", segment3);
             },
           },
         ];
@@ -450,58 +471,60 @@
 
       ── THE CYCLE, AS PERCENTAGES OF ONE PERIOD ─────────────────────────────
 
-        0%         A alone on the centre line. The pen is on it
-        0 → 9.30%   the trunk draws from A to the junction. The frame slides with
-                   it, keeping the half-drawn shape centred the whole way
-        9.30 → 20.57%  both branches draw on from the junction to the tips,
-                   frame still tracking; B lands as they arrive
-        20.57 → 32%  HELD. This is the mark: one dot, two dots, dead centre.
-        32 → 40.14%  the trunk retracts into the junction and A goes with its
-                   tail; the frame tracks the shrinking shape
-        40.14 → 50%  the branches retract into the tips. The frame arrives with
-                   them: B alone, on the centre line, pen on it
-        50 → 100%  the same again, mirrored — branches out to the junction, trunk
-                   on to C, held, then retracted the same way, landing on C alone
-                   on the centre line, which is where A was at 0%
+      A SEGMENT IS EATEN FROM BEHIND WHILE THE NEXT IS LAID DOWN IN FRONT, and
+      that one rule is what the whole schedule serves. The old way grew the mark
+      out of a dot and shrank it back into one, so its width pulsed from nothing
+      to full and back twice a cycle. Now two segments are partly on screen at
+      every instant, joined at the anchor they share, and what travels right is
+      one shape of constant span.
 
-      THE FRAME IS ALWAYS CENTRED ON THE INK, and that one rule replaces every
-      schedule this went through to get here. The camera is not a sequence of
-      moves between poses; it is a function of what is drawn. At any instant the
-      visible shape runs from the leftmost live end to the rightmost, and the pan
-      is whatever puts the middle of that on the centre line — so the mark grows
-      out of the centre, sits in the centre, and shrinks back into the centre.
+        0 → 23%     HELD. A fork: the lone dot A, the two dots B, the roads
+                    between them. This is the mark, and it is on screen from the
+                    very first frame rather than assembling itself
+        23 → 50%    THE EXCHANGE. Segment one retracts into B while segment two
+                    draws out of B toward C. The left end walks 12 → 52 and the
+                    right end walks 52 → 92, so the span stays 40 the whole way
+        50 → 73%    HELD. A merge — the mark mirrored — spanning B to C
+        73 → 100%   the same exchange again: segment two retracts into C while
+                    segment three draws out of C toward D
+        100%        a fork spanning C to D, which IS the fork at 0% two strides
+                    along, so the loop wraps there
 
-      Which makes it continuous for free, and continuity is the thing this was
-      missing. Earlier versions moved the frame BETWEEN segments, in one lurch or
-      two, and no amount of easing hides a camera that waits for a gap: the shape
-      drifts off centre as it draws, snaps back, drifts again. Tracking the pen
-      means the frame is already where it needs to be at every frame, and the
-      only times it is still are the holds — when the pen is still too, so they
-      stop together and that reads as arrival rather than as a stop.
+      THE SPAN IS THE THING, AND IT IS WHY THE PARTS ARE TIMED BY X. The width is
+      the gap between the two live fronts, so it only holds still if they advance
+      in x together. At any instant they are on opposite parts of their segments
+      — one losing its trunk while the other grows its branches — so a single
+      shared schedule would put one front on 24 units of straight trunk while the
+      other crawls 16 units of branch, and the mark would breathe by about a
+      ninth of its width. Each part instead gets the share of the exchange its
+      x-extent earns: 60% for a trunk, 40% for the branches. What is left is the
+      curve itself — x does not advance quite linearly along a bezier — and that
+      is worth about a unit in forty. See BOOT_ROAD_PART in generate-brand.mjs.
 
-      The pan keyframes are the pen's x at each phase boundary, turned into
-      `32 − midpoint`: +20 with the pen on A at x=12, +8 at the junction, 0 at
-      the tips, and so on down to −60. They are LINEAR between, because the pen
-      is, and because the two have to be the same function or the tracking is
-      only true at the corners. Every one of those numbers is derived — change
-      the geometry or a phase split and they all move.
+      WHICH MAKES THE PAN FIVE STOPS AND A STRAIGHT LINE. The camera is still a
+      function of the ink: at every instant it is `32 − midpoint(live span)`. But
+      a span of constant width whose ends advance together has a midpoint that
+      advances at exactly the same rate, so the pan is linear through each
+      exchange and still through each hold. It was eleven stops and a piecewise
+      approximation when the shape was growing and shrinking; it is now 0, 0,
+      −40, −40, −80. It never reverses.
 
-      IT NEVER REVERSES. 20, 8, 0, 0, −12, −20, −28, −40, −40, −48, −60: the graph
-      is going one way, and a frame that slid back to recentre would say it was
-      not.
+      THE HOLDS ARE 23% EACH AND THAT SIZE IS NOT FREE. They are what makes the
+      mark legible — the two poses you actually read — but they are also the only
+      moment any segment is off screen, and a colour cannot be changed while
+      something is wearing it. Segment two is the binding case: it is lit from
+      23% right through to the seam, so its one dark window IS the first hold.
+      That is why the period is 2400ms rather than 2100 — see the colour script
+      in <head>, and bootMarkColourTicks.test.ts, which fails if a tick ends up
+      with less room than a boot-time timer will eat.
 
-      THE DOTS ARE THE PEN'S ENDS. One lands as the stroke reaches it and one
-      leaves with the tail that passes it — nothing appears or disappears on its
-      own schedule, which is what made an earlier pass read as two motions, a
-      dot going and then a dot coming.
-
-      THE SEAM IS AT THE LAST LINE and it is the reason two segments is enough.
-      At 100% the only thing on screen is C, dead centre, at the size and colour
-      A's dot has at 0%. So the loop restarts on an identical
-      frame: C goes dark and A lights up on the same pixel in the same tick, and
-      the 80 units of accumulated slide reset under cover of that. Change any
-      number in the last three rows and check this still holds, or the splash
-      develops a visible hitch once a cycle.
+      THE SEAM IS AT THE LAST LINE, as before, but it now swaps a whole mark
+      rather than a lone dot: at 100% segment three is complete with C and D lit,
+      and at 0% segment one is complete with A and B lit. Same shape, same
+      colours, 80 units of pan apart — so the two frames are identical and the
+      accumulated slide resets underneath them. A merge would not do: the chain
+      has to end on the same kind of pose it began on, which is why there are
+      three segments and not two.
 
       ── THE EXIT: MOLD, THEN OPEN ───────────────────────────────────────────
 
@@ -581,20 +604,21 @@
         --boot-bg: #0b0d10;
         --boot-amber: #e5a33c;
         /* One period of the loop — two beats, one for each pose. Everything
-           below is a percentage of this, so it is the only speed control. It was
-           1800ms, which put 44.6 units of road down in 288ms and was too quick
-           to follow the pen.
+           below is a percentage of this, so it is the only speed control. It
+           was 1800ms, then 2100ms, and it is 2400ms now because the exchange
+           needs a hold long enough to re-dye segment two in — see the note on
+           the holds in the docblock above.
 
            TWO THINGS OUTSIDE THIS STYLESHEET ARE DERIVED FROM IT and neither can
            read it, so both have to be moved by hand if this changes:
 
              - `BOOT_SPLASH_MIN_MS` in src/lib/bootSplash.ts, which is aimed at a
-               held pose so the exit does not interrupt a draw;
+               held pose so the exit does not interrupt an exchange;
              - `PERIOD` and the tick offsets in the colour script in <head>,
                which recolours the roads and dots during the windows in which
                they are NOT on screen. Retune this and leave those, and a tick
                lands mid-draw and recolours a road in front of you. */
-        --boot-beat: 2100ms;
+        --boot-beat: 2400ms;
       }
       html[data-theme="dim"] { --boot-bg: #25292e; --boot-amber: #f0b45b; }
       html[data-theme="light"] { --boot-bg: #e9edf2; --boot-amber: #9a5b00; }
@@ -688,17 +712,41 @@
         animation: boot-splash-pan var(--boot-beat) linear infinite;
       }
       @keyframes boot-splash-pan {
-        0% { transform: translateX(20px); }
-        9.3% { transform: translateX(8px); }
-        20.57%,
-        32% { transform: translateX(0); }
-        40.14% { transform: translateX(-12px); }
-        50% { transform: translateX(-20px); }
-        61.27% { transform: translateX(-28px); }
-        70.57%,
-        82% { transform: translateX(-40px); }
-        91.86% { transform: translateX(-48px); }
-        100% { transform: translateX(-60px); }
+        0% { transform: translateX(0px); }
+        23% { transform: translateX(0px); }
+        24.69% { transform: translateX(-0.3px); }
+        26.38% { transform: translateX(-1.24px); }
+        28.06% { transform: translateX(-2.86px); }
+        29.75% { transform: translateX(-5.17px); }
+        31.44% { transform: translateX(-8.14px); }
+        33.13% { transform: translateX(-11.71px); }
+        34.81% { transform: translateX(-15.73px); }
+        36.5% { transform: translateX(-20px); }
+        38.19% { transform: translateX(-24.27px); }
+        39.88% { transform: translateX(-28.29px); }
+        41.56% { transform: translateX(-31.86px); }
+        43.25% { transform: translateX(-34.83px); }
+        44.94% { transform: translateX(-37.14px); }
+        46.63% { transform: translateX(-38.76px); }
+        48.31% { transform: translateX(-39.7px); }
+        50% { transform: translateX(-40px); }
+        73% { transform: translateX(-40px); }
+        74.69% { transform: translateX(-40.3px); }
+        76.38% { transform: translateX(-41.24px); }
+        78.06% { transform: translateX(-42.86px); }
+        79.75% { transform: translateX(-45.17px); }
+        81.44% { transform: translateX(-48.14px); }
+        83.13% { transform: translateX(-51.71px); }
+        84.81% { transform: translateX(-55.73px); }
+        86.5% { transform: translateX(-60px); }
+        88.19% { transform: translateX(-64.27px); }
+        89.88% { transform: translateX(-68.29px); }
+        91.56% { transform: translateX(-71.86px); }
+        93.25% { transform: translateX(-74.83px); }
+        94.94% { transform: translateX(-77.14px); }
+        96.63% { transform: translateX(-78.76px); }
+        98.31% { transform: translateX(-79.7px); }
+        100% { transform: translateX(-80px); }
       }
 
       /*
@@ -740,78 +788,173 @@
         stroke-dashoffset: 1.06;
         animation-duration: var(--boot-beat);
         animation-iteration-count: infinite;
+        /* LINEAR BETWEEN STOPS, AND THE STOPS CARRY THE CURVE.
+
+           The exchange ramps up and down rather than starting and stopping flat,
+           but that ease CANNOT be a timing function on these keyframes. The two
+           live fronts have to advance in x together or the span breathes, and
+           they are on opposite parts of their segments — one losing its trunk
+           over the first 60% of the exchange while the other grows its branches
+           over the first 40%. A per-interval ease restarts at each of those
+           boundaries, which are in different places, so the two fronts come
+           apart by about three units either side of the crossover.
+
+           So the ease is applied to the exchange AS A WHOLE and sampled into
+           eight stops, which every road and the pan share. They therefore all
+           ramp together, and what CSS does between the stops must be a straight
+           line or the curve gets applied twice.
+
+           Declared rather than assumed: the initial value is `ease`, not
+           `linear`. Rewriting these keyframes once dropped it and the span swung
+           31 to 53 units against a nominal 40. The worker's `sample()` is linear
+           by default, so this is also what keeps the two renderers agreeing.
+
+           THE STOPS ARE GENERATED. `scripts/boot-splash-ramp.mjs` writes both
+           these keyframes and the worker's tables from one description of the
+           ease; do not edit them by hand, and re-run it after changing the ease,
+           the hold, or the trunk/branch split. */
+        animation-timing-function: linear;
       }
-      .boot-splash__road--1a,
-      .boot-splash__road--1b { stroke: var(--c-s1, var(--boot-amber)); }
-      .boot-splash__road--2a,
-      .boot-splash__road--2b { stroke: var(--c-s2, var(--boot-amber)); }
-      .boot-splash__road--1a { animation-name: boot-splash-road-1a; }
-      .boot-splash__road--1b { animation-name: boot-splash-road-1b; }
-      .boot-splash__road--2a { animation-name: boot-splash-road-2a; }
-      .boot-splash__road--2b { animation-name: boot-splash-road-2b; }
+      .boot-splash__road--s1-trunk,
+      .boot-splash__road--s1-branch { stroke: var(--c-s1, var(--boot-amber)); }
+      .boot-splash__road--s2-trunk,
+      .boot-splash__road--s2-branch { stroke: var(--c-s2, var(--boot-amber)); }
+      .boot-splash__road--s3-trunk,
+      .boot-splash__road--s3-branch { stroke: var(--c-s3, var(--boot-amber)); }
+      .boot-splash__road--s1-trunk { animation-name: boot-splash-road-s1-trunk; }
+      .boot-splash__road--s1-branch { animation-name: boot-splash-road-s1-branch; }
+      .boot-splash__road--s2-trunk { animation-name: boot-splash-road-s2-trunk; }
+      .boot-splash__road--s2-branch { animation-name: boot-splash-road-s2-branch; }
+      .boot-splash__road--s3-trunk { animation-name: boot-splash-road-s3-trunk; }
+      .boot-splash__road--s3-branch { animation-name: boot-splash-road-s3-branch; }
 
-      /* THE SPLIT IS 45.2 / 54.8, AND IT IS NOT THE ARC LENGTHS. Those are 24
-         units of trunk against 20.6 of branch, which would be 53.8/46.2 — and
-         that is what this was, because it makes the pen measurably constant:
-         one stroke advancing along itself at one rate through the junction.
+      /* EACH PART GETS THE SHARE OF THE EXCHANGE ITS X-EXTENT EARNS: 60% of it
+         for a trunk's 24 units, 40% for the branches' 16. Not the arc lengths,
+         and not a perceptual weighting either — both of those were right for
+         the old choreography, where the mark grew out of a dot and the only
+         question was how fast one pen moved. The question now is whether the
+         SPAN holds still, and it only does if the retracting segment's front
+         and the drawing segment's front advance in x at the same rate. See the
+         docblock above and BOOT_ROAD_PART in generate-brand.mjs.
 
-         It does not LOOK constant, and the reason is that a fork has two
-         branches drawing at the same time. Hold the per-pen rate and twice as
-         much ink appears per second after the junction as before it, which reads
-         as the branches whipping out. Hold the total ink rate instead and each
-         branch pen crawls at half the trunk's speed, which reads as the pen
-         stalling at the fork. Both are "equal" and neither looks it.
+         Every one of these is LINEAR, and that is no longer a compromise: a
+         constant-width span whose ends move at a constant rate is exactly what
+         the eye is being asked to follow, and easing either end would make the
+         width breathe. The punctuation is all in the dots' springs.
 
-         So the branch phase is weighted by its length times √2 — 29.15 against
-         the trunk's 24 — which lands exactly between the two: the ink rate goes
-         up by √2 across the junction and the per-pen rate down by the same
-         factor. √2 because perceived rate of a simultaneous event scales with
-         about the square root of how many of them there are, not linearly.
+         The order within a segment is fixed by which way the pen runs. A fork
+         is trunk-then-branches and a merge is branches-then-trunk — in to the
+         intersection, then out the other side — so a segment RETRACTING runs
+         those in the same order it drew them, because a retract chases the tail
+         along the same path.
 
-         Note it lands differently on a fork and a merge, since the trunk is the
-         FIRST phase of one and the second of the other.
-
-         LINEAR within a phase, still, and that part is not negotiable: an
-         ease-in/ease-out pair across the boundary does not hand off, stepping
-         from 6.3 to 4.2 units of ink per unit of time right at the join. What
-         punctuates an arrival is the dot's spring, not a decelerating stroke.
-
-         The draw window is 20.57 points of the period and the retract 18, so the
-         retract is a little quicker — deliberately. A shape that comes apart at
-         exactly the speed it assembled reads as the animation played backwards.
-         Both were widened by half again, and the period with them, when the draw
-         turned out to be too quick to watch; the HOLDS were not, so the mark
-         spends proportionally less of the loop sitting still and more of it
-         being made, which is the part worth looking at. */
-      @keyframes boot-splash-road-1a {
-        0% { stroke-dashoffset: 1.06; animation-timing-function: linear; }
-        9.3% { stroke-dashoffset: 0; }
-        32% { stroke-dashoffset: 0; animation-timing-function: linear; }
-        40.14%,
+         `1 3` and the +/-1.06 overshoot are unchanged and load-bearing: at
+         exactly +/-1 the dash boundary lands ON the path end, and a zero-length
+         dash under a round cap is faithfully painted as a filled 4.5px dot, so
+         the mark appears to keep a stroke it has just retracted past. */
+      @keyframes boot-splash-road-s1-trunk {
+        0% { stroke-dashoffset: 0; }
+        23% { stroke-dashoffset: 0; }
+        24.69% { stroke-dashoffset: -0.013; }
+        26.38% { stroke-dashoffset: -0.055; }
+        28.06% { stroke-dashoffset: -0.126; }
+        29.75% { stroke-dashoffset: -0.228; }
+        31.44% { stroke-dashoffset: -0.36; }
+        33.13% { stroke-dashoffset: -0.517; }
+        34.81% { stroke-dashoffset: -0.695; }
+        36.5% { stroke-dashoffset: -0.883; }
+        38.19% { stroke-dashoffset: -1.06; }
+        50% { stroke-dashoffset: -1.06; }
         100% { stroke-dashoffset: -1.06; }
       }
-      @keyframes boot-splash-road-1b {
-        0%,
-        9.3% { stroke-dashoffset: 1.06; animation-timing-function: linear; }
-        20.57% { stroke-dashoffset: 0; }
-        40.14% { stroke-dashoffset: 0; animation-timing-function: linear; }
-        50%,
+      @keyframes boot-splash-road-s1-branch {
+        0% { stroke-dashoffset: 0; }
+        23% { stroke-dashoffset: 0; }
+        36.5% { stroke-dashoffset: 0; }
+        38.19% { stroke-dashoffset: -0.018; }
+        39.88% { stroke-dashoffset: -0.284; }
+        41.56% { stroke-dashoffset: -0.521; }
+        43.25% { stroke-dashoffset: -0.718; }
+        44.94% { stroke-dashoffset: -0.871; }
+        46.63% { stroke-dashoffset: -0.978; }
+        48.31% { stroke-dashoffset: -1.04; }
+        50% { stroke-dashoffset: -1.06; }
         100% { stroke-dashoffset: -1.06; }
       }
-      @keyframes boot-splash-road-2a {
-        0%,
-        50% { stroke-dashoffset: 1.06; animation-timing-function: linear; }
-        61.27% { stroke-dashoffset: 0; }
-        82% { stroke-dashoffset: 0; animation-timing-function: linear; }
-        91.86%,
+      @keyframes boot-splash-road-s2-branch {
+        0% { stroke-dashoffset: 1.06; }
+        23% { stroke-dashoffset: 1.06; }
+        24.69% { stroke-dashoffset: 1.04; }
+        26.38% { stroke-dashoffset: 0.978; }
+        28.06% { stroke-dashoffset: 0.871; }
+        29.75% { stroke-dashoffset: 0.718; }
+        31.44% { stroke-dashoffset: 0.521; }
+        33.13% { stroke-dashoffset: 0.284; }
+        34.81% { stroke-dashoffset: 0.018; }
+        36.5% { stroke-dashoffset: 0; }
+        50% { stroke-dashoffset: 0; }
+        73% { stroke-dashoffset: 0; }
+        74.69% { stroke-dashoffset: -0.02; }
+        76.38% { stroke-dashoffset: -0.082; }
+        78.06% { stroke-dashoffset: -0.189; }
+        79.75% { stroke-dashoffset: -0.342; }
+        81.44% { stroke-dashoffset: -0.539; }
+        83.13% { stroke-dashoffset: -0.776; }
+        84.81% { stroke-dashoffset: -1.042; }
+        86.5% { stroke-dashoffset: -1.06; }
         100% { stroke-dashoffset: -1.06; }
       }
-      @keyframes boot-splash-road-2b {
-        0%,
-        61.27% { stroke-dashoffset: 1.06; animation-timing-function: linear; }
-        70.57% { stroke-dashoffset: 0; }
-        91.86% { stroke-dashoffset: 0; animation-timing-function: linear; }
+      @keyframes boot-splash-road-s2-trunk {
+        0% { stroke-dashoffset: 1.06; }
+        23% { stroke-dashoffset: 1.06; }
+        34.81% { stroke-dashoffset: 1.06; }
+        36.5% { stroke-dashoffset: 0.883; }
+        38.19% { stroke-dashoffset: 0.695; }
+        39.88% { stroke-dashoffset: 0.517; }
+        41.56% { stroke-dashoffset: 0.36; }
+        43.25% { stroke-dashoffset: 0.228; }
+        44.94% { stroke-dashoffset: 0.126; }
+        46.63% { stroke-dashoffset: 0.055; }
+        48.31% { stroke-dashoffset: 0.013; }
+        50% { stroke-dashoffset: 0; }
+        73% { stroke-dashoffset: 0; }
+        84.81% { stroke-dashoffset: 0; }
+        86.5% { stroke-dashoffset: -0.177; }
+        88.19% { stroke-dashoffset: -0.365; }
+        89.88% { stroke-dashoffset: -0.543; }
+        91.56% { stroke-dashoffset: -0.7; }
+        93.25% { stroke-dashoffset: -0.832; }
+        94.94% { stroke-dashoffset: -0.934; }
+        96.63% { stroke-dashoffset: -1.005; }
+        98.31% { stroke-dashoffset: -1.047; }
         100% { stroke-dashoffset: -1.06; }
+      }
+      @keyframes boot-splash-road-s3-trunk {
+        0% { stroke-dashoffset: 1.06; }
+        73% { stroke-dashoffset: 1.06; }
+        74.69% { stroke-dashoffset: 1.047; }
+        76.38% { stroke-dashoffset: 1.005; }
+        78.06% { stroke-dashoffset: 0.934; }
+        79.75% { stroke-dashoffset: 0.832; }
+        81.44% { stroke-dashoffset: 0.7; }
+        83.13% { stroke-dashoffset: 0.543; }
+        84.81% { stroke-dashoffset: 0.365; }
+        86.5% { stroke-dashoffset: 0.177; }
+        88.19% { stroke-dashoffset: 0; }
+        100% { stroke-dashoffset: 0; }
+      }
+      @keyframes boot-splash-road-s3-branch {
+        0% { stroke-dashoffset: 1.06; }
+        73% { stroke-dashoffset: 1.06; }
+        86.5% { stroke-dashoffset: 1.06; }
+        88.19% { stroke-dashoffset: 1.042; }
+        89.88% { stroke-dashoffset: 0.776; }
+        91.56% { stroke-dashoffset: 0.539; }
+        93.25% { stroke-dashoffset: 0.342; }
+        94.94% { stroke-dashoffset: 0.189; }
+        96.63% { stroke-dashoffset: 0.082; }
+        98.31% { stroke-dashoffset: 0.02; }
+        100% { stroke-dashoffset: 0; }
       }
 
       /*
@@ -839,10 +982,14 @@
        * so it is lit for seven tenths of the cycle while the others take about
        * four each.
        */
+      /* NO TRANSFORM. The dots used to spring open and deflate shut, which
+         read as a pop — a second event on top of the stroke arriving. They fade
+         now, at constant size, so the only thing that happens when a stroke
+         lands is that the dot it lands on is there. The arrivals get a longer
+         fade than the departures for the same reason a sunrise is slower than a
+         switch. */
       .boot-splash__dot {
         fill: var(--boot-amber);
-        transform-box: fill-box;
-        transform-origin: center;
         animation-duration: var(--boot-beat);
         animation-iteration-count: infinite;
       }
@@ -855,30 +1002,49 @@
       .boot-splash__dot--a { fill: var(--c-a, var(--boot-amber)); animation-name: boot-splash-dot-a; }
       .boot-splash__dot--b { fill: var(--c-b, var(--boot-amber)); animation-name: boot-splash-dot-b; }
       .boot-splash__dot--c { fill: var(--c-c, var(--boot-amber)); animation-name: boot-splash-dot-c; }
+      .boot-splash__dot--d { fill: var(--c-d, var(--boot-amber)); animation-name: boot-splash-dot-d; }
 
-      /* At the seam, 100% has C alone on the centre line and 0% has A alone on
-         it — both a single dot at full size and the same colour, so the two
-         frames are identical and two strides of pan reset under them. Do not
-         give either of those ends a pop. */
+      /* A DOT LEAVES WITH THE TAIL THAT PASSES IT AND ARRIVES WITH THE HEAD
+         THAT REACHES IT, and with the exchange the two happen at once rather
+         than a phase apart, so every window below is pinned to a moment the PEN
+         defines:
+
+           A goes out at 23%, when segment one starts being eaten from behind
+           B is lit the whole time segment one is retracting into it AND segment
+             two is drawing out of it, and only goes at 73% when segment two in
+             turn starts retracting
+           C arrives by 50%, as segment two's head lands, and then stays because
+             it is what segment three grows out of
+           D arrives by 100%, which is the seam
+
+         ARRIVALS FADE OVER 8% AND DEPARTURES OVER 5%. Longer coming than going,
+         because an arrival is the thing you are meant to notice and a departure
+         should not draw the eye back to ink that has already gone.
+
+         AND AT THE SEAM, C BECOMES A AND D BECOMES B. Both pairs must be at full
+         opacity on both sides of it or the wrap shows. */
       @keyframes boot-splash-dot-a {
         0%,
-        32% { opacity: 1; transform: scale(1); animation-timing-function: cubic-bezier(0.55, 0, 0.75, 0.2); }
-        37%,
-        100% { opacity: 0; transform: scale(0.35); }
+        23% { opacity: 1; animation-timing-function: cubic-bezier(0.42, 0, 0.58, 1); }
+        28%,
+        100% { opacity: 0; }
       }
       @keyframes boot-splash-dot-b {
         0%,
-        17% { opacity: 0; transform: scale(0.35); animation-timing-function: cubic-bezier(0.22, 1.6, 0.4, 1); }
-        23%,
-        82% { opacity: 1; transform: scale(1); animation-timing-function: cubic-bezier(0.55, 0, 0.75, 0.2); }
-        87%,
-        100% { opacity: 0; transform: scale(0.35); }
+        73% { opacity: 1; animation-timing-function: cubic-bezier(0.42, 0, 0.58, 1); }
+        78%,
+        100% { opacity: 0; }
       }
       @keyframes boot-splash-dot-c {
         0%,
-        67% { opacity: 0; transform: scale(0.35); animation-timing-function: cubic-bezier(0.22, 1.6, 0.4, 1); }
-        73%,
-        100% { opacity: 1; transform: scale(1); }
+        42% { opacity: 0; animation-timing-function: cubic-bezier(0.42, 0, 0.58, 1); }
+        50%,
+        100% { opacity: 1; }
+      }
+      @keyframes boot-splash-dot-d {
+        0%,
+        92% { opacity: 0; animation-timing-function: cubic-bezier(0.42, 0, 0.58, 1); }
+        100% { opacity: 1; }
       }
 
       /* ── THE EXIT ───────────────────────────────────────────────────────── */
@@ -912,17 +1078,39 @@
       }
 
       /*
-       * MOLD — the pose shrinks into the centre of the view box while the ball
-       * swells up under it. See the exit note in the docblock above.
+       * MOLD — the pose shrinks INTO the ball, which is a different thing from
+       * shrinking away while a ball happens to appear.
        *
-       * ACCELERATING (`0.55, 0, 0.85, 0.35`), so the mark leaves rather than
-       * settles, and its opacity is held near full for the first half so that
-       * what you see is the logo going rather than the logo fading.
+       * IT STOPS AT 0.30, NOT AT NOTHING, and that number is measured rather
+       * than chosen: the mark is 47 view-box units wide, which at 116px for 64
+       * units is 85px, and the ball is 26px across. 26/85 is 0.306. So the mark
+       * arrives at exactly the ball's size and the ball is what it has become —
+       * where before it carried on down to 0.06 and vanished, which read as two
+       * things swapping rather than one turning into the other.
        *
-       * The ball is deliberately LATE — it starts at 160ms, when the mark is
-       * already small — and springs (`0.22, 1.5, 0.4, 1`). Starting them
-       * together read as a cross-fade between two objects; starting the ball
-       * late reads as the mark condensing into it.
+       * Its opacity therefore holds to 70% and only then goes, under a ball that
+       * is by then full size. What you should see is the logo compacting, not
+       * the logo dissolving.
+       *
+       * DECELERATING (`0.32, 0.58, 0.38, 1`), and that is the whole difference
+       * between this reading as a shrink and not reading at all. It used to
+       * ACCELERATE, which sounds right — a thing collapsing under its own weight
+       * — and is wrong here, because an ease-in spends its first half barely
+       * moving: at the midpoint the mark was still at 0.84 of full size. So the
+       * ball came up beside a logo that had not visibly changed, and the logo
+       * then vanished in the last few frames. Two things swapping again, by a
+       * different route.
+       *
+       * Ease-OUT puts the size change where it can be seen. The mark is at 0.65
+       * a quarter of the way in and 0.42 at the midpoint, so by the time the
+       * ball appears at 250ms the shrink is most of the way done and the ball is
+       * landing on something already small.
+       *
+       * Which is also why the ball is LATE and the opacity holds to 78%: the
+       * mark is at 0.35 by then, a hair above the ball's own size, so what fades
+       * out is a mark that has already arrived rather than one still travelling.
+       * And the ball does not spring — an overshoot is a POP, which is the one
+       * thing a mark condensing into a dot must not do.
        *
        * The loop keeps running underneath. Stopping it would freeze the pan
        * mid-slide on a slow boot, which is a worse-looking frame than any the
@@ -933,12 +1121,12 @@
         transform-origin: center;
       }
       #boot-splash[data-done] .boot-splash__collapse {
-        animation: boot-splash-mold 400ms cubic-bezier(0.55, 0, 0.85, 0.35) forwards;
+        animation: boot-splash-mold 480ms cubic-bezier(0.32, 0.58, 0.38, 1) forwards;
       }
       @keyframes boot-splash-mold {
         0% { transform: scale(1); opacity: 1; }
-        55% { opacity: 0.92; }
-        100% { transform: scale(0.06); opacity: 0; }
+        78% { opacity: 1; }
+        100% { transform: scale(0.3); opacity: 0; }
       }
 
       /* The optical lift comes off, so the aperture opens on the true centre of
@@ -970,8 +1158,8 @@
        */
       #boot-splash[data-done] .boot-splash__iris-ring {
         animation:
-          boot-splash-ball 260ms cubic-bezier(0.22, 1.5, 0.4, 1) 160ms both,
-          boot-splash-open 580ms cubic-bezier(0.5, 0, 0.35, 1) 420ms forwards;
+          boot-splash-ball 230ms cubic-bezier(0.2, 0.7, 0.4, 1) 250ms both,
+          boot-splash-open 580ms cubic-bezier(0.5, 0, 0.35, 1) 480ms forwards;
       }
       @keyframes boot-splash-ball {
         from { r: 0; fill-opacity: 1; stroke-opacity: 0; }
@@ -990,7 +1178,7 @@
         100% { r: 71vmax; stroke-width: 6; fill-opacity: 0; stroke-opacity: 0; }
       }
       #boot-splash[data-done] .boot-splash__iris-hole {
-        animation: boot-splash-hole 580ms cubic-bezier(0.5, 0, 0.35, 1) 420ms forwards;
+        animation: boot-splash-hole 580ms cubic-bezier(0.5, 0, 0.35, 1) 480ms forwards;
       }
       @keyframes boot-splash-hole {
         from { r: 13px; }
@@ -1003,7 +1191,7 @@
          to land WITH the ring rather than before it: on a 16:10 window the ring
          crosses the corner at about 870ms, and this is 700→1000. */
       #boot-splash[data-done] .boot-splash__iris-plate {
-        animation: boot-splash-corners 300ms linear 700ms forwards;
+        animation: boot-splash-corners 300ms linear 760ms forwards;
       }
       @keyframes boot-splash-corners { to { fill-opacity: 0; } }
 
@@ -1039,11 +1227,14 @@
         #root.boot-reveal {
           animation: none;
         }
-        .boot-splash__road--1a,
-        .boot-splash__road--1b { stroke-dashoffset: 0; }
-        .boot-splash__road--2a,
-        .boot-splash__road--2b,
-        .boot-splash__dot--c {
+        .boot-splash__road--s1-trunk,
+        .boot-splash__road--s1-branch { stroke-dashoffset: 0; }
+        .boot-splash__road--s2-trunk,
+        .boot-splash__road--s2-branch,
+        .boot-splash__road--s3-trunk,
+        .boot-splash__road--s3-branch,
+        .boot-splash__dot--c,
+        .boot-splash__dot--d {
           display: none;
         }
         .boot-splash__dot--a,
@@ -1078,16 +1269,21 @@
         <svg class="boot-splash__mark" viewBox="0 0 64 64" aria-hidden="true" style="--bsw: 4.5">
           <g class="boot-splash__collapse">
             <g class="boot-splash__pan">
-              <path class="boot-splash__road boot-splash__road--1a" d="M12 32L36 32" pathLength="1" />
-              <path class="boot-splash__road boot-splash__road--1b" d="M36 32C42 32 43 22 52 20" pathLength="1" />
-              <path class="boot-splash__road boot-splash__road--1b" d="M36 32C42 32 43 42 52 44" pathLength="1" />
-              <path class="boot-splash__road boot-splash__road--2b" d="M68 32L92 32" pathLength="1" />
-              <path class="boot-splash__road boot-splash__road--2a" d="M52 20C61 22 62 32 68 32" pathLength="1" />
-              <path class="boot-splash__road boot-splash__road--2a" d="M52 44C61 42 62 32 68 32" pathLength="1" />
+              <path class="boot-splash__road boot-splash__road--s1-trunk" d="M12 32L36 32" pathLength="1" />
+              <path class="boot-splash__road boot-splash__road--s1-branch" d="M36 32C42 32 43 22 52 20" pathLength="1" />
+              <path class="boot-splash__road boot-splash__road--s1-branch" d="M36 32C42 32 43 42 52 44" pathLength="1" />
+              <path class="boot-splash__road boot-splash__road--s2-trunk" d="M68 32L92 32" pathLength="1" />
+              <path class="boot-splash__road boot-splash__road--s2-branch" d="M52 20C61 22 62 32 68 32" pathLength="1" />
+              <path class="boot-splash__road boot-splash__road--s2-branch" d="M52 44C61 42 62 32 68 32" pathLength="1" />
+              <path class="boot-splash__road boot-splash__road--s3-trunk" d="M92 32L116 32" pathLength="1" />
+              <path class="boot-splash__road boot-splash__road--s3-branch" d="M116 32C122 32 123 22 132 20" pathLength="1" />
+              <path class="boot-splash__road boot-splash__road--s3-branch" d="M116 32C122 32 123 42 132 44" pathLength="1" />
               <circle class="boot-splash__dot boot-splash__dot--a" cx="12" cy="32" r="3.5" />
               <circle class="boot-splash__dot boot-splash__dot--b" cx="52" cy="20" r="3.5" />
               <circle class="boot-splash__dot boot-splash__dot--b" cx="52" cy="44" r="3.5" />
               <circle class="boot-splash__dot boot-splash__dot--c" cx="92" cy="32" r="3.5" />
+              <circle class="boot-splash__dot boot-splash__dot--d" cx="132" cy="20" r="3.5" />
+              <circle class="boot-splash__dot boot-splash__dot--d" cx="132" cy="44" r="3.5" />
             </g>
           </g>
         </svg>
@@ -1198,9 +1394,13 @@
             };
           }
           var LINEAR = function (t) { return t; };
-          var SPRING = bezier(0.22, 1.6, 0.4, 1);
-          var SINK = bezier(0.55, 0, 0.75, 0.2);
-          var LEAVE = bezier(0.55, 0, 0.85, 0.35);
+          // The one curve the loop uses, on the dots' fades. The roads and the
+          // pan ramp too, but theirs is baked into their stops — see the note on
+          // `.boot-splash__road` — so they interpolate straight.
+          var EASE = bezier(0.42, 0, 0.58, 1);
+          // The mold's curve. Decelerating, so the shrink is visible early —
+          // see the exit note in the <style>.
+          var LEAVE = bezier(0.32, 0.58, 0.38, 1);
 
           /* A stop is [atPercent, [values...], easingForTheSegmentThatSTARTSHere].
              That is how CSS reads `animation-timing-function` inside a keyframe:
@@ -1216,26 +1416,27 @@
             return out;
           }
 
-          // The frame's x, as `32 - midpoint(live ink)`. Linear throughout,
-          // because the pen is; see the pan note in index.html's <style>.
-          var PAN = [
-            [0, [20]], [9.3, [8]], [20.57, [0]], [32, [0]], [40.14, [-12]],
-            [50, [-20]], [61.27, [-28]], [70.57, [-40]], [82, [-40]],
-            [91.86, [-48]], [100, [-60]],
-          ];
+          // The frame's x, as `32 - midpoint(live span)`. Still on the ink, but
+          // a straight line now: a span of constant width whose ends advance
+          // together has a midpoint that advances at the same rate. Flat through
+          // the holds, because nothing is moving there either.
+          var PAN = [[0, [0]], [23, [0]], [24.69, [-0.3]], [26.38, [-1.24]], [28.06, [-2.86]], [29.75, [-5.17]], [31.44, [-8.14]], [33.13, [-11.71]], [34.81, [-15.73]], [36.5, [-20]], [38.19, [-24.27]], [39.88, [-28.29]], [41.56, [-31.86]], [43.25, [-34.83]], [44.94, [-37.14]], [46.63, [-38.76]], [48.31, [-39.7]], [50, [-40]], [73, [-40]], [74.69, [-40.3]], [76.38, [-41.24]], [78.06, [-42.86]], [79.75, [-45.17]], [81.44, [-48.14]], [83.13, [-51.71]], [84.81, [-55.73]], [86.5, [-60]], [88.19, [-64.27]], [89.88, [-68.29]], [91.56, [-71.86]], [93.25, [-74.83]], [94.94, [-77.14]], [96.63, [-78.76]], [98.31, [-79.7]], [100, [-80]]];
           // Dash offset as a FRACTION of each road's own length: +1.06 undrawn,
           // 0 drawn, -1.06 retracted past its end.
           var ROADS = {
-            "1a": [[0, [1.06]], [9.3, [0]], [32, [0]], [40.14, [-1.06]], [100, [-1.06]]],
-            "1b": [[0, [1.06]], [9.3, [1.06]], [20.57, [0]], [40.14, [0]], [50, [-1.06]], [100, [-1.06]]],
-            "2a": [[0, [1.06]], [50, [1.06]], [61.27, [0]], [82, [0]], [91.86, [-1.06]], [100, [-1.06]]],
-            "2b": [[0, [1.06]], [61.27, [1.06]], [70.57, [0]], [91.86, [0]], [100, [-1.06]]],
+            "s1-trunk": [[0, [0]], [23, [0]], [24.69, [-0.013]], [26.38, [-0.055]], [28.06, [-0.126]], [29.75, [-0.228]], [31.44, [-0.36]], [33.13, [-0.517]], [34.81, [-0.695]], [36.5, [-0.883]], [38.19, [-1.06]], [50, [-1.06]], [100, [-1.06]]],
+            "s1-branch": [[0, [0]], [23, [0]], [36.5, [0]], [38.19, [-0.018]], [39.88, [-0.284]], [41.56, [-0.521]], [43.25, [-0.718]], [44.94, [-0.871]], [46.63, [-0.978]], [48.31, [-1.04]], [50, [-1.06]], [100, [-1.06]]],
+            "s2-branch": [[0, [1.06]], [23, [1.06]], [24.69, [1.04]], [26.38, [0.978]], [28.06, [0.871]], [29.75, [0.718]], [31.44, [0.521]], [33.13, [0.284]], [34.81, [0.018]], [36.5, [0]], [50, [0]], [73, [0]], [74.69, [-0.02]], [76.38, [-0.082]], [78.06, [-0.189]], [79.75, [-0.342]], [81.44, [-0.539]], [83.13, [-0.776]], [84.81, [-1.042]], [86.5, [-1.06]], [100, [-1.06]]],
+            "s2-trunk": [[0, [1.06]], [23, [1.06]], [34.81, [1.06]], [36.5, [0.883]], [38.19, [0.695]], [39.88, [0.517]], [41.56, [0.36]], [43.25, [0.228]], [44.94, [0.126]], [46.63, [0.055]], [48.31, [0.013]], [50, [0]], [73, [0]], [84.81, [0]], [86.5, [-0.177]], [88.19, [-0.365]], [89.88, [-0.543]], [91.56, [-0.7]], [93.25, [-0.832]], [94.94, [-0.934]], [96.63, [-1.005]], [98.31, [-1.047]], [100, [-1.06]]],
+            "s3-trunk": [[0, [1.06]], [73, [1.06]], [74.69, [1.047]], [76.38, [1.005]], [78.06, [0.934]], [79.75, [0.832]], [81.44, [0.7]], [83.13, [0.543]], [84.81, [0.365]], [86.5, [0.177]], [88.19, [0]], [100, [0]]],
+            "s3-branch": [[0, [1.06]], [73, [1.06]], [86.5, [1.06]], [88.19, [1.042]], [89.88, [0.776]], [91.56, [0.539]], [93.25, [0.342]], [94.94, [0.189]], [96.63, [0.082]], [98.31, [0.02]], [100, [0]]],
           };
-          // [opacity, scale].
+          // Opacity, and nothing else — the dots do not scale any more.
           var DOTS = {
-            a: [[0, [1, 1]], [32, [1, 1], SINK], [37, [0, 0.35]], [100, [0, 0.35]]],
-            b: [[0, [0, 0.35]], [17, [0, 0.35], SPRING], [23, [1, 1]], [82, [1, 1], SINK], [87, [0, 0.35]], [100, [0, 0.35]]],
-            c: [[0, [0, 0.35]], [67, [0, 0.35], SPRING], [73, [1, 1]], [100, [1, 1]]],
+            a: [[0, [1]], [23, [1], EASE], [28, [0]], [100, [0]]],
+            b: [[0, [1]], [73, [1], EASE], [78, [0]], [100, [0]]],
+            c: [[0, [0]], [42, [0], EASE], [50, [1]], [100, [1]]],
+            d: [[0, [0]], [92, [0], EASE], [100, [1]]],
           };
           /* The exit's mold, as a percentage of its own 400ms, and SPLIT IN TWO
              because CSS interpolates a property across the keyframes that
@@ -1243,8 +1444,8 @@
              `opacity`, so scale runs 0 -> 100 in one uneased-at-the-seam span
              while opacity breaks in the middle. Fold them into one track and the
              mark starts fading noticeably earlier than it does today. */
-          var MOLD_SCALE = [[0, [1], LEAVE], [100, [0.06]]];
-          var MOLD_ALPHA = [[0, [1], LEAVE], [55, [0.92], LEAVE], [100, [0]]];
+          var MOLD_SCALE = [[0, [1], LEAVE], [100, [0.3]]];
+          var MOLD_ALPHA = [[0, [1], LEAVE], [78, [1], LEAVE], [100, [0]]];
 
           var tmp = [0, 0];
           var tmp2 = [0, 0];
@@ -1284,7 +1485,9 @@
               // and a zero-length dash under a round cap is a filled dot.
               ctx.setLineDash([road.len, road.len * 3]);
               ctx.lineDashOffset = tmp[0] * road.len * cfg.dashSign;
-              ctx.strokeStyle = colours[road.phase.charAt(0) === "1" ? "--c-s1" : "--c-s2"] || cfg.amber;
+              // "s2-branch" -> "--c-s2". Three segments now, so this cannot
+              // be a two-way test any more.
+              ctx.strokeStyle = colours["--c-" + road.phase.slice(0, 2)] || cfg.amber;
               ctx.globalAlpha = alpha;
               ctx.stroke(road.path);
             }
@@ -1297,7 +1500,7 @@
               ctx.globalAlpha = alpha * tmp[0];
               ctx.fillStyle = colours["--c-" + dot.id] || cfg.amber;
               ctx.beginPath();
-              ctx.arc(dot.cx, dot.cy, dot.r * tmp[1], 0, Math.PI * 2);
+              ctx.arc(dot.cx, dot.cy, dot.r, 0, Math.PI * 2);
               ctx.fill();
             }
             ctx.globalAlpha = 1;
@@ -1408,7 +1611,7 @@
 
         var seed = {};
         var rootCss = getComputedStyle(document.documentElement);
-        ["--c-s1", "--c-s2", "--c-a", "--c-b", "--c-c"].forEach(function (n) {
+        ["--c-s1", "--c-s2", "--c-s3", "--c-a", "--c-b", "--c-c", "--c-d"].forEach(function (n) {
           seed[n] = rootCss.getPropertyValue(n).trim();
         });
         api.onColour(function (name, value) {
@@ -1471,8 +1674,8 @@
             dots: dots,
             docTime: document.timeline ? document.timeline.currentTime : performance.now(),
             cfg: {
-              period: 2100,
-              moldMs: 400,
+              period: 2400,
+              moldMs: 480,
               strokeWidth: parseFloat(css.getPropertyValue("--bsw")) || 4.5,
               amber: rootCss.getPropertyValue("--boot-amber").trim() || "#e5a33c",
               dashSign: 1,

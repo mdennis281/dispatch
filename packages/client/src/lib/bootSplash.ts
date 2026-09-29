@@ -45,10 +45,10 @@
  * screen anyway.
  *
  * The sequence is built for exactly that (see the docblock over the `<style>` in
- * index.html): the mark EXTENDS — a fork's roads undraw into its two leading
- * dots, the frame slides on, and new roads draw out of them into a merge, which
- * is the mark mirrored. One — two — one — two, and it loops, so it is the only
- * open-ended part. A fast boot sees a couple of poses, a slow one keeps
+ * index.html): the mark EXTENDS — one segment is eaten from behind while the
+ * next is laid down in front, so a fork becomes a merge becomes a fork without
+ * the shape ever losing its width. One — two — one — two, and it loops, so it is
+ * the only open-ended part. A fast boot sees a couple of poses, a slow one keeps
  * counting, and neither has to invent a progress bar for a number nobody has.
  *
  * `MIN_MS` and the loop's period over there are set against each other, not
@@ -106,21 +106,22 @@ declare global {
 /**
  * Long enough to count to four, and TUNED TO LAND ON A HELD POSE.
  *
- * The loop in index.html is 2100ms and holds a pose twice per cycle — 20.57–32%
- * and 70.57–82% — so a pose is fully drawn and the frame has stopped at 432ms
- * (one), 1482ms (two), 2532ms (one) and 3582ms (two). 3.6s puts the dismissal
- * 18ms into that fourth one, with 222ms of it still to run. One, two, one, two,
- * and then it leaves — the whole shape of the thing, seen once.
+ * The loop in index.html is 2400ms and holds a pose twice per cycle — 0–23% and
+ * 50–73% — so a pose is complete and the frame has stopped at 0ms (one), 1200ms
+ * (two), 2400ms (one) and 3600ms (two). 3.66s puts the dismissal 60ms into that
+ * fourth one, with 492ms of it still to run. One, two, one, two, and then it
+ * leaves — the whole shape of the thing, seen once.
  *
- * This went UP, from 3.05s, when the draw was slowed by half: four poses take
- * as long as they take, and the alternative was to cut the sequence at three
- * and never show the second mirror. It is a shade over the 3.4s the previous
- * splash held for, so the floor on a reload is not new — but it is the number to
- * challenge first if this ever feels long.
+ * THE FIRST POSE IS AT ZERO, which is new. The mark used to grow out of a lone
+ * dot; it now retracts one segment while drawing the next, so it is complete
+ * and legible on the very first painted frame and it never stops being a whole
+ * mark. Four poses therefore cost three cycles' worth of exchange rather than
+ * four, which is what keeps this near where it was after the period went from
+ * 2100 to 2400 (see the note on the holds over there).
  *
  * That alignment is what the exact figure is for. The exit molds whatever is on
- * screen into a ball, and a pose is a much better thing to mold than a road
- * half-drawn or a frame mid-slide.
+ * screen into a ball, and a pose is a much better thing to mold than a mark
+ * caught halfway through an exchange.
  *
  * The hold's leading edge rather than its middle, deliberately, because the
  * error here is ONE-SIDED. The CSS clock starts when the splash first paints;
@@ -136,7 +137,7 @@ declare global {
  * on a real boot the REST snapshot is what the splash is waiting for, and that
  * lands after this does.
  */
-export const BOOT_SPLASH_MIN_MS = 3_600;
+export const BOOT_SPLASH_MIN_MS = 3_660;
 /**
  * Never hold the app hostage to a boot that isn't coming.
  *
@@ -147,9 +148,9 @@ export const BOOT_SPLASH_MIN_MS = 3_600;
  * still filling in — which is what this change is fixing.
  */
 export const BOOT_SPLASH_MAX_MS = 9_000;
-/** Must outlast the exit in index.html: the 420ms mold, the aperture open that
- *  follows it, and the corners of the plate gone by 1000ms. */
-export const BOOT_SPLASH_EXIT_MS = 1_080;
+/** Must outlast the exit in index.html: the 480ms mold, the aperture open that
+ *  follows it, and the corners of the plate gone by 1060ms. */
+export const BOOT_SPLASH_EXIT_MS = 1_140;
 
 export interface BootState {
   /** `/api/auth/status` has answered, or been guessed at. */
