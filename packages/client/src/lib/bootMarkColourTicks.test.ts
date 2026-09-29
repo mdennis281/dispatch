@@ -42,43 +42,88 @@ const PERIOD = Number(/--boot-beat: (\d+)ms/.exec(html)![1]);
  */
 const MIN_MARGIN_MS = 450;
 
-/** Which keyframes wear each custom property. */
-const WORN_BY: Record<string, string[]> = {
-  "--c-a": ["boot-splash-dot-a"],
-  "--c-b": ["boot-splash-dot-b"],
-  "--c-c": ["boot-splash-dot-c"],
-  "--c-d": ["boot-splash-dot-d"],
-  "--c-s1": ["boot-splash-road-s1-trunk", "boot-splash-road-s1-branch"],
-  "--c-s2": ["boot-splash-road-s2-trunk", "boot-splash-road-s2-branch"],
-  "--c-s3": ["boot-splash-road-s3-trunk", "boot-splash-road-s3-branch"],
+/**
+ * Which keyframes wear each custom property — and for the two dots that change
+ * hands mid-cycle, WHICH OF THEIR TWO COLOURS.
+ *
+ * A held pose is a single colour now, so the dot two roads share crossfades from
+ * one to the other across the exchange. That makes "is anything wearing this"
+ * finer than "is the element on screen": dot B is lit from 0% to 78% but it has
+ * stopped wearing `--c-b` by 43.5%, and that difference is a whole 400ms of room
+ * for the tick that re-dyes it.
+ */
+const WORN_BY: Record<string, Array<{ keyframes: string; fill?: string }>> = {
+  "--c-a": [{ keyframes: "boot-splash-dot-a" }],
+  "--c-b": [{ keyframes: "boot-splash-dot-b", fill: "--c-b" }],
+  "--c-b2": [{ keyframes: "boot-splash-dot-b", fill: "--c-b2" }],
+  "--c-c": [{ keyframes: "boot-splash-dot-c", fill: "--c-c" }],
+  "--c-c2": [{ keyframes: "boot-splash-dot-c", fill: "--c-c2" }],
+  "--c-d": [{ keyframes: "boot-splash-dot-d" }],
+  "--c-s1": [{ keyframes: "boot-splash-road-s1-trunk" }, { keyframes: "boot-splash-road-s1-branch" }],
+  "--c-s2": [{ keyframes: "boot-splash-road-s2-trunk" }, { keyframes: "boot-splash-road-s2-branch" }],
+  "--c-s3": [{ keyframes: "boot-splash-road-s3-trunk" }, { keyframes: "boot-splash-road-s3-branch" }],
   // `--c-ball` is read once, at dismissal, by which time the ticks have stopped.
   // There is no window to respect and nothing wearing it during the loop.
 };
 
-/** [percent, isOnScreen] for one keyframes block, sorted. */
-function visibility(name: string): Array<[number, boolean]> {
+/** One stop: whether the element is on screen there, and which fill is in force. */
+type Stop = { pct: number; lit: boolean; fill: string | null };
+
+/** Every stop of one keyframes block, sorted. */
+function visibility(name: string): Stop[] {
   const block = new RegExp(`@keyframes ${name} \\{([\\s\\S]*?)\\n      \\}`).exec(html);
   if (!block) throw new Error(`no @keyframes ${name}`);
-  const out: Array<[number, boolean]> = [];
+  const rows: Array<{ pct: number; opacity: number | null; dash: number | null; fill: string | null }> = [];
   const stop = /([\d.%,\s]+?)\{([^}]*)\}/g;
   let m: RegExpExecArray | null;
   while ((m = stop.exec(block[1]!))) {
     const body = m[2]!;
     const opacity = /opacity:\s*([\d.]+)/.exec(body);
     const dash = /stroke-dashoffset:\s*(-?[\d.]+)/.exec(body);
-    // A dot shows when it has any opacity; a road shows while its dash is
-    // anywhere between "not yet drawn" (+1.06) and "retracted past its end".
-    const shown = opacity
-      ? parseFloat(opacity[1]!) > 0
-      : dash
-        ? Math.abs(parseFloat(dash[1]!)) < 1.06
-        : false;
+    const f = /fill:\s*var\((--c-[a-z0-9]+)\)/.exec(body);
     for (const pct of m[1]!.split(",")) {
       const t = pct.trim().replace("%", "");
-      if (t) out.push([parseFloat(t), shown]);
+      if (!t) continue;
+      rows.push({
+        pct: parseFloat(t),
+        opacity: opacity ? parseFloat(opacity[1]!) : null,
+        dash: dash ? parseFloat(dash[1]!) : null,
+        fill: f ? f[1]! : null,
+      });
     }
   }
-  return out.sort((a, b) => a[0] - b[0]);
+  rows.sort((a, b) => a.pct - b.pct);
+
+  // A crossfading dot has stops that name only `fill`. CSS interpolates opacity
+  // across the stops that declare IT, so that is what this has to do too —
+  // read the missing ones off the neighbours rather than treating them as zero.
+  for (let i = 0; i < rows.length; i++) {
+    if (rows[i]!.opacity !== null) continue;
+    let a = i - 1, b = i + 1;
+    while (a >= 0 && rows[a]!.opacity === null) a--;
+    while (b < rows.length && rows[b]!.opacity === null) b++;
+    if (a < 0 || b >= rows.length) continue;
+    const [lo, hi] = [rows[a]!, rows[b]!];
+    const t = (rows[i]!.pct - lo.pct) / (hi.pct - lo.pct);
+    rows[i]!.opacity = lo.opacity! + (hi.opacity! - lo.opacity!) * t;
+  }
+
+  let inForce: string | null = null;
+  return rows.map((row) => {
+    if (row.fill) inForce = row.fill;
+    return {
+      pct: row.pct,
+      // A dot shows when it has any opacity; a road shows while its dash is
+      // anywhere between "not yet drawn" (+1.06) and "retracted past its end".
+      lit:
+        row.opacity !== null
+          ? row.opacity > 0
+          : row.dash !== null
+            ? Math.abs(row.dash) < 1.06
+            : false,
+      fill: inForce,
+    };
+  });
 }
 
 /**
@@ -87,13 +132,18 @@ function visibility(name: string): Array<[number, boolean]> {
  * dark — anything else is a fade, and a fade is on screen.
  */
 function darkWindows(name: string): Array<[number, number]> {
-  const tracks = WORN_BY[name]!.map(visibility);
   const lit: Array<[number, number]> = [];
-  for (const stops of tracks) {
+  for (const source of WORN_BY[name]!) {
+    const stops = visibility(source.keyframes);
     for (let i = 0; i < stops.length - 1; i++) {
-      if (stops[i]![1] || stops[i + 1]![1]) {
-        lit.push([(stops[i]![0] / 100) * PERIOD, (stops[i + 1]![0] / 100) * PERIOD]);
-      }
+      const [a, b] = [stops[i]!, stops[i + 1]!];
+      if (!a.lit && !b.lit) continue;
+      // And for a dot that changes hands, this colour has to be one of the two
+      // the interval runs BETWEEN. Asking only whether it is in force at either
+      // END would light the whole hold before a crossfade starts, which is a
+      // colour's widest window written off for no reason.
+      if (source.fill && a.fill !== source.fill && b.fill !== source.fill) continue;
+      lit.push([(a.pct / 100) * PERIOD, (b.pct / 100) * PERIOD]);
     }
   }
   lit.sort((a, b) => a[0] - b[0]);

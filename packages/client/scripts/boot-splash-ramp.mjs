@@ -223,15 +223,34 @@ function panStops() {
  * those moments are exchange STARTS, which are fixed; the other two are where
  * the ink FINISHES, which moves with DRAW_END — so they are generated here
  * rather than typed next to the roads and left behind when the shape changes.
+ *
+ * AND ONE OF THEM CHANGES COLOUR ON SCREEN, which everything else in the splash
+ * is arranged to avoid. At a hold there is exactly one road up, and both of its
+ * ends now wear its colour, so the mark at rest is a single colour. The dot that
+ * makes that possible is the SHARED anchor — the one the outgoing segment
+ * retracts into while the incoming one draws out of it — and it has to change
+ * hands somewhere. It does it in the open, crossfading over the exchange, so the
+ * recolour is something the slide does rather than something that happens to it.
+ *
+ * `mix` is 0 for the colour the dot arrives wearing and 1 for the one it leaves
+ * wearing: `--c-b` -> `--c-b2` across exchange one, `--c-c` -> `--c-c2` across
+ * exchange two. The other two dots never share an anchor and never move.
  */
 const DOTS = {
-  a: [[0, 1], [HOLD, 1], [HOLD + FADE_OUT, 0], [100, 0]],
-  b: [[0, 1], [HOLD + 50, 1], [HOLD + 50 + FADE_OUT, 0], [100, 0]],
-  c: [[0, 0], [r2(E1_DONE - FADE_IN), 0], [E1_DONE, 1], [100, 1]],
-  d: [[0, 0], [r2(E2_DONE - FADE_IN), 0], [E2_DONE, 1], [100, 1]],
+  a: { op: [[0, 1], [HOLD, 1], [HOLD + FADE_OUT, 0], [100, 0]] },
+  b: {
+    op: [[0, 1], [HOLD + 50, 1], [HOLD + 50 + FADE_OUT, 0], [100, 0]],
+    mix: [[0, 0], [HOLD, 0], [E1_DONE, 1], [100, 1]],
+  },
+  c: {
+    op: [[0, 0], [r2(E1_DONE - FADE_IN), 0], [E1_DONE, 1], [100, 1]],
+    mix: [[0, 0], [HOLD + 50, 0], [E2_DONE, 1], [100, 1]],
+  },
+  d: { op: [[0, 0], [r2(E2_DONE - FADE_IN), 0], [E2_DONE, 1], [100, 1]] },
 };
-/** The interval LEAVING each dot's second stop is its fade, and only that one. */
+/** The interval LEAVING each track's second stop is its fade, and only that one. */
 const FADING = 1;
+const EASE_CSS = "cubic-bezier(0.42, 0, 0.58, 1)";
 
 const PAN = panStops();
 
@@ -245,16 +264,25 @@ const cssPan =
   PAN.map(([p, v]) => `        ${p}% { transform: translateX(${v}px); }`).join("\n") +
   `\n      }`;
 
-const cssDot = (id) =>
-  `      @keyframes boot-splash-dot-${id} {\n` +
-  DOTS[id]
-    .map(([p, v], i) =>
-      i === FADING
-        ? `        ${p}% { opacity: ${v}; animation-timing-function: cubic-bezier(0.42, 0, 0.58, 1); }`
-        : `        ${p}% { opacity: ${v}; }`,
-    )
-    .join("\n") +
-  `\n      }`;
+/** Both tracks folded into one set of stops, each declaring what it has. */
+function cssDot(id) {
+  const { op, mix } = DOTS[id];
+  const at = new Map();
+  const put = (p, decl) => at.set(p, (at.get(p) || []).concat(decl));
+  op.forEach(([p, v], i) => {
+    put(p, `opacity: ${v};`);
+    if (i === FADING) put(p, `animation-timing-function: ${EASE_CSS};`);
+  });
+  (mix || []).forEach(([p, v], i) => {
+    put(p, `fill: var(--c-${id}${v ? "2" : ""});`);
+    if (i === FADING) put(p, `animation-timing-function: ${EASE_CSS};`);
+  });
+  const rows = [...at.entries()]
+    .sort((a, b) => a[0] - b[0])
+    // One `animation-timing-function` per stop even when both tracks turn there.
+    .map(([p, decls]) => `        ${p}% { ${[...new Set(decls)].join(" ")} }`);
+  return `      @keyframes boot-splash-dot-${id} {\n${rows.join("\n")}\n      }`;
+}
 
 const workerRoads =
   `          var ROADS = {\n` +
@@ -265,15 +293,19 @@ const workerRoads =
 
 const workerPan = `          var PAN = [${PAN.map(([p, v]) => `[${p}, [${v}]]`).join(", ")}];`;
 
+const trackLit = (t) =>
+  `[${t.map(([p, v], i) => `[${p}, [${v}]${i === FADING ? ", EASE" : ""}]`).join(", ")}]`;
+
 const workerDots =
   `          var DOTS = {\n` +
+  Object.keys(DOTS).map((id) => `            ${id}: ${trackLit(DOTS[id].op)},`).join("\n") +
+  `\n          };`;
+
+const workerMix =
+  `          var MIX = {\n` +
   Object.keys(DOTS)
-    .map(
-      (id) =>
-        `            ${id}: [${DOTS[id]
-          .map(([p, v], i) => `[${p}, [${v}]${i === FADING ? ", EASE" : ""}]`)
-          .join(", ")}],`,
-    )
+    .filter((id) => DOTS[id].mix)
+    .map((id) => `            ${id}: ${trackLit(DOTS[id].mix)},`)
     .join("\n") +
   `\n          };`;
 
@@ -281,7 +313,7 @@ if (process.argv.includes("--print")) {
   console.log(cssPan + "\n");
   for (const n of Object.keys(ROADS)) console.log(cssRoad(n));
   for (const id of Object.keys(DOTS)) console.log(cssDot(id));
-  console.log("\n" + workerPan + "\n" + workerRoads + "\n" + workerDots);
+  console.log("\n" + workerPan + "\n" + workerRoads + "\n" + workerDots + "\n" + workerMix);
   let lurch = 0;
   for (let u = 0; u < RING_LEN; u += 0.001) lurch = Math.max(lurch, ring(u) * STRIDE);
   console.error(
@@ -312,5 +344,6 @@ for (const id of Object.keys(DOTS)) {
 swap("          var PAN = [", "];", workerPan);
 swap("          var ROADS = {", "\n          };", workerRoads);
 swap("          var DOTS = {", "\n          };", workerDots);
+swap("          var MIX = {", "\n          };", workerMix);
 writeFileSync(TARGET, html);
 console.log("boot-splash ramp: patched index.html");

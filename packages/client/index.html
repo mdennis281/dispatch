@@ -140,12 +140,23 @@
         set("--c-s1", segment1);
         set("--c-s2", segment2);
         set("--c-s3", segment3);
-        // A is the dot the opening fork grows OUT of, so it wears the colour of
-        // the segment before this one — which does not exist yet on the first
-        // cycle, so it opens on the brand yellow with everything else.
+        /*
+          * BOTH ENDS OF A ROAD WEAR THAT ROAD, so a held pose is one colour.
+          *
+          * Which means the dot two roads SHARE cannot have one colour, and the
+          * `2` suffix is the second one: B is segment one's while segment one is
+          * up and segment two's by the time segment two is all that is left, and
+          * it crossfades between them across the exchange that hands it over. C
+          * does the same one stride later. See the dot keyframes.
+          *
+          * The opening cycle has no segment before it, so A, B and segment one
+          * all start on the brand yellow together.
+          */
         set("--c-a", segment1);
         set("--c-b", segment1);
+        set("--c-b2", segment2);
         set("--c-c", segment2);
+        set("--c-c2", segment3);
         set("--c-d", segment3);
         /*
          * The colour the EXIT's ball wears — "whatever it last was".
@@ -190,7 +201,14 @@
          * the recolour happens in front of you. Against the 2400ms schedule in
          * the stylesheet, the dark windows are: segment one 1045-2400, segment
          * two 0-552 (and again 2245-2400), segment three 0-1752, dot A 672-2400,
-         * dot B 1872-2400, dot C 0-852, dot D 0-2052.
+         * dot D 0-2052 — and, for the two dots that change hands, one window per
+         * COLOUR rather than per dot: --c-b 1045-2400, --c-b2 1872-552 across the
+         * seam, --c-c 2245-852 across the seam, --c-c2 0-1752.
+         *
+         * THAT SPLIT IS WHY THE CROSSFADE COSTS NOTHING. B is lit from 0% to 78%
+         * and on the old accounting that left one 528ms window for its single
+         * colour; split in two, each half has its own and the tightest of them is
+         * wider than what dot B used to get.
          *
          * SEGMENT TWO IS THE TIGHT ONE, AND IT SETS THE PERIOD. Because the
          * exchange eats one segment while laying down the next, two are lit at
@@ -227,30 +245,35 @@
           },
           // Segment two, dyed inside the first hold — the ONE stretch of the
           // cycle where it is off screen, which is why that hold is as long as
-          // it is. C goes with it: C is the dot segment two lands on, so it
-          // wears the same colour, and its own window is far wider.
+          // it is. Both of its ends go with it: C is the dot it lands on, and
+          // `--c-b2` is what B crossfades INTO as it draws out of B. B is still
+          // showing `--c-b` here and does not touch this until 23%.
           {
             at: 40,
             fn: function () {
               segment2 = next();
               set("--c-s2", segment2);
+              set("--c-b2", segment2);
               set("--c-c", segment2);
             },
           },
           // Segment three does not start drawing until 73%, so it has most of
-          // the cycle to be dyed in. D is the dot it lands on.
+          // the cycle to be dyed in. D is the dot it lands on and `--c-c2` is
+          // what C crossfades into as it draws out of C — the same pair, one
+          // stride along.
           {
             at: 600,
             fn: function () {
               segment3 = next();
               set("--c-s3", segment3);
+              set("--c-c2", segment3);
               set("--c-d", segment3);
             },
           },
-          // The merge is complete at 43.5%, so from here the newest road on
-          // screen is segment two's.
+          // The merge is complete at 43.5% — 1044ms — so from here the newest
+          // road on screen is segment two's, and so is every dot on it.
           {
-            at: 1240,
+            at: 1080,
             fn: function () {
               set("--c-ball", segment2);
             },
@@ -260,26 +283,22 @@
            *
            * At 100% segment three is complete with C and D lit, and at 0% that
            * same picture is segment one with A and B lit. So the next cycle's
-           * segment one has to BE this cycle's segment three, and the next
-           * cycle's A has to be this cycle's C — which is segment two's colour.
-           * Both are set here, at 60%, because segment one has been off screen
-           * since 43.5% and A since 28%.
+           * segment one has to BE this cycle's segment three — and since a road
+           * now dyes BOTH of its ends, so do A and B, which is all three in one
+           * assignment rather than the three different colours this used to take.
+           *
+           * At 60%, because everything it touches has been off screen for a
+           * while: segment one since 43.5%, A since 28%, and `--c-b` since 43.5%
+           * as well — B is still lit past here, but it has been wearing
+           * `--c-b2` since the crossfade finished.
            */
           {
             at: 1440,
             fn: function () {
               segment1 = segment3;
               set("--c-s1", segment1);
-              set("--c-a", segment2);
-            },
-          },
-          // B is the last to go dark (78%), so it is dyed last. It becomes the
-          // dot the next cycle's segment one has landed on, which is segment
-          // three's colour — the same one segment one just took.
-          {
-            at: 1880,
-            fn: function () {
-              set("--c-b", segment3);
+              set("--c-a", segment1);
+              set("--c-b", segment1);
             },
           },
         ];
@@ -1064,12 +1083,21 @@
         animation-duration: var(--boot-beat);
         animation-iteration-count: infinite;
       }
-      /* A dot is dyed by the road that LANDED on it, which is why these are
-         three slots and not one: B wears the segment that drew into it while C
-         already wears the next, and that is the whole point — after the opening
-         mark, one of the three dots on screen never matches the other two. A is
-         the odd one, wearing the previous cycle's segment two, because at the
-         seam it IS the dot C of the cycle before. */
+      /* A DOT IS DYED BY THE ROAD IT IS AN END OF — both ends, so a held pose is
+         a single colour and the mark reads as one object rather than a graph of
+         differently-coloured parts. It used to be the other way round: a dot
+         kept the colour of the road that LANDED on it, so one of the three on
+         screen never matched the other two.
+
+         The cost is that the dot two roads SHARE cannot have one colour. B is
+         segment one's while segment one is up and segment two's once segment two
+         is all that is left, and the handover happens in the open — see the
+         keyframes below, which crossfade it to `--c-b2` across the exchange that
+         does the handing over. C does the same one stride later. A and D are
+         only ever one road's end and need one slot each.
+
+         These stay as the fallback each animation starts from, and are all a
+         blocked colour script or reduced motion ever sees. */
       .boot-splash__dot--a { fill: var(--c-a, var(--boot-amber)); animation-name: boot-splash-dot-a; }
       .boot-splash__dot--b { fill: var(--c-b, var(--boot-amber)); animation-name: boot-splash-dot-b; }
       .boot-splash__dot--c { fill: var(--c-c, var(--boot-amber)); animation-name: boot-splash-dot-c; }
@@ -1099,7 +1127,15 @@
          should not draw the eye back to ink that has already gone.
 
          AND AT THE SEAM, C BECOMES A AND D BECOMES B. Both pairs must be at full
-         opacity on both sides of it or the wrap shows. */
+         opacity on both sides of it or the wrap shows — and at the same COLOUR,
+         which is why C's crossfade has to be finished by then: what A wears at
+         0% is what C finished exchange two wearing.
+
+         THE CROSSFADE IS THE ONE PLACE A COLOUR CHANGES IN FRONT OF YOU, and the
+         whole rotation is otherwise built to prevent that. It is not an exception
+         so much as the reason the rest works: there is exactly one road up at a
+         hold and both its ends wear it, so the shared dot has to change hands
+         somewhere, and the only honest place is the slide that hands it over. */
       @keyframes boot-splash-dot-a {
         0% { opacity: 1; }
         23% { opacity: 1; animation-timing-function: cubic-bezier(0.42, 0, 0.58, 1); }
@@ -1107,16 +1143,20 @@
         100% { opacity: 0; }
       }
       @keyframes boot-splash-dot-b {
-        0% { opacity: 1; }
+        0% { opacity: 1; fill: var(--c-b); }
+        23% { fill: var(--c-b); animation-timing-function: cubic-bezier(0.42, 0, 0.58, 1); }
+        43.52% { fill: var(--c-b2); }
         73% { opacity: 1; animation-timing-function: cubic-bezier(0.42, 0, 0.58, 1); }
         78% { opacity: 0; }
-        100% { opacity: 0; }
+        100% { opacity: 0; fill: var(--c-b2); }
       }
       @keyframes boot-splash-dot-c {
-        0% { opacity: 0; }
+        0% { opacity: 0; fill: var(--c-c); }
         35.52% { opacity: 0; animation-timing-function: cubic-bezier(0.42, 0, 0.58, 1); }
         43.52% { opacity: 1; }
-        100% { opacity: 1; }
+        73% { fill: var(--c-c); animation-timing-function: cubic-bezier(0.42, 0, 0.58, 1); }
+        93.52% { fill: var(--c-c2); }
+        100% { opacity: 1; fill: var(--c-c2); }
       }
       @keyframes boot-splash-dot-d {
         0% { opacity: 0; }
@@ -1518,6 +1558,24 @@
             c: [[0, [0]], [35.52, [0], EASE], [43.52, [1]], [100, [1]]],
             d: [[0, [0]], [85.52, [0], EASE], [93.52, [1]], [100, [1]]],
           };
+          /* How far each shared anchor is through changing hands: 0 is the
+             colour it arrived wearing, 1 the one it leaves wearing. The two dots
+             that are only ever one road's end are not in here. */
+          var MIX = {
+            b: [[0, [0]], [23, [0], EASE], [43.52, [1]], [100, [1]]],
+            c: [[0, [0]], [73, [0], EASE], [93.52, [1]], [100, [1]]],
+          };
+          /* sRGB, componentwise, which is what CSS does for `fill` by default —
+             so the canvas and the stylesheet are the same colour mid-crossfade
+             and not merely the same at both ends. The palette is six hex
+             literals (see PALETTES), so there is nothing else to parse. */
+          function mix(from, to, t) {
+            var a = parseInt(from.slice(1), 16), b = parseInt(to.slice(1), 16);
+            var r = ((a >> 16) & 255) + (((b >> 16) & 255) - ((a >> 16) & 255)) * t;
+            var g = ((a >> 8) & 255) + (((b >> 8) & 255) - ((a >> 8) & 255)) * t;
+            var l = (a & 255) + ((b & 255) - (a & 255)) * t;
+            return "rgb(" + (r | 0) + "," + (g | 0) + "," + (l | 0) + ")";
+          }
           /* The exit's mold, as a percentage of its own 400ms, and SPLIT IN TWO
              because CSS interpolates a property across the keyframes that
              declare IT — not across every keyframe. The 55% stop names only
@@ -1578,7 +1636,10 @@
               sample(DOTS[dot.id], p, tmp);
               if (tmp[0] <= 0.001) continue;
               ctx.globalAlpha = alpha * tmp[0];
-              ctx.fillStyle = colours["--c-" + dot.id] || cfg.amber;
+              var from = colours["--c-" + dot.id] || cfg.amber;
+              var to = colours["--c-" + dot.id + "2"];
+              var m = MIX[dot.id] ? sample(MIX[dot.id], p, tmp2)[0] : 0;
+              ctx.fillStyle = !to || m <= 0 ? from : m >= 1 ? to : mix(from, to, m);
               ctx.beginPath();
               ctx.arc(dot.cx, dot.cy, dot.r, 0, Math.PI * 2);
               ctx.fill();
