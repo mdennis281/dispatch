@@ -41,10 +41,19 @@ function keyframes(name: string): Array<[number, string]> {
   return out.sort((a, b) => a[0] - b[0]);
 }
 
-/** These are JS literals, not JSON: they are written over several lines with a
- *  trailing comma, which `JSON.parse` refuses. */
+/**
+ * These are JS literals, not JSON: they carry a bare identifier for the easing
+ * and are written over several lines with a trailing comma, both of which
+ * `JSON.parse` refuses.
+ *
+ * ANY SHOUTING IDENTIFIER, not a list of the ones in use today. The list was
+ * `LINEAR|SPRING|SINK|LEAVE`, and renaming an easing turned four real
+ * comparisons into four parse errors — which at least failed loudly, but failed
+ * for the wrong reason and would have been just as easy to "fix" by deleting
+ * the tests.
+ */
 const asJson = (literal: string): string =>
-  literal.replace(/\b(LINEAR|SPRING|SINK|LEAVE)\b/g, '"$1"').replace(/,(\s*[\]}])/g, "$1");
+  literal.replace(/\b([A-Z][A-Z_]+)\b/g, '"$1"').replace(/,(\s*[\]}])/g, "$1");
 
 const num = (body: string, prop: string): number | null => {
   const m = new RegExp(`${prop}:\\s*(-?[\\d.]+)`).exec(body);
@@ -120,12 +129,12 @@ describe("the canvas renderer draws the same schedule as the stylesheet", () => 
     });
   }
 
-  // [opacity, scale] — the dots carry all the punctuation in the loop, so a
-  // drift here is the one that would actually be visible.
+  // Opacity, and nothing else: the dots fade rather than springing, so there is
+  // no scale to compare. A drift here is the one that would actually be visible.
   for (const id of ["a", "b", "c", "d"]) {
-    it(`pops dot ${id} through the same stops`, () => {
+    it(`fades dot ${id} through the same stops`, () => {
       const css = keyframes(`boot-splash-dot-${id}`).map(
-        ([p, body]) => [p, [num(body, "opacity") ?? 0, fn(body, "transform", "scale") ?? 0]] as [number, number[]],
+        ([p, body]) => [p, [num(body, "opacity") ?? 0]] as [number, number[]],
       );
       bothParsed(dotTrack(id), css);
       expect(dotTrack(id)).toEqual(css);
