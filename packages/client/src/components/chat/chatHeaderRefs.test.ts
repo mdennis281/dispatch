@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Chat, PRInfo, WorktreeInfo } from "@dispatch/shared";
-import { branchFromPath, chatPrRefs, chatWorktreeRefs } from "./chatHeaderRefs.js";
+import { branchFromPath, chatPrRefs, chatWorktreeRefs, rosterRows } from "./chatHeaderRefs.js";
 
 const chat = (over: Partial<Chat> = {}): Chat =>
   ({
@@ -143,5 +143,45 @@ describe("chatPrRefs", () => {
     });
     const refs = chatPrRefs(c, [pr(9, { title: "tracked" }), pr(8, { title: "theirs" })]);
     expect(refs.map((p) => p.title)).toEqual(["tracked", "mine"]);
+  });
+});
+
+describe("rosterRows", () => {
+  const ref = (branch: string, path = `/w/${branch}`) => ({
+    branch,
+    path,
+    live: true,
+    merged: false,
+  });
+  const prRef = (number: number, branch: string) => ({ number, url: `u${number}`, branch });
+
+  it("hangs a PR off the worktree it was cut from", () => {
+    const { rows, orphans } = rosterRows(
+      [ref("feat/a"), ref("feat/b")],
+      [prRef(2, "feat/b"), prRef(1, "feat/a")],
+    );
+    expect(rows.map((r) => r.prs.map((p) => p.number))).toEqual([[1], [2]]);
+    expect(orphans).toEqual([]);
+  });
+
+  it("keeps a PR whose branch has no worktree row", () => {
+    const { rows, orphans } = rosterRows([ref("feat/a")], [prRef(1, "feat/gone")]);
+    expect(rows[0]?.prs).toEqual([]);
+    expect(orphans.map((p) => p.number)).toEqual([1]);
+  });
+
+  // Two worktrees CAN sit on one branch; listing the PR under both would be the
+  // same double-count the header's "+1" used to have.
+  it("attaches to the first worktree on a shared branch only", () => {
+    const { rows } = rosterRows(
+      [ref("feat/a", "/w/one"), ref("feat/a", "/w/two")],
+      [prRef(1, "feat/a")],
+    );
+    expect(rows.map((r) => r.prs.length)).toEqual([1, 0]);
+  });
+
+  it("keeps every PR on one branch in the order it was given", () => {
+    const { rows } = rosterRows([ref("feat/a")], [prRef(9, "feat/a"), prRef(4, "feat/a")]);
+    expect(rows[0]?.prs.map((p) => p.number)).toEqual([9, 4]);
   });
 });
