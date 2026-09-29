@@ -79,8 +79,26 @@ function parseQuestions(input: Record<string, unknown>): ParsedQuestion[] {
 }
 
 interface GivenAnswer {
-  value: string;
+  /** One entry per pick — a pick-one question always has exactly one. */
+  values: string[];
   notes?: string;
+}
+
+/**
+ * Split a multi-select answer back into the picks it was joined from.
+ *
+ * The answer reaches us as the `", "`-joined string the model was given, so a
+ * three-pick answer would otherwise render as one line whose commas are
+ * indistinguishable from commas INSIDE a label. Only split when every fragment
+ * is a label this question actually offered: that leaves a custom answer (which
+ * may contain any punctuation, and isn't in the option list) whole rather than
+ * shredding it at its commas.
+ */
+function splitPicks(q: ParsedQuestion, value: string): string[] {
+  if (!q.multiSelect) return [value];
+  const parts = value.split(", ");
+  const labels = new Set(q.options.map((o) => o.label));
+  return parts.length > 1 && parts.every((p) => labels.has(p)) ? parts : [value];
 }
 
 /**
@@ -110,9 +128,9 @@ function parseGiven(input: Record<string, unknown>, questions: ParsedQuestion[])
     if (!text) return null;
     const cut = text.indexOf(QUESTION_NOTES_SEPARATOR);
     return cut < 0
-      ? { value: text }
+      ? { values: splitPicks(q, text) }
       : {
-          value: text.slice(0, cut),
+          values: splitPicks(q, text.slice(0, cut)),
           notes: text.slice(cut + QUESTION_NOTES_SEPARATOR.length).trim() || undefined,
         };
   });
@@ -492,7 +510,7 @@ export function QuestionCard({ row }: QuestionCardProps) {
   const shownAnswers: (GivenAnswer | null)[] = corrected
     ? questions.map((_, qi) => {
         const v = valueFor(qi);
-        return v?.answer ? { value: v.answer, notes: v.notes } : null;
+        return v?.answer ? { values: splitPicks(questions[qi]!, v.answer), notes: v.notes } : null;
       })
     : pending || declined
       ? questions.map(() => null)
@@ -599,21 +617,26 @@ export function QuestionCard({ row }: QuestionCardProps) {
                   same marker, same indent — so a resolved card reads as the
                   live one with everything but the choice taken away. */}
               {shownAnswers[qi] && (
-                <div className="border-t border-line-soft bg-inset/60 px-3 py-2.5">
-                  <div className="flex items-start gap-2">
-                    <Marker checked multi={questions[qi]!.multiSelect} />
-                    <div className="min-w-0 flex-1">
-                      <p className="whitespace-pre-wrap break-words text-sm font-medium text-primary">
-                        {shownAnswers[qi]!.value}
+                <div className="flex flex-col gap-1.5 border-t border-line-soft bg-inset/60 px-3 py-2.5">
+                  {/* One row per pick, so three choices read as three answers
+                      rather than as one line whose commas could equally be
+                      inside a single label. */}
+                  {shownAnswers[qi]!.values.map((v, vi) => (
+                    <div key={vi} className="flex items-start gap-2">
+                      <Marker checked multi={q.multiSelect} />
+                      <p className="min-w-0 flex-1 whitespace-pre-wrap break-words text-sm font-medium text-primary">
+                        {v}
                       </p>
-                      {shownAnswers[qi]!.notes && (
-                        <p className="mt-1 whitespace-pre-wrap break-words text-xs text-muted">
-                          <span className="text-secondary">Also: </span>
-                          {shownAnswers[qi]!.notes}
-                        </p>
-                      )}
                     </div>
-                  </div>
+                  ))}
+                  {shownAnswers[qi]!.notes && (
+                    // Notes qualify the whole answer, not one pick — so they sit
+                    // under the set, aligned with the labels rather than a marker.
+                    <p className="ml-6 whitespace-pre-wrap break-words text-xs text-muted">
+                      <span className="text-secondary">Also: </span>
+                      {shownAnswers[qi]!.notes}
+                    </p>
+                  )}
                 </div>
               )}
 
