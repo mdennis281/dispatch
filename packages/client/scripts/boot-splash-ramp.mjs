@@ -75,8 +75,23 @@ const STRIDE = 40;
 const N_DRAW = 20;
 /** Recoil sample step, in units of g — ~36ms, two frames. */
 const RING_STEP = 0.055;
-/** Arrivals fade over this much of the cycle, departures over 5%. */
-const FADE_IN = 8, FADE_OUT = 5;
+/**
+ * WHEN AN ARRIVING DOT STARTS TO APPEAR, as a fraction of the head's stride
+ * rather than a fixed slice of the cycle.
+ *
+ * It used to be a flat 8% of the cycle before the ink landed, which sounds like
+ * a duration and behaves like a distance: 8% back from the end of a draw this
+ * fast is the head still SEVEN STROKE-WIDTHS short of the anchor, so the dot lit
+ * up in empty space and the road caught up with it. Pinning it to the head's
+ * position instead says the thing that was actually meant — the dot resolves as
+ * the stroke reaches it — and it stays true if the velocity profile is retuned.
+ *
+ * 0.82 leaves about seven view-box units to cover, which at top speed is about
+ * 60ms: enough to be a fade rather than a switch, not enough to be a promise.
+ */
+const FADE_AT = 0.82;
+/** Departures are a plain slice — nothing is arriving to be early for. */
+const FADE_OUT = 5;
 
 const clamp = (v) => Math.max(0, Math.min(1, v));
 const r2 = (v) => +v.toFixed(2);
@@ -115,6 +130,17 @@ const drive = (g) => drawn(clamp(g / DRAW_END));
 /** Where in the cycle each exchange's ink finishes. */
 const E1_DONE = r2(HOLD + DRAW_END * EXCH);
 const E2_DONE = r2(HOLD + 50 + DRAW_END * EXCH);
+
+/** Where in the cycle the head of an exchange starting at `start` is FADE_AT along. */
+function fadeFrom(start) {
+  let lo = 0, hi = DRAW_END;
+  for (let i = 0; i < 60; i++) {
+    const mid = (lo + hi) / 2;
+    if (drive(mid) < FADE_AT) lo = mid;
+    else hi = mid;
+  }
+  return r2(start + lo * EXCH);
+}
 
 /** A part's progress from the exchange's, given where it sits in the x-span. */
 const part = (G, from, to) => clamp((G - from) / (to - from));
@@ -243,10 +269,10 @@ const DOTS = {
     mix: [[0, 0], [HOLD, 0], [E1_DONE, 1], [100, 1]],
   },
   c: {
-    op: [[0, 0], [r2(E1_DONE - FADE_IN), 0], [E1_DONE, 1], [100, 1]],
+    op: [[0, 0], [fadeFrom(HOLD), 0], [E1_DONE, 1], [100, 1]],
     mix: [[0, 0], [HOLD + 50, 0], [E2_DONE, 1], [100, 1]],
   },
-  d: { op: [[0, 0], [r2(E2_DONE - FADE_IN), 0], [E2_DONE, 1], [100, 1]] },
+  d: { op: [[0, 0], [fadeFrom(HOLD + 50), 0], [E2_DONE, 1], [100, 1]] },
 };
 /** The interval LEAVING each track's second stop is its fade, and only that one. */
 const FADING = 1;

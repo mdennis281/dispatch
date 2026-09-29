@@ -201,9 +201,9 @@
          * the recolour happens in front of you. Against the 2400ms schedule in
          * the stylesheet, the dark windows are: segment one 1045-2400, segment
          * two 0-552 (and again 2245-2400), segment three 0-1752, dot A 672-2400,
-         * dot D 0-2052 — and, for the two dots that change hands, one window per
+         * dot D 0-2177 — and, for the two dots that change hands, one window per
          * COLOUR rather than per dot: --c-b 1045-2400, --c-b2 1872-552 across the
-         * seam, --c-c 2245-852 across the seam, --c-c2 0-1752.
+         * seam, --c-c 2245-977 across the seam, --c-c2 0-1752.
          *
          * THAT SPLIT IS WHY THE CROSSFADE COSTS NOTHING. B is lit from 0% to 78%
          * and on the old accounting that left one 528ms window for its single
@@ -1122,9 +1122,15 @@
          scripts/boot-splash-ramp.mjs alongside the roads rather than typed here
          and left behind the next time that shape is retuned.
 
-         ARRIVALS FADE OVER 8% AND DEPARTURES OVER 5%. Longer coming than going,
-         because an arrival is the thing you are meant to notice and a departure
-         should not draw the eye back to ink that has already gone.
+         AN ARRIVAL IS TIMED BY WHERE THE HEAD IS, NOT BY HOW LONG IT HAS LEFT.
+         It used to start a flat 8% of the cycle before the ink landed, which
+         sounds like a duration and behaves like a distance: at this speed that
+         put the dot on screen while the stroke coming to meet it was still a
+         half-stride away, lit in empty space and waited for. It now begins when
+         the head is 82% of the way, about seven units short — roughly 60ms, so
+         still a fade rather than a switch, but one that resolves as the stroke
+         reaches it. A DEPARTURE is a plain 5%: nothing is arriving to be early
+         for, and it should not draw the eye back to ink that has already gone.
 
          AND AT THE SEAM, C BECOMES A AND D BECOMES B. Both pairs must be at full
          opacity on both sides of it or the wrap shows — and at the same COLOUR,
@@ -1152,7 +1158,7 @@
       }
       @keyframes boot-splash-dot-c {
         0% { opacity: 0; fill: var(--c-c); }
-        35.52% { opacity: 0; animation-timing-function: cubic-bezier(0.42, 0, 0.58, 1); }
+        40.71% { opacity: 0; animation-timing-function: cubic-bezier(0.42, 0, 0.58, 1); }
         43.52% { opacity: 1; }
         73% { fill: var(--c-c); animation-timing-function: cubic-bezier(0.42, 0, 0.58, 1); }
         93.52% { fill: var(--c-c2); }
@@ -1160,7 +1166,7 @@
       }
       @keyframes boot-splash-dot-d {
         0% { opacity: 0; }
-        85.52% { opacity: 0; animation-timing-function: cubic-bezier(0.42, 0, 0.58, 1); }
+        90.71% { opacity: 0; animation-timing-function: cubic-bezier(0.42, 0, 0.58, 1); }
         93.52% { opacity: 1; }
         100% { opacity: 1; }
       }
@@ -1555,8 +1561,8 @@
           var DOTS = {
             a: [[0, [1]], [23, [1], EASE], [28, [0]], [100, [0]]],
             b: [[0, [1]], [73, [1], EASE], [78, [0]], [100, [0]]],
-            c: [[0, [0]], [35.52, [0], EASE], [43.52, [1]], [100, [1]]],
-            d: [[0, [0]], [85.52, [0], EASE], [93.52, [1]], [100, [1]]],
+            c: [[0, [0]], [40.71, [0], EASE], [43.52, [1]], [100, [1]]],
+            d: [[0, [0]], [90.71, [0], EASE], [93.52, [1]], [100, [1]]],
           };
           /* How far each shared anchor is through changing hands: 0 is the
              colour it arrived wearing, 1 the one it leaves wearing. The two dots
