@@ -96,8 +96,13 @@ interface GivenAnswer {
  */
 function splitPicks(q: ParsedQuestion, value: string): string[] {
   if (!q.multiSelect) return [value];
-  const parts = value.split(", ");
   const labels = new Set(q.options.map((o) => o.label));
+  // An option whose own label contains ", " wins over splitting it. With options
+  // `A`, `B` and `A, B`, picking only the third produces the same string as
+  // picking the first two, and nothing in it can tell them apart — so prefer the
+  // reading where a real option was chosen whole over one that invents two.
+  if (labels.has(value)) return [value];
+  const parts = value.split(", ");
   return parts.length > 1 && parts.every((p) => labels.has(p)) ? parts : [value];
 }
 
