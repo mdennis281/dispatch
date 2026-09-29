@@ -260,26 +260,39 @@ export function ConnectingScreen() {
         </p>
       )}
 
+      {/*
+        Only the buttons that can change the outcome. When `retry` is false the
+        socket is not the problem — a stale bundle reconnects perfectly and keeps
+        dropping frames — so "Retry now" would be a button whose only effect is
+        to make the screen look like it did something. The reload takes primary.
+      */}
       <div className="mt-4 flex items-center gap-2">
-        <Button
-          variant="primary"
-          leftIcon={<RotateCw />}
-          onClick={() => ws.retryNow()}
-        >
-          Retry now
-        </Button>
-        {(diagnosis.action === "reload" || diagnosis.action === "sign-in") && (
-          <Button onClick={() => location.reload()}>
+        {diagnosis.retry && (
+          <Button variant="primary" leftIcon={<RotateCw />} onClick={() => ws.retryNow()}>
+            Retry now
+          </Button>
+        )}
+        {diagnosis.action && (
+          <Button
+            variant={diagnosis.retry ? "default" : "primary"}
+            leftIcon={!diagnosis.retry && diagnosis.action === "reload" ? <RotateCw /> : undefined}
+            onClick={() => location.reload()}
+          >
             {diagnosis.action === "sign-in" ? "Go to sign in" : "Reload"}
           </Button>
         )}
       </div>
 
-      <p className="mt-3.5 text-xs text-faint">
-        {attempts > 0 ? `Attempt ${attempts}` : "Not yet attempted"}
-        {countdown !== null && ` · retrying in ${countdown}s`}
-        {countdown === null && state !== "closed" && " · trying now"}
-      </p>
+      {/* The attempt counter narrates the retry loop. With no retry to narrate
+          it reads as "Not yet attempted · trying now" under a screen that is not
+          trying anything, which is worse than saying nothing. */}
+      {diagnosis.retry && (
+        <p className="mt-3.5 text-xs text-faint">
+          {attempts > 0 ? `Attempt ${attempts}` : "Not yet attempted"}
+          {countdown !== null && ` · retrying in ${countdown}s`}
+          {countdown === null && state !== "closed" && " · trying now"}
+        </p>
+      )}
     </div>
   );
 }

@@ -104,6 +104,8 @@ describe("diagnose — network", () => {
     // wifi" over a process that isn't running is the wrong instruction.
     const d = diagnose(input({ online: false, reach: "loopback", probe: { kind: "unreachable", at: 0 } }));
     expect(d.headline).toBe("Dispatch isn't running");
+    // A server that isn't up yet is exactly what a retry is for.
+    expect(d.retry).toBe(true);
     expect(check(d.checks, "network").state).toBe("skip");
   });
 });
@@ -187,12 +189,14 @@ describe("diagnose — socket", () => {
     );
     expect(d.headline).toBe("Session no longer valid");
     expect(d.action).toBe("sign-in");
+    expect(d.retry).toBe(false);
   });
 
   it("uses the auth probe when the close code cannot say (the 401 the browser hides)", () => {
     const d = diagnose(input({ probe: { kind: "ok", status: 200, needsLogin: true, at: 0 } }));
     expect(d.headline).toBe("Sign in again");
     expect(d.action).toBe("sign-in");
+    expect(d.retry).toBe(false);
   });
 
   it("reports an open socket that never handshook", () => {
@@ -211,6 +215,8 @@ describe("diagnose — protocol", () => {
     expect(d.detail).toContain("2026.08.20.00001");
     expect(d.detail).toContain("2026.08.21.00002");
     expect(d.action).toBe("reload");
+    // Reconnecting hands the same bundle the same protocol — only a reload moves.
+    expect(d.retry).toBe(false);
     expect(check(d.checks, "protocol").state).toBe("fail");
   });
 
@@ -234,6 +240,7 @@ describe("diagnose — protocol", () => {
     expect(over.headline).toContain("protocol this build doesn't know");
     expect(over.detail).toContain("chat-status");
     expect(over.action).toBe("reload");
+    expect(over.retry).toBe(false);
   });
 });
 
