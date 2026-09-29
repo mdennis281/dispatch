@@ -156,7 +156,11 @@ export function applyServerEvent(evt: WsServerEvent): void {
     case "chat-status":
       useChats
         .getState()
-        .setStatus(evt.chatId, evt.status, evt.activity, evt.queued, evt.prSettled);
+        .setStatus(evt.chatId, evt.status, evt.activity, {
+          queued: evt.queued,
+          pending: evt.pending,
+          prSettled: evt.prSettled,
+        });
       // Not every status is the chat doing something — `broker.stop()` settles a
       // session to `done`/`idle` on behalf of the Power button and the idle
       // sweep, and bumping on those reset the row's age to "now" for something

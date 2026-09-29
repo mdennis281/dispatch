@@ -83,6 +83,7 @@ import type {
   HarnessKind,
   Effort,
   ShellTranscriptFilter,
+  SendMode,
   FsEntry,
   FsListing,
   FsDetails,
@@ -198,6 +199,15 @@ export interface AppSettings {
   spawnChat?: {
     autoApprove?: boolean;
   };
+  /**
+   * What the composer's Send does to a turn already running — the app default
+   * behind Ctrl/⌘↵ and the button. Unset = `DEFAULT_SEND_MODE` ("steer").
+   *
+   * Written through `api.settings.setSendMode`, NOT through a settings PUT: that
+   * endpoint is a full replace and the dropup holds one value, not a complete
+   * settings draft (same arrangement as `mcpEnabled` above).
+   */
+  defaultSendMode?: SendMode;
   /**
    * Automatic worktree cleanup. ON when unset, unlike `spawnChat` above: the
    * reaper only removes a tree whose branch has merged, which is clean, fully
@@ -1294,6 +1304,15 @@ export const api = {
     update: (body: Partial<AppSettings>) => put<AppSettings>("/api/settings", body),
     /** What a CLEARED optional setting falls back to on THIS server. */
     defaults: () => get<AppSettingsDefaults>("/api/settings/defaults"),
+    /**
+     * Pin what Send does mid-turn; `null` clears back to "steer".
+     *
+     * Its own endpoint because the caller — the dropup beside Send — holds this
+     * one value and nothing else. Routed through `update` above it would send a
+     * one-field body to a full-replace PUT and wipe every other setting.
+     */
+    setSendMode: (mode: SendMode | null) =>
+      put<AppSettings>("/api/settings/send-mode", { mode }),
   },
 
   /**

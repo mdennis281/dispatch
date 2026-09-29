@@ -76,6 +76,15 @@ import { Spinner } from "../ui/Spinner.js";
 import { Popover, MenuItem } from "../ui/Popover.js";
 import { cn } from "../../lib/cn.js";
 import { composerPlaceholder } from "../../lib/submitHint.js";
+import {
+  DEFAULT_SEND_MODE,
+  SEND_MODE_LABEL,
+  sendModeFromKey,
+  sendModeKeyHint,
+  type SendMode,
+} from "../../lib/sendMode.js";
+import { SendModeMenu, SEND_MODE_ICON } from "./SendModeMenu.js";
+import { useSettings } from "../../stores/settings.js";
 import { useChats } from "../../stores/chats.js";
 import { useModels } from "../../stores/models.js";
 import { useHarnesses } from "../../stores/harnesses.js";
@@ -314,6 +323,16 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   // Queued/steering count is server truth (chat-status.queued): it clears the
   // instant the agent consumes the message, not only when the whole turn ends.
   const queued = useChats((s) => s.queued[chat.id] ?? 0);
+  // Sends deliberately WITHHELD until this turn ends (a Queue, or the fresh-turn
+  // half of an Interrupt). Server truth for the same reason `queued` is, and a
+  // separate number because it means the opposite thing: the agent cannot have
+  // seen these yet.
+  const pending = useChats((s) => s.pending[chat.id] ?? 0);
+  // What Ctrl/⌘↵ and the Send button DO to a turn in flight. App-wide, pinned
+  // from the dropup beside Send (there is no Settings row for it).
+  const appSendMode = useSettings((s) => s.app.defaultSendMode) ?? DEFAULT_SEND_MODE;
+  const applySettings = useSettings((s) => s.apply);
+  const pinDefaultSendMode = useSettings((s) => s.setDefaultSendMode);
   const [isEmpty, setIsEmpty] = useState(true);
   // Two scopes of drag state. `fileDrag` is the whole window — it lights the
   // composer up the moment a file crosses the app, so the user sees where to
@@ -417,7 +436,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   // Latest submit/upload closures, so the (once-configured) TipTap key/paste
   // handlers always call through to fresh state.
-  const submitRef = useRef<() => void>(() => {});
+  const submitRef = useRef<(mode?: SendMode) => void>(() => {});
   const addFilesRef = useRef<(files: File[]) => void>(() => {});
   // Drop handling (images → upload, everything else → a path), reached through a
   // ref for the same reason: TipTap's handler is configured once.
@@ -449,6 +468,13 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   );
 
   const running = chat.status === "running" || chat.status === "waiting";
+  // TipTap's `handleKeyDown` is configured ONCE, so the send-mode chords read
+  // both of their inputs through refs — the same arrangement as `submitRef` and
+  // the slash menu just above.
+  const runningRef = useRef(running);
+  runningRef.current = running;
+  const appSendModeRef = useRef(appSendMode);
+  appSendModeRef.current = appSendMode;
 
   const editor = useEditor({
     extensions: [
@@ -483,9 +509,16 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
           event.preventDefault();
           return true;
         }
-        if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+        // Which of the three mid-turn behaviours this chord asks for — or null,
+        // which is how bare ⇧↵ keeps inserting a newline on an idle chat. See
+        // lib/sendMode.
+        const mode = sendModeFromKey(event, {
+          running: runningRef.current,
+          appDefault: appSendModeRef.current,
+        });
+        if (mode) {
           event.preventDefault();
-          submitRef.current();
+          submitRef.current(mode);
           return true;
         }
         return false;
@@ -749,7 +782,17 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     setEditing(null);
   };
 
-  const submit = () => {
+  /**
+   * Send what's in the box.
+   *
+   * `mode` is which of the three mid-turn behaviours to use, defaulting to the
+   * app's pin — so the button, Ctrl/⌘↵ and a dropup row all arrive here and
+   * differ only in that argument. It is passed through unconditionally: the
+   * server ignores it unless a turn is actually live, which keeps the "is
+   * anything running" judgement in the one place that cannot be stale by the time
+   * the message lands.
+   */
+  const submit = (mode: SendMode = appSendMode) => {
     // Serialize with single-newline separators: paragraph breaks join with "\n"
     // (not the default "\n\n", which doubled every newline) and hard breaks — which
     // getText otherwise drops entirely — also become "\n".
@@ -759,25 +802,12 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
         .trim() ?? "";
     if ((!text && attachments.length === 0) || uploading > 0) return;
 
-    if (running) {
-      // Mid-run: a send steers the live turn. Steering carries text only, so a
-      // message with attachments goes as a queued send-message instead.
-      if (attachments.length > 0) {
-        actions.sendMessage(chat.id, {
-          text: text || undefined,
-          images: attachments,
-          priority: "next",
-        });
-      } else {
-        actions.steer(chat.id, text, "next");
-      }
-    } else {
-      actions.sendMessage(chat.id, {
-        text: text || undefined,
-        images: attachments.length ? attachments : undefined,
-        effort: chat.effort,
-      });
-    }
+    actions.sendMessage(chat.id, {
+      text: text || undefined,
+      images: attachments.length ? attachments : undefined,
+      effort: chat.effort,
+      sendMode: mode,
+    });
 
     // Sending ends the dictation that composed it — otherwise the tail of the
     // sentence you just sent lands at the top of the next message.
@@ -792,6 +822,28 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     setError(null);
   };
   submitRef.current = submit;
+
+  /**
+   * Pin what Ctrl/⌘↵ and the Send button do from now on.
+   *
+   * Applied to the local store BEFORE the request, off the response body, so the
+   * menu's check mark and the button's label move under the pointer instead of
+   * after a round trip. The endpoint returns the saved settings, so a rejected
+   * write is corrected by the same `apply` rather than left lying.
+   */
+  const pinSendMode = (mode: SendMode) => {
+    const was = appSendMode;
+    pinDefaultSendMode(mode);
+    api.settings
+      .setSendMode(mode)
+      // The endpoint returns the whole saved settings, so the authoritative body
+      // replaces the guess rather than sitting beside it.
+      .then((saved) => applySettings(saved))
+      .catch((err) => {
+        pinDefaultSendMode(was);
+        setError(err instanceof Error ? err.message : String(err));
+      });
+  };
 
   /* ------------------------------------------------------------ / commands */
 
@@ -1404,13 +1456,26 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   return (
     <div className="border-t border-line bg-surface/80 px-4 py-3">
       <div className="mx-auto w-full max-w-[860px]">
+      {/* Two different states, deliberately worded as such: a steered message is
+          already inside the running turn's input and may be read at any moment,
+          where a withheld one has not been handed over at all and cannot be seen
+          until the next turn starts. One chip for both would make the difference
+          between Steer and Queue invisible at exactly the moment it matters. */}
       {queued > 0 && (
         <div className="mb-2 flex items-center gap-2">
           <Chip tone="accent" icon={<Layers />}>
-            {queued} queued
+            {queued} steering
           </Chip>
           <span className="text-xs text-muted">
-            steering {queued === 1 ? "message" : "messages"} will inject after the current turn
+            {queued === 1 ? "message" : "messages"} will inject into the current turn
+          </span>
+        </div>
+      )}
+      {pending > 0 && (
+        <div className="mb-2 flex items-center gap-2">
+          <Chip icon={SEND_MODE_ICON.queue}>{pending} waiting</Chip>
+          <span className="text-xs text-muted">
+            {pending === 1 ? "message" : "messages"} will send when this turn finishes
           </span>
         </div>
       )}
@@ -1938,6 +2003,11 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
                 clicking Send used to no-op while ⌘↵ — which bypasses the button —
                 worked. `submit` reads the live editor text and self-guards, so the
                 click now always takes the exact same path as the shortcut. */}
+            {/* Mid-turn the button is no longer just "Send": it names which of
+                the three things it will do, because the default is settable and a
+                button that said Send while quietly interrupting would be a trap.
+                Idle it goes back to Send — none of the modes mean anything to a
+                chat with no turn to act on. */}
             <Button
               type="button"
               variant="primary"
@@ -1947,14 +2017,27 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
               // as a word was clipped off the right edge and the primary action
               // was unreachable on every phone.
               circle={phone}
-              rightIcon={running ? <Layers /> : <ArrowUp />}
-              onClick={submit}
+              rightIcon={running ? SEND_MODE_ICON[appSendMode] : <ArrowUp />}
+              onClick={() => submit()}
               aria-disabled={!canSend}
-              aria-label={phone ? (running ? "Queue" : "Send") : undefined}
+              title={
+                running
+                  ? `${SEND_MODE_LABEL[appSendMode]} — ${sendModeKeyHint(appSendMode)}`
+                  : undefined
+              }
+              aria-label={phone ? (running ? SEND_MODE_LABEL[appSendMode] : "Send") : undefined}
               className={cn(!canSend && "opacity-45")}
             >
-              {phone ? null : running ? "Queue" : "Send"}
+              {phone ? null : running ? SEND_MODE_LABEL[appSendMode] : "Send"}
             </Button>
+            {running && (
+              <SendModeMenu
+                appDefault={appSendMode}
+                onSend={submit}
+                onPinDefault={pinSendMode}
+                phone={phone}
+              />
+            )}
           </div>
         </div>
       </div>

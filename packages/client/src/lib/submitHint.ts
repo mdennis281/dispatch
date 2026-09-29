@@ -27,8 +27,12 @@ function isTouchPrimary(): boolean {
 /**
  * True on macOS and iPadOS. iPadOS reports a Mac platform, which is fine —
  * a coarse pointer has already excluded it before this is asked.
+ *
+ * Exported for `lib/sendMode`, which spells the same modifier in the send
+ * dropup's key hints. One reading of the platform, or the placeholder and the
+ * menu can name different keys on the same machine.
  */
-function isApple(): boolean {
+export function isApple(): boolean {
   if (typeof navigator === "undefined") return false;
   const platform =
     (navigator as Navigator & { userAgentData?: { platform?: string } })

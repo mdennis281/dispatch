@@ -152,6 +152,27 @@ export type AgentActivity = z.infer<typeof AgentActivitySchema>;
 export const MessageOriginSchema = z.enum(["human", "channel", "peer"]);
 export type MessageOrigin = z.infer<typeof MessageOriginSchema>;
 
+/**
+ * What a human's send should DO to a turn that is already running.
+ *
+ * Only meaningful mid-turn: an idle chat has nothing to steer, hold behind or
+ * cut off, so every mode starts the turn identically and the server ignores the
+ * field. Distinct from {@link MessageOrigin}'s peer `delivery` (chat-messenger),
+ * which has no `steer` — an agent's message must never derail a human's turn.
+ *
+ *   - `steer`     inject into the live turn, the agent sees it mid-thought.
+ *   - `queue`     withhold until the turn settles, then send as a fresh turn.
+ *   - `interrupt` stop the turn now, then send as a fresh turn.
+ *
+ * NOT the same axis as `MessagePriority` ("now"/"next"/"later"), which is handed
+ * straight to the SDK to order messages already inside a live input.
+ */
+export const SendModeSchema = z.enum(["steer", "queue", "interrupt"]);
+export type SendMode = z.infer<typeof SendModeSchema>;
+
+/** What a send does when the app has expressed no preference. */
+export const DEFAULT_SEND_MODE: SendMode = "steer";
+
 /** An image attached to / produced by a chat (paste/drop send, sprite receive). */
 export const ImageRefSchema = z.object({
   id: z.string(),

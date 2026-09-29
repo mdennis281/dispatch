@@ -269,6 +269,48 @@ describe("routes — server defaults", () => {
   });
 });
 
+describe("routes — composer send-mode default", () => {
+  beforeEach(async () => {
+    await boot(makeFakeQuery(() => [assistantText("hi"), resultMsg()]));
+  });
+
+  it("pins and clears the default through its own endpoint", async () => {
+    const pinned = await app.inject({
+      method: "PUT",
+      url: "/api/settings/send-mode",
+      payload: { mode: "queue" },
+    });
+    expect(pinned.statusCode).toBe(200);
+    expect((pinned.json() as { defaultSendMode?: string }).defaultSendMode).toBe("queue");
+
+    const cleared = await app.inject({
+      method: "PUT",
+      url: "/api/settings/send-mode",
+      payload: { mode: null },
+    });
+    expect((cleared.json() as { defaultSendMode?: string }).defaultSendMode).toBeUndefined();
+
+    const bad = await app.inject({
+      method: "PUT",
+      url: "/api/settings/send-mode",
+      payload: { mode: "yell" },
+    });
+    expect(bad.statusCode).toBe(400);
+  });
+
+  it("survives a full-replace settings PUT that has never heard of it", async () => {
+    // The hazard this test exists for: there is NO row for this in the Settings
+    // modal, so every PUT to /api/settings omits the field — and without the
+    // preserve, changing your theme would silently put your Send key back to
+    // steering. Same arrangement as `auth` and `updateChannel`.
+    await app.inject({ method: "PUT", url: "/api/settings/send-mode", payload: { mode: "interrupt" } });
+    await app.inject({ method: "PUT", url: "/api/settings", payload: { theme: "light" } });
+
+    const after = await app.inject({ method: "GET", url: "/api/settings" });
+    expect(after.json()).toMatchObject({ theme: "light", defaultSendMode: "interrupt" });
+  });
+});
+
 describe("routes — REST CRUD", () => {
   beforeEach(async () => {
     await boot(makeFakeQuery(() => [assistantText("hi"), resultMsg()]));

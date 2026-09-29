@@ -102,6 +102,7 @@ import {
   ShellTranscriptFilterSchema,
   McpEnabledMapSchema,
   ProjectConfigLocationSchema,
+  SendModeSchema,
 } from "@dispatch/shared";
 import {
   HarnessSettingsSchema,
@@ -274,6 +275,17 @@ export const AppSettingsSchema = z.object({
    * the first time; a project that already has one keeps it either way.
    */
   projectConfigLocation: ProjectConfigLocationSchema.optional(),
+  /**
+   * What the composer's Send does to a turn that is already running — the
+   * app-wide default behind Ctrl/⌘↵ and the button, overridden per-send by the
+   * dropup beside it. Unset reads as `DEFAULT_SEND_MODE` ("steer").
+   *
+   * Owned by `PUT /api/settings/send-mode` and PRESERVED by the full-replace
+   * `PUT /api/settings`, because the Settings modal does not carry the field: the
+   * dropup is the only UI for it, so a modal save would otherwise reset it every
+   * time someone changed their theme.
+   */
+  defaultSendMode: SendModeSchema.optional(),
   /**
    * Policy for `mcp__dispatch-chat__spawn_chat` — an agent starting ANOTHER chat.
    * `autoApprove` off (the default, and the reason this is opt-in rather than

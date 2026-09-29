@@ -83,6 +83,7 @@ import type {
   MessagePart,
   ImageRef,
   PeerSender,
+  SendMode,
   AgentConfig,
   ModeConfig,
   McpServerConfig,
@@ -1190,6 +1191,12 @@ export interface SessionBrokerOptions {
 export type MessagePriority = "now" | "next" | "later";
 
 /** Options for a single user/steering message. */
+/** A send parked by {@link SessionBroker.sendMessage} until the turn settles. */
+interface HeldSend {
+  text: string;
+  opts: SendOptions;
+}
+
 export interface SendOptions {
   priority?: MessagePriority;
   images?: ImageRef[];
@@ -1217,6 +1224,12 @@ export interface SendOptions {
    * a different one "declined".
    */
   keepPendingQuestions?: boolean;
+  /**
+   * What this send does to a turn already in flight — see {@link SendMode}.
+   * Absent (and every non-human caller) means `steer`, the only behaviour that
+   * existed before the field. Ignored unless a turn is actually live.
+   */
+  sendMode?: SendMode;
 }
 
 /** Host answer to a `permission-request`. */
@@ -1877,6 +1890,20 @@ interface LiveSession {
   runLoop?: Promise<void>;
   outbox: OutboxItem[];
   /**
+   * Human sends DELIBERATELY withheld until this turn settles — a
+   * `sendMode: "queue"`, or the second half of an `"interrupt"`.
+   *
+   * The request is parked, NOT the prepared message: a flush re-enters
+   * `sendMessage` with the mode dropped, so the user row, the memory block, the
+   * image resolution and the inherited posture are all computed against the turn
+   * the message actually joins rather than the one it was typed over.
+   *
+   * DURABILITY LIMIT, stated rather than discovered: these live only here and
+   * are LOST if the server restarts before the turn settles. Same limit the peer
+   * messenger's `held` map has, for the same reason.
+   */
+  pendingSends: HeldSend[];
+  /**
    * Who to tell when a STEERING message lands. The manager MCP's blocking
    * waits (`watch_pr`, `wait_for_chat`, …) register here so the message ends
    * the wait rather than sitting behind it — see `ManagerMcpContext.onSteer`.
@@ -2209,6 +2236,7 @@ export class SessionBroker {
         // and that is the design. See the field's docblock.
         exemptions: [],
         outbox: [],
+        pendingSends: [],
         steerListeners: new Set(),
         pendingPermissions: new Map(),
         writeChain: Promise.resolve(),
@@ -2262,6 +2290,31 @@ export class SessionBroker {
     opts: SendOptions | MessagePriority = {},
   ): Promise<void> {
     const session = this.mustGet(chatId);
+    // What a mid-turn send DOES, decided before anything is prepared. A parked
+    // message must not decline this turn's question cards, must not reset the PR
+    // dot and must not be composed against a posture the turn it eventually joins
+    // has moved on from — so the request is stashed and every line below is
+    // re-run at flush. See `LiveSession.pendingSends`.
+    const sendMode: SendMode = (typeof opts === "string" ? undefined : opts.sendMode) ?? "steer";
+    if (sendMode !== "steer" && this.isTurnLive(session)) {
+      session.pendingSends.push({
+        text,
+        // The mode is dropped: the flush re-enters this method once the turn has
+        // settled, and carrying it through would park the message a second time,
+        // forever.
+        opts: { ...(typeof opts === "string" ? { priority: opts } : opts), sendMode: undefined },
+      });
+      // Cutting in is queueing plus a stop — the flush hangs off settlement
+      // either way. So an interrupt the provider can't honour (no streaming
+      // input, a turn that ended in the same tick) degrades to a queue rather
+      // than stranding the message: the turn still settles on its own.
+      if (sendMode === "interrupt") await this.interrupt(chatId);
+      // Re-publish so the composer's "N waiting" chip appears now rather than at
+      // this session's next status change of its own — same reason `schedule`
+      // re-publishes for the steering chip.
+      this.setStatus(session, session.status);
+      return;
+    }
     // A fast Send after selecting a persona must wait for the idle runtime to retire.
     if (session.personaChange) await session.personaChange.catch(() => {});
     // Before the user row is written, not only in `buildOptions`: the row below
@@ -6191,6 +6244,7 @@ export class SessionBroker {
       status,
       activity,
       queued: this.queuedCount(session),
+      pending: session.pendingSends.length || undefined,
       prSettled: session.prWatchSettled || undefined,
     });
     // A slot may have just freed WITHOUT a turn ending: the chat blocked on a
@@ -6217,6 +6271,56 @@ export class SessionBroker {
     // Cheap by construction: `pump` returns immediately when nothing is queued,
     // which is the overwhelmingly common case.
     if (this.isTurnLive(session) && !session.activity.occupied) this.pump();
+  }
+
+  /**
+   * Send whatever was parked behind the turn that just settled.
+   *
+   * Drained before the first send rather than iterated in place: each `sendMessage`
+   * awaits, and the second one lands while the first has already re-opened the
+   * turn — so a queue still holding the rest would park them again and they would
+   * only leave on the turn after that. Draining first makes the whole batch join
+   * one turn, in the order it was typed.
+   *
+   * Fire-and-forget on purpose: every caller is a synchronous settle handler, and
+   * a send that throws must not take the turn's teardown down with it.
+   */
+  private flushPendingSends(session: LiveSession): void {
+    if (!session.pendingSends.length) return;
+    const batch = session.pendingSends.splice(0);
+    void (async () => {
+      for (const held of batch) {
+        try {
+          await this.sendMessage(session.chatId, held.text, held.opts);
+        } catch (err) {
+          this.bus.publish({
+            type: "error",
+            chatId: session.chatId,
+            message: "a queued message could not be sent",
+            detail: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    })();
+  }
+
+  /**
+   * Throw away parked sends, because the session they were parked on is gone.
+   *
+   * A notice rather than a silent drop: the composer cleared the box the moment
+   * the message was accepted, so the text only exists here — the human has to be
+   * told it never went, or they will believe the agent read it.
+   */
+  private dropPendingSends(session: LiveSession): void {
+    const n = session.pendingSends.length;
+    if (!n) return;
+    session.pendingSends.length = 0;
+    this.bus.publish({
+      type: "notice",
+      chatId: session.chatId,
+      level: "warn",
+      text: `The session ended before ${n === 1 ? "a queued message" : `${n} queued messages`} could be sent.`,
+    });
   }
 
   /** Steering messages submitted but not yet consumed by the SDK (outbox + input). */
@@ -6252,6 +6356,10 @@ export class SessionBroker {
       },
     });
     this.pump();
+    // Last, not first: the send resolves the idle attention item this just added,
+    // and doing it the other way round leaves "Turn complete — awaiting your
+    // input" sitting in the list above a chat that is already running again.
+    this.flushPendingSends(session);
   }
 
   /** A turn failed but its reusable runtime session is still available. */
@@ -6260,6 +6368,10 @@ export class SessionBroker {
     session.turnOpen = false;
     this.setStatus(session, "failed", { state: "idle" });
     this.pump();
+    // Flushed on failure too. The runtime survives a failed turn, so the message
+    // can still be sent — and a usage limit or a transport blip is exactly when
+    // the human's "do this next" is worth the most, not something to discard.
+    this.flushPendingSends(session);
   }
 
   private onDone(session: LiveSession): void {
@@ -6278,6 +6390,8 @@ export class SessionBroker {
     session.stopping = false;
     this.cleanupSkills(session);
     this.resolveIdleAttention(session);
+    // The runtime is gone, so there is no settling turn left to flush behind.
+    this.dropPendingSends(session);
     if (session.switching) {
       session.switching = false;
       this.setStatus(session, "idle", { state: "idle" });
@@ -6315,6 +6429,7 @@ export class SessionBroker {
     // A crash after a completed turn leaves a live "Turn complete" item; clear it.
     this.resolveIdleAttention(session);
     this.drainPendingPermissions(session, "Session ended.");
+    this.dropPendingSends(session);
 
     if (session.stopping) {
       // Deliberate stop/fork abort — settle as a clean done (which cleans skills).

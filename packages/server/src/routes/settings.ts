@@ -5,6 +5,8 @@
  *   GET /api/settings/defaults → the server-side defaults a field must NAME
  */
 import type { FastifyInstance } from "fastify";
+import * as z from "zod";
+import { SendModeSchema } from "@dispatch/shared";
 import { AppSettingsSchema } from "../store/index.js";
 
 export function registerSettingsRoutes(app: FastifyInstance): void {
@@ -64,6 +66,11 @@ export function registerSettingsRoutes(app: FastifyInstance): void {
       // And the account list, owned by PUT /api/subscriptions — a draft loaded
       // before an account was added must not delete it on save.
       ...(current.subscriptions ? { subscriptions: current.subscriptions } : {}),
+      // And the composer's send-mode default, owned by the endpoint below. It has
+      // no row in the Settings modal at all — the dropup beside Send is the whole
+      // UI — so nothing that PUTs here has ever heard of it, and not preserving it
+      // would mean picking a theme silently put your Send key back to steering.
+      ...(current.defaultSendMode ? { defaultSendMode: current.defaultSendMode } : {}),
     });
     // The concurrency cap is held by the LIVE broker, not re-read per turn, so a
     // save has to hand it over or the new number means nothing until a restart —
@@ -74,5 +81,27 @@ export function registerSettingsRoutes(app: FastifyInstance): void {
     // Same reason: the idle window lives on the live broker's sweep timer.
     broker.setIdleTimeout(saved.idleSessionMinutes);
     return saved;
+  });
+
+  /**
+   * The composer's send-mode default, on its own endpoint for the same reason
+   * `PUT /api/update/channel` has one: the caller is the dropup beside Send,
+   * which holds ONE value and not a complete settings draft — sending a partial
+   * body to the full-replace PUT above would clear every field it didn't know.
+   *
+   * `null` clears the pin back to `DEFAULT_SEND_MODE`.
+   */
+  app.put("/api/settings/send-mode", async (req, reply) => {
+    const parsed = z
+      .object({ mode: SendModeSchema.nullable() })
+      .safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ error: parsed.error.message });
+    }
+    const current = await store.getSettings();
+    return store.saveSettings({
+      ...current,
+      defaultSendMode: parsed.data.mode ?? undefined,
+    });
   });
 }

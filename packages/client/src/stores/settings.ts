@@ -14,7 +14,11 @@
  */
 import { create } from "zustand";
 import type { AppSettings } from "../lib/api.js";
-import { SHELL_TRANSCRIPT_CATEGORIES, type ShellTranscriptFilter } from "@dispatch/shared";
+import {
+  SHELL_TRANSCRIPT_CATEGORIES,
+  type SendMode,
+  type ShellTranscriptFilter,
+} from "@dispatch/shared";
 
 /**
  * The app LAYER of every layered setting, exactly as the server stores it —
@@ -25,7 +29,12 @@ import { SHELL_TRANSCRIPT_CATEGORIES, type ShellTranscriptFilter } from "@dispat
  */
 export type AppLayer = Pick<
   AppSettings,
-  "showInjectedContext" | "shellFilter" | "defaultModeId" | "harness" | "spawnChat"
+  | "showInjectedContext"
+  | "shellFilter"
+  | "defaultModeId"
+  | "harness"
+  | "spawnChat"
+  | "defaultSendMode"
 >;
 
 interface SettingsStore {
@@ -36,6 +45,16 @@ interface SettingsStore {
   app: AppLayer;
   /** Apply a freshly-fetched or freshly-saved AppSettings payload. */
   apply: (settings: Partial<AppSettings>) => void;
+  /**
+   * Pin ONE field: the composer's send-mode default.
+   *
+   * Not `apply` with a one-field object — `apply` is a full replace (it resolves
+   * every field it knows against the payload, so an absent one reads as
+   * "cleared"), which is right for a fetched body and catastrophic for an
+   * optimistic update. The dropup pins this before its request lands, so it needs
+   * a setter that touches nothing else.
+   */
+  setDefaultSendMode: (mode: SendMode | undefined) => void;
 }
 
 export const useSettings = create<SettingsStore>((set) => ({
@@ -52,6 +71,9 @@ export const useSettings = create<SettingsStore>((set) => ({
         defaultModeId: settings.defaultModeId,
         harness: settings.harness,
         spawnChat: settings.spawnChat,
+        defaultSendMode: settings.defaultSendMode,
       },
     }),
+  setDefaultSendMode: (mode) =>
+    set((s) => ({ app: { ...s.app, defaultSendMode: mode } })),
 }));
