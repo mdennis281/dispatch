@@ -410,6 +410,7 @@ export async function dispatchClientAction(
             images: action.images as ImageRef[] | undefined,
             parts: action.parts,
             effort: action.effort,
+            sendMode: action.sendMode,
           },
         );
         return;

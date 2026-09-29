@@ -1809,6 +1809,76 @@ describe("SessionBroker — steering & concurrency", () => {
     await broker.waitFor("c1", "idle").catch(() => {});
   });
 
+  it("holds a `queue` send out of the running turn and sends it once the turn settles", async () => {
+    const gate = deferred();
+    const { fn, controllers } = makeFakeQuery(async () => {
+      await gate.promise;
+      return [assistantText("done"), resultMsg()];
+    });
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+
+    await broker.sendMessage("c1", "go");
+    await until(() => controllers[0]?.pushed.length === 1);
+
+    await broker.sendMessage("c1", "and then tidy up", { sendMode: "queue" });
+    // The whole point: it is NOT in the running turn's input, where a steer
+    // would be by now.
+    expect(controllers[0]!.pushed).toEqual(["go"]);
+    // …and it is visibly withheld rather than silently dropped.
+    const status = events.filter((e) => e.type === "chat-status").at(-1);
+    expect(status).toMatchObject({ pending: 1 });
+    // No user row either: the transcript shows what the agent was given, and it
+    // has not been given this.
+    expect(events.filter((e) => e.type === "chat-message" && e.message.kind === "user")).toHaveLength(1);
+
+    gate.resolve();
+    await until(() => controllers[0]!.pushed.length === 2);
+    expect(controllers[0]!.pushed).toEqual(["go", "and then tidy up"]);
+    await broker.waitFor("c1", "idle").catch(() => {});
+    expect(events.filter((e) => e.type === "chat-status").at(-1)).not.toMatchObject({ pending: 1 });
+  });
+
+  it("an `interrupt` send stops the turn, then sends once it has settled", async () => {
+    const gate = deferred();
+    const { fn, controllers } = makeFakeQuery(async () => {
+      await gate.promise;
+      return [assistantText("done"), resultMsg("interrupted")];
+    });
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+
+    await broker.sendMessage("c1", "go");
+    await until(() => controllers[0]?.pushed.length === 1);
+
+    await broker.sendMessage("c1", "stop, do this instead", { sendMode: "interrupt" });
+    // Interrupt is queue PLUS a stop: the provider is told to abandon the turn,
+    // and the message still waits for settlement rather than racing the turn it
+    // just killed.
+    expect(controllers[0]!.calls.interrupt).toBe(1);
+    expect(controllers[0]!.pushed).toEqual(["go"]);
+
+    gate.resolve();
+    await until(() => controllers[0]!.pushed.length === 2);
+    expect(controllers[0]!.pushed).toEqual(["go", "stop, do this instead"]);
+  });
+
+  it("ignores the send mode when nothing is running — an idle chat has no turn to hold behind", async () => {
+    const { fn, controllers } = makeFakeQuery((text) => [assistantText(text), resultMsg()]);
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+
+    const resultsP = waitForResults("c1", 1);
+    await broker.sendMessage("c1", "first", { sendMode: "queue" });
+    await resultsP;
+
+    expect(controllers[0]!.pushed).toEqual(["first"]);
+    expect(controllers[0]!.calls.interrupt).toBe(0);
+  });
+
   it("funnels multiple messages through one live session in FIFO order", async () => {
     const { fn, controllers } = makeFakeQuery((text) => [assistantText(text), resultMsg()]);
     const broker = makeBroker(fn);

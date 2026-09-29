@@ -12,6 +12,7 @@ import {
   HarnessKindSchema,
   ImageRefSchema,
   PermissionDecisionSchema,
+  SendModeSchema,
 } from "./common.js";
 import {
   ChatSchema,
@@ -99,6 +100,15 @@ export const ChatStatusEventSchema = z.object({
    * so it clears the instant the message is injected — not only at turn end.
    */
   queued: z.number().int().nonnegative().optional(),
+  /**
+   * Sends DELIBERATELY withheld by a `sendMode: "queue"` (or the fresh-turn half
+   * of an `"interrupt"`), waiting for this turn to settle. Separate from
+   * `queued` above because the two say opposite things about where the message
+   * is: `queued` has already been handed to the agent's input and may be read at
+   * any moment, where these have not been handed over at all and cannot be seen
+   * until the next turn starts.
+   */
+  pending: z.number().int().nonnegative().optional(),
   /**
    * A `watch_pr` on this chat has run to a terminal state (the PR merged/closed)
    * and hasn't been superseded by a new user message. Lets the sidebar render a
@@ -588,6 +598,12 @@ export const SendMessageActionSchema = z.object({
   parts: z.array(MessagePartSchema).optional(),
   effort: EffortSchema.optional(),
   priority: z.enum(["now", "next", "later"]).optional(),
+  /**
+   * What this send does to a turn already in flight. Absent = `steer`, which is
+   * what every client did before the field existed. Ignored when nothing is
+   * running: there is no turn to hold behind or cut off.
+   */
+  sendMode: SendModeSchema.optional(),
 });
 
 /** Queue a steering message while a turn is running. */

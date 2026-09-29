@@ -23,6 +23,15 @@ interface ChatsStore {
   /** steering messages submitted but not yet consumed, per chat (server truth) */
   queued: Record<string, number>;
   /**
+   * sends WITHHELD until the running turn settles, per chat (server truth) — a
+   * `sendMode: "queue"` or the fresh-turn half of an `"interrupt"`.
+   *
+   * Deliberately not folded into `queued`: those have been handed to the agent's
+   * input and may be read at any moment, where these have not been handed over at
+   * all. The composer says so in different words, so it needs both numbers.
+   */
+  pending: Record<string, number>;
+  /**
    * chatId → a `watch_pr` on this chat reached a terminal PR state (merged/closed)
    * and hasn't been superseded by a new message. Combined with an `idle` status it
    * renders the sidebar dot green ("PR done") instead of the neutral idle gray.
@@ -77,12 +86,16 @@ interface ChatsStore {
   bumpActivity: (chatId: string, ts?: number) => void;
   /** Drop a deleted chat; if it was active, reselect a sibling (same project first). */
   removeChat: (chatId: string) => void;
+  /**
+   * Apply a `chat-status` event. The counts and flags ride in one object rather
+   * than as a tail of positionals: there are three of them now and every one is
+   * optional, which is exactly the shape that gets passed in the wrong order.
+   */
   setStatus: (
     chatId: string,
     status: ChatStatus,
     activity?: AgentActivity,
-    queued?: number,
-    prSettled?: boolean,
+    extras?: { queued?: number; pending?: number; prSettled?: boolean },
   ) => void;
   setExemptions: (chatId: string, exemptions: WorkflowExemption[]) => void;
 }
@@ -93,6 +106,7 @@ export const useChats = create<ChatsStore>((set) => ({
   activeChatId: null,
   activity: {},
   queued: {},
+  pending: {},
   prSettled: {},
   exemptions: {},
   lastActivity: {},
@@ -188,6 +202,8 @@ export const useChats = create<ChatsStore>((set) => ({
       delete activity[chatId];
       const queued = { ...s.queued };
       delete queued[chatId];
+      const pending = { ...s.pending };
+      delete pending[chatId];
       const prSettled = { ...s.prSettled };
       delete prSettled[chatId];
       const exemptions = { ...s.exemptions };
@@ -209,6 +225,7 @@ export const useChats = create<ChatsStore>((set) => ({
         order,
         activity,
         queued,
+        pending,
         prSettled,
         exemptions,
         lastActivity,
@@ -218,7 +235,7 @@ export const useChats = create<ChatsStore>((set) => ({
     });
   },
 
-  setStatus: (chatId, status, activity, queued, prSettled) =>
+  setStatus: (chatId, status, activity, extras) =>
     set((s) => {
       const prev = s.byId[chatId];
       const next = prev ? { ...prev, status } : undefined;
@@ -226,8 +243,9 @@ export const useChats = create<ChatsStore>((set) => ({
       return {
         byId: next ? { ...s.byId, [chatId]: next } : s.byId,
         activity: { ...s.activity, [chatId]: activity },
-        queued: { ...s.queued, [chatId]: queued ?? 0 },
-        prSettled: { ...s.prSettled, [chatId]: prSettled ?? false },
+        queued: { ...s.queued, [chatId]: extras?.queued ?? 0 },
+        pending: { ...s.pending, [chatId]: extras?.pending ?? 0 },
+        prSettled: { ...s.prSettled, [chatId]: extras?.prSettled ?? false },
         sectionSince: moved ? { ...s.sectionSince, [chatId]: Date.now() } : s.sectionSince,
       };
     }),

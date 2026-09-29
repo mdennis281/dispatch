@@ -18,6 +18,7 @@ import type {
   ImageRef,
   MessagePart,
   PermissionDecision,
+  SendMode,
 } from "@dispatch/shared";
 import { ws } from "./ws.js";
 import { api } from "./api.js";
@@ -58,7 +59,14 @@ export const actions = {
     ws.send({ type: "unsubscribe", chatId });
   },
 
-  /** Send a user message (starts a turn, or injects as steering mid-run). */
+  /**
+   * Send a user message (starts a turn, or acts on a running one per `sendMode`).
+   *
+   * `sendMode` is the ONE knob for a mid-turn send — steer into the live turn,
+   * queue behind it, or interrupt it — and the server ignores it when nothing is
+   * running. Omitted means steer, which is what this did before the field
+   * existed.
+   */
   sendMessage(
     chatId: string,
     opts: {
@@ -67,6 +75,7 @@ export const actions = {
       parts?: MessagePart[];
       effort?: Effort;
       priority?: Priority;
+      sendMode?: SendMode;
     } = {},
   ): void {
     ws.send({
@@ -77,6 +86,7 @@ export const actions = {
       parts: opts.parts,
       effort: opts.effort,
       priority: opts.priority,
+      sendMode: opts.sendMode,
     });
   },
 
