@@ -164,6 +164,38 @@ describe("the canvas renderer draws the same schedule as the stylesheet", () => 
     }
   });
 
+  /**
+   * The pan is the one track that does NOT end where it began, and it has to
+   * miss by exactly one reset.
+   *
+   * At 100% the strip has slid two strides and the seam puts the next cycle's
+   * segment one where segment three just was — so 100% and 0% are the same
+   * picture 80 units apart, and the keyframes have to say so. They no longer
+   * say it by landing on round numbers: the second recoil is still ringing when
+   * the cycle wraps, so both ends carry the same leftover and the DIFFERENCE is
+   * the only thing that is clean. Get it wrong and the mark jumps once a cycle,
+   * forever, by however much you were out.
+   */
+  it("closes the pan cycle on exactly one reset", () => {
+    const css = keyframes("boot-splash-pan");
+    const at = (p: number) =>
+      fn(css.find(([q]) => q === p)![1], "transform", "translateX")!;
+    expect(at(100) - at(0)).toBeCloseTo(-80, 6);
+  });
+
+  /**
+   * And it must interpolate straight, for the roads' reason and one of its own:
+   * the recoil is a damped sine SAMPLED into stops, so a curve applied between
+   * them would be a second curve on top of the one already baked in.
+   */
+  it("pans linearly between its stops", () => {
+    const rule = /\.boot-splash__pan \{([\s\S]*?)\n      \}/.exec(html);
+    expect(rule, "no .boot-splash__pan rule").not.toBeNull();
+    expect(rule![1]).toMatch(/animation: boot-splash-pan var\(--boot-beat\) linear/);
+    const block = /@keyframes boot-splash-pan \{([\s\S]*?)\n      \}/.exec(html);
+    expect(block![1]).not.toMatch(/animation-timing-function/);
+  });
+
   it("molds the exit over the same duration the stylesheet uses", () => {
     // `moldMs` in the worker's config against `boot-splash-mold`'s duration.
     const cssMs = /animation: boot-splash-mold (\d+)ms/.exec(html);

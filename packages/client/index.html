@@ -188,9 +188,9 @@
          *
          * A variable can only change while nothing wearing it is on screen, or
          * the recolour happens in front of you. Against the 2400ms schedule in
-         * the stylesheet, the dark windows are: segment one 1200-2400, segment
-         * two 0-552, segment three 0-1752, dot A 672-2400, dot B 1872-2400,
-         * dot C 0-1080, dot D 0-2280.
+         * the stylesheet, the dark windows are: segment one 1045-2400, segment
+         * two 0-552 (and again 2245-2400), segment three 0-1752, dot A 672-2400,
+         * dot B 1872-2400, dot C 0-852, dot D 0-2052.
          *
          * SEGMENT TWO IS THE TIGHT ONE, AND IT SETS THE PERIOD. Because the
          * exchange eats one segment while laying down the next, two are lit at
@@ -247,7 +247,7 @@
               set("--c-d", segment3);
             },
           },
-          // The merge is complete at 50%, so from here the newest road on
+          // The merge is complete at 43.5%, so from here the newest road on
           // screen is segment two's.
           {
             at: 1240,
@@ -263,7 +263,7 @@
            * segment one has to BE this cycle's segment three, and the next
            * cycle's A has to be this cycle's C — which is segment two's colour.
            * Both are set here, at 60%, because segment one has been off screen
-           * since 50% and A since 28%.
+           * since 43.5% and A since 28%.
            */
           {
             at: 1440,
@@ -481,12 +481,16 @@
         0 → 23%     HELD. A fork: the lone dot A, the two dots B, the roads
                     between them. This is the mark, and it is on screen from the
                     very first frame rather than assembling itself
-        23 → 50%    THE EXCHANGE. Segment one retracts into B while segment two
+        23 → 43.5%  THE EXCHANGE. Segment one retracts into B while segment two
                     draws out of B toward C. The left end walks 12 → 52 and the
                     right end walks 52 → 92, so the span stays 40 the whole way
-        50 → 73%    HELD. A merge — the mark mirrored — spanning B to C
-        73 → 100%   the same exchange again: segment two retracts into C while
+        43.5 → 73%  HELD. A merge — the mark mirrored — spanning B to C. The
+                    FRAME is still recoiling through the first fifth of this;
+                    the ink is not, and that distinction is the whole of it
+        73 → 93.5%  the same exchange again: segment two retracts into C while
                     segment three draws out of C toward D
+        93.5 → 100% held, and still ringing — this recoil runs past the seam, so
+                    the stops at the top of the pan are the tail of it
         100%        a fork spanning C to D, which IS the fork at 0% two strides
                     along, so the loop wraps there
 
@@ -501,13 +505,25 @@
       curve itself — x does not advance quite linearly along a bezier — and that
       is worth about a unit in forty. See BOOT_ROAD_PART in generate-brand.mjs.
 
-      WHICH MAKES THE PAN FIVE STOPS AND A STRAIGHT LINE. The camera is still a
-      function of the ink: at every instant it is `32 − midpoint(live span)`. But
-      a span of constant width whose ends advance together has a midpoint that
-      advances at exactly the same rate, so the pan is linear through each
-      exchange and still through each hold. It was eleven stops and a piecewise
-      approximation when the shape was growing and shrinking; it is now 0, 0,
-      −40, −40, −80. It never reverses.
+      AND IT IS WHY THE CAMERA MAY SHAKE WHEN THE INK MAY NOT. The pan is a
+      function of the ink — at every instant of the draw it is
+      `32 − midpoint(live span)`, and a span of constant width whose ends advance
+      together has a midpoint that advances at the same rate, so through the draw
+      that is a straight line. But a pan is also a RIGID transform: it moves both
+      fronts or neither, so nothing it does can change the span. That is the
+      licence the recoil runs on. The draw stops HARD at 43.5%, still doing 60%
+      of its top speed, and the frame spends the next fifth of the cycle ringing
+      the leftover momentum out — one lurch a unit and a half past centre, a
+      counter-swing a tenth of that, gone. The roads are finished and holding the
+      whole time; the mark's shape does not move again after the ink stops.
+
+      THE DRAW ITSELF IS A VELOCITY PROFILE RATHER THAN A CURVE, and it lives in
+      scripts/boot-splash-ramp.mjs, which generates every stop below. Two thirds
+      of it is spent winding up on a smoothstep, then it runs flat out, then it
+      runs out of road. A bezier cannot say that — one that arrives fast cannot
+      also leave slowly, and it can overshoot only once — and it could not be a
+      timing function on the keyframes anyway, for the reason under
+      `.boot-splash__road`.
 
       THE HOLDS ARE 23% EACH AND THAT SIZE IS NOT FREE. They are what makes the
       mark legible — the two poses you actually read — but they are also the only
@@ -690,63 +706,108 @@
       }
 
       /*
-       * THE FRAME SLIDE — the pen's x, centred.
+       * THE FRAME SLIDE — the pen's x, centred, and then the recoil.
        *
-       * Every value here is `32 − (leftEnd + rightEnd) / 2` at a phase boundary,
-       * in view-box units: the pen starts on A at x=12 against a left end of 12,
-       * so +20; it reaches the junction at 36 for +8; the tips at 52 for 0. The
-       * retract does the same from the other side as the left end walks right.
-       * See the docblock above — these are derived, not chosen.
+       * Through the draw every value is `32 − midpoint(live span)` in view-box
+       * units, sampled off the same velocity profile the roads are, at the same
+       * percentages, so the two cannot disagree between stops. Measured against
+       * the real paths the mark's centre holds to within 0.2 units for the whole
+       * of it; the residue is the bezier, whose x does not advance quite
+       * linearly with its arc length.
        *
-       * LINEAR, and it has to be: the roads draw at a constant rate, so anything
-       * else here would only be centred at the corners and drifting in between.
-       * The branch phases approximate slightly — a cubic's x does not advance
-       * quite linearly with its arc length — but measured against the real path
-       * the worst error is 0.66 units, about a pixel at the size this renders.
+       * THEN IT KEEPS GOING, WHICH IS THE POINT. The ink stops at 43.5% while
+       * still doing 60% of its top speed, and the frame rings that momentum out
+       * as a damped oscillator seeded with the draw's own terminal velocity —
+       * continuous in position AND in speed at the handoff, which is the whole
+       * difference between a recoil and a glitch. Its amplitude is therefore not
+       * a dial: it is v0/ωd, so asking for a faster shake asks for a smaller one.
        *
-       * It never reverses, and the flat stretches are the held poses: nothing is
-       * being drawn, so the middle of the shape is not moving either.
+       * This is the ONLY thing in the loop that moves the mark without drawing
+       * it, and it is allowed to because a pan is rigid — it carries both live
+       * fronts together, so the span it is famous for keeping cannot notice.
+       *
+       * LINEAR BETWEEN STOPS. Same reason as the roads, below, and the same trap:
+       * CSS's initial `animation-timing-function` is `ease`, so this says so.
+       *
+       * Generated by scripts/boot-splash-ramp.mjs. Do not hand-edit the stops.
        */
       .boot-splash__pan {
         transform-box: view-box;
         animation: boot-splash-pan var(--boot-beat) linear infinite;
       }
       @keyframes boot-splash-pan {
-        0% { transform: translateX(0px); }
+        0% { transform: translateX(0.51px); }
+        0.95% { transform: translateX(0.39px); }
+        2.43% { transform: translateX(0.05px); }
+        3.91% { transform: translateX(-0.15px); }
+        5.4% { transform: translateX(-0.13px); }
+        6.88% { transform: translateX(-0.03px); }
+        8.37% { transform: translateX(0.04px); }
+        9.86% { transform: translateX(0.05px); }
+        11.34% { transform: translateX(0.01px); }
+        12.83% { transform: translateX(-0.01px); }
+        14.31% { transform: translateX(-0.02px); }
         23% { transform: translateX(0px); }
-        24.69% { transform: translateX(-0.3px); }
-        26.38% { transform: translateX(-1.24px); }
-        28.06% { transform: translateX(-2.86px); }
-        29.75% { transform: translateX(-5.17px); }
-        31.44% { transform: translateX(-8.14px); }
-        33.13% { transform: translateX(-11.71px); }
-        34.81% { transform: translateX(-15.73px); }
-        36.5% { transform: translateX(-20px); }
-        38.19% { transform: translateX(-24.27px); }
-        39.88% { transform: translateX(-28.29px); }
-        41.56% { transform: translateX(-31.86px); }
-        43.25% { transform: translateX(-34.83px); }
-        44.94% { transform: translateX(-37.14px); }
-        46.63% { transform: translateX(-38.76px); }
-        48.31% { transform: translateX(-39.7px); }
-        50% { transform: translateX(-40px); }
+        24.03% { transform: translateX(-0.02px); }
+        25.05% { transform: translateX(-0.13px); }
+        26.08% { transform: translateX(-0.42px); }
+        27.1% { transform: translateX(-0.96px); }
+        28.13% { transform: translateX(-1.79px); }
+        29.16% { transform: translateX(-2.95px); }
+        30.18% { transform: translateX(-4.45px); }
+        31.21% { transform: translateX(-6.3px); }
+        32.23% { transform: translateX(-8.48px); }
+        33.26% { transform: translateX(-10.97px); }
+        34.29% { transform: translateX(-13.71px); }
+        35.31% { transform: translateX(-16.64px); }
+        36.34% { transform: translateX(-19.69px); }
+        37.36% { transform: translateX(-22.77px); }
+        38.39% { transform: translateX(-25.85px); }
+        39.42% { transform: translateX(-28.92px); }
+        40.44% { transform: translateX(-32px); }
+        41.47% { transform: translateX(-35.08px); }
+        42.49% { transform: translateX(-37.92px); }
+        43.52% { transform: translateX(-40px); }
+        45.01% { transform: translateX(-41.55px); }
+        46.49% { transform: translateX(-41.13px); }
+        47.98% { transform: translateX(-40.08px); }
+        49.46% { transform: translateX(-39.52px); }
+        50.95% { transform: translateX(-39.61px); }
+        52.43% { transform: translateX(-39.95px); }
+        53.91% { transform: translateX(-40.15px); }
+        55.4% { transform: translateX(-40.13px); }
+        56.88% { transform: translateX(-40.03px); }
+        58.37% { transform: translateX(-39.96px); }
+        59.86% { transform: translateX(-39.95px); }
+        61.34% { transform: translateX(-39.99px); }
+        62.83% { transform: translateX(-40.01px); }
+        64.31% { transform: translateX(-40.02px); }
         73% { transform: translateX(-40px); }
-        74.69% { transform: translateX(-40.3px); }
-        76.38% { transform: translateX(-41.24px); }
-        78.06% { transform: translateX(-42.86px); }
-        79.75% { transform: translateX(-45.17px); }
-        81.44% { transform: translateX(-48.14px); }
-        83.13% { transform: translateX(-51.71px); }
-        84.81% { transform: translateX(-55.73px); }
-        86.5% { transform: translateX(-60px); }
-        88.19% { transform: translateX(-64.27px); }
-        89.88% { transform: translateX(-68.29px); }
-        91.56% { transform: translateX(-71.86px); }
-        93.25% { transform: translateX(-74.83px); }
-        94.94% { transform: translateX(-77.14px); }
-        96.63% { transform: translateX(-78.76px); }
-        98.31% { transform: translateX(-79.7px); }
-        100% { transform: translateX(-80px); }
+        74.03% { transform: translateX(-40.02px); }
+        75.05% { transform: translateX(-40.13px); }
+        76.08% { transform: translateX(-40.42px); }
+        77.1% { transform: translateX(-40.96px); }
+        78.13% { transform: translateX(-41.79px); }
+        79.16% { transform: translateX(-42.95px); }
+        80.18% { transform: translateX(-44.45px); }
+        81.21% { transform: translateX(-46.3px); }
+        82.23% { transform: translateX(-48.48px); }
+        83.26% { transform: translateX(-50.97px); }
+        84.29% { transform: translateX(-53.71px); }
+        85.31% { transform: translateX(-56.64px); }
+        86.34% { transform: translateX(-59.69px); }
+        87.36% { transform: translateX(-62.77px); }
+        88.39% { transform: translateX(-65.85px); }
+        89.42% { transform: translateX(-68.92px); }
+        90.44% { transform: translateX(-72px); }
+        91.47% { transform: translateX(-75.08px); }
+        92.49% { transform: translateX(-77.92px); }
+        93.52% { transform: translateX(-80px); }
+        95% { transform: translateX(-81.55px); }
+        96.49% { transform: translateX(-81.13px); }
+        97.97% { transform: translateX(-80.08px); }
+        99.46% { transform: translateX(-79.52px); }
+        100% { transform: translateX(-79.49px); }
       }
 
       /*
@@ -790,8 +851,8 @@
         animation-iteration-count: infinite;
         /* LINEAR BETWEEN STOPS, AND THE STOPS CARRY THE CURVE.
 
-           The exchange ramps up and down rather than starting and stopping flat,
-           but that ease CANNOT be a timing function on these keyframes. The two
+           The exchange winds up and then stops hard rather than running flat,
+           but that shape CANNOT be a timing function on these keyframes. The two
            live fronts have to advance in x together or the span breathes, and
            they are on opposite parts of their segments — one losing its trunk
            over the first 60% of the exchange while the other grows its branches
@@ -855,105 +916,125 @@
       @keyframes boot-splash-road-s1-trunk {
         0% { stroke-dashoffset: 0; }
         23% { stroke-dashoffset: 0; }
-        24.69% { stroke-dashoffset: -0.013; }
-        26.38% { stroke-dashoffset: -0.055; }
-        28.06% { stroke-dashoffset: -0.126; }
-        29.75% { stroke-dashoffset: -0.228; }
-        31.44% { stroke-dashoffset: -0.36; }
-        33.13% { stroke-dashoffset: -0.517; }
-        34.81% { stroke-dashoffset: -0.695; }
-        36.5% { stroke-dashoffset: -0.883; }
-        38.19% { stroke-dashoffset: -1.06; }
-        50% { stroke-dashoffset: -1.06; }
+        24.03% { stroke-dashoffset: -0.001; }
+        25.05% { stroke-dashoffset: -0.006; }
+        26.08% { stroke-dashoffset: -0.019; }
+        27.1% { stroke-dashoffset: -0.042; }
+        28.13% { stroke-dashoffset: -0.079; }
+        29.16% { stroke-dashoffset: -0.13; }
+        30.18% { stroke-dashoffset: -0.197; }
+        31.21% { stroke-dashoffset: -0.278; }
+        32.23% { stroke-dashoffset: -0.375; }
+        33.26% { stroke-dashoffset: -0.485; }
+        34.29% { stroke-dashoffset: -0.606; }
+        35.31% { stroke-dashoffset: -0.735; }
+        36.34% { stroke-dashoffset: -0.87; }
+        37.36% { stroke-dashoffset: -1.006; }
+        38.39% { stroke-dashoffset: -1.06; }
+        43.52% { stroke-dashoffset: -1.06; }
         100% { stroke-dashoffset: -1.06; }
       }
       @keyframes boot-splash-road-s1-branch {
         0% { stroke-dashoffset: 0; }
         23% { stroke-dashoffset: 0; }
-        36.5% { stroke-dashoffset: 0; }
-        38.19% { stroke-dashoffset: -0.018; }
-        39.88% { stroke-dashoffset: -0.284; }
-        41.56% { stroke-dashoffset: -0.521; }
-        43.25% { stroke-dashoffset: -0.718; }
-        44.94% { stroke-dashoffset: -0.871; }
-        46.63% { stroke-dashoffset: -0.978; }
-        48.31% { stroke-dashoffset: -1.04; }
-        50% { stroke-dashoffset: -1.06; }
+        37.36% { stroke-dashoffset: 0; }
+        38.39% { stroke-dashoffset: -0.122; }
+        39.42% { stroke-dashoffset: -0.326; }
+        40.44% { stroke-dashoffset: -0.53; }
+        41.47% { stroke-dashoffset: -0.734; }
+        42.49% { stroke-dashoffset: -0.922; }
+        43.52% { stroke-dashoffset: -1.06; }
         100% { stroke-dashoffset: -1.06; }
       }
       @keyframes boot-splash-road-s2-branch {
         0% { stroke-dashoffset: 1.06; }
         23% { stroke-dashoffset: 1.06; }
-        24.69% { stroke-dashoffset: 1.04; }
-        26.38% { stroke-dashoffset: 0.978; }
-        28.06% { stroke-dashoffset: 0.871; }
-        29.75% { stroke-dashoffset: 0.718; }
-        31.44% { stroke-dashoffset: 0.521; }
-        33.13% { stroke-dashoffset: 0.284; }
-        34.81% { stroke-dashoffset: 0.018; }
-        36.5% { stroke-dashoffset: 0; }
-        50% { stroke-dashoffset: 0; }
+        24.03% { stroke-dashoffset: 1.059; }
+        25.05% { stroke-dashoffset: 1.051; }
+        26.08% { stroke-dashoffset: 1.032; }
+        27.1% { stroke-dashoffset: 0.996; }
+        28.13% { stroke-dashoffset: 0.941; }
+        29.16% { stroke-dashoffset: 0.865; }
+        30.18% { stroke-dashoffset: 0.765; }
+        31.21% { stroke-dashoffset: 0.643; }
+        32.23% { stroke-dashoffset: 0.498; }
+        33.26% { stroke-dashoffset: 0.333; }
+        34.29% { stroke-dashoffset: 0.152; }
+        35.31% { stroke-dashoffset: 0; }
+        43.52% { stroke-dashoffset: 0; }
         73% { stroke-dashoffset: 0; }
-        74.69% { stroke-dashoffset: -0.02; }
-        76.38% { stroke-dashoffset: -0.082; }
-        78.06% { stroke-dashoffset: -0.189; }
-        79.75% { stroke-dashoffset: -0.342; }
-        81.44% { stroke-dashoffset: -0.539; }
-        83.13% { stroke-dashoffset: -0.776; }
-        84.81% { stroke-dashoffset: -1.042; }
-        86.5% { stroke-dashoffset: -1.06; }
+        74.03% { stroke-dashoffset: -0.001; }
+        75.05% { stroke-dashoffset: -0.009; }
+        76.08% { stroke-dashoffset: -0.028; }
+        77.1% { stroke-dashoffset: -0.064; }
+        78.13% { stroke-dashoffset: -0.119; }
+        79.16% { stroke-dashoffset: -0.195; }
+        80.18% { stroke-dashoffset: -0.295; }
+        81.21% { stroke-dashoffset: -0.417; }
+        82.23% { stroke-dashoffset: -0.562; }
+        83.26% { stroke-dashoffset: -0.727; }
+        84.29% { stroke-dashoffset: -0.908; }
+        85.31% { stroke-dashoffset: -1.06; }
+        93.52% { stroke-dashoffset: -1.06; }
         100% { stroke-dashoffset: -1.06; }
       }
       @keyframes boot-splash-road-s2-trunk {
         0% { stroke-dashoffset: 1.06; }
         23% { stroke-dashoffset: 1.06; }
-        34.81% { stroke-dashoffset: 1.06; }
-        36.5% { stroke-dashoffset: 0.883; }
-        38.19% { stroke-dashoffset: 0.695; }
-        39.88% { stroke-dashoffset: 0.517; }
-        41.56% { stroke-dashoffset: 0.36; }
-        43.25% { stroke-dashoffset: 0.228; }
-        44.94% { stroke-dashoffset: 0.126; }
-        46.63% { stroke-dashoffset: 0.055; }
-        48.31% { stroke-dashoffset: 0.013; }
-        50% { stroke-dashoffset: 0; }
+        34.29% { stroke-dashoffset: 1.06; }
+        35.31% { stroke-dashoffset: 1.032; }
+        36.34% { stroke-dashoffset: 0.897; }
+        37.36% { stroke-dashoffset: 0.761; }
+        38.39% { stroke-dashoffset: 0.625; }
+        39.42% { stroke-dashoffset: 0.489; }
+        40.44% { stroke-dashoffset: 0.353; }
+        41.47% { stroke-dashoffset: 0.217; }
+        42.49% { stroke-dashoffset: 0.092; }
+        43.52% { stroke-dashoffset: 0; }
         73% { stroke-dashoffset: 0; }
-        84.81% { stroke-dashoffset: 0; }
-        86.5% { stroke-dashoffset: -0.177; }
-        88.19% { stroke-dashoffset: -0.365; }
-        89.88% { stroke-dashoffset: -0.543; }
-        91.56% { stroke-dashoffset: -0.7; }
-        93.25% { stroke-dashoffset: -0.832; }
-        94.94% { stroke-dashoffset: -0.934; }
-        96.63% { stroke-dashoffset: -1.005; }
-        98.31% { stroke-dashoffset: -1.047; }
+        84.29% { stroke-dashoffset: 0; }
+        85.31% { stroke-dashoffset: -0.028; }
+        86.34% { stroke-dashoffset: -0.163; }
+        87.36% { stroke-dashoffset: -0.299; }
+        88.39% { stroke-dashoffset: -0.435; }
+        89.42% { stroke-dashoffset: -0.571; }
+        90.44% { stroke-dashoffset: -0.707; }
+        91.47% { stroke-dashoffset: -0.843; }
+        92.49% { stroke-dashoffset: -0.968; }
+        93.52% { stroke-dashoffset: -1.06; }
         100% { stroke-dashoffset: -1.06; }
       }
       @keyframes boot-splash-road-s3-trunk {
         0% { stroke-dashoffset: 1.06; }
         73% { stroke-dashoffset: 1.06; }
-        74.69% { stroke-dashoffset: 1.047; }
-        76.38% { stroke-dashoffset: 1.005; }
-        78.06% { stroke-dashoffset: 0.934; }
-        79.75% { stroke-dashoffset: 0.832; }
-        81.44% { stroke-dashoffset: 0.7; }
-        83.13% { stroke-dashoffset: 0.543; }
-        84.81% { stroke-dashoffset: 0.365; }
-        86.5% { stroke-dashoffset: 0.177; }
-        88.19% { stroke-dashoffset: 0; }
+        74.03% { stroke-dashoffset: 1.059; }
+        75.05% { stroke-dashoffset: 1.054; }
+        76.08% { stroke-dashoffset: 1.041; }
+        77.1% { stroke-dashoffset: 1.018; }
+        78.13% { stroke-dashoffset: 0.981; }
+        79.16% { stroke-dashoffset: 0.93; }
+        80.18% { stroke-dashoffset: 0.863; }
+        81.21% { stroke-dashoffset: 0.782; }
+        82.23% { stroke-dashoffset: 0.685; }
+        83.26% { stroke-dashoffset: 0.575; }
+        84.29% { stroke-dashoffset: 0.454; }
+        85.31% { stroke-dashoffset: 0.325; }
+        86.34% { stroke-dashoffset: 0.19; }
+        87.36% { stroke-dashoffset: 0.054; }
+        88.39% { stroke-dashoffset: 0; }
+        93.52% { stroke-dashoffset: 0; }
         100% { stroke-dashoffset: 0; }
       }
       @keyframes boot-splash-road-s3-branch {
         0% { stroke-dashoffset: 1.06; }
         73% { stroke-dashoffset: 1.06; }
-        86.5% { stroke-dashoffset: 1.06; }
-        88.19% { stroke-dashoffset: 1.042; }
-        89.88% { stroke-dashoffset: 0.776; }
-        91.56% { stroke-dashoffset: 0.539; }
-        93.25% { stroke-dashoffset: 0.342; }
-        94.94% { stroke-dashoffset: 0.189; }
-        96.63% { stroke-dashoffset: 0.082; }
-        98.31% { stroke-dashoffset: 0.02; }
+        87.36% { stroke-dashoffset: 1.06; }
+        88.39% { stroke-dashoffset: 0.938; }
+        89.42% { stroke-dashoffset: 0.734; }
+        90.44% { stroke-dashoffset: 0.53; }
+        91.47% { stroke-dashoffset: 0.326; }
+        92.49% { stroke-dashoffset: 0.138; }
+        93.52% { stroke-dashoffset: 0; }
         100% { stroke-dashoffset: 0; }
       }
 
@@ -965,22 +1046,12 @@
        * makes the only transform they carry, the pop, scale each circle about
        * itself wherever it sits on the strip.
        *
-       * The scale rides along with the opacity — a dot springs open as the
-       * stroke lands on it and collapses as the tail leaves. That spring is the
-       * only non-linear easing left anywhere in the loop, and it carries all the
-       * punctuation, which is why the strokes themselves can afford to be
-       * perfectly flat.
-       *
-       * Every window straddles a moment the PEN defines, and that is the whole
-       * of the tuning: B lands across 20.57%, where the branches reach it; A
-       * leaves at 32%, where the trunk's tail lets go of it; C lands across
-       * 70.57%.
        * A dot is an end of a stroke, so it appears and disappears when a stroke
-       * gets there.
+       * gets there — every window below straddles a moment the PEN defines, and
+       * that is the whole of the tuning.
        *
        * B is the long one — segment one's destination and segment two's origin,
-       * so it is lit for seven tenths of the cycle while the others take about
-       * four each.
+       * so it is lit for half the cycle while the others take about a third.
        */
       /* NO TRANSFORM. The dots used to spring open and deflate shut, which
          read as a pop — a second event on top of the stroke arriving. They fade
@@ -1013,9 +1084,15 @@
            B is lit the whole time segment one is retracting into it AND segment
              two is drawing out of it, and only goes at 73% when segment two in
              turn starts retracting
-           C arrives by 50%, as segment two's head lands, and then stays because
-             it is what segment three grows out of
-           D arrives by 100%, which is the seam
+           C arrives by 43.5%, as segment two's head lands, and then stays
+             because it is what segment three grows out of
+           D arrives by 93.5%, the same moment one stride later
+
+         THOSE LAST TWO ARE WHERE THE INK FINISHES, WHICH MOVES. The exchange no
+         longer runs to the end of its window — it stops early and the frame
+         recoils for the rest — so C and D are generated by
+         scripts/boot-splash-ramp.mjs alongside the roads rather than typed here
+         and left behind the next time that shape is retuned.
 
          ARRIVALS FADE OVER 8% AND DEPARTURES OVER 5%. Longer coming than going,
          because an arrival is the thing you are meant to notice and a departure
@@ -1024,26 +1101,27 @@
          AND AT THE SEAM, C BECOMES A AND D BECOMES B. Both pairs must be at full
          opacity on both sides of it or the wrap shows. */
       @keyframes boot-splash-dot-a {
-        0%,
+        0% { opacity: 1; }
         23% { opacity: 1; animation-timing-function: cubic-bezier(0.42, 0, 0.58, 1); }
-        28%,
+        28% { opacity: 0; }
         100% { opacity: 0; }
       }
       @keyframes boot-splash-dot-b {
-        0%,
+        0% { opacity: 1; }
         73% { opacity: 1; animation-timing-function: cubic-bezier(0.42, 0, 0.58, 1); }
-        78%,
+        78% { opacity: 0; }
         100% { opacity: 0; }
       }
       @keyframes boot-splash-dot-c {
-        0%,
-        42% { opacity: 0; animation-timing-function: cubic-bezier(0.42, 0, 0.58, 1); }
-        50%,
+        0% { opacity: 0; }
+        35.52% { opacity: 0; animation-timing-function: cubic-bezier(0.42, 0, 0.58, 1); }
+        43.52% { opacity: 1; }
         100% { opacity: 1; }
       }
       @keyframes boot-splash-dot-d {
-        0%,
-        92% { opacity: 0; animation-timing-function: cubic-bezier(0.42, 0, 0.58, 1); }
+        0% { opacity: 0; }
+        85.52% { opacity: 0; animation-timing-function: cubic-bezier(0.42, 0, 0.58, 1); }
+        93.52% { opacity: 1; }
         100% { opacity: 1; }
       }
 
@@ -1395,8 +1473,9 @@
           }
           var LINEAR = function (t) { return t; };
           // The one curve the loop uses, on the dots' fades. The roads and the
-          // pan ramp too, but theirs is baked into their stops — see the note on
-          // `.boot-splash__road` — so they interpolate straight.
+          // pan have a shape too — a wind-up and a recoil — but theirs is baked
+          // into their stops, see the note on `.boot-splash__road`, so they
+          // interpolate straight.
           var EASE = bezier(0.42, 0, 0.58, 1);
           // The mold's curve. Decelerating, so the shrink is visible early —
           // see the exit note in the <style>.
@@ -1416,27 +1495,28 @@
             return out;
           }
 
-          // The frame's x, as `32 - midpoint(live span)`. Still on the ink, but
-          // a straight line now: a span of constant width whose ends advance
-          // together has a midpoint that advances at the same rate. Flat through
-          // the holds, because nothing is moving there either.
-          var PAN = [[0, [0]], [23, [0]], [24.69, [-0.3]], [26.38, [-1.24]], [28.06, [-2.86]], [29.75, [-5.17]], [31.44, [-8.14]], [33.13, [-11.71]], [34.81, [-15.73]], [36.5, [-20]], [38.19, [-24.27]], [39.88, [-28.29]], [41.56, [-31.86]], [43.25, [-34.83]], [44.94, [-37.14]], [46.63, [-38.76]], [48.31, [-39.7]], [50, [-40]], [73, [-40]], [74.69, [-40.3]], [76.38, [-41.24]], [78.06, [-42.86]], [79.75, [-45.17]], [81.44, [-48.14]], [83.13, [-51.71]], [84.81, [-55.73]], [86.5, [-60]], [88.19, [-64.27]], [89.88, [-68.29]], [91.56, [-71.86]], [93.25, [-74.83]], [94.94, [-77.14]], [96.63, [-78.76]], [98.31, [-79.7]], [100, [-80]]];
+          // The frame's x. `32 - midpoint(live span)` through the draw — a span
+          // of constant width whose ends advance together has a midpoint that
+          // advances at the same rate — and then the recoil, which is the frame
+          // alone. The stops at the top of the cycle are the previous one's
+          // second recoil still ringing; see `.boot-splash__pan`.
+          var PAN = [[0, [0.51]], [0.95, [0.39]], [2.43, [0.05]], [3.91, [-0.15]], [5.4, [-0.13]], [6.88, [-0.03]], [8.37, [0.04]], [9.86, [0.05]], [11.34, [0.01]], [12.83, [-0.01]], [14.31, [-0.02]], [23, [0]], [24.03, [-0.02]], [25.05, [-0.13]], [26.08, [-0.42]], [27.1, [-0.96]], [28.13, [-1.79]], [29.16, [-2.95]], [30.18, [-4.45]], [31.21, [-6.3]], [32.23, [-8.48]], [33.26, [-10.97]], [34.29, [-13.71]], [35.31, [-16.64]], [36.34, [-19.69]], [37.36, [-22.77]], [38.39, [-25.85]], [39.42, [-28.92]], [40.44, [-32]], [41.47, [-35.08]], [42.49, [-37.92]], [43.52, [-40]], [45.01, [-41.55]], [46.49, [-41.13]], [47.98, [-40.08]], [49.46, [-39.52]], [50.95, [-39.61]], [52.43, [-39.95]], [53.91, [-40.15]], [55.4, [-40.13]], [56.88, [-40.03]], [58.37, [-39.96]], [59.86, [-39.95]], [61.34, [-39.99]], [62.83, [-40.01]], [64.31, [-40.02]], [73, [-40]], [74.03, [-40.02]], [75.05, [-40.13]], [76.08, [-40.42]], [77.1, [-40.96]], [78.13, [-41.79]], [79.16, [-42.95]], [80.18, [-44.45]], [81.21, [-46.3]], [82.23, [-48.48]], [83.26, [-50.97]], [84.29, [-53.71]], [85.31, [-56.64]], [86.34, [-59.69]], [87.36, [-62.77]], [88.39, [-65.85]], [89.42, [-68.92]], [90.44, [-72]], [91.47, [-75.08]], [92.49, [-77.92]], [93.52, [-80]], [95, [-81.55]], [96.49, [-81.13]], [97.97, [-80.08]], [99.46, [-79.52]], [100, [-79.49]]];
           // Dash offset as a FRACTION of each road's own length: +1.06 undrawn,
           // 0 drawn, -1.06 retracted past its end.
           var ROADS = {
-            "s1-trunk": [[0, [0]], [23, [0]], [24.69, [-0.013]], [26.38, [-0.055]], [28.06, [-0.126]], [29.75, [-0.228]], [31.44, [-0.36]], [33.13, [-0.517]], [34.81, [-0.695]], [36.5, [-0.883]], [38.19, [-1.06]], [50, [-1.06]], [100, [-1.06]]],
-            "s1-branch": [[0, [0]], [23, [0]], [36.5, [0]], [38.19, [-0.018]], [39.88, [-0.284]], [41.56, [-0.521]], [43.25, [-0.718]], [44.94, [-0.871]], [46.63, [-0.978]], [48.31, [-1.04]], [50, [-1.06]], [100, [-1.06]]],
-            "s2-branch": [[0, [1.06]], [23, [1.06]], [24.69, [1.04]], [26.38, [0.978]], [28.06, [0.871]], [29.75, [0.718]], [31.44, [0.521]], [33.13, [0.284]], [34.81, [0.018]], [36.5, [0]], [50, [0]], [73, [0]], [74.69, [-0.02]], [76.38, [-0.082]], [78.06, [-0.189]], [79.75, [-0.342]], [81.44, [-0.539]], [83.13, [-0.776]], [84.81, [-1.042]], [86.5, [-1.06]], [100, [-1.06]]],
-            "s2-trunk": [[0, [1.06]], [23, [1.06]], [34.81, [1.06]], [36.5, [0.883]], [38.19, [0.695]], [39.88, [0.517]], [41.56, [0.36]], [43.25, [0.228]], [44.94, [0.126]], [46.63, [0.055]], [48.31, [0.013]], [50, [0]], [73, [0]], [84.81, [0]], [86.5, [-0.177]], [88.19, [-0.365]], [89.88, [-0.543]], [91.56, [-0.7]], [93.25, [-0.832]], [94.94, [-0.934]], [96.63, [-1.005]], [98.31, [-1.047]], [100, [-1.06]]],
-            "s3-trunk": [[0, [1.06]], [73, [1.06]], [74.69, [1.047]], [76.38, [1.005]], [78.06, [0.934]], [79.75, [0.832]], [81.44, [0.7]], [83.13, [0.543]], [84.81, [0.365]], [86.5, [0.177]], [88.19, [0]], [100, [0]]],
-            "s3-branch": [[0, [1.06]], [73, [1.06]], [86.5, [1.06]], [88.19, [1.042]], [89.88, [0.776]], [91.56, [0.539]], [93.25, [0.342]], [94.94, [0.189]], [96.63, [0.082]], [98.31, [0.02]], [100, [0]]],
+            "s1-trunk": [[0, [0]], [23, [0]], [24.03, [-0.001]], [25.05, [-0.006]], [26.08, [-0.019]], [27.1, [-0.042]], [28.13, [-0.079]], [29.16, [-0.13]], [30.18, [-0.197]], [31.21, [-0.278]], [32.23, [-0.375]], [33.26, [-0.485]], [34.29, [-0.606]], [35.31, [-0.735]], [36.34, [-0.87]], [37.36, [-1.006]], [38.39, [-1.06]], [43.52, [-1.06]], [100, [-1.06]]],
+            "s1-branch": [[0, [0]], [23, [0]], [37.36, [0]], [38.39, [-0.122]], [39.42, [-0.326]], [40.44, [-0.53]], [41.47, [-0.734]], [42.49, [-0.922]], [43.52, [-1.06]], [100, [-1.06]]],
+            "s2-branch": [[0, [1.06]], [23, [1.06]], [24.03, [1.059]], [25.05, [1.051]], [26.08, [1.032]], [27.1, [0.996]], [28.13, [0.941]], [29.16, [0.865]], [30.18, [0.765]], [31.21, [0.643]], [32.23, [0.498]], [33.26, [0.333]], [34.29, [0.152]], [35.31, [0]], [43.52, [0]], [73, [0]], [74.03, [-0.001]], [75.05, [-0.009]], [76.08, [-0.028]], [77.1, [-0.064]], [78.13, [-0.119]], [79.16, [-0.195]], [80.18, [-0.295]], [81.21, [-0.417]], [82.23, [-0.562]], [83.26, [-0.727]], [84.29, [-0.908]], [85.31, [-1.06]], [93.52, [-1.06]], [100, [-1.06]]],
+            "s2-trunk": [[0, [1.06]], [23, [1.06]], [34.29, [1.06]], [35.31, [1.032]], [36.34, [0.897]], [37.36, [0.761]], [38.39, [0.625]], [39.42, [0.489]], [40.44, [0.353]], [41.47, [0.217]], [42.49, [0.092]], [43.52, [0]], [73, [0]], [84.29, [0]], [85.31, [-0.028]], [86.34, [-0.163]], [87.36, [-0.299]], [88.39, [-0.435]], [89.42, [-0.571]], [90.44, [-0.707]], [91.47, [-0.843]], [92.49, [-0.968]], [93.52, [-1.06]], [100, [-1.06]]],
+            "s3-trunk": [[0, [1.06]], [73, [1.06]], [74.03, [1.059]], [75.05, [1.054]], [76.08, [1.041]], [77.1, [1.018]], [78.13, [0.981]], [79.16, [0.93]], [80.18, [0.863]], [81.21, [0.782]], [82.23, [0.685]], [83.26, [0.575]], [84.29, [0.454]], [85.31, [0.325]], [86.34, [0.19]], [87.36, [0.054]], [88.39, [0]], [93.52, [0]], [100, [0]]],
+            "s3-branch": [[0, [1.06]], [73, [1.06]], [87.36, [1.06]], [88.39, [0.938]], [89.42, [0.734]], [90.44, [0.53]], [91.47, [0.326]], [92.49, [0.138]], [93.52, [0]], [100, [0]]],
           };
           // Opacity, and nothing else — the dots do not scale any more.
           var DOTS = {
             a: [[0, [1]], [23, [1], EASE], [28, [0]], [100, [0]]],
             b: [[0, [1]], [73, [1], EASE], [78, [0]], [100, [0]]],
-            c: [[0, [0]], [42, [0], EASE], [50, [1]], [100, [1]]],
-            d: [[0, [0]], [92, [0], EASE], [100, [1]]],
+            c: [[0, [0]], [35.52, [0], EASE], [43.52, [1]], [100, [1]]],
+            d: [[0, [0]], [85.52, [0], EASE], [93.52, [1]], [100, [1]]],
           };
           /* The exit's mold, as a percentage of its own 400ms, and SPLIT IN TWO
              because CSS interpolates a property across the keyframes that

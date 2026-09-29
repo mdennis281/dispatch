@@ -106,11 +106,12 @@ declare global {
 /**
  * Long enough to count to four, and TUNED TO LAND ON A HELD POSE.
  *
- * The loop in index.html is 2400ms and holds a pose twice per cycle — 0–23% and
- * 50–73% — so a pose is complete and the frame has stopped at 0ms (one), 1200ms
- * (two), 2400ms (one) and 3600ms (two). 3.66s puts the dismissal 60ms into that
- * fourth one, with 492ms of it still to run. One, two, one, two, and then it
- * leaves — the whole shape of the thing, seen once.
+ * The loop in index.html is 2400ms and finishes a pose twice per cycle — the ink
+ * lands at 43.5% and at 93.5% — so a pose is complete at 0ms (one), 1044ms
+ * (two), 2244ms (one) and 3444ms (two). 3.66s puts the dismissal 216ms past that
+ * fourth one, by which point its recoil is under a tenth of a pixel and 492ms of
+ * the hold is still to run. One, two, one, two, and then it leaves — the whole
+ * shape of the thing, seen once.
  *
  * THE FIRST POSE IS AT ZERO, which is new. The mark used to grow out of a lone
  * dot; it now retracts one segment while drawing the next, so it is complete
