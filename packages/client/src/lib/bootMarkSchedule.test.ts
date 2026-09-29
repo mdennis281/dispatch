@@ -80,13 +80,15 @@ function roadTrack(phase: string): Array<[number, number[]]> {
   return JSON.parse(asJson(row[1]!)) as Array<[number, number[]]>;
 }
 
-function dotTrack(id: string): Array<[number, number[]]> {
-  const m = /var DOTS = \{([\s\S]*?)\n          \};/.exec(html);
-  if (!m) throw new Error("no worker DOTS in index.html");
+function objectTrack(table: string, id: string): Array<[number, number[]]> {
+  const m = new RegExp(`var ${table} = \\{([\\s\\S]*?)\\n          \\};`).exec(html);
+  if (!m) throw new Error(`no worker ${table} in index.html`);
   const row = new RegExp(`^\\s*${id}:\\s*(\\[[\\s\\S]*?\\]),?$`, "m").exec(m[1]!);
-  if (!row) throw new Error(`no worker dot track ${id}`);
+  if (!row) throw new Error(`no worker ${table} track ${id}`);
   return (JSON.parse(asJson(row[1]!)) as Array<[number, number[], string?]>).map(([p, v]) => [p, v]);
 }
+const dotTrack = (id: string) => objectTrack("DOTS", id);
+const mixTrack = (id: string) => objectTrack("MIX", id);
 
 /**
  * Both sides are parsed out of a file, so "they match" is worth nothing until
@@ -131,15 +133,49 @@ describe("the canvas renderer draws the same schedule as the stylesheet", () => 
 
   // Opacity, and nothing else: the dots fade rather than springing, so there is
   // no scale to compare. A drift here is the one that would actually be visible.
+  //
+  // Only the stops that DECLARE opacity, because the crossfading dots now carry
+  // `fill`-only stops in the middle of the same block — and CSS interpolates a
+  // property across the keyframes that declare IT, which is exactly what the
+  // worker's separate tracks reproduce.
   for (const id of ["a", "b", "c", "d"]) {
     it(`fades dot ${id} through the same stops`, () => {
-      const css = keyframes(`boot-splash-dot-${id}`).map(
-        ([p, body]) => [p, [num(body, "opacity") ?? 0]] as [number, number[]],
-      );
+      const css = keyframes(`boot-splash-dot-${id}`)
+        .filter(([, body]) => num(body, "opacity") !== null)
+        .map(([p, body]) => [p, [num(body, "opacity")!]] as [number, number[]]);
       bothParsed(dotTrack(id), css);
       expect(dotTrack(id)).toEqual(css);
     });
   }
+
+  /**
+   * The crossfade, which is the one place a colour changes IN FRONT OF YOU.
+   *
+   * A held pose is a single colour, so the dot two roads share has to change
+   * hands, and it does it over the exchange rather than in a dark window. That
+   * makes it a schedule like any other — and one the worker cannot infer, since
+   * it picks its fill from a colour bag rather than from `var()`.
+   *
+   * `fill: var(--c-b)` is 0 and `var(--c-b2)` is 1, the same as the worker's
+   * MIX: what is compared is WHEN each dot is wearing which of its two colours.
+   */
+  for (const id of ["b", "c"]) {
+    it(`hands dot ${id} over through the same stops`, () => {
+      const css = keyframes(`boot-splash-dot-${id}`)
+        .filter(([, body]) => /fill:/.test(body))
+        .map(([p, body]) => [p, [/--c-[a-z]2\)/.test(body) ? 1 : 0]] as [number, number[]]);
+      bothParsed(mixTrack(id), css);
+      expect(mixTrack(id)).toEqual(css);
+    });
+  }
+
+  /** And the other two must NOT have one — they are only ever one road's end. */
+  it("leaves the unshared dots one colour", () => {
+    for (const id of ["a", "d"]) {
+      expect(keyframes(`boot-splash-dot-${id}`).some(([, b]) => /fill:/.test(b))).toBe(false);
+      expect(() => mixTrack(id)).toThrow();
+    }
+  });
 
   /**
    * The stop positions agreeing is not the same as the ANIMATION agreeing.
@@ -162,6 +198,38 @@ describe("the canvas renderer draws the same schedule as the stylesheet", () => 
       const block = new RegExp(`@keyframes boot-splash-road-${phase} \\{([\\s\\S]*?)\\n      \\}`).exec(html);
       expect(block![1]).not.toMatch(/animation-timing-function/);
     }
+  });
+
+  /**
+   * The pan is the one track that does NOT end where it began, and it has to
+   * miss by exactly one reset.
+   *
+   * At 100% the strip has slid two strides and the seam puts the next cycle's
+   * segment one where segment three just was — so 100% and 0% are the same
+   * picture 80 units apart, and the keyframes have to say so. They no longer
+   * say it by landing on round numbers: the second recoil is still ringing when
+   * the cycle wraps, so both ends carry the same leftover and the DIFFERENCE is
+   * the only thing that is clean. Get it wrong and the mark jumps once a cycle,
+   * forever, by however much you were out.
+   */
+  it("closes the pan cycle on exactly one reset", () => {
+    const css = keyframes("boot-splash-pan");
+    const at = (p: number) =>
+      fn(css.find(([q]) => q === p)![1], "transform", "translateX")!;
+    expect(at(100) - at(0)).toBeCloseTo(-80, 6);
+  });
+
+  /**
+   * And it must interpolate straight, for the roads' reason and one of its own:
+   * the recoil is a damped sine SAMPLED into stops, so a curve applied between
+   * them would be a second curve on top of the one already baked in.
+   */
+  it("pans linearly between its stops", () => {
+    const rule = /\.boot-splash__pan \{([\s\S]*?)\n      \}/.exec(html);
+    expect(rule, "no .boot-splash__pan rule").not.toBeNull();
+    expect(rule![1]).toMatch(/animation: boot-splash-pan var\(--boot-beat\) linear/);
+    const block = /@keyframes boot-splash-pan \{([\s\S]*?)\n      \}/.exec(html);
+    expect(block![1]).not.toMatch(/animation-timing-function/);
   });
 
   it("molds the exit over the same duration the stylesheet uses", () => {
