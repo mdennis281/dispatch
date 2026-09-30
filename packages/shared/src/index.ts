@@ -27,6 +27,7 @@ export * from "./limits.js";
 export * from "./mcp.js";
 export * from "./mcp-enablement.js";
 export * from "./layered.js";
+export * from "./agent-context.js";
 export * from "./chat-posture.js";
 export * from "./file-tools.js";
 export * from "./fs-entry.js";

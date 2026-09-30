@@ -27,6 +27,7 @@ import {
 import { SubAppSchema, AgentConfigSchema } from "./domain.js";
 import { WorkflowConfigSchema } from "./workflow.js";
 import { IssueConfigSchema } from "./issues.js";
+import { ProjectAgentContextSchema } from "./agent-context.js";
 
 /* ------------------------------------------------------------ dir defaults */
 
@@ -380,6 +381,15 @@ export const ProjectManifestSchema = z.object({
   workflow: WorkflowConfigSchema.optional(),
   /** Per-project spawn-chat consent policy (see {@link ManifestSpawnChatSchema}). */
   spawnChat: ManifestSpawnChatSchema.optional(),
+  /**
+   * This repo's overrides for what rides on every turn — the house-rules cap and
+   * mode, and how much durable memory surfaces (see
+   * {@link ProjectAgentContextSchema}). Committed because it is a statement
+   * about the repo: a codebase whose conventions genuinely need 3000 chars of
+   * always-on guidance needs them on every machine, not just the one where
+   * someone happened to raise the app setting.
+   */
+  agentContext: ProjectAgentContextSchema.optional(),
   /** Issue-triggered chats (see {@link IssueConfigSchema}). Off unless authored. */
   issues: IssueConfigSchema.optional(),
   defaults: ManifestDefaultsSchema.optional(),
@@ -509,6 +519,8 @@ export const ProjectConfigSchema = z.object({
   workflow: WorkflowConfigSchema.optional(),
   /** From manifest `spawnChat` — this project's spawn-consent override. */
   spawnChat: ManifestSpawnChatSchema.optional(),
+  /** From manifest `agentContext` — this repo's always-on context overrides. */
+  agentContext: ProjectAgentContextSchema.optional(),
   /** From manifest `issues` — issue-triggered chats for this project. */
   issues: IssueConfigSchema.optional(),
   defaults: ProjectConfigDefaultsSchema.optional(),

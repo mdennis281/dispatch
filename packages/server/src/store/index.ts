@@ -105,6 +105,7 @@ import {
   SendModeSchema,
 } from "@dispatch/shared";
 import {
+  AgentContextSettingsSchema,
   HarnessSettingsSchema,
   SubscriptionListSchema,
   ReviewerCredentialSchema,
@@ -170,6 +171,17 @@ export const AppSettingsSchema = z.object({
    * and then to the shared default, the same chain as `maxActiveSessions`.
    */
   idleSessionMinutes: z.number().int().nonnegative().optional(),
+  /**
+   * What Dispatch puts in front of an agent before the task: the house-rules cap
+   * and how much durable memory surfaces per turn (see
+   * {@link AgentContextSettingsSchema}). The app layer — a project may override
+   * any of it in its `project.yaml`.
+   *
+   * Optional, and every field inside it optional too, so an untouched install
+   * gets the shipped defaults rather than having whatever they were on the day
+   * the field was introduced frozen into its config.json.
+   */
+  agentContext: AgentContextSettingsSchema.optional(),
   webhook: z
     .object({
       kind: z.enum(["ntfy", "pushover"]).optional(),

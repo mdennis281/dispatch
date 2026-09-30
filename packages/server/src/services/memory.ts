@@ -36,6 +36,9 @@ import { join, basename } from "node:path";
 import { mkdir, readdir, readFile, writeFile, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import {
+  DEFAULT_MEMORY_CHAR_BUDGET,
+  DEFAULT_MEMORY_FULL_LIMIT,
+  DEFAULT_MEMORY_SURFACE_LIMIT,
   ProjectMemorySchema,
   MemoryTypeSchema,
   type ProjectMemory,
@@ -75,8 +78,13 @@ const AREA_LIMIT = 12;
 const SURFACE_MIN_SCORE = 16;
 /** At/above this score a match is confident enough to earn its full body. */
 const SURFACE_FULL_SCORE = 25;
-/** Most full-body memories per turn, however many clear the bar. */
-const FULL_LIMIT = 2;
+/**
+ * Most full-body memories per turn, however many clear the bar — the DEFAULT
+ * now, overridable per install and per project (Settings → Agent context).
+ * Aliased from shared rather than redeclared so the number the settings pane
+ * prints as "blank = 2" is the number this file actually falls back to.
+ */
+const FULL_LIMIT = DEFAULT_MEMORY_FULL_LIMIT;
 /** The runner-up needs this share of the leader's score to also come in full. */
 const FULL_RUNNERUP_RATIO = 0.8;
 /** Per-memory body clamp for a full-body surface (p90 body here is ~5.8KB). */
@@ -84,9 +92,9 @@ const SURFACE_BODY_MAX = 1500;
 /** A full body clipped below this by the budget is demoted to a pointer instead. */
 const SURFACE_BODY_MIN = 400;
 /** Total chars one turn's surfaced block may spend (bodies + pointer lines). */
-const SURFACE_CHAR_BUDGET = 3200;
+const SURFACE_CHAR_BUDGET = DEFAULT_MEMORY_CHAR_BUDGET;
 /** Most memories referenced in one turn's block, across both tiers. */
-const SURFACE_LIMIT = 6;
+const SURFACE_LIMIT = DEFAULT_MEMORY_SURFACE_LIMIT;
 /** Most `[[link]]` neighbours one turn may pull in behind its real matches. */
 const SURFACE_MAX_LINKS = 2;
 
@@ -1188,6 +1196,13 @@ export class MemoryService {
     opts: {
       exclude?: ReadonlySet<string>;
       limit?: number;
+      /**
+       * How many of `limit` may arrive as a full body. Settable because the
+       * right answer depends on the store: the constants here were calibrated
+       * against one 141-memory project, and a repo with 800 memories wants a
+       * different split from one with 20. See `resolveAgentContext`.
+       */
+      fullLimit?: number;
       minScore?: number;
       fullScore?: number;
       charBudget?: number;
@@ -1196,6 +1211,10 @@ export class MemoryService {
     const minScore = opts.minScore ?? SURFACE_MIN_SCORE;
     const fullScore = opts.fullScore ?? SURFACE_FULL_SCORE;
     const limit = Math.max(1, opts.limit ?? SURFACE_LIMIT);
+    // Never above `limit`: promising more full bodies than the block may name at
+    // all is not a bigger budget, it's a contradiction. `resolveAgentContext`
+    // clamps the same pair, but the two layers arrive here independently.
+    const fullLimit = Math.min(limit, Math.max(0, opts.fullLimit ?? FULL_LIMIT));
     let budget = Math.max(200, opts.charBudget ?? SURFACE_CHAR_BUDGET);
 
     // Threshold INSIDE the search so link expansion only fans out from matches
@@ -1225,7 +1244,7 @@ export class MemoryService {
         !m.linked &&
         m.score >= fullScore &&
         (full.length === 0 || m.score >= top * FULL_RUNNERUP_RATIO);
-      if (confident && full.length < FULL_LIMIT) {
+      if (confident && full.length < fullLimit) {
         const head = `### ${m.name} (${m.type})\n${m.description}\n\n`;
         // Reserve the header before clamping — otherwise a body sized to the whole
         // remaining budget always overruns it and silently demotes to a pointer.

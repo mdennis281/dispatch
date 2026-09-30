@@ -53,6 +53,7 @@ import {
   DEFAULT_SKILLS_DIR,
   type Project,
   type ProjectConfig,
+  type ProjectAgentContext,
   type ProjectConfigResult,
   type ProjectConfigError,
   type NormalizedInstruction,
@@ -442,6 +443,19 @@ export class ProjectConfigService {
   }
 
   /**
+   * This project's `agentContext:` block — its overrides for what rides on every
+   * turn — or null when it authors none (then the app settings apply alone).
+   *
+   * Returned raw rather than resolved: the caller pairs it with the app-level
+   * block through `resolveAgentContext`, which is the one place that chain is
+   * walked. Handing back a resolved value here would need the settings, which
+   * this service has no business reading.
+   */
+  getAgentContext(projectId: string): ProjectAgentContext | null {
+    return this.cache.get(projectId)?.config?.agentContext ?? null;
+  }
+
+  /**
    * How deep this project lets `spawn_chat` stack chats, or null when it doesn't
    * author a cap (then {@link DEFAULT_SPAWN_MAX_DEPTH} applies).
    *
@@ -818,6 +832,7 @@ export class ProjectConfigService {
       shipCmd: manifest.ship,
       workflow: manifest.workflow,
       spawnChat: manifest.spawnChat,
+      agentContext: manifest.agentContext,
       issues: manifest.issues,
       browser: manifest.browser,
       defaults: manifest.defaults,
