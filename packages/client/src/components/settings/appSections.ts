@@ -12,6 +12,7 @@
  */
 import {
   Bell,
+  BookMarked,
   KeyRound,
   Layers,
   MessageSquare,
@@ -74,6 +75,17 @@ export const APP_SECTIONS: AppSectionDef[] = [
       "How many chats Dispatch will run at the same time — the rest wait their turn as " +
       "Queued — and what happens as a session's context window fills. Left alone, a full " +
       "window is an error; with auto-compaction on it's a summary and a continuation.",
+  },
+  {
+    id: "agent-context",
+    icon: BookMarked,
+    label: "Agent context",
+    blurb: "House rules and memory, on every turn",
+    explainer:
+      "What every agent is handed before it reads a word of the task. Unlike the rest of " +
+      "Settings this is not a preference — it is tokens, paid on every turn of every chat, " +
+      "so each control here is bounded and shows what it costs. A project can override any " +
+      "of it in its own settings.",
   },
   {
     id: "notifications",

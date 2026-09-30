@@ -2884,6 +2884,41 @@ describe("SessionBroker — project memory injection", () => {
     expect(append).not.toContain("FEEDBACK BODY must stay out of the prompt");
   });
 
+  it("discloses house rules as a context part on the first turn only", async () => {
+    // They enter through the SYSTEM PROMPT, which is built once per session, so
+    // a per-turn disclosure would misreport what was attached to turn two — and
+    // repeat the whole block down the transcript.
+    const { fn } = makeFakeQuery((t) => [assistantText(t), resultMsg()]);
+    const houseRules = new HouseRulesService({
+      globalRoot: join(dir, "global"),
+      projectDir: (id) => join(dir, "house", id),
+    });
+    await houseRules.write("global", "GLOBAL RULE: ask before upgrading stable.");
+    await houseRules.write("project", "PROJECT RULE: ship through a PR.", "p1");
+    const broker = makeBroker(fn, 6, { houseRules });
+    await store.saveChat(chatFor("c1", "p1"));
+    broker.create(chatFor("c1", "p1"));
+
+    await broker.sendMessage("c1", "hi");
+    await broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "again");
+    await broker.waitFor("c1", "idle");
+
+    const rows = await store.readMessages("c1");
+    const userRows = rows.filter((r) => r.kind === "user");
+    const contextParts = userRows.map(
+      (r) =>
+        (r as { parts?: { kind: string; label?: string; text?: string }[] }).parts?.filter(
+          (p) => p.kind === "context",
+        ) ?? [],
+    );
+    expect(contextParts[0]).toHaveLength(1);
+    expect(contextParts[0]![0]!.label).toBe("House rules — global + project");
+    expect(contextParts[0]![0]!.text).toContain("PROJECT RULE: ship through a PR.");
+    // Second turn: same rules, still in the prompt, but not re-disclosed.
+    expect(contextParts[1] ?? []).toHaveLength(0);
+  });
+
   it("injects nothing for a project with no memories", async () => {
     const { fn, controllers } = makeFakeQuery((t) => [assistantText(t), resultMsg()]);
     const memory = new MemoryService({ store, bus });

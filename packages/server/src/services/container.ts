@@ -23,6 +23,7 @@ import {
   pinnedIdOf,
   PrSnapshotSchema,
   prRecordKey,
+  resolveAgentContext,
   resolveWorkflow,
   spawnedPurposeLabel,
   type PRRef,
@@ -320,6 +321,22 @@ export function createServices(
   // `.dispatch/` when it has one, else the external config dir — so they travel
   // with the instructions they sit above. See `houseRulesDirFor` for why this
   // doesn't go through the parsed config.
+  /**
+   * What rides on every turn, resolved project-over-app. One closure, shared by
+   * the house-rules service and the broker's memory surfacing, so the two can't
+   * disagree about which project raised what.
+   *
+   * Reads the settings PER CALL rather than closing over a snapshot: these are
+   * edited while chats are running, and a cap captured at boot would keep
+   * refusing writes the human had already allowed.
+   */
+  const agentContextFor = async (projectId?: string) => {
+    const settings = await store.getSettings().catch(() => null);
+    return resolveAgentContext(
+      settings?.agentContext,
+      projectId ? projectConfig.getAgentContext(projectId) : null,
+    );
+  };
   const houseRules =
     overrides.houseRules ??
     new HouseRulesService({
@@ -329,6 +346,7 @@ export function createServices(
           await store.getProject(projectId).catch(() => null),
           store.projectConfigDir(projectId),
         ),
+      agentContext: agentContextFor,
     });
   const claudeMemory = overrides.claudeMemory ?? new ClaudeMemoryService();
   // The `/` command menu. Holds the process-wide snapshot of the runtime's
@@ -428,6 +446,7 @@ export function createServices(
       memoryHistory,
       authored,
       houseRules,
+      agentContext: agentContextFor,
       slashCommands,
       github,
       runner,

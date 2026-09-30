@@ -13,6 +13,7 @@ import {
   ShellTranscriptFilterSchema,
   ProjectConfigLocationSchema,
 } from "./common.js";
+import { HouseRulesModeSchema } from "./agent-context.js";
 import { ResumePlanSchema } from "./limits.js";
 import { PeerSenderSchema } from "./messages.js";
 import { WorkflowConfigSchema } from "./workflow.js";
@@ -1256,15 +1257,6 @@ export const ProjectMemorySchema = z.object({
 });
 export type ProjectMemory = z.infer<typeof ProjectMemorySchema>;
 
-/**
- * Hard cap (chars) on ONE house-rules file. House rules are the only guidance
- * injected into every session unconditionally, so the cap is what keeps them
- * from growing back into the 4KB "standing rules" tier they replaced — where
- * whichever rules sorted first alphabetically ate the budget and the rest were
- * silently reduced to one-liners.
- */
-export const HOUSE_RULES_MAX_CHARS = 1000;
-
 export const HouseRulesScopeSchema = z.enum(["global", "project"]);
 export type HouseRulesScope = z.infer<typeof HouseRulesScopeSchema>;
 
@@ -1275,7 +1267,12 @@ export const HouseRulesFileSchema = z.object({
   text: z.string(),
   /** Absolute path the text is read from / written to. */
   path: z.string(),
-  /** Character cap for this file. */
+  /**
+   * Character cap for this file, as RESOLVED for this project — the app setting
+   * unless the project overrode it. Sent per-file rather than assumed by the
+   * client, because the two scopes can genuinely differ: a project may raise its
+   * own cap without touching the machine-wide one.
+   */
   limit: z.number().int(),
 });
 export type HouseRulesFile = z.infer<typeof HouseRulesFileSchema>;
@@ -1284,6 +1281,12 @@ export const HouseRulesSchema = z.object({
   global: HouseRulesFileSchema,
   /** Null when no project was asked about. */
   project: HouseRulesFileSchema.nullable(),
+  /**
+   * Whether the project's rules follow the global ones or stand in for them.
+   * Always `append` when no project was asked about. Carried here so the editor
+   * can warn that the global file it is showing is not actually being sent.
+   */
+  mode: HouseRulesModeSchema,
 });
 export type HouseRules = z.infer<typeof HouseRulesSchema>;
 

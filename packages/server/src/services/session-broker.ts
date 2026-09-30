@@ -129,6 +129,7 @@ import {
   resolveWorkflow,
   type McpEnablementLayers,
   type MetricEvent,
+  type ResolvedAgentContext,
 } from "@dispatch/shared";
 import type { AppSettings, Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
@@ -1155,6 +1156,12 @@ export interface SessionBrokerOptions {
   /** The human's always-on house rules (global + project). Optional — without
    *  it no house-rules section is injected. */
   houseRules?: HouseRulesService;
+  /**
+   * What rides on every turn, resolved project-over-app (see
+   * `resolveAgentContext`). Optional — without it the shipped defaults apply,
+   * which is exactly what every install did before the setting existed.
+   */
+  agentContext?: (projectId?: string) => ResolvedAgentContext | Promise<ResolvedAgentContext>;
   /** The composer's `/` menu — given each live session's command list to cache. */
   slashCommands?: SlashCommandService;
   /** GitHub control plane: backs `mcp__dispatch-github__watch_pr`'s checks/threads/merge polls. */
@@ -2005,6 +2012,16 @@ interface LiveSession {
    */
   surfacedMemories: Set<string>;
   /**
+   * Whether this session has already disclosed its house rules on a transcript
+   * row. They're injected into the SYSTEM PROMPT once per session, so disclosing
+   * them per turn would be a lie about what was attached to that turn — and 1000+
+   * chars of the same text repeated down the transcript.
+   *
+   * Set even when there are no rules to show, so a project without any doesn't
+   * pay two file stats on every message.
+   */
+  houseRulesDisclosed?: boolean;
+  /**
    * This chat's runtime timeline — which actor was in which state, for how long
    * (see metrics-activity.ts). Fed from the same neutral events the transcript
    * is, and a no-op when no MetricsService is wired, so nothing here has to be
@@ -2041,6 +2058,9 @@ export class SessionBroker {
   private readonly memoryHistory?: MemoryHistoryService;
   private readonly authored?: AuthoredConfigService;
   private readonly houseRules?: HouseRulesService;
+  private readonly agentContext?: (
+    projectId?: string,
+  ) => ResolvedAgentContext | Promise<ResolvedAgentContext>;
   private readonly slashCommands?: SlashCommandService;
   private readonly github?: GitHubService;
   private readonly runner?: RunnerService;
@@ -2174,6 +2194,7 @@ export class SessionBroker {
     this.memoryHistory = opts.memoryHistory;
     this.authored = opts.authored;
     this.houseRules = opts.houseRules;
+    this.agentContext = opts.agentContext;
     this.slashCommands = opts.slashCommands;
     this.github = opts.github;
     this.runner = opts.runner;
@@ -2376,7 +2397,8 @@ export class SessionBroker {
     // omits context the model was given, which is the exact opacity this whole
     // parts mechanism exists to remove.
     const memory = await this.surfaceMemory(session, text);
-    const parts = this.messageParts(text, o.parts, memory);
+    const houseRules = await this.discloseHouseRules(session);
+    const parts = this.messageParts(text, o.parts, memory, houseRules);
 
     await this.emit(session, {
       kind: "user",
@@ -2545,8 +2567,14 @@ export class SessionBroker {
   ): Promise<SurfacedMemory | undefined> {
     if (!this.memory || !session.projectId || !text.trim()) return undefined;
     try {
+      // Resolved per turn, not per session: a budget raised mid-conversation
+      // should apply to the next message, not to the next chat you open.
+      const ctx = await this.agentContext?.(session.projectId);
       const surfaced = await this.memory.surfaceFor(session.projectId, text, {
         exclude: session.surfacedMemories,
+        limit: ctx?.memory.surfaceLimit.effective,
+        fullLimit: ctx?.memory.fullLimit.effective,
+        charBudget: ctx?.memory.charBudget.effective,
       });
       if (!surfaced) return undefined;
       // Two tiers, recorded distinctly: `surfaced` got its full body into the
@@ -2581,20 +2609,50 @@ export class SessionBroker {
     text: string,
     given: MessagePart[] | undefined,
     memory: SurfacedMemory | undefined,
+    houseRules: { block: string; label: string } | undefined,
   ): MessagePart[] | undefined {
-    if (!memory) return given;
-    const count = memory.names.length + memory.pointed.length;
-    const detail = memory.names.length
-      ? `${memory.names.length} in full`
-      : "names only";
-    return [
+    if (!memory && !houseRules) return given;
+    const parts: MessagePart[] = [
       ...(given ?? (text ? [{ kind: "text" as const, text }] : [])),
-      {
+    ];
+    // House rules first of the context parts: they're the frame everything else
+    // was read inside, and they arrived before the turn did.
+    if (houseRules) {
+      parts.push({ kind: "context", label: houseRules.label, text: houseRules.block });
+    }
+    if (memory) {
+      const count = memory.names.length + memory.pointed.length;
+      const detail = memory.names.length ? `${memory.names.length} in full` : "names only";
+      parts.push({
         kind: "context",
         label: `${count} project ${count === 1 ? "memory" : "memories"} surfaced — ${detail}`,
         text: memory.block,
-      },
-    ];
+      });
+    }
+    return parts;
+  }
+
+  /**
+   * The house-rules block for this session's FIRST turn, so "show sent context"
+   * can display the one injection that never came through a message.
+   *
+   * Once per session, matching where the rules actually enter: the system
+   * prompt, built once per session. A resumed session discloses again because
+   * its prompt is rebuilt — and because the files may have changed since, which
+   * is precisely the case a reader needs told.
+   */
+  private async discloseHouseRules(
+    session: LiveSession,
+  ): Promise<{ block: string; label: string } | undefined> {
+    if (!this.houseRules || session.houseRulesDisclosed) return undefined;
+    // Set before the read, not after: a throwing read must not leave the session
+    // retrying it on every subsequent message.
+    session.houseRulesDisclosed = true;
+    try {
+      return (await this.houseRules.describeInjection(session.projectId ?? undefined)) ?? undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   /**

@@ -15,7 +15,6 @@ import { cn } from "../../lib/cn.js";
 import { SegmentedControl } from "../ui/SegmentedControl.js";
 import { MemoryForm, TYPE_META } from "./MemoryForm.js";
 import { MemoryListRow } from "./MemoryListRow.js";
-import { HouseRulesPanel } from "./HouseRulesPanel.js";
 import { ClaudeMemoryPanel } from "./ClaudeMemoryPanel.js";
 
 /* ------------------------------------------------------------------ relevance */
@@ -143,17 +142,22 @@ function MemoryViewer({
 
 /* ----------------------------------------------------------------------- view */
 
-type MemorySection = "project" | "house" | "claude";
+// The "House rules" tab used to be here, editing the same two files that
+// Settings → Agent context now does. Two editors over one file is a lost edit
+// waiting to happen — each holds its own unsaved draft and the last Save wins
+// silently — so the tab is gone rather than duplicated. House rules also aren't
+// memory: memory is a lookup catalogue that surfaces when relevant, and house
+// rules are the block that always arrives, which is the whole distinction.
+type MemorySection = "project" | "claude";
 
 const SECTIONS = [
   { value: "project" as const, label: "Project", icon: <Brain /> },
-  { value: "house" as const, label: "House rules", icon: <ScrollText /> },
   { value: "claude" as const, label: "Claude", icon: <Bot /> },
 ];
 
-/** The top-level, chat-independent Memory browser, in three sections that share
- *  one list/detail layout: Dispatch's project memory, the always-on house rules,
- *  and Claude Code's own auto-memory for the repo. Scoped to the active project. */
+/** The top-level, chat-independent Memory browser, in two sections that share
+ *  one list/detail layout: Dispatch's project memory and Claude Code's own
+ *  auto-memory for the repo. Scoped to the active project. */
 export function MemoryView() {
   const project = useActiveProject();
   const projectId = project?.id ?? null;
@@ -180,9 +184,6 @@ export function MemoryView() {
     </div>
   );
 
-  if (section === "house") {
-    return <HouseRulesPanel projectId={projectId} header={<SectionHeader title="House rules">{tabs}</SectionHeader>} />;
-  }
   if (section === "claude") {
     return <ClaudeMemoryPanel projectId={projectId} header={<SectionHeader title="Claude memory">{tabs}</SectionHeader>} />;
   }

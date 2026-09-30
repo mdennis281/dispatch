@@ -41,6 +41,8 @@ import type {
   HouseRules,
   HouseRulesFile,
   HouseRulesScope,
+  AgentContextSettings,
+  ProjectAgentContext,
   ClaudeMemoryFile,
   ClaudeMemoryListing,
   McpCatalog,
@@ -222,6 +224,13 @@ export interface AppSettings {
   };
   /** Issue-triggered chats — the app-wide switch. ON when unset; enrolment is per project. */
   issueWatcher?: { enabled?: boolean };
+  /**
+   * What Dispatch puts in front of an agent before the task — the house-rules
+   * cap and how much durable memory surfaces per turn. Every field optional:
+   * absent = the shipped default (see shared `agent-context.ts`), and a project
+   * may override any of it in its `project.yaml`.
+   */
+  agentContext?: AgentContextSettings;
   auth?: {
     enabled?: boolean;
     firstRunDismissed?: boolean;
@@ -826,6 +835,15 @@ export const api = {
       ),
     save: (scope: HouseRulesScope, text: string, projectId?: string) =>
       put<HouseRulesFile>(`/api/house-rules/${scope}`, { text, projectId }),
+    /**
+     * This repo's `agentContext:` block, written whole. `null` removes it, so
+     * the project goes back to inheriting every app-level value.
+     *
+     * Not part of the settings PUT: that endpoint is the APP's settings, and
+     * this lands in the project's `project.yaml` where it can be committed.
+     */
+    saveProjectContext: (projectId: string, block: ProjectAgentContext | null) =>
+      put<{ manifestPath?: string }>(`/api/projects/${projectId}/config/agent-context`, block),
   },
 
   /* Claude Code's own auto-memory dir for a project's repo */

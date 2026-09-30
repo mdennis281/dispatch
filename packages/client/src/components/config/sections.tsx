@@ -16,6 +16,7 @@
  */
 import {
   Blocks,
+  BookMarked,
   Bot,
   Boxes,
   Brain,
@@ -126,15 +127,32 @@ export const SECTIONS: SectionDef[] = [
     countable: false,
   },
   {
+    id: "agentContext",
+    icon: BookMarked,
+    label: "Agent context",
+    blurb: "House rules and memory, on every turn",
+    explainer:
+      "This repo's always-on guidance, and how much durable memory surfaces per turn. " +
+      "Overrides your app settings for anyone working in this project; blank fields inherit " +
+      "them. Unlike Instructions below, it is capped and shown to you as a cost — because it " +
+      "is paid on every turn of every chat.",
+    noun: "setting",
+    countable: false,
+  },
+  {
     id: "instructions",
     icon: ScrollText,
     label: "Instructions",
-    blurb: "House rules appended to every session",
+    // Deliberately no longer "house rules appended to every session": that is
+    // what the section ABOVE is, and calling both by the same name is how a
+    // 5811-char instruction file ended up doing the always-on job uncapped.
+    blurb: "Long-form prose appended to every session",
     explainer:
       "Prose that rides on every turn of every chat in this project. Use it for the things " +
       "an agent keeps getting wrong here — the test command that isn't the obvious one, the " +
-      "directory that's generated, the convention a newcomer would violate. Keep it short: " +
-      "it competes for attention with everything else in the window, and a long one gets skimmed.",
+      "directory that's generated, the convention a newcomer would violate. Reach for House " +
+      "rules (above) first for anything short and absolute: this section is uncapped, which " +
+      "means nothing here is protecting you from a file long enough to get skimmed.",
     noun: "instruction",
   },
   {

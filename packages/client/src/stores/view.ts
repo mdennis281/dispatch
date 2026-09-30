@@ -37,6 +37,7 @@ export type AppSettingsSection =
   | "chat"
   | "accounts"
   | "context"
+  | "agent-context"
   | "notifications"
   | "auth"
   | "updates"
