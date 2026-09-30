@@ -39,7 +39,13 @@ export type ChatWorktreeRecord = z.infer<typeof ChatWorktreeRecordSchema>;
  * disagrees with a `c:` would file one tree as two.
  */
 export function worktreeKey(path: string): string {
-  return path.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  const slashed = path.replace(/\\/g, "/").toLowerCase();
+  // Trailing separators are trimmed with a scan rather than `/\/+$/`: that
+  // pattern backtracks polynomially on a path of many trailing slashes, which
+  // CodeQL flags because these paths come in off the wire.
+  let end = slashed.length;
+  while (end > 0 && slashed[end - 1] === "/") end--;
+  return slashed.slice(0, end);
 }
 
 /**
