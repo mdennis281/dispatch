@@ -30,6 +30,7 @@ import {
   type ShellTranscriptFilter,
   type WorkflowConfig,
   type IssueConfig,
+  type ProjectAgentContext,
 } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import type { ProjectConfigService } from "./project-config.js";
@@ -326,6 +327,46 @@ export async function saveProjectIssues(
   const pruned = block ? prune(block) : null;
   if (pruned && Object.keys(pruned).length) loaded.doc.setIn(["issues"], pruned);
   else loaded.doc.delete("issues");
+  const manifestPath = await saveManifest(loaded);
+  await deps.projectConfig.reload(projectId);
+  const project2 = (await deps.store.getProject(projectId).catch(() => null)) ?? project;
+  return { target: "manifest", project: project2, manifestPath };
+}
+
+/**
+ * Write (or remove) the manifest's `agentContext:` block — this repo's
+ * overrides for what rides on every turn.
+ *
+ * Whole-block replace rather than a key-by-key patch, for the same reason as
+ * `saveProjectIssues`: the pane edits it as one form, and the fields constrain
+ * each other (a `fullLimit` above a `surfaceLimit` is a contradiction), so
+ * merging half of a new form over half of an old one can produce a pair nobody
+ * chose. Manifest-only — the block is read from the loaded config and nowhere
+ * else, so a project without a `project.yaml` has nowhere to hold it.
+ *
+ * An empty block is DELETED rather than written as `agentContext: {}`: the two
+ * mean the same thing to the loader, but only one of them stops reading as a
+ * deliberate authored choice in a file someone else will open.
+ */
+export async function saveProjectAgentContext(
+  deps: { store: Store; projectConfig: ProjectConfigService },
+  projectId: string,
+  block: ProjectAgentContext | null,
+): Promise<ProjectSettingSaveResult | null> {
+  const project = await deps.store.getProject(projectId).catch(() => null);
+  if (!project) return null;
+  const externalDir = deps.store.projectConfigDir(projectId);
+  const paths = isManifestBacked(project, externalDir) ? configPathsFor(project, externalDir) : null;
+  if (!paths) {
+    throw new Error(
+      "This project has no config dir yet. Create one (Project config → Create config) " +
+        "and the agent-context settings will be written to its project.yaml.",
+    );
+  }
+  const loaded = await loadManifest(paths);
+  const pruned = block ? prune(block) : null;
+  if (pruned && Object.keys(pruned).length) loaded.doc.setIn(["agentContext"], pruned);
+  else loaded.doc.delete("agentContext");
   const manifestPath = await saveManifest(loaded);
   await deps.projectConfig.reload(projectId);
   const project2 = (await deps.store.getProject(projectId).catch(() => null)) ?? project;

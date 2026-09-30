@@ -567,12 +567,14 @@ export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;
  * because the server composes a DIFFERENT briefing per section (where the file
  * goes, what shape it takes), so both ends have to agree on the names.
  *
- * `workflow` and `memory` appear in the UI but are not authorable here: workflow
- * has its own editor (it's manifest keys, not files), and memory has its own
- * view and is written by agents through the memory tools.
+ * `workflow`, `memory` and `agentContext` appear in the UI but are not
+ * authorable here: workflow and agentContext have their own editors (they're
+ * manifest keys, not files), and memory has its own view and is written by
+ * agents through the memory tools.
  */
 export const ConfigSectionSchema = z.enum([
   "workflow",
+  "agentContext",
   "chat",
   "reviewer",
   "issues",

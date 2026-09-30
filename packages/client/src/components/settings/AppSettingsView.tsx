@@ -45,6 +45,7 @@ import { AppearanceSection } from "./sections/AppearanceSection.js";
 import { AccountsSection } from "./sections/AccountsSection.js";
 import { ChatSection } from "./sections/ChatSection.js";
 import { ContextSection, normalizeContextLimits } from "./sections/ContextSection.js";
+import { AgentContextSection } from "./sections/AgentContextSection.js";
 import { NotificationsSection } from "./sections/NotificationsSection.js";
 import { AuthSettings } from "../auth/AuthSettings.js";
 import { UpdateBanner } from "../update/UpdateBanner.js";
@@ -305,6 +306,8 @@ export function AppSettingsView() {
           <ChatSection {...paneProps} />
         ) : section === "context" ? (
           <ContextSection {...paneProps} />
+        ) : section === "agent-context" ? (
+          <AgentContextSection {...paneProps} />
         ) : (
           <NotificationsSection {...paneProps} />
         )}

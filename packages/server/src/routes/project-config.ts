@@ -25,12 +25,14 @@ import type { FastifyInstance } from "fastify";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import {
+  ProjectAgentContextSchema,
   ProjectConfigLocationSchema,
   ShellTranscriptFilterSchema,
   WorkflowConfigSchema,
 } from "@dispatch/shared";
 import {
   ProjectDefaultsPatchSchema,
+  saveProjectAgentContext,
   saveProjectDefaults,
   saveProjectShellFilter,
   saveProjectWorkflow,
@@ -118,6 +120,29 @@ export function registerProjectConfigRoutes(app: FastifyInstance): void {
       if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
       try {
         const out = await saveProjectDefaults({ store, projectConfig }, req.params.id, parsed.data);
+        if (!out) return reply.code(404).send({ error: "project not found" });
+        app.services.bus.publish({ type: "project-update", project: out.project });
+        return out;
+      } catch (err) {
+        return reply.code(400).send({ error: err instanceof Error ? err.message : String(err) });
+      }
+    },
+  );
+
+  // This repo's overrides for what rides on every turn — the house-rules cap and
+  // mode, and the memory-surfacing budget. Whole-block replace; a `null` body
+  // removes the block (inherit the app settings for everything).
+  app.put<{ Params: { id: string } }>(
+    "/api/projects/:id/config/agent-context",
+    async (req, reply) => {
+      const body = req.body == null ? null : ProjectAgentContextSchema.safeParse(req.body);
+      if (body && !body.success) return reply.code(400).send({ error: body.error.message });
+      try {
+        const out = await saveProjectAgentContext(
+          { store, projectConfig },
+          req.params.id,
+          body ? body.data : null,
+        );
         if (!out) return reply.code(404).send({ error: "project not found" });
         app.services.bus.publish({ type: "project-update", project: out.project });
         return out;

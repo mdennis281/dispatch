@@ -20,6 +20,7 @@
 import { PersonasPane } from "./PersonasPane.js";
 import { SecretsPane } from "./SecretsPane.js";
 import { IssuesPane } from "./IssuesPane.js";
+import { AgentContextPane } from "./AgentContextPane.js";
 import { useState } from "react";
 import { FileCog, Plus, SquarePen, Trash2 } from "lucide-react";
 import {
@@ -71,6 +72,8 @@ export function ConfigSectionPane({
   if (section.id === "personas") return <PersonasPane projectId={projectId} />;
   if (section.id === "secrets") return <SecretsPane projectId={projectId} />;
   if (section.id === "issues" && projectId) return <IssuesPane projectId={projectId} hasConfigDir={!!config} />;
+  if (section.id === "agentContext" && projectId)
+    return <AgentContextPane projectId={projectId} hasConfigDir={!!config} />;
 
   return (
     <div className="space-y-3">
