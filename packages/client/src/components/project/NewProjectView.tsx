@@ -428,7 +428,7 @@ export function NewProjectView({ setup = false, onBack, onDone }: NewProjectView
         <IconButton tip="Back" onClick={() => (onBack ? onBack() : setView("chat"))}>
           <ArrowLeft />
         </IconButton>
-        <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-accent-ghost text-accent [&_svg]:size-3.5">
+        <span className="flex size-6 shrink-0 items-center justify-center rounded-md text-accent [&_svg]:size-3.5">
           <FolderPlus />
         </span>
         <div className="min-w-0">

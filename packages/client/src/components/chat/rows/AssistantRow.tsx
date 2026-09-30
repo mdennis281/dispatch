@@ -62,7 +62,7 @@ export const AssistantRow = memo(function AssistantRow({
         </>
       }
       gutter={
-        <span className="flex size-6 items-center justify-center rounded-md bg-accent-ghost text-accent-hi [&_svg]:size-3.5">
+        <span className="flex size-6 items-center justify-center rounded-md text-accent-hi [&_svg]:size-3.5">
           <Sparkles />
         </span>
       }

@@ -18,7 +18,7 @@ function Card({ title, description, children }: { title: string; description: st
   return (
     <div className="w-full max-w-md rounded-xl border border-line-strong bg-overlay p-6 shadow-[var(--shadow-pop)]">
       <div className="mb-5 flex items-start gap-3">
-        <span className="flex size-9 items-center justify-center rounded-lg bg-accent-ghost text-accent [&_svg]:size-5"><ShieldCheck /></span>
+        <span className="flex size-9 items-center justify-center rounded-lg text-accent [&_svg]:size-5"><ShieldCheck /></span>
         <div><h1 className="text-lg font-semibold text-primary">{title}</h1><p className="mt-1 text-sm text-muted">{description}</p></div>
       </div>
       {children}

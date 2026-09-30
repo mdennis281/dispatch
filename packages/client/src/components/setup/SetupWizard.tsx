@@ -777,7 +777,7 @@ export function SetupWizard() {
       aria-label="Set up Dispatch"
     >
       <header className="flex h-12 shrink-0 items-center gap-3 border-b border-line bg-surface px-4">
-        <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-accent-ghost text-accent [&_svg]:size-3.5">
+        <span className="flex size-6 shrink-0 items-center justify-center rounded-md text-accent [&_svg]:size-3.5">
           <ShieldCheck />
         </span>
         <h2 className="shrink-0 text-sm font-semibold text-primary">Set up Dispatch</h2>
