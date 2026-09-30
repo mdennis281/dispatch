@@ -698,7 +698,14 @@ export class WorktreeDetector {
           ...chat,
           worktrees: desired,
           worktreeHistory: history,
-          updatedAt: this.now(),
+          // NOT stamped. This runs on a 4s timer over every chat in the project,
+          // so whatever it writes here, it writes to chats that have been idle
+          // for weeks. When `worktreeHistory` shipped, the first pass after the
+          // upgrade back-filled it for every chat that still held a tree and
+          // stamped `updatedAt: now` on all of them in the same millisecond —
+          // 57 months-old chats surfaced at the top of the Idle queue at once,
+          // with their age chips reset to "now". Reconciling a chat's worktree
+          // set is not the chat being active; `...chat` keeps the real value.
         })
         .catch(() => null);
       if (!updated) continue;

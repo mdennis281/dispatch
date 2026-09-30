@@ -271,6 +271,26 @@ describe("WorktreeDetector.detectForChat", () => {
     ]);
   });
 
+  // The Idle queue sorts by `updatedAt`. This reconcile runs on a timer over
+  // every chat in the project, so if it stamps, a background pass republishes
+  // months-old chats as the freshest thing in the sidebar.
+  it("leaves updatedAt alone when it reconciles worktrees", async () => {
+    const long_ago = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    await store.saveChat(mkChat({ updatedAt: long_ago }));
+    await detector.start();
+    const wtPath = await agentCreatesWorktree("chatA", "feat/quiet");
+
+    await detector.detectForChat("chatA"); // attach
+    expect((await store.getChat("chatA"))!.updatedAt).toBe(long_ago);
+
+    await git(repo, "worktree", "remove", "--force", wtPath);
+    await detector.detectForChat("chatA"); // detach + history stamp
+    const reloaded = await store.getChat("chatA");
+    expect(reloaded!.worktrees).toEqual([]);
+    expect(reloaded!.worktreeHistory?.[0]?.removedAt).toEqual(expect.any(Number));
+    expect(reloaded!.updatedAt).toBe(long_ago);
+  });
+
   it("does not steal a worktree already owned by another chat", async () => {
     // chatB owns feat/shared; chatA's detection must leave it alone.
     await detector.start();

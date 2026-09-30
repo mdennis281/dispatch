@@ -768,6 +768,38 @@ describe("WorktreeService — the attribution registry (real git)", () => {
     expect(after?.worktreeHistory?.[0]?.removedAt).toEqual(expect.any(Number));
   });
 
+  // Linking a tree to a chat says nothing about the chat having been active,
+  // and the reaper detaches from chats that have been quiet for days.
+  it("attach and detach leave the chat's updatedAt where it was", async () => {
+    const long_ago = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    const info = await svc.create(project(), "feat/quiet", {
+      base: "main",
+      noFetch: true,
+      chatId: "chatQ",
+    });
+    await store.saveChat({
+      id: "chatQ",
+      projectId: "p1",
+      title: "t",
+      harness: "claude",
+      modeId: "default",
+      status: "idle",
+      effort: "medium",
+      worktrees: [],
+      prs: [],
+      createdAt: long_ago,
+      updatedAt: long_ago,
+    });
+
+    await svc.attachToChat("chatQ", info.path, info.branch);
+    expect((await store.getChat("chatQ"))?.updatedAt).toBe(long_ago);
+
+    await svc.detachFromChat("chatQ", info.path);
+    const after = await store.getChat("chatQ");
+    expect(after?.worktreeHistory?.[0]?.removedAt).toEqual(expect.any(Number));
+    expect(after?.updatedAt).toBe(long_ago);
+  });
+
   it("listAll applies the shared registry filter", async () => {
     await svc.create(project(), "feat/alpha", {
       base: "main",
