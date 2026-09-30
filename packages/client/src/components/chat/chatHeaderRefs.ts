@@ -16,9 +16,10 @@ import type { ChatWorktreeRef } from "./ChatHeaderBadges.js";
  * The branch a worktree path implies, for a worktree the catalog no longer has.
  *
  * A guess — the directory leaf with its first `-` read back as the `/` that
- * `worktree create` flattened — and the only thing available once the worktree
- * is gone, since its real branch name lived in the catalog row that went with
- * it. Wrong only for a branch whose first segment genuinely contains a dash.
+ * `worktree create` flattened — wrong for any branch whose first segment
+ * genuinely contains a dash. Now the LEGACY path only: a chat that has a
+ * `worktreeHistory` record carries the branch git actually used, and this is
+ * what is left for the chats that predate the record.
  */
 export function branchFromPath(path: string | undefined): string | null {
   if (!path) return null;
@@ -35,6 +36,14 @@ export function branchFromPath(path: string | undefined): string | null {
  * the chip is meant to say where the work is now, and a directory that no
  * longer exists is not an answer — but they stay in the list, because the
  * roster's whole job is that the record survives the cleanup.
+ *
+ * The removed ones come from `chat.worktreeHistory`, not from `chat.worktrees`:
+ * the detector rewrites the latter to the LIVE set on every reconcile, so by
+ * the time a tree is worth calling "removed" it has already been deleted from
+ * there. Measured before the history existed, 721 of the 770 chats that had
+ * opened a PR listed no worktree at all. `chat.worktrees` is still read for the
+ * chats that predate the history, where a path the catalog has lost is the only
+ * trace left and its branch has to be guessed off the directory name.
  */
 export function chatWorktreeRefs(
   chat: Chat,
@@ -44,7 +53,15 @@ export function chatWorktreeRefs(
   const mine = live.filter((w) => worktreeMatchesChat(w, chat));
   const primary = mine.find((w) => !isMerged(w.branch)) ?? mine[0];
   const ordered = primary ? [primary, ...mine.filter((w) => w.path !== primary.path)] : mine;
-  const removed = chat.worktrees.filter((p) => !mine.some((w) => samePath(w.path, p)));
+  const isLive = (p: string) => mine.some((w) => samePath(w.path, p));
+  // Newest first, so a chat that cut six trees leads its tail with the one it
+  // was on most recently rather than with something from four PRs ago.
+  const recorded = [...(chat.worktreeHistory ?? [])]
+    .filter((r) => !isLive(r.path))
+    .sort((a, b) => b.createdAt - a.createdAt);
+  const legacy = chat.worktrees.filter(
+    (p) => !isLive(p) && !recorded.some((r) => samePath(r.path, p)),
+  );
   return [
     ...ordered.map((w) => ({
       branch: w.branch,
@@ -52,7 +69,13 @@ export function chatWorktreeRefs(
       live: true,
       merged: isMerged(w.branch),
     })),
-    ...removed.map((p) => {
+    ...recorded.map((r) => ({
+      branch: r.branch,
+      path: r.path,
+      live: false,
+      merged: isMerged(r.branch),
+    })),
+    ...legacy.map((p) => {
       const branch = branchFromPath(p) ?? p;
       return { branch, path: p, live: false, merged: isMerged(branch) };
     }),

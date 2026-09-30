@@ -9,6 +9,7 @@ export * from "./subscriptions.js";
 export * from "./runtime-config.js";
 export * from "./registry.js";
 export * from "./worktree-cleanup.js";
+export * from "./worktree-history.js";
 export * from "./domain.js";
 export * from "./git.js";
 export * from "./project-config.js";

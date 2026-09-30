@@ -733,6 +733,41 @@ describe("WorktreeService — the attribution registry (real git)", () => {
     expect((await store.getWorktreeRecord(info.path))?.chatId).toBeUndefined();
   });
 
+  // The record is the point: a chat that cut a tree has to still say so after
+  // the reaper takes the directory, because `chat.worktrees` will not.
+  it("keeps a history record of a worktree, and stamps it on detach", async () => {
+    const info = await svc.create(project(), "feat/remembered", {
+      base: "main",
+      noFetch: true,
+      chatId: "chatH",
+    });
+    await store.saveChat({
+      id: "chatH",
+      projectId: "p1",
+      title: "t",
+      harness: "claude",
+      modeId: "default",
+      status: "idle",
+      effort: "medium",
+      worktrees: [],
+      prs: [],
+      createdAt: Date.now(),
+    });
+    await svc.attachToChat("chatH", info.path, info.branch);
+
+    const attached = await store.getChat("chatH");
+    expect(attached?.worktreeHistory).toEqual([
+      { path: info.path, branch: "feat/remembered", createdAt: expect.any(Number) },
+    ]);
+
+    await svc.detachFromChat("chatH", info.path);
+    const after = await store.getChat("chatH");
+    expect(after?.worktrees).toEqual([]);
+    // Still one record, now with a removal stamp — the branch name survives.
+    expect(after?.worktreeHistory?.[0]?.branch).toBe("feat/remembered");
+    expect(after?.worktreeHistory?.[0]?.removedAt).toEqual(expect.any(Number));
+  });
+
   it("listAll applies the shared registry filter", async () => {
     await svc.create(project(), "feat/alpha", {
       base: "main",

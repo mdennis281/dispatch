@@ -258,6 +258,17 @@ describe("WorktreeDetector.detectForChat", () => {
     expect(res.removed).toEqual(attach.attached);
     const reloaded = await store.getChat("chatA");
     expect(reloaded!.worktrees).toEqual([]);
+    // The reconcile rewrites `worktrees` to the live set — which is why the
+    // record has to outlive it. Without this the chat kept no trace at all that
+    // it had ever cut `feat/gone`, and its PR had nothing to hang off.
+    expect(reloaded!.worktreeHistory).toEqual([
+      {
+        path: wtPath,
+        branch: "feat/gone",
+        createdAt: expect.any(Number),
+        removedAt: expect.any(Number),
+      },
+    ]);
   });
 
   it("does not steal a worktree already owned by another chat", async () => {
