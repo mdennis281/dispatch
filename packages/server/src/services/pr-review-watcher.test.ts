@@ -237,6 +237,28 @@ describe("PrReviewWatcher — noticing", () => {
     await settling.sweep();
     expect((await store.getChat("c2"))?.prs[0].state).toBe("merged");
   });
+
+  // The sweep settles PRs on chats that finished weeks ago, a batch at a time.
+  // Stamping `updatedAt` there put every one of them back at the top of the
+  // sidebar's Idle queue; the `attention-add` is how a landed PR gets reported.
+  it("settling a PR does not bump the chat's updatedAt", async () => {
+    const long_ago = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    await store.saveChat({
+      ...(await makeChat("c3", [REF])),
+      updatedAt: long_ago,
+    });
+    const settling = new PrReviewWatcher({
+      store,
+      bus,
+      github: fakeGitHub({ prMergeState: async () => ({ state: "merged" as const }) }),
+    });
+    await settling.sweep();
+
+    const chat = await store.getChat("c3");
+    expect(chat?.prs[0].state).toBe("merged");
+    expect(chat?.prs[0].settledAt).toEqual(expect.any(Number));
+    expect(chat?.updatedAt).toBe(long_ago);
+  });
 });
 
 describe("PrReviewWatcher — dedup", () => {

@@ -807,7 +807,13 @@ export class PrReviewWatcher {
           ? { ...p, state, settledAt: p.settledAt ?? this.now() }
           : p,
       );
-      const saved = await this.store.saveChat({ ...chat, prs, updatedAt: this.now() });
+      // `updatedAt` is NOT stamped. This fires from a sweep, so it lands on
+      // chats that finished weeks ago — and because the sweep walks a batch at a
+      // time, it walks them back to the top of the Idle queue (which sorts by
+      // `updatedAt`) in groups. "Your PR landed" reaches the human through the
+      // `attention-add` below, which is the channel built for it; re-sorting
+      // their whole sidebar is not a second, better notification.
+      const saved = await this.store.saveChat({ ...chat, prs });
       this.bus.publish({ type: "chat-update", chat: saved });
       // "It landed" is the one PR event that closes a loop rather than opening
       // one, and until now it was the only state change the human had to go

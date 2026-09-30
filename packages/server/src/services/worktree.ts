@@ -1196,7 +1196,11 @@ export class WorktreeService {
         ...chat,
         worktrees: known ? chat.worktrees : [...chat.worktrees, path],
         worktreeHistory: history,
-        updatedAt: Date.now(),
+        // `updatedAt` is deliberately NOT stamped: the sidebar sorts its Idle
+        // queue by it, so a background write here is indistinguishable from the
+        // chat having said something. Linking a worktree is bookkeeping ABOUT a
+        // chat, not the chat doing anything. `...chat` carries the real value
+        // through, and the store derives it from the transcript mtime anyway.
       });
       this.bus?.publish({ type: "chat-update", chat: updated });
       return !known;
@@ -1227,7 +1231,9 @@ export class WorktreeService {
             ? { ...r, removedAt: Date.now() }
             : r,
         ),
-        updatedAt: Date.now(),
+        // Not stamped — see attachToChat. This one is worse: the reaper detaches
+        // trees from chats that have been quiet for days, so stamping here walks
+        // a whole batch of long-finished chats back to the top of Idle.
       });
       this.bus?.publish({ type: "chat-update", chat: updated });
       return true;
