@@ -119,8 +119,18 @@ const ALLOWED_DIR = join(SRC, "components", "ui");
  * 88 → 87: the assistant row's hand-rolled "Thought for a moment" toggle went
  * with the thinking it folded — reasoning is its own stacked block now
  * (`chat/rows/ThinkingGroup.tsx`), built on `Button` and `IconButton`.
+ *
+ * 87 → 88: the append/replace picker in `config/AgentContextPane`. It is a
+ * two-line selectable CARD — a label with an icon above, a sentence explaining
+ * what the choice does below — and `Button` is `h-6 justify-center
+ * whitespace-nowrap`, every part of which this would have to override. It is
+ * deliberately the same bare shape as `config/WorkflowProfilePicker`'s cards,
+ * which are the same control answering the same kind of question two sections
+ * up the same settings page; a difference in height or padding between the two
+ * would show. The rest of the feature pays its own way — both Saves and the
+ * Revert are `Button`, and the house-rules editor it sits under adds none.
  */
-const BASELINE = 87;
+const BASELINE = 88;
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {

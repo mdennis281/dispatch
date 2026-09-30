@@ -81,6 +81,10 @@ export function AgentContextSection({ draft, patch }: AppPaneProps) {
         ) : rules ? (
           <HouseRulesEditor
             file={rules.global}
+            // Shorter than the editor's own default: this pane is a column of
+            // settings, and a 14-row box empty of text reads as the page rather
+            // than as one field on it. It is still resizable.
+            rows={8}
             onSaved={(saved) => setRules((r) => (r ? { ...r, global: saved } : r))}
           />
         ) : (
@@ -89,10 +93,13 @@ export function AgentContextSection({ draft, patch }: AppPaneProps) {
       </div>
 
       <div className="space-y-2 border-b border-line-soft pb-4">
+        {/* "Cap" rather than "House-rules cap": at this column width the longer
+            label wrapped onto two lines beside its own hint. The heading above
+            already says what it caps. */}
         <Field
-          label="House-rules cap"
+          label="Cap"
           hint={`chars per file; blank = ${DEFAULT_HOUSE_RULES_LIMIT}`}
-          className="max-w-[12rem]"
+          className="max-w-[14rem]"
         >
           <TextInput
             mono
