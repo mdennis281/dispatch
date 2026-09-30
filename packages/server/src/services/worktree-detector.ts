@@ -85,6 +85,7 @@
  * attributes.
  */
 import { isAbsolute, resolve, sep } from "node:path";
+import { mergeWorktreeHistory } from "@dispatch/shared";
 import type {
   Chat,
   ChatMessage,
@@ -675,10 +676,30 @@ export class WorktreeDetector {
       const toRemove = chat.worktrees.filter(
         (p) => !desiredCanon.has(canonPath(p)),
       );
-      if (toAdd.length === 0 && toRemove.length === 0) continue;
+      // This reconcile is the one place that sees a chat's WHOLE live set with
+      // each tree's real branch, so it is also where the history is trued up:
+      // the rewrite below is what used to destroy the only evidence a chat had
+      // ever cut a worktree, the moment the reaper took the directory.
+      const history = mergeWorktreeHistory(
+        chat.worktreeHistory ?? [],
+        desired.map((p) => ({
+          path: p,
+          branch: infoByCanon.get(canonPath(p))?.branch ?? "",
+        })),
+        this.now(),
+      );
+      const historyChanged =
+        JSON.stringify(history) !== JSON.stringify(chat.worktreeHistory ?? []);
+      if (toAdd.length === 0 && toRemove.length === 0 && !historyChanged)
+        continue;
 
       const updated = await this.store
-        .saveChat({ ...chat, worktrees: desired, updatedAt: this.now() })
+        .saveChat({
+          ...chat,
+          worktrees: desired,
+          worktreeHistory: history,
+          updatedAt: this.now(),
+        })
         .catch(() => null);
       if (!updated) continue;
       this.bus.publish({ type: "chat-update", chat: updated });

@@ -11,6 +11,7 @@ const chat = (over: Partial<Chat> = {}): Chat =>
     createdAt: 0,
     updatedAt: 0,
     worktrees: [],
+    worktreeHistory: [],
     prs: [],
     ...over,
   }) as Chat;
@@ -183,5 +184,53 @@ describe("rosterRows", () => {
   it("keeps every PR on one branch in the order it was given", () => {
     const { rows } = rosterRows([ref("feat/a")], [prRef(9, "feat/a"), prRef(4, "feat/a")]);
     expect(rows[0]?.prs.map((p) => p.number)).toEqual([9, 4]);
+  });
+});
+
+describe("chatWorktreeRefs · history", () => {
+  const hist = (branch: string, over: Record<string, unknown> = {}) => ({
+    path: `/w/${branch.replace("/", "-")}`,
+    branch,
+    createdAt: 1,
+    ...over,
+  });
+
+  // The record is the ONLY place the branch survives: `chat.worktrees` is
+  // rewritten to the live set, so a reaped tree has left it long before anyone
+  // asks what this chat produced.
+  it("lists a reaped worktree with the branch git actually used", () => {
+    const c = chat({ worktrees: [], worktreeHistory: [hist("feat/a-b", { removedAt: 9 })] });
+    const refs = chatWorktreeRefs(c, [], merged("feat/a-b"));
+    expect(refs).toEqual([{ branch: "feat/a-b", path: "/w/feat-a-b", live: false, merged: true }]);
+  });
+
+  it("never lists a live worktree twice for having a record too", () => {
+    const c = chat({
+      worktrees: ["/w/feat-a"],
+      worktreeHistory: [hist("feat/a", { path: "/w/feat-a" })],
+    });
+    const refs = chatWorktreeRefs(c, [wt("/w/feat-a", "feat/a")], merged());
+    expect(refs).toEqual([{ branch: "feat/a", path: "/w/feat-a", live: true, merged: false }]);
+  });
+
+  it("leads with the live worktree and tails the records newest first", () => {
+    const c = chat({
+      worktrees: ["/w/live"],
+      worktreeHistory: [
+        hist("feat/old", { path: "/w/old", createdAt: 1, removedAt: 5 }),
+        hist("feat/new", { path: "/w/new", createdAt: 3, removedAt: 7 }),
+      ],
+    });
+    const refs = chatWorktreeRefs(c, [wt("/w/live", "feat/live")], merged());
+    expect(refs.map((r) => r.branch)).toEqual(["feat/live", "feat/new", "feat/old"]);
+  });
+
+  // Chats older than the record have only the path, and a guessed branch.
+  it("still guesses for a legacy path no record covers", () => {
+    const c = chat({ worktrees: ["/w/feat-legacy"], worktreeHistory: [] });
+    const refs = chatWorktreeRefs(c, [], merged());
+    expect(refs).toEqual([
+      { branch: "feat/legacy", path: "/w/feat-legacy", live: false, merged: false },
+    ]);
   });
 });

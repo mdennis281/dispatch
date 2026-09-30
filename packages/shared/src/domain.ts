@@ -16,6 +16,7 @@ import {
 import { ResumePlanSchema } from "./limits.js";
 import { PeerSenderSchema } from "./messages.js";
 import { WorkflowConfigSchema } from "./workflow.js";
+import { ChatWorktreeRecordSchema } from "./worktree-history.js";
 
 /* ------------------------------------------------------------------ subApps */
 
@@ -828,8 +829,22 @@ export const ChatSchema = z.object({
   effort: EffortSchema.optional(),
   /** SDK model id pinned on the session; unset inherits (see `modeId`). */
   model: z.string().optional(),
-  /** Worktree paths this chat has created/owns. */
+  /**
+   * Worktree paths this chat currently owns — rewritten to the LIVE set by the
+   * detector on every reconcile. For what this chat has EVER cut (the record
+   * that outlives the reaper) read {@link Chat.worktreeHistory}.
+   */
   worktrees: z.array(z.string()).default([]),
+  /**
+   * Every worktree this chat has owned, live or reaped, with the branch git
+   * gave it. Append-only; a reaped tree is stamped `removedAt`, never dropped.
+   *
+   * Optional rather than `.default([])` — unlike its neighbours — because
+   * ABSENT is a real and different state here: a chat written before the record
+   * existed has no history and no way to get one, since the directories it
+   * would describe are gone. An empty array would claim it cut nothing.
+   */
+  worktreeHistory: z.array(ChatWorktreeRecordSchema).optional(),
   prs: z.array(PRRefSchema).default([]),
   /**
    * The pull request this chat was spawned to REVIEW, as the catalog key

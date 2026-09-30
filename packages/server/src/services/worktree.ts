@@ -34,6 +34,8 @@ import {
   WorktreeInfoSchema,
   BranchInfoSchema,
   applyRegistryQuery,
+  mergeWorktreeHistory,
+  worktreeKey,
   type Project,
   type WorktreeInfo,
   type WorktreeOrigin,
@@ -1113,7 +1115,7 @@ export class WorktreeService {
   ): Promise<void> {
     this.bus?.publish({ type: "worktree-update", chatId, worktree: info });
     if (this.store && chatId) {
-      await this.attachToChat(chatId, info.path);
+      await this.attachToChat(chatId, info.path, info.branch);
     }
     if (project) this.startPrewarm(info, chatId, project);
   }
@@ -1151,7 +1153,11 @@ export class WorktreeService {
    * attribute an agent-created worktree through the very same link path as
    * `create()` — best-effort: a missing store / save failure returns false.
    */
-  async attachToChat(chatId: string, path: string): Promise<boolean> {
+  async attachToChat(
+    chatId: string,
+    path: string,
+    branch?: string,
+  ): Promise<boolean> {
     if (!this.store) return false;
     // The record is the catalog's answer to "whose is this?", so it is updated
     // even when the chat already listed the path — the two used to be able to
@@ -1159,14 +1165,41 @@ export class WorktreeService {
     await this.setRecordChat(path, chatId);
     try {
       const chat = await this.store.getChat(chatId);
-      if (!chat || chat.worktrees.includes(path)) return false;
+      if (!chat) return false;
+      const known = chat.worktrees.includes(path);
+      // The branch is written NOW, while the tree still exists, because after
+      // the reaper there is nowhere left to read it from — which is the whole
+      // reason the history exists.
+      const named = branch ?? (await this.recordBranch(path));
+      const prior = chat.worktreeHistory ?? [];
+      const history = named
+        ? mergeWorktreeHistory(
+            prior,
+            // Only this path: the caller is attaching ONE tree and knows
+            // nothing about the others, and a full-set merge here would stamp
+            // every worktree it didn't mention as removed.
+            [
+              ...prior
+                .filter((r) => r.removedAt === undefined)
+                .map((r) => ({ path: r.path, branch: r.branch })),
+              { path, branch: named },
+            ],
+            Date.now(),
+          )
+        : prior;
+      // `mergeWorktreeHistory` always returns a fresh array, so identity says
+      // nothing; without a value compare an attach of an already-known tree
+      // would write and publish `chat-update` on every single reconcile.
+      const changed = JSON.stringify(history) !== JSON.stringify(prior);
+      if (known && !changed) return false;
       const updated = await this.store.saveChat({
         ...chat,
-        worktrees: [...chat.worktrees, path],
+        worktrees: known ? chat.worktrees : [...chat.worktrees, path],
+        worktreeHistory: history,
         updatedAt: Date.now(),
       });
       this.bus?.publish({ type: "chat-update", chat: updated });
-      return true;
+      return !known;
     } catch {
       /* linking is best-effort; the worktree itself already exists */
       return false;
@@ -1187,6 +1220,13 @@ export class WorktreeService {
       const updated = await this.store.saveChat({
         ...chat,
         worktrees: chat.worktrees.filter((p) => p !== path),
+        // Stamped, not dropped: "this chat cut feat/x and it has since been
+        // cleaned up" is exactly the fact the header had no way to state.
+        worktreeHistory: (chat.worktreeHistory ?? []).map((r) =>
+          worktreeKey(r.path) === worktreeKey(path) && r.removedAt === undefined
+            ? { ...r, removedAt: Date.now() }
+            : r,
+        ),
         updatedAt: Date.now(),
       });
       this.bus?.publish({ type: "chat-update", chat: updated });
@@ -1194,6 +1234,21 @@ export class WorktreeService {
     } catch {
       /* best-effort */
       return false;
+    }
+  }
+
+  /**
+   * The branch the registry has for a path, for an attach that wasn't told one
+   * (the detector's re-attribution of a tree it found on disk). Undefined means
+   * no row — and then no history record, because a record whose branch is a
+   * guess off the directory name is the thing this replaced.
+   */
+  private async recordBranch(path: string): Promise<string | undefined> {
+    if (!this.store) return undefined;
+    try {
+      return findRecord(await this.records(), path)?.branch;
+    } catch {
+      return undefined;
     }
   }
 
