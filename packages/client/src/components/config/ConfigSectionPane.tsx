@@ -73,7 +73,16 @@ export function ConfigSectionPane({
   if (section.id === "secrets") return <SecretsPane projectId={projectId} />;
   if (section.id === "issues" && projectId) return <IssuesPane projectId={projectId} hasConfigDir={!!config} />;
   if (section.id === "agentContext" && projectId)
-    return <AgentContextPane projectId={projectId} hasConfigDir={!!config} />;
+    // `config.agentContext` and not just `!!config`: the pane SAVES the block
+    // whole, so it has to start from what is already in `project.yaml` or a save
+    // would silently drop every override it didn't happen to render.
+    return (
+      <AgentContextPane
+        projectId={projectId}
+        hasConfigDir={!!config}
+        saved={config?.agentContext ?? null}
+      />
+    );
 
   return (
     <div className="space-y-3">

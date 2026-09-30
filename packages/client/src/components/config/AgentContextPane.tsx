@@ -16,7 +16,7 @@
  * clearing a field tells you where the value will come from instead of leaving
  * you to guess.
  */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Check, Layers2, Replace } from "lucide-react";
 import {
   DEFAULT_HOUSE_RULES_LIMIT,
@@ -57,9 +57,21 @@ const MODES: { id: HouseRulesMode; label: string; hint: string; icon: typeof Lay
 export function AgentContextPane({
   projectId,
   hasConfigDir,
+  saved: savedBlock,
 }: {
   projectId: string;
   hasConfigDir: boolean;
+  /**
+   * The project's `agentContext:` block as it stands in `project.yaml`, or null
+   * when it authors none.
+   *
+   * Load-bearing, not a convenience. The save is a WHOLE-BLOCK replace, so a
+   * draft that started empty would write an empty block over whatever was
+   * there: open this pane on a project with `houseRulesLimit: 3000`, click the
+   * mode toggle, press Save, and the 3000 is gone with nothing said. The draft
+   * has to start as what is already on disk.
+   */
+  saved: ProjectAgentContext | null;
 }) {
   const [rules, setRules] = useState<HouseRules | null>(null);
   // The app layer, so a blank override can name what it INHERITS rather than
@@ -68,8 +80,11 @@ export function AgentContextPane({
   // placeholder that lies about where a value comes from is worse than a
   // placeholder that arrives a moment late.
   const [app, setApp] = useState<AgentContextSettings>({});
-  const [draft, setDraft] = useState<ProjectAgentContext | null>(null);
-  const [saved, setSaved] = useState<ProjectAgentContext | null>(null);
+  // Both seeded from what is ON DISK, so `dirty` means "differs from the file"
+  // and a save carries every override — including the ones no field on this
+  // pane happens to render.
+  const [draft, setDraft] = useState<ProjectAgentContext | null>(savedBlock);
+  const [saved, setSaved] = useState<ProjectAgentContext | null>(savedBlock);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState<number | null>(null);
@@ -87,28 +102,35 @@ export function AgentContextPane({
     };
   }, []);
 
+  // The config arrives asynchronously on the page that mounts this, so the
+  // first render can legitimately see null. Re-seed when it lands — but only
+  // while the form is CLEAN, or a slow config load would discard edits that
+  // started before it arrived.
+  const dirty = JSON.stringify(draft) !== JSON.stringify(saved);
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
+  useEffect(() => {
+    if (dirtyRef.current) return;
+    setDraft(savedBlock);
+    setSaved(savedBlock);
+  }, [savedBlock]);
+
   useEffect(() => {
     let live = true;
     setRules(null);
+    // House rules are FILES, fetched separately from the manifest block. This
+    // read feeds the editor and `replacing` ONLY — deliberately not the draft,
+    // because `r.mode` is the RESOLVED mode: it says "append" whether the
+    // project authored that or authored nothing, so writing it back would pin
+    // a default the first time anybody pressed Save.
     api.houseRules
       .get(projectId)
-      .then((r) => {
-        if (!live) return;
-        setRules(r);
-        // The mode is the one field readable straight off the house-rules
-        // response, so the pane can render its current state without a second
-        // request for the manifest it is about to write.
-        const initial: ProjectAgentContext = { houseRulesMode: r.mode };
-        setDraft(initial);
-        setSaved(initial);
-      })
+      .then((r) => live && setRules(r))
       .catch((err) => live && setError(err instanceof ApiError ? err.message : "Failed to load."));
     return () => {
       live = false;
     };
   }, [projectId]);
-
-  const dirty = JSON.stringify(draft) !== JSON.stringify(saved);
   const patch = (p: Partial<ProjectAgentContext>) => {
     setDraft((d) => ({ ...(d ?? {}), ...p }));
     setSavedAt(null);
@@ -132,7 +154,9 @@ export function AgentContextPane({
         ...(draft.houseRulesMode === "append" ? { houseRulesMode: undefined } : {}),
       };
       await api.houseRules.saveProjectContext(projectId, block);
-      setSaved(draft);
+      // `block`, not `draft` — what is on disk is what was sent, and the config
+      // reload that follows hands the same thing back as `savedBlock`.
+      setSaved(block);
       setSavedAt(Date.now());
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Failed to save.");
