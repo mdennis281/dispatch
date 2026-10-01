@@ -78,8 +78,13 @@ declare global {
       hold: () => () => void;
       /** Give back the hold the splash itself took when the document was parsed. */
       releaseSplash: () => void;
-      /** Subscribe to colour changes. Set by the rotation; used by the canvas renderer. */
-      onColour: (fn: (name: string, value: string) => void) => void;
+      /**
+       * Subscribe to colour changes; returns an unsubscribe. Set by the
+       * rotation and used by the canvas renderer, which is one subscription per
+       * MOUNT now that `BootMark` runs it too — so the unsubscribe is not
+       * optional tidiness.
+       */
+      onColour: (fn: (name: string, value: string) => void) => () => void;
       /**
        * Tell the canvas renderer to play the mold.
        *
@@ -99,6 +104,25 @@ declare global {
        * loop. Absent unless the worker started; see `onExit`.
        */
       stopCanvas?: () => void;
+      /**
+       * Run the SAME worker renderer on a canvas of your own — what `BootMark`
+       * uses, so an in-app mark is not the one animation in the app that stops
+       * dead when the main thread is busy.
+       *
+       * The canvas must be FRESH: `transferControlToOffscreen` is a one-way
+       * door per element, so a component that can remount has to create one in
+       * its effect rather than render one and hold a ref. `markPx` is the
+       * mark's own box; the canvas is sized around it.
+       *
+       * Returns null when there is no renderer to be had (no worker, no
+       * `OffscreenCanvas`, reduced motion), which is the signal to leave the
+       * SVG showing — `onReady` is what says the canvas has a frame up.
+       */
+      attachCanvas?: (
+        canvas: HTMLCanvasElement,
+        markPx: number,
+        onReady?: () => void,
+      ) => { stop: () => void } | null;
     };
   }
 }

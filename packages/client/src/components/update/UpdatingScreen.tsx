@@ -43,7 +43,7 @@
  * to a server it no longer matches.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AlertTriangle, Check, ChevronDown, RotateCw } from "lucide-react";
+import { AlertTriangle, Check, ChevronDown, RotateCw, Terminal } from "lucide-react";
 import type { UpdatePhase } from "@dispatch/shared";
 import { Button } from "../ui/Button.js";
 import { useUpdate } from "../../stores/update.js";
@@ -250,71 +250,90 @@ function Attempt({ flight }: { flight: UpdateFlight }) {
   const index = Math.max(0, stepIndex(phase));
   const patient = waited > PATIENCE_MS;
 
+  // One line, not three stacked paragraphs. This screen is read at a glance by
+  // someone waiting, and the four states it can be in are mutually exclusive —
+  // rendering them as separate <p>s made the page tall enough that the mark
+  // stopped being the thing you looked at.
+  const note =
+    stage === "ready"
+      ? "The new build is up. Waiting for it to answer at this address."
+      : phase === "swapping"
+        ? "Dispatch is restarting. Nothing for you to do."
+        : patient
+          ? "Taking longer than usual. The previous build is kept and rolls back on its own if the new one doesn't come up."
+          : "You can leave this open — it takes over as soon as the new build answers.";
+
   return (
     <div
       style={{ zIndex: LAYER.shutdown }}
-      className="fixed inset-0 flex flex-col items-center justify-center bg-app/95 p-6 backdrop-blur-sm"
+      className="fixed inset-0 flex flex-col items-center overflow-y-auto bg-app/95 p-6 backdrop-blur-sm"
     >
-      <div className="w-full max-w-[440px]">
-        <div className="flex flex-col items-center text-center">
-          {/* The boot mark while it is working — the same loop the splash runs,
-              and for the same reason: this is a wait of unknown length with a
-              progress bar that can sit on one phase for minutes. A pulsing arrow
-              said "an update" where the mark says "and it is still going".
+      {/* `my-auto`, NOT `justify-center` on the scroller. An auto margin
+          collapses to zero when the child is taller than the box, where
+          `justify-center` would centre it anyway and put its first lines above
+          the scroll origin — unreachable, because you cannot scroll up past the
+          top. This column can outgrow a short window the moment the log is
+          open. */}
+      <div className="my-auto flex w-full max-w-[400px] flex-col items-center text-center">
+        {/* The boot mark while it is working — the same loop the splash runs,
+            and for the same reason: this is a wait of unknown length with a
+            progress bar that can sit on one phase for minutes. A pulsing arrow
+            said "an update" where the mark says "and it is still going".
 
-              A FAILED update keeps its warning triangle. It is over, there is
-              nothing left running, and an animation that implies otherwise is
-              the one thing this screen must never do. */}
-          {stage === "failed" ? (
-            <span className="mb-3.5 flex size-12 items-center justify-center rounded-xl border border-danger-line bg-panel-2 text-danger [&_svg]:size-5">
-              <AlertTriangle />
-            </span>
-          ) : (
-            <BootMark />
-          )}
-          <p className="text-lg font-medium text-primary">
-            {stage === "failed"
-              ? "Update failed"
-              : `Updating Dispatch${flight.version ? ` to v${flight.version}` : ""}`}
-          </p>
-        </div>
+            Bigger than the 72px default, and the anchor of the page rather than
+            a bullet in front of the heading: with a log panel under it the
+            screen has enough going on that the mark has to be unambiguously the
+            first thing you see, or the page reads as a wall of status text.
+
+            A FAILED update keeps its warning triangle. It is over, there is
+            nothing left running, and an animation that implies otherwise is
+            the one thing this screen must never do. */}
+        {stage === "failed" ? (
+          <span className="flex size-16 items-center justify-center rounded-2xl border border-danger-line bg-panel-2 text-danger [&_svg]:size-6">
+            <AlertTriangle />
+          </span>
+        ) : (
+          <BootMark size={104} />
+        )}
+
+        <h2 className="mt-5 text-xl font-semibold tracking-tight text-primary">
+          {stage === "failed" ? "Update failed" : "Updating Dispatch"}
+        </h2>
+        {/* The version is not part of the sentence. Inline it ran the heading to
+            two lines at phone width and put a build stamp in the same weight as
+            the only word that matters. */}
+        {stage !== "failed" && flight.version && (
+          <p className="cm-mono mt-1 text-xs text-faint">v{flight.version}</p>
+        )}
 
         {stage === "failed" ? (
           <>
-            <p className="mt-1 text-center text-sm leading-relaxed text-muted">
-              The installer stopped and put the previous build back. Dispatch is still running the
-              version you had.
+            <p className="mt-2.5 text-sm leading-relaxed text-muted">
+              The installer put the previous build back. Dispatch is still running the version you
+              had.
             </p>
-            <p className="mt-3 rounded-lg border border-line bg-inset p-3 text-left text-xs leading-relaxed text-secondary">
+            <p className="mt-4 w-full rounded-lg border border-line bg-inset p-3 text-left text-xs leading-relaxed text-secondary">
               {failure}
             </p>
           </>
         ) : (
           <>
             <Progress index={index} total={STEPS.length - 1} />
-            <p className="mt-2.5 text-center text-sm text-secondary">
+            <p className="mt-2.5 text-sm text-secondary">
               {STEPS[index]?.label ?? "Working"}
-              <span className="ml-1.5 text-faint">{elapsed(waited)}</span>
+              <span className="cm-mono ml-2 text-xs text-faint">{elapsed(waited)}</span>
             </p>
-            <p className="mt-1 text-center text-xs leading-relaxed text-muted">
-              {stage === "ready"
-                ? "The new build is up. Waiting for it to be reachable at this address before reloading."
-                : phase === "swapping"
-                ? "Dispatch is restarting. This page is waiting for the new build — you don't need to do anything."
-                : patient
-                  ? "This is taking longer than usual. The installer keeps the previous build and rolls it back on its own if the new one doesn't come up."
-                  : "You can leave this page open. It takes over as soon as the new build answers."}
-            </p>
+            <p className="mt-1.5 text-xs leading-relaxed text-muted">{note}</p>
           </>
         )}
 
-        <div className="mt-4 flex items-center justify-center gap-2">
-          {stage === "failed" ? (
-            <Button variant="primary" leftIcon={<Check />} onClick={endFlight}>
-              Back to Dispatch
-            </Button>
-          ) : (
-            patient && (
+        {(stage === "failed" || patient) && (
+          <div className="mt-5">
+            {stage === "failed" ? (
+              <Button variant="primary" leftIcon={<Check />} onClick={endFlight}>
+                Back to Dispatch
+              </Button>
+            ) : (
               // The marker is cleared FIRST. This button is the escape hatch for
               // an update this page cannot see the end of, and a reload that
               // keeps the marker lands straight back on this screen — which is
@@ -332,29 +351,47 @@ function Attempt({ flight }: { flight: UpdateFlight }) {
               >
                 Reload now
               </Button>
-            )
-          )}
-          {log.length > 0 && (
+            )}
+          </div>
+        )}
+
+        {/* The log is its own thing now, not a second button in the action row.
+            It sat beside "Reload now" wearing the same weight, which made a
+            diagnostic read like one of the two things you were being asked to
+            do — and only appeared at all once the update had gone on long
+            enough for that button to show up. */}
+        {log.length > 0 && (
+          <div className="mt-5 flex w-full flex-col items-center">
             <Button
-              leftIcon={<ChevronDown className={showLog ? "rotate-180 transition-transform" : "transition-transform"} />}
+              variant="subtle"
+              aria-expanded={showLog}
+              leftIcon={<Terminal />}
+              rightIcon={
+                <ChevronDown
+                  className={showLog ? "rotate-180 transition-transform" : "transition-transform"}
+                />
+              }
               onClick={() => setShowLog((v) => !v)}
             >
-              {showLog ? "Hide log" : "Show log"}
+              {showLog ? "Hide update log" : "Update log"}
             </Button>
-          )}
-        </div>
-
-        {showLog && log.length > 0 && (
-          <pre className="cm-mono mt-3 max-h-56 overflow-auto rounded-lg border border-line bg-inset p-3 text-left text-2xs leading-relaxed text-secondary">
-            {log.join("\n")}
-          </pre>
+            {showLog && (
+              // `overflow-wrap: anywhere`, because `pnpm`'s progress bars are
+              // single 200-character tokens of `+`. Left to themselves they gave
+              // the panel a horizontal scrollbar and pushed every readable line
+              // off to the left of it — which is most of what made this look
+              // like something that had gone wrong.
+              <pre className="cm-mono mt-2 max-h-56 w-full overflow-y-auto rounded-xl border border-line bg-inset px-3 py-2.5 text-left text-2xs leading-relaxed text-secondary whitespace-pre-wrap [overflow-wrap:anywhere]">
+                {log.join("\n")}
+              </pre>
+            )}
+          </div>
         )}
 
         {stage !== "failed" && (
-          <p className="mt-3.5 text-center text-xs text-faint">
-            Agents that were mid-run are stopped with the server and pick themselves
-            back up a few seconds after it returns; their transcripts are intact
-            either way.
+          <p className="mt-5 text-xs leading-relaxed text-faint">
+            Agents mid-run stop with the server and pick themselves back up a few seconds after it
+            returns. Transcripts are intact either way.
           </p>
         )}
       </div>
@@ -366,7 +403,7 @@ function Attempt({ flight }: { flight: UpdateFlight }) {
 function Progress({ index, total }: { index: number; total: number }) {
   const pct = Math.round((Math.min(index, total) / total) * 100);
   return (
-    <div className="mt-4 h-1.5 w-full overflow-hidden rounded-full bg-inset">
+    <div className="mt-6 h-1.5 w-full overflow-hidden rounded-full bg-inset">
       <div
         className="h-full rounded-full bg-accent transition-[width] duration-500 ease-out"
         style={{ width: `${Math.max(pct, 4)}%` }}

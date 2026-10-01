@@ -184,9 +184,25 @@
             return function () {};
           },
           releaseSplash: function () {},
-          /** Called with (name, value) on every colour change, and never replayed. */
+          /*
+           * Called with (name, value) on every colour change, never replayed.
+           * RETURNS AN UNSUBSCRIBE, and callers must use it.
+           *
+           * This used to be subscribe-only, which was fine while the only
+           * subscriber was the splash's canvas renderer — one per document, for
+           * the life of the document. `BootMark` makes it one per MOUNT: a
+           * retried update keys a fresh `Attempt`, and `ConnectingScreen` swaps
+           * its mark in and out every time the diagnosis flips across its 4s
+           * polls — exactly the long flaky outage that screen is for. Without
+           * this, each of those left a dead closure in `listeners` for good, and
+           * every tick walked all of them.
+           */
           onColour: function (fn) {
             listeners.push(fn);
+            return function () {
+              var i = listeners.indexOf(fn);
+              if (i >= 0) listeners.splice(i, 1);
+            };
           },
         };
         window.__dispatchBootMark = api;
@@ -710,6 +726,27 @@
          errors — so the SVG is on screen for every moment the canvas is not. */
       #boot-splash:not([data-canvas]) .boot-splash__canvas { display: none; }
       #boot-splash[data-canvas] .boot-splash__mark { display: none; }
+
+      /* `BootMark`'s half of the same handover, for the marks the APP renders
+         (the connecting screen, the updating screen). Same two rules, keyed off
+         the component's own host rather than `#boot-splash` — there can be more
+         than one of these on a page and there is only ever one splash.
+
+         The host carries the mark's box itself, inline, because the SVG is
+         taken out of flow once the canvas is up — `display: none` and not
+         `visibility: hidden`, for the reason given directly above: a hidden SVG
+         keeps ticking its eleven animations on the very thread this exists to
+         free. Sizing the host instead is what lets it. */
+      .boot-mark { position: relative; display: flex; align-items: center; justify-content: center; }
+      .boot-mark__canvas {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        transform: translate(-50%, -50%);
+        pointer-events: none;
+      }
+      .boot-mark:not([data-canvas]) .boot-mark__canvas { display: none; }
+      .boot-mark[data-canvas] .boot-splash__mark { display: none; }
 
       /* Bigger than the mark ever appears in the app. `overflow: visible` is
          load-bearing rather than defensive: the strip is 80 units longer than
@@ -1667,6 +1704,11 @@
               ctx = m.canvas.getContext("2d");
               colours = m.colours;
               cfg = m.cfg;
+              // Same reason as the `resize` branch below: the element was
+              // transferred at whatever size its markup said (the splash's says
+              // zero), and this side is the only one that may change it now.
+              ctx.canvas.width = cfg.device;
+              ctx.canvas.height = cfg.device;
               cfg.roads = m.roads.map(function (r) {
                 return { path: new Path2D(r.d), len: r.len, phase: r.phase };
               });
@@ -1679,6 +1721,14 @@
             } else if (m.type === "colour") {
               colours[m.name] = m.value;
             } else if (m.type === "resize") {
+              // THE BACKING STORE IS RESIZED HERE, not on the main thread.
+              // Once an element has been handed to `transferControlToOffscreen`
+              // it is a placeholder, and assigning `width`/`height` to it throws
+              // `InvalidStateError` — so the one place the bitmap can grow is
+              // the side that owns it. (Which also clears it, hence the redraw
+              // the next frame does anyway.)
+              ctx.canvas.width = m.device;
+              ctx.canvas.height = m.device;
               cfg.device = m.device;
               cfg.scale = m.scale;
               cfg.origin = m.origin;
@@ -1708,14 +1758,14 @@
          */
         var probe = document.createElementNS("http://www.w3.org/2000/svg", "path");
         svg.appendChild(probe);
-        var roads = roadEls.map(function (el) {
+        var ROADS = roadEls.map(function (el) {
           probe.setAttribute("d", el.getAttribute("d"));
           var phase = (el.className.baseVal.match(/boot-splash__road--(\S+)/) || [])[1];
           return { d: el.getAttribute("d"), len: probe.getTotalLength(), phase: phase };
         });
         svg.removeChild(probe);
 
-        var dots = dotEls.map(function (el) {
+        var DOTS = dotEls.map(function (el) {
           return {
             cx: +el.getAttribute("cx"),
             cy: +el.getAttribute("cy"),
@@ -1725,45 +1775,214 @@
         });
 
         var css = getComputedStyle(svg);
+        var rootCss = getComputedStyle(document.documentElement);
         var VIEW_BOX = 64;
-        var CSS_SIZE = 320;
-        var markPx = parseFloat(css.width) || 116;
+        var STROKE = parseFloat(css.getPropertyValue("--bsw")) || 4.5;
+        var AMBER = rootCss.getPropertyValue("--boot-amber").trim() || "#e5a33c";
+        /*
+         * EVERY colour the worker reads, including the `2` slots.
+         *
+         * `--c-b2` and `--c-c2` were missing, and on the splash that was
+         * invisible: it mounts with the document, so the first tick to set them
+         * arrives long before anything wears them. A `BootMark` mounts at an
+         * arbitrary point in the cycle — forty minutes into a session — and an
+         * unseeded slot makes `draw()` fall back to the dot's OTHER colour for
+         * up to a whole cycle, so the canvas holds a shared dot on the outgoing
+         * road's colour while the SVG it replaced had already crossfaded it.
+         */
+        var SEEDED = [
+          "--c-s1",
+          "--c-s2",
+          "--c-s3",
+          "--c-a",
+          "--c-b",
+          "--c-b2",
+          "--c-c",
+          "--c-c2",
+          "--c-d",
+        ];
 
-        function layout() {
-          var dpr = window.devicePixelRatio || 1;
-          var device = Math.round(CSS_SIZE * dpr);
-          canvas.width = device;
-          canvas.height = device;
+        /*
+         * The splash's canvas is 320px around a 116px mark, and every other
+         * mount keeps that RATIO rather than a fixed pixel box.
+         *
+         * The SVG can rely on `overflow: visible` because the strip is 80 view
+         * box units longer than the frame; a canvas has no such escape, so it is
+         * given the room instead. Scale the mark down and the room has to come
+         * down with it, or a 72px mark sits in a 320px box that mostly overlaps
+         * whatever is laid out beside it.
+         */
+        var CANVAS_RATIO = 320 / 116;
+
+        // Stringified ONCE. `bootMarkWorker` closes over nothing (see its note),
+        // so every mount can be handed the same source text.
+        var WORKER_SRC = "(" + bootMarkWorker.toString() + ")()";
+
+        /*
+         * One canvas, one worker, one rAF loop.
+         *
+         * `transferControlToOffscreen` is a one-way door PER ELEMENT — a canvas
+         * that has been handed over can never be handed over again — so a caller
+         * that may mount twice has to supply a fresh element each time.
+         * `BootMark` creates its canvas inside the effect for exactly that
+         * reason, rather than rendering one and holding a ref to it.
+         *
+         * Returns null when there is no renderer to be had, which is the signal
+         * to leave the SVG showing.
+         */
+        function spawn(canvas, markPx, onReady, onExitDone) {
+          var cssSize = Math.round(markPx * CANVAS_RATIO);
+          canvas.style.width = cssSize + "px";
+          canvas.style.height = cssSize + "px";
+
+          /*
+           * Geometry only — it must NOT touch `canvas.width`.
+           *
+           * The element is a placeholder the moment `transferControlToOffscreen`
+           * has run, and assigning its `width`/`height` after that throws
+           * `InvalidStateError`. `layout()` is called again on every resize, so
+           * a sizing line here is an uncaught exception per resize and a bitmap
+           * that never grows. The worker sets its own backing store; see the
+           * `resize` branch of its `onmessage`.
+           *
+           * The FIRST call still has to establish the bitmap, and does — the
+           * `init` message carries `device` and the worker applies it the same
+           * way, rather than this reaching across the handover to do it.
+           */
+          function layout() {
+            var dpr = window.devicePixelRatio || 1;
+            var device = Math.round(cssSize * dpr);
+            var scale = (markPx / VIEW_BOX) * dpr;
+            return { device: device, scale: scale, origin: device / 2 - 32 * scale };
+          }
+
+          var worker;
+          var blobUrl;
+          try {
+            blobUrl = URL.createObjectURL(new Blob([WORKER_SRC], { type: "text/javascript" }));
+            worker = new Worker(blobUrl);
+          } catch (err) {
+            // No worker, no canvas, and the SVG never stops being correct — but
+            // say so. A silent catch here is how this would come to be quietly
+            // disabled everywhere (a CSP that forbids `blob:` workers, say) with
+            // the splash still looking plausible and nobody any the wiser.
+            console.warn("[dispatch] boot mark: canvas renderer unavailable:", err);
+            return null;
+          }
+
+          function onResize() {
+            if (!worker) return;
+            var g = layout();
+            worker.postMessage({ type: "resize", device: g.device, scale: g.scale, origin: g.origin });
+          }
+
+          function stop() {
+            if (!worker) return;
+            worker.terminate();
+            worker = null;
+            removeEventListener("resize", onResize);
+            // Both of these are per-MOUNT now, not per-document — a `BootMark`
+            // that comes and goes a dozen times across a long outage would
+            // otherwise leave a dozen dead closures the rotation walks forever.
+            offColour();
+          }
+
+          var seed = {};
+          SEEDED.forEach(function (n) {
+            seed[n] = rootCss.getPropertyValue(n).trim();
+          });
+          var offColour = api.onColour(function (name, value) {
+            if (worker) worker.postMessage({ type: "colour", name: name, value: value });
+          });
+
+          worker.onmessage = function (e) {
+            if (blobUrl) {
+              // Not synchronously after `new Worker()`: the script fetch may
+              // still be in flight there, and revoking the URL out from under it
+              // aborts the load silently. Once it has spoken, it has loaded.
+              URL.revokeObjectURL(blobUrl);
+              blobUrl = null;
+            }
+            if (e.data.type === "ready") {
+              if (onReady) onReady();
+            } else if (e.data.type === "exit-done") {
+              // The mold has played out and `frame()` has already stopped
+              // scheduling itself; stopping here gives the thread back rather
+              // than leaving an idle worker alive until the tab closes.
+              if (onExitDone) onExitDone();
+              stop();
+            }
+          };
+          worker.onerror = function (err) {
+            console.warn("[dispatch] boot mark: canvas renderer failed:", err.message || err);
+            stop();
+          };
+
+          var geom = layout();
+          var off = canvas.transferControlToOffscreen();
+          worker.postMessage(
+            {
+              type: "init",
+              canvas: off,
+              colours: seed,
+              roads: ROADS,
+              dots: DOTS,
+              docTime: document.timeline ? document.timeline.currentTime : performance.now(),
+              cfg: {
+                period: 2400,
+                moldMs: 480,
+                strokeWidth: STROKE,
+                amber: AMBER,
+                dashSign: 1,
+                device: geom.device,
+                scale: geom.scale,
+                origin: geom.origin,
+              },
+            },
+            [off],
+          );
+
+          addEventListener("resize", onResize);
+
           return {
-            device: device,
-            scale: (markPx / VIEW_BOX) * dpr,
-            origin: device / 2 - 32 * ((markPx / VIEW_BOX) * dpr),
+            stop: stop,
+            exit: function () {
+              if (worker) worker.postMessage({ type: "exit" });
+            },
           };
         }
 
-        var worker;
-        var blobUrl;
-        try {
-          var src = "(" + bootMarkWorker.toString() + ")()";
-          blobUrl = URL.createObjectURL(new Blob([src], { type: "text/javascript" }));
-          worker = new Worker(blobUrl);
-        } catch (err) {
-          // No worker, no canvas, and the SVG never stops being correct — but
-          // say so. A silent catch here is how this would come to be quietly
-          // disabled everywhere (a CSP that forbids `blob:` workers, say) with
-          // the splash still looking plausible and nobody any the wiser.
-          console.warn("[dispatch] boot mark: canvas renderer unavailable:", err);
-          return;
-        }
+        /*
+         * THE SAME RENDERER, FROM INSIDE THE APP.
+         *
+         * `BootMark` was SVG-only, which meant the one screen where the mark is
+         * watched for minutes rather than seconds — an update — ran the loop on
+         * the main thread. Everything it animates is main-thread-only, so a busy
+         * tab drops it to zero frames; see the note at the top of this script
+         * for why that is not fixable in CSS. An update is exactly such a tab:
+         * `pnpm install` saturates the disk and the SPA keeps polling through it.
+         *
+         * `markPx` is the MARK's box, not the canvas's — the room around it is
+         * `CANVAS_RATIO`'s business. Hand over a fresh <canvas>, get back a stop.
+         */
+        api.attachCanvas = function (canvas, markPx, onReady) {
+          if (!canvas || !canvas.transferControlToOffscreen || !window.Worker) return null;
+          var handle = spawn(canvas, markPx, onReady, null);
+          return handle && { stop: handle.stop };
+        };
 
-        var seed = {};
-        var rootCss = getComputedStyle(document.documentElement);
-        ["--c-s1", "--c-s2", "--c-s3", "--c-a", "--c-b", "--c-c", "--c-d"].forEach(function (n) {
-          seed[n] = rootCss.getPropertyValue(n).trim();
-        });
-        api.onColour(function (name, value) {
-          worker.postMessage({ type: "colour", name: name, value: value });
-        });
+        var splashHandle = spawn(
+          canvas,
+          parseFloat(css.width) || 116,
+          function () {
+            // The one flip. Until it happens the SVG is what you are watching.
+            splash.setAttribute("data-canvas", "");
+          },
+          function () {
+            canvas.style.opacity = "0";
+          },
+        );
+        if (!splashHandle) return;
 
         /*
           * The worker's rAF loop is the only thing here that outlives the
@@ -1779,71 +1998,14 @@
           * would each leave a worker redrawing an orphaned canvas, at 60fps,
           * for as long as the window stayed open.
           */
-        function stopWorker() {
-          if (!worker) return;
-          worker.terminate();
-          worker = null;
-        }
-        api.stopCanvas = stopWorker;
-
-        worker.onmessage = function (e) {
-          if (blobUrl) {
-            // Not synchronously after `new Worker()`: the script fetch may still
-            // be in flight there, and revoking the URL out from under it aborts
-            // the load silently. Once it has spoken, it has loaded.
-            URL.revokeObjectURL(blobUrl);
-            blobUrl = null;
-          }
-          if (e.data.type === "ready") {
-            // The one flip. Until it happens the SVG is what you are watching.
-            splash.setAttribute("data-canvas", "");
-          } else if (e.data.type === "exit-done") {
-            // The mold has played out and `frame()` has already stopped
-            // scheduling itself; this gives the thread back rather than leaving
-            // an idle worker alive until the tab closes.
-            canvas.style.opacity = "0";
-            stopWorker();
-          }
-        };
-        worker.onerror = function (err) {
-          console.warn("[dispatch] boot mark: canvas renderer failed:", err.message || err);
+        api.stopCanvas = function () {
           splash.removeAttribute("data-canvas");
+          splashHandle.stop();
         };
-
-        var geom = layout();
-        var off = canvas.transferControlToOffscreen();
-        worker.postMessage(
-          {
-            type: "init",
-            canvas: off,
-            colours: seed,
-            roads: roads,
-            dots: dots,
-            docTime: document.timeline ? document.timeline.currentTime : performance.now(),
-            cfg: {
-              period: 2400,
-              moldMs: 480,
-              strokeWidth: parseFloat(css.getPropertyValue("--bsw")) || 4.5,
-              amber: rootCss.getPropertyValue("--boot-amber").trim() || "#e5a33c",
-              dashSign: 1,
-              device: geom.device,
-              scale: geom.scale,
-              origin: geom.origin,
-            },
-          },
-          [off],
-        );
-
-        addEventListener("resize", function () {
-          var g = layout();
-          worker.postMessage({ type: "resize", device: g.device, scale: g.scale, origin: g.origin });
-        });
 
         // bootSplash.ts sets `data-done`; the mold is the worker's half of the
         // exit, and the aperture underneath it is still pure CSS on the iris.
-        api.onExit = function () {
-          if (worker) worker.postMessage({ type: "exit" });
-        };
+        api.onExit = splashHandle.exit;
       })();
     </script>
 
