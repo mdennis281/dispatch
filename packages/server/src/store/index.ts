@@ -446,11 +446,6 @@ export function isEntityId(id: unknown): id is string {
   return typeof id === "string" && ENTITY_ID.test(id);
 }
 
-/** `1 chat` / `2 chats`. The refusal is a message whose only job is clarity. */
-function plural(n: number, noun: string): string {
-  return `${n} ${noun}${n === 1 ? "" : "s"}`;
-}
-
 /**
  * Raised when the reserved project id is not available on this install.
  *
@@ -914,12 +909,11 @@ export class Store {
       // genuine global chats by then, and telling the operator to refile them
       // would be telling them to break the global chat to fix the row.
       const reserved = existsSync(this.globalReservationMarker());
-      throw this.reservedIdRefusal(
-        legacy,
-        true,
-        reserved ? [] : await this.scanReservedChats(),
-        reserved,
-      );
+      // Chats are passed ONLY when this instance has not reserved the id yet.
+      // Once it has, chats under that id are the global chat's own and nothing
+      // is wrong with them — listing them as part of the conflict would point
+      // the reader at the one thing they must not touch.
+      throw this.reservedIdRefusal(legacy, true, reserved ? [] : await this.scanReservedChats());
     }
 
     // Already reserved HERE: anything else under the id is the global chat's.
@@ -935,7 +929,7 @@ export class Store {
     const hasRow = existsSync(legacy);
     // Reached only without the marker (the fast path above returns), so the
     // directory here is never the global chat's.
-    if (hasRow || chats.length) throw this.reservedIdRefusal(legacy, hasRow, chats, false);
+    if (hasRow || chats.length) throw this.reservedIdRefusal(legacy, hasRow, chats);
 
     await this.markGlobalIdReserved();
   }
@@ -965,156 +959,58 @@ export class Store {
   }
 
   /**
-   * The refusal, with the exact manual fix in it.
+   * The refusal: what is there, that nothing was touched, and the paths.
    *
-   * Whoever reads this has NO RESCUE BEHIND THEM — the migration that used to
-   * do this for them is gone deliberately — so the message has to be a
-   * procedure, not a diagnosis. Every path is absolute, because the two store
-   * roots can be anywhere and are usually not where the reader guesses.
+   * NOT a procedure, deliberately, and this is the second decision on that
+   * point rather than the first. It WAS a numbered runbook — rename the row,
+   * move the entity directory, rewrite each chat's `projectId`, with a
+   * suggested free id — and three consecutive review rounds found a defect in
+   * it: a step that moved the global chat's own memories onto an unrelated
+   * project, an instruction to "create a project in the app" when `init()`
+   * had already aborted, and an alternative numbered as a step so the list
+   * read as "set projectId, then delete the chats".
    *
-   * The two cases need DIFFERENT instructions, which is why this isn't one
-   * string with optional clauses. With a row there is a project to rename.
-   * With only chats there is no project at all — telling that reader to
-   * "rename the project" sends them looking for a file that does not exist.
+   * Every clause was a new way to be wrong, and the states multiplied the
+   * clauses. The proportionality that deleted the migration applies to its
+   * replacement too: reaching this state takes a hand-written
+   * `POST /api/projects` naming the reserved literal, so a runbook for it is
+   * polish on an unreachable case — and anyone who does hit it will ask,
+   * bringing history no message could have anticipated.
+   *
+   * So: name the conflict, say Dispatch changed nothing, list the absolute
+   * paths (the two store roots can be anywhere), stop. The CALLER decides
+   * which facts to pass — chats are omitted once the id is reserved, because
+   * by then they are the global chat's own and nothing is wrong with them.
    */
   private reservedIdRefusal(
     legacy: string,
     hasRow: boolean,
     chats: Chat[],
-    /**
-     * This instance has already reserved the id, so anything under it belongs
-     * to the GLOBAL CHAT — the late-row case. It changes the PROCEDURE, not
-     * just the wording: `remember` writes the global chat's memories into the
-     * entity directory under this id, so step 2's "rename its directory"
-     * would hand them to the legacy project. Report the collision and let a
-     * human separate it rather than prescribing a merge.
-     */
-    reserved: boolean,
   ): ReservedProjectIdError {
     // Bounded: an operator with 200 orphans needs the shape, not 200 paths.
     const SHOWN = 5;
-    const chatList = chats
-      .slice(0, SHOWN)
-      .map((c) => `     - ${this.chatFile(c.id)}`)
-      .join("\n");
-    const more = chats.length > SHOWN ? `\n     - …and ${chats.length - SHOWN} more` : "";
-
-    const steps: string[] = [];
-    if (hasRow) {
-      // A suggested id rather than "any other id": a reader following steps
-      // under pressure should not have to invent one, and a concrete value
-      // makes steps 2 and 3 copy-pasteable.
-      const to = this.reservedIdSuggestion();
-      steps.push(
-        `  1. Rename the project record:\n` +
-          `     ${legacy}\n` +
-          `     -> ${this.entityFile(this.projectsDir(), to)}\n` +
-          `     and edit its "id" field to "${to}".`,
-        reserved
-          ? `  2. Do NOT move this directory. It belongs to the global chat on\n` +
-            `     this instance and holds ITS memories, not the legacy\n` +
-            `     project's:\n` +
-            `     ${this.projectConfigDir(GLOBAL_PROJECT_ID)}\n` +
-            `     If the legacy project had config of its own it is mixed in\n` +
-            `     there; copy out what belongs to it by hand and leave the rest.`
-          : `  2. Rename its directory, if it has one (this holds the project's\n` +
-            `     memories and, for an external-config project, its .dispatch\n` +
-            `     tree):\n` +
-            `     ${this.projectConfigDir(GLOBAL_PROJECT_ID)}\n` +
-            `     -> ${this.projectConfigDir(to)}`,
-      );
-      if (chats.length) {
-        steps.push(
-          `  3. Set "projectId" to "${to}" in ${plural(chats.length, "chat record")}:\n` +
-            `${chatList}${more}`,
-        );
-      }
-    } else {
-      steps.push(
-        `  1. Pick the project these ${plural(chats.length, "chat")} belong to.\n` +
-          `     The ids available are the .json filenames in:\n` +
-          `     ${this.projectsDir()}\n` +
-          `\n` +
-          // Deliberately NOT "create one in the app": `init()` has already
-          // aborted, so there is no app to create it in. That instruction was
-          // circular, and this is the state where the reader has the least
-          // room to work out a way round it.
-          `     If that directory is EMPTY there is no project to pick, and\n` +
-          `     Dispatch cannot start for you to make one — so write the\n` +
-          `     record by hand. Save this as <some-id>.json in that\n` +
-          `     directory, with a path to the checkout it belongs to:\n` +
-          `\n` +
-          `       {\n` +
-          `         "id": "<some-id>",\n` +
-          `         "name": "<some name>",\n` +
-          `         "repoPath": "<absolute path to the repo>",\n` +
-          `         "worktreeRoot": "<absolute path for worktrees>",\n` +
-          `         "createdAt": ${Date.now()}\n` +
-          `       }`,
-        `  2. Set "projectId" to that id in each of:\n${chatList}${more}`,
-      );
+    const found: string[] = [];
+    if (hasRow) found.push(`  project record    ${legacy}`);
+    const dir = this.projectConfigDir(GLOBAL_PROJECT_ID);
+    if (existsSync(dir)) found.push(`  directory         ${dir}`);
+    for (const c of chats.slice(0, SHOWN)) {
+      found.push(`  chat              ${this.chatFile(c.id)}`);
     }
-    steps.push(`  ${steps.length + 1}. Start Dispatch again.`);
-
-    // An ALTERNATIVE, deliberately not a numbered step. Rendering it as one
-    // made the list read as "set projectId, then delete the chats" — a
-    // procedure that contradicts itself, which is the same failure this
-    // message has already been fixed for once.
-    const alternative = hasRow
-      ? ""
-      : `\nOr, if you do not want these conversations kept, delete the directory ` +
-        `each of those chat.json files sits in and start Dispatch again.\n`;
-
-    // Two leads, not one with optional clauses. "already uses it AND has N
-    // chats filed under it" is a redundant way to describe the orphan case,
-    // where the chats are the only thing there.
-    // Three leads, because the three states are genuinely different problems.
-    // The late-row one especially: nothing of the operator's is being
-    // reinterpreted there — the chats really are the global chat's. What is
-    // wrong is that the synthesized record SHADOWS their row, so the project
-    // they wrote is the thing that has gone missing.
-    const lead = reserved
-      ? `"${GLOBAL_PROJECT_ID}" is reserved for the global chat on this install, but a ` +
-        `project record has appeared at that id — most likely written by another ` +
-        `Dispatch instance on an older build.\n` +
-        `Dispatch refuses to start because the global chat's synthesized record ` +
-        `would hide that project: it would be missing from the project list, and ` +
-        `listed twice in the API.`
-      : hasRow
-        ? `"${GLOBAL_PROJECT_ID}" is reserved for the global chat, but this install ` +
-          `already uses it for a project` +
-          `${chats.length ? `, with ${plural(chats.length, "chat")} filed under it` : ""}.\n` +
-          `Dispatch refuses to start rather than reinterpret that project's ` +
-          `conversations as the global chat's.`
-        : `"${GLOBAL_PROJECT_ID}" is reserved for the global chat, but this install has ` +
-          `${plural(chats.length, "chat")} filed under it, left behind by a project that ` +
-          `was deleted.\nDispatch refuses to start rather than reinterpret those ` +
-          `conversations as the global chat's.`;
+    if (chats.length > SHOWN) {
+      found.push(`                    …and ${chats.length - SHOWN} more`);
+    }
 
     return new ReservedProjectIdError(
-      `${lead}\n\nTo fix it by hand:\n\n${steps.join("\n")}\n${alternative}`,
+      `"${GLOBAL_PROJECT_ID}" is reserved for the global chat, and this install ` +
+        `already has something at that id.\n` +
+        `Dispatch has changed nothing and refuses to start, rather than silently ` +
+        `treat one as the other.\n\n` +
+        `${found.join("\n")}\n\n` +
+        `Move or remove whatever should not be there, then start Dispatch again. ` +
+        `If it is not obvious which is which, ask before changing anything — these ` +
+        `are project records and conversations, and the right answer depends on ` +
+        `history this message cannot see.\n`,
     );
-  }
-
-  /**
-   * A free id to send the legacy project to. `legacy-project`, suffixed only
-   * if something is already there — the suggestion must not name a row the
-   * reader would then overwrite by following the instructions.
-   */
-  private reservedIdSuggestion(): string {
-    for (let n = 0; ; n++) {
-      const id = n === 0 ? "legacy-project" : `legacy-project-${n}`;
-      // BOTH the row and the entity directory. Deleting a project removes the
-      // row and leaves `projects/<id>/`, so a row-only check can suggest an id
-      // whose directory already holds somebody's memories — and the printed
-      // procedure would then have the operator move a directory onto it.
-      if (
-        !existsSync(this.entityFile(this.projectsDir(), id)) &&
-        !existsSync(this.projectConfigDir(id))
-      ) {
-        return id;
-      }
-    }
   }
 
   /**

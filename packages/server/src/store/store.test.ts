@@ -107,9 +107,12 @@ describe("Store projects/chats CRUD", () => {
         name: "Acme Billing",
       });
       const store2 = new Store(cfg);
-      // Actionable: whoever reads this has no rescue behind them, so the
-      // message has to be a procedure with real paths in it — not a
-      // diagnosis. Pin the parts an operator actually follows.
+      // It states the conflict and the paths, and stops. It used to be a
+      // numbered runbook; three review rounds found a defect in it (a step
+      // that moved the global chat's memories onto an unrelated project, an
+      // instruction to use an app that had already refused to start, an
+      // alternative numbered as a step). Reaching this state needs a
+      // hand-written POST, so the runbook was polish on an unreachable case.
       const err = await store2.init().then(
         () => null,
         (e: Error) => e,
@@ -117,17 +120,15 @@ describe("Store projects/chats CRUD", () => {
       store2.close();
       const msg = err!.message;
       expect(msg).toContain('"__global__" is reserved for the global chat');
-      expect(msg).toContain("To fix it by hand:");
-      // The record, by absolute path, and a free id to send it to.
+      expect(msg).toContain("Dispatch has changed nothing");
       expect(msg).toContain(join(cfg, "projects", `${GLOBAL_PROJECT_ID}.json`));
-      expect(msg).toContain(join(cfg, "projects", "legacy-project.json"));
-      // The entity directory, which is where the memories live — the thing
-      // the deleted migration forgot and lost.
-      expect(msg).toContain(`${join(cfg, "projects", GLOBAL_PROJECT_ID)}\n`);
-      expect(msg).toContain("Start Dispatch again.");
-      // No "fix the underlying error and restart" tail: that was true of the
-      // migration and is wrong of a refusal with steps.
-      expect(msg).not.toMatch(/underlying error/);
+      // No procedure: these are the three shapes that were each wrong once.
+      expect(msg).not.toMatch(/To fix it by hand/);
+      expect(msg).not.toMatch(/[0-9]\. /);
+      expect(msg).not.toMatch(/legacy-project/);
+      // And it points at asking rather than guessing, because the right answer
+      // depends on history the message cannot see.
+      expect(msg).toContain("ask before changing anything");
       // And it touched nothing — the record is exactly as the operator left it.
       expect(
         ((await readJson(join(cfg, "projects", `${GLOBAL_PROJECT_ID}.json`))) as Project).name,
@@ -166,46 +167,15 @@ describe("Store projects/chats CRUD", () => {
       // Its own lead: nothing of the operator's is being reinterpreted here —
       // the chats really are the global chat's. What is wrong is that the
       // synthesized record SHADOWS their row.
-      expect(err!.message).toContain("would hide that project");
-      expect(err!.message).not.toContain("already uses it for a project");
-      // The genuine global chat is NOT offered for remapping: by now it really
-      // is a global chat, and refiling it would break the thing being fixed.
-      expect(err!.message).not.toContain("chats filed under it");
-      expect(err!.message).not.toContain("global-1");
-      // And NOT told to move the entity directory. `remember` writes the
-      // global chat's memories there under this id, so the ordinary step 2
-      // would hand them to the legacy project — the procedure itself would be
-      // the data loss.
-      expect(err!.message).toContain("Do NOT move this directory");
-      expect(err!.message).not.toMatch(/2\. Rename its directory/);
+      const msg = err!.message;
+      expect(msg).toContain(join(d, "projects", `${GLOBAL_PROJECT_ID}.json`));
+      // The genuine global chat is NOT listed. By now it really is a global
+      // chat, and naming it in the conflict points the reader at the one
+      // thing they must not touch — the caller decides which facts to pass.
+      expect(msg).not.toContain("global-1");
+      expect(msg).not.toMatch(/chat {2,}/);
     } finally {
       await rm(d, { recursive: true, force: true });
-    }
-  });
-
-  it("suggests a rename target whose DIRECTORY is free, not just its row", async () => {
-    // Deleting a project leaves `projects/<id>/` behind, so a row-only check
-    // can name an id whose directory already holds somebody's memories — and
-    // the printed procedure would then have the operator move a directory
-    // right on top of it.
-    const cfg = await mkdtemp(join(tmpdir(), "cm-sugg-dir-"));
-    try {
-      await mkdir(join(cfg, "projects", "legacy-project", "memory"), { recursive: true });
-      await writeFile(join(cfg, "projects", "legacy-project", "memory", "a.md"), "keep", "utf8");
-      await writeJsonAtomic(join(cfg, "projects", `${GLOBAL_PROJECT_ID}.json`), {
-        ...project(GLOBAL_PROJECT_ID),
-        name: "Acme Billing",
-      });
-      const store2 = new Store(cfg);
-      const err = await store2.init().then(
-        () => null,
-        (e: Error) => e,
-      );
-      store2.close();
-      expect(err!.message).toContain(join(cfg, "projects", "legacy-project-1"));
-      expect(err!.message).not.toContain(`${join(cfg, "projects", "legacy-project")}.json`);
-    } finally {
-      await rm(cfg, { recursive: true, force: true });
     }
   });
 
@@ -230,25 +200,14 @@ describe("Store projects/chats CRUD", () => {
       // Different instructions from the row case, deliberately: there is no
       // project here, so "rename the project" would send the reader looking
       // for a file that does not exist.
-      expect(msg).toContain("left behind by a project that was deleted");
-      expect(msg).not.toMatch(/Rename the project record/);
-      // Named, not counted — the reader has to edit this exact file. And
-      // pluralised, because "1 chat(s)" in the one message whose whole job is
-      // clarity is not good enough.
+      // Same frame as the row case — only the facts listed differ. There is
+      // no per-state clause left to be wrong in, which is the point.
+      expect(msg).toContain('"__global__" is reserved for the global chat');
+      expect(msg).toContain("Dispatch has changed nothing");
       expect(msg).toContain(join(data, "chats", "orphan", "chat.json"));
-      expect(msg).toContain("1 chat filed under it");
-      // The procedure has to be EXECUTABLE in the state that produced it.
-      // `init()` has aborted, so "create a new project in the app" was
-      // circular — there is no app. It now gives the record to write by hand,
-      // with every field `ProjectSchema` requires.
+      expect(msg).not.toMatch(/To fix it by hand/);
       expect(msg).not.toMatch(/in the app/);
-      for (const field of ['"id"', '"name"', '"repoPath"', '"worktreeRoot"', '"createdAt"']) {
-        expect(msg, field).toContain(field);
-      }
-      // And the "just delete them" option is NOT a numbered step: as one it
-      // read as "set projectId, then delete the chats".
-      expect(msg).toContain(`\n\nOr, if you do not want these conversations kept`);
-      expect(msg).not.toMatch(/[0-9]\. Or, if you do not want/);
+      expect(msg).not.toMatch(/"worktreeRoot"/);
       // Still pointing where it was: the refusal is not a half-migration.
       expect(
         ((await readJson(join(data, "chats", "orphan", "chat.json"))) as Chat).projectId,
