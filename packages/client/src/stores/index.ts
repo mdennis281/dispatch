@@ -222,6 +222,15 @@ export function applyServerEvent(evt: WsServerEvent): void {
       return;
     }
 
+    case "attention-filter":
+      // Another window (or another device) saved the app-wide queue filter.
+      // Re-stamping the badge is the point as much as the list is: muting a kind
+      // that already has rows must take them off the OS icon now, not whenever
+      // the next attention event happens to arrive.
+      useAttention.getState().setFilter(evt.filter);
+      void setAttentionBadge(useAttention.getState().visible.length);
+      return;
+
     case "attention-resolve": {
       // The event's chatId is optional, so read the owner off the item we still
       // hold before dropping it — otherwise there is nothing left to re-render.

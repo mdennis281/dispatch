@@ -40,9 +40,12 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import {
   DEFAULT_NOTIFICATION_PREFS,
+  DEFAULT_ATTENTION_FILTER,
   NotificationPrefsSchema,
+  passesAttentionFilter,
   shouldNotify,
   type AttentionItem,
+  type AttentionFilter,
   type NotificationPrefs,
 } from "@dispatch/shared";
 import { z } from "zod";
@@ -321,6 +324,18 @@ export class PushService {
   private writeChain: Promise<unknown> = Promise.resolve();
   private offs: Array<() => void> = [];
 
+  /**
+   * The app-wide Attention Queue filter, pushed in by the container at boot and
+   * by `PUT /api/settings` after that. Held rather than read per event because
+   * the bus handler is synchronous and `track` must not race its own resolve.
+   */
+  private queueFilter: AttentionFilter = DEFAULT_ATTENTION_FILTER;
+
+  /** Re-point the queue filter (boot, and every settings save). */
+  setQueueFilter(filter: AttentionFilter | undefined): void {
+    this.queueFilter = filter ?? DEFAULT_ATTENTION_FILTER;
+  }
+
   constructor(deps: PushServiceDeps) {
     this.bus = deps.bus;
     this.vapidFile = join(deps.configDir, "vapid.json");
@@ -360,6 +375,11 @@ export class PushService {
     if (this.offs.length) return;
     this.offs.push(
       this.bus.on("attention-add", (e) => {
+        // A kind hidden from the Attention Queue must not reach a phone either:
+        // a push you cannot find the row for is the worst of both. Gated BEFORE
+        // `track`, so the badge and "+N more" counts it carries also exclude
+        // what the queue is hiding.
+        if (!passesAttentionFilter(this.queueFilter, e.item)) return;
         this.track(e.item);
         void this.fanOut(e.item).catch((err) => this.onError?.(err));
       }),

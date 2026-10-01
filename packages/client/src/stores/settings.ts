@@ -21,6 +21,7 @@ import {
   type ShellTranscriptFilter,
 } from "@dispatch/shared";
 import { useAttention } from "./attention.js";
+import { setAttentionBadge } from "../lib/browserNotify.js";
 
 /**
  * The app LAYER of every layered setting, exactly as the server stores it —
@@ -70,6 +71,10 @@ export const useSettings = create<SettingsStore>((set) => ({
     // Settings save, the shell-filter modal) get it without each remembering to;
     // attention.ts imports nothing from here, so the dependency stays one-way.
     useAttention.getState().setFilter(settings.attentionQueue ?? DEFAULT_ATTENTION_FILTER);
+    // And re-stamp the OS badge off the newly filtered list. The window that
+    // SAVED the filter applies it here rather than through the broadcast, and
+    // without this its icon would keep the old count until the next event.
+    void setAttentionBadge(useAttention.getState().visible.length);
     set({
       showInjectedContext: settings.showInjectedContext ?? false,
       shellFilter: settings.shellFilter ?? [...SHELL_TRANSCRIPT_CATEGORIES],

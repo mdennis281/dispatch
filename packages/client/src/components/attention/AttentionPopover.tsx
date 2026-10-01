@@ -121,12 +121,18 @@ export function AttentionPopover({
     (i) => i.kind === "permission" || i.kind === "question",
   ).length;
   const [clearing, setClearing] = useState(false);
-  // What Clear would actually take. The blocking items are deliberately not in
-  // it — see DISMISSIBLE_ATTENTION_KINDS — so the button has to say so rather
-  // than appear to have done nothing on a queue that is all permissions.
-  const dismissible = items.filter((i) =>
-    (DISMISSIBLE_ATTENTION_KINDS as readonly string[]).includes(i.kind),
-  ).length;
+  // What Clear would actually take — counted off the RAW list, not the visible
+  // one, because the request clears what the server holds: a tooltip promising
+  // "1 item" while three more are cleared unseen, or a disabled button over rows
+  // that a muted kind is hiding, would both be lies. The blocking items are
+  // deliberately excluded — see DISMISSIBLE_ATTENTION_KINDS — so the button has
+  // to say so rather than appear to have done nothing on a queue of permissions.
+  const dismissible = useAttention(
+    (s) =>
+      s.items.filter((i) =>
+        (DISMISSIBLE_ATTENTION_KINDS as readonly string[]).includes(i.kind),
+      ).length,
+  );
 
   const clear = async () => {
     setClearing(true);

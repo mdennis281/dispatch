@@ -282,6 +282,25 @@ describe("PushService", () => {
     expect(sent).toHaveLength(1);
   });
 
+  it("never pushes a kind the Attention Queue is hiding", async () => {
+    // A push you cannot find the row for is the worst of both. The gate is on
+    // the BUS path (not `fanOut`), because it also has to keep the muted item
+    // out of the outstanding counts the payload carries.
+    const { svc, sent } = make();
+    svc.start();
+    await svc.subscribe(sub(1));
+    svc.setQueueFilter({ kinds: { done: false }, reviewKinds: {} });
+    bus.publish({ type: "attention-add", item: attn("done") });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(sent).toHaveLength(0);
+
+    svc.setQueueFilter({ kinds: {}, reviewKinds: {} });
+    bus.publish({ type: "attention-add", item: attn("done") });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(sent).toHaveLength(1);
+    svc.stop();
+  });
+
   it("setPrefs retunes a registered device and reports an unknown one", async () => {
     const { svc, sent } = make();
     await svc.subscribe(sub(1));
