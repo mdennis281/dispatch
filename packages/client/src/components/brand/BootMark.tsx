@@ -17,9 +17,12 @@
  * would drift, and the splash is the one surface where a drift is invisible
  * until somebody boots cold and watches carefully.
  *
- * It also means both marks run off the SAME document timeline. A `BootMark`
- * mounted forty minutes into a session is already mid-cycle, in phase with a
- * splash that is long gone, and that is correct — the loop has no beginning.
+ * IT DOES NOT MEAN BOTH MARKS RUN OFF THE SAME CLOCK, which is what this said
+ * for a while and is the bug it cost. A CSS animation starts when it is APPLIED
+ * TO AN ELEMENT, not at the document's time origin — so a `BootMark` mounted
+ * forty minutes into a session starts its cycle at 0%, while the splash's
+ * started at 0% forty minutes ago. `--boot-phase` is what closes that; see the
+ * note on `.boot-splash__pan` in index.html for why the colours depend on it.
  *
  * The exit (`[data-done]`, the ball, the aperture) is scoped to `#boot-splash`
  * and deliberately not reachable from here. This mark does not resolve into
@@ -37,7 +40,7 @@
  * so is always there in a real page, but a vitest render of a component that
  * happens to contain this has no <head> at all.
  */
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import { BootMarkArt } from "./BootMarkArt.js";
 // For the `Window.__dispatchBootMark` declaration, which lives with the module
 // that owns the splash's lifetime.
@@ -47,10 +50,47 @@ import "../../lib/bootSplash.js";
  *  a strip that moves rather than a glyph that sits, and it needs the room. */
 const DEFAULT_SIZE = 72;
 
+/** The loop's period, from `--boot-beat`. Duplicated because CSS cannot hand a
+ *  number to JS, and pinned against index.html by bootMarkPhase.test.ts. */
+const PERIOD_MS = 2_400;
+
 export function BootMark({ size = DEFAULT_SIZE }: { size?: number }) {
   useEffect(() => window.__dispatchBootMark?.hold(), []);
 
   const host = useRef<HTMLDivElement>(null);
+
+  /*
+   * JOIN THE LOOP ALREADY IN PROGRESS.
+   *
+   * A negative `animation-delay` starts an animation partway through, and the
+   * part to skip is however far into the current cycle the document already is.
+   * With it, this mark's 0% and the splash's are the same instant — which is
+   * what the colour rotation's whole schedule assumes, since it reads the phase
+   * off `performance.now()` and dyes each piece during a window in which that
+   * piece is off screen. Without it every tick lands somewhere arbitrary in this
+   * mark's cycle and you watch the mark change colour.
+   *
+   * `useLayoutEffect`, so the correction is in before the first paint rather
+   * than a frame of the wrong phase after it.
+   *
+   * ON MOUNT AND SIZE ONLY, NEVER ON EVERY RENDER — the dependency array is
+   * load-bearing and dropping it would reintroduce the bug it fixes. The delay
+   * is measured from the moment the animation STARTED, so re-stamping it later
+   * against a start time that has not moved shifts the mark by the difference.
+   * Mount is when the animations begin; a size change is when the canvas effect
+   * below tears its canvas down, un-hides the SVG and so starts them again.
+   *
+   * It is read by the rules in index.html, not here: the delay belongs to the
+   * animations, which are not ours. `document.timeline` rather than
+   * `performance.now()` because it is the clock those animations are on, and on
+   * the one browser where they could differ it is the animations that matter.
+   */
+  useLayoutEffect(() => {
+    const el = host.current;
+    if (!el) return;
+    const now = Number(document.timeline?.currentTime ?? performance.now());
+    el.style.setProperty("--boot-phase", `${-(now % PERIOD_MS)}ms`);
+  }, [size]);
 
   /*
    * THE CANVAS RENDERER, NOT JUST THE SVG.
