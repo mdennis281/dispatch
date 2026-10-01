@@ -899,6 +899,79 @@ export class MetricsService {
   }
 
   /**
+   * Per-project event counts, attributed runtime and a daily spark, for ONE
+   * window — the homepage's whole read of the ledger, in three statements.
+   *
+   * Deliberately not `totals({ groupBy: "projectId" })` +
+   * `spanTotals({ groupBy: "projectId" })`, for the same reason
+   * {@link chatRuntime} is not `spanTotals({ groupBy: "chatId" })`: `spanTotals`
+   * ships every clipped span row out of SQLite into Node so it can union the
+   * intervals into `busyMs`. Measured on the 338 MB install (400k spans, a 7-day
+   * window): the aggregate alone is ~110 ms and the row shipment another
+   * ~140 ms, against ~30 ms for the three sums below. A quarter-second of
+   * blocked event loop is not what a page whose headline feature is arriving
+   * instantly should cost, and it would be paid by every live chat streaming
+   * through the same loop.
+   *
+   * What that trade gives up is EXACTNESS of the time figure, and only of that
+   * figure: this returns ATTRIBUTED ms (the plain sum of span durations), so a
+   * turn that ran five tool calls at once books all five. The Metrics view
+   * still reports the union — that is the page you open when the number has to
+   * be defensible. Here it is a glance, and a glance that over-reports parallel
+   * work by a roughly constant factor still ranks the projects correctly.
+   */
+  projectRollup(
+    from: number,
+    to: number,
+  ): {
+    byProject: Record<string, { events: number; runtimeMs: number; lastAt: number }>;
+    /** project id → (day index, `ts / 86_400_000` floored) → count. */
+    spark: Record<string, Record<number, number>>;
+  } {
+    this.flush();
+    const at = this.now();
+    const events = this.db
+      .prepare(
+        `SELECT COALESCE(project_id, '') AS g, COUNT(*) AS c, MAX(ts) AS last
+           FROM metric WHERE ts >= ? AND ts < ? GROUP BY g`,
+      )
+      .all(from, to) as { g: string; c: number; last: number }[];
+    // Selected by `start_ts` ALONE. The overlap predicate every other span read
+    // uses (`start_ts < to AND COALESCE(end_ts, now) > from`) cannot use the
+    // index on a window that ends at now — `start_ts < now` matches the whole
+    // table — and measured 112 ms where this measures 30. The cost is that a
+    // span which began before the window is attributed to the window it STARTED
+    // in rather than split across both; at the widths this page offers that
+    // moves a handful of long sleeps and nothing else.
+    const runtime = this.db
+      .prepare(
+        `SELECT COALESCE(project_id, '') AS g,
+                SUM(MAX(COALESCE(end_ts, ?), start_ts) - start_ts) AS ms
+           FROM metric_span WHERE start_ts >= ? AND start_ts < ? GROUP BY g`,
+      )
+      .all(at, from, to) as { g: string; ms: number | null }[];
+    const sparkRows = this.db
+      .prepare(
+        `SELECT COALESCE(project_id, '') AS g, ts / 86400000 AS d, COUNT(*) AS c
+           FROM metric WHERE ts >= ? AND ts < ? GROUP BY g, d`,
+      )
+      .all(from, to) as { g: string; d: number; c: number }[];
+
+    const byProject: Record<string, { events: number; runtimeMs: number; lastAt: number }> = {};
+    const row = (g: string): { events: number; runtimeMs: number; lastAt: number } =>
+      (byProject[g] ??= { events: 0, runtimeMs: 0, lastAt: 0 });
+    for (const r of events) {
+      const e = row(r.g);
+      e.events = Number(r.c);
+      e.lastAt = Number(r.last ?? 0);
+    }
+    for (const r of runtime) row(r.g).runtimeMs = Math.max(0, Number(r.ms ?? 0));
+    const spark: Record<string, Record<number, number>> = {};
+    for (const r of sparkRows) (spark[r.g] ??= {})[Number(r.d)] = Number(r.c);
+    return { byProject, spark };
+  }
+
+  /**
    * Drop rows older than `before`. Deliberately NOT on a timer: a metrics ledger
    * that silently forgets last quarter is worse than a large one, so retention
    * is a button someone presses, not a policy that runs behind them.

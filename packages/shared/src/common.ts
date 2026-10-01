@@ -137,6 +137,32 @@ export const ChatStatusSchema = z.enum([
 ]);
 export type ChatStatus = z.infer<typeof ChatStatusSchema>;
 
+/**
+ * Statuses that mean an agent is mid-turn on this chat. `queued` counts: the
+ * turn is already submitted and will run on its own, so the chat has work in
+ * flight even though nothing is streaming yet.
+ */
+const WORKING_STATUS: ReadonlySet<ChatStatus> = new Set(["running", "waiting", "queued"]);
+
+/**
+ * Whether an agent is mid-turn on this chat — the project picker's badge, the
+ * row's child-chat glyph and the homepage's per-project count asking the same
+ * question of one definition.
+ *
+ * Exported rather than re-spelled at the call site because the narrow reading
+ * (`status === "running"`) is the tempting one and it is wrong in the case that
+ * matters most: `waiting` is what the broker assigns for a tool blocked on work
+ * elsewhere, which is a `watch_pr` sitting on a PR for ten minutes. A marker
+ * that goes quiet for exactly those ten minutes is quiet when you need it.
+ *
+ * It lives HERE, beside the enum, rather than in the client store it started
+ * in: the server answers the same question for the homepage rollup, and a
+ * second copy of the set is exactly the drift this comment warns about.
+ */
+export function isChatWorking(status: ChatStatus | undefined): boolean {
+  return status != null && WORKING_STATUS.has(status);
+}
+
 /** Derived "agent working" animation state for the live chat header. */
 export const AgentActivitySchema = z.object({
   state: z.enum(["idle", "thinking", "responding", "tool", "awaiting"]),

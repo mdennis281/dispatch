@@ -8,7 +8,12 @@ import type {
   PrRecord,
   WorkflowExemption,
 } from "@dispatch/shared";
-import { isPrSettledIdle, parseReviewingTarget, parseSpawnedParent } from "@dispatch/shared";
+import {
+  isChatWorking,
+  isPrSettledIdle,
+  parseReviewingTarget,
+  parseSpawnedParent,
+} from "@dispatch/shared";
 import { clearDraft } from "../lib/composerDrafts.js";
 import { usePrs } from "./prs.js";
 
@@ -629,25 +634,11 @@ export function useProjectChatTree(projectId: string | null): ChatBranch[] {
 }
 
 /**
- * Statuses that mean an agent is mid-turn on this chat. `queued` counts: the
- * turn is already submitted and will run on its own, so the project has work in
- * flight even though nothing is streaming yet.
+ * Re-exported from `@dispatch/shared`, where it moved so the server can answer
+ * the same question for the homepage rollup. Every existing caller imports it
+ * from this module, and the definition is the thing that must not fork.
  */
-const WORKING_STATUS: ReadonlySet<ChatStatus> = new Set(["running", "waiting", "queued"]);
-
-/**
- * Whether an agent is mid-turn on this chat — the project picker's badge and
- * the row's child-chat glyph asking the same question of one definition.
- *
- * Exported rather than re-spelled at the call site because the narrow reading
- * (`status === "running"`) is the tempting one and it is wrong in the case that
- * matters most: `waiting` is what the broker assigns for a tool blocked on work
- * elsewhere, which is a `watch_pr` sitting on a PR for ten minutes. A marker
- * that goes quiet for exactly those ten minutes is quiet when you need it.
- */
-export function isChatWorking(status: ChatStatus | undefined): boolean {
-  return status != null && WORKING_STATUS.has(status);
-}
+export { isChatWorking };
 
 /**
  * Statuses whose arrival counts as the CHAT doing something, for `lastActivity`.
