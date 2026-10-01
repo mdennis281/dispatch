@@ -59,10 +59,29 @@ describe("a mark that joins the loop late is aligned to the document's clock", (
    * it was meant to remove.
    */
   it("does not derive the alignment from the current time", () => {
-    const effect = /useLayoutEffect\(\(\) => \{[\s\S]*?\n  \}\);/.exec(bootMark);
-    expect(effect, "no layout effect to check").not.toBeNull();
-    expect(effect![0], "align absolutely, not by an offset from now").not.toMatch(
+    const fn = /const align = useCallback\(\(\) => \{[\s\S]*?\n  \}, \[\]\);/.exec(bootMark);
+    expect(fn, "no align callback to check").not.toBeNull();
+    expect(fn![0], "align absolutely, not by an offset from now").not.toMatch(
       /performance\.now\(\)|timeline\??\.currentTime/,
+    );
+  });
+
+  /**
+   * A restart is not always followed by a render.
+   *
+   * Tearing the canvas down un-hides the SVG, and a `display: none` SVG has no
+   * animations — so the ones that come back are new, at 0%. On a size change
+   * React runs the layout effect BEFORE that cleanup, while there is still
+   * nothing to align, and then nothing re-renders: measured, the mark comes back
+   * drawing 0.0% against ticks working to 12.6%. Aligning inside the cleanup is
+   * what closes it (17.5% against 18.3%, one frame apart).
+   */
+  it("re-aligns where the canvas is torn down", () => {
+    const cleanup = /return \(\) => \{[\s\S]*?\n    \};/.exec(bootMark);
+    expect(cleanup, "no canvas cleanup to check").not.toBeNull();
+    expect(cleanup![0]).toMatch(/removeAttribute\("data-canvas"\)/);
+    expect(cleanup![0], "un-hiding the SVG restarts it; nothing may re-render after").toMatch(
+      /\balign\(\)/,
     );
   });
 

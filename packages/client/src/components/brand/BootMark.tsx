@@ -40,7 +40,7 @@
  * so is always there in a real page, but a vitest render of a component that
  * happens to contain this has no <head> at all.
  */
-import { useEffect, useLayoutEffect, useRef } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import { BootMarkArt } from "./BootMarkArt.js";
 // For the `Window.__dispatchBootMark` declaration, which lives with the module
 // that owns the splash's lifetime.
@@ -72,26 +72,30 @@ export function BootMark({ size = DEFAULT_SIZE }: { size?: number }) {
    * `documentTime % period` — exactly what the scheduler assumes — without this
    * having to know what the period IS.
    *
-   * It is also why this needs no dependency array and no care about when the
-   * animations restart. Assigning 0 to something that is already 0 is nothing,
-   * so running it on every render is free; and a restart (a remount, or the
-   * canvas below being torn down and un-hiding the SVG) hands back animations
-   * with a fresh start time that the next render puts back. The version of this
-   * that stored an offset instead had to GUESS which renders followed a restart,
-   * and was wrong in both directions.
+   * It is also why this needs no dependency array. Assigning 0 to something that
+   * is already 0 is nothing, so running it on every render is free, and there is
+   * no question of WHICH renders may safely re-run it. The version that stored
+   * an offset had to answer that question — it had to know whether a restart had
+   * happened since — and was wrong in both directions.
+   *
+   * What it does need is to run whenever the animations restart, and a render is
+   * not guaranteed to follow one: see the cleanup below, which un-hides the SVG
+   * and calls this itself. `getAnimations` flushes style, so the animations it
+   * hands back there are the fresh ones, already created.
    *
    * `useLayoutEffect`, so the alignment is in before the first paint rather than
    * a frame of the wrong phase after it. Filtered by name because only the
    * loop's own animations are ours to move.
    */
-  useLayoutEffect(() => {
+  const align = useCallback(() => {
     const el = host.current;
     if (!el?.getAnimations) return;
     for (const animation of el.getAnimations({ subtree: true })) {
       const name = (animation as CSSAnimation).animationName;
       if (typeof name === "string" && name.startsWith("boot-splash-")) animation.startTime = 0;
     }
-  });
+  }, []);
+  useLayoutEffect(align);
 
   /*
    * THE CANVAS RENDERER, NOT JUST THE SVG.
@@ -122,11 +126,23 @@ export function BootMark({ size = DEFAULT_SIZE }: { size?: number }) {
       el.setAttribute("data-canvas", ""),
     );
     return () => {
+      /*
+       * REMOVING THIS PUTS THE SVG BACK ON SCREEN, and a `display: none` SVG has
+       * no animations — so the ones that come back are new, starting at 0%.
+       *
+       * `align()` has to be called HERE rather than left to the next render,
+       * because on a size change there isn't one: React runs the layout effect
+       * above BEFORE this cleanup, while the SVG is still hidden and there is
+       * nothing to align, and then nothing re-renders. The mark would run out of
+       * phase with the rotation until the replacement worker came up, and for
+       * good if it never did.
+       */
       el.removeAttribute("data-canvas");
+      align();
       handle?.stop();
       canvas.remove();
     };
-  }, [size]);
+  }, [size, align]);
 
   // The host carries the box, because the SVG leaves the flow once the canvas
   // takes over. `--boot-mark-size` is what `.boot-splash__mark` reads for its
