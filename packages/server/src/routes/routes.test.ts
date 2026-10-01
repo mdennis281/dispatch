@@ -349,6 +349,32 @@ describe("routes — REST CRUD", () => {
     expect(att.json()).toEqual([]);
   });
 
+  it("DELETE /api/attention clears the finished items and broadcasts a resolve for each", async () => {
+    const seen: WsServerEvent[] = [];
+    const off = bus.subscribe((e) => seen.push(e));
+    for (const kind of ["permission", "idle", "done"] as const) {
+      bus.publish({
+        type: "attention-add",
+        item: { id: kind, chatId: "c1", kind, summary: kind, createdAt: 1 },
+      });
+    }
+
+    const res = await app.inject({ method: "DELETE", url: "/api/attention" });
+    expect(res.json().cleared).toBe(2);
+    // The blocking item stays: it is a live agent waiting on an answer, and the
+    // only thing marking its chat as needing input.
+    const left = await app.inject({ method: "GET", url: "/api/attention" });
+    expect(left.json().map((i: { id: string }) => i.id)).toEqual(["permission"]);
+    // Every other connected client drops its rows off these, not off the reply.
+    expect(
+      seen.filter((e) => e.type === "attention-resolve").map((e) => e.id).sort(),
+    ).toEqual(["done", "idle"]);
+
+    const bad = await app.inject({ method: "DELETE", url: "/api/attention?kinds=nonsense" });
+    expect(bad.statusCode).toBe(400);
+    off();
+  });
+
   it("owns the account list at /api/subscriptions and keeps it through a settings PUT", async () => {
     const put = await app.inject({
       method: "PUT",

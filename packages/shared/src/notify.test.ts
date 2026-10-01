@@ -1,6 +1,10 @@
 import { describe, it, expect } from "vitest";
 import {
+  AttentionFilterSchema,
+  DEFAULT_ATTENTION_FILTER,
   DEFAULT_NOTIFICATION_PREFS,
+  DISMISSIBLE_ATTENTION_KINDS,
+  passesAttentionFilter,
   NotificationPrefsSchema,
   inQuietHours,
   shouldNotify,
@@ -125,5 +129,57 @@ describe("NotificationPrefsSchema", () => {
       quietHours: { enabled: true, start: "25:00", end: "07:00", tz: "UTC" },
     });
     expect(bad.success).toBe(false);
+  });
+});
+
+describe("passesAttentionFilter", () => {
+  it("lets everything through when nothing is muted", () => {
+    for (const kind of ["permission", "question", "idle", "done", "review"] as const) {
+      expect(passesAttentionFilter(DEFAULT_ATTENTION_FILTER, { kind })).toBe(true);
+    }
+  });
+
+  it("mutes one kind without touching the others", () => {
+    const f = { kinds: { done: false } };
+    expect(passesAttentionFilter(f, { kind: "done" })).toBe(false);
+    expect(passesAttentionFilter(f, { kind: "idle" })).toBe(true);
+  });
+
+  it("treats an unset kind as allowed, so a newer kind is never silently hidden", () => {
+    // The whole reason the stored shape is partial: a filter written by an older
+    // version says nothing about a kind added later.
+    expect(passesAttentionFilter({ kinds: { idle: false } }, { kind: "review" })).toBe(true);
+  });
+
+  it("keeps a review round whose OTHER reason is still wanted", () => {
+    const f = { reviewKinds: { comment: false } };
+    expect(
+      passesAttentionFilter(f, { kind: "review", reviewKinds: ["comment", "check"] }),
+    ).toBe(true);
+    expect(passesAttentionFilter(f, { kind: "review", reviewKinds: ["comment"] })).toBe(false);
+  });
+
+  it("keeps an untagged review round, which is not filterable", () => {
+    expect(passesAttentionFilter({ reviewKinds: { comment: false } }, { kind: "review" })).toBe(
+      true,
+    );
+  });
+
+  it("is the same predicate shouldNotify runs", () => {
+    const p = prefs({ kinds: { done: false } });
+    expect(shouldNotify(p, { kind: "done" }, 0)).toBe(false);
+    expect(shouldNotify(p, { kind: "idle" }, 0)).toBe(true);
+  });
+});
+
+describe("AttentionFilterSchema", () => {
+  it("accepts an empty object and mutes nothing", () => {
+    const parsed = AttentionFilterSchema.parse({});
+    expect(passesAttentionFilter(parsed, { kind: "permission" })).toBe(true);
+  });
+
+  it("never offers to dismiss a blocking kind", () => {
+    expect(DISMISSIBLE_ATTENTION_KINDS).not.toContain("permission");
+    expect(DISMISSIBLE_ATTENTION_KINDS).not.toContain("question");
   });
 });

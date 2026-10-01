@@ -10,13 +10,14 @@ import {
   pushUnavailableReason,
   deviceTimeZone,
 } from "../../../lib/webPush.js";
-import type { NotificationPrefs } from "@dispatch/shared";
+import type { AttentionFilter, NotificationPrefs } from "@dispatch/shared";
 import { cn } from "../../../lib/cn.js";
 import type { AppPaneProps } from "./types.js";
 
 /**
- * Everything on this pane except the webhook block is per-DEVICE and lives in
- * this browser's localStorage, NOT in server-side AppSettings — which is why it
+ * Everything on this pane except the Attention Queue and webhook blocks is
+ * per-DEVICE and lives in this browser's localStorage, NOT in server-side
+ * AppSettings — which is why it
  * takes effect on click and ignores the save bar at the bottom of the page. The
  * permission a notification depends on is granted per origin per browser, so
  * "on" can only ever mean "on here"; persisting it centrally would promise every
@@ -249,6 +250,84 @@ function NotificationFilters() {
   );
 }
 
+/* -------------------------------------------------- attention queue filter */
+
+/**
+ * Which kinds reach the Attention Queue itself — and the one block of filters
+ * here that is NOT per-device.
+ *
+ * It saves with the bar at the bottom of the page, unlike everything above it,
+ * because the queue is a single list the server owns and every surface reads:
+ * the popover, the sidebar's "Needs input" marker, the app badge. A device-local
+ * answer would have the phone and the desktop disagreeing about how many chats
+ * are waiting.
+ *
+ * Muting only HIDES. The server goes on recording every item, so turning a kind
+ * back on shows what arrived while it was off instead of a gap.
+ */
+function QueueFilters({ draft, patch }: Pick<AppPaneProps, "draft" | "patch">) {
+  const filter: Partial<AttentionFilter> = draft.attentionQueue ?? {};
+  const on = (k: keyof NotificationPrefs["kinds"]) => filter.kinds?.[k] !== false;
+  const reviewOn = (k: keyof NotificationPrefs["reviewKinds"]) =>
+    filter.reviewKinds?.[k] !== false;
+  const set = (p: Partial<AttentionFilter>) =>
+    patch({
+      attentionQueue: {
+        kinds: { ...filter.kinds },
+        reviewKinds: { ...filter.reviewKinds },
+        ...p,
+      },
+    });
+  const setKind = (k: keyof NotificationPrefs["kinds"], v: boolean) =>
+    set({ kinds: { ...filter.kinds, [k]: v } });
+  const setReview = (k: keyof NotificationPrefs["reviewKinds"], v: boolean) =>
+    set({ reviewKinds: { ...filter.reviewKinds, [k]: v } });
+
+  return (
+    <div className="space-y-2">
+      <SectionLabel className="mb-1.5 px-0">What reaches the Attention Queue</SectionLabel>
+      <div className="divide-y divide-line/60 rounded-md border border-line bg-inset/40 px-2.5">
+        {KIND_ROWS.map((r) => (
+          <ToggleRow
+            key={r.key}
+            label={r.label}
+            hint={r.hint}
+            checked={on(r.key)}
+            onChange={(v) => setKind(r.key, v)}
+          />
+        ))}
+      </div>
+      <p className="mt-1 text-xs leading-snug text-faint">
+        Hides a kind from the queue, its badges and the sidebar's "Needs input" marker — on every
+        device, and only from view: nothing is deleted, so switching one back on shows whatever
+        arrived while it was off. Unlike the filters above, this saves with the button below.
+      </p>
+      <SectionLabel className="mb-1.5 px-0">PR activity in the queue</SectionLabel>
+      <div
+        className={cn(
+          "divide-y divide-line/60 rounded-md border border-line bg-inset/40 px-2.5 transition-opacity",
+          !on("review") && "pointer-events-none opacity-45",
+        )}
+      >
+        {REVIEW_ROWS.map((r) => (
+          <ToggleRow
+            key={r.key}
+            label={r.label}
+            hint={r.hint}
+            checked={reviewOn(r.key)}
+            onChange={(v) => setReview(r.key, v)}
+          />
+        ))}
+      </div>
+      <p className="text-xs leading-snug text-faint">
+        PR activity, split the same way the notification filters split it — "CI passed" is the row
+        most worth muting here, since the queue is a to-do list and a green run is not a to-do. A
+        round carrying several reasons at once stays if any of them is on.
+      </p>
+    </div>
+  );
+}
+
 /* ---------------------------------------------------------- in-page toast */
 
 function DesktopNotifications() {
@@ -291,6 +370,7 @@ export function NotificationsSection({ draft, patch }: AppPaneProps) {
       <PushNotifications />
       <DesktopNotifications />
       <NotificationFilters />
+      <QueueFilters draft={draft} patch={patch} />
 
       <div>
         <div className="mb-1.5 flex items-center justify-between">

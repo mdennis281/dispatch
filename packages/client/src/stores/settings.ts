@@ -15,10 +15,12 @@
 import { create } from "zustand";
 import type { AppSettings } from "../lib/api.js";
 import {
+  DEFAULT_ATTENTION_FILTER,
   SHELL_TRANSCRIPT_CATEGORIES,
   type SendMode,
   type ShellTranscriptFilter,
 } from "@dispatch/shared";
+import { useAttention } from "./attention.js";
 
 /**
  * The app LAYER of every layered setting, exactly as the server stores it —
@@ -61,7 +63,13 @@ export const useSettings = create<SettingsStore>((set) => ({
   showInjectedContext: false,
   shellFilter: [...SHELL_TRANSCRIPT_CATEGORIES],
   app: {},
-  apply: (settings) =>
+  apply: (settings) => {
+    // The Attention Queue's filter is an app setting but it belongs to the
+    // attention store, which is where `visible` is computed. Pushed from here
+    // rather than read from there so all three `apply` callers (startup fetch,
+    // Settings save, the shell-filter modal) get it without each remembering to;
+    // attention.ts imports nothing from here, so the dependency stays one-way.
+    useAttention.getState().setFilter(settings.attentionQueue ?? DEFAULT_ATTENTION_FILTER);
     set({
       showInjectedContext: settings.showInjectedContext ?? false,
       shellFilter: settings.shellFilter ?? [...SHELL_TRANSCRIPT_CATEGORIES],
@@ -73,7 +81,8 @@ export const useSettings = create<SettingsStore>((set) => ({
         spawnChat: settings.spawnChat,
         defaultSendMode: settings.defaultSendMode,
       },
-    }),
+    });
+  },
   setDefaultSendMode: (mode) =>
     set((s) => ({ app: { ...s.app, defaultSendMode: mode } })),
 }));

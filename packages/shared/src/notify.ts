@@ -35,9 +35,20 @@ const TimeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
 export const REVIEW_KINDS = ["check", "passed", "comment", "review", "settled"] as const;
 export type ReviewKind = (typeof REVIEW_KINDS)[number];
 
-export const NotificationPrefsSchema = z.object({
-  /** Master switch for this device. */
-  enabled: z.boolean().default(true),
+/**
+ * WHICH attention kinds a surface wants to hear about — the half of a
+ * preference that is a pure predicate over an `AttentionItem`.
+ *
+ * It is split out of `NotificationPrefsSchema` below because two different
+ * surfaces ask the same question for different reasons: a device asks "may this
+ * interrupt me", and the Attention Queue asks "does this belong in my inbox at
+ * all". Those answers are stored in different places (localStorage vs
+ * AppSettings) and must not be shared, but the TEST is identical — and when it
+ * was written twice the two drifted on the thing that is easy to get wrong:
+ * unset means ON, so that a kind added in a later version is never silently
+ * invisible on a device whose stored prefs predate it.
+ */
+export const AttentionFilterSchema = z.object({
   /** Per attention kind. Unset means allowed — a kind added later is not silently muted. */
   kinds: z
     .object({
@@ -60,6 +71,15 @@ export const NotificationPrefsSchema = z.object({
     })
     .partial()
     .default({}),
+});
+export type AttentionFilter = z.infer<typeof AttentionFilterSchema>;
+
+/** Nothing muted — what a surface gets before anyone touches Settings. */
+export const DEFAULT_ATTENTION_FILTER: AttentionFilter = { kinds: {}, reviewKinds: {} };
+
+export const NotificationPrefsSchema = AttentionFilterSchema.extend({
+  /** Master switch for this device. */
+  enabled: z.boolean().default(true),
   /**
    * A nightly window where nothing fires.
    *
@@ -130,6 +150,39 @@ export function inQuietHours(prefs: NotificationPrefs, now: number): boolean {
 }
 
 /**
+ * What a plain "clear the queue" dismisses: the kinds that say a turn ALREADY
+ * finished, plus review activity (the PR is still there once you look).
+ *
+ * `permission` and `question` are excluded on purpose. Those are not clutter —
+ * they are a live agent blocked on an answer, and they are also what puts the
+ * chat under "Needs input" in the sidebar, so dismissing one hides a chat that is
+ * genuinely stuck. They clear themselves when you answer.
+ */
+export const DISMISSIBLE_ATTENTION_KINDS = ["idle", "done", "review"] as const;
+
+/**
+ * Does this item pass a kind filter? The shared half of `shouldNotify` below and
+ * of the Attention Queue's own filter.
+ *
+ * Fails OPEN on anything it doesn't recognise: a kind added server-side that
+ * predates a stored filter must still come through, because the alternative is a
+ * new class of alert that is silently invisible everywhere.
+ */
+export function passesAttentionFilter(
+  filter: Partial<AttentionFilter>,
+  item: Pick<AttentionItem, "kind" | "reviewKinds">,
+): boolean {
+  if (filter.kinds?.[item.kind] === false) return false;
+  if (item.kind === "review") {
+    const subs = item.reviewKinds ?? [];
+    // An untagged review item (older server, or a reason we didn't classify)
+    // is not filterable — let it through rather than swallow it.
+    if (subs.length && !subs.some((s) => filter.reviewKinds?.[s] !== false)) return false;
+  }
+  return true;
+}
+
+/**
  * The one predicate. True when this device wants to be interrupted by this item.
  *
  * Deliberately fails OPEN on anything it doesn't recognise: an attention kind
@@ -143,13 +196,7 @@ export function shouldNotify(
   now: number,
 ): boolean {
   if (!prefs.enabled) return false;
-  if (prefs.kinds[item.kind] === false) return false;
-  if (item.kind === "review") {
-    const subs = item.reviewKinds ?? [];
-    // An untagged review item (older server, or a reason we didn't classify)
-    // is not filterable — let it through rather than swallow it.
-    if (subs.length && !subs.some((s) => prefs.reviewKinds[s] !== false)) return false;
-  }
+  if (!passesAttentionFilter(prefs, item)) return false;
   if (inQuietHours(prefs, now)) return false;
   return true;
 }

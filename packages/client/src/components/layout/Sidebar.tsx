@@ -1595,7 +1595,7 @@ export function Sidebar() {
   const refreshProcesses = useChatProcesses((s) => s.refresh);
   const activeChatId = useChats((s) => s.activeChatId);
   const runners = useRunners((s) => s.byId);
-  const attentionItems = useAttention((s) => s.items);
+  const attentionItems = useAttention((s) => s.visible);
   const view = useView((s) => s.view);
   const setView = useView((s) => s.setView);
   const memCount = useProjectMemories(project?.id ?? null).length;
