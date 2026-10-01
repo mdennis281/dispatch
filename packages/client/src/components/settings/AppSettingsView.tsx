@@ -93,6 +93,13 @@ function normalize(s: AppSettings): AppSettings {
       graceMinutes: s.worktreeCleanup?.graceMinutes,
     },
     issueWatcher: { enabled: s.issueWatcher?.enabled ?? true },
+    // Spelled out for the reason above, and it matters doubly here: a field
+    // this function drops is a field the section renders as "nothing muted"
+    // whatever is stored, AND one the next save clears.
+    attentionQueue: {
+      kinds: s.attentionQueue?.kinds ?? {},
+      reviewKinds: s.attentionQueue?.reviewKinds ?? {},
+    },
     harness: {
       defaultHarness: s.harness?.defaultHarness ?? DEFAULT_HARNESS,
       defaults: s.harness?.defaults ?? {},

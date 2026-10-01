@@ -21,7 +21,19 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-const html = readFileSync(fileURLToPath(new URL("../../index.html", import.meta.url)), "utf8");
+/**
+ * LF, whatever the checkout says.
+ *
+ * `index.html` is LF in the repo, but `core.autocrlf` hands out a CRLF working
+ * copy on Windows — and every pattern below that anchors on a newline then stops
+ * matching. The failure is silent in the useful direction and loud in the
+ * useless one: the suite goes red on a Windows worktree and green in CI, which
+ * is how a guard like this gets learned as noise.
+ */
+const read = (p: string): string =>
+  readFileSync(fileURLToPath(new URL(p, import.meta.url)), "utf8").replace(/\r\n/g, "\n");
+
+const html = read("../../index.html");
 
 const PERIOD = Number(/--boot-beat: (\d+)ms/.exec(html)![1]);
 

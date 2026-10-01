@@ -352,6 +352,14 @@
                 // right now is `now % PERIOD` — which is what a tick has to land
                 // on. On the very first start `now` is a paint or two, so the
                 // authored offsets stand as written.
+                //
+                // THAT HOLDS FOR THE SPLASH BECAUSE IT WAS HERE AT PARSE, and
+                // for nothing else by default: a CSS animation starts when it is
+                // applied to an element, so a mark mounted later runs its own
+                // cycle from 0% and every one of these lands somewhere arbitrary
+                // in it. `BootMark` aligns itself to this clock for exactly that
+                // reason — see the layout effect there before assuming any mark
+                // on screen is at the phase this computes.
                 var delay = first;
                 if (delay == null) {
                   var now = performance.now();

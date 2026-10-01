@@ -106,6 +106,7 @@ import {
 } from "@dispatch/shared";
 import {
   AgentContextSettingsSchema,
+  AttentionFilterSchema,
   HarnessSettingsSchema,
   SubscriptionListSchema,
   ReviewerCredentialSchema,
@@ -348,6 +349,22 @@ export const AppSettingsSchema = z.object({
       enabled: z.boolean().default(true),
     })
     .optional(),
+  /**
+   * Which attention kinds are allowed into the Attention Queue — the inbox's own
+   * filter, separate from the per-device notification filter.
+   *
+   * It is app-wide (and so lives here) rather than per-device because the queue
+   * is one list the server owns and every surface reads: the popover, the
+   * sidebar's "Needs input" marker, the app badge. A device-local answer would
+   * have the phone and the desktop disagreeing about how many chats are waiting.
+   *
+   * Muting is a DISPLAY decision, deliberately: the server keeps every item, so
+   * turning a kind back on shows what arrived while it was off instead of a gap.
+   *
+   * Optional, and unset reads as nothing muted — a kind added in a later version
+   * must not arrive invisible on an install whose config.json predates it.
+   */
+  attentionQueue: AttentionFilterSchema.optional(),
   /**
    * First-run setup wizard state.
    *

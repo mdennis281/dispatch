@@ -40,9 +40,12 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import {
   DEFAULT_NOTIFICATION_PREFS,
+  DEFAULT_ATTENTION_FILTER,
   NotificationPrefsSchema,
+  showsInQueue,
   shouldNotify,
   type AttentionItem,
+  type AttentionFilter,
   type NotificationPrefs,
 } from "@dispatch/shared";
 import { z } from "zod";
@@ -296,7 +299,7 @@ export class PushService {
   /** endpoint → when it last reported the app in front. In memory only. */
   private readonly inFront = new Map<string, number>();
   /**
-   * chatId → its outstanding attention item ids.
+   * chatId → its outstanding attention items, by id.
    *
    * A second copy of what {@link AttentionQueue} already holds, and deliberately
    * so: it is derived from the same two bus events in the same order, so the two
@@ -304,8 +307,16 @@ export class PushService {
    * from `{bus, configDir, dataDir}` alone. The alternative — injecting the
    * queue — would reorder container construction and rewrite every test's setup
    * to buy a count this map already has.
+   *
+   * It holds the ITEMS, not just their ids, and holds every one of them —
+   * including the kinds the queue filter is hiding. The counts are derived per
+   * read instead, which is the same arrangement the client's store uses and for
+   * the same reason: a filter that changes must change the counts immediately,
+   * in both directions, with nothing to reconcile. Caching filtered counts meant
+   * a `done` tracked before `done` was muted went on inflating "+N more", and an
+   * item that arrived while muted stayed missing forever after unmuting.
    */
-  private readonly outstanding = new Map<string, Set<string>>();
+  private readonly outstanding = new Map<string, Map<string, AttentionItem>>();
   /**
    * endpoint → chats that device is currently holding a notification for.
    *
@@ -320,6 +331,18 @@ export class PushService {
   /** Serializes the read-modify-write of the registry file. */
   private writeChain: Promise<unknown> = Promise.resolve();
   private offs: Array<() => void> = [];
+
+  /**
+   * The app-wide Attention Queue filter, pushed in by the container at boot and
+   * by `PUT /api/settings` after that. Held rather than read per event because
+   * the bus handler is synchronous and `track` must not race its own resolve.
+   */
+  private queueFilter: AttentionFilter = DEFAULT_ATTENTION_FILTER;
+
+  /** Re-point the queue filter (boot, and every settings save). */
+  setQueueFilter(filter: AttentionFilter | undefined): void {
+    this.queueFilter = filter ?? DEFAULT_ATTENTION_FILTER;
+  }
 
   constructor(deps: PushServiceDeps) {
     this.bus = deps.bus;
@@ -360,7 +383,12 @@ export class PushService {
     if (this.offs.length) return;
     this.offs.push(
       this.bus.on("attention-add", (e) => {
+        // Tracked whatever the filter says — the counts read through it, so a
+        // later unmute must find the item still here. Only the SEND is gated: a
+        // push for a kind hidden from the Attention Queue would be a buzz you
+        // cannot find the row for.
         this.track(e.item);
+        if (!showsInQueue(this.queueFilter, e.item)) return;
         void this.fanOut(e.item).catch((err) => this.onError?.(err));
       }),
       // The other half of the deal: a notification whose reason is gone is worse
@@ -380,36 +408,63 @@ export class PushService {
   /* ------------------------------------------------- outstanding bookkeeping */
 
   private track(item: AttentionItem): void {
-    let set = this.outstanding.get(item.chatId);
-    if (!set) this.outstanding.set(item.chatId, (set = new Set()));
-    set.add(item.id);
+    let items = this.outstanding.get(item.chatId);
+    if (!items) this.outstanding.set(item.chatId, (items = new Map()));
+    items.set(item.id, item);
   }
 
   /**
    * Forget one resolved item. Returns its chatId ONLY when that was the chat's
-   * last outstanding item, which is the single condition a withdrawal fires on.
+   * last VISIBLE item, which is the single condition a withdrawal fires on.
    *
    * That is also what keeps a burst quiet without a debounce timer: deleting a
    * chat resolves all six of its items at once, but only the sixth empties the
-   * set, so exactly one withdrawal goes out.
+   * set — and `withdraw` is idempotent anyway, so any extra call is a no-op.
    */
   private untrack(id: string, chatId?: string): string | undefined {
     // `chatId` is optional on the event, so fall back to finding the owner.
     const owner =
       chatId && this.outstanding.has(chatId)
         ? chatId
-        : [...this.outstanding.entries()].find(([, ids]) => ids.has(id))?.[0];
+        : [...this.outstanding.entries()].find(([, items]) => items.has(id))?.[0];
     if (!owner) return undefined;
-    const set = this.outstanding.get(owner);
-    if (!set?.delete(id) || set.size > 0) return undefined;
-    this.outstanding.delete(owner);
-    return owner;
+    const items = this.outstanding.get(owner);
+    const removed = items?.get(id);
+    if (!items || !removed) return undefined;
+    items.delete(id);
+    if (items.size === 0) this.outstanding.delete(owner);
+    // The device is holding a notification for the VISIBLE queue, so that is
+    // what has to empty — a muted `done` left in the map must not keep a sticky
+    // permission toast on a phone forever.
+    //
+    // Deliberately NOT gated on the resolved item having been visible itself:
+    // the filter can have changed since its push went out, and the item that
+    // put a notification on a phone is then exactly the one a kind-check here
+    // would skip. Firing more than once is free — `withdraw` clears `shown`
+    // for the chat, so every later call finds no device holding it and sends
+    // nothing.
+    return this.visibleCount(items) === 0 ? owner : undefined;
   }
 
-  /** Items waiting across every chat — what the app icon badges. */
+  /**
+   * Items waiting across every chat — what the app icon badges. Counted through
+   * the queue filter, so the badge agrees with the list the human can see.
+   */
   private totalOutstanding(): number {
     let n = 0;
-    for (const ids of this.outstanding.values()) n += ids.size;
+    for (const items of this.outstanding.values()) n += this.visibleCount(items);
+    return n;
+  }
+
+  /** One chat's outstanding items, as the queue filter leaves them. */
+  private visibleOutstanding(chatId: string): number {
+    const items = this.outstanding.get(chatId);
+    return items ? this.visibleCount(items) : 0;
+  }
+
+  private visibleCount(items: Map<string, AttentionItem>): number {
+    let n = 0;
+    for (const item of items.values()) if (showsInQueue(this.queueFilter, item)) n += 1;
     return n;
   }
 
@@ -593,7 +648,7 @@ export class PushService {
     if (!targets.length) return;
     const payload = JSON.stringify(
       PushService.payloadFor(item, {
-        outstanding: this.outstanding.get(item.chatId)?.size ?? 1,
+        outstanding: this.visibleOutstanding(item.chatId) || 1,
         badge: this.totalOutstanding(),
       }),
     );

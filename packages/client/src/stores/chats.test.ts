@@ -199,7 +199,7 @@ describe("countProjectAgents", () => {
     archived,
   });
 
-  it("splits working from awaiting-input, per project", () => {
+  it("splits working, queued and awaiting-input, per project", () => {
     const counts = countProjectAgents(
       byId([
         withStatus(chat("a", "p1"), "running"),
@@ -209,9 +209,12 @@ describe("countProjectAgents", () => {
       ]),
     );
 
+    // `queued` is a tally of its own: the picker shows it as a still outline
+    // beside the pulsing working dot, so a project with nothing started yet
+    // can't pass for one with agents streaming.
     expect(counts).toEqual({
-      p1: { working: 2, attention: 1 },
-      p2: { working: 1, attention: 0 },
+      p1: { working: 1, queued: 1, attention: 1 },
+      p2: { working: 1, queued: 0, attention: 0 },
     });
   });
 
