@@ -323,6 +323,31 @@ describe("PushService", () => {
     svc.stop();
   });
 
+  it("withdraws when the last VISIBLE item goes, even with a muted one left behind", async () => {
+    const { svc, sent } = make();
+    svc.start();
+    await svc.subscribe(sub(1));
+    svc.setQueueFilter({ kinds: { done: false }, reviewKinds: {} });
+    bus.publish({ type: "attention-add", item: attn("done", { id: "d1" }) });
+    bus.publish({ type: "attention-add", item: attn("permission", { id: "p1" }) });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(sent).toHaveLength(1);
+
+    // The muted `done` is still tracked (it has to be, for unmuting), but the
+    // phone is holding a sticky permission toast for a chat with nothing left
+    // to show — so the withdrawal must still fire.
+    bus.publish({ type: "attention-resolve", id: "p1", chatId: "c1" });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(sent).toHaveLength(2);
+    expect(JSON.parse(sent[1]!.payload)).toMatchObject({ outstanding: 0 });
+
+    // …and resolving the hidden one after that withdraws nothing a second time.
+    bus.publish({ type: "attention-resolve", id: "d1", chatId: "c1" });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(sent).toHaveLength(2);
+    svc.stop();
+  });
+
   it("setPrefs retunes a registered device and reports an unknown one", async () => {
     const { svc, sent } = make();
     await svc.subscribe(sub(1));

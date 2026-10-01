@@ -415,7 +415,7 @@ export class PushService {
 
   /**
    * Forget one resolved item. Returns its chatId ONLY when that was the chat's
-   * last outstanding item, which is the single condition a withdrawal fires on.
+   * last VISIBLE item, which is the single condition a withdrawal fires on.
    *
    * That is also what keeps a burst quiet without a debounce timer: deleting a
    * chat resolves all six of its items at once, but only the sixth empties the
@@ -429,9 +429,17 @@ export class PushService {
         : [...this.outstanding.entries()].find(([, items]) => items.has(id))?.[0];
     if (!owner) return undefined;
     const items = this.outstanding.get(owner);
-    if (!items?.delete(id) || items.size > 0) return undefined;
-    this.outstanding.delete(owner);
-    return owner;
+    const removed = items?.get(id);
+    if (!items || !removed) return undefined;
+    items.delete(id);
+    if (items.size === 0) this.outstanding.delete(owner);
+    // The device is holding a notification for the VISIBLE queue, so that is
+    // what has to empty — a muted `done` left in the map must not keep a sticky
+    // permission toast on a phone forever. And only a visible item LEAVING can
+    // empty it: resolving a hidden one changes nothing the device ever saw,
+    // which is what keeps the burst case to exactly one withdrawal.
+    if (!showsInQueue(this.queueFilter, removed)) return undefined;
+    return this.visibleCount(items) === 0 ? owner : undefined;
   }
 
   /**
