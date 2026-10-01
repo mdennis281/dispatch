@@ -28,7 +28,7 @@ import { GitCommitHorizontal, FolderGit2, Layers } from "lucide-react";
 import { METRIC_OTHER_KEY, type GrowthReport } from "@dispatch/shared";
 import { Button } from "../ui/Button.js";
 import { Select } from "../ui/Select.js";
-import { useProjects } from "../../stores/projects.js";
+import { useProjects, useRealProjects } from "../../stores/projects.js";
 import {
   GROWTH_MEASURE_LABELS,
   GROWTH_RANGES,
@@ -283,7 +283,9 @@ function Notable({ report }: { report: GrowthReport }) {
 /* ----------------------------------------------------------------- subpage */
 
 export function GrowthMetrics() {
-  const projects = useProjects((s) => s.projects);
+  // Real repos only: the growth report is per-repository, and the global
+  // pseudo-project has none to report on.
+  const projects = useRealProjects();
   const activeProjectId = useProjects((s) => s.activeProjectId);
 
   const projectId = useGrowth((s) => s.projectId);

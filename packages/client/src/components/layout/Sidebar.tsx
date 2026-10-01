@@ -25,9 +25,10 @@ import {
   Activity,
   Skull,
   Copy,
+  Globe,
   type LucideIcon,
 } from "lucide-react";
-import { parsePrRecordKey } from "@dispatch/shared";
+import { GLOBAL_PROJECT_ID, parsePrRecordKey } from "@dispatch/shared";
 import type { Chat, PrRecord, SubApp, RunnerInstance, Project } from "@dispatch/shared";
 import { Popover, MenuItem } from "../ui/Popover.js";
 import { IconButton } from "../ui/IconButton.js";
@@ -47,7 +48,7 @@ import { Chip } from "../ui/Chip.js";
 import { Tooltip } from "../ui/Tooltip.js";
 import { Spinner } from "../ui/Spinner.js";
 import { ScrollArea } from "../ui/ScrollArea.js";
-import { useProjects, useActiveProject } from "../../stores/projects.js";
+import { useActiveProject, useRealProjects } from "../../stores/projects.js";
 import {
   useChats,
   useProjectChatTree,
@@ -70,7 +71,7 @@ import {
 } from "../../stores/chatProcesses.js";
 import { useView, openOverlay } from "../../stores/view.js";
 import { useLayout, dismissLeftDrawer } from "../../stores/layout.js";
-import { selectChat, selectProject } from "../../stores/navigation.js";
+import { selectChat, selectGlobalChat, selectProject } from "../../stores/navigation.js";
 import { useProjectMemories } from "../../stores/memory.js";
 import { useGit, useGitChangeCount } from "../../stores/git.js";
 import { useRunners } from "../../stores/runners.js";
@@ -171,9 +172,13 @@ function ProjectSelector({
   onAddProject: () => void;
   onManageConfig: () => void;
 }) {
-  const projects = useProjects((s) => s.projects);
+  // Real repos only — the global chat is NOT one of them and gets its own row
+  // below. Listing it among the projects would read as "a repo called Global",
+  // which is exactly the leak this pseudo-project approach has to avoid.
+  const projects = useRealProjects();
   const active = useActiveProject();
   const agentCounts = useProjectAgentCounts();
+  const globalActive = active?.id === GLOBAL_PROJECT_ID;
 
   return (
     <Popover
@@ -202,14 +207,21 @@ function ProjectSelector({
               column that is otherwise full-bleed rows. The span keeps size-6 so
               the title's left edge doesn't move. */}
           <span className="flex size-6 items-center justify-center text-accent [&_svg]:size-4">
-            <FolderGit2 />
+            {globalActive ? <Globe /> : <FolderGit2 />}
           </span>
           <span className="min-w-0 flex-1">
             <span className="block truncate text-base font-semibold text-primary">
               {active?.name ?? "No project"}
             </span>
             <span className="block truncate cm-mono !text-2xs text-faint">
-              {active ? midTruncate(active.repoPath, 30) : "—"}
+              {/* A path is the useful subtitle for a repo and a misleading one
+                  for the global chat, whose repoPath is an empty scratch dir
+                  nobody should go looking for. */}
+              {globalActive
+                ? "every project · spawn and observe"
+                : active
+                  ? midTruncate(active.repoPath, 30)
+                  : "—"}
             </span>
           </span>
           <ChevronsUpDown className="size-3.5 shrink-0 text-faint" />
@@ -240,6 +252,24 @@ function ProjectSelector({
               {p.name}
             </MenuItem>
           ))}
+          <div className="my-1 h-px bg-line" />
+          {/* The global chat's entry point. Below the projects and above the
+              actions, because it is a place you GO rather than a thing you do
+              — and fenced off from them because it is not a repo.
+
+              Routed through `selectGlobalChat` like every other navigation in
+              this file: it is a project id as far as the stores are concerned,
+              so the project↔chat invariant applies to it unchanged. */}
+          <MenuItem
+            icon={<Globe />}
+            active={globalActive}
+            onClick={() => {
+              selectGlobalChat();
+              close();
+            }}
+          >
+            Global chat
+          </MenuItem>
           <div className="my-1 h-px bg-line" />
           <MenuItem
             icon={<Plus />}

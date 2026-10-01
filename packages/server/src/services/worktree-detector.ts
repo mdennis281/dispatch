@@ -85,7 +85,7 @@
  * attributes.
  */
 import { isAbsolute, resolve, sep } from "node:path";
-import { mergeWorktreeHistory } from "@dispatch/shared";
+import { mergeWorktreeHistory, realProjects} from "@dispatch/shared";
 import type {
   Chat,
   ChatMessage,
@@ -479,7 +479,9 @@ export class WorktreeDetector {
   private async seedAll(): Promise<void> {
     let projects: Project[];
     try {
-      projects = await this.store.listProjects();
+      // The pseudo-project is not a git repo: `git worktree list` there fails
+      // every pass, leaving it permanently unseeded and retried forever.
+      projects = realProjects(await this.store.listProjects());
     } catch {
       return;
     }
@@ -515,7 +517,7 @@ export class WorktreeDetector {
   private async healAll(): Promise<void> {
     let projects: Project[];
     try {
-      projects = await this.store.listProjects();
+      projects = realProjects(await this.store.listProjects());
     } catch {
       return;
     }

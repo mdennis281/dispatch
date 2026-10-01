@@ -1,4 +1,6 @@
+import { useMemo } from "react";
 import { create } from "zustand";
+import { realProjects } from "@dispatch/shared";
 import type { Project, AgentConfig, ModeConfig } from "@dispatch/shared";
 
 /**
@@ -67,7 +69,11 @@ function initialProject(projects: Project[]): string | null {
     remembered = null;
   }
   if (remembered && projects.some((p) => p.id === remembered)) return remembered;
-  return projects[0]?.id ?? null;
+  // `realProjects` on the FALLBACK only. A remembered `__global__` is honoured
+  // — you were there on purpose and should land back there — but nobody should
+  // ever be DROPPED into the global chat by a first visit, which is what
+  // `projects[0]` would do on an install with no real projects yet.
+  return realProjects(projects)[0]?.id ?? null;
 }
 
 interface ProjectsStore {
@@ -107,6 +113,25 @@ export const useProjects = create<ProjectsStore>((set) => ({
     }),
   setConfigLists: ({ agents, modes }) => set({ agents, modes }),
 }));
+
+/**
+ * The REAL projects — the reserved pseudo-project dropped.
+ *
+ * A hook rather than a selector because `realProjects` builds a new array, and
+ * a selector that does that returns a fresh identity on every store read:
+ * zustand reads that as a change and re-renders into "Maximum update depth
+ * exceeded". The `useMemo` is what makes it stable (see the same note in
+ * `settings/sections/ChatSection`).
+ *
+ * Use this for any list offered to a human as a repo to act on. Lookups of the
+ * form `projects.find(p => p.id === chat.projectId)` must keep reading the
+ * unfiltered list — resolving the pseudo-project is the whole reason it is a
+ * project record.
+ */
+export function useRealProjects(): Project[] {
+  const projects = useProjects((s) => s.projects);
+  return useMemo(() => realProjects(projects), [projects]);
+}
 
 /** Selector: the currently-focused project record (or null). */
 export function useActiveProject(): Project | null {

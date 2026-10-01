@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { Store, isEntityId, InvalidEntityIdError } from "./index.js";
 import type { KeyedMutex } from "./fsq.js";
 import type { Project, Chat } from "@dispatch/shared";
+import { realProjects } from "@dispatch/shared";
 
 let dir: string;
 let store: Store;
@@ -199,7 +200,7 @@ describe("listing tolerates entries that aren't ids", () => {
   it("listProjects skips a file whose name isn't an id", async () => {
     await store.saveProject(project("realproject"));
     await writeFile(join(dir, "projects", "not.an.id.json"), "{}", "utf8");
-    const ids = (await store.listProjects()).map((p) => p.id);
+    const ids = realProjects(await store.listProjects()).map((p) => p.id);
     expect(ids).toEqual(["realproject"]);
   });
 });

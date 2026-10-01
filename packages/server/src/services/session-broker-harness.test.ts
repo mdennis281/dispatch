@@ -16,6 +16,7 @@ import { Store } from "../store/index.js";
 import { EventBus } from "../bus.js";
 import { AuthoredConfigService } from "./authored-config.js";
 import { SessionBroker } from "./session-broker.js";
+import { GLOBAL_MODE_ID, GLOBAL_PROJECT_ID } from "@dispatch/shared";
 
 let transfers: unknown[][] = [];
 let transferResult: Promise<boolean> = Promise.resolve(false);
@@ -168,6 +169,101 @@ describe("SessionBroker neutral harness path", () => {
     expect(specs[0]!.agent).toBeUndefined();
     await broker.setHarness(chat.id, "claude");
     expect((await store.getChat(chat.id))!.personaId).toBe("product-owner");
+  });
+
+  /**
+   * The global chat's posture, proven rather than asserted.
+   *
+   * These go through the real broker: a chat whose `projectId` is the reserved
+   * id resolves the `global` mode through the ordinary posture chain, and the
+   * session spec it produces is what any runtime receives. The guard is called
+   * the way a PreToolUse hook calls it.
+   */
+  describe("the global chat", () => {
+    const globalChat = () =>
+      store.saveChat({
+        id: "global-1",
+        projectId: GLOBAL_PROJECT_ID,
+        title: "Global",
+        harness: "codex",
+        worktrees: [],
+        prs: [],
+        createdAt: 1,
+      });
+
+    it("lands in the global mode without anybody pinning one", async () => {
+      const chat = await globalChat();
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "what is where?");
+      await broker.waitFor(chat.id, "idle");
+      expect(broker.getSession(chat.id)?.modeId).toBe(GLOBAL_MODE_ID);
+    });
+
+    it("refuses to be moved off it", async () => {
+      const chat = await globalChat();
+      broker.create(chat);
+      await expect(broker.setMode(chat.id, "yolo")).rejects.toThrow(/always runs in global/);
+      // Unpinning is fine — it resolves straight back to `global`.
+      await expect(broker.setMode(chat.id, null)).resolves.toBeDefined();
+    });
+
+    it("hands the runtime a denylist, so the tools are never offered at all", async () => {
+      const chat = await globalChat();
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "hello");
+      await broker.waitFor(chat.id, "idle");
+      const denied = specs[0]!.disallowedTools ?? [];
+      expect(denied).toContain("Bash");
+      expect(denied).toContain("Edit");
+      expect(denied).toContain("mcp__dispatch-workspace__worktree");
+      expect(denied).toContain("mcp__dispatch-github__approve_pr");
+      expect(denied).not.toContain("mcp__dispatch-chat__spawn_chat");
+    });
+
+    it("refuses a worktree, a merge and an edit at the guard — and lets a spawn through", async () => {
+      const chat = await globalChat();
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "hello");
+      await broker.waitFor(chat.id, "idle");
+      const guard = specs[0]!.toolGuard!;
+
+      // The three the posture exists to stop…
+      expect(guard("mcp__dispatch-workspace__worktree", { action: "create" })).toMatch(
+        /not available in Global mode/,
+      );
+      expect(guard("mcp__dispatch-github__approve_pr", { number: 1 })).toMatch(
+        /not available in Global mode/,
+      );
+      expect(guard("Edit", { file_path: "C:/x.ts" })).toMatch(/not available in Global mode/);
+      // …and the shell, which is otherwise all three in one command.
+      expect(guard("Bash", { command: "echo hi" })).toMatch(/not available in Global mode/);
+
+      // …and the one it exists to ENABLE.
+      expect(guard("mcp__dispatch-chat__spawn_chat", { prompt: "go" })).toBeNull();
+      expect(guard("Read", { file_path: "C:/x.ts" })).toBeNull();
+    });
+
+    it("carries the project index and the posture overlay, and nothing bigger", async () => {
+      await store.saveProject({
+        id: "alpha",
+        name: "Alpha",
+        repoPath: "C:/repos/alpha",
+        worktreeRoot: "C:/repos/alpha-trees",
+        subApps: [],
+        createdAt: 1,
+      });
+      const chat = await globalChat();
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "hello");
+      await broker.waitFor(chat.id, "idle");
+      const appended = specs[0]!.systemPromptAppends.join("\n\n");
+      expect(appended).toContain("## Projects on this install");
+      expect(appended).toContain("- Alpha `alpha` — C:/repos/alpha");
+      // The pseudo-project must not offer itself as somewhere to spawn into.
+      expect(appended).not.toContain(GLOBAL_PROJECT_ID);
+      // And the posture explains itself in the transcript's own terms.
+      expect(appended).toContain("You are the GLOBAL chat");
+    });
   });
 
   it("persists neutral Codex events and keeps the native thread id", async () => {

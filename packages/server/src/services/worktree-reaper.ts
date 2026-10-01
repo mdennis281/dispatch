@@ -58,6 +58,7 @@ import {
   type RunnerInstance,
   type TerminalInfo,
   type WorktreeInfo,
+  realProjects,
 } from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
 import type { Store } from "../store/index.js";
@@ -747,7 +748,7 @@ export class WorktreeReaper {
       const p = await this.store.getProject(projectId).catch(() => null);
       return p ? [p] : [];
     }
-    return this.store.listProjects().catch(() => []);
+    return this.store.listProjects().then(realProjects).catch(() => []);
   }
 
   /** Every project's worktrees, tagged with the project they came from. */

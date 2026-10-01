@@ -9,6 +9,7 @@ import { DatabaseSync } from "node:sqlite";
 import { renameWithRetry, writeJsonAtomic, readJson } from "./fsq.js";
 import type { Project, Chat, ChatMessage, RunnerInstance, Checkpoint, PrRecord, IssueClaim } from "@dispatch/shared";
 import { PrRecordSchema } from "@dispatch/shared";
+import { GLOBAL_PROJECT_ID, realProjects } from "@dispatch/shared";
 
 let dir: string;
 let store: Store;
@@ -65,10 +66,29 @@ describe("Store projects/chats CRUD", () => {
   it("saves, reads, lists, and deletes a project", async () => {
     await store.saveProject(project("p1"));
     expect(await store.getProject("p1")).toMatchObject({ id: "p1", name: "Project p1" });
-    expect(await store.listProjects()).toHaveLength(1);
+    expect(realProjects(await store.listProjects())).toHaveLength(1);
     await store.deleteProject("p1");
     expect(await store.getProject("p1")).toBeNull();
-    expect(await store.listProjects()).toHaveLength(0);
+    expect(realProjects(await store.listProjects())).toHaveLength(0);
+  });
+
+  it("always resolves the reserved pseudo-project, and never writes one", async () => {
+    // It exists without anybody creating it — that is what lets a global chat
+    // resolve its project on an install that has never heard of one.
+    const g = await store.getProject(GLOBAL_PROJECT_ID);
+    expect(g).toMatchObject({ id: GLOBAL_PROJECT_ID, name: "Global" });
+    expect(g!.repoPath).toBe(store.globalProjectDir());
+    expect((await store.listProjects()).map((p) => p.id)).toContain(GLOBAL_PROJECT_ID);
+
+    // …and it cannot be turned into a record pointing at a real checkout,
+    // which is what would hand a project-less chat a repo.
+    await expect(store.saveProject({ ...g!, repoPath: "C:/repos/real" })).rejects.toThrow(
+      /reserved/,
+    );
+    await expect(store.deleteProject(GLOBAL_PROJECT_ID)).rejects.toThrow(/reserved/);
+    expect(await store.getProject(GLOBAL_PROJECT_ID)).toMatchObject({
+      repoPath: store.globalProjectDir(),
+    });
   });
 
   it("scopes listChats by projectId and deletes chat dir", async () => {
@@ -384,7 +404,7 @@ describe("Store config/state split", () => {
       const other = new Store(otherState, configDir);
       await other.init();
       // Sees the shared project...
-      expect(await other.listProjects()).toHaveLength(1);
+      expect(realProjects(await other.listProjects())).toHaveLength(1);
       // ...but not the first instance's chats.
       expect(await other.listChats()).toHaveLength(0);
       other.close();

@@ -70,6 +70,7 @@ import {
   migrateToolList,
   isManagerServer,
   MANAGER_SERVER_PREFIX,
+  realProjects,
 } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
@@ -393,7 +394,8 @@ export class ProjectConfigService {
   async start(): Promise<void> {
     let projects: Project[];
     try {
-      projects = await this.store.listProjects();
+      // No repo, so no `.dispatch/` to load or watch.
+      projects = realProjects(await this.store.listProjects());
     } catch {
       return;
     }

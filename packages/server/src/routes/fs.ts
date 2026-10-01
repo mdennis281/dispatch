@@ -28,6 +28,7 @@ import {
   FsMutationSchema,
   FsSelectKindSchema,
   type Project,
+  realProjects,
 } from "@dispatch/shared";
 import { enclosingRepoRoot, fwd, FsPathError } from "../services/fs-explorer.js";
 
@@ -261,7 +262,9 @@ export function registerFsRoutes(app: FastifyInstance): void {
    */
   app.get("/api/fs/roots", async () => {
     const home = homedir();
-    const projects = await store.listProjects().catch(() => [] as Project[]);
+    // Real repos only: the pseudo-project's dir is an empty scratch folder,
+    // which is noise in a file picker and has no worktrees to list.
+    const projects = realProjects(await store.listProjects().catch(() => [] as Project[]));
     // Worktrees are best-effort: they cost a `git worktree list` per project,
     // and a picker that fails to open because one repo is mid-rebase would be a
     // bad trade for a few extra shortcuts.
