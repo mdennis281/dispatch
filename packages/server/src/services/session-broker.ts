@@ -7583,6 +7583,12 @@ export class SessionBroker {
         chatId: session.chatId,
         bus: this.bus,
         broker: this,
+        // Don't just refuse what the mode denies — don't HAND IT OVER. For
+        // Dispatch's own tools absence beats a veto: a veto needs the runtime
+        // to report the call under a name the policy recognises, which is a
+        // capability ACP cannot provide, and absence needs nothing. The guard
+        // stays for the harness-native tools nothing here can unregister.
+        toolPolicy: { allowedTools: session.allowedTools, disallowedTools: session.deniedTools },
         // So `run_subapp` can name the tool that opens the URL it returns.
         browserServers: Object.keys(browserMcp),
         // Bind the terminal runner to this session's chat + default cwd (its

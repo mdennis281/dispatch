@@ -102,6 +102,7 @@ import {
   prReviewAgentView,
   MANAGER_TOOL_CATEGORY,
   managerServerName,
+  isToolAllowed,
   managerToolQualifiedName,
   AuthoredKindSchema,
   AuthoredScopeSchema,
@@ -1904,6 +1905,22 @@ export interface ManagerMcpExemptions {
 export interface ManagerMcpContext {
   /** The chat this session drives (for the waiting status label). */
   chatId: string;
+  /**
+   * The selected MODE's tool policy. A tool it denies is NOT REGISTERED —
+   * the session never sees it rather than seeing it and being refused.
+   *
+   * This is the structural half of a mode's gating, and for Dispatch's own
+   * tools it is the better half. A guard has to be given the call under a
+   * name it recognises, which costs a runtime capability
+   * (`guardsMcpToolNames`) that ACP cannot provide and that a future adapter
+   * may not either. Absence costs nothing and cannot be misnamed: there is no
+   * `worktree` tool to call.
+   *
+   * It does not replace the guard, which still covers the harness-native
+   * tools nothing here can unregister (`Bash`, `Edit`, …) and still backstops
+   * these. Two mechanisms because they fail differently.
+   */
+  toolPolicy?: { allowedTools?: string[]; disallowedTools?: string[] };
   bus: EventBus;
   broker: ManagerMcpBroker;
   /** Persistent-terminal runner for this session (omitted → no `terminal` tool). */
@@ -7924,6 +7941,12 @@ function boundToolsByCategory(
     const name = TOOL_WIRE_NAME[key];
     if (!bound[name]) continue;
     const category = MANAGER_TOOL_CATEGORY[name];
+    // The mode's policy, by the QUALIFIED name the agent would call — the
+    // same string a denylist is written in. A denied tool is dropped here,
+    // so it is never registered on its category server at all.
+    if (!isToolAllowed(`mcp__${managerServerName(category)}__${name}`, ctx.toolPolicy)) {
+      continue;
+    }
     const list = byCategory.get(category);
     if (list) list.push(tools[key]);
     else byCategory.set(category, [tools[key]]);
