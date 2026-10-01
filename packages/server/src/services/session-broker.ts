@@ -215,6 +215,7 @@ import {
   inspectCwdSync,
 } from "./workflow.js";
 import {
+  createModePolicyHook,
   createBackgroundShellGuardHook,
   createWorktreeGuardHook,
 } from "./shell-guard.js";
@@ -7240,6 +7241,38 @@ export class SessionBroker {
         ],
       };
     }
+
+    // The MODE's tool policy, as a hook — so the direct Claude path (which
+    // never builds `HarnessSessionSpec.toolGuard`) enforces exactly what the
+    // neutral harness path does. Installed FIRST among the guards because it
+    // is the most categorical: a tool the mode forbids is forbidden whatever
+    // the command says. Read through closures so a live `setMode` applies to
+    // the very next call rather than the next session.
+    options.hooks = {
+      ...options.hooks,
+      PreToolUse: [
+        ...(options.hooks?.PreToolUse ?? []),
+        {
+          hooks: [
+            createModePolicyHook({
+              policy: () => ({
+                allowedTools: session.allowedTools,
+                disallowedTools: session.deniedTools,
+              }),
+              mode: () => ({ name: session.modeName ?? session.modeId, id: session.modeId }),
+              onBlocked: (tool) => {
+                this.bus.publish({
+                  type: "notice",
+                  chatId: session.chatId,
+                  level: "info",
+                  text: `${session.modeName ?? session.modeId} mode refused ${tool}.`,
+                });
+              },
+            }),
+          ],
+        },
+      ],
+    };
 
     // …and refuse a shell-cut worktree, which lands in the catalog attributed to
     // nobody. Gated on the same service the `worktree` tool is bound from, so

@@ -19,19 +19,23 @@ export function registerModeRoutes(app: FastifyInstance): void {
   // OVER the `.data` store — the repo config wins on id collision — so the
   // composer's mode picker (and the broker) see the config-authored postures.
   /**
-   * A PROTECTED id is reported as its built-in self and never as a stored or
-   * project-authored row — the same rule `mode-editor` applies to the MCP
-   * surface, for the same reason. The broker resolves those ids from the
-   * built-in record before it looks at either authored layer, so returning an
-   * authored copy here would have the client labelling and offering to edit a
-   * policy that is not the one being enforced.
+   * The EDITABLE roster: authored modes only, with protected ids filtered out.
+   *
+   * Protected built-ins are deliberately ABSENT rather than appended. This
+   * list is what `ManageConfigDialog` renders with Save and Delete on every
+   * row, and a `ModeConfig` carries no "you may not write this" bit — so an
+   * appended built-in would open as editable and then 400 on every mutation.
+   * Their LABEL does not depend on being here: `modeLabel` already falls back
+   * to `BUILTIN_MODE_CONFIGS`, which is the same record the broker resolves
+   * from, so the composer's badge reads "Global" either way.
+   *
+   * Filtering authored copies out is the other half: the broker resolves a
+   * protected id from the built-in record before it looks at either authored
+   * layer, so returning one here would advertise a policy nothing enforces.
    */
   app.get("/api/modes", async () => {
     const merged = mergeById(projectConfig.configModes(), await store.listModes());
-    return [
-      ...merged.filter((m) => !isProtectedMode(m.id)),
-      ...Object.values(BUILTIN_MODE_CONFIGS),
-    ];
+    return merged.filter((m) => !isProtectedMode(m.id));
   });
 
   app.post("/api/modes", async (req, reply) => {
