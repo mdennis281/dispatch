@@ -2244,15 +2244,39 @@ export class Store {
 /**
  * Is this stored row the same project as `project`, ignoring `id`?
  *
- * Compared as serialized JSON with the key order normalised, so a field added
- * to `ProjectSchema` later is part of the comparison automatically — the
- * failure mode to avoid is a check that silently stops distinguishing two
- * projects because it was never told about a new field.
+ * Compared as canonical JSON, so a field added to `ProjectSchema` later is
+ * part of the comparison automatically — the failure mode to avoid is a check
+ * that silently stops distinguishing two projects because nobody told it
+ * about a new field.
+ *
+ * NOT `JSON.stringify(rest, Object.keys(rest).sort())`. That second argument
+ * is a property ALLOWLIST applied at every nesting level, not a key order:
+ * `workflow: { profile: "review" }` came out as `workflow: {}` and
+ * `subApps: [{ id, name }]` lost its `id`, so two projects differing only in
+ * nested config compared EQUAL and the migration would have adopted and
+ * overwritten the incumbent row. Recursion is the only way to normalise key
+ * order without also filtering.
  */
 function sameProjectExceptId(stored: Record<string, unknown>, project: Project): boolean {
-  const norm = (o: Record<string, unknown>): string => {
+  const withoutId = (o: Record<string, unknown>): unknown => {
     const { id: _id, ...rest } = o;
-    return JSON.stringify(rest, Object.keys(rest).sort());
+    return rest;
   };
-  return norm(stored) === norm(project as unknown as Record<string, unknown>);
+  return (
+    canonicalJson(withoutId(stored)) ===
+    canonicalJson(withoutId(project as unknown as Record<string, unknown>))
+  );
+}
+
+/** JSON with object keys sorted at EVERY level; arrays keep their order. */
+function canonicalJson(value: unknown): string {
+  const canon = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(canon);
+    if (v && typeof v === "object") {
+      const o = v as Record<string, unknown>;
+      return Object.fromEntries(Object.keys(o).sort().map((k) => [k, canon(o[k])]));
+    }
+    return v;
+  };
+  return JSON.stringify(canon(value));
 }

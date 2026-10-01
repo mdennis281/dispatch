@@ -198,12 +198,24 @@ describe("Store projects/chats CRUD", () => {
       await writeJsonAtomic(join(dir2, "projects", `${GLOBAL_PROJECT_ID}.json`), {
         ...project(GLOBAL_PROJECT_ID),
         name: "Acme Billing",
+        // `createdAt` pinned on BOTH records: `project()` uses `Date.now()`,
+        // so leaving it would make them differ for a reason that has nothing
+        // to do with what this test is about, and the comparison would take
+        // the suffix path even when broken.
+        createdAt: 1,
+        workflow: { profile: "none" },
       });
-      // Same name AND same repoPath, but a different project.
+      // Same name, same repoPath, same KEYS — differing only in a value
+      // NESTED one level down. Deliberately not a top-level or
+      // key-presence difference: the first version of this comparison used
+      // `JSON.stringify`'s replacer array, which filters at every level, so
+      // both of these serialised `"workflow":{}` and compared EQUAL. Anything
+      // shallower would have passed against the buggy implementation too.
       await writeJsonAtomic(join(dir2, "projects", "acme-billing.json"), {
         ...project("acme-billing"),
         name: "Acme Billing",
-        defaultBranch: "develop",
+        createdAt: 1,
+        workflow: { profile: "review" },
       });
 
       const store2 = new Store(dir2);
@@ -212,9 +224,9 @@ describe("Store projects/chats CRUD", () => {
         const ids = realProjects(await store2.listProjects()).map((p) => p.id).sort();
         expect(ids).toEqual(["acme-billing", "acme-billing-1"]);
         // The incumbent is untouched…
-        expect((await store2.getProject("acme-billing"))!.defaultBranch).toBe("develop");
+        expect((await store2.getProject("acme-billing"))!.workflow?.profile).toBe("review");
         // …and the migrated one is beside it, not merged into it.
-        expect((await store2.getProject("acme-billing-1"))!.defaultBranch).toBeUndefined();
+        expect((await store2.getProject("acme-billing-1"))!.workflow?.profile).toBe("none");
       } finally {
         store2.close();
       }
