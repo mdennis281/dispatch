@@ -180,6 +180,51 @@ describe("SessionBroker neutral harness path", () => {
     expect((await store.getChat(chat.id))!.personaId).toBe("product-owner");
   });
 
+  it("pays off a mid-turn policy switch once the turn settles, not 'eventually'", async () => {
+    // The catalogue a runtime is built with is fixed, so a policy change owes
+    // it a restart — and `setMode` cannot take one on the spot, because
+    // `chat_set_mode` is a tool the agent can call on its own chat and
+    // `stop()` would wait on the run loop waiting on that handler. Skipping it
+    // is only safe if something later actually does it: otherwise a chat
+    // switched OUT of a restrictive mode keeps its newly allowed tools
+    // unregistered for the rest of the runtime's life.
+    session = new FakeHarnessSession(true);
+    await store.saveMode({
+      id: "audit",
+      name: "Audit",
+      permissionMode: "default",
+      disallowedTools: ["Bash"],
+      scope: "global",
+    });
+    const chat = await store.saveChat({
+      id: "policy-switch",
+      projectId: "p1",
+      title: "Audit",
+      modeId: "audit",
+      harness: "codex",
+      worktrees: [],
+      prs: [],
+      createdAt: 1,
+    });
+    broker.create(chat);
+    await broker.sendMessage(chat.id, "look around");
+    await waitUntil(() => specs.length === 1);
+    expect(specs[0]!.disallowedTools).toContain("Bash");
+    expect(broker.getSession(chat.id)?.status).toBe("running");
+
+    // Mid-turn: the runtime must survive the switch rather than be torn down
+    // under the turn it is serving.
+    await broker.setMode(chat.id, "plan");
+    expect(broker.getSession(chat.id)?.started).toBe(true);
+
+    session.emit({ type: "turn-end", ok: true, subtype: "success", result: "done" });
+    await waitUntil(() => broker.getSession(chat.id)?.started === false);
+    // And the next turn is built without the denylist it was carrying.
+    await broker.sendMessage(chat.id, "again");
+    await waitUntil(() => specs.length === 2);
+    expect(specs[1]!.disallowedTools).toBeUndefined();
+  });
+
   /**
    * The global chat's posture, proven rather than asserted.
    *

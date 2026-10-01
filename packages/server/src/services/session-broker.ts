@@ -2055,6 +2055,13 @@ interface LiveSession {
   stopping: boolean;
   /** Teardown is a provider migration; settle quietly instead of as session done. */
   switching?: boolean;
+  /**
+   * A mode switch changed the tool policy while a turn was in flight, so the
+   * runtime's tool catalogue is stale and owes a restart. Drained when the turn
+   * settles — see `setMode`, which cannot do it on the spot without deadlocking
+   * against its own caller.
+   */
+  pendingPolicyRestart?: boolean;
   /** One-shot resume/fork config consumed at the next query start. */
   resumeSessionId?: string;
   forkAtUuid?: string;
@@ -3051,16 +3058,18 @@ export class SessionBroker {
     // is the enforcement and it is already updated above, synchronously, so
     // the very next call is judged by the new policy. The CATALOGUE is only
     // what the model can see, and a stale one costs a refusal it could have
-    // been spared — never a tool it should not have had. It corrects itself
-    // on the next session build.
-    if (
-      session.started &&
-      !session.turnOpen &&
-      !ACTIVE_STATUSES.has(session.status) &&
-      toolPolicyKey(session) !== policyBefore
-    ) {
-      session.switching = true;
-      await this.stop(chatId);
+    // been spared — never a tool it should not have had. But it must actually
+    // HAPPEN: left to "the next session build" the runtime can outlive many
+    // more turns, and a chat switched OUT of a restrictive mode would keep its
+    // newly allowed tools unregistered until some unrelated reap. So the debt
+    // is recorded and settled by `drainPendingPolicyRestart` at turn end.
+    if (session.started && toolPolicyKey(session) !== policyBefore) {
+      if (!session.turnOpen && !ACTIVE_STATUSES.has(session.status)) {
+        session.switching = true;
+        await this.stop(chatId);
+      } else {
+        session.pendingPolicyRestart = true;
+      }
     }
     const mode = await this.resolvePermissionMode(session.modeId);
     if (session.harnessSession) {
@@ -6630,6 +6639,7 @@ export class SessionBroker {
     // and doing it the other way round leaves "Turn complete — awaiting your
     // input" sitting in the list above a chat that is already running again.
     this.flushPendingSends(session);
+    this.drainPendingPolicyRestart(session);
   }
 
   /** A turn failed but its reusable runtime session is still available. */
@@ -6642,6 +6652,34 @@ export class SessionBroker {
     // can still be sent — and a usage limit or a transport blip is exactly when
     // the human's "do this next" is worth the most, not something to discard.
     this.flushPendingSends(session);
+    this.drainPendingPolicyRestart(session);
+  }
+
+  /**
+   * Retire a runtime whose tool catalogue a mode switch left stale.
+   *
+   * `setMode` cannot do this itself: `chat_set_mode` is a tool the agent can
+   * call on its own chat, so `stop()` would wait on the run loop that is
+   * waiting on the tool handler. It records the debt instead and this pays it
+   * once the turn has settled.
+   *
+   * Re-checks everything rather than trusting the flag. `flushPendingSends`
+   * runs first and may already have started the next turn, in which case the
+   * debt stands and the turn after this one pays it — a stale catalogue costs
+   * a refusal the model could have been spared, never a tool it should not
+   * have had, so waiting is cheap and interrupting is not.
+   */
+  private drainPendingPolicyRestart(session: LiveSession): void {
+    if (!session.pendingPolicyRestart) return;
+    if (!session.started || session.stopping) return;
+    if (session.turnOpen || ACTIVE_STATUSES.has(session.status)) return;
+    session.pendingPolicyRestart = false;
+    session.switching = true;
+    void this.stop(session.chatId).catch(() => {
+      // The transcript is resumed on the next send either way, so a failed
+      // teardown costs the catalogue refresh and nothing else.
+      session.switching = false;
+    });
   }
 
   private onDone(session: LiveSession): void {
@@ -6655,6 +6693,8 @@ export class SessionBroker {
     session.guardRecoveries.length = 0;
     session.explicitInterruptPending = false;
     session.turnOpen = false;
+    // The runtime is gone, so the catalogue it owed a refresh on is gone too.
+    session.pendingPolicyRestart = false;
     session.managerGrant?.revoke();
     session.managerGrant = undefined;
     session.stopping = false;
@@ -6694,6 +6734,8 @@ export class SessionBroker {
     session.guardRecoveries.length = 0;
     session.explicitInterruptPending = false;
     session.turnOpen = false;
+    // The runtime is gone, so the catalogue it owed a refresh on is gone too.
+    session.pendingPolicyRestart = false;
     session.managerGrant?.revoke();
     session.managerGrant = undefined;
     // A crash after a completed turn leaves a live "Turn complete" item; clear it.

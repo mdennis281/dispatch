@@ -19,7 +19,7 @@ import { EventBus } from "../bus.js";
 import { Store } from "../store/index.js";
 import { SessionBroker, type QueryFn } from "../services/session-broker.js";
 import { GitHubService, type ExecaLike } from "../services/github.js";
-import { PROVIDER_IDS, type WsServerEvent } from "@dispatch/shared";
+import { GLOBAL_PROJECT_ID, PROVIDER_IDS, type WsServerEvent } from "@dispatch/shared";
 
 /* --------------------------------------------------------------- scripted SDK */
 
@@ -599,6 +599,31 @@ describe("routes — REST CRUD", () => {
     });
     expect(existsSync(join(cfg.json().sourceDir as string, "project.yaml"))).toBe(true);
     expect(existsSync(join(fresh, ".dispatch"))).toBe(false);
+  });
+
+  it("refuses the reserved project id BEFORE initRepo touches the disk", async () => {
+    // `store.saveProject` refuses the id too, and that is the real guard — but
+    // it runs after `ensureRepo`, so refusing only there means a request that
+    // was never going to succeed still leaves a directory and a `git init`
+    // behind at whatever path it named.
+    const fresh = join(dir, "reserved-id-repo");
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/projects",
+      payload: {
+        id: GLOBAL_PROJECT_ID,
+        name: "Sneaky",
+        repoPath: fresh,
+        worktreeRoot: ".worktrees",
+        initRepo: true,
+      },
+    });
+    // The directory first: that is the claim. The status code would be 400
+    // either way — `saveProject` refuses the id — but only after the repo is
+    // already on disk.
+    expect(existsSync(fresh)).toBe(false);
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/reserved/);
   });
 
   it("initRepo leaves an existing checkout's git dir alone", async () => {
