@@ -254,6 +254,29 @@ describe("HomeService — runtime", () => {
     expect(out.projects[0]!.runtimeMs).toBe(2 * MINUTE);
   });
 
+  it("survives a project id that is also an Object.prototype key", async () => {
+    // Project ids can be AUTHORED rather than generated — "hivebreak" and
+    // "zomboid-rcon" are real ones — so `__proto__` is a legal id. On a plain
+    // `{}` accumulator the `??=` would resolve the inherited property instead
+    // of creating a row, write through to `Object.prototype`, and corrupt every
+    // other project's totals. Both accumulators are null-prototype.
+    await store.saveProject(project("__proto__", "Edge"));
+    await store.saveProject(project("p1", "Alpha"));
+    metrics.recordMany([
+      event({ ts: NOW - DAY, projectId: "__proto__", chatId: "cx" }),
+      event({ ts: NOW - DAY }),
+    ]);
+    metrics.recordSpans([span({ startTs: NOW - HOUR, projectId: "__proto__", chatId: "cx" })]);
+
+    const out = await makeHome().overview("7d");
+    const byId = Object.fromEntries(out.projects.map((p) => [p.id, p]));
+    expect(byId.__proto__!.events).toBe(1);
+    expect(byId.__proto__!.runtimeMs).toBe(MINUTE);
+    expect(byId.p1!.events).toBe(1);
+    expect(byId.p1!.runtimeMs).toBe(0);
+    expect(({} as Record<string, unknown>).events).toBeUndefined();
+  });
+
   it("excludes a span that STARTED before the window, as documented", async () => {
     await store.saveProject(project("p1", "Alpha"));
     metrics.recordSpans([

@@ -958,16 +958,26 @@ export class MetricsService {
       )
       .all(at, from, to) as { g: string; ms: number | null }[];
 
-    const byProject: Record<string, { events: number; runtimeMs: number; lastAt: number }> = {};
+    // NULL-PROTOTYPE, both of them. The key is a project id, and a project id
+    // can be authored rather than generated ("hivebreak", "zomboid-rcon" are
+    // real ones) — so `__proto__` is a legal id. On a `{}` literal
+    // `byProject[g] ??= …` would then resolve the INHERITED property instead of
+    // creating a row, writing through to `Object.prototype` and reporting
+    // garbage totals for everything else.
+    const byProject: Record<string, { events: number; runtimeMs: number; lastAt: number }> =
+      Object.create(null) as Record<string, { events: number; runtimeMs: number; lastAt: number }>;
     const row = (g: string): { events: number; runtimeMs: number; lastAt: number } =>
       (byProject[g] ??= { events: 0, runtimeMs: 0, lastAt: 0 });
-    const spark: Record<string, Record<number, number>> = {};
+    const spark: Record<string, Record<number, number>> = Object.create(null) as Record<
+      string,
+      Record<number, number>
+    >;
     for (const r of eventRows) {
       const e = row(r.g);
       const c = Number(r.c);
       e.events += c;
       e.lastAt = Math.max(e.lastAt, Number(r.last ?? 0));
-      (spark[r.g] ??= {})[Number(r.d)] = c;
+      (spark[r.g] ??= Object.create(null) as Record<number, number>)[Number(r.d)] = c;
     }
     for (const r of runtime) row(r.g).runtimeMs = Math.max(0, Number(r.ms ?? 0));
     return { byProject, spark };

@@ -119,9 +119,20 @@ export function HomeView() {
         {/* `max-w` with auto margins: the grid below is cards, and cards stretched
             across a 2560px monitor stop reading as a set. */}
         <div className="mx-auto flex max-w-5xl flex-col gap-3 p-3 sm:p-4">
-          {error && !overview && (
-            <p className="rounded-lg border border-danger-line bg-danger-ghost px-3 py-2 text-xs text-danger">
-              {error}
+          {/* Shown whenever there IS an error, not only when there is nothing
+              to paint under it. Once the first load succeeds the store keeps
+              the last snapshot forever, so gating the banner on `!overview`
+              meant a failed Reload stopped the spinner, left the old figures up
+              and said nothing — the one case where the user explicitly asked
+              for a newer number and silently did not get one. The stale figures
+              stay on screen (they are still the best answer available); the
+              banner says they are stale, and the footer's "as of" says how. */}
+          {error && (
+            <p
+              role="alert"
+              className="rounded-lg border border-danger-line bg-danger-ghost px-3 py-2 text-xs text-danger"
+            >
+              {overview ? `Could not refresh: ${error}. Showing the last reading.` : error}
             </p>
           )}
 

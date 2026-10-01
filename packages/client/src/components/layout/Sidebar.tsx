@@ -227,9 +227,13 @@ function ProjectSelector({
               question one level up. Putting it under a divider with "New
               project…" would have filed a destination among the verbs.
 
-              It does not close the drawer on a phone, for the same reason
-              picking a project doesn't: the overview replaces the main area, and
-              the drawer is over the main area. */}
+              Unlike picking a project, this DOES dismiss the chat picker on a
+              phone — `goHome` clears `leftOpen` itself. The overview is
+              full-bleed, so `App` stops rendering the drawer entirely, and a
+              flag left set would have `currentSlot` reporting a picker that
+              isn't on screen. Picking a project keeps the drawer open because
+              it leaves you IN the sidebar with a list to choose from; this
+              replaces the sidebar outright. */}
           <MenuItem
             icon={<LayoutGrid />}
             onClick={() => {
