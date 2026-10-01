@@ -682,8 +682,16 @@ export function statusIsActivity(status: ChatStatus): boolean {
 }
 
 export interface ProjectAgentCounts {
-  /** Chats with an agent mid-turn. */
+  /** Chats with an agent actually mid-turn — `running` or `waiting`. */
   working: number;
+  /**
+   * Chats whose turn is submitted but has not started. Counted apart from
+   * `working` because the two ask different things of you: a queued project is
+   * one whose work hasn't begun yet, and folding it into the working count made
+   * a project that is entirely stalled behind the context cap look just as busy
+   * as one with three agents streaming.
+   */
+  queued: number;
   /** Chats stopped on a question — nothing moves until a human answers. */
   attention: number;
 }
@@ -699,8 +707,9 @@ export function countProjectAgents(byId: Record<string, Chat>): Record<string, P
     const status = chat.status;
     if (chat.archived || !status) continue;
     if (status !== "awaiting-input" && !WORKING_STATUS.has(status)) continue;
-    const counts = (out[chat.projectId] ??= { working: 0, attention: 0 });
+    const counts = (out[chat.projectId] ??= { working: 0, queued: 0, attention: 0 });
     if (status === "awaiting-input") counts.attention++;
+    else if (status === "queued") counts.queued++;
     else counts.working++;
   }
   return out;

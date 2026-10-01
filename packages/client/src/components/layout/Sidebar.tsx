@@ -124,29 +124,39 @@ function isActive(status: RunnerInstance["status"] | undefined): boolean {
 /**
  * The right-hand half of a project row: how many agents are live in it.
  *
- * Two tones, never summed into one number — "3 working" and "1 waiting on you"
- * are different calls to action, and a project you have to go answer must not
- * hide inside a busy-looking count. Nothing renders for a quiet project: a row
- * of zeroes would make the menu read as a dashboard rather than a picker.
+ * Three tallies, never summed into one number — "3 working", "2 queued" and
+ * "1 waiting on you" are different calls to action, and a project you have to go
+ * answer must not hide inside a busy-looking count. Queued is kept apart from
+ * working for the same reason in the other direction: a project whose turns are
+ * all parked behind the context cap has nothing moving in it, and reading as
+ * busy is exactly the wrong signal when you are picking where to go next.
+ *
+ * `queued` and `working` share the accent family — see `statusMeta` — so they
+ * are separated by FILL, not hue: a live agent is a pulsing disc, a queued one a
+ * still outline. Nothing renders for a quiet project: a row of zeroes would make
+ * the menu read as a dashboard rather than a picker.
  */
 function ProjectAgentBadge({ counts }: { counts: ProjectAgentCounts | undefined }) {
   const working = counts?.working ?? 0;
+  const queued = counts?.queued ?? 0;
   const attention = counts?.attention ?? 0;
-  if (!working && !attention) return null;
+  if (!working && !queued && !attention) return null;
 
-  // "working" rather than "running": the count also covers `waiting` and
-  // `queued`, which are agents with a turn in flight but nothing streaming.
+  // "working" rather than "running": the count also covers `waiting`, which is
+  // an agent with a tool in flight but nothing streaming.
   const label = [
     attention ? `${attention} awaiting input` : null,
     working ? `${working} working` : null,
+    queued ? `${queued} queued` : null,
   ]
     .filter(Boolean)
     .join(" · ");
 
   return (
     <span className="flex items-center gap-1.5 tabular-nums" title={label}>
-      {/* The dots carry the meaning by colour alone, so the readable form goes
-          to assistive tech directly — a `title` is not reliably announced. */}
+      {/* The dots carry the meaning by colour and fill alone, so the readable
+          form goes to assistive tech directly — a `title` is not reliably
+          announced. */}
       <span className="sr-only">{label}</span>
       {attention > 0 && (
         <span aria-hidden className={cn("flex items-center gap-1", toneText("warn"))}>
@@ -158,6 +168,14 @@ function ProjectAgentBadge({ counts }: { counts: ProjectAgentCounts | undefined 
         <span aria-hidden className={cn("flex items-center gap-1", toneText("working"))}>
           <StatusDot tone="working" pulse size={5} />
           {working}
+        </span>
+      )}
+      {queued > 0 && (
+        <span aria-hidden className={cn("flex items-center gap-1", toneText("accent"))}>
+          {/* A touch larger than the filled dots: at 5px the hole inside a
+              1.5px ring closes up and the outline reads as a disc again. */}
+          <StatusDot tone="accent" hollow size={7} />
+          {queued}
         </span>
       )}
     </span>
