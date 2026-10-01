@@ -17,9 +17,12 @@
  * would drift, and the splash is the one surface where a drift is invisible
  * until somebody boots cold and watches carefully.
  *
- * It also means both marks run off the SAME document timeline. A `BootMark`
- * mounted forty minutes into a session is already mid-cycle, in phase with a
- * splash that is long gone, and that is correct — the loop has no beginning.
+ * IT DOES NOT MEAN BOTH MARKS RUN OFF THE SAME CLOCK, which is what this said
+ * for a while and is the bug it cost. A CSS animation starts when it is APPLIED
+ * TO AN ELEMENT, not at the document's time origin — so a `BootMark` mounted
+ * forty minutes into a session starts its cycle at 0%, while the splash's
+ * started at 0% forty minutes ago. They have to be made to agree, and the layout
+ * effect below is where; the colour rotation is what cares.
  *
  * The exit (`[data-done]`, the ball, the aperture) is scoped to `#boot-splash`
  * and deliberately not reachable from here. This mark does not resolve into
@@ -37,7 +40,7 @@
  * so is always there in a real page, but a vitest render of a component that
  * happens to contain this has no <head> at all.
  */
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import { BootMarkArt } from "./BootMarkArt.js";
 // For the `Window.__dispatchBootMark` declaration, which lives with the module
 // that owns the splash's lifetime.
@@ -51,6 +54,48 @@ export function BootMark({ size = DEFAULT_SIZE }: { size?: number }) {
   useEffect(() => window.__dispatchBootMark?.hold(), []);
 
   const host = useRef<HTMLDivElement>(null);
+
+  /*
+   * JOIN THE LOOP ALREADY IN PROGRESS.
+   *
+   * A CSS animation's start time is when it was applied to its element, so this
+   * mark's cycle begins when this screen appeared and the splash's began at
+   * parse. Nothing about the ANIMATION minds — the loop has no beginning. The
+   * COLOURS do: the rotation dyes each piece during a window in which that piece
+   * is off screen, those windows are phases of the loop, and the scheduler reads
+   * the phase off `performance.now()`. Only a mark whose cycle is aligned to the
+   * document's is at the phase it thinks. Any other one has every tick land
+   * somewhere arbitrary, and you watch the mark change colour.
+   *
+   * MOVING THE START TIME TO THE TIMELINE ORIGIN IS THE WHOLE OF IT. A start
+   * time of 0 makes elapsed time equal document time, so the phase is
+   * `documentTime % period` — exactly what the scheduler assumes — without this
+   * having to know what the period IS.
+   *
+   * It is also why this needs no dependency array. Assigning 0 to something that
+   * is already 0 is nothing, so running it on every render is free, and there is
+   * no question of WHICH renders may safely re-run it. The version that stored
+   * an offset had to answer that question — it had to know whether a restart had
+   * happened since — and was wrong in both directions.
+   *
+   * What it does need is to run whenever the animations restart, and a render is
+   * not guaranteed to follow one: see the cleanup below, which un-hides the SVG
+   * and calls this itself. `getAnimations` flushes style, so the animations it
+   * hands back there are the fresh ones, already created.
+   *
+   * `useLayoutEffect`, so the alignment is in before the first paint rather than
+   * a frame of the wrong phase after it. Filtered by name because only the
+   * loop's own animations are ours to move.
+   */
+  const align = useCallback(() => {
+    const el = host.current;
+    if (!el?.getAnimations) return;
+    for (const animation of el.getAnimations({ subtree: true })) {
+      const name = (animation as CSSAnimation).animationName;
+      if (typeof name === "string" && name.startsWith("boot-splash-")) animation.startTime = 0;
+    }
+  }, []);
+  useLayoutEffect(align);
 
   /*
    * THE CANVAS RENDERER, NOT JUST THE SVG.
@@ -81,11 +126,23 @@ export function BootMark({ size = DEFAULT_SIZE }: { size?: number }) {
       el.setAttribute("data-canvas", ""),
     );
     return () => {
+      /*
+       * REMOVING THIS PUTS THE SVG BACK ON SCREEN, and a `display: none` SVG has
+       * no animations — so the ones that come back are new, starting at 0%.
+       *
+       * `align()` has to be called HERE rather than left to the next render,
+       * because on a size change there isn't one: React runs the layout effect
+       * above BEFORE this cleanup, while the SVG is still hidden and there is
+       * nothing to align, and then nothing re-renders. The mark would run out of
+       * phase with the rotation until the replacement worker came up, and for
+       * good if it never did.
+       */
       el.removeAttribute("data-canvas");
+      align();
       handle?.stop();
       canvas.remove();
     };
-  }, [size]);
+  }, [size, align]);
 
   // The host carries the box, because the SVG leaves the flow once the canvas
   // takes over. `--boot-mark-size` is what `.boot-splash__mark` reads for its
