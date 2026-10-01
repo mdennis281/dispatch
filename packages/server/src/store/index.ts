@@ -106,6 +106,7 @@ import {
 } from "@dispatch/shared";
 import {
   AgentContextSettingsSchema,
+  AppReviewAgentDefaultsSchema,
   HarnessSettingsSchema,
   SubscriptionListSchema,
   ReviewerCredentialSchema,
@@ -348,6 +349,22 @@ export const AppSettingsSchema = z.object({
       enabled: z.boolean().default(true),
     })
     .optional(),
+  /**
+   * App-wide defaults for Dispatch's own reviewer — currently just how many
+   * rounds a PR gets, and whether that number is fixed or sized to the diff.
+   *
+   * The bottom of a two-level chain: a project's `workflow.pr.reviewAgent`
+   * overrides any field it authors, and anything neither names falls through to
+   * the shipped default (see `applyReviewAgentDefaults`). Here rather than in a
+   * manifest because "how much of my quota may a review loop spend" is a fact
+   * about this install, not about the repository — and a committed answer would
+   * be spending somebody else's.
+   *
+   * Optional rather than `.default({})` so every existing AppSettings literal
+   * (tests, DEFAULT_SETTINGS) stays valid; unset means every project keeps the
+   * behaviour it had before this existed.
+   */
+  reviewAgent: AppReviewAgentDefaultsSchema.optional(),
   /**
    * First-run setup wizard state.
    *

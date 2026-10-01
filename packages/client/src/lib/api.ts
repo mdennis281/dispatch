@@ -6,6 +6,7 @@
  */
 import type {
   Persona,
+  ReviewRoundsPolicy,
   GhCliStatus,
   RuntimeSetupStatus,
   SetupStatus,
@@ -224,6 +225,16 @@ export interface AppSettings {
   };
   /** Issue-triggered chats — the app-wide switch. ON when unset; enrolment is per project. */
   issueWatcher?: { enabled?: boolean };
+  /**
+   * App-wide defaults for Dispatch's own reviewer: how many rounds a PR gets,
+   * and whether that number is fixed or sized to the diff. A project's
+   * `workflow.pr.reviewAgent` overrides any field it authors; what neither
+   * names falls through to the shipped values (`DEFAULT_REVIEW_ROUNDS`).
+   */
+  reviewAgent?: {
+    maxRounds?: number;
+    rounds?: ReviewRoundsPolicy;
+  };
   /**
    * What Dispatch puts in front of an agent before the task — the house-rules
    * cap and how much durable memory surfaces per turn. Every field optional:

@@ -3,12 +3,22 @@ import { Cpu } from "lucide-react";
 import {
   AGENT_TASKS,
   DEFAULT_HARNESS,
+  DEFAULT_REVIEW_MAX_ROUNDS,
+  DEFAULT_REVIEW_ROUNDS,
   DEFAULT_MODE_ID,
   SHELL_TRANSCRIPT_CATEGORIES,
   accountLabel,
   listProviders,
+  reviewRoundCap,
 } from "@dispatch/shared";
-import type { Effort, HarnessDefaults, HarnessKind, ProjectConfigLocation } from "@dispatch/shared";
+import type {
+  Effort,
+  HarnessDefaults,
+  HarnessKind,
+  ProjectConfigLocation,
+  ReviewRoundsMode,
+  ReviewRoundsPolicy,
+} from "@dispatch/shared";
 import { Field } from "../../sidebar/Modal.js";
 import { Select, type SelectOption } from "../../ui/Select.js";
 import { SectionLabel } from "../../ui/Panel.js";
@@ -67,6 +77,16 @@ export function ChatSection({ draft, patch, harnesses, catalogs }: AppPaneProps)
     useView.getState().setProjectSection("chat");
     useView.getState().setView("project-settings");
   };
+
+  // The install's reviewer defaults — the layer UNDER every project's own
+  // `workflow.pr.reviewAgent`. Only the round policy lives here: the reviewer
+  // model and effort are per provider (in the cards below, because a model id
+  // belongs to one catalogue), and the account and its token are a secret that
+  // never goes near a settings PUT.
+  const reviewAgent = draft.reviewAgent ?? {};
+  const appRounds = { ...DEFAULT_REVIEW_ROUNDS, ...reviewAgent.rounds };
+  const patchRounds = (p: Partial<ReviewRoundsPolicy>) =>
+    patch({ reviewAgent: { ...reviewAgent, rounds: { ...reviewAgent.rounds, ...p } } });
 
   const patchHarnessDefault = (kind: HarnessKind, p: HarnessDefaults) =>
     patch({
@@ -234,6 +254,93 @@ export function ChatSection({ draft, patch, harnesses, catalogs }: AppPaneProps)
             );
           })}
         </div>
+      </div>
+
+      <div className="border-t border-line-soft pt-3">
+        <SectionLabel className="mb-1.5 px-0">Review rounds</SectionLabel>
+        <p className="mb-2 text-2xs leading-snug text-faint">
+          How many times Dispatch&rsquo;s own reviewer may go round on one pull request
+          before it stops. A project&rsquo;s Reviewer pane overrides any of this; what it
+          leaves alone lands here. The cap is what stops a PR that never converges &mdash;
+          and scaling it to the diff is the answer to a fixed number having to serve both a
+          typo fix and a 4,000-line refactor.
+        </p>
+        <Field label="Sizing" hint="how the per-PR cap is decided">
+          <Select<ReviewRoundsMode>
+            width={220}
+            align="start"
+            value={appRounds.mode}
+            onChange={(mode) => patchRounds({ mode })}
+            options={[
+              { value: "static", label: "Fixed cap", hint: "every PR the same" },
+              { value: "dynamic", label: "Scale to the diff", hint: "bigger PR, more rounds" },
+            ]}
+          />
+        </Field>
+        {appRounds.mode === "static" ? (
+          <Field label="Cap" hint="rounds per pull request">
+            <Select
+              width={220}
+              align="start"
+              value={String(reviewAgent.maxRounds ?? DEFAULT_REVIEW_MAX_ROUNDS)}
+              onChange={(v) => patch({ reviewAgent: { ...reviewAgent, maxRounds: Number(v) } })}
+              options={[1, 2, 3, 4, 6, 8, 12].map((n) => ({
+                value: String(n),
+                label: n === 1 ? "1 round · no re-review" : `${n} rounds`,
+              }))}
+            />
+          </Field>
+        ) : (
+          <>
+            <Field label="Start at" hint="what the smallest diff gets">
+              <Select
+                width={220}
+                align="start"
+                value={String(appRounds.base)}
+                onChange={(v) => patchRounds({ base: Number(v) })}
+                options={[1, 2, 3, 4].map((n) => ({
+                  value: String(n),
+                  label: n === 1 ? "1 round" : `${n} rounds`,
+                }))}
+              />
+            </Field>
+            <Field label="+1 round per" hint="lines added plus deleted">
+              <Select
+                width={220}
+                align="start"
+                value={String(appRounds.linesPerRound)}
+                onChange={(v) => patchRounds({ linesPerRound: Number(v) })}
+                options={[100, 200, 250, 500, 750, 1000, 1500, 2000].map((n) => ({
+                  value: String(n),
+                  label: `${n} lines`,
+                }))}
+              />
+            </Field>
+            <Field label="Ceiling" hint="no diff buys more than this">
+              <Select
+                width={220}
+                align="start"
+                value={String(appRounds.max)}
+                onChange={(v) => patchRounds({ max: Number(v) })}
+                options={[2, 3, 4, 6, 8, 12, 20].map((n) => ({
+                  value: String(n),
+                  label: `${n} rounds`,
+                }))}
+              />
+            </Field>
+            {/* The law, run on four diff sizes: a formula in prose is a thing
+                people get wrong by one round, worked numbers are not. */}
+            <p className="mt-1 text-2xs leading-snug text-faint">
+              {[50, 600, 1500, 5000]
+                .map(
+                  (n) =>
+                    `${n.toLocaleString()} lines → ` +
+                    `${reviewRoundCap({ maxRounds: reviewAgent.maxRounds ?? DEFAULT_REVIEW_MAX_ROUNDS, rounds: appRounds }, n)}`,
+                )
+                .join(" · ")}
+            </p>
+          </>
+        )}
       </div>
 
       <div className="border-t border-line-soft pt-3">

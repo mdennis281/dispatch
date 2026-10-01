@@ -9,7 +9,7 @@ import type {
   ResolvedReviewAgent,
   WsServerEvent,
 } from "@dispatch/shared";
-import { composeMessageText } from "@dispatch/shared";
+import { DEFAULT_REVIEW_ROUNDS, composeMessageText } from "@dispatch/shared";
 import { EventBus } from "../bus.js";
 import { Store } from "../store/index.js";
 import { PrReviewWatcher, type PrReviewGitHub } from "./pr-review-watcher.js";
@@ -853,6 +853,7 @@ describe("PrReviewWatcher — Dispatch's own reviewer", () => {
     identity: "self",
     effort: "high",
     maxRounds: 2,
+    rounds: DEFAULT_REVIEW_ROUNDS,
     post: true,
   };
 
@@ -984,6 +985,91 @@ describe("PrReviewWatcher — Dispatch's own reviewer", () => {
     }
 
     expect(spawned.length).toBe(POLICY.maxRounds);
+  });
+
+  it("sizes the cap to the diff under a dynamic policy, and raises it as the PR grows", async () => {
+    // The failure this exists for: one fixed cap has to serve a typo fix and a
+    // 4,000-line refactor. Tuned for the refactor it spends four reviews on the
+    // typo; tuned for the typo the refactor strands mid-round-three.
+    await makeChat("c1", [REF]);
+    let head = "sha-0";
+    let additions = 120;
+    const { registry, watcher, spawned, tick } = await withReviewer({
+      policy: {
+        ...POLICY,
+        rounds: { mode: "dynamic", base: 1, linesPerRound: 500, max: 4 },
+      },
+      github: {
+        pollPrState: async (repo, number) => ({
+          ...(await fakeGitHub().pollPrState(repo, number))!,
+          headRefOid: head,
+          additions,
+          deletions: 0,
+        }),
+      },
+    });
+    await registry.track(REF, { chatId: "c1", projectId: "p1" });
+
+    // A 120-line diff is one round, whatever the static cap says.
+    head = "sha-1";
+    tick();
+    await watcher.sweep();
+    await registry.requestReviewAgent("octo/repo", 42, "c1");
+    tick();
+    await watcher.sweep();
+    expect(spawned.length).toBe(1);
+    expect((await store.getPrRecord("octo/repo#42"))?.reviewAgent?.maxRounds).toBe(1);
+
+    // Spent: a push and a fresh request buy nothing while it stays small.
+    head = "sha-2";
+    tick();
+    await watcher.sweep();
+    await registry.requestReviewAgent("octo/repo", 42, "c1");
+    tick();
+    await watcher.sweep();
+    expect(spawned.length).toBe(1);
+
+    // Now the branch grows past two more brackets. The cap is recomputed every
+    // sweep, so the extra rounds are earned there and then — no config edit, no
+    // `extraRounds` grant.
+    additions = 1200;
+    head = "sha-3";
+    tick();
+    await watcher.sweep();
+    expect((await store.getPrRecord("octo/repo#42"))?.reviewAgent?.maxRounds).toBe(3);
+    await registry.requestReviewAgent("octo/repo", 42, "c1");
+    tick();
+    await watcher.sweep();
+    expect(spawned).toEqual([
+      { number: 42, round: 1 },
+      { number: 42, round: 2 },
+    ]);
+  });
+
+  it("falls back to the static cap when the poll could not read the diff size", async () => {
+    // Absent counts are not evidence of a small diff OR a big one. `base` is
+    // the honest floor, and the next poll that knows raises it within a sweep.
+    await makeChat("c1", [REF]);
+    const { registry, watcher, spawned } = await withReviewer({
+      policy: {
+        ...POLICY,
+        rounds: { mode: "dynamic", base: 2, linesPerRound: 500, max: 8 },
+      },
+      github: {
+        pollPrState: async (repo, number) => ({
+          ...(await fakeGitHub().pollPrState(repo, number))!,
+          headRefOid: "sha-1",
+          additions: undefined,
+          deletions: undefined,
+        }),
+      },
+    });
+    await registry.track(REF, { chatId: "c1", projectId: "p1" });
+    await registry.requestReviewAgent("octo/repo", 42, "c1");
+    await watcher.sweep();
+
+    expect(spawned.length).toBe(1);
+    expect((await store.getPrRecord("octo/repo#42"))?.reviewAgent?.maxRounds).toBe(2);
   });
 
   it("spawns for a PR whose POLL isn't due — `watch_pr` must not starve the reviewer", async () => {

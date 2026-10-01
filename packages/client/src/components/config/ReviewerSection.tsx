@@ -32,6 +32,7 @@ import {
   Gauge,
   Loader2,
   Plus,
+  Ruler,
   ScanEye,
   Trash2,
   TriangleAlert,
@@ -40,11 +41,15 @@ import {
   X,
 } from "lucide-react";
 import {
+  DEFAULT_REVIEW_MAX_ROUNDS,
+  DEFAULT_REVIEW_ROUNDS,
   PROVIDER_IDS,
+  applyReviewAgentDefaults,
   authorReviewerRoster,
   providerFor,
   COPILOT_LOGIN,
   resolveWorkflow,
+  reviewRoundCap,
   type Effort,
   type HarnessKind,
   type ReviewerCheck,
@@ -52,11 +57,13 @@ import {
   type ReviewerRosterEntry,
   type ReviewerStatus,
   type ReviewerVerify,
+  type ReviewRoundsPolicy,
   type WorkflowConfig,
 } from "@dispatch/shared";
 import { api } from "../../lib/api.js";
 import { harnessLabel } from "../../lib/harness.js";
 import { useProviderCatalogs } from "../../lib/useProviderCatalogs.js";
+import { useSettings } from "../../stores/settings.js";
 import { EFFORT_OPTIONS } from "../../lib/efforts.js";
 import { Button } from "../ui/Button.js";
 import { IconButton } from "../ui/IconButton.js";
@@ -118,6 +125,17 @@ const ROUND_OPTIONS = [
   ...[2, 3, 4, 6, 8, 12].map((n) => ({ value: String(n), label: `${n} rounds` })),
 ];
 
+/** How many lines of diff buy one more round, under a `dynamic` policy. */
+const LINES_PER_ROUND_OPTIONS = [100, 200, 250, 500, 750, 1000, 1500, 2000].map((n) => ({
+  value: String(n),
+  label: `${n} lines`,
+}));
+
+/** The diff sizes the preview line walks, so the law is legible before it runs. */
+const PREVIEW_SIZES = [50, 600, 1500, 5000];
+
+const nf = new Intl.NumberFormat();
+
 const HARNESSES = PROVIDER_IDS;
 
 export function ReviewerSection({
@@ -149,13 +167,36 @@ export function ReviewerSection({
   // here dead on a `none`/`commit` project — a toggle you can click that springs
   // straight back, under a banner promising these settings are kept either way.
   const pr = resolveWorkflow({ workflow: { ...value, profile: "review" } }).pr;
-  const resolved = pr.reviewAgent;
+  // The app layer goes on here for the same reason the server applies it in
+  // `resolveReviewer`: `resolveWorkflow` is pure and knows nothing about this
+  // install, so without the overlay every control in this pane would render the
+  // SHIPPED default while the reviewer actually ran on the app's.
+  const appDefaults = useSettings((st) => st.app.reviewAgent);
+  const authored = value.pr?.reviewAgent;
+  const resolved = applyReviewAgentDefaults(pr.reviewAgent, authored, appDefaults);
+  const rounds = resolved.rounds;
+  // What each "App default" option actually resolves to — the install's value
+  // where it has one, the shipped value otherwise. Read off the raw app layer
+  // rather than off `resolved`, which has the project's own pins mixed in and
+  // so would show a project its OWN number as the thing it would inherit.
+  const appMaxRounds = appDefaults?.maxRounds ?? DEFAULT_REVIEW_MAX_ROUNDS;
+  const appRounds = {
+    mode: appDefaults?.rounds?.mode ?? DEFAULT_REVIEW_ROUNDS.mode,
+    base: appDefaults?.rounds?.base ?? DEFAULT_REVIEW_ROUNDS.base,
+    linesPerRound: appDefaults?.rounds?.linesPerRound ?? DEFAULT_REVIEW_ROUNDS.linesPerRound,
+    max: appDefaults?.rounds?.max ?? DEFAULT_REVIEW_ROUNDS.max,
+  };
   const isReviewProfile = value.profile === "review";
 
   const patchPr = (p: Partial<NonNullable<WorkflowConfig["pr"]>>) =>
     onChange({ ...value, pr: { ...value.pr, ...p } });
   const patch = (p: Partial<NonNullable<NonNullable<WorkflowConfig["pr"]>["reviewAgent"]>>) =>
     patchPr({ reviewAgent: { ...value.pr?.reviewAgent, ...p } });
+  // One field of the sizing law at a time, each clearable back to "app default"
+  // on its own — the knobs are independent decisions and pinning `max` should
+  // not silently pin `linesPerRound` to whatever was on screen at the time.
+  const patchRounds = (p: Partial<ReviewRoundsPolicy>) =>
+    patch({ rounds: { ...authored?.rounds, ...p } });
 
   const { harnesses, catalogs } = useProviderCatalogs();
   const providerOptions = [
@@ -307,22 +348,123 @@ export function ReviewerSection({
                   />
                 </label>
                 <label className="flex items-center gap-2">
-                  <span className="text-2xs text-faint">Cap</span>
+                  <span className="text-2xs text-faint">Rounds</span>
+                  {/* Unset defers to Settings → Chat, like Effort above. */}
                   <Select
-                    options={ROUND_OPTIONS}
-                    value={String(resolved.maxRounds)}
-                    onChange={(v) => patch({ maxRounds: Number(v) })}
-                    width={150}
+                    options={[
+                      {
+                        value: "",
+                        label: "App default",
+                        hint: appRounds.mode === "dynamic" ? "scaled" : "fixed",
+                      },
+                      { value: "static", label: "Fixed cap" },
+                      { value: "dynamic", label: "Scale to the diff" },
+                    ]}
+                    value={authored?.rounds?.mode ?? ""}
+                    onChange={(v) =>
+                      patchRounds({ mode: (v || undefined) as ReviewRoundsPolicy["mode"] })
+                    }
+                    leftIcon={<Ruler />}
+                    width={190}
                   />
                 </label>
               </div>
+              {/* The knobs on their OWN row. Inlined beside Effort and the mode
+                  they made five selects on one line, which wrapped into a
+                  staircase at the pane's real width — the ceiling ended up on a
+                  line of its own, reading as though it belonged to the next
+                  section. */}
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                {rounds.mode === "static" ? (
+                  <label className="flex items-center gap-2">
+                    <span className="text-2xs text-faint">Cap</span>
+                    <Select
+                      options={[
+                        {
+                          value: "",
+                          label: "App default",
+                          hint: `${appMaxRounds}`,
+                        },
+                        ...ROUND_OPTIONS,
+                      ]}
+                      value={authored?.maxRounds != null ? String(authored.maxRounds) : ""}
+                      onChange={(v) => patch({ maxRounds: v ? Number(v) : undefined })}
+                      width={180}
+                    />
+                  </label>
+                ) : (
+                  <>
+                    <label className="flex items-center gap-2">
+                      <span className="text-2xs text-faint">Start at</span>
+                      <Select
+                        options={[
+                          { value: "", label: "App default", hint: `${appRounds.base}` },
+                          ...[1, 2, 3, 4].map((n) => ({
+                            value: String(n),
+                            label: n === 1 ? "1 round" : `${n} rounds`,
+                          })),
+                        ]}
+                        value={authored?.rounds?.base != null ? String(authored.rounds.base) : ""}
+                        onChange={(v) => patchRounds({ base: v ? Number(v) : undefined })}
+                        width={160}
+                      />
+                    </label>
+                    <label className="flex items-center gap-2">
+                      <span className="text-2xs text-faint">+1 round per</span>
+                      <Select
+                        options={[
+                          {
+                            value: "",
+                            label: "App default",
+                            hint: `${nf.format(appRounds.linesPerRound)} lines`,
+                          },
+                          ...LINES_PER_ROUND_OPTIONS,
+                        ]}
+                        value={
+                          authored?.rounds?.linesPerRound != null
+                            ? String(authored.rounds.linesPerRound)
+                            : ""
+                        }
+                        onChange={(v) => patchRounds({ linesPerRound: v ? Number(v) : undefined })}
+                        width={170}
+                      />
+                    </label>
+                    <label className="flex items-center gap-2">
+                      <span className="text-2xs text-faint">Ceiling</span>
+                      <Select
+                        options={[
+                          { value: "", label: "App default", hint: `${appRounds.max}` },
+                          ...ROUND_OPTIONS,
+                        ]}
+                        value={authored?.rounds?.max != null ? String(authored.rounds.max) : ""}
+                        onChange={(v) => patchRounds({ max: v ? Number(v) : undefined })}
+                        width={180}
+                      />
+                    </label>
+                  </>
+                )}
+              </div>
+              {/* The law, run on four diff sizes. A formula in prose is a thing
+                  people get wrong by one round; the worked numbers are not. */}
+              {rounds.mode === "dynamic" && (
+                <p className="text-2xs leading-snug text-faint">
+                  {PREVIEW_SIZES.map(
+                    (n) => `${nf.format(n)} lines → ${reviewRoundCap(resolved, n)}`,
+                  ).join(" · ")}
+                  {" · never more than "}
+                  {rounds.max}.
+                </p>
+              )}
               <p className="text-2xs leading-snug text-faint">
                 The reviewer can run on a different provider than the project&rsquo;s own chats —
                 a second model reading the diff catches what the first one wrote past. Reviewing
                 well is a reading job, so unless an effort is picked here or in Settings → Chat
                 it runs at high. The cap bounds
                 the fix-and-re-request cycle: a review is only spent on the code it read, so a
-                push re-arms it — the cap is what stops a PR that never converges.
+                push re-arms it — the cap is what stops a PR that never converges.{" "}
+                {rounds.mode === "dynamic"
+                  ? "Scaled to the diff, it is recomputed on every sweep — so a branch that grows past the next bracket earns its extra round there and then."
+                  : "A fixed cap treats a typo fix and a 4,000-line refactor as the same reading job; scale it to the diff if that is wrong here."}
               </p>
 
               <ToggleRow
