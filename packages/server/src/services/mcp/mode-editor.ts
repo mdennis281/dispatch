@@ -35,6 +35,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { loadManifest, type ProjectPaths } from "@dispatch/cli/core";
 import {
   BUILTIN_MODE_CONFIGS,
+  isProtectedMode,
   DEFAULT_MODES_DIR,
   PermissionModeSchema,
   type ModeConfig,
@@ -151,10 +152,22 @@ export function createModeEditor(deps: ModeEditorDeps): ManagerMcpModes {
     hasProject: Boolean(configPaths),
 
     async list() {
-      return [...(await projectModes()), ...(await globalModes()), ...builtinModes()];
+      // A PROTECTED id is reported ONLY as its built-in self, whatever files
+      // happen to exist. The broker resolves those from the built-in record
+      // before it looks at either authored layer, so listing an authored copy
+      // as "the project mode in effect" would be the catalogue stating a
+      // policy that is not the one being enforced — and for a mode that is a
+      // security boundary, a catalogue nobody can trust is worse than none.
+      const authored = [...(await projectModes()), ...(await globalModes())].filter(
+        (m) => !isProtectedMode(m.id),
+      );
+      return [...authored, ...builtinModes()];
     },
 
     async read(id, scope) {
+      if (isProtectedMode(id)) {
+        return builtinModes().find((m) => m.id === id) ?? null;
+      }
       const order: ModeScope[] = scope ? [scope] : [...MODE_SCOPES];
       for (const s of order) {
         const pool =
@@ -168,6 +181,16 @@ export function createModeEditor(deps: ModeEditorDeps): ManagerMcpModes {
     async write({ scope, name, permissionMode, description, allowedTools, disallowedTools, instructions }) {
       const id = modeIdFor(name);
       if (!id) throw new Error(`"${name}" leaves nothing to make a mode id from.`);
+      // Writing one would produce a file that is never read — the broker
+      // resolves protected ids from the built-in record — so the write has to
+      // fail rather than succeed into a lie.
+      if (isProtectedMode(id)) {
+        throw new Error(
+          `"${id}" is a built-in posture and cannot be redefined. It is what makes a ` +
+            "project-less chat safe, so a project or store copy would be a policy nobody " +
+            "enforces. Pick another name.",
+        );
+      }
       if (scope === "project") {
         if (!configPaths) throw new Error("this session has no project to write a mode into");
         const dir = await modesDir(configPaths);
@@ -215,6 +238,7 @@ export function createModeEditor(deps: ModeEditorDeps): ManagerMcpModes {
     },
 
     async remove(id, scope) {
+      if (isProtectedMode(id)) return false;
       if (scope === "project") {
         if (!configPaths) throw new Error("this session has no project to delete a mode from");
         const dir = await modesDir(configPaths);

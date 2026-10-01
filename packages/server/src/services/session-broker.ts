@@ -1285,6 +1285,20 @@ export interface SessionView {
 /* -------------------------------------------------------- mode / effort maps */
 
 /** Built-in mode-id → SDK permissionMode fallback (used when no ModeConfig). */
+/**
+ * A comparable stand-in for a session's tool policy, so `setMode` can tell
+ * whether a switch actually moved it and only pay for a runtime restart when
+ * it did.
+ *
+ * JSON rather than a join, because `undefined` and `[]` must compare DIFFERENT
+ * — one means "every tool", the other means "none" (see `isToolAllowed`), and
+ * any encoding that flattens them would skip the restart on the single most
+ * consequential change this can make.
+ */
+function toolPolicyKey(s: { allowedTools?: string[]; deniedTools?: string[] }): string {
+  return JSON.stringify([s.allowedTools ?? null, s.deniedTools ?? null]);
+}
+
 export const BUILTIN_MODE_PERMISSION: Record<string, PermissionMode> = {
   default: "default",
   ask: "default",
@@ -3005,7 +3019,21 @@ export class SessionBroker {
     // mode's (absent) denylist until its next session build, and a chat
     // switched OUT of one stayed restricted — in both directions the guard
     // was enforcing a mode the chat was no longer in.
+    const policyBefore = toolPolicyKey(session);
     this.stampModeGate(session, await this.resolveMode(session.modeId));
+    // The guard is now right, but the RUNTIME's tool catalogue is not: those
+    // lists are fixed when the session is created, and `setPermissionMode`
+    // does not revisit them. So a chat switched out of a restrictive mode
+    // would keep its tools hidden, and one switched in would keep seeing tools
+    // the guard will now refuse — the catalogue disagreeing with the rule.
+    // Retire the runtime and resume its transcript, the same move
+    // `setPersona` makes for the same reason (instructions are fixed at
+    // startup too). Only when the policy actually MOVED: most mode switches
+    // change nothing here and must not cost a restart.
+    if (session.started && toolPolicyKey(session) !== policyBefore) {
+      session.switching = true;
+      await this.stop(chatId);
+    }
     const mode = await this.resolvePermissionMode(session.modeId);
     if (session.harnessSession) {
       await session.harnessSession.setPermissionMode(mode).catch((err) => {
