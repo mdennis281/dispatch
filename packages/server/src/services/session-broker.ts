@@ -913,17 +913,34 @@ export interface SessionPrRegistry {
  * A failed refresh keeps the stored answer rather than inventing a bigger cap:
  * "GitHub was unreadable" is not evidence that the diff grew.
  */
-async function freshReviewRoundCap(
+export async function freshReviewRoundCap(
   registry: SessionPrRegistry,
   repo: string,
   prNumber: number,
   policy: ResolvedReviewAgent,
   /** Rounds already spent out of the POLICY's allowance — per-PR grants removed. */
   spent: number,
+  opts: {
+    /**
+     * Poll first, whatever the stored row says. For the paths that ACT on the
+     * answer — arming a request spends a round — where the conditional poll
+     * below is not enough: a force-push that SHRANK the diff leaves a stale cap
+     * that is too big, which reads as headroom, so nothing triggers the
+     * confirmation and a round gets armed that the policy would not allow.
+     *
+     * Not the default, because `watch_pr` makes the passive read every 20
+     * seconds per watched PR and over-granting by one round until the next
+     * sweep is a far smaller problem than a poll per PR per 20s.
+     */
+    force?: boolean;
+  } = {},
 ): Promise<number> {
+  if (policy.rounds.mode !== "dynamic") return policy.maxRounds;
+  const live = opts.force ? await registry.refresh(repo, prNumber).catch(() => null) : null;
+  if (live) return reviewRoundCap(policy, changedLines(live));
   const stored = await registry.snapshot(repo, prNumber).catch(() => null);
   const cap = reviewRoundCap(policy, stored ? changedLines(stored) : undefined);
-  if (policy.rounds.mode !== "dynamic" || spent < cap) return cap;
+  if (spent < cap) return cap;
   const fresh = await registry.refresh(repo, prNumber).catch(() => null);
   return fresh ? reviewRoundCap(policy, changedLines(fresh)) : cap;
 }
@@ -7607,6 +7624,9 @@ export class SessionBroker {
                                       n,
                                       reviewer.policy,
                                       (state?.rounds ?? 0) - (state?.extraRounds ?? 0),
+                                      // This one ARMS a round. Worth a poll
+                                      // every time, in both directions.
+                                      { force: true },
                                     )
                                   : undefined,
                               })) ?? { armed: false, reason: "unknown-pr" }

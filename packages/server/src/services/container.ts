@@ -703,7 +703,12 @@ export function createServices(
     raiseReviewRoundCap: async (repo, number, extra) => {
       await prRegistry.raiseReviewRoundCap(repo, number, extra);
     },
-    requestReviewAgent: (repo, number, by) => prRegistry.requestReviewAgent(repo, number, by),
+    // BOUND, not re-wrapped. The hand-written arrow dropped the options
+    // argument the day one was added — and silently, because a function of
+    // fewer parameters is assignable to one of more, so the fresh round cap
+    // `request_review` computes was discarded here while every type checked.
+    // Binding forwards whatever the interface grows next by construction.
+    requestReviewAgent: prRegistry.requestReviewAgent.bind(prRegistry),
     notePostedReview: (repo, number, by) => prRegistry.notePostedReview(repo, number, by),
     noteReviewRequestError: (repo, number, error) =>
       prRegistry.noteReviewRequestError(repo, number, error),

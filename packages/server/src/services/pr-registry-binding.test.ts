@@ -12,6 +12,7 @@ import { describe, it, expect } from "vitest";
 import { DEFAULT_REVIEW_ROUNDS, type ResolvedReviewAgent } from "@dispatch/shared";
 import type { PrReviewAgentState, PrSnapshot } from "@dispatch/shared";
 import {
+  freshReviewRoundCap,
   makePrRegistryBinding,
   type SessionDirs,
   type SessionPrRegistry,
@@ -151,6 +152,44 @@ describe("the reviewer row, as the MCP tools read it", () => {
     );
 
     expect(await bind(registry, DYNAMIC).reviewAgent(7, "o/r")).toMatchObject({ maxRounds: 1 });
+  });
+
+  it("polls unconditionally on the path that ARMS a round", async () => {
+    // The conditional poll is gated on the stale answer being a stop, which
+    // only catches a diff that GREW. A force-push the other way — cap 4 down to
+    // cap 1 — leaves a stale cap that is too BIG, so one spent round still
+    // reads as headroom, nothing triggers the confirmation, and round 2 gets
+    // armed against an allowance the policy no longer grants.
+    const { registry, refreshes } = fakeRegistry(
+      { rounds: 1, maxRounds: 4 },
+      { additions: 1800, deletions: 0 }, // catalog: before the force-push
+      { additions: 60, deletions: 0 }, // GitHub: after it
+    );
+
+    expect(
+      await freshReviewRoundCap(registry, "o/r", 7, DYNAMIC, 1, { force: true }),
+    ).toBe(1);
+    expect(refreshes()).toBe(1);
+
+    // And the passive read keeps its cheap answer — `watch_pr` makes that one
+    // every 20 seconds per watched PR.
+    const passive = fakeRegistry(
+      { rounds: 1, maxRounds: 4 },
+      { additions: 1800, deletions: 0 },
+      { additions: 60, deletions: 0 },
+    );
+    expect(await freshReviewRoundCap(passive.registry, "o/r", 7, DYNAMIC, 1)).toBe(4);
+    expect(passive.refreshes()).toBe(0);
+  });
+
+  it("never polls under a static policy, forced or not", async () => {
+    const { registry, refreshes } = fakeRegistry(
+      { rounds: 1, maxRounds: 4 },
+      { additions: 9000, deletions: 0 },
+    );
+
+    expect(await freshReviewRoundCap(registry, "o/r", 7, POLICY(), 4, { force: true })).toBe(4);
+    expect(refreshes()).toBe(0);
   });
 
   it("counts a per-PR extraRounds grant into the headroom", async () => {
