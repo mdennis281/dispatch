@@ -156,12 +156,16 @@ describe("Store projects/chats CRUD", () => {
       failing.patchChat = async () => {
         throw new Error("disk full");
       };
-      await failing.init();
+      // Boot FAILS rather than continuing: in this process the reserved id
+      // already resolves to the synthesized record, so a chat still pointing
+      // at it would be running under the cross-project posture until someone
+      // restarted. Refusing is the louder and safer failure.
+      await expect(failing.init()).rejects.toThrow(/could not free the reserved project id/);
       failing.patchChat = realPatch;
       try {
         // The target record exists (step 1 ran)…
         expect((await failing.getProject("acme-billing"))?.name).toBe("Acme Billing");
-        // …but the legacy row is STILL THERE, so nothing has been orphaned.
+        // …and the legacy row is STILL THERE, so nothing has been orphaned.
         expect(existsSync(join(dir2, "projects", `${GLOBAL_PROJECT_ID}.json`))).toBe(true);
       } finally {
         failing.close();

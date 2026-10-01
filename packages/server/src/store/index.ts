@@ -447,6 +447,28 @@ export function isEntityId(id: unknown): id is string {
 }
 
 /**
+ * Raised when the reserved-id migration cannot finish.
+ *
+ * Fatal on purpose. The alternative is a boot that leaves a real project's
+ * chats resolving to the synthesized global project — a silent posture change
+ * on somebody's live conversations — and a log line nobody reads. The old
+ * project row is left in place, so fixing whatever broke (disk full, a
+ * permissions problem) and restarting completes the move.
+ */
+export class ReservedProjectMigrationError extends Error {
+  constructor(detail: string, options?: { cause?: unknown }) {
+    super(
+      `Dispatch could not free the reserved project id "${GLOBAL_PROJECT_ID}": ${detail}. ` +
+        "Refusing to start, because continuing would file those chats under the global " +
+        "chat's cross-project posture. The original project has been left untouched — fix " +
+        "the underlying error and start again.",
+      options,
+    );
+    this.name = "ReservedProjectMigrationError";
+  }
+}
+
+/**
  * Raised when a write targets the reserved pseudo-project, which has no row on
  * disk and must not acquire one. A 400 rather than a 403: the id is simply not
  * a project anybody may create or remove.
@@ -885,27 +907,29 @@ export class Store {
     try {
       chats = await this.listChats(GLOBAL_PROJECT_ID);
     } catch (err) {
-      // eslint-disable-next-line no-console
-      console.error(
-        `[store] could not list chats under the reserved id "${GLOBAL_PROJECT_ID}", so the ` +
-          `migration to "${movedId}" was left unfinished; it retries on the next start.`,
-        err,
+      throw new ReservedProjectMigrationError(
+        `could not list the chats under "${GLOBAL_PROJECT_ID}"`,
+        { cause: err },
       );
-      return;
     }
     const failed: string[] = [];
     for (const chat of chats) {
       const moved = await this.patchChat(chat.id, { projectId: movedId }).catch(() => null);
       if (!moved) failed.push(chat.id);
     }
+    // THROW, rather than returning and letting boot continue. Keeping the old
+    // row only protects the NEXT start: in this process `getProject` already
+    // answers the reserved id with the synthesized record, so every chat still
+    // pointing at it is a real project's conversation running under the
+    // cross-project posture — the precise outcome this migration exists to
+    // prevent, live until someone restarts. Refusing to come up is the louder
+    // and safer failure, and it is reachable only by a disk error during a
+    // collision that should not exist in the first place.
     if (failed.length) {
-      // eslint-disable-next-line no-console
-      console.error(
-        `[store] ${failed.length} chat(s) could not be moved off the reserved id ` +
-          `"${GLOBAL_PROJECT_ID}" (${failed.join(", ")}); keeping the old project row so the ` +
-          "migration retries on the next start rather than leaving them as global chats.",
+      throw new ReservedProjectMigrationError(
+        `${failed.length} chat(s) could not be moved off "${GLOBAL_PROJECT_ID}" ` +
+          `(${failed.join(", ")})`,
       );
-      return;
     }
 
     // 3. Only now is the id free.

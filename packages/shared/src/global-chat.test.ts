@@ -94,6 +94,9 @@ describe("the global posture", () => {
       "mcp__dispatch-github__approve_pr",
       "mcp__dispatch-github__create_pr",
       "mcp__dispatch-config__config_write",
+      // Install-wide secrets: destroying or minting one reaches every project.
+      "mcp__dispatch-secrets__secret_delete",
+      "mcp__dispatch-secrets__secret_request",
     ]) {
       expect(isToolDenied(tool, GLOBAL_MODE.disallowedTools)).toBe(true);
     }
@@ -111,6 +114,8 @@ describe("the global posture", () => {
       "mcp__dispatch-github__watch_pr",
       "mcp__dispatch-memory__recall",
       "mcp__dispatch-memory__remember",
+      // Reading which secrets exist is observation, and the point of the chat.
+      "mcp__dispatch-secrets__secret_list",
     ]) {
       expect(isToolDenied(tool, GLOBAL_MODE.disallowedTools)).toBe(false);
     }

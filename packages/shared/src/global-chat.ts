@@ -166,6 +166,13 @@ export const GLOBAL_MODE_DISALLOWED_TOOLS: readonly string[] = [
   "mcp__dispatch-config__mode_delete",
   "mcp__dispatch-mcp__mcp_add",
   "mcp__dispatch-mcp__mcp_remove",
+  // install-wide secrets: `secret_delete` destroys a credential every project
+  // may depend on, and `secret_request` writes one. Both are config for the
+  // whole machine, which is further-reaching than the repo config above, not
+  // less. A confirmation card is not the answer — offering the operation at
+  // all is what this posture is declining to do.
+  "mcp__dispatch-secrets__secret_delete",
+  "mcp__dispatch-secrets__secret_request",
   // destructive
   "mcp__dispatch-memory__forget",
 ];
