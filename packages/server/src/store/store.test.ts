@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm, readdir } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -89,6 +89,47 @@ describe("Store projects/chats CRUD", () => {
     expect(await store.getProject(GLOBAL_PROJECT_ID)).toMatchObject({
       repoPath: store.globalProjectDir(),
     });
+  });
+
+  it("moves a legacy project off the reserved id at init, taking its chats", async () => {
+    // `__global__` passes the entity-id allowlist and `POST /api/projects`
+    // takes a caller-supplied id, so an install made before the reservation
+    // could hold this row. The upgrade must not quietly reinterpret that
+    // project — and its conversations — as the global chat.
+    const dir2 = await mkdtemp(join(tmpdir(), "cm-legacy-global-"));
+    try {
+      // Both written by hand, as an older version would have left them —
+      // the migration runs during `init`, so neither may be created through
+      // a Store that has already migrated.
+      await mkdir(join(dir2, "projects"), { recursive: true });
+      await writeJsonAtomic(join(dir2, "projects", `${GLOBAL_PROJECT_ID}.json`), {
+        ...project(GLOBAL_PROJECT_ID),
+        name: "Acme Billing",
+      });
+      await mkdir(join(dir2, "chats", "legacy-chat"), { recursive: true });
+      await writeJsonAtomic(
+        join(dir2, "chats", "legacy-chat", "chat.json"),
+        chat("legacy-chat", GLOBAL_PROJECT_ID),
+      );
+
+      const reopened = new Store(dir2);
+      await reopened.init();
+      try {
+        const real = realProjects(await reopened.listProjects());
+        expect(real).toHaveLength(1);
+        expect(real[0]!.id).toBe("acme-billing");
+        expect(real[0]!.name).toBe("Acme Billing");
+        // The reserved id is the synthesized record and nothing else.
+        expect((await reopened.getProject(GLOBAL_PROJECT_ID))!.name).toBe("Global");
+        // …and the chat went with its project rather than becoming global.
+        expect((await reopened.getChat("legacy-chat"))!.projectId).toBe("acme-billing");
+        expect(await reopened.listChats(GLOBAL_PROJECT_ID)).toHaveLength(0);
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      await rm(dir2, { recursive: true, force: true });
+    }
   });
 
   it("scopes listChats by projectId and deletes chat dir", async () => {

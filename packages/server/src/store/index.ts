@@ -765,6 +765,7 @@ export class Store {
       mkdir(this.chatsDir(), { recursive: true }),
       mkdir(this.globalProjectDir(), { recursive: true }),
     ]);
+    await this.freeReservedProjectId();
     this.db.open();
   }
 
@@ -826,6 +827,67 @@ export class Store {
    */
 
   /* ---------------------------------------------------------- projects */
+
+  /**
+   * Move a pre-existing project off the now-reserved id, with its chats.
+   *
+   * `__global__` passes the entity-id allowlist and `POST /api/projects`
+   * accepts a caller-supplied id, so an install made before this landed COULD
+   * hold `projects/__global__.json`. Left alone the upgrade is silent and
+   * nasty: `getProject` answers with the synthesized record instead of the
+   * user's project, `listProjects` returns the id twice, and every chat filed
+   * under it is reinterpreted as a global chat — i.e. a real repo's
+   * conversations quietly acquire the cross-project posture.
+   *
+   * So the row is RENAMED rather than refused. Refusing would mean a boot
+   * failure over a name, and deleting would lose a project; renaming keeps
+   * both the data and the reservation. Chats move with it, because a chat
+   * pointing at the vacated id is exactly the hijack this prevents.
+   *
+   * Runs once per boot, costs one `existsSync` on an install that never had
+   * the collision, which is all of them but is not something to assume.
+   */
+  private async freeReservedProjectId(): Promise<void> {
+    const legacy = this.entityFile(this.projectsDir(), GLOBAL_PROJECT_ID);
+    if (!existsSync(legacy)) return;
+    const project = await this.readEntity(legacy, ProjectSchema).catch(() => null);
+    // Unreadable: move it aside anyway. Leaving it would keep `listProjects`
+    // double-reporting the id, and it is recoverable by hand from the backup.
+    const movedId = await this.freeProjectId(project?.name ?? "global");
+    if (project) {
+      await this.writeEntity(
+        `project:${movedId}`,
+        this.entityFile(this.projectsDir(), movedId),
+        ProjectSchema,
+        { ...project, id: movedId },
+      );
+      for (const chat of await this.listChats(GLOBAL_PROJECT_ID).catch(() => [])) {
+        await this.patchChat(chat.id, { projectId: movedId }).catch(() => null);
+      }
+    } else {
+      await copyFile(legacy, this.entityFile(this.projectsDir(), `${movedId}-unreadable`)).catch(
+        () => undefined,
+      );
+    }
+    await rm(legacy, { force: true });
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[store] "${GLOBAL_PROJECT_ID}" is reserved for the global chat; moved the existing ` +
+        `project (and its chats) to "${movedId}".`,
+    );
+  }
+
+  /** A project id derived from `name` that nothing on disk is using yet. */
+  private async freeProjectId(name: string): Promise<string> {
+    const base = (name.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") ||
+      "project").slice(0, 48);
+    for (let n = 0; ; n++) {
+      const id = n === 0 ? base : `${base}-${n}`;
+      if (id !== GLOBAL_PROJECT_ID && !existsSync(this.entityFile(this.projectsDir(), id))) {
+        return id;
+      }
+    }
+  }
 
   /**
    * The global chat's working directory — a real directory that is NOT a git

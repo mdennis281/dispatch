@@ -3554,9 +3554,17 @@ describe("SessionBroker — effort on the transcript", () => {
 
 describe("SessionBroker — the wrong-worktree guard", () => {
   /**
-   * The cwd guard is the SECOND unmatched PreToolUse entry the broker registers
-   * (the effort observer is the first). Both are unmatched because both have to
-   * see every call, not just the ones they act on.
+   * The cwd guard is the SECOND unmatched PreToolUse entry the broker
+   * registers (the effort observer is the first). Both are unmatched because
+   * both have to see every call, not just the ones they act on.
+   *
+   * Taken by that INDEX rather than as the last unmatched entry, which is
+   * what this did and is not the same thing. It was only ever equivalent
+   * because the entries that follow — the background-shell and worktree
+   * guards — are conditional on services this suite does not wire. The first
+   * unconditional hook appended after the cwd guard silently stole the
+   * selection and the expected denial vanished, with the test still passing
+   * its earlier assertions.
    */
   function cwdHook(ctl: FakeCtl) {
     const pre = (
@@ -3570,7 +3578,17 @@ describe("SessionBroker — the wrong-worktree guard", () => {
         | undefined
     )?.PreToolUse;
     const unmatched = pre!.filter((e) => e.matcher === undefined);
-    return unmatched[unmatched.length - 1]!.hooks[0]!;
+    return unmatched[1]!.hooks[0]!;
+  }
+
+  /** Every unmatched PreToolUse hook, for the assertions about what is installed. */
+  function unmatchedHooks(ctl: FakeCtl) {
+    const pre = (
+      ctl.options?.hooks as
+        | { PreToolUse?: { matcher?: string; hooks: unknown[] }[] }
+        | undefined
+    )?.PreToolUse;
+    return (pre ?? []).filter((e) => e.matcher === undefined);
   }
 
   /** Two sibling worktrees on disk, as in the 2026-08-07 incident. */
@@ -3602,6 +3620,62 @@ describe("SessionBroker — the wrong-worktree guard", () => {
     },
     resultMsg(),
   ];
+
+  it("installs the mode tool policy on the DIRECT Claude path", async () => {
+    // `startQuery` hands these options straight to the SDK — it never builds
+    // `HarnessSessionSpec.toolGuard`, so this hook is the only unconditional
+    // veto a stock Claude chat has for a denied tool. An unmatched entry that
+    // denies a tool the mode forbids has to be here, or the posture is only
+    // the SDK's advisory `disallowedTools`.
+    const { fn, controllers } = makeFakeQuery(spawnScript);
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+    const idleP = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "go");
+    await idleP;
+
+    const hooks = unmatchedHooks(controllers[0]!).flatMap((e) => e.hooks);
+    const verdicts = await Promise.all(
+      hooks.map(async (h) =>
+        ((await (h as (i: unknown) => Promise<Record<string, unknown>>)({
+          hook_event_name: "PreToolUse",
+          tool_name: "mcp__dispatch-workspace__worktree",
+          tool_input: { action: "create" },
+        })) ?? {}) as { hookSpecificOutput?: { permissionDecision?: string } },
+      ),
+    );
+    // This chat is in a normal mode with no denylist, so nothing refuses yet…
+    expect(verdicts.some((v) => v.hookSpecificOutput?.permissionDecision === "deny")).toBe(
+      false,
+    );
+
+    // …but give the live session a policy and the very next call is refused,
+    // which is also what makes a live `setMode` land without a restart.
+    const session = broker.getSession("c1") as unknown as {
+      deniedTools?: string[];
+      modeName?: string;
+    };
+    (broker as unknown as { sessions: Map<string, typeof session> }).sessions.get(
+      "c1",
+    )!.deniedTools = ["mcp__dispatch-workspace__worktree"];
+    const after = await Promise.all(
+      hooks.map(async (h) =>
+        ((await (h as (i: unknown) => Promise<Record<string, unknown>>)({
+          hook_event_name: "PreToolUse",
+          tool_name: "mcp__dispatch-workspace__worktree",
+          tool_input: { action: "create" },
+        })) ?? {}) as {
+          hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string };
+        },
+      ),
+    );
+    const denied = after.find((v) => v.hookSpecificOutput?.permissionDecision === "deny");
+    expect(denied).toBeDefined();
+    expect(denied!.hookSpecificOutput!.permissionDecisionReason).toContain(
+      "mcp__dispatch-workspace__worktree",
+    );
+  });
 
   it("denies a subagent's write into a sibling worktree, and names both", async () => {
     const { home, other } = await twoWorktrees();
