@@ -223,6 +223,59 @@ describe("Store projects/chats CRUD", () => {
     }
   });
 
+  it("rescues orphaned chats left by a DELETED legacy project", async () => {
+    // Deleting a project removes its row and leaves its chats, so an install
+    // that created `__global__`, chatted in it and deleted it has chats under
+    // the reserved id and no file to notice them by. Keying the migration off
+    // the row alone would file them as global chats on upgrade.
+    const dir2 = await mkdtemp(join(tmpdir(), "cm-legacy-orphan-"));
+    try {
+      await mkdir(join(dir2, "chats", "orphan"), { recursive: true });
+      await writeJsonAtomic(
+        join(dir2, "chats", "orphan", "chat.json"),
+        chat("orphan", GLOBAL_PROJECT_ID),
+      );
+
+      const store2 = new Store(dir2);
+      await store2.init();
+      try {
+        const real = realProjects(await store2.listProjects());
+        expect(real).toHaveLength(1);
+        expect(real[0]!.name).toBe("Recovered project");
+        expect((await store2.getChat("orphan"))!.projectId).toBe(real[0]!.id);
+        expect(await store2.listChats(GLOBAL_PROJECT_ID)).toHaveLength(0);
+      } finally {
+        store2.close();
+      }
+    } finally {
+      await rm(dir2, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves genuine global chats alone once the id is reserved", async () => {
+    // The counterpart: after the reservation is established, a chat under the
+    // reserved id IS a global chat and must not be migrated anywhere. The
+    // marker is what distinguishes the two, since they look identical.
+    const dir2 = await mkdtemp(join(tmpdir(), "cm-global-chats-"));
+    try {
+      const first = new Store(dir2);
+      await first.init(); // establishes the reservation on an empty store
+      await first.saveChat(chat("global-1", GLOBAL_PROJECT_ID));
+      first.close();
+
+      const reopened = new Store(dir2);
+      await reopened.init();
+      try {
+        expect((await reopened.getChat("global-1"))!.projectId).toBe(GLOBAL_PROJECT_ID);
+        expect(realProjects(await reopened.listProjects())).toHaveLength(0);
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      await rm(dir2, { recursive: true, force: true });
+    }
+  });
+
   it("scopes listChats by projectId and deletes chat dir", async () => {
     await store.saveChat(chat("c1", "p1"));
     await store.saveChat(chat("c2", "p2"));

@@ -866,12 +866,30 @@ export class Store {
    * both the data and the reservation. Chats move with it, because a chat
    * pointing at the vacated id is exactly the hijack this prevents.
    *
-   * Runs once per boot, costs one `existsSync` on an install that never had
-   * the collision, which is all of them but is not something to assume.
+   * The ROW IS NOT THE ONLY EVIDENCE. Deleting a project removes its row and
+   * leaves its chats (`routes/projects.ts`), so an install that once created
+   * `__global__`, chatted in it, and deleted it has orphaned chats under the
+   * reserved id and no file to notice them by. Those are migrated too, onto a
+   * placeholder.
+   *
+   * Which needs a way to tell a legacy orphan from a LEGITIMATE global chat,
+   * because after this ships they look identical. Hence the marker: it is
+   * written once the reservation has been established cleanly, and its
+   * absence is what says "any chat under this id predates the reservation".
+   * Written only after a successful pass, so a failed migration retries.
+   *
+   * Costs one `existsSync` per boot once established.
    */
   private async freeReservedProjectId(): Promise<void> {
+    // Already reserved: chats under the id are global chats, and must be left
+    // exactly where they are.
+    if (existsSync(this.globalReservationMarker())) return;
+
     const legacy = this.entityFile(this.projectsDir(), GLOBAL_PROJECT_ID);
-    if (!existsSync(legacy)) return;
+    if (!existsSync(legacy) && !(await this.listChats(GLOBAL_PROJECT_ID).catch(() => [])).length) {
+      await this.markGlobalIdReserved();
+      return;
+    }
     const stored = await this.readEntity(legacy, ProjectSchema).catch(() => null);
     // An unreadable row is still migrated rather than skipped. The project is
     // already broken, but its CHATS are the thing at risk: left pointing at
@@ -934,10 +952,31 @@ export class Store {
 
     // 3. Only now is the id free.
     await rm(legacy, { force: true });
+    await this.markGlobalIdReserved();
     // eslint-disable-next-line no-console
     console.warn(
       `[store] "${GLOBAL_PROJECT_ID}" is reserved for the global chat; moved the existing ` +
         `project${chats.length ? ` and its ${chats.length} chat(s)` : ""} to "${movedId}".`,
+    );
+  }
+
+  /**
+   * The flag that says the reserved id belongs to the global chat on this
+   * install, so chats filed under it are global chats rather than a deleted
+   * project's orphans. Written only after a clean pass; see
+   * `freeReservedProjectId`.
+   */
+  private globalReservationMarker(): string {
+    return join(this.globalProjectDir(), ".reserved");
+  }
+
+  private async markGlobalIdReserved(): Promise<void> {
+    await mkdir(this.globalProjectDir(), { recursive: true });
+    await fsWriteFile(
+      this.globalReservationMarker(),
+      "The global chat owns the reserved project id. Do not delete: without this, " +
+        "chats under that id are taken for a deleted project's orphans and migrated away.\n",
+      "utf8",
     );
   }
 
