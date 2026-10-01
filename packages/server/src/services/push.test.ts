@@ -341,10 +341,30 @@ describe("PushService", () => {
     expect(sent).toHaveLength(2);
     expect(JSON.parse(sent[1]!.payload)).toMatchObject({ outstanding: 0 });
 
-    // …and resolving the hidden one after that withdraws nothing a second time.
+    // …and resolving the hidden one after that sends nothing more: `withdraw`
+    // already cleared `shown`, so the second pass has no device to wake.
     bus.publish({ type: "attention-resolve", id: "d1", chatId: "c1" });
     await new Promise((r) => setTimeout(r, 10));
     expect(sent).toHaveLength(2);
+    svc.stop();
+  });
+
+  it("still withdraws an item whose push went out before its kind was muted", async () => {
+    // The filter can change between the push and the resolve, which is exactly
+    // the case a "was this item visible?" check in `untrack` would skip — and
+    // the toast is already on the phone.
+    const { svc, sent } = make();
+    svc.start();
+    await svc.subscribe(sub(1));
+    bus.publish({ type: "attention-add", item: attn("done", { id: "d1" }) });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(sent).toHaveLength(1);
+
+    svc.setQueueFilter({ kinds: { done: false }, reviewKinds: {} });
+    bus.publish({ type: "attention-resolve", id: "d1", chatId: "c1" });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(sent).toHaveLength(2);
+    expect(JSON.parse(sent[1]!.payload)).toMatchObject({ id: "withdraw-c1", outstanding: 0 });
     svc.stop();
   });
 

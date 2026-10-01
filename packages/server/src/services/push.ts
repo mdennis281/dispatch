@@ -419,7 +419,7 @@ export class PushService {
    *
    * That is also what keeps a burst quiet without a debounce timer: deleting a
    * chat resolves all six of its items at once, but only the sixth empties the
-   * set, so exactly one withdrawal goes out.
+   * set — and `withdraw` is idempotent anyway, so any extra call is a no-op.
    */
   private untrack(id: string, chatId?: string): string | undefined {
     // `chatId` is optional on the event, so fall back to finding the owner.
@@ -435,10 +435,14 @@ export class PushService {
     if (items.size === 0) this.outstanding.delete(owner);
     // The device is holding a notification for the VISIBLE queue, so that is
     // what has to empty — a muted `done` left in the map must not keep a sticky
-    // permission toast on a phone forever. And only a visible item LEAVING can
-    // empty it: resolving a hidden one changes nothing the device ever saw,
-    // which is what keeps the burst case to exactly one withdrawal.
-    if (!showsInQueue(this.queueFilter, removed)) return undefined;
+    // permission toast on a phone forever.
+    //
+    // Deliberately NOT gated on the resolved item having been visible itself:
+    // the filter can have changed since its push went out, and the item that
+    // put a notification on a phone is then exactly the one a kind-check here
+    // would skip. Firing more than once is free — `withdraw` clears `shown`
+    // for the chat, so every later call finds no device holding it and sends
+    // nothing.
     return this.visibleCount(items) === 0 ? owner : undefined;
   }
 
