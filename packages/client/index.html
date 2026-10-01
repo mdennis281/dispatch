@@ -184,9 +184,25 @@
             return function () {};
           },
           releaseSplash: function () {},
-          /** Called with (name, value) on every colour change, and never replayed. */
+          /*
+           * Called with (name, value) on every colour change, never replayed.
+           * RETURNS AN UNSUBSCRIBE, and callers must use it.
+           *
+           * This used to be subscribe-only, which was fine while the only
+           * subscriber was the splash's canvas renderer — one per document, for
+           * the life of the document. `BootMark` makes it one per MOUNT: a
+           * retried update keys a fresh `Attempt`, and `ConnectingScreen` swaps
+           * its mark in and out every time the diagnosis flips across its 4s
+           * polls — exactly the long flaky outage that screen is for. Without
+           * this, each of those left a dead closure in `listeners` for good, and
+           * every tick walked all of them.
+           */
           onColour: function (fn) {
             listeners.push(fn);
+            return function () {
+              var i = listeners.indexOf(fn);
+              if (i >= 0) listeners.splice(i, 1);
+            };
           },
         };
         window.__dispatchBootMark = api;
@@ -1865,16 +1881,17 @@
             worker.terminate();
             worker = null;
             removeEventListener("resize", onResize);
+            // Both of these are per-MOUNT now, not per-document — a `BootMark`
+            // that comes and goes a dozen times across a long outage would
+            // otherwise leave a dozen dead closures the rotation walks forever.
+            offColour();
           }
 
           var seed = {};
           SEEDED.forEach(function (n) {
             seed[n] = rootCss.getPropertyValue(n).trim();
           });
-          // `onColour` has no unsubscribe, so the guard is the listener's own
-          // job: a stopped mount's forwarder outlives it and must not post to a
-          // terminated worker for the rest of the document's life.
-          api.onColour(function (name, value) {
+          var offColour = api.onColour(function (name, value) {
             if (worker) worker.postMessage({ type: "colour", name: name, value: value });
           });
 

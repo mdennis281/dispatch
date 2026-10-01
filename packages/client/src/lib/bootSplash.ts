@@ -78,8 +78,13 @@ declare global {
       hold: () => () => void;
       /** Give back the hold the splash itself took when the document was parsed. */
       releaseSplash: () => void;
-      /** Subscribe to colour changes. Set by the rotation; used by the canvas renderer. */
-      onColour: (fn: (name: string, value: string) => void) => void;
+      /**
+       * Subscribe to colour changes; returns an unsubscribe. Set by the
+       * rotation and used by the canvas renderer, which is one subscription per
+       * MOUNT now that `BootMark` runs it too — so the unsubscribe is not
+       * optional tidiness.
+       */
+      onColour: (fn: (name: string, value: string) => void) => () => void;
       /**
        * Tell the canvas renderer to play the mold.
        *
