@@ -65,7 +65,7 @@ import {
   readFile as fsReadFile,
   writeFile as fsWriteFile,
 } from "node:fs/promises";
-import { existsSync, createReadStream, type Dirent } from "node:fs";
+import { existsSync, readFileSync, createReadStream, type Dirent } from "node:fs";
 import type { Readable } from "node:stream";
 import * as z from "zod";
 import {
@@ -850,42 +850,102 @@ export class Store {
   private async freeReservedProjectId(): Promise<void> {
     const legacy = this.entityFile(this.projectsDir(), GLOBAL_PROJECT_ID);
     if (!existsSync(legacy)) return;
-    const project = await this.readEntity(legacy, ProjectSchema).catch(() => null);
-    // Unreadable: move it aside anyway. Leaving it would keep `listProjects`
-    // double-reporting the id, and it is recoverable by hand from the backup.
-    const movedId = await this.freeProjectId(project?.name ?? "global");
-    if (project) {
-      await this.writeEntity(
-        `project:${movedId}`,
-        this.entityFile(this.projectsDir(), movedId),
-        ProjectSchema,
-        { ...project, id: movedId },
+    const stored = await this.readEntity(legacy, ProjectSchema).catch(() => null);
+    // An unreadable row is still migrated rather than skipped. The project is
+    // already broken, but its CHATS are the thing at risk: left pointing at
+    // the reserved id they become global chats, which is the whole hazard.
+    // They get attached to a placeholder the operator has to fix, which is a
+    // visible problem rather than a silent posture change.
+    const project: Project = stored ?? {
+      id: GLOBAL_PROJECT_ID,
+      name: "Recovered project",
+      repoPath: join(this.dataDir, "recovered-project"),
+      worktreeRoot: join(this.dataDir, "recovered-project"),
+      subApps: [],
+      createdAt: Date.now(),
+    };
+    const movedId = this.reservedMigrationTarget(project);
+
+    // 1. The project under its new id. Written BEFORE the chats move so they
+    //    never point at an id with no record behind it, and idempotent: a
+    //    previous attempt that got this far resolves to the same target.
+    await this.writeEntity(
+      `project:${movedId}`,
+      this.entityFile(this.projectsDir(), movedId),
+      ProjectSchema,
+      { ...project, id: movedId },
+    );
+
+    // 2. The chats. EVERY one has to land before the source row goes — a
+    //    failure here used to be swallowed and the row removed anyway, which
+    //    left exactly the chat-reinterpreted-as-global outcome this exists to
+    //    prevent. Leaving the row costs a duplicate id in `listProjects` until
+    //    the next boot retries, which is visible and recoverable.
+    let chats: Chat[];
+    try {
+      chats = await this.listChats(GLOBAL_PROJECT_ID);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(
+        `[store] could not list chats under the reserved id "${GLOBAL_PROJECT_ID}", so the ` +
+          `migration to "${movedId}" was left unfinished; it retries on the next start.`,
+        err,
       );
-      for (const chat of await this.listChats(GLOBAL_PROJECT_ID).catch(() => [])) {
-        await this.patchChat(chat.id, { projectId: movedId }).catch(() => null);
-      }
-    } else {
-      await copyFile(legacy, this.entityFile(this.projectsDir(), `${movedId}-unreadable`)).catch(
-        () => undefined,
-      );
+      return;
     }
+    const failed: string[] = [];
+    for (const chat of chats) {
+      const moved = await this.patchChat(chat.id, { projectId: movedId }).catch(() => null);
+      if (!moved) failed.push(chat.id);
+    }
+    if (failed.length) {
+      // eslint-disable-next-line no-console
+      console.error(
+        `[store] ${failed.length} chat(s) could not be moved off the reserved id ` +
+          `"${GLOBAL_PROJECT_ID}" (${failed.join(", ")}); keeping the old project row so the ` +
+          "migration retries on the next start rather than leaving them as global chats.",
+      );
+      return;
+    }
+
+    // 3. Only now is the id free.
     await rm(legacy, { force: true });
     // eslint-disable-next-line no-console
     console.warn(
       `[store] "${GLOBAL_PROJECT_ID}" is reserved for the global chat; moved the existing ` +
-        `project (and its chats) to "${movedId}".`,
+        `project${chats.length ? ` and its ${chats.length} chat(s)` : ""} to "${movedId}".`,
     );
   }
 
-  /** A project id derived from `name` that nothing on disk is using yet. */
-  private async freeProjectId(name: string): Promise<string> {
-    const base = (name.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") ||
-      "project").slice(0, 48);
+  /**
+   * Where the legacy project is being moved to — the SAME answer every time
+   * for the same project, which is what makes an interrupted migration safe
+   * to retry.
+   *
+   * A slug of its name, and if something already sits there, that record is
+   * reused when it is this very project (same `repoPath`) — i.e. a previous
+   * attempt that wrote step 1 and died before step 3. Only a genuinely
+   * different project forces a suffix; otherwise every retry would mint
+   * `-1`, `-2`, … and litter the store with copies.
+   */
+  private reservedMigrationTarget(project: Project): string {
+    const base =
+      (project.name.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") ||
+        "project").slice(0, 48);
     for (let n = 0; ; n++) {
       const id = n === 0 ? base : `${base}-${n}`;
-      if (id !== GLOBAL_PROJECT_ID && !existsSync(this.entityFile(this.projectsDir(), id))) {
-        return id;
+      if (id === GLOBAL_PROJECT_ID) continue;
+      const path = this.entityFile(this.projectsDir(), id);
+      if (!existsSync(path)) return id;
+      // Read raw: a half-written or older record must not throw the
+      // migration off, it just means "not the same project, try the next id".
+      let existing: { repoPath?: unknown } | null = null;
+      try {
+        existing = JSON.parse(readFileSync(path, "utf8")) as { repoPath?: unknown };
+      } catch {
+        /* unreadable — treat as somebody else's */
       }
+      if (existing?.repoPath === project.repoPath) return id;
     }
   }
 

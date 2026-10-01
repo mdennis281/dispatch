@@ -132,6 +132,58 @@ describe("Store projects/chats CRUD", () => {
     }
   });
 
+  it("keeps the legacy row when a chat cannot be moved, and retries cleanly", async () => {
+    // Swallowing a remap failure and removing the source anyway would leave
+    // the chat pointing at the reserved id — i.e. silently global on the next
+    // boot, which is the exact outcome the migration exists to prevent. The
+    // retry must also land on the SAME target rather than minting a copy.
+    const dir2 = await mkdtemp(join(tmpdir(), "cm-legacy-retry-"));
+    try {
+      await mkdir(join(dir2, "projects"), { recursive: true });
+      await writeJsonAtomic(join(dir2, "projects", `${GLOBAL_PROJECT_ID}.json`), {
+        ...project(GLOBAL_PROJECT_ID),
+        name: "Acme Billing",
+      });
+      await mkdir(join(dir2, "chats", "legacy-chat"), { recursive: true });
+      await writeJsonAtomic(
+        join(dir2, "chats", "legacy-chat", "chat.json"),
+        chat("legacy-chat", GLOBAL_PROJECT_ID),
+      );
+
+      const failing = new Store(dir2);
+      // Make the one chat unmovable for this attempt only.
+      const realPatch = failing.patchChat.bind(failing);
+      failing.patchChat = async () => {
+        throw new Error("disk full");
+      };
+      await failing.init();
+      failing.patchChat = realPatch;
+      try {
+        // The target record exists (step 1 ran)…
+        expect((await failing.getProject("acme-billing"))?.name).toBe("Acme Billing");
+        // …but the legacy row is STILL THERE, so nothing has been orphaned.
+        expect(existsSync(join(dir2, "projects", `${GLOBAL_PROJECT_ID}.json`))).toBe(true);
+      } finally {
+        failing.close();
+      }
+
+      const retried = new Store(dir2);
+      await retried.init();
+      try {
+        // The retry reuses `acme-billing` rather than minting `acme-billing-1`.
+        expect(realProjects(await retried.listProjects()).map((p) => p.id)).toEqual([
+          "acme-billing",
+        ]);
+        expect((await retried.getChat("legacy-chat"))!.projectId).toBe("acme-billing");
+        expect(existsSync(join(dir2, "projects", `${GLOBAL_PROJECT_ID}.json`))).toBe(false);
+      } finally {
+        retried.close();
+      }
+    } finally {
+      await rm(dir2, { recursive: true, force: true });
+    }
+  });
+
   it("scopes listChats by projectId and deletes chat dir", async () => {
     await store.saveChat(chat("c1", "p1"));
     await store.saveChat(chat("c2", "p2"));
