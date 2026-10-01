@@ -38,6 +38,8 @@ function chat(id: string, projectId: string, over: Partial<Chat> = {}): Chat {
     id,
     projectId,
     title: `chat ${id}`,
+    worktrees: [],
+    prs: [],
     createdAt: NOW - 2 * DAY,
     ...over,
   };
@@ -57,7 +59,7 @@ function event(over: Partial<MetricInput> & { ts: number }): MetricInput {
 }
 
 function item(id: string, chatId: string): AttentionItem {
-  return { id, chatId, kind: "question", title: id, createdAt: NOW };
+  return { id, chatId, kind: "question", summary: id, createdAt: NOW };
 }
 
 beforeEach(async () => {

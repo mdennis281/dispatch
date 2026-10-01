@@ -2,6 +2,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import {
   ChevronRight,
   ChevronsUpDown,
+  LayoutGrid,
   Plus,
   Play,
   Square,
@@ -70,7 +71,7 @@ import {
 } from "../../stores/chatProcesses.js";
 import { useView, openOverlay } from "../../stores/view.js";
 import { useLayout, dismissLeftDrawer } from "../../stores/layout.js";
-import { selectChat, selectProject } from "../../stores/navigation.js";
+import { goHome, selectChat, selectProject } from "../../stores/navigation.js";
 import { useProjectMemories } from "../../stores/memory.js";
 import { useGit, useGitChangeCount } from "../../stores/git.js";
 import { useRunners } from "../../stores/runners.js";
@@ -218,6 +219,27 @@ function ProjectSelector({
     >
       {(close) => (
         <div className="flex flex-col">
+          {/* The overview leads the menu, above the projects rather than below
+              them with the actions.
+              It is the SECOND of its two entry points — the brand mark in the
+              top bar is the first — and it is here because this control is
+              already "which project am I in", so "all of them" is the same
+              question one level up. Putting it under a divider with "New
+              project…" would have filed a destination among the verbs.
+
+              It does not close the drawer on a phone, for the same reason
+              picking a project doesn't: the overview replaces the main area, and
+              the drawer is over the main area. */}
+          <MenuItem
+            icon={<LayoutGrid />}
+            onClick={() => {
+              goHome();
+              close();
+            }}
+          >
+            Overview &mdash; all projects
+          </MenuItem>
+          <div className="my-1 h-px bg-line" />
           {projects.length === 0 && (
             <p className="px-2 py-1.5 text-xs text-faint">No projects yet.</p>
           )}

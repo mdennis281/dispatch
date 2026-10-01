@@ -129,8 +129,28 @@ const ALLOWED_DIR = join(SRC, "components", "ui");
  * up the same settings page; a difference in height or padding between the two
  * would show. The rest of the feature pays its own way — both Saves and the
  * Revert are `Button`, and the house-rules editor it sits under adds none.
+ *
+ * 88 → 90: the homepage. Two bare elements, and the feature pays for everything
+ * else it added (`IconButton` for reload, `Tabs` for the window picker,
+ * `MenuItem` for the sidebar's Overview row).
+ *
+ * The first is `home/HomeView`'s `ProjectCard` — the same argument as
+ * `ReviewRow` and `SpawnRow` above: a whole TILE that happens to be clickable,
+ * with a name, a path, two status markers, a sparkline and four figures stacked
+ * inside it, where `Button` is `h-6 justify-center whitespace-nowrap` with its
+ * own padding. The alternative is a card with a small "open" control in it,
+ * which is a worse target than the card.
+ *
+ * The second is `layout/BrandLockup`'s `HomeToggle`. It IS an icon-only control
+ * with a tooltip, which is `IconButton`'s whole job — except the icon is the
+ * 48px brand mark in the installed title bar and 32px elsewhere, and
+ * `IconButton` is a `size-6`/`size-8` box that also forces `[&_svg]:size-3.5`
+ * onto its child. `cn` is plain `clsx` with no tailwind-merge, so overriding
+ * either from `className` leaves both declarations in the class list and lets
+ * stylesheet order decide which mark size you get. A bare button with the
+ * tooltip wrapped around it says what it is instead of fighting a box.
  */
-const BASELINE = 88;
+const BASELINE = 90;
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {

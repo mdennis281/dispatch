@@ -59,6 +59,22 @@ describe("currentSlot", () => {
     expect(currentSlot(at({ view: "new-project" }))).toBeNull();
   });
 
+  it("lights nothing on the homepage either — More does not open it", () => {
+    // The specific lie this guards: every other non-chat view IS something the
+    // More sheet opens, so the fall-through below returns "more". The homepage
+    // is reached from the brand lockup and the project selector, so a lit More
+    // would point at a sheet that cannot take you there.
+    expect(currentSlot(at({ view: "home" }))).toBeNull();
+    expect(currentSlot(at({ view: "home", pane: "ship" }))).toBeNull();
+  });
+
+  it("still lets the transient chrome win over the homepage", () => {
+    // Same precedence as everywhere else: what is in FRONT of you is what the
+    // bar names, and both of these can be up over a full-bleed view.
+    expect(currentSlot(at({ view: "home", moreOpen: true }))).toBe("more");
+    expect(currentSlot(at({ view: "home", leftOpen: true }))).toBe("chats");
+  });
+
   it("resolves view-vs-pane rather than letting both answer", () => {
     // Representable and meaningless — only the view is on screen.
     expect(currentSlot(at({ view: "git", pane: "run" }))).toBe("more");
@@ -76,6 +92,9 @@ describe("chatsAction", () => {
 
   it("returns to the transcript first from anywhere else", () => {
     expect(chatsAction(at({ view: "memory" }))).toBe("go-chat");
+    // Including the homepage, which has no sidebar of its own to pick from —
+    // see `leaveHome` for what the bar does with this answer there.
+    expect(chatsAction(at({ view: "home" }))).toBe("go-chat");
     expect(chatsAction(at({ pane: "run" }))).toBe("go-chat");
     expect(chatsAction(at({ moreOpen: true }))).toBe("go-chat");
   });

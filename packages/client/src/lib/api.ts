@@ -73,6 +73,8 @@ import type {
   MetricSpanSummary,
   MetricSpanTotalsResponse,
   MetricTotalsResponse,
+  HomeOverview,
+  HomeWindow,
   UpdateStatus,
   RestartResumeStatus,
   UpdateChannel,
@@ -1458,6 +1460,14 @@ export const api = {
   },
 
   /* subscription usage (5h + weekly) for the header meter */
+  /**
+   * The homepage. ONE call for the whole page — see `server/services/home.ts`
+   * for why, and for what is deliberately not in it.
+   */
+  home: {
+    overview: (window: HomeWindow) => get<HomeOverview>(`/api/home?window=${window}`),
+  },
+
   usage: {
     /** One ACCOUNT's windows; a bare provider means that provider's default account. */
     get: (target: UsageTarget = { harness: DEFAULT_HARNESS }) =>

@@ -689,7 +689,7 @@ export function countProjectAgents(byId: Record<string, Chat>): Record<string, P
     const chat = byId[id]!;
     const status = chat.status;
     if (chat.archived || !status) continue;
-    if (status !== "awaiting-input" && !WORKING_STATUS.has(status)) continue;
+    if (status !== "awaiting-input" && !isChatWorking(status)) continue;
     const counts = (out[chat.projectId] ??= { working: 0, attention: 0 });
     if (status === "awaiting-input") counts.attention++;
     else counts.working++;

@@ -3,7 +3,16 @@ import type { Chat, Project } from "@dispatch/shared";
 import { useChats } from "./chats.js";
 import { useProjects } from "./projects.js";
 import { useView } from "./view.js";
-import { selectProject, selectChat, reconcileActiveChat, visibleChat } from "./navigation.js";
+import {
+  selectProject,
+  selectChat,
+  reconcileActiveChat,
+  visibleChat,
+  goHome,
+  leaveHome,
+  toggleHome,
+  lastPlace,
+} from "./navigation.js";
 
 /* --------------------------------------------------------------- fixtures */
 
@@ -296,5 +305,66 @@ describe("reconcileActiveChat", () => {
         expect(useChats.getState().byId[id]?.projectId).toBe(activeProject());
       }
     }
+  });
+});
+
+/* ------------------------------------------------------------------- home */
+
+describe("the homepage toggle", () => {
+  it("snapshots where you were and returns you to exactly that", () => {
+    seed({ chats: [chat("c1", "p1"), chat("c2", "p2")], activeChatId: "c1" });
+
+    goHome();
+    expect(useView.getState().view).toBe("home");
+    expect(lastPlace()).toEqual({ projectId: "p1", chatId: "c1" });
+
+    leaveHome();
+    expect(useView.getState().view).toBe("chat");
+    expect(useProjects.getState().activeProjectId).toBe("p1");
+    expect(useChats.getState().activeChatId).toBe("c1");
+  });
+
+  it("returns to where you LEFT, not to a card you clicked while home", () => {
+    // The reason the place is snapshotted rather than read live: picking p2's
+    // chat from the grid moves the selection, and the toggle still means "back".
+    seed({ chats: [chat("c1", "p1"), chat("c2", "p2")], activeChatId: "c1" });
+    goHome();
+    selectChat("c2");
+    expect(useProjects.getState().activeProjectId).toBe("p2");
+
+    useView.setState({ view: "home" });
+    leaveHome();
+    expect(useProjects.getState().activeProjectId).toBe("p1");
+    expect(useChats.getState().activeChatId).toBe("c1");
+  });
+
+  it("falls back to the project when the remembered chat is gone", () => {
+    seed({ chats: [chat("c1", "p2")], activeProjectId: "p2", activeChatId: "c1" });
+    goHome();
+    // The chat is deleted while the overview is up.
+    useChats.setState({ byId: {}, order: [], lastActivity: {}, activeChatId: null });
+
+    leaveHome();
+    expect(useView.getState().view).toBe("chat");
+    expect(useProjects.getState().activeProjectId).toBe("p2");
+  });
+
+  it("still leaves when there is nothing at all to return to", () => {
+    // The one thing it must never do is strand you on a view with no sidebar.
+    seed({ chats: [], activeProjectId: null, activeChatId: null });
+    goHome();
+    leaveHome();
+    expect(useView.getState().view).toBe("chat");
+  });
+
+  it("toggles both ways and does not overwrite the place on a second press", () => {
+    seed({ chats: [chat("c1", "p1")], activeChatId: "c1" });
+    toggleHome();
+    expect(useView.getState().view).toBe("home");
+    // Already home — pressing again must not record `home` as the place to
+    // return to, which would make the toggle a no-op forever after.
+    toggleHome();
+    expect(useView.getState().view).toBe("chat");
+    expect(lastPlace()).toEqual({ projectId: "p1", chatId: "c1" });
   });
 });

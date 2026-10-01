@@ -50,9 +50,13 @@ export interface NavPlace {
 export function currentSlot({ view, pane, leftOpen, moreOpen }: NavPlace): NavSlot | null {
   if (moreOpen) return "more";
   if (leftOpen) return "chats";
-  // Project setup is full-bleed and isn't reachable FROM the bar — it's the one
-  // place where "nothing here is where you are" is the honest answer.
-  if (view === "new-project") return null;
+  // The two full-bleed views, neither of which the bar can reach: project setup
+  // and the homepage. These are where "nothing here is where you are" is the
+  // honest answer. Lighting More for the homepage would be the specific lie
+  // this module exists to prevent — More does not open it, the brand lockup and
+  // the project selector do, and a sheet highlighted for a screen it cannot
+  // take you to is a bar that can't be glanced at.
+  if (view === "new-project" || view === "home") return null;
   // Everything else that isn't the transcript is something the More sheet opens,
   // and More is the only slot that stands for any of it.
   if (view !== "chat") return "more";

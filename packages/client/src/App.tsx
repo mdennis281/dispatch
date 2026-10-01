@@ -18,6 +18,7 @@ import { MemoryView } from "./components/memory/MemoryView.js";
 import { GitView } from "./components/git/GitView.js";
 import { FilesView } from "./components/files/FilesView.js";
 import { MetricsView } from "./components/metrics/MetricsView.js";
+import { HomeView } from "./components/home/HomeView.js";
 import { FilePickerHost } from "./components/files/FilePickerModal.js";
 import { AppSettingsView } from "./components/settings/AppSettingsView.js";
 import { ManageConfigDialog } from "./components/sidebar/ManageConfigDialog.js";
@@ -68,11 +69,12 @@ export default function App() {
   // empty state.
   const chat = useChats((s) => visibleChat(s, activeProjectId));
   const view = useView((s) => s.view);
-  // Project setup is the one surface that isn't ABOUT the active project — it's
-  // how a project comes to exist — so it takes the whole window under the top
-  // bar. A sidebar listing some other project's chats beside it is noise at
-  // best, and at worst reads as "you're editing that one".
-  const fullBleed = view === "new-project";
+  // Two surfaces aren't ABOUT the active project, so both take the whole window
+  // under the top bar. Project setup is how a project comes to EXIST; the
+  // homepage is how you choose BETWEEN them, and it carries its own grid — a
+  // sidebar whose top control is a second project picker beside it would have
+  // two controls on one screen disagreeing about which project is active.
+  const fullBleed = view === "new-project" || view === "home";
 
   // Breakpoint (see lib/useBreakpoint + stores/layout). `lg` is the layout this
   // app has always had and must stay pixel-identical: both `Drawer`s are
@@ -273,7 +275,9 @@ export default function App() {
               take the whole app down. Keyed on view + chat so navigating away
               from the thing that threw clears it without a reload. */}
           <RegionErrorBoundary scope={`main:${view}`} resetKey={`${view}:${chat?.id ?? ""}`}>
-          {view === "new-project" ? (
+          {view === "home" ? (
+            <HomeView />
+          ) : view === "new-project" ? (
             <NewProjectView />
           ) : view === "memory" ? (
             <MemoryView />
