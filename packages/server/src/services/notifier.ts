@@ -20,7 +20,7 @@
  * A failing webhook is swallowed (surfaced via the optional onError hook) so a
  * flaky endpoint can never crash the event bus.
  */
-import { passesAttentionFilter } from "@dispatch/shared";
+import { showsInQueue } from "@dispatch/shared";
 import type { AttentionItem } from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
 import type { AppSettings, Store } from "../store/index.js";
@@ -203,7 +203,7 @@ export class Notifier {
       // the Attention Queue does not get to ring a phone through the webhook
       // either. Read per item (not cached) because this path is already async
       // and settings are a single cheap read.
-      if (!passesAttentionFilter(settings.attentionQueue ?? {}, item)) return;
+      if (!showsInQueue(settings.attentionQueue ?? {}, item)) return;
       webhook = settings.webhook;
     } catch (err) {
       this.onError(err, item);

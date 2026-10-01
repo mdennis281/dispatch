@@ -36,6 +36,17 @@ describe("useAttention — queue filter", () => {
     expect(useAttention.getState().visible.map((i) => i.kind)).toEqual(["done"]);
   });
 
+  it("keeps permissions and questions visible even if a stored filter mutes them", () => {
+    // Only reachable through a hand-edited config.json — the Settings UI does not
+    // offer those two rows — but `visible` is what the sidebar's "Needs input"
+    // marker reads, so it must not be possible at all.
+    useAttention
+      .getState()
+      .setFilter({ kinds: { permission: false, question: false }, reviewKinds: {} });
+    useAttention.getState().hydrate([item("permission"), item("question")]);
+    expect(useAttention.getState().visible).toHaveLength(2);
+  });
+
   it("filters review rounds by sub-kind", () => {
     useAttention.getState().setFilter({ kinds: {}, reviewKinds: { passed: false } });
     useAttention.getState().hydrate([

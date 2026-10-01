@@ -183,6 +183,29 @@ export function passesAttentionFilter(
 }
 
 /**
+ * Does this item belong in the Attention Queue? The queue's own filter, and NOT
+ * the same question as `passesAttentionFilter` above.
+ *
+ * A `permission` or `question` item is never filterable. It is a live agent
+ * blocked on an answer, and it is what marks its chat "Needs input" in the
+ * sidebar — so a muted one is a chat that is genuinely stuck with no badge, no
+ * row and no marker anywhere. The same two kinds are excluded from
+ * `DISMISSIBLE_ATTENTION_KINDS` for exactly this reason; this is that rule held
+ * at the read side as well, so a hand-edited config.json cannot blind the app.
+ *
+ * Notifications are a different question — "don't toast me about approvals on
+ * this laptop" is a reasonable thing to want — and `shouldNotify` still honours
+ * it, which is why the two predicates are not one.
+ */
+export function showsInQueue(
+  filter: Partial<AttentionFilter>,
+  item: Pick<AttentionItem, "kind" | "reviewKinds">,
+): boolean {
+  if (!(DISMISSIBLE_ATTENTION_KINDS as readonly string[]).includes(item.kind)) return true;
+  return passesAttentionFilter(filter, item);
+}
+
+/**
  * The one predicate. True when this device wants to be interrupted by this item.
  *
  * Deliberately fails OPEN on anything it doesn't recognise: an attention kind

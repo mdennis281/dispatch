@@ -10,6 +10,7 @@ import {
   pushUnavailableReason,
   deviceTimeZone,
 } from "../../../lib/webPush.js";
+import { DISMISSIBLE_ATTENTION_KINDS } from "@dispatch/shared";
 import type { AttentionFilter, NotificationPrefs } from "@dispatch/shared";
 import { cn } from "../../../lib/cn.js";
 import type { AppPaneProps } from "./types.js";
@@ -265,6 +266,20 @@ function NotificationFilters() {
  * Muting only HIDES. The server goes on recording every item, so turning a kind
  * back on shows what arrived while it was off instead of a gap.
  */
+/**
+ * The same rows as `KIND_ROWS` MINUS permission and question, which this filter
+ * must never be able to mute.
+ *
+ * Offering them would be offering to hide a chat whose agent is blocked on an
+ * answer: the queue's filter feeds `visible`, and `visible` is what the badge,
+ * the popover and the sidebar's "Needs input" marker all read. `showsInQueue`
+ * refuses to mute them whatever is stored; this is the UI not asking in the
+ * first place.
+ */
+const QUEUE_KIND_ROWS = KIND_ROWS.filter((r) =>
+  (DISMISSIBLE_ATTENTION_KINDS as readonly string[]).includes(r.key),
+);
+
 function QueueFilters({ draft, patch }: Pick<AppPaneProps, "draft" | "patch">) {
   const filter: Partial<AttentionFilter> = draft.attentionQueue ?? {};
   const on = (k: keyof NotificationPrefs["kinds"]) => filter.kinds?.[k] !== false;
@@ -287,7 +302,7 @@ function QueueFilters({ draft, patch }: Pick<AppPaneProps, "draft" | "patch">) {
     <div className="space-y-2">
       <SectionLabel className="mb-1.5 px-0">What reaches the Attention Queue</SectionLabel>
       <div className="divide-y divide-line/60 rounded-md border border-line bg-inset/40 px-2.5">
-        {KIND_ROWS.map((r) => (
+        {QUEUE_KIND_ROWS.map((r) => (
           <ToggleRow
             key={r.key}
             label={r.label}
@@ -298,9 +313,11 @@ function QueueFilters({ draft, patch }: Pick<AppPaneProps, "draft" | "patch">) {
         ))}
       </div>
       <p className="mt-1 text-xs leading-snug text-faint">
-        Hides a kind from the queue, its badges and the sidebar's "Needs input" marker — on every
-        device, and only from view: nothing is deleted, so switching one back on shows whatever
-        arrived while it was off. Unlike the filters above, this saves with the button below.
+        Hides a kind from the queue and its badges — on every device, and only from view: nothing
+        is deleted, so switching one back on shows whatever arrived while it was off. Permission
+        prompts and questions are not listed because they cannot be hidden: an agent blocked on
+        your answer has to stay findable. Unlike the filters above, this saves with the button
+        below.
       </p>
       <SectionLabel className="mb-1.5 px-0">PR activity in the queue</SectionLabel>
       <div

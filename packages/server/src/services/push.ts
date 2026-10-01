@@ -42,7 +42,7 @@ import {
   DEFAULT_NOTIFICATION_PREFS,
   DEFAULT_ATTENTION_FILTER,
   NotificationPrefsSchema,
-  passesAttentionFilter,
+  showsInQueue,
   shouldNotify,
   type AttentionItem,
   type AttentionFilter,
@@ -379,7 +379,7 @@ export class PushService {
         // a push you cannot find the row for is the worst of both. Gated BEFORE
         // `track`, so the badge and "+N more" counts it carries also exclude
         // what the queue is hiding.
-        if (!passesAttentionFilter(this.queueFilter, e.item)) return;
+        if (!showsInQueue(this.queueFilter, e.item)) return;
         this.track(e.item);
         void this.fanOut(e.item).catch((err) => this.onError?.(err));
       }),

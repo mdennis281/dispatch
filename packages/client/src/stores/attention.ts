@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import {
   DEFAULT_ATTENTION_FILTER,
-  passesAttentionFilter,
+  showsInQueue,
   type AttentionFilter,
   type AttentionItem,
 } from "@dispatch/shared";
@@ -55,7 +55,7 @@ function slice(
   const sorted = sortItems(items);
   return {
     items: sorted,
-    visible: sorted.filter((i) => passesAttentionFilter(filter, i)),
+    visible: sorted.filter((i) => showsInQueue(filter, i)),
   };
 }
 
