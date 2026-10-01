@@ -963,13 +963,18 @@ export class Store {
       if (!existsSync(path)) return id;
       // Read raw: a half-written or older record must not throw the
       // migration off, it just means "not the same project, try the next id".
-      let existing: { repoPath?: unknown } | null = null;
+      let existing: Record<string, unknown> | null = null;
       try {
-        existing = JSON.parse(readFileSync(path, "utf8")) as { repoPath?: unknown };
+        existing = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
       } catch {
         /* unreadable — treat as somebody else's */
       }
-      if (existing?.repoPath === project.repoPath) return id;
+      // EVERY field but `id`, not just `repoPath`. Two distinct projects may
+      // legitimately point at one checkout (duplicate rows are allowed), and
+      // matching on the path alone would adopt such a row as this migration's
+      // half-finished output and then overwrite it in step 1 — merging two
+      // separate records, and their chats, into one.
+      if (existing && sameProjectExceptId(existing, project)) return id;
     }
   }
 
@@ -2179,4 +2184,20 @@ export class Store {
       await rm(this.reviewerFile(), { force: true });
     });
   }
+}
+
+/**
+ * Is this stored row the same project as `project`, ignoring `id`?
+ *
+ * Compared as serialized JSON with the key order normalised, so a field added
+ * to `ProjectSchema` later is part of the comparison automatically — the
+ * failure mode to avoid is a check that silently stops distinguishing two
+ * projects because it was never told about a new field.
+ */
+function sameProjectExceptId(stored: Record<string, unknown>, project: Project): boolean {
+  const norm = (o: Record<string, unknown>): string => {
+    const { id: _id, ...rest } = o;
+    return JSON.stringify(rest, Object.keys(rest).sort());
+  };
+  return norm(stored) === norm(project as unknown as Record<string, unknown>);
 }

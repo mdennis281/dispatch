@@ -188,6 +188,41 @@ describe("Store projects/chats CRUD", () => {
     }
   });
 
+  it("does not adopt a different project that happens to sit on the slug", async () => {
+    // Duplicate rows are allowed, so two projects can legitimately point at
+    // one checkout. Matching the retry target on `repoPath` alone would adopt
+    // such a row and then overwrite it — merging two records and their chats.
+    const dir2 = await mkdtemp(join(tmpdir(), "cm-legacy-collide-"));
+    try {
+      await mkdir(join(dir2, "projects"), { recursive: true });
+      await writeJsonAtomic(join(dir2, "projects", `${GLOBAL_PROJECT_ID}.json`), {
+        ...project(GLOBAL_PROJECT_ID),
+        name: "Acme Billing",
+      });
+      // Same name AND same repoPath, but a different project.
+      await writeJsonAtomic(join(dir2, "projects", "acme-billing.json"), {
+        ...project("acme-billing"),
+        name: "Acme Billing",
+        defaultBranch: "develop",
+      });
+
+      const store2 = new Store(dir2);
+      await store2.init();
+      try {
+        const ids = realProjects(await store2.listProjects()).map((p) => p.id).sort();
+        expect(ids).toEqual(["acme-billing", "acme-billing-1"]);
+        // The incumbent is untouched…
+        expect((await store2.getProject("acme-billing"))!.defaultBranch).toBe("develop");
+        // …and the migrated one is beside it, not merged into it.
+        expect((await store2.getProject("acme-billing-1"))!.defaultBranch).toBeUndefined();
+      } finally {
+        store2.close();
+      }
+    } finally {
+      await rm(dir2, { recursive: true, force: true });
+    }
+  });
+
   it("scopes listChats by projectId and deletes chat dir", async () => {
     await store.saveChat(chat("c1", "p1"));
     await store.saveChat(chat("c2", "p2"));
