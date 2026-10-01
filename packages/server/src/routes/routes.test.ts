@@ -373,8 +373,10 @@ describe("routes — REST CRUD", () => {
     const bad = await app.inject({ method: "DELETE", url: "/api/attention?kinds=nonsense" });
     expect(bad.statusCode).toBe(400);
     // An empty scope is a malformed scoped request, not a global clear.
-    const empty = await app.inject({ method: "DELETE", url: "/api/attention?chatId=" });
-    expect(empty.statusCode).toBe(400);
+    for (const q of ["chatId=", "kinds=", "kinds=,%20,"]) {
+      const empty = await app.inject({ method: "DELETE", url: `/api/attention?${q}` });
+      expect(empty.statusCode).toBe(400);
+    }
     off();
   });
 

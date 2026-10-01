@@ -920,9 +920,14 @@ export const api = {
      * and a client-only drop comes straight back on the next reload.
      */
     clear: (opts: { chatId?: string; kinds?: Array<AttentionItem["kind"]> } = {}) =>
-      del<{ cleared: number; ids: string[] }>(
-        `/api/attention${qs({ chatId: opts.chatId, kinds: opts.kinds?.join(",") })}`,
-      ),
+      // An EMPTY `kinds` means "clear nothing", and is answered without a
+      // request: serialized it would vanish from the query string and arrive as
+      // the omitted-kinds default, which is the broad clear — the exact opposite.
+      opts.kinds && opts.kinds.length === 0
+        ? Promise.resolve({ cleared: 0, ids: [] as string[] })
+        : del<{ cleared: number; ids: string[] }>(
+            `/api/attention${qs({ chatId: opts.chatId, kinds: opts.kinds?.join(",") })}`,
+          ),
     /** Open permission/question requests to re-materialize inline cards on (re)connect. */
     pendingPermissions: () =>
       get<PermissionRequest[]>("/api/attention/permissions"),

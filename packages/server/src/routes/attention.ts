@@ -8,7 +8,7 @@
  */
 import type { FastifyInstance } from "fastify";
 import * as z from "zod";
-import { AttentionItemSchema } from "@dispatch/shared";
+import { AttentionItemSchema, type AttentionItem } from "@dispatch/shared";
 
 const ClearQuery = z.object({
   // `min(1)`, so `?chatId=` is a 400 rather than a global clear. An empty value
@@ -42,19 +42,26 @@ export function registerAttentionRoutes(app: FastifyInstance): void {
   app.delete("/api/attention", async (req, reply) => {
     const parsed = ClearQuery.safeParse(req.query ?? {});
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
-    const kindList = parsed.data.kinds
-      ?.split(",")
-      .map((k) => k.trim())
-      .filter(Boolean);
-    const kinds = kindList?.length
-      ? z.array(AttentionItemSchema.shape.kind).safeParse(kindList)
-      : null;
-    if (kinds && !kinds.success) {
-      return reply.code(400).send({ error: `unknown attention kind in ${parsed.data.kinds}` });
+    // A SUPPLIED `kinds` must name at least one, for the same reason `chatId`
+    // must be non-empty: `?kinds=` (or `?kinds=,,`) is a half-built narrowing,
+    // and the one thing it must not quietly become is the broad default.
+    let kinds: Array<AttentionItem["kind"]> | undefined;
+    if (parsed.data.kinds !== undefined) {
+      const tokens = parsed.data.kinds
+        .split(",")
+        .map((k) => k.trim())
+        .filter(Boolean);
+      const checked = z.array(AttentionItemSchema.shape.kind).safeParse(tokens);
+      if (!tokens.length || !checked.success) {
+        return reply
+          .code(400)
+          .send({ error: `kinds must name at least one attention kind, got ${JSON.stringify(parsed.data.kinds)}` });
+      }
+      kinds = checked.data;
     }
     const removed = attention.clear({
       ...(parsed.data.chatId ? { chatId: parsed.data.chatId } : {}),
-      ...(kinds?.success ? { kinds: kinds.data } : {}),
+      ...(kinds ? { kinds } : {}),
     });
     // One authoritative resolve per id, exactly as chat deletion does: every
     // client already holds these from their `attention-add`, so without the
