@@ -339,11 +339,17 @@ export async function readModesDir(dir: string): Promise<ModeRecord[]> {
  * (`project-config.ts`'s `toToolList`).
  *
  * Without the migration this surface and the broker disagree about the same
- * file: a mode carrying a legacy `mcp__manager__worktree` would be ENFORCED as
- * `mcp__dispatch-workspace__worktree` and REPORTED as the old name, and
- * `mode_write` would faithfully write the stale name back. A catalogue that
- * describes a different policy from the one in force is the failure this
- * editor has already been corrected for twice.
+ * file: a mode carrying a pre-split tool name would be ENFORCED under the
+ * current `mcp__dispatch-workspace__worktree` and REPORTED under the retired
+ * one, and `mode_write` would faithfully write the stale name back. A
+ * catalogue that describes a different policy from the one in force is the
+ * failure this editor has already been corrected for twice.
+ *
+ * The retired name is deliberately not spelled here. `tools/verify/
+ * no-stale-tool-names.mjs` fails the build on any occurrence of it anywhere —
+ * prose included, with no exemptions — so that the rename cannot rot back in
+ * through a comment. `migrateToolList` in `@dispatch/shared` is where the
+ * actual before/after names live.
  */
 function toolList(v: unknown): string[] | undefined {
   if (!Array.isArray(v)) return undefined;
