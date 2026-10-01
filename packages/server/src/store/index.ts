@@ -65,7 +65,7 @@ import {
   readFile as fsReadFile,
   writeFile as fsWriteFile,
 } from "node:fs/promises";
-import { existsSync, createReadStream, type Dirent } from "node:fs";
+import { existsSync, readFileSync, createReadStream, type Dirent } from "node:fs";
 import type { Readable } from "node:stream";
 import * as z from "zod";
 import {
@@ -103,9 +103,13 @@ import {
   McpEnabledMapSchema,
   ProjectConfigLocationSchema,
   SendModeSchema,
+  GLOBAL_PROJECT_ID,
+  globalProject,
+  isGlobalProject,
 } from "@dispatch/shared";
 import {
   AgentContextSettingsSchema,
+  AppReviewAgentDefaultsSchema,
   AttentionFilterSchema,
   HarnessSettingsSchema,
   SubscriptionListSchema,
@@ -350,6 +354,22 @@ export const AppSettingsSchema = z.object({
     })
     .optional(),
   /**
+   * App-wide defaults for Dispatch's own reviewer — currently just how many
+   * rounds a PR gets, and whether that number is fixed or sized to the diff.
+   *
+   * The bottom of a two-level chain: a project's `workflow.pr.reviewAgent`
+   * overrides any field it authors, and anything neither names falls through to
+   * the shipped default (see `applyReviewAgentDefaults`). Here rather than in a
+   * manifest because "how much of my quota may a review loop spend" is a fact
+   * about this install, not about the repository — and a committed answer would
+   * be spending somebody else's.
+   *
+   * Optional rather than `.default({})` so every existing AppSettings literal
+   * (tests, DEFAULT_SETTINGS) stays valid; unset means every project keeps the
+   * behaviour it had before this existed.
+   */
+  reviewAgent: AppReviewAgentDefaultsSchema.optional(),
+  /**
    * Which attention kinds are allowed into the Attention Queue — the inbox's own
    * filter, separate from the per-device notification filter.
    *
@@ -458,6 +478,39 @@ const ENTITY_ID = /^[A-Za-z0-9_-]{1,64}$/;
 /** Whether `id` can be used as a path segment. Cheap; no filesystem access. */
 export function isEntityId(id: unknown): id is string {
   return typeof id === "string" && ENTITY_ID.test(id);
+}
+
+/**
+ * Raised when the reserved project id is not available on this install.
+ *
+ * Fatal on purpose. The alternative is a boot that leaves a real project's
+ * chats resolving to the synthesized global project — a silent posture change
+ * on somebody's live conversations — and a log line nobody reads.
+ *
+ * Carries the message VERBATIM rather than wrapping it in advice. It used to
+ * append "fix the underlying error and start again", which was true of the
+ * migration this replaced and is wrong of a refusal: the fix is a procedure
+ * the caller spells out, and a trailing sentence of generic consolation
+ * landed after the numbered steps telling the reader to do something else.
+ */
+export class ReservedProjectIdError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "ReservedProjectIdError";
+  }
+}
+
+/**
+ * Raised when a write targets the reserved pseudo-project, which has no row on
+ * disk and must not acquire one. A 400 rather than a 403: the id is simply not
+ * a project anybody may create or remove.
+ */
+export class ReservedProjectError extends Error {
+  readonly statusCode = 400;
+  constructor() {
+    super(`"${GLOBAL_PROJECT_ID}" is reserved and cannot be created, edited or deleted`);
+    this.name = "ReservedProjectError";
+  }
 }
 
 /**
@@ -764,7 +817,9 @@ export class Store {
       mkdir(this.agentsDir(), { recursive: true }),
       mkdir(this.modesDir(), { recursive: true }),
       mkdir(this.chatsDir(), { recursive: true }),
+      mkdir(this.globalProjectDir(), { recursive: true }),
     ]);
+    await this.freeReservedProjectId();
     this.db.open();
   }
 
@@ -827,15 +882,228 @@ export class Store {
 
   /* ---------------------------------------------------------- projects */
 
+  /**
+   * Refuse to boot on an install that already used the now-reserved id.
+   *
+   * `__global__` passes the entity-id allowlist and `POST /api/projects`
+   * accepts a caller-supplied id, so an install made before this landed COULD
+   * hold `projects/__global__.json`. Left alone the upgrade is silent and
+   * nasty: `getProject` answers with the synthesized record instead of the
+   * user's project, and every chat filed under it is reinterpreted as a
+   * global chat — a real repo's conversations quietly acquiring the
+   * cross-project posture.
+   *
+   * THIS USED TO MIGRATE instead: rename the row, remap the chats, move the
+   * entity directory, coordinate the chosen id between instances through a
+   * shared record. ~140 lines, and review found two data-loss bugs in them —
+   * a project-comparison that ignored nested fields and so overwrote an
+   * unrelated row, and an entity directory left behind so the migrated
+   * project lost its memories to the global chat. The asymmetry decided it: a
+   * third bug of that shape destroys a real project's data silently, while
+   * refusing costs an install that cannot plausibly exist one rename.
+   *
+   * Cannot plausibly exist, specifically: nothing DERIVES this id. Seeding
+   * creates no projects, the new-project form never sends an `id`, and every
+   * other `saveProject` caller updates a row that already exists. It takes a
+   * hand-written `POST`/`PUT` naming the literal, before the literal meant
+   * anything.
+   *
+   * THE ROW IS NOT THE ONLY EVIDENCE. Deleting a project removes its row and
+   * leaves its chats (`routes/projects.ts`), so an install that once created
+   * `__global__`, chatted in it and deleted it has orphaned chats under the
+   * reserved id and no file to notice them by. Both are checked.
+   *
+   * Which needs a way to tell a legacy orphan from a LEGITIMATE global chat,
+   * because once this ships they look identical. Hence the marker: written
+   * the first time a boot finds the id clean, and its absence is what says
+   * "anything under this id predates the reservation". Per-instance, under
+   * `dataDir`, because it is a statement about chats and chats are
+   * per-instance — and with nothing to move there is nothing to coordinate
+   * between instances, which is the whole reason this is now short.
+   *
+   * Costs one `existsSync` per boot once established.
+   */
+  private async freeReservedProjectId(): Promise<void> {
+    const legacy = this.entityFile(this.projectsDir(), GLOBAL_PROJECT_ID);
+
+    // The ROW is checked on EVERY boot, ahead of the marker, because the two
+    // live in different stores: the marker is per-instance under `dataDir`,
+    // the row is in the SHARED `configDir`. A sibling instance on an older
+    // build — one that still lets `POST /api/projects` take the id — can
+    // write that row after this instance has already marked the id reserved,
+    // and a marker-first fast path would then return before noticing it
+    // forever: `getProject` would answer with the synthesized record and hide
+    // a real project, and `listProjects` would return the id twice.
+    //
+    // Unconditional because there is no longer any such thing as a legitimate
+    // row here — the store and `POST /api/projects` both refuse to write one.
+    // Its presence is always somebody else's mistake, so always say so.
+    if (existsSync(legacy)) {
+      // Chats are NOT offered for remapping once the marker exists: they are
+      // genuine global chats by then, and telling the operator to refile them
+      // would be telling them to break the global chat to fix the row.
+      const reserved = existsSync(this.globalReservationMarker());
+      // Chats are passed ONLY when this instance has not reserved the id yet.
+      // Once it has, chats under that id are the global chat's own and nothing
+      // is wrong with them — listing them as part of the conflict would point
+      // the reader at the one thing they must not touch.
+      throw this.reservedIdRefusal(legacy, true, reserved ? [] : await this.scanReservedChats());
+    }
+
+    // Already reserved HERE: anything else under the id is the global chat's.
+    if (existsSync(this.globalReservationMarker())) return;
+
+    // NOT `.catch(() => [])`. `listChats` throws on EACCES/IO rather than
+    // reporting an empty store precisely so a caller cannot mistake "cannot
+    // see" for "nothing there" — and here that mistake writes the marker and
+    // classifies every unseen legacy chat as a genuine global chat
+    // PERMANENTLY, since the marker is what the next boot trusts.
+    const chats = await this.scanReservedChats();
+
+    const hasRow = existsSync(legacy);
+    // Reached only without the marker (the fast path above returns), so the
+    // directory here is never the global chat's.
+    if (hasRow || chats.length) throw this.reservedIdRefusal(legacy, hasRow, chats);
+
+    await this.markGlobalIdReserved();
+  }
+
+  /**
+   * Chats filed under the reserved id.
+   *
+   * NOT `.catch(() => [])`. `listChats` throws on EACCES/IO rather than
+   * reporting an empty store precisely so a caller cannot mistake "cannot
+   * see" for "nothing there" — and here that mistake writes the marker and
+   * classifies every unseen legacy chat as a genuine global chat
+   * PERMANENTLY, since the marker is what the next boot trusts.
+   */
+  private async scanReservedChats(): Promise<Chat[]> {
+    try {
+      return await this.listChats(GLOBAL_PROJECT_ID);
+    } catch (err) {
+      throw new ReservedProjectIdError(
+        `Dispatch could not scan for chats under the reserved project id ` +
+          `"${GLOBAL_PROJECT_ID}", so it cannot tell whether this install used that id ` +
+          `before it was reserved. Refusing to start rather than guess: guessing wrong ` +
+          `files a real project's conversations under the global chat permanently. ` +
+          `Fix the underlying error (permissions, or a full disk) and start again.`,
+        { cause: err },
+      );
+    }
+  }
+
+  /**
+   * The refusal: what is there, that nothing was touched, and the paths.
+   *
+   * NOT a procedure, deliberately, and this is the second decision on that
+   * point rather than the first. It WAS a numbered runbook — rename the row,
+   * move the entity directory, rewrite each chat's `projectId`, with a
+   * suggested free id — and three consecutive review rounds found a defect in
+   * it: a step that moved the global chat's own memories onto an unrelated
+   * project, an instruction to "create a project in the app" when `init()`
+   * had already aborted, and an alternative numbered as a step so the list
+   * read as "set projectId, then delete the chats".
+   *
+   * Every clause was a new way to be wrong, and the states multiplied the
+   * clauses. The proportionality that deleted the migration applies to its
+   * replacement too: reaching this state takes a hand-written
+   * `POST /api/projects` naming the reserved literal, so a runbook for it is
+   * polish on an unreachable case — and anyone who does hit it will ask,
+   * bringing history no message could have anticipated.
+   *
+   * So: name the conflict, say Dispatch changed nothing, list the absolute
+   * paths (the two store roots can be anywhere), stop. The CALLER decides
+   * which facts to pass — chats are omitted once the id is reserved, because
+   * by then they are the global chat's own and nothing is wrong with them.
+   */
+  private reservedIdRefusal(
+    legacy: string,
+    hasRow: boolean,
+    chats: Chat[],
+  ): ReservedProjectIdError {
+    // Bounded: an operator with 200 orphans needs the shape, not 200 paths.
+    const SHOWN = 5;
+    const found: string[] = [];
+    if (hasRow) found.push(`  project record    ${legacy}`);
+    const dir = this.projectConfigDir(GLOBAL_PROJECT_ID);
+    if (existsSync(dir)) found.push(`  directory         ${dir}`);
+    for (const c of chats.slice(0, SHOWN)) {
+      found.push(`  chat              ${this.chatFile(c.id)}`);
+    }
+    if (chats.length > SHOWN) {
+      found.push(`                    …and ${chats.length - SHOWN} more`);
+    }
+
+    return new ReservedProjectIdError(
+      `"${GLOBAL_PROJECT_ID}" is reserved for the global chat, and this install ` +
+        `already has something at that id.\n` +
+        `Dispatch has changed nothing and refuses to start, rather than silently ` +
+        `treat one as the other.\n\n` +
+        `${found.join("\n")}\n\n` +
+        `Move or remove whatever should not be there, then start Dispatch again. ` +
+        `If it is not obvious which is which, ask before changing anything — these ` +
+        `are project records and conversations, and the right answer depends on ` +
+        `history this message cannot see.\n`,
+    );
+  }
+
+  /**
+   * The flag that says the reserved id belongs to the global chat on this
+   * install, so chats filed under it are global chats rather than a deleted
+   * project's orphans. See `freeReservedProjectId`.
+   */
+  private globalReservationMarker(): string {
+    return join(this.globalProjectDir(), ".reserved");
+  }
+
+  private async markGlobalIdReserved(): Promise<void> {
+    await mkdir(this.globalProjectDir(), { recursive: true });
+    await fsWriteFile(
+      this.globalReservationMarker(),
+      "The global chat owns the reserved project id. Do not delete: without this, " +
+        "chats under that id are taken for a pre-reservation project's and refused.\n",
+      "utf8",
+    );
+  }
+
+  /**
+   * The global chat's working directory — a real directory that is NOT a git
+   * repo. See `globalProject` in shared for why both halves of that matter.
+   */
+  globalProjectDir(): string {
+    return join(this.dataDir, "global");
+  }
+
+  /**
+   * Every project, with the reserved pseudo-project appended.
+   *
+   * It is in the list rather than bolted on by the HTTP route because every
+   * reader of this method — the broker, the MCP spawner, `GET /api/projects` —
+   * needs the record to exist for a global chat to resolve at all. The places
+   * that want REAL repos filter with `realProjects`; it is last in the list so
+   * nothing that takes `[0]` lands on it.
+   */
   async listProjects(): Promise<Project[]> {
     const ids = await this.listDir(this.projectsDir());
     const all = await Promise.all(ids.map((id) => this.getProject(id)));
-    return all.filter((p): p is Project => p !== null);
+    return [...all.filter((p): p is Project => p !== null), this.globalProjectRecord()];
   }
   async getProject(id: string): Promise<Project | null> {
+    if (isGlobalProject(id)) return this.globalProjectRecord();
     return this.readEntity(this.entityFile(this.projectsDir(), id), ProjectSchema);
   }
+  /** Synthesized, never read from disk — nothing persists the pseudo-project. */
+  private globalProjectRecord(): Project {
+    return globalProject(this.globalProjectDir());
+  }
   async saveProject(project: Project): Promise<Project> {
+    // The pseudo-project grants a chat its cross-project posture. A row on disk
+    // would be editable into a record pointing at a real checkout, which is a
+    // project-less chat holding a repo — so there is no row, and the write that
+    // would create one fails loudly rather than being silently dropped.
+    if (isGlobalProject(project.id)) {
+      throw new ReservedProjectError();
+    }
     return this.writeEntity(
       `project:${project.id}`,
       this.entityFile(this.projectsDir(), project.id),
@@ -844,6 +1112,7 @@ export class Store {
     );
   }
   async deleteProject(id: string): Promise<void> {
+    if (isGlobalProject(id)) throw new ReservedProjectError();
     // Resolve (and so VALIDATE) before taking the lock: `mutex.run` interns its
     // key forever, so validating inside the task would let a caller mint an
     // unbounded number of dead map entries with ids that were never legal.

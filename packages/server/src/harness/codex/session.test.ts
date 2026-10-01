@@ -579,6 +579,37 @@ describe("CodexSession approvals", () => {
     expect(events.some((e) => e.type === "permission-request")).toBe(false);
   });
 
+  it("guards every mapped item type, not just the shell", async () => {
+    // Any mode can carry a tool policy now, so an item type the guard does not
+    // see is a policy nothing enforces. These four were each unguarded until
+    // the guard started using the stream's own mapper.
+    for (const [item, toolName] of [
+      [{ type: "mcpToolCall", id: "m1", server: "dispatch-workspace", tool: "worktree", arguments: {} },
+       "mcp__dispatch-workspace__worktree"],
+      [{ type: "fileChange", id: "f1", changes: [{ path: "/repo/a.ts", diff: "" }] }, "Edit"],
+      [{ type: "dynamicToolCall", id: "d1", namespace: "ns", tool: "t", arguments: {} }, "mcp__ns__t"],
+      [{ type: "webSearch", id: "w1", query: "q" }, "WebSearch"],
+    ] as const) {
+      const { session, fake } = makeSession({
+        permissionMode: "bypassPermissions",
+        toolGuard: () => "not allowed here",
+      });
+      const events: HarnessEvent[] = [];
+      void (async () => {
+        for await (const e of session.events) events.push(e);
+      })();
+      session.send({ text: "go" });
+      await fake.tick();
+      fake.push("turn/started", { threadId: "thread-1", turn: { id: "turn-1" } });
+      fake.push("item/started", { threadId: "thread-1", turnId: "turn-1", item });
+      await fake.tick();
+      expect(
+        events.some((e) => e.type === "guard-blocked" && e.toolName === toolName),
+      ).toBe(true);
+      expect(fake.calls.some((c) => c.method === "turn/interrupt")).toBe(true);
+    }
+  });
+
   it("marks an unprompted forbidden command for turn restart before interrupting", async () => {
     // The `never` posture path: nothing is submitted for approval, so the guard
     // can only catch it once the item is already running.
@@ -608,7 +639,14 @@ describe("CodexSession approvals", () => {
     expect(events).toContainEqual({
       type: "guard-blocked",
       toolName: "Bash",
-      input: { command: "git push origin main", cwd: "/repo/worktree" },
+      // `description` rides along because the guard now maps the item with
+      // `codexToolCall` — the same mapper the stream decoder labels rows with,
+      // which is what makes every item type guarded by construction.
+      input: {
+        command: "git push origin main",
+        cwd: "/repo/worktree",
+        description: "git push origin main",
+      },
       reason: "not allowed here",
       continuation: "restart-turn",
     });

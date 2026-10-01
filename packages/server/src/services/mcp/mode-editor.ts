@@ -34,6 +34,9 @@ import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { loadManifest, type ProjectPaths } from "@dispatch/cli/core";
 import {
+  migrateToolList,
+  BUILTIN_MODE_CONFIGS,
+  isProtectedMode,
   DEFAULT_MODES_DIR,
   PermissionModeSchema,
   type ModeConfig,
@@ -55,6 +58,14 @@ export interface ModeRecord {
   scope: ModeScope;
   permissionMode: PermissionMode;
   description?: string;
+  /**
+   * The mode's tool gate. Carried through read AND write because a `mode_write`
+   * is a REPLACE: without these an agent editing a mode's instructions would
+   * silently strip the allow/deny lists that made it safe, and `mode_read`
+   * would never have shown them to be preserved.
+   */
+  allowedTools?: string[];
+  disallowedTools?: string[];
   instructions?: string;
   /** Absolute file for a project mode; absent for the other two scopes. */
   path?: string;
@@ -89,6 +100,8 @@ export interface ManagerMcpModes {
     name: string;
     permissionMode: PermissionMode;
     description?: string;
+    allowedTools?: string[];
+    disallowedTools?: string[];
     instructions?: string;
   }): Promise<ModeRecord>;
   remove(id: string, scope: WritableModeScope): Promise<boolean>;
@@ -117,22 +130,45 @@ export function createModeEditor(deps: ModeEditorDeps): ManagerMcpModes {
       .filter((m) => m.scope !== "project")
       .map((m) => fromStore(m));
 
+  // A built-in is usually nothing but an id and a posture. The few that are a
+  // full record (`global`) carry a name, a description and tool gating, and
+  // must report those — an agent asking `mode_read("global")` to find out what
+  // it is allowed to do should not be told only "permissionMode: default".
   const builtinModes = (): ModeRecord[] =>
-    Object.entries(builtin).map(([id, permissionMode]) => ({
-      id,
-      name: id,
-      scope: "builtin" as const,
-      permissionMode,
-    }));
+    Object.entries(builtin).map(([id, permissionMode]) => {
+      const full = BUILTIN_MODE_CONFIGS[id];
+      return {
+        id,
+        name: full?.name ?? id,
+        scope: "builtin" as const,
+        permissionMode,
+        ...(full?.description ? { description: full.description } : {}),
+        ...(full?.allowedTools ? { allowedTools: [...full.allowedTools] } : {}),
+        ...(full?.disallowedTools ? { disallowedTools: [...full.disallowedTools] } : {}),
+        ...(full?.instructions ? { instructions: full.instructions } : {}),
+      };
+    });
 
   return {
     hasProject: Boolean(configPaths),
 
     async list() {
-      return [...(await projectModes()), ...(await globalModes()), ...builtinModes()];
+      // A PROTECTED id is reported ONLY as its built-in self, whatever files
+      // happen to exist. The broker resolves those from the built-in record
+      // before it looks at either authored layer, so listing an authored copy
+      // as "the project mode in effect" would be the catalogue stating a
+      // policy that is not the one being enforced — and for a mode that is a
+      // security boundary, a catalogue nobody can trust is worse than none.
+      const authored = [...(await projectModes()), ...(await globalModes())].filter(
+        (m) => !isProtectedMode(m.id),
+      );
+      return [...authored, ...builtinModes()];
     },
 
     async read(id, scope) {
+      if (isProtectedMode(id)) {
+        return builtinModes().find((m) => m.id === id) ?? null;
+      }
       const order: ModeScope[] = scope ? [scope] : [...MODE_SCOPES];
       for (const s of order) {
         const pool =
@@ -143,9 +179,19 @@ export function createModeEditor(deps: ModeEditorDeps): ManagerMcpModes {
       return null;
     },
 
-    async write({ scope, name, permissionMode, description, instructions }) {
+    async write({ scope, name, permissionMode, description, allowedTools, disallowedTools, instructions }) {
       const id = modeIdFor(name);
       if (!id) throw new Error(`"${name}" leaves nothing to make a mode id from.`);
+      // Writing one would produce a file that is never read — the broker
+      // resolves protected ids from the built-in record — so the write has to
+      // fail rather than succeed into a lie.
+      if (isProtectedMode(id)) {
+        throw new Error(
+          `"${id}" is a built-in posture and cannot be redefined. It is what makes a ` +
+            "project-less chat safe, so a project or store copy would be a policy nobody " +
+            "enforces. Pick another name.",
+        );
+      }
       if (scope === "project") {
         if (!configPaths) throw new Error("this session has no project to write a mode into");
         const dir = await modesDir(configPaths);
@@ -163,15 +209,29 @@ export function createModeEditor(deps: ModeEditorDeps): ManagerMcpModes {
         const doc: Record<string, unknown> = { name };
         if (description) doc.description = description;
         doc.permissionMode = permissionMode;
+        if (allowedTools) doc.allowedTools = allowedTools;
+        if (disallowedTools) doc.disallowedTools = disallowedTools;
         if (instructions) doc.instructions = instructions;
         await writeFile(path, stringifyYaml(doc), "utf8");
-        return { id, name, scope, permissionMode, description, instructions, path };
+        return {
+          id,
+          name,
+          scope,
+          permissionMode,
+          description,
+          allowedTools,
+          disallowedTools,
+          instructions,
+          path,
+        };
       }
       const saved = await store.saveMode({
         id,
         name,
         description,
         permissionMode,
+        allowedTools,
+        disallowedTools,
         instructions,
         scope: "global",
       });
@@ -179,6 +239,7 @@ export function createModeEditor(deps: ModeEditorDeps): ManagerMcpModes {
     },
 
     async remove(id, scope) {
+      if (isProtectedMode(id)) return false;
       if (scope === "project") {
         if (!configPaths) throw new Error("this session has no project to delete a mode from");
         const dir = await modesDir(configPaths);
@@ -209,6 +270,8 @@ function fromStore(m: ModeConfig): ModeRecord {
     scope: "global",
     permissionMode: m.permissionMode,
     description: m.description,
+    allowedTools: m.allowedTools,
+    disallowedTools: m.disallowedTools,
     instructions: m.instructions,
   };
 }
@@ -257,6 +320,8 @@ export async function readModesDir(dir: string): Promise<ModeRecord[]> {
         scope: "project",
         permissionMode: perm.data,
         description: typeof data.description === "string" ? data.description.trim() || undefined : undefined,
+        allowedTools: toolList(data.allowedTools),
+        disallowedTools: toolList(data.disallowedTools),
         instructions:
           typeof data.instructions === "string" ? data.instructions.trim() || undefined : undefined,
         path: join(dir, file),
@@ -266,4 +331,30 @@ export async function readModesDir(dir: string): Promise<ModeRecord[]> {
     }
   }
   return out;
+}
+
+/**
+ * A YAML tool list, kept only when it really is a list of strings — and run
+ * through the manager-server rename, exactly as the broker-facing loader does
+ * (`project-config.ts`'s `toToolList`).
+ *
+ * Without the migration this surface and the broker disagree about the same
+ * file: a mode carrying a pre-split tool name would be ENFORCED under the
+ * current `mcp__dispatch-workspace__worktree` and REPORTED under the retired
+ * one, and `mode_write` would faithfully write the stale name back. A
+ * catalogue that describes a different policy from the one in force is the
+ * failure this editor has already been corrected for twice.
+ *
+ * The retired name is deliberately not spelled here. `tools/verify/
+ * no-stale-tool-names.mjs` fails the build on any occurrence of it anywhere —
+ * prose included, with no exemptions — so that the rename cannot rot back in
+ * through a comment. `migrateToolList` in `@dispatch/shared` is where the
+ * actual before/after names live.
+ */
+function toolList(v: unknown): string[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const out = v.filter((e): e is string => typeof e === "string" && e.trim().length > 0);
+  // `[]` is preserved: a defined-but-empty allowlist permits nothing, which is
+  // a real policy. Only a non-array is "unset".
+  return out.length ? migrateToolList(out).tools : [];
 }

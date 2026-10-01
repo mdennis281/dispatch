@@ -12,7 +12,7 @@ import { mkdir } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import type { FastifyInstance } from "fastify";
 import { nanoid } from "nanoid";
-import { ProjectSchema, type Project } from "@dispatch/shared";
+import { ProjectSchema, isGlobalProject, type Project } from "@dispatch/shared";
 import { enclosingRepoRoot } from "./fs.js";
 
 /**
@@ -76,6 +76,15 @@ export function registerProjectRoutes(app: FastifyInstance): void {
     const parsed = ProjectSchema.safeParse(draft);
     if (!parsed.success) {
       return reply.code(400).send({ error: parsed.error.message });
+    }
+    // The reserved id BEFORE any side effect. `store.saveProject` refuses it
+    // too, and that is the real guard — but it runs after `ensureRepo` has
+    // already made a directory and `git init`ed it, so refusing only there
+    // leaves a repo behind for a request that was never going to succeed.
+    if (isGlobalProject(parsed.data.id)) {
+      return reply
+        .code(400)
+        .send({ error: `"${parsed.data.id}" is reserved for the global chat` });
     }
 
     // `initRepo` is read off the raw body, not the parsed project: it's an

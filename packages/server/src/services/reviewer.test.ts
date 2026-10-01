@@ -1,10 +1,15 @@
 import { describe, it, expect } from "vitest";
 import type { Project, ReviewerCredential, WorkflowConfig } from "@dispatch/shared";
 import { resolveReviewer, verifyReviewer, type ReviewerGitHub } from "./reviewer.js";
+import type { AppSettings } from "../store/index.js";
 
-/** A store that holds one credential (or none) — the only read these two make. */
-const storeWith = (cred: ReviewerCredential | null) => ({
+/**
+ * A store holding one credential (or none), and optionally the install's own
+ * reviewer defaults — the two reads `resolveReviewer` makes.
+ */
+const storeWith = (cred: ReviewerCredential | null, settings: AppSettings = { theme: "dark" }) => ({
   getReviewer: async () => cred,
+  getSettings: async () => settings,
 });
 
 const CRED: ReviewerCredential = {
@@ -150,6 +155,7 @@ describe("resolveReviewer — joining the policy to the credential", () => {
           reads += 1;
           return CRED;
         },
+        getSettings: async (): Promise<AppSettings> => ({ theme: "dark" }),
       },
       project(REVIEW({ enabled: false, identity: "dedicated" })),
     );

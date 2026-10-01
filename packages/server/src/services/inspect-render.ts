@@ -17,6 +17,7 @@ import type {
   ChatSummary,
   FindChatsResult,
   ProjectInfoResult,
+  ProjectListEntry,
   RawRow,
   ReadChatResult,
 } from "./inspect.js";
@@ -181,6 +182,45 @@ export function renderRead(result: ReadChatResult): string {
         "(the oldest id above) or narrow with `kinds` / `view: 'grep'`._",
     );
   }
+  return lines.join("\n");
+}
+
+/* ---------------------------------------------------------- project_list */
+
+/**
+ * One line per project, each dense enough to PICK from.
+ *
+ * Deliberately names the sub-apps and MCP servers rather than counting them:
+ * "which project has the Playwright MCP" is the question this tier exists to
+ * answer in one call, and a count answers nothing. Agents, modes and skills
+ * ARE counts — you pick a project by what it runs, not by how many agents it
+ * happens to define, and `project_info` is one call away.
+ */
+export function renderProjectList(entries: ProjectListEntry[]): string {
+  if (!entries.length) return "No projects on this install yet.";
+  const lines: string[] = [`# Projects (${entries.length})`, ""];
+  for (const e of entries) {
+    lines.push(`## ${e.name}  \`${e.id}\``);
+    lines.push(`${e.repoPath}`);
+    lines.push(
+      `workflow: ${e.workflow} · trunk: ${e.defaultBranch} · ${e.chats} open chat${
+        e.chats === 1 ? "" : "s"
+      }${e.lastActiveAt ? ` · last active ${new Date(e.lastActiveAt).toISOString().slice(0, 10)}` : ""}`,
+    );
+    if (e.subApps.length) lines.push(`sub-apps: ${e.subApps.join(", ")}`);
+    if (e.mcpServers.length) lines.push(`MCP: ${e.mcpServers.join(", ")}`);
+    const cfg = [
+      e.agents ? `${e.agents} agent${e.agents === 1 ? "" : "s"}` : "",
+      e.modes ? `${e.modes} mode${e.modes === 1 ? "" : "s"}` : "",
+      e.skills ? `${e.skills} skill${e.skills === 1 ? "" : "s"}` : "",
+    ].filter(Boolean);
+    if (cfg.length) lines.push(`config: ${cfg.join(" · ")}`);
+    lines.push("");
+  }
+  lines.push(
+    "`project_info({ project })` for one of these in full — instructions, agent and " +
+      "mode names, config errors, recent chats.",
+  );
   return lines.join("\n");
 }
 

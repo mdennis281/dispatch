@@ -134,13 +134,97 @@ export type WorkflowMergeMethod = z.infer<typeof WorkflowMergeMethodSchema>;
  * asymmetry is documented at `GitHubService.prReviewState`). An App could post
  * the review but could never be asked for it, which is the half that matters.
  */
+/**
+ * How a PR's round cap is arrived at: a fixed number, or one sized to the diff.
+ *
+ * `static` is the cap as it has always been — one number, every pull request.
+ * It is the right answer only if every PR is the same reading job, and they are
+ * not: the cap is really rationing REVIEW EFFORT, and a cap tuned so a 4,000-line
+ * refactor converges is a cap that spends four rounds arguing about a typo fix,
+ * while one tuned for the small ones strands the refactor mid-round-three with
+ * `roundsSpent` and no way forward but a manual `extraRounds` grant.
+ *
+ * `dynamic` sizes it off the diff instead, which is the one number that is
+ * already on every row and needs no new bookkeeping.
+ */
+export const ReviewRoundsModeSchema = z.enum(["static", "dynamic"]);
+export type ReviewRoundsMode = z.infer<typeof ReviewRoundsModeSchema>;
+
+/**
+ * The dynamic sizing law: `base + floor(changedLines / linesPerRound)`, clamped
+ * to `max`.
+ *
+ * Three knobs rather than one ratio because each answers a question the others
+ * cannot: `base` is what the smallest PR still gets (never zero — a cap of zero
+ * is a reviewer that is configured on and can never run), `linesPerRound` is how
+ * fast the allowance grows, and `max` is the ceiling that keeps the whole thing
+ * bounded. Without `max` a generated-file PR of 90,000 lines would authorise
+ * 181 reviews.
+ *
+ * FLOOR, not ceil: the round `base` already grants covers the first bracket, so
+ * `ceil` would hand a 1-line PR the same two rounds as a 501-line one. With
+ * base 1 and 500 lines per round, 0–499 lines gets 1, 500–999 gets 2, and so on.
+ *
+ * Every field optional, and resolved against the app-level default before the
+ * shipped one — see {@link applyReviewAgentDefaults}.
+ */
+export const ReviewRoundsPolicySchema = z.object({
+  /** `static` uses `maxRounds` verbatim; `dynamic` computes the cap per PR. */
+  mode: ReviewRoundsModeSchema.nullish(),
+  /** Rounds the smallest possible diff still gets. */
+  base: z.number().int().min(1).max(20).nullish(),
+  /** Lines of diff (additions + deletions) that buy one more round. */
+  linesPerRound: z.number().int().min(1).max(100000).nullish(),
+  /** The ceiling no diff can push the cap past. */
+  max: z.number().int().min(1).max(20).nullish(),
+});
+export type ReviewRoundsPolicy = z.infer<typeof ReviewRoundsPolicySchema>;
+
+/** {@link ReviewRoundsPolicySchema} with every field decided. */
+export const ResolvedReviewRoundsSchema = z.object({
+  mode: ReviewRoundsModeSchema,
+  base: z.number().int(),
+  linesPerRound: z.number().int().positive(),
+  max: z.number().int(),
+});
+export type ResolvedReviewRounds = z.infer<typeof ResolvedReviewRoundsSchema>;
+
+/**
+ * The shipped sizing policy — `static`, so nothing changes for anyone who never
+ * opens the setting. The dynamic numbers are still spelled out here so that
+ * flipping the mode alone produces something sensible rather than demanding
+ * three more decisions first.
+ */
+/**
+ * The shipped STATIC cap. Exported because a settings pane has to be able to
+ * say what "app default" resolves to, and it cannot read it back off a resolved
+ * policy — by then an authored 4 and an inherited 4 are the same number.
+ */
+export const DEFAULT_REVIEW_MAX_ROUNDS = 4;
+
+export const DEFAULT_REVIEW_ROUNDS: ResolvedReviewRounds = {
+  mode: "static",
+  base: 1,
+  linesPerRound: 500,
+  max: 8,
+};
+
+/**
+ * Every optional field here is `nullish`, not merely optional, and the
+ * difference is load-bearing: `undefined` cannot travel over JSON, so a pane
+ * offering "App default" had no way to say *un-pin this*. `saveProjectWorkflow`
+ * merges rather than replaces (for good reasons — see its docblock), so an
+ * omitted key silently kept the old value and the inherit option did nothing.
+ * `null` is the explicit clear. Every resolver reads these with `??`, which
+ * already treats null as absent, so nothing downstream has to know.
+ */
 export const WorkflowReviewAgentConfigSchema = z.object({
   /** Spawn a reviewer when one is requested here. Off unless a project says so. */
   enabled: z.boolean().optional(),
   /** Who the review is posted as (see the docblock). Default `self`. */
-  identity: ReviewerIdentitySchema.optional(),
+  identity: ReviewerIdentitySchema.nullish(),
   /** Reasoning effort the reviewer runs at. Reviewing well is not a cheap job. */
-  effort: EffortSchema.optional(),
+  effort: EffortSchema.nullish(),
   /**
    * The provider the reviewer runs on. Absent = the project's own provider.
    *
@@ -151,7 +235,7 @@ export const WorkflowReviewAgentConfigSchema = z.object({
    * that fails on its first turn, which is exactly how `spawn_chat` children
    * broke before they carried a provider of their own.
    */
-  harness: HarnessKindSchema.optional(),
+  harness: HarnessKindSchema.nullish(),
   /**
    * The model the reviewer runs on. Absent = that provider's default.
    *
@@ -160,9 +244,9 @@ export const WorkflowReviewAgentConfigSchema = z.object({
    * the project switches. The Reviewer pane enforces that; a hand-written
    * manifest with `model` and no `harness` keeps its old meaning.
    */
-  model: z.string().optional(),
+  model: z.string().nullish(),
   /** A configured agent (`.dispatch/agents/`) to run the review as. */
-  agentId: z.string().optional(),
+  agentId: z.string().nullish(),
   /** House rules appended to the briefing — what to be strict about, what to skip. */
   instructions: z.string().optional(),
   /**
@@ -173,7 +257,15 @@ export const WorkflowReviewAgentConfigSchema = z.object({
    * rounds that never converges is the failure mode worth capping, because it
    * spends quota indefinitely and looks like progress the whole time.
    */
-  maxRounds: z.number().int().min(1).max(20).optional(),
+  maxRounds: z.number().int().min(1).max(20).nullish(),
+  /**
+   * How that cap is ARRIVED AT — fixed, or sized to the diff.
+   *
+   * Beside `maxRounds` rather than replacing it, because `maxRounds` is still
+   * the whole answer in `static` mode and every manifest written before this
+   * existed says exactly what it used to.
+   */
+  rounds: ReviewRoundsPolicySchema.optional(),
   /**
    * Post the review to GitHub. Off = the reviewer reports in its own chat and
    * touches nothing — the honest way to try this on a repo before trusting it.
@@ -203,7 +295,13 @@ export const ResolvedReviewAgentSchema = z.object({
   model: z.string().optional(),
   agentId: z.string().optional(),
   instructions: z.string().optional(),
+  /**
+   * The STATIC cap, and the fallback whenever a dynamic one cannot be computed.
+   * Not necessarily the cap in force — ask {@link reviewRoundCap}, which is the
+   * one place the two modes are reconciled.
+   */
   maxRounds: z.number().int(),
+  rounds: ResolvedReviewRoundsSchema,
   post: z.boolean(),
 });
 export type ResolvedReviewAgent = z.infer<typeof ResolvedReviewAgentSchema>;
@@ -468,7 +566,8 @@ const REVIEW_AGENT_OFF: ResolvedReviewAgent = {
   enabled: false,
   identity: "self",
   effort: "high",
-  maxRounds: 4,
+  maxRounds: DEFAULT_REVIEW_MAX_ROUNDS,
+  rounds: DEFAULT_REVIEW_ROUNDS,
   post: true,
 };
 
@@ -630,7 +729,121 @@ function resolveReviewAgent(
     agentId: authored?.agentId ?? base.agentId,
     instructions: authored?.instructions ?? base.instructions,
     maxRounds: authored?.maxRounds ?? base.maxRounds,
+    rounds: {
+      mode: authored?.rounds?.mode ?? base.rounds.mode,
+      base: authored?.rounds?.base ?? base.rounds.base,
+      linesPerRound: authored?.rounds?.linesPerRound ?? base.rounds.linesPerRound,
+      max: authored?.rounds?.max ?? base.rounds.max,
+    },
     post: authored?.post ?? base.post,
+  };
+}
+
+/**
+ * The diff size a round policy sizes off: additions plus deletions.
+ *
+ * Both halves count. A review reads what CHANGED, and 500 deleted lines are as
+ * much to check as 500 added ones — a pure deletion is exactly where "is
+ * anything still calling this" gets missed.
+ *
+ * `undefined` when NEITHER is known, rather than 0: zero is a real diff size
+ * and would silently mean the same thing here, but keeping them distinct is
+ * what lets {@link reviewRoundCap} document its own fallback.
+ *
+ * Here rather than beside either caller because there are two — the sweep and
+ * `request_review` — and they must agree on what a PR's size is or the same PR
+ * gets two different caps depending on which one looked last.
+ */
+export function changedLines(pr: {
+  additions?: number;
+  deletions?: number;
+}): number | undefined {
+  if (pr.additions == null && pr.deletions == null) return undefined;
+  return (pr.additions ?? 0) + (pr.deletions ?? 0);
+}
+
+/**
+ * The cap in force for ONE pull request — the single place `static` and
+ * `dynamic` are reconciled.
+ *
+ * Every consumer that asks "how many rounds does this PR get" must come through
+ * here rather than reading `policy.maxRounds`, for the reason the view helper
+ * spells the cap rule once: `claimReviewAgent` refuses on this number,
+ * `notePolicy` mirrors it onto the row, the chip renders it as the denominator
+ * and `watch_pr` decides "no further review can ever spawn" from it. Two
+ * derivations of it would mean a PR that reads as spent while the sweep is
+ * still spawning on it.
+ *
+ * `changedLines` absent falls back to `base`, NOT to `max`. A size we could not
+ * read is not evidence of a big diff, and the sweep rewrites the cap from the
+ * next poll that does know — so under-granting self-corrects within ~90s, while
+ * over-granting has already spent the quota by the time anyone notices.
+ */
+export function reviewRoundCap(
+  policy: Pick<ResolvedReviewAgent, "maxRounds" | "rounds">,
+  changedLines?: number,
+): number {
+  const r = policy.rounds;
+  if (r.mode !== "dynamic") return policy.maxRounds;
+  const lines =
+    typeof changedLines === "number" && Number.isFinite(changedLines) && changedLines > 0
+      ? changedLines
+      : 0;
+  const granted = r.base + Math.floor(lines / r.linesPerRound);
+  // `max` wins even over `base` — a ceiling below the floor is a misconfiguration
+  // either way, and honouring the ceiling is the half that cannot overspend.
+  return Math.max(1, Math.min(granted, r.max));
+}
+
+/**
+ * The reviewer settings an INSTALL can default, under every project and over
+ * the shipped values.
+ *
+ * Only the round policy, deliberately. The other reviewer fields are either a
+ * secret (the account and its token, which is why they live beside `auth.json`
+ * and not here) or already have an app-level home of their own — reviewer model
+ * and effort are per provider, in `harness.defaults[kind].reviewer`, because a
+ * model id belongs to one catalogue. "How many times may a reviewer go round"
+ * belongs to neither: it is a spending decision about this machine's quota, and
+ * it is the same decision whatever provider answers it.
+ */
+export const AppReviewAgentDefaultsSchema = z.object({
+  /** The static cap, when a project does not pin one. */
+  maxRounds: z.number().int().min(1).max(20).optional(),
+  /** The sizing law, field by field, when a project does not pin that field. */
+  rounds: ReviewRoundsPolicySchema.optional(),
+});
+export type AppReviewAgentDefaults = z.infer<typeof AppReviewAgentDefaultsSchema>;
+
+/**
+ * Slot the app-level defaults in UNDER the project's authored block.
+ *
+ * Applied after {@link resolveWorkflow} rather than inside it, for the same
+ * reason `login` is overlaid by the server: this package cannot read the config
+ * dir, and `resolveWorkflow` is pure and called from the client. It therefore
+ * needs `authored` as well as `resolved` — by the time a value reaches
+ * `resolved` it has already been given the shipped default, and "the project
+ * said 4" is indistinguishable from "nobody said anything" there. That
+ * distinction IS the setting.
+ */
+export function applyReviewAgentDefaults(
+  resolved: ResolvedReviewAgent,
+  authored: WorkflowReviewAgentConfig | undefined,
+  app: AppReviewAgentDefaults | undefined,
+): ResolvedReviewAgent {
+  if (!app) return resolved;
+  return {
+    ...resolved,
+    maxRounds: authored?.maxRounds ?? app.maxRounds ?? resolved.maxRounds,
+    rounds: {
+      mode: authored?.rounds?.mode ?? app.rounds?.mode ?? resolved.rounds.mode,
+      base: authored?.rounds?.base ?? app.rounds?.base ?? resolved.rounds.base,
+      linesPerRound:
+        authored?.rounds?.linesPerRound ??
+        app.rounds?.linesPerRound ??
+        resolved.rounds.linesPerRound,
+      max: authored?.rounds?.max ?? app.rounds?.max ?? resolved.rounds.max,
+    },
   };
 }
 

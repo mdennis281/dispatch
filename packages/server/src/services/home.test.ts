@@ -7,6 +7,7 @@ import { EventBus } from "../bus.js";
 import { MetricsService, type MetricInput, type MetricSpanInput } from "./metrics.js";
 import { AttentionQueue } from "./attention.js";
 import { HomeService } from "./home.js";
+import { GLOBAL_PROJECT_ID } from "@dispatch/shared";
 import type { AttentionItem, Chat, Project } from "@dispatch/shared";
 
 const DAY = 86_400_000;
@@ -149,6 +150,24 @@ describe("HomeService.overview", () => {
     // Every spark is the same width, whatever the project did.
     expect(alpha!.spark).toHaveLength(beta!.spark.length);
     expect(alpha!.spark.reduce((a, b) => a + b, 0)).toBe(2);
+  });
+
+  it("keeps the global chat's pseudo-project out of the grid", async () => {
+    // `store.listProjects()` synthesizes it, and it is not a repo — no
+    // checkout, no workflow, nothing a project card could say. Without
+    // `realProjects` the grid grows a card for it and the headline counts it
+    // as a project. The activity TAIL still names it, because that reports
+    // where a row came from rather than offering somewhere to go.
+    await store.saveProject(project("p1", "Alpha"));
+    await store.saveChat(chat("cg", GLOBAL_PROJECT_ID));
+    metrics.record(
+      event({ ts: NOW - 1000, projectId: GLOBAL_PROJECT_ID, chatId: "cg", identifier: "Glob" }),
+    );
+
+    const out = await makeHome().overview("7d");
+    expect(out.projects.map((p) => p.id)).toEqual(["p1"]);
+    expect(out.totals.projects).toBe(1);
+    expect(out.recent[0]).toMatchObject({ identifier: "Glob", projectName: "Global" });
   });
 
   it("excludes archived chats from the counts", async () => {

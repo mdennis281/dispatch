@@ -104,6 +104,16 @@ import type {
   PrReviewAgentState,
 } from "@dispatch/shared";
 import {
+  BUILTIN_MODE_CONFIGS,
+  GLOBAL_MODE,
+  GLOBAL_MODE_ID,
+  isGlobalProject,
+  isProtectedMode,
+  isToolAllowed,
+  enforceGlobalPosture,
+  deniedToolRefusal,
+  buildGlobalProjectIndex,
+  realProjects,
   DEFAULT_HARNESS,
   DEFAULT_MAX_ACTIVE_SESSIONS,
   composeMessageText,
@@ -125,8 +135,10 @@ import {
   SECRET_ANSWERS,
   type SecretRequestPayload,
   type SecretScope,
+  changedLines,
   prReviewAgentView,
   resolveWorkflow,
+  reviewRoundCap,
   type McpEnablementLayers,
   type MetricEvent,
   type ResolvedAgentContext,
@@ -150,8 +162,10 @@ import type { MemoryHistoryService } from "./memory-history.js";
 import type {
   FindChatsQuery,
   FindChatsResult,
+  InspectInstance,
   ProjectInfoQuery,
   ProjectInfoResult,
+  ProjectListEntry,
   ReadChatQuery,
   ReadChatResult,
 } from "./inspect.js";
@@ -203,6 +217,7 @@ import {
   inspectCwdSync,
 } from "./workflow.js";
 import {
+  createModePolicyHook,
   createBackgroundShellGuardHook,
   createWorktreeGuardHook,
 } from "./shell-guard.js";
@@ -868,6 +883,12 @@ export interface SessionPrRegistry {
     repo: string,
     prNumber: number,
     by: string,
+    /**
+     * The cap recomputed from THIS diff, when the caller knows it. Consulted
+     * ahead of the row's stored copy, which under a `dynamic` round policy is
+     * only as fresh as the last sweep — see the registry's own comment.
+     */
+    opts?: { maxRounds?: number },
   ): Promise<{ armed: boolean; reason: string } | null>;
   /**
    * Record that this chat's review actually landed — the completion signal the
@@ -886,7 +907,63 @@ export interface SessionPrRegistry {
   ): Promise<unknown>;
 }
 
-function makePrRegistryBinding(
+/**
+ * This PR's round cap, confirmed against GitHub only when the cheap answer
+ * would be a permanent stop.
+ *
+ * The catalog row is the free read, and under a `dynamic` policy its
+ * `additions`/`deletions` are stale in exactly the window this exists for: the
+ * push-then-`request_review` sequence the watcher's own wake() prompt
+ * prescribes. Computing the cap off that row would recompute the PRE-PUSH size
+ * and refuse a PR that had just earned another round.
+ *
+ * So the live poll is spent only on the case where it can change the answer —
+ * when the row says every round is gone. That is the one verdict with no way
+ * back (no further round can spawn, and `watch_pr` stops waiting), so it is
+ * worth one GraphQL call to be sure of; every other read stays free, which
+ * matters because `watch_pr` makes this one every 20 seconds.
+ *
+ * A failed refresh keeps the stored answer rather than inventing a bigger cap:
+ * "GitHub was unreadable" is not evidence that the diff grew.
+ */
+export async function freshReviewRoundCap(
+  registry: SessionPrRegistry,
+  repo: string,
+  prNumber: number,
+  policy: ResolvedReviewAgent,
+  /** Rounds already spent out of the POLICY's allowance — per-PR grants removed. */
+  spent: number,
+  opts: {
+    /**
+     * Poll first, whatever the stored row says. For the paths that ACT on the
+     * answer — arming a request spends a round — where the conditional poll
+     * below is not enough: a force-push that SHRANK the diff leaves a stale cap
+     * that is too big, which reads as headroom, so nothing triggers the
+     * confirmation and a round gets armed that the policy would not allow.
+     *
+     * Not the default, because `watch_pr` makes the passive read every 20
+     * seconds per watched PR and over-granting by one round until the next
+     * sweep is a far smaller problem than a poll per PR per 20s.
+     */
+    force?: boolean;
+  } = {},
+): Promise<number> {
+  if (policy.rounds.mode !== "dynamic") return policy.maxRounds;
+  const live = opts.force ? await registry.refresh(repo, prNumber).catch(() => null) : null;
+  if (live) return reviewRoundCap(policy, changedLines(live));
+  const stored = await registry.snapshot(repo, prNumber).catch(() => null);
+  const cap = reviewRoundCap(policy, stored ? changedLines(stored) : undefined);
+  if (spent < cap) return cap;
+  const fresh = await registry.refresh(repo, prNumber).catch(() => null);
+  return fresh ? reviewRoundCap(policy, changedLines(fresh)) : cap;
+}
+
+/**
+ * Exported for its own test: the cap refresh below is read by three tools that
+ * each decide whether another review can ever happen, and driving that through
+ * a live broker would test the wiring rather than the rule.
+ */
+export function makePrRegistryBinding(
   registry: SessionPrRegistry,
   github: GitHubService,
   dirs: SessionDirs,
@@ -902,6 +979,17 @@ function makePrRegistryBinding(
    * problem, and recording it as a reviewer fault would cry wolf.
    */
   reviewerLogin: string | undefined,
+  /**
+   * The resolved round policy, so a READ of the reviewer row can report the cap
+   * that is actually in force rather than the one the last sweep happened to
+   * write.
+   *
+   * It has to be here and not at each call site because three tools decide
+   * "can another round still happen" off this one read — `request_review`'s
+   * spent-cap refusal, `watch_pr`'s `reviewsSpent`, and `approve_pr` — and
+   * under a `dynamic` policy the stored cap is a function of a diff that moves.
+   */
+  reviewPolicy: ResolvedReviewAgent | undefined,
 ): ManagerMcpPrRegistry {
   const repoFor = makeRepoResolver(github, dirs);
   // Every method degrades to null rather than throwing: a card is a nicety, and
@@ -936,7 +1024,36 @@ function makePrRegistryBinding(
     },
     reviewAgent: async (n, repo) => {
       const r = await repoFor(repo);
-      return r ? registry.reviewAgent(r, n) : null;
+      if (!r) return null;
+      const state = await registry.reviewAgent(r, n);
+      // The cap, recomputed from the diff as it is NOW.
+      //
+      // The sweep writes `maxRounds` onto the row every ~90s, which is fine
+      // while the number is a constant and wrong the moment it is a function of
+      // the diff. The sequence the `wake()` prompt in `pr-review-watcher.ts`
+      // actually tells an agent to follow is: push the fix, then call
+      // `request_review` — so a push that grows the PR past the next bracket
+      // lands squarely in the stale window. Read off the row, the cap is the
+      // pre-push one, `request_review` refuses `rounds-spent` without ever
+      // setting `requestedAt`, and the sweep that follows raises the
+      // denominator onto a row with no request left to claim. The PR then
+      // strands on a manual `extraRounds` grant — which is the exact failure
+      // dynamic sizing exists to remove.
+      //
+      // Only when the row ALREADY carries a cap: a row that never recorded one
+      // cannot say the cap is reached, and inventing a number here would turn
+      // "we don't know" into a confident refusal.
+      if (!state || state.maxRounds == null || reviewPolicy?.rounds.mode !== "dynamic") {
+        return state;
+      }
+      const cap = await freshReviewRoundCap(
+        registry,
+        r,
+        n,
+        reviewPolicy,
+        (state.rounds ?? 0) - (state.extraRounds ?? 0),
+      );
+      return cap === state.maxRounds ? state : { ...state, maxRounds: cap };
     },
     raiseReviewRoundCap: async (n, repo, extra) => {
       const r = await repoFor(repo);
@@ -1122,6 +1239,7 @@ export interface BrokerInspect {
   findChats(q: FindChatsQuery): Promise<FindChatsResult>;
   readChat(q: ReadChatQuery): Promise<ReadChatResult>;
   projectInfo(q: ProjectInfoQuery, callerProjectId?: string): Promise<ProjectInfoResult>;
+  projectList(instance?: InspectInstance): Promise<ProjectListEntry[]>;
 }
 
 export interface SessionBrokerOptions {
@@ -1272,6 +1390,28 @@ export interface SessionView {
 /* -------------------------------------------------------- mode / effort maps */
 
 /** Built-in mode-id → SDK permissionMode fallback (used when no ModeConfig). */
+/**
+ * A comparable stand-in for a session's tool policy, so `setMode` can tell
+ * whether a switch actually moved it and only pay for a runtime restart when
+ * it did.
+ *
+ * JSON rather than a join, because `undefined` and `[]` must compare DIFFERENT
+ * — one means "every tool", the other means "none" (see `isToolAllowed`), and
+ * any encoding that flattens them would skip the restart on the single most
+ * consequential change this can make.
+ */
+function toolPolicyKey(s: { allowedTools?: string[]; deniedTools?: string[] }): string {
+  return JSON.stringify([s.allowedTools ?? null, s.deniedTools ?? null]);
+}
+
+/** Statuses in which a turn is in flight — see `setMode`'s deferred restart. */
+const ACTIVE_STATUSES: ReadonlySet<string> = new Set([
+  "running",
+  "queued",
+  "waiting",
+  "awaiting-input",
+]);
+
 export const BUILTIN_MODE_PERMISSION: Record<string, PermissionMode> = {
   default: "default",
   ask: "default",
@@ -1283,6 +1423,10 @@ export const BUILTIN_MODE_PERMISSION: Record<string, PermissionMode> = {
   bypass: "bypassPermissions",
   bypassPermissions: "bypassPermissions",
   dontAsk: "dontAsk",
+  // The global chat's posture. Listed here as well as in `BUILTIN_MODE_CONFIGS`
+  // so it shows up wherever built-in mode IDS are enumerated (`mode_list`, the
+  // mode picker) rather than only where full records are resolved.
+  [GLOBAL_MODE_ID]: GLOBAL_MODE.permissionMode,
 };
 
 /**
@@ -1866,6 +2010,23 @@ interface LiveSession {
    * the prompt and the rules enforced on tool calls can never disagree.
    */
   workflow?: ResolvedWorkflow;
+  /**
+   * The tool gating the selected MODE imposes, stamped alongside `workflow` in
+   * `buildOptions` and read by the same guard.
+   *
+   * Both halves are handed to the runtime as well (`HarnessSessionSpec`), where
+   * they thin the tool catalogue. This copy is the ENFORCEMENT: the runtime's
+   * gating is advisory from Dispatch's side (a harness may not implement it, it
+   * demonstrably does not cover MCP tools — a global chat still reported seeing
+   * `mcp__dispatch-github__request_review` in its toolbox with that name on the
+   * list — and a subagent definition can re-widen its own). The guard runs as a
+   * PreToolUse veto, fires for subagent calls, and is not skipped under
+   * `bypassPermissions`. For the posture that makes a project-less chat safe,
+   * advisory is not enough.
+   */
+  modeName?: string;
+  allowedTools?: string[];
+  deniedTools?: string[];
   /** The protected trunk for this project (`defaultBranch`, default "main"). */
   trunk?: string;
   /** Branch at the session cwd, or null when detached / unknown. */
@@ -1998,6 +2159,13 @@ interface LiveSession {
   stopping: boolean;
   /** Teardown is a provider migration; settle quietly instead of as session done. */
   switching?: boolean;
+  /**
+   * A mode switch changed the tool policy while a turn was in flight, so the
+   * runtime's tool catalogue is stale and owes a restart. Drained when the turn
+   * settles — see `setMode`, which cannot do it on the spot without deadlocking
+   * against its own caller.
+   */
+  pendingPolicyRestart?: boolean;
   /** One-shot resume/fork config consumed at the next query start. */
   resumeSessionId?: string;
   forkAtUuid?: string;
@@ -2224,12 +2392,27 @@ export class SessionBroker {
         worktreeCwd,
         // Placeholders until the first `buildOptions`, which resolves the
         // inherited chain asynchronously — `create` is sync and only has the row.
-        modeId: chat.modeId ?? DEFAULT_MODE_ID,
+        modeId: isGlobalProject(chat.projectId)
+          ? GLOBAL_MODE_ID
+          : (chat.modeId ?? DEFAULT_MODE_ID),
         agentId: chat.agentId,
         personaId: chat.personaId,
         effort: chat.effort ?? DEFAULT_EFFORT,
         pins: {
-          ...(chat.modeId !== undefined ? { modeId: chat.modeId } : {}),
+          // A mode pin on a GLOBAL chat is ignored, whatever the row says.
+          //
+          // This is the chokepoint, and it has to be here rather than only on
+          // the routes that write the row. `PUT /api/chats/:id` merges its
+          // body and saves directly — no posture resolution, no broker — so a
+          // `{ modeId: "yolo" }` lands as a pin; `refreshInheritedPosture`
+          // then sees a defined pin and never re-resolves, and the chat comes
+          // up with `bypassPermissions` and no denylist at all. A row can also
+          // predate this change, or be edited by hand. Dropping the pin here
+          // means the posture holds no matter how the row got written, and the
+          // project layer (`enforceGlobalPosture`) answers instead.
+          ...(chat.modeId !== undefined && !isGlobalProject(chat.projectId)
+            ? { modeId: chat.modeId }
+            : {}),
           ...(chat.effort !== undefined ? { effort: chat.effort } : {}),
           ...(chat.model !== undefined ? { model: chat.model } : {}),
         },
@@ -2932,6 +3115,18 @@ export class SessionBroker {
    */
   async setMode(chatId: string, modeId: string | null): Promise<PermissionMode> {
     const session = this.mustGet(chatId);
+    // A global chat's posture is not a preference. Everything that makes it
+    // safe to be project-less — no shell, no edits, no worktree, no merge —
+    // lives in that one mode, so letting the picker move off it would turn the
+    // cross-project chat into an unanchored agent with a shell. `null` is
+    // allowed because unpinning resolves straight back to `global`.
+    if (isGlobalProject(session.projectId) && modeId !== null && modeId !== GLOBAL_MODE_ID) {
+      throw new Error(
+        `The global chat always runs in ${GLOBAL_MODE_ID} mode — it has no project, so ` +
+          "there is nothing for another posture to be safe in. Spawn a chat into a " +
+          "project to work there.",
+      );
+    }
     if (modeId === null) {
       delete session.pins.modeId;
       session.modeId = (await this.resolvePosture(session)).modeId.effective;
@@ -2939,9 +3134,55 @@ export class SessionBroker {
       session.pins.modeId = modeId;
       session.modeId = modeId;
     }
+    // Re-stamp the tool gate, not just the permission mode. Without this a
+    // chat switched INTO a restricted mode kept running under the previous
+    // mode's (absent) denylist until its next session build, and a chat
+    // switched OUT of one stayed restricted — in both directions the guard
+    // was enforcing a mode the chat was no longer in.
+    const policyBefore = toolPolicyKey(session);
+    this.stampModeGate(session, await this.resolveMode(session.modeId));
+    // The guard is now right, but the RUNTIME's tool catalogue is not: those
+    // lists are fixed when the session is created, and `setPermissionMode`
+    // does not revisit them. So a chat switched out of a restrictive mode
+    // would keep its tools hidden, and one switched in would keep seeing tools
+    // the guard will now refuse — the catalogue disagreeing with the rule.
+    // Retire the runtime and resume its transcript, the same move
+    // `setPersona` makes for the same reason (instructions are fixed at
+    // startup too). Only when the policy actually MOVED: most mode switches
+    // change nothing here and must not cost a restart.
+    //
+    // NEVER MID-TURN, though — and not merely as a courtesy. `chat_set_mode`
+    // is a tool the agent can call on its OWN chat, from inside its own turn:
+    // `stop()` waits for that run loop, the run loop is waiting for this tool
+    // handler to return, and the call hangs until the stop timeout fires and
+    // aborts the turn it was serving. A human switching mode on a running
+    // chat would lose the turn the same way, just without the deadlock.
+    //
+    // Deferring is safe because the two halves have different jobs. The GUARD
+    // is the enforcement and it is already updated above, synchronously, so
+    // the very next call is judged by the new policy. The CATALOGUE is only
+    // what the model can see, and a stale one costs a refusal it could have
+    // been spared — never a tool it should not have had. But it must actually
+    // HAPPEN: left to "the next session build" the runtime can outlive many
+    // more turns, and a chat switched OUT of a restrictive mode would keep its
+    // newly allowed tools unregistered until some unrelated reap. So the debt
+    // is recorded and settled by `drainPendingPolicyRestart` at turn end.
+    if (session.started && toolPolicyKey(session) !== policyBefore) {
+      if (!session.turnOpen && !ACTIVE_STATUSES.has(session.status)) {
+        session.switching = true;
+        await this.stop(chatId);
+      } else {
+        session.pendingPolicyRestart = true;
+      }
+    }
     const mode = await this.resolvePermissionMode(session.modeId);
     if (session.harnessSession) {
-      await session.harnessSession.setPermissionMode(mode).catch((err) => {
+      // The freshly stamped gate travels with the mode. An adapter whose only
+      // interception point is its own permission prompt (ACP) has to know the
+      // policy moved, because the deferred restart above may be a whole turn
+      // away and the spec's copy was frozen at construction.
+      const policy = { allowedTools: session.allowedTools, disallowedTools: session.deniedTools };
+      await session.harnessSession.setPermissionMode(mode, policy).catch((err) => {
         this.bus.publish({
           type: "error",
           chatId,
@@ -4238,6 +4479,8 @@ export class SessionBroker {
           : undefined,
         mcpServers,
         managerMcp,
+        allowedTools: session.allowedTools,
+        disallowedTools: session.deniedTools,
         skills: (session.materializedSkillDirs ?? []).map((dir) => ({
           dir,
           name: dir.split(/[\\/]/).pop() ?? dir,
@@ -4252,6 +4495,23 @@ export class SessionBroker {
         abortSignal: session.abortController.signal,
         account: session.account,
         toolGuard: (toolName, input) => {
+          // The MODE's tool policy is checked first and is unconditional:
+          // unlike the workflow guard below it has no `off` setting, because
+          // the mode that uses it is the one a chat with no project runs
+          // under. Both halves are enforced here — a runtime that ignores the
+          // SDK allowlist must not thereby be unrestricted.
+          if (
+            !isToolAllowed(toolName, {
+              allowedTools: session.allowedTools,
+              disallowedTools: session.deniedTools,
+            })
+          ) {
+            return deniedToolRefusal(
+              toolName,
+              session.modeName ?? session.modeId,
+              session.modeId,
+            );
+          }
           if (toolName !== "Bash" || session.workflow?.guard === "off") return null;
           const command = typeof input.command === "string" ? input.command : "";
           // The call's real cwd outranks the directory the chat started in. This
@@ -4283,6 +4543,36 @@ export class SessionBroker {
         },
       };
 
+      // A posture whose entire point is its denylist needs TWO things from a
+      // runtime, and they fail independently:
+      //
+      //   - `preToolGuard` — refuse BEFORE the call. Codex can only catch a
+      //     violation on sighting, which is an acceptable degradation for the
+      //     workflow guard (an interrupted `git push` has still been seen) and
+      //     not for this: by the time a `worktree` call is sighted, the
+      //     worktree exists.
+      //   - `guardsMcpToolNames` — see the call under its qualified
+      //     `mcp__server__tool` name. ACP vetoes in time but its permission
+      //     requests carry no server, so `mcp__dispatch-workspace__worktree`
+      //     never matches and the call becomes a prompt a human can approve.
+      //     Nearly everything this posture denies is namespaced.
+      //
+      // Either missing and the posture is decoration, so refuse loudly and
+      // name the fix rather than run a project-less chat under a rule that
+      // isn't holding.
+      const caps = resolved.harness.capabilities;
+      if (isProtectedMode(session.modeId) && !(caps.preToolGuard && caps.guardsMcpToolNames)) {
+        throw new Error(
+          `${session.modeName ?? session.modeId} mode cannot run on ${resolved.harness.kind}: ` +
+            (caps.preToolGuard
+              ? "that runtime cannot tell which MCP tool a call is for until after it runs, " +
+                "and almost everything this posture denies is an MCP tool."
+              : "that runtime cannot refuse a tool call before it runs, and this posture is " +
+                "nothing but a list of calls to refuse.") +
+            " Switch this chat to a runtime that can (Claude) from the composer's provider " +
+            "picker.",
+        );
+      }
       session.harnessSession = resolved.harness.createSession(spec);
       session.resumeSessionId = undefined;
       session.forkAtUuid = undefined;
@@ -6453,6 +6743,7 @@ export class SessionBroker {
     // and doing it the other way round leaves "Turn complete — awaiting your
     // input" sitting in the list above a chat that is already running again.
     this.flushPendingSends(session);
+    this.drainPendingPolicyRestart(session);
   }
 
   /** A turn failed but its reusable runtime session is still available. */
@@ -6465,6 +6756,34 @@ export class SessionBroker {
     // can still be sent — and a usage limit or a transport blip is exactly when
     // the human's "do this next" is worth the most, not something to discard.
     this.flushPendingSends(session);
+    this.drainPendingPolicyRestart(session);
+  }
+
+  /**
+   * Retire a runtime whose tool catalogue a mode switch left stale.
+   *
+   * `setMode` cannot do this itself: `chat_set_mode` is a tool the agent can
+   * call on its own chat, so `stop()` would wait on the run loop that is
+   * waiting on the tool handler. It records the debt instead and this pays it
+   * once the turn has settled.
+   *
+   * Re-checks everything rather than trusting the flag. `flushPendingSends`
+   * runs first and may already have started the next turn, in which case the
+   * debt stands and the turn after this one pays it — a stale catalogue costs
+   * a refusal the model could have been spared, never a tool it should not
+   * have had, so waiting is cheap and interrupting is not.
+   */
+  private drainPendingPolicyRestart(session: LiveSession): void {
+    if (!session.pendingPolicyRestart) return;
+    if (!session.started || session.stopping) return;
+    if (session.turnOpen || ACTIVE_STATUSES.has(session.status)) return;
+    session.pendingPolicyRestart = false;
+    session.switching = true;
+    void this.stop(session.chatId).catch(() => {
+      // The transcript is resumed on the next send either way, so a failed
+      // teardown costs the catalogue refresh and nothing else.
+      session.switching = false;
+    });
   }
 
   private onDone(session: LiveSession): void {
@@ -6478,6 +6797,8 @@ export class SessionBroker {
     session.guardRecoveries.length = 0;
     session.explicitInterruptPending = false;
     session.turnOpen = false;
+    // The runtime is gone, so the catalogue it owed a refresh on is gone too.
+    session.pendingPolicyRestart = false;
     session.managerGrant?.revoke();
     session.managerGrant = undefined;
     session.stopping = false;
@@ -6517,6 +6838,8 @@ export class SessionBroker {
     session.guardRecoveries.length = 0;
     session.explicitInterruptPending = false;
     session.turnOpen = false;
+    // The runtime is gone, so the catalogue it owed a refresh on is gone too.
+    session.pendingPolicyRestart = false;
     session.managerGrant?.revoke();
     session.managerGrant = undefined;
     // A crash after a completed turn leaves a live "Turn complete" item; clear it.
@@ -6799,9 +7122,18 @@ export class SessionBroker {
    * (the source of truth) wins over a `.data`-defined one on id collision.
    */
   private async resolveMode(modeId: string): Promise<ModeConfig | null> {
+    // A PROTECTED built-in wins over both authored layers, which inverts this
+    // method's usual rule. It has to: `global` is writable as a project mode
+    // and as a store row, so under the normal order any repo could ship a
+    // `modes/global.yaml` with no denylist and silently unrestrict every
+    // global chat on the install. See `PROTECTED_MODE_IDS`.
+    if (isProtectedMode(modeId)) return BUILTIN_MODE_CONFIGS[modeId] ?? null;
     return (
       this.projectConfig?.getMode(modeId) ??
-      (await this.store.getMode(modeId).catch(() => null))
+      (await this.store.getMode(modeId).catch(() => null)) ??
+      // Other built-ins come LAST, so a project or the store can refine them.
+      BUILTIN_MODE_CONFIGS[modeId] ??
+      null
     );
   }
 
@@ -6831,15 +7163,17 @@ export class SessionBroker {
    */
   private async resolvePosture(session: LiveSession): Promise<ChatPosture> {
     const settings = await this.store.getSettings().catch(() => undefined);
-    return resolveChatPosture({
-      chat: {
-        harness: session.harnessKind,
-        subscriptionId: session.subscriptionId,
-        ...session.pins,
-      },
-      project: this.projectConfig?.getDefaults?.(session.projectId),
-      settings,
-    });
+    return resolveChatPosture(
+      enforceGlobalPosture(session.projectId, {
+        chat: {
+          harness: session.harnessKind,
+          subscriptionId: session.subscriptionId,
+          ...session.pins,
+        },
+        project: this.projectConfig?.getDefaults?.(session.projectId),
+        settings,
+      }),
+    );
   }
 
   /**
@@ -6858,6 +7192,20 @@ export class SessionBroker {
     if (pins.modeId === undefined) session.modeId = posture.modeId.effective;
     if (pins.effort === undefined) session.effort = posture.effort.effective;
     if (pins.model === undefined) session.modelOverride = posture.model.effective;
+  }
+
+  /**
+   * Copy the resolved mode's tool policy onto the session, where the guard
+   * reads it.
+   *
+   * One function because two callers need it at different times — the session
+   * build, and a live `setMode` — and a gate that only one of them refreshed
+   * is a gate enforcing the wrong mode.
+   */
+  private stampModeGate(session: LiveSession, mode: ModeConfig | null): void {
+    session.modeName = mode?.name ?? session.modeId;
+    session.allowedTools = mode?.allowedTools;
+    session.deniedTools = mode?.disallowedTools;
   }
 
   private async buildOptions(session: LiveSession): Promise<Options> {
@@ -6960,6 +7308,16 @@ export class SessionBroker {
     const mode = await this.resolveMode(session.modeId);
     const agent = session.agentId ? await this.resolveAgent(session.agentId) : null;
 
+    // The mode's tool gating, applied two ways — see `LiveSession.deniedTools`.
+    // Handing it to the SDK thins the catalogue where the SDK honours it
+    // (built-ins reliably, MCP tools not); the guard below is the enforcement.
+    this.stampModeGate(session, mode);
+    // `!== undefined`, never `.length`: a DEFINED but empty allowlist permits
+    // nothing, and collapsing it to "absent" would turn the strictest policy
+    // expressible into the loosest one.
+    if (session.allowedTools !== undefined) options.allowedTools = session.allowedTools;
+    if (session.deniedTools !== undefined) options.disallowedTools = session.deniedTools;
+
     // The workflow contract — how change ships in THIS project. Resolved BEFORE
     // the tools directive because it decides one of the session's capabilities:
     // `approve_pr` exists only where the project opted into auto-merge, so the
@@ -6999,6 +7357,24 @@ export class SessionBroker {
       memory: Boolean(this.memory && session.projectId),
     });
     if (workflowDirective) appends.push(workflowDirective);
+
+    // The global chat's one standing block: what projects exist, and where.
+    //
+    // Deliberately the SMALLEST thing that makes the install navigable — a
+    // name and a path each, ~12 tokens per project. Everything deeper
+    // (workflow, sub-apps, MCP servers, skills, recent chats) is a tool call
+    // away and is paid for only when it is wanted; see
+    // `buildGlobalProjectIndex`. The alternative — injecting the overview —
+    // charges every turn of every global chat for every project Michael has
+    // ever onboarded, and that bill only goes up.
+    if (isGlobalProject(session.projectId)) {
+      const all = await this.store.listProjects().catch(() => []);
+      appends.push(
+        buildGlobalProjectIndex(
+          realProjects(all).map((p) => ({ id: p.id, name: p.name, repoPath: p.repoPath })),
+        ),
+      );
+    }
 
     // Learn the effort the runtime is REALLY running each thread at. Hook inputs
     // are the only place that number surfaces (the message stream never carries
@@ -7057,6 +7433,38 @@ export class SessionBroker {
         ],
       };
     }
+
+    // The MODE's tool policy, as a hook — so the direct Claude path (which
+    // never builds `HarnessSessionSpec.toolGuard`) enforces exactly what the
+    // neutral harness path does. Installed FIRST among the guards because it
+    // is the most categorical: a tool the mode forbids is forbidden whatever
+    // the command says. Read through closures so a live `setMode` applies to
+    // the very next call rather than the next session.
+    options.hooks = {
+      ...options.hooks,
+      PreToolUse: [
+        ...(options.hooks?.PreToolUse ?? []),
+        {
+          hooks: [
+            createModePolicyHook({
+              policy: () => ({
+                allowedTools: session.allowedTools,
+                disallowedTools: session.deniedTools,
+              }),
+              mode: () => ({ name: session.modeName ?? session.modeId, id: session.modeId }),
+              onBlocked: (tool) => {
+                this.bus.publish({
+                  type: "notice",
+                  chatId: session.chatId,
+                  level: "info",
+                  text: `${session.modeName ?? session.modeId} mode refused ${tool}.`,
+                });
+              },
+            }),
+          ],
+        },
+      ],
+    };
 
     // …and refuse a shell-cut worktree, which lands in the catalog attributed to
     // nobody. Gated on the same service the `worktree` tool is bound from, so
@@ -7291,6 +7699,17 @@ export class SessionBroker {
     // refreshed from the SDK after init; for a local model nothing upstream
     // ever supplies a true one, so this is it.
     if (contextWindow !== undefined) session.contextWindow = contextWindow;
+    // The browser pair is attached to a global chat like any other, and that
+    // is a deliberate call rather than an oversight.
+    //
+    // Review raised that `browser_click` could drive github.com's merge
+    // button and so route around "never land". True in principle, and
+    // declined: the posture exists to stop an agent CASUALLY damaging a repo
+    // — the one-command `sed -i`, the reflexive `approve_pr`, the write into
+    // the wrong worktree. Driving a browser to a merge button is not a thing
+    // a model does by accident, and withholding browser automation costs a
+    // chat whose entire job is looking at things the ability to look at
+    // things. Michael's call; recording it so nobody re-derives the ban.
     const browserMcp = buildBrowserMcpServers({
       contextWindow,
       config: projectId ? this.projectConfig?.getBrowserConfig?.(projectId) : undefined,
@@ -7353,6 +7772,12 @@ export class SessionBroker {
         chatId: session.chatId,
         bus: this.bus,
         broker: this,
+        // Don't just refuse what the mode denies — don't HAND IT OVER. For
+        // Dispatch's own tools absence beats a veto: a veto needs the runtime
+        // to report the call under a name the policy recognises, which is a
+        // capability ACP cannot provide, and absence needs nothing. The guard
+        // stays for the harness-native tools nothing here can unregister.
+        toolPolicy: { allowedTools: session.allowedTools, disallowedTools: session.deniedTools },
         // So `run_subapp` can name the tool that opens the URL it returns.
         browserServers: Object.keys(browserMcp),
         // Bind the terminal runner to this session's chat + default cwd (its
@@ -7473,6 +7898,7 @@ export class SessionBroker {
                 dirs,
                 session.chatId,
                 reviewer?.policy.login,
+                reviewer?.policy,
               )
             : undefined,
         github: github
@@ -7493,17 +7919,40 @@ export class SessionBroker {
                     // review.
                     requestLocal:
                       reviewer.policy.identity === "self" && this.prRegistry
-                        ? async (repo, n) =>
+                        ? async (repo, n) => {
+                            // The cap, recomputed from the diff THIS request is
+                            // about. Under a `dynamic` policy the row's copy is
+                            // only as fresh as the last sweep, and the order a
+                            // growing PR arrives in — push, then request — is
+                            // exactly the one that lands inside that window, so
+                            // this confirms a spent cap against GitHub before
+                            // letting it refuse.
+                            const registry = this.prRegistry;
+                            const state = registry
+                              ? await registry.reviewAgent(repo, n).catch(() => null)
+                              : null;
                             // The REASON, not truthiness of the result: the
                             // registry answers with an object on every path now,
                             // so `Boolean(result)` called a spent cap a success —
                             // and a bare `.armed` would call an already-queued
                             // request a failure. Only the reason tells them apart.
-                            (await this.prRegistry?.requestReviewAgent(
-                              repo,
-                              n,
-                              session.chatId,
-                            )) ?? { armed: false, reason: "unknown-pr" }
+                            return (
+                              (await registry?.requestReviewAgent(repo, n, session.chatId, {
+                                maxRounds: registry
+                                  ? await freshReviewRoundCap(
+                                      registry,
+                                      repo,
+                                      n,
+                                      reviewer.policy,
+                                      (state?.rounds ?? 0) - (state?.extraRounds ?? 0),
+                                      // This one ARMS a round. Worth a poll
+                                      // every time, in both directions.
+                                      { force: true },
+                                    )
+                                  : undefined,
+                              })) ?? { armed: false, reason: "unknown-pr" }
+                            );
+                          }
                         : undefined,
                   }
                 : undefined,
@@ -7717,6 +8166,7 @@ export class SessionBroker {
               findChats: (q) => this.inspect!.findChats(q),
               readChat: (q) => this.inspect!.readChat(q),
               projectInfo: (q) => this.inspect!.projectInfo(q, projectId),
+              projectList: (instance) => this.inspect!.projectList(instance),
             }
           : undefined,
         // Cross-chat messaging. `from` is CLOSED OVER rather than passed as an

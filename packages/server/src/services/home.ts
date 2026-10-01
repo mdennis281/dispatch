@@ -38,6 +38,7 @@
  * to need a progress bar.
  */
 import {
+  realProjects,
   HOME_SPARK_BUCKETS,
   HOME_WINDOW_MS,
   isChatWorking,
@@ -195,10 +196,20 @@ export class HomeService {
     const to = startedAt + 1;
     const from = to - HOME_WINDOW_MS[window];
 
-    const [projects, chats] = await Promise.all([
+    const [allProjects, chats] = await Promise.all([
       this.store.listProjects(),
       this.store.listChats(),
     ]);
+    // The grid is a list of repos you can go and work in, which is exactly the
+    // test `realProjects` exists for — `listProjects` synthesizes the global
+    // chat's pseudo-project and it has no checkout, no workflow and nothing a
+    // project card could honestly say about it. The TOTALS are summed from the
+    // grid below, so they are "across every project" in the same sense: a
+    // global chat's activity is out of this page's scope, not hidden from it.
+    //
+    // `allProjects` is kept for naming the activity tail, which reports what
+    // HAPPENED rather than offering somewhere to go — see `nameOfProject`.
+    const projects = realProjects(allProjects);
 
     // Attention is an in-memory list of outstanding items; counting it per
     // project means mapping chat → project, which the chats pass above already
@@ -266,7 +277,10 @@ export class HomeService {
     // still lands above a year-dormant one.
     rows.sort((a, b) => b.events - a.events || b.lastActivityAt - a.lastActivityAt);
 
-    const nameOfProject = new Map(projects.map((p) => [p.id, p.name]));
+    // Built from the UNFILTERED list: the tail names a row's origin rather
+    // than offering it as a destination, so a line from the global chat should
+    // say where it came from instead of reading "—".
+    const nameOfProject = new Map(allProjects.map((p) => [p.id, p.name]));
     const recent: HomeActivity[] = this.metrics
       .recent({ from, to, limit: RECENT })
       .map((e) => ({

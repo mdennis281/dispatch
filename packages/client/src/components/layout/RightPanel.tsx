@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { GitBranch, Bot, AppWindow, SquareTerminal, GitPullRequest, Ship, Play } from "lucide-react";
 import type { Chat } from "@dispatch/shared";
+import { isGlobalProject } from "@dispatch/shared";
 import { Tabs, type TabDef } from "../ui/Tabs.js";
 import { SegmentedControl } from "../ui/SegmentedControl.js";
 import { Badge } from "../ui/Chip.js";
@@ -50,7 +51,15 @@ export function RightPanel({ chat }: { chat: Chat }) {
   const tab = useLayout((s) => s.panelTab);
   const setTab = useLayout((s) => s.setPanelTab);
   const mode = useLayout((s) => s.mode);
-  const group = PANEL_GROUP[tab];
+  // A global chat ships nothing: it has no repo to cut a worktree in and no
+  // tool that could open a PR. The Ship group is therefore not empty, it is
+  // inapplicable — and leaving its "+ New" worktree button on screen would be
+  // a UI route around the very posture the mode enforces.
+  const shipless = isGlobalProject(chat.projectId);
+  const group = shipless ? "run" : PANEL_GROUP[tab];
+  useEffect(() => {
+    if (shipless && PANEL_GROUP[tab] === "ship") setTab(GROUP_HOME.run);
+  }, [shipless, tab, setTab]);
 
   // Shared with the mobile bottom nav, so a nav badge and a tab badge can never
   // disagree. See panels/usePanelCounts.
@@ -80,6 +89,13 @@ export function RightPanel({ chat }: { chat: Chat }) {
   ];
   const runTabs: TabDef[] = [
     { id: "agents", label: "Agents", icon: <Bot />, count: counts.agents },
+    // Terminals and Apps are repo-shaped too, and Terminals especially: the
+    // panel OPENS a shell, which is the one thing the global posture exists
+    // to prevent. The server refuses it as well (`resolveCwd` in
+    // routes/terminals.ts) — a tab that always errors is worse than no tab.
+    ...(shipless
+      ? []
+      : [
     { id: "terminals", label: "Terminals", icon: <SquareTerminal />, count: counts.terminals },
     {
       id: "apps",
@@ -90,6 +106,7 @@ export function RightPanel({ chat }: { chat: Chat }) {
       // it is orphans.
       tip: appsTip(counts),
     },
+        ] as TabDef[]),
   ];
 
   const tabs = group === "ship" ? shipTabs : runTabs;
@@ -108,7 +125,9 @@ export function RightPanel({ chat }: { chat: Chat }) {
         <SegmentedControl
           className="w-full [&>button]:flex-1"
           segments={[
-            {
+            ...(shipless
+              ? []
+              : [{
               value: "ship",
               label: "Ship",
               icon: <Ship />,
@@ -120,7 +139,7 @@ export function RightPanel({ chat }: { chat: Chat }) {
                     <Badge count={counts.ship} tone="warn" />
                   </span>
                 ) : undefined,
-            },
+            }]),
             {
               value: "run",
               label: "Run",

@@ -51,3 +51,4 @@ export * from "./human-review.js";
 export * from "./secrets.js";
 export * from "./issues.js";
 export * from "./authoring.js";
+export * from "./global-chat.js";

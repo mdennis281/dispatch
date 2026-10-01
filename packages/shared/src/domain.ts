@@ -151,6 +151,18 @@ export const ModeConfigSchema = z.object({
   /** One line on when to pick this mode — shown in listings, never injected. */
   description: z.string().optional(),
   permissionMode: PermissionModeSchema,
+  /**
+   * Tool gating, on the same terms as {@link AgentConfigSchema} — an allowlist
+   * (absent = every tool) and a denylist applied over it.
+   *
+   * `ConfigModeSchema` has carried these since `.dispatch/modes/` existed,
+   * with a comment promising "later phases map permissionMode/tools onto the
+   * SDK options when a chat selects it". This is that phase: the fields are on
+   * the store type too, so a mode is one shape wherever it came from, and the
+   * broker enforces them for every mode rather than only for authored ones.
+   */
+  allowedTools: z.array(z.string()).optional(),
+  disallowedTools: z.array(z.string()).optional(),
   instructions: z.string().optional(),
   scope: ConfigScopeSchema.default("global"),
   projectId: z.string().optional(),

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveProjectPaths } from "@dispatch/cli/core";
 import type { ModeConfig } from "@dispatch/shared";
+import { GLOBAL_MODE_ID } from "@dispatch/shared";
 import { createModeEditor, readModesDir, type ModeStore } from "./mode-editor.js";
 
 /** An in-memory `.data` — the `global` scope. */
@@ -144,5 +145,51 @@ describe("mode-editor", () => {
     await writeFile(join(dir, "bad.yaml"), "name: Bad\npermissionMode: sudo\n", "utf8");
     await writeFile(join(dir, "broken.yaml"), "name: [\n", "utf8");
     expect((await readModesDir(dir)).map((m) => m.id)).toEqual(["good"]);
+  });
+});
+
+describe("protected built-in modes", () => {
+  it("reports only the built-in, even when an authored copy exists on disk", async () => {
+    // The broker resolves a protected id from the built-in record BEFORE it
+    // looks at either authored layer, so an authored copy listed here would
+    // be the catalogue advertising a policy nothing enforces.
+    const dir = await mkdtemp(join(tmpdir(), "cm-modes-protected-"));
+    try {
+      await mkdir(join(dir, ".dispatch", "modes"), { recursive: true });
+      await writeFile(join(dir, ".dispatch", "project.yaml"), "name: t\n", "utf8");
+      await writeFile(
+        join(dir, ".dispatch", "modes", "global.yaml"),
+        "name: Global\npermissionMode: bypassPermissions\n",
+        "utf8",
+      );
+      const editor = createModeEditor({
+        store: fakeStore(),
+        configPaths: await resolveProjectPaths(dir),
+        builtin: { [GLOBAL_MODE_ID]: "default", plan: "plan" },
+      });
+      const listed = (await editor.list()).filter((m) => m.id === GLOBAL_MODE_ID);
+      expect(listed).toHaveLength(1);
+      expect(listed[0]!.scope).toBe("builtin");
+      expect(listed[0]!.permissionMode).not.toBe("bypassPermissions");
+      expect(listed[0]!.disallowedTools).toContain("Bash");
+
+      const read = await editor.read(GLOBAL_MODE_ID);
+      expect(read?.scope).toBe("builtin");
+      expect(read?.permissionMode).not.toBe("bypassPermissions");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to write or delete one", async () => {
+    const editor = createModeEditor({
+      store: fakeStore(),
+      configPaths: null,
+      builtin: { [GLOBAL_MODE_ID]: "default" },
+    });
+    await expect(
+      editor.write({ scope: "global", name: "Global", permissionMode: "bypassPermissions" }),
+    ).rejects.toThrow(/built-in posture/);
+    expect(await editor.remove(GLOBAL_MODE_ID, "global")).toBe(false);
   });
 });

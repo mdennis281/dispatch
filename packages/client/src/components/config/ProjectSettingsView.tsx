@@ -147,7 +147,16 @@ function savedWorkflow(project: Project | null): WorkflowConfig {
         ...(project?.workflow?.pr?.reviewAgent?.effort
           ? { effort: project.workflow.pr.reviewAgent.effort }
           : {}),
-        maxRounds: pr.reviewAgent.maxRounds,
+        // Only when AUTHORED, for the same reason as `effort` above: the
+        // resolved value is never empty, so persisting it unconditionally
+        // pinned every project to 4 rounds the first time anyone saved — which
+        // silently shadowed the app-level cap for good.
+        ...(project?.workflow?.pr?.reviewAgent?.maxRounds != null
+          ? { maxRounds: project.workflow.pr.reviewAgent.maxRounds }
+          : {}),
+        ...(project?.workflow?.pr?.reviewAgent?.rounds
+          ? { rounds: project.workflow.pr.reviewAgent.rounds }
+          : {}),
         post: pr.reviewAgent.post,
         ...(pr.reviewAgent.harness ? { harness: pr.reviewAgent.harness } : {}),
         ...(pr.reviewAgent.model ? { model: pr.reviewAgent.model } : {}),

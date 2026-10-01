@@ -19,6 +19,7 @@ import {
   prRecordKey,
   composeMessageText,
   resolveChatPosture,
+  enforceGlobalPosture,
   type WsClientAction,
   type Chat,
   type ChatPurpose,
@@ -119,18 +120,20 @@ export async function createChat(
     await resolvePersona(services.authored, input.personaId, paths?.configDir);
   }
   const settings = await store.getSettings().catch(() => null);
-  const posture = resolveChatPosture({
-    chat: {
-      harness: input.harness,
-      subscriptionId: input.subscriptionId,
-      modeId: input.modeId,
-      effort: input.effort,
-      model: input.model,
-    },
-    parent: input.parent,
-    project: services.projectConfig?.getDefaults(project.id),
-    settings,
-  });
+  const posture = resolveChatPosture(
+    enforceGlobalPosture(project.id, {
+      chat: {
+        harness: input.harness,
+        subscriptionId: input.subscriptionId,
+        modeId: input.modeId,
+        effort: input.effort,
+        model: input.model,
+      },
+      parent: input.parent,
+      project: services.projectConfig?.getDefaults(project.id),
+      settings,
+    }),
+  );
   const harness = posture.harness.effective;
   const now = Date.now();
   const chat: Chat = {

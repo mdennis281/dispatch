@@ -27,6 +27,7 @@
  * GitHub docs.
  */
 import {
+  applyReviewAgentDefaults,
   resolveWorkflow,
   type Project,
   type ResolvedReviewAgent,
@@ -46,8 +47,21 @@ export type ReviewerGitHub = Pick<
   "whoami" | "isCollaborator" | "canReadRepoAs"
 >;
 
-/** The credential reads a verification needs, kept structural for the same reason. */
+/** The credential read a verification needs, kept structural for the same reason. */
 export type ReviewerStore = Pick<Store, "getReviewer">;
+
+/**
+ * What RESOLVING additionally needs: the install's own reviewer defaults.
+ *
+ * Separate from {@link ReviewerStore} rather than widening it, because
+ * `verifyReviewer` genuinely only reads the credential and a type that claimed
+ * otherwise would make every setup-check caller carry a settings store it never
+ * touches. The policy has a layer behind the manifest and the shipped values —
+ * `AppSettings.reviewAgent` — and `resolveWorkflow` cannot read it: that
+ * function is pure and runs in the client too. This is where the chain is
+ * completed.
+ */
+export type ReviewerPolicyStore = ReviewerStore & Pick<Store, "getSettings">;
 
 /** The reviewer as the rest of the server should see it: one policy, one token. */
 export interface ReviewerResolution {
@@ -73,11 +87,20 @@ export interface ReviewerResolution {
  * it stays two cheap reads and no network.
  */
 export async function resolveReviewer(
-  store: ReviewerStore,
+  store: ReviewerPolicyStore,
   project: Project,
 ): Promise<ReviewerResolution> {
   const pr = resolveWorkflow(project).pr;
-  const policy = pr.reviewAgent;
+  // The app-level defaults go on BEFORE the identity branch below returns, or
+  // self-review — the default identity, and so most projects — would never see
+  // them. The overlay needs the AUTHORED block as well as the resolved one:
+  // "the project pinned 4" and "nobody said anything, so it resolved to 4" are
+  // the same value by here, and telling them apart is the whole setting.
+  const policy = applyReviewAgentDefaults(
+    pr.reviewAgent,
+    project.workflow?.pr?.reviewAgent,
+    (await store.getSettings().catch(() => null))?.reviewAgent,
+  );
   if (!policy.enabled || policy.identity !== "dedicated") return { policy };
 
   const cred = await store.getReviewer().catch(() => null);

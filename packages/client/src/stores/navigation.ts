@@ -18,6 +18,7 @@
  * These live outside the stores because the rule spans two of them, and neither
  * store should have to import the other.
  */
+import { GLOBAL_PROJECT_ID } from "@dispatch/shared";
 import type { Chat } from "@dispatch/shared";
 import { useChats, chatsForProject } from "./chats.js";
 import { useProjects } from "./projects.js";
@@ -57,6 +58,27 @@ export function selectChat(chatId: string): void {
     if (chat.projectId !== projects.activeProjectId) projects.setActiveProject(chat.projectId);
   }
   useChats.getState().setActiveChat(chatId);
+  useView.getState().setView("chat");
+}
+
+/**
+ * Open the GLOBAL chat surface — the reserved pseudo-project.
+ *
+ * Deliberately built out of the two functions above rather than setting the
+ * two selections itself. The global chat is special in what it is ALLOWED to
+ * do, not in how it is navigated to: it is a project id like any other, so the
+ * invariant this module holds applies to it unchanged, and an entry point that
+ * poked `setActiveProject`/`setActiveChat` directly would be the one place
+ * free to get it wrong.
+ *
+ * Lands on the most recent global chat when there is one, and on the empty
+ * state when there isn't — `reconcileActiveChat` already encodes that choice
+ * for a hydrate, and arriving at an empty surface when a conversation is
+ * sitting right there is the same bad landing here.
+ */
+export function selectGlobalChat(): void {
+  selectProject(GLOBAL_PROJECT_ID);
+  reconcileActiveChat();
   useView.getState().setView("chat");
 }
 

@@ -70,6 +70,7 @@ import {
   migrateToolList,
   isManagerServer,
   MANAGER_SERVER_PREFIX,
+  realProjects,
 } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
@@ -169,6 +170,8 @@ export function configModeToModeConfig(
     name: mode.name,
     description: mode.description,
     permissionMode: mode.permissionMode,
+    allowedTools: mode.allowedTools,
+    disallowedTools: mode.disallowedTools,
     instructions: mode.instructions,
     scope: "project",
     projectId,
@@ -224,8 +227,14 @@ function toStringArray(v: unknown): string[] | undefined {
  * must not become `[]` on the way through.
  */
 function toToolList(v: unknown): string[] | undefined {
-  const raw = toStringArray(v);
-  return raw ? migrateToolList(raw).tools : undefined;
+  // NOT via `toStringArray`, which collapses `[]` to `undefined` — the exact
+  // distinction the comment above promises to keep. An authored mode with
+  // `allowedTools: []` permits nothing; passed through that helper it arrived
+  // as "no list" and the broker read it as "allow everything", turning the
+  // strictest policy expressible into the loosest. Only a NON-ARRAY is unset.
+  if (!Array.isArray(v)) return undefined;
+  const raw = v.filter((x): x is string => typeof x === "string");
+  return raw.length ? migrateToolList(raw).tools : [];
 }
 
 interface Frontmatter {
@@ -391,7 +400,8 @@ export class ProjectConfigService {
   async start(): Promise<void> {
     let projects: Project[];
     try {
-      projects = await this.store.listProjects();
+      // No repo, so no `.dispatch/` to load or watch.
+      projects = realProjects(await this.store.listProjects());
     } catch {
       return;
     }

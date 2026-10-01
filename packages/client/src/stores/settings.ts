@@ -38,6 +38,10 @@ export type AppLayer = Pick<
   | "harness"
   | "spawnChat"
   | "defaultSendMode"
+  // The reviewer pane reads it to show what a project inherits when it pins
+  // nothing — a "Cap: App default" that cannot say WHICH number is no better
+  // than a blank.
+  | "reviewAgent"
 >;
 
 interface SettingsStore {
@@ -85,6 +89,7 @@ export const useSettings = create<SettingsStore>((set) => ({
         harness: settings.harness,
         spawnChat: settings.spawnChat,
         defaultSendMode: settings.defaultSendMode,
+        reviewAgent: settings.reviewAgent,
       },
     });
   },

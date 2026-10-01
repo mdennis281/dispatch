@@ -14,7 +14,7 @@
  * a leak in either direction commits somebody's local preference or strands a
  * team decision on one machine.
  */
-import { MANAGER_SERVER_NAMES } from "@dispatch/shared";
+import { GLOBAL_PROJECT_ID, MANAGER_SERVER_NAMES } from "@dispatch/shared";
 import { describe, it, expect, afterEach } from "vitest";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -587,6 +587,33 @@ describe("PUT /api/projects/:projectId/mcp/:name/enabled", () => {
     expect(pw.status).toBe("disabled");
     expect(pw.enablement).toMatchObject({ effective: false, source: "default" });
     expect(pw.defaultReason).toMatch(/no sub-app/);
+  });
+
+  it("refuses a PROJECT pin on the reserved pseudo-project, and writes nothing", async () => {
+    // The sibling of the /config guard, and the reason that guard was not
+    // enough: it is a hook keyed on the `/api/projects/:id/config` route
+    // PATTERN, and this route spells the param `:projectId`. A path-keyed
+    // guard only covers the paths someone remembered to spell the same way.
+    //
+    // What it would otherwise create is `projects/__global__/project.yaml`,
+    // whose `mcpServers` the broker attaches to global sessions under tool
+    // names no fixed denylist can enumerate.
+    await setup();
+    const res = await toggle(GLOBAL_PROJECT_ID, "chrome-devtools", {
+      scope: "project",
+      enabled: true,
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/no project config/);
+    expect(existsSync(join(dir, "projects", GLOBAL_PROJECT_ID, "project.yaml"))).toBe(false);
+
+    // The install-wide scope still works: it writes settings, not this
+    // project's config dir, and refusing it would break an unrelated surface.
+    const appScope = await toggle(GLOBAL_PROJECT_ID, "chrome-devtools", {
+      scope: "app",
+      enabled: false,
+    });
+    expect(appScope.statusCode).toBe(200);
   });
 
   it("writes a project pin to the project.yaml and returns the rebuilt catalog", async () => {

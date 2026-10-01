@@ -6,6 +6,7 @@ import type {
 import {
   createBackgroundShellGuardHook,
   createWorktreeGuardHook,
+  createModePolicyHook,
 } from "./shell-guard.js";
 
 /** A PreToolUse hook's real return shape (`HookJSONOutput` unions them all). */
@@ -173,5 +174,65 @@ describe("worktree guard", () => {
       command: "git worktree add -b feat/x ./x",
     });
     expect(seen).toEqual(["git worktree add -b feat/x ./x"]);
+  });
+});
+
+/**
+ * The mode tool policy, as the DIRECT Claude path gets it.
+ *
+ * That path never builds `HarnessSessionSpec.toolGuard` — `startQuery` hands
+ * `buildOptions`' options straight to the SDK — so this hook is the only
+ * unconditional veto a stock Claude chat has. It must enforce exactly what
+ * the neutral harness path's guard does.
+ */
+describe("mode tool policy guard", () => {
+  const policyGuard = (
+    policy: { allowedTools?: string[]; disallowedTools?: string[] },
+    mode = { name: "Global", id: "global" },
+  ) => {
+    const hook = createModePolicyHook({ policy: () => policy, mode: () => mode });
+    return async (tool: string): Promise<PreOut> =>
+      (await hook(pre(tool, {}), "t1", {
+        signal: new AbortController().signal,
+      })) as PreOut;
+  };
+
+  it("denies an MCP tool on the denylist — the case the SDK option does not cover", async () => {
+    const out = await policyGuard({
+      disallowedTools: ["mcp__dispatch-workspace__worktree"],
+    })("mcp__dispatch-workspace__worktree");
+    expect(out.hookSpecificOutput?.permissionDecision).toBe("deny");
+    expect(out.hookSpecificOutput?.permissionDecisionReason).toContain("Global mode");
+    // The global posture redirects rather than merely refusing.
+    expect(out.hookSpecificOutput?.permissionDecisionReason).toContain("spawn_chat");
+  });
+
+  it("allows anything the policy does not name", async () => {
+    const out = await policyGuard({ disallowedTools: ["Bash"] })("Read");
+    expect(out.hookSpecificOutput).toBeUndefined();
+  });
+
+  it("enforces an allowlist, including the empty one that permits nothing", async () => {
+    expect(
+      (await policyGuard({ allowedTools: ["Read"] })("Write")).hookSpecificOutput
+        ?.permissionDecision,
+    ).toBe("deny");
+    expect((await policyGuard({ allowedTools: ["Read"] })("Read")).hookSpecificOutput).toBeUndefined();
+    expect(
+      (await policyGuard({ allowedTools: [] })("Read")).hookSpecificOutput?.permissionDecision,
+    ).toBe("deny");
+  });
+
+  it("keeps the refusal honest for an ordinary mode", async () => {
+    const out = await policyGuard({ disallowedTools: ["WebFetch"] }, {
+      name: "Audit",
+      id: "audit",
+    })("WebFetch");
+    expect(out.hookSpecificOutput?.permissionDecisionReason).toContain("Audit mode");
+    expect(out.hookSpecificOutput?.permissionDecisionReason).not.toContain("spawn_chat");
+  });
+
+  it("is a no-op when the mode has no policy at all", async () => {
+    expect((await policyGuard({})("Bash")).hookSpecificOutput).toBeUndefined();
   });
 });
