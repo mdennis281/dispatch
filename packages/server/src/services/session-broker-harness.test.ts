@@ -191,20 +191,16 @@ describe("SessionBroker neutral harness path", () => {
         createdAt: 1,
       });
 
-    it("lands in the global mode without anybody pinning one", async () => {
+    it("lands in the global mode with nothing pinned, and refuses to leave it", async () => {
       const chat = await globalChat();
       broker.create(chat);
-      await broker.sendMessage(chat.id, "what is where?");
-      await broker.waitFor(chat.id, "idle");
+      // Deliberately NOT asserted after a turn: `setMode(null)` walks the same
+      // posture chain `buildOptions` does, synchronously, so this proves the
+      // resolution without depending on how long a fake turn takes to settle.
+      await broker.setMode(chat.id, null);
       expect(broker.getSession(chat.id)?.modeId).toBe(GLOBAL_MODE_ID);
-    });
-
-    it("refuses to be moved off it", async () => {
-      const chat = await globalChat();
-      broker.create(chat);
       await expect(broker.setMode(chat.id, "yolo")).rejects.toThrow(/always runs in global/);
-      // Unpinning is fine — it resolves straight back to `global`.
-      await expect(broker.setMode(chat.id, null)).resolves.toBeDefined();
+      expect(broker.getSession(chat.id)?.modeId).toBe(GLOBAL_MODE_ID);
     });
 
     it("hands the runtime a denylist, so the tools are never offered at all", async () => {

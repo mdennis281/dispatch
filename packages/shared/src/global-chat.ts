@@ -31,6 +31,7 @@
  * rule across every handler and leave the next tool ungated by default.
  */
 import type { ModeConfig, Project } from "./domain.js";
+import type { PostureProject } from "./chat-posture.js";
 
 /* ----------------------------------------------------------- the pseudo-project */
 
@@ -205,6 +206,26 @@ export const GLOBAL_MODE: ModeConfig = {
   instructions: GLOBAL_MODE_INSTRUCTIONS,
   scope: "global",
 };
+
+/**
+ * The project layer of the posture chain, with the pseudo-project stating its
+ * own: a global chat runs in {@link GLOBAL_MODE} unless its own row pins
+ * something, and `setMode` is what stops it pinning anything else.
+ *
+ * It arrives through the PROJECT layer rather than as a special case further
+ * down because that is where "work in this repo starts like this" already
+ * lives — and because three separate places build that layer (the broker at
+ * session start, the create-chat route, and the client's badge). Routing all
+ * three through one function is what stops the composer showing "Auto" while
+ * the session actually runs as `global`, which is exactly what happened when
+ * only the broker knew.
+ */
+export function projectPostureLayer(
+  projectId: string | null | undefined,
+  layer: PostureProject | null | undefined,
+): PostureProject | null | undefined {
+  return isGlobalProject(projectId) ? { ...(layer ?? {}), mode: GLOBAL_MODE_ID } : layer;
+}
 
 /* ---------------------------------------------------------- the always-on index */
 

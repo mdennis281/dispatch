@@ -19,6 +19,7 @@ import {
   prRecordKey,
   composeMessageText,
   resolveChatPosture,
+  projectPostureLayer,
   type WsClientAction,
   type Chat,
   type ChatPurpose,
@@ -128,7 +129,7 @@ export async function createChat(
       model: input.model,
     },
     parent: input.parent,
-    project: services.projectConfig?.getDefaults(project.id),
+    project: projectPostureLayer(project.id, services.projectConfig?.getDefaults(project.id)),
     settings,
   });
   const harness = posture.harness.effective;

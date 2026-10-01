@@ -12,6 +12,7 @@ import {
   RotateCcw,
 } from "lucide-react";
 import type { ModeConfig } from "@dispatch/shared";
+import { BUILTIN_MODE_CONFIGS } from "@dispatch/shared";
 import { Popover, MenuItem } from "../ui/Popover.js";
 import type { SelectInherit } from "../ui/Select.js";
 import { Tooltip } from "../ui/Tooltip.js";
@@ -82,6 +83,10 @@ export function modeLabel(modes: ModeConfig[], modeId: string): string {
     modes.find((m) => m.id === modeId)?.name ??
     PRIMARY_MODE_LABEL[modeId] ??
     BUILTIN_POSTURES.find((b) => b.id === modeId)?.name ??
+    // The built-in modes that are a full record rather than a bare posture —
+    // `global` is one, and without this the composer bottomed out at the raw
+    // id and labelled the global chat's badge "global" in lowercase.
+    BUILTIN_MODE_CONFIGS[modeId]?.name ??
     modeId
   );
 }

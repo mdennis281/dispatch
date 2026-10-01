@@ -247,10 +247,17 @@ export interface HarnessSessionSpec {
    * Tool gating from the selected MODE: an allowlist (absent = everything) and
    * a denylist over it, in the runtime's own tool names.
    *
-   * Advertised to the runtime so a denied tool is never offered to the model.
-   * It is not the enforcement — `toolGuard` is, because a runtime may ignore
-   * these and a subagent definition can widen its own list. Both are set from
-   * one resolved mode, so they cannot disagree.
+   * ADVISORY, and measured as such. Handing these to the runtime does drop the
+   * named BUILT-IN tools from the model's catalogue, which is the cheap win —
+   * no description in context, and nothing to reach for. It does NOT reliably
+   * drop MCP tools: a global chat given `mcp__dispatch-github__request_review`
+   * on this list still reported seeing it in its toolbox.
+   *
+   * So the enforcement is {@link HarnessSessionSpec.toolGuard}, which runs as a
+   * PreToolUse veto, fires for subagent calls too, and is not skipped under
+   * `bypassPermissions`. Both are set from one resolved mode, so the catalogue
+   * the model sees and the rule applied to it cannot disagree about intent —
+   * only about how early the refusal lands.
    */
   allowedTools?: string[];
   disallowedTools?: string[];

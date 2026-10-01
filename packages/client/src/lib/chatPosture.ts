@@ -19,6 +19,7 @@ import {
   layerSourceLabel,
   layerSourceShort,
   resolveChatPosture,
+  projectPostureLayer,
   type ChatPosture,
   type PostureSource,
 } from "@dispatch/shared";
@@ -41,7 +42,7 @@ export function useChatPosture(chatId: string | null): ChatPosture {
           model: chat.model,
         }
       : undefined,
-    project,
+    project: projectPostureLayer(chat?.projectId, project),
     settings,
   });
 }

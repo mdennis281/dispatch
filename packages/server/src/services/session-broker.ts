@@ -109,6 +109,7 @@ import {
   GLOBAL_MODE_ID,
   isGlobalProject,
   isToolDenied,
+  projectPostureLayer,
   deniedToolRefusal,
   buildGlobalProjectIndex,
   realProjects,
@@ -1885,13 +1886,15 @@ interface LiveSession {
    * The tool gating the selected MODE imposes, stamped alongside `workflow` in
    * `buildOptions` and read by the same guard.
    *
-   * Both halves are handed to the runtime as well (`HarnessSessionSpec`), which
-   * is what keeps a denied tool out of the model's catalogue entirely. This copy
-   * is the BACKSTOP: the runtime's own gating is advisory from Dispatch's side
-   * (a harness may not implement it, and a subagent definition can re-widen its
-   * own list), whereas the guard runs as a PreToolUse veto that fires even under
-   * `bypassPermissions`. For the global chat's posture — the one that makes a
-   * project-less chat safe — advisory is not enough.
+   * Both halves are handed to the runtime as well (`HarnessSessionSpec`), where
+   * they thin the tool catalogue. This copy is the ENFORCEMENT: the runtime's
+   * gating is advisory from Dispatch's side (a harness may not implement it, it
+   * demonstrably does not cover MCP tools — a global chat still reported seeing
+   * `mcp__dispatch-github__request_review` in its toolbox with that name on the
+   * list — and a subagent definition can re-widen its own). The guard runs as a
+   * PreToolUse veto, fires for subagent calls, and is not skipped under
+   * `bypassPermissions`. For the posture that makes a project-less chat safe,
+   * advisory is not enough.
    */
   modeName?: string;
   allowedTools?: string[];
@@ -6893,12 +6896,10 @@ export class SessionBroker {
         subscriptionId: session.subscriptionId,
         ...session.pins,
       },
-      // The pseudo-project has no manifest to read defaults from, so it states
-      // its own: the global posture arrives through the normal project layer
-      // rather than as a special case somewhere downstream.
-      project: isGlobalProject(session.projectId)
-        ? { mode: GLOBAL_MODE_ID }
-        : this.projectConfig?.getDefaults?.(session.projectId),
+      project: projectPostureLayer(
+        session.projectId,
+        this.projectConfig?.getDefaults?.(session.projectId),
+      ),
       settings,
     });
   }
@@ -7022,9 +7023,8 @@ export class SessionBroker {
     const agent = session.agentId ? await this.resolveAgent(session.agentId) : null;
 
     // The mode's tool gating, applied two ways — see `LiveSession.deniedTools`.
-    // Handing it to the SDK keeps a denied tool out of the catalogue, which is
-    // both cheaper (no description in context) and kinder (the model never
-    // reaches for something it will be refused).
+    // Handing it to the SDK thins the catalogue where the SDK honours it
+    // (built-ins reliably, MCP tools not); the guard below is the enforcement.
     session.modeName = mode?.name ?? session.modeId;
     session.allowedTools = mode?.allowedTools;
     session.deniedTools = mode?.disallowedTools;

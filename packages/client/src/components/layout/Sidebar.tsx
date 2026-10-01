@@ -28,7 +28,7 @@ import {
   Globe,
   type LucideIcon,
 } from "lucide-react";
-import { GLOBAL_PROJECT_ID, parsePrRecordKey } from "@dispatch/shared";
+import { GLOBAL_PROJECT_ID, isGlobalProject, parsePrRecordKey } from "@dispatch/shared";
 import type { Chat, PrRecord, SubApp, RunnerInstance, Project } from "@dispatch/shared";
 import { Popover, MenuItem } from "../ui/Popover.js";
 import { IconButton } from "../ui/IconButton.js";
@@ -1618,6 +1618,13 @@ export function Sidebar() {
   const inDrawer = mode === "sm";
 
   const project = useActiveProject();
+  // The global surface has no repo, so the repo-shaped views are not merely
+  // empty there — Source Control would run `git status` against a scratch
+  // directory, and Files would open a picker rooted at nothing. They are
+  // hidden rather than disabled: there is no state of the world in which they
+  // would become available, and a greyed row invites a click that explains
+  // nothing.
+  const repoless = isGlobalProject(project?.id);
   const branches = useProjectChatTree(project?.id ?? null);
   const chatCount = branches.reduce((n, b) => n + 1 + b.descendants.length, 0);
   const runtimeByChat = useChatRuntime((s) => s.byChat);
@@ -1783,6 +1790,7 @@ export function Sidebar() {
               dismissLeftDrawer();
             }}
           />
+          {!repoless && (
           <NavButton
             icon={GitBranch}
             label="Source Control"
@@ -1795,9 +1803,11 @@ export function Sidebar() {
               dismissLeftDrawer();
             }}
           />
+          )}
           {/* Below Source Control because it's the wider lens on the same
               thing: git shows what CHANGED in the checkout, this shows what's
               on the disk — including the drives and mounts no repo covers. */}
+          {!repoless && (
           <NavButton
             icon={FolderOpen}
             label="Files"
@@ -1807,6 +1817,7 @@ export function Sidebar() {
               dismissLeftDrawer();
             }}
           />
+          )}
           {/* Last in the group: it is the only one that is not about the CURRENT
               state of the project — it is the record of what has already
               happened, across every project. */}
@@ -1821,6 +1832,8 @@ export function Sidebar() {
           />
         </div>
 
+        {!repoless && (
+          <>
         <div className="my-2 h-px bg-line-soft" />
 
         {/* subApps */}
@@ -1855,6 +1868,8 @@ export function Sidebar() {
             ))
           )}
         </div>
+          </>
+        )}
 
         <div className="my-2.5 h-px bg-line-soft" />
 
