@@ -306,6 +306,50 @@ describe("Store projects/chats CRUD", () => {
     }
   });
 
+  it("keeps a split-store install's chats on ONE project across both instances", async () => {
+    // The documented layout: `configDir` shared between the stable app and
+    // dev, `dataDir` per-instance. The project row is shared; the chats and
+    // the reservation marker are not. Without a shared note of where the row
+    // went, the second instance finds no row, sees its own chats under the
+    // reserved id, and files them under a fresh "Recovered project" — one
+    // project's conversations across two records, with no error anywhere.
+    const cfg = await mkdtemp(join(tmpdir(), "cm-split-cfg-"));
+    const dataA = await mkdtemp(join(tmpdir(), "cm-split-a-"));
+    const dataB = await mkdtemp(join(tmpdir(), "cm-split-b-"));
+    try {
+      await mkdir(join(cfg, "projects"), { recursive: true });
+      await writeJsonAtomic(join(cfg, "projects", `${GLOBAL_PROJECT_ID}.json`), {
+        ...project(GLOBAL_PROJECT_ID),
+        name: "Acme Billing",
+        createdAt: 1,
+      });
+      for (const [dir, id] of [[dataA, "chat-a"], [dataB, "chat-b"]] as const) {
+        await mkdir(join(dir, "chats", id), { recursive: true });
+        await writeJsonAtomic(join(dir, "chats", id, "chat.json"), chat(id, GLOBAL_PROJECT_ID));
+      }
+
+      const a = new Store(dataA, cfg);
+      await a.init();
+      const target = realProjects(await a.listProjects())[0]!.id;
+      expect((await a.getChat("chat-a"))!.projectId).toBe(target);
+      a.close();
+
+      // Second instance, shared config, its OWN data. It must land on the
+      // SAME project rather than inventing one.
+      const b = new Store(dataB, cfg);
+      await b.init();
+      try {
+        expect((await b.getChat("chat-b"))!.projectId).toBe(target);
+        expect(realProjects(await b.listProjects()).map((p) => p.id)).toEqual([target]);
+        expect(await b.listChats(GLOBAL_PROJECT_ID)).toHaveLength(0);
+      } finally {
+        b.close();
+      }
+    } finally {
+      for (const d of [cfg, dataA, dataB]) await rm(d, { recursive: true, force: true });
+    }
+  });
+
   it("scopes listChats by projectId and deletes chat dir", async () => {
     await store.saveChat(chat("c1", "p1"));
     await store.saveChat(chat("c2", "p2"));

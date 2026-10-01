@@ -881,71 +881,78 @@ export class Store {
    * Costs one `existsSync` per boot once established.
    */
   private async freeReservedProjectId(): Promise<void> {
-    // Already reserved: chats under the id are global chats, and must be left
-    // exactly where they are.
+    // Already reserved HERE: chats under the id are global chats, and must be
+    // left exactly where they are.
     if (existsSync(this.globalReservationMarker())) return;
 
+    // What some instance already decided, if any. SHARED, and that is the
+    // whole point of it — see `globalReservationRecord`.
+    const decided = this.readGlobalReservation();
     const legacy = this.entityFile(this.projectsDir(), GLOBAL_PROJECT_ID);
-    if (!existsSync(legacy)) {
-      // NOT `.catch(() => [])`. `listChats` throws on EACCES/IO rather than
-      // reporting an empty store precisely so a caller cannot mistake "cannot
-      // see" for "nothing there" — and here that mistake would write the
-      // marker and classify every unseen legacy chat as a genuine global chat
-      // PERMANENTLY, since the marker is what the next boot trusts.
-      let orphans: Chat[];
-      try {
-        orphans = await this.listChats(GLOBAL_PROJECT_ID);
-      } catch (err) {
-        throw new ReservedProjectMigrationError(
-          `could not scan for chats under "${GLOBAL_PROJECT_ID}"`,
-          { cause: err },
-        );
-      }
-      if (!orphans.length) {
-        await this.markGlobalIdReserved();
-        return;
-      }
-    }
-    const stored = await this.readEntity(legacy, ProjectSchema).catch(() => null);
-    // An unreadable row is still migrated rather than skipped. The project is
-    // already broken, but its CHATS are the thing at risk: left pointing at
-    // the reserved id they become global chats, which is the whole hazard.
-    // They get attached to a placeholder the operator has to fix, which is a
-    // visible problem rather than a silent posture change.
-    const project: Project = stored ?? {
-      id: GLOBAL_PROJECT_ID,
-      name: "Recovered project",
-      repoPath: join(this.dataDir, "recovered-project"),
-      worktreeRoot: join(this.dataDir, "recovered-project"),
-      subApps: [],
-      createdAt: Date.now(),
-    };
-    const movedId = this.reservedMigrationTarget(project);
+    const legacyExists = existsSync(legacy);
 
-    // 1. The project under its new id. Written BEFORE the chats move so they
-    //    never point at an id with no record behind it, and idempotent: a
-    //    previous attempt that got this far resolves to the same target.
-    await this.writeEntity(
-      `project:${movedId}`,
-      this.entityFile(this.projectsDir(), movedId),
-      ProjectSchema,
-      { ...project, id: movedId },
-    );
-
-    // 2. The chats. EVERY one has to land before the source row goes — a
-    //    failure here used to be swallowed and the row removed anyway, which
-    //    left exactly the chat-reinterpreted-as-global outcome this exists to
-    //    prevent. Leaving the row costs a duplicate id in `listProjects` until
-    //    the next boot retries, which is visible and recoverable.
+    // NOT `.catch(() => [])`. `listChats` throws on EACCES/IO rather than
+    // reporting an empty store precisely so a caller cannot mistake "cannot
+    // see" for "nothing there" — and here that mistake would write the marker
+    // and classify every unseen legacy chat as a genuine global chat
+    // PERMANENTLY, since the marker is what the next boot trusts.
     let chats: Chat[];
     try {
       chats = await this.listChats(GLOBAL_PROJECT_ID);
     } catch (err) {
       throw new ReservedProjectMigrationError(
-        `could not list the chats under "${GLOBAL_PROJECT_ID}"`,
+        `could not scan for chats under "${GLOBAL_PROJECT_ID}"`,
         { cause: err },
       );
     }
+
+    // Nothing to move and nobody has moved anything: a normal install meeting
+    // the reservation for the first time.
+    if (!decided && !legacyExists && !chats.length) {
+      await this.markGlobalIdReserved();
+      return;
+    }
+
+    let movedId: string;
+    if (decided) {
+      // Another instance already migrated the SHARED project row. Join its
+      // decision rather than making a second one — inventing a target here is
+      // how one project's conversations end up split across two records.
+      movedId = decided.movedTo;
+    } else {
+      const stored = await this.readEntity(legacy, ProjectSchema).catch(() => null);
+      // An unreadable row is still migrated rather than skipped. The project
+      // is already broken, but its CHATS are the thing at risk: left pointing
+      // at the reserved id they become global chats, which is the whole
+      // hazard. They get attached to a placeholder the operator has to fix —
+      // a visible problem rather than a silent posture change.
+      const project: Project = stored ?? {
+        id: GLOBAL_PROJECT_ID,
+        name: "Recovered project",
+        repoPath: join(this.dataDir, "recovered-project"),
+        worktreeRoot: join(this.dataDir, "recovered-project"),
+        subApps: [],
+        createdAt: Date.now(),
+      };
+      movedId = this.reservedMigrationTarget(project);
+
+      // 1. The project under its new id, and the SHARED note of where it
+      //    went. Both before anything is removed: the note is what a second
+      //    instance reads, and writing it late would leave a window in which
+      //    the row is gone and the decision unrecorded.
+      await this.writeEntity(
+        `project:${movedId}`,
+        this.entityFile(this.projectsDir(), movedId),
+        ProjectSchema,
+        { ...project, id: movedId },
+      );
+      await this.writeGlobalReservation(movedId);
+    }
+
+    // 2. THIS instance's chats. Every one has to land before the source row
+    //    goes — a failure here used to be swallowed and the row removed
+    //    anyway, which left exactly the chat-reinterpreted-as-global outcome
+    //    this exists to prevent.
     const failed: string[] = [];
     for (const chat of chats) {
       const moved = await this.patchChat(chat.id, { projectId: movedId }).catch(() => null);
@@ -966,14 +973,59 @@ export class Store {
       );
     }
 
-    // 3. Only now is the id free.
-    await rm(legacy, { force: true });
+    // 3. Only now is the id free here. The row removal is idempotent: the
+    //    instance that went first already did it.
+    if (legacyExists) await rm(legacy, { force: true });
     await this.markGlobalIdReserved();
     // eslint-disable-next-line no-console
     console.warn(
-      `[store] "${GLOBAL_PROJECT_ID}" is reserved for the global chat; moved the existing ` +
-        `project${chats.length ? ` and its ${chats.length} chat(s)` : ""} to "${movedId}".`,
+      `[store] "${GLOBAL_PROJECT_ID}" is reserved for the global chat; ` +
+        `${decided ? "joined the existing move of" : "moved"} the project` +
+        `${chats.length ? ` and ${chats.length} of this instance's chat(s)` : ""} ` +
+        `to "${movedId}".`,
     );
+  }
+
+  /**
+   * Where a migrated legacy project went, recorded in the SHARED config root.
+   *
+   * The marker that says "reserved" is per-instance, under `dataDir`, because
+   * it is a statement about chats and chats are per-instance. This is the
+   * opposite: the project ROW lives in the shared `configDir`, so the decision
+   * about where it moved is shared too.
+   *
+   * Without it the two-instance layout splits a project in half. Stable boots,
+   * moves the shared row to `acme-billing`, remaps its own chats, deletes the
+   * row. Dev boots later, finds no row, sees its own chats under the reserved
+   * id, and — with no way to know a migration already happened — files them
+   * under a fresh "Recovered project". One project's conversations, two
+   * records, no error.
+   *
+   * Kept forever rather than cleaned up: a third instance added next year has
+   * to be able to join the same decision.
+   */
+  private globalReservationRecord(): string {
+    return join(this.configDir, "global-reservation.json");
+  }
+
+  private readGlobalReservation(): { movedTo: string } | null {
+    const path = this.globalReservationRecord();
+    if (!existsSync(path)) return null;
+    try {
+      const raw = JSON.parse(readFileSync(path, "utf8")) as { movedTo?: unknown };
+      return typeof raw.movedTo === "string" && isEntityId(raw.movedTo)
+        ? { movedTo: raw.movedTo }
+        : null;
+    } catch {
+      // Unreadable: treat as undecided. The worst case is this instance makes
+      // its own (deterministic) choice, which `reservedMigrationTarget`
+      // resolves to the same id anyway when the project matches.
+      return null;
+    }
+  }
+
+  private async writeGlobalReservation(movedTo: string): Promise<void> {
+    await writeJsonAtomic(this.globalReservationRecord(), { movedTo, at: Date.now() });
   }
 
   /**

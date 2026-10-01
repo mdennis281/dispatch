@@ -4398,20 +4398,34 @@ export class SessionBroker {
         },
       };
 
-      // A posture whose entire point is its denylist must not run on a runtime
-      // that can only catch a violation AFTER the call has started. Codex and
-      // the ACP adapters report `preToolGuard: false` and enforce by sighting
-      // + interrupt, which is an acceptable degradation for the workflow guard
-      // (a `git push` that gets interrupted has still been seen) and NOT an
-      // acceptable one here: by the time a `worktree` call is sighted, the
-      // worktree exists. Refuse loudly, naming the fix, rather than running a
-      // project-less chat under a posture that isn't actually holding.
-      if (isProtectedMode(session.modeId) && !resolved.harness.capabilities.preToolGuard) {
+      // A posture whose entire point is its denylist needs TWO things from a
+      // runtime, and they fail independently:
+      //
+      //   - `preToolGuard` — refuse BEFORE the call. Codex can only catch a
+      //     violation on sighting, which is an acceptable degradation for the
+      //     workflow guard (an interrupted `git push` has still been seen) and
+      //     not for this: by the time a `worktree` call is sighted, the
+      //     worktree exists.
+      //   - `guardsMcpToolNames` — see the call under its qualified
+      //     `mcp__server__tool` name. ACP vetoes in time but its permission
+      //     requests carry no server, so `mcp__dispatch-workspace__worktree`
+      //     never matches and the call becomes a prompt a human can approve.
+      //     Nearly everything this posture denies is namespaced.
+      //
+      // Either missing and the posture is decoration, so refuse loudly and
+      // name the fix rather than run a project-less chat under a rule that
+      // isn't holding.
+      const caps = resolved.harness.capabilities;
+      if (isProtectedMode(session.modeId) && !(caps.preToolGuard && caps.guardsMcpToolNames)) {
         throw new Error(
           `${session.modeName ?? session.modeId} mode cannot run on ${resolved.harness.kind}: ` +
-            "that runtime cannot refuse a tool call before it runs, and this posture is " +
-            "nothing but a list of calls to refuse. Switch this chat to a runtime that can " +
-            "(Claude) from the composer's provider picker.",
+            (caps.preToolGuard
+              ? "that runtime cannot tell which MCP tool a call is for until after it runs, " +
+                "and almost everything this posture denies is an MCP tool."
+              : "that runtime cannot refuse a tool call before it runs, and this posture is " +
+                "nothing but a list of calls to refuse.") +
+            " Switch this chat to a runtime that can (Claude) from the composer's provider " +
+            "picker.",
         );
       }
       session.harnessSession = resolved.harness.createSession(spec);

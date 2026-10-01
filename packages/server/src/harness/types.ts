@@ -96,6 +96,23 @@ export interface HarnessCapabilities {
    */
   preToolGuard: boolean;
   /**
+   * True when the guard sees an MCP call under its QUALIFIED
+   * `mcp__<server>__<tool>` name.
+   *
+   * Separate from {@link preToolGuard} because they fail independently, and
+   * ACP is the proof: it vetoes before the call (so `preToolGuard` is true and
+   * earns its name), but its permission requests carry no extension/server —
+   * only a title like `worktree · …` — so `worktree` is the most it can
+   * recover. A denylist entry of `mcp__dispatch-workspace__worktree` simply
+   * does not match, and the call becomes a prompt a human can approve.
+   *
+   * It matters because a posture is mostly a list of MCP tools. `Bash` and
+   * `Edit` are named the same everywhere and are caught on every runtime;
+   * everything that moves a PR, cuts a worktree or writes config is namespaced
+   * and is only enforceable where this is true.
+   */
+  guardsMcpToolNames: boolean;
+  /**
    * How this runtime wants Dispatch's own `mcp__dispatch-*__*` tools attached.
    *
    * The one place a runtime difference legitimately reaches the broker, because

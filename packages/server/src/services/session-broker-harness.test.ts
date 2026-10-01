@@ -25,7 +25,7 @@ let transfers: unknown[][] = [];
  * it runs, because the broker refuses a protected posture on one that can't —
  * and the default here models Codex, which can't.
  */
-let caps: { preToolGuard: boolean } & Record<string, unknown>;
+let caps: { preToolGuard: boolean; guardsMcpToolNames: boolean } & Record<string, unknown>;
 let transferResult: Promise<boolean> = Promise.resolve(false);
 let specs: HarnessSessionSpec[];
 
@@ -136,6 +136,7 @@ describe("SessionBroker neutral harness path", () => {
       livePermissionSwitch: true,
       efforts: ["low", "medium", "high"],
       preToolGuard: false,
+      guardsMcpToolNames: true,
       managerTransport: "http",
     };
     const codex: Harness = {
@@ -194,6 +195,7 @@ describe("SessionBroker neutral harness path", () => {
     // wants a runtime that CAN, so it is granted here rather than globally.
     beforeEach(() => {
       caps.preToolGuard = true;
+      caps.guardsMcpToolNames = true;
     });
 
     const globalChat = () =>
@@ -280,6 +282,25 @@ describe("SessionBroker neutral harness path", () => {
       expect(specs[0]!.disallowedTools).toContain("Bash");
       expect(specs[0]!.permissionMode).not.toBe("bypassPermissions");
       expect(specs[0]!.toolGuard!("Bash", { command: "echo hi" })).toMatch(/not available/);
+    });
+
+    it("refuses a runtime that cannot name an MCP call, even if it vetoes in time", async () => {
+      // The two capabilities fail independently. ACP is the real case: it
+      // refuses BEFORE the call, but its permission requests carry no server
+      // name, so `mcp__dispatch-workspace__worktree` never matches — and
+      // nearly everything this posture denies is namespaced. In time but
+      // unnamed is not enforcement.
+      caps.preToolGuard = true;
+      caps.guardsMcpToolNames = false;
+      const chat = await globalChat();
+      const errors: string[] = [];
+      bus.subscribe((e) => {
+        if (e.type === "error") errors.push(`${e.message} ${e.detail ?? ""}`);
+      });
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "hello");
+      await waitUntil(() => errors.some((m) => /which MCP tool a call is for/.test(m)));
+      expect(specs).toHaveLength(0);
     });
 
     it("refuses to start on a runtime that can only catch a violation late", async () => {
@@ -1124,6 +1145,7 @@ describe("SessionBroker neutral harness path", () => {
           livePermissionSwitch: true,
           efforts: [],
           preToolGuard: true,
+          guardsMcpToolNames: true,
           managerTransport: "http",
         },
         runtime: () => ({ kind: "goose", source: "installed", available: true }),
@@ -1264,6 +1286,7 @@ describe("SessionBroker neutral harness path", () => {
           livePermissionSwitch: true,
           efforts: [],
           preToolGuard: true,
+          guardsMcpToolNames: true,
           managerTransport: "http",
         },
         // The CLI is NOT installed — this is what makes the broker fall back.
@@ -1306,6 +1329,7 @@ describe("SessionBroker neutral harness path", () => {
           livePermissionSwitch: true,
           efforts: ["low", "medium", "high"],
           preToolGuard: true,
+          guardsMcpToolNames: true,
           managerTransport: "in-process",
         },
         runtime: () => ({ kind: "claude", source: "installed", available: true }),
