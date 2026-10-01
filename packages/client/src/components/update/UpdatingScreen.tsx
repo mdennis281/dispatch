@@ -266,9 +266,15 @@ function Attempt({ flight }: { flight: UpdateFlight }) {
   return (
     <div
       style={{ zIndex: LAYER.shutdown }}
-      className="fixed inset-0 flex flex-col items-center justify-center overflow-y-auto bg-app/95 p-6 backdrop-blur-sm"
+      className="fixed inset-0 flex flex-col items-center overflow-y-auto bg-app/95 p-6 backdrop-blur-sm"
     >
-      <div className="flex w-full max-w-[400px] flex-col items-center text-center">
+      {/* `my-auto`, NOT `justify-center` on the scroller. An auto margin
+          collapses to zero when the child is taller than the box, where
+          `justify-center` would centre it anyway and put its first lines above
+          the scroll origin — unreachable, because you cannot scroll up past the
+          top. This column can outgrow a short window the moment the log is
+          open. */}
+      <div className="my-auto flex w-full max-w-[400px] flex-col items-center text-center">
         {/* The boot mark while it is working — the same loop the splash runs,
             and for the same reason: this is a wait of unknown length with a
             progress bar that can sit on one phase for minutes. A pulsing arrow

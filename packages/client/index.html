@@ -1688,6 +1688,11 @@
               ctx = m.canvas.getContext("2d");
               colours = m.colours;
               cfg = m.cfg;
+              // Same reason as the `resize` branch below: the element was
+              // transferred at whatever size its markup said (the splash's says
+              // zero), and this side is the only one that may change it now.
+              ctx.canvas.width = cfg.device;
+              ctx.canvas.height = cfg.device;
               cfg.roads = m.roads.map(function (r) {
                 return { path: new Path2D(r.d), len: r.len, phase: r.phase };
               });
@@ -1700,6 +1705,14 @@
             } else if (m.type === "colour") {
               colours[m.name] = m.value;
             } else if (m.type === "resize") {
+              // THE BACKING STORE IS RESIZED HERE, not on the main thread.
+              // Once an element has been handed to `transferControlToOffscreen`
+              // it is a placeholder, and assigning `width`/`height` to it throws
+              // `InvalidStateError` — so the one place the bitmap can grow is
+              // the side that owns it. (Which also clears it, hence the redraw
+              // the next frame does anyway.)
+              ctx.canvas.width = m.device;
+              ctx.canvas.height = m.device;
               cfg.device = m.device;
               cfg.scale = m.scale;
               cfg.origin = m.origin;
@@ -1750,7 +1763,28 @@
         var VIEW_BOX = 64;
         var STROKE = parseFloat(css.getPropertyValue("--bsw")) || 4.5;
         var AMBER = rootCss.getPropertyValue("--boot-amber").trim() || "#e5a33c";
-        var SEEDED = ["--c-s1", "--c-s2", "--c-s3", "--c-a", "--c-b", "--c-c", "--c-d"];
+        /*
+         * EVERY colour the worker reads, including the `2` slots.
+         *
+         * `--c-b2` and `--c-c2` were missing, and on the splash that was
+         * invisible: it mounts with the document, so the first tick to set them
+         * arrives long before anything wears them. A `BootMark` mounts at an
+         * arbitrary point in the cycle — forty minutes into a session — and an
+         * unseeded slot makes `draw()` fall back to the dot's OTHER colour for
+         * up to a whole cycle, so the canvas holds a shared dot on the outgoing
+         * road's colour while the SVG it replaced had already crossfaded it.
+         */
+        var SEEDED = [
+          "--c-s1",
+          "--c-s2",
+          "--c-s3",
+          "--c-a",
+          "--c-b",
+          "--c-b2",
+          "--c-c",
+          "--c-c2",
+          "--c-d",
+        ];
 
         /*
          * The splash's canvas is 320px around a 116px mark, and every other
@@ -1785,11 +1819,23 @@
           canvas.style.width = cssSize + "px";
           canvas.style.height = cssSize + "px";
 
+          /*
+           * Geometry only — it must NOT touch `canvas.width`.
+           *
+           * The element is a placeholder the moment `transferControlToOffscreen`
+           * has run, and assigning its `width`/`height` after that throws
+           * `InvalidStateError`. `layout()` is called again on every resize, so
+           * a sizing line here is an uncaught exception per resize and a bitmap
+           * that never grows. The worker sets its own backing store; see the
+           * `resize` branch of its `onmessage`.
+           *
+           * The FIRST call still has to establish the bitmap, and does — the
+           * `init` message carries `device` and the worker applies it the same
+           * way, rather than this reaching across the handover to do it.
+           */
           function layout() {
             var dpr = window.devicePixelRatio || 1;
             var device = Math.round(cssSize * dpr);
-            canvas.width = device;
-            canvas.height = device;
             var scale = (markPx / VIEW_BOX) * dpr;
             return { device: device, scale: scale, origin: device / 2 - 32 * scale };
           }
