@@ -32,15 +32,28 @@ const DYNAMIC = POLICY({
   rounds: { mode: "dynamic", base: 1, linesPerRound: 500, max: 8 },
 });
 
-/** A registry holding one reviewer row and one PR, with nothing else wired. */
+/**
+ * A registry holding one reviewer row, the CATALOG's idea of the PR, and
+ * optionally a different live one — which is the whole point: the row is what
+ * the last sweep saw, and `refresh()` is a GitHub poll.
+ */
 function fakeRegistry(
   state: PrReviewAgentState | null,
   pr: Partial<PrSnapshot>,
-): SessionPrRegistry {
-  return {
+  live?: Partial<PrSnapshot> | null,
+) {
+  let refreshes = 0;
+  const row = (over: Partial<PrSnapshot>) =>
+    ({ repo: "o/r", number: 7, ...over }) as PrSnapshot;
+  const registry = {
     reviewAgent: async () => state,
-    snapshot: async () => ({ repo: "o/r", number: 7, ...pr }) as PrSnapshot,
+    snapshot: async () => row(pr),
+    refresh: async () => {
+      refreshes += 1;
+      return live === undefined ? row(pr) : live === null ? null : row(live);
+    },
   } as unknown as SessionPrRegistry;
+  return { registry, refreshes: () => refreshes };
 }
 
 /** The repo resolves straight off the override, so no cwd or `gh` is involved. */
@@ -61,9 +74,12 @@ describe("the reviewer row, as the MCP tools read it", () => {
     // next bracket lands inside the sweep's stale window — and read off the row
     // the request is refused `rounds-spent` without ever setting `requestedAt`,
     // so the sweep that raises the denominator has no request left to claim.
-    const row = fakeRegistry({ rounds: 1, maxRounds: 1 }, { additions: 600, deletions: 0 });
+    const { registry } = fakeRegistry(
+      { rounds: 1, maxRounds: 1 },
+      { additions: 600, deletions: 0 },
+    );
 
-    const state = await bind(row, DYNAMIC).reviewAgent(7, "o/r");
+    const state = await bind(registry, DYNAMIC).reviewAgent(7, "o/r");
 
     expect(state).toMatchObject({ rounds: 1, maxRounds: 2 });
   });
@@ -72,24 +88,90 @@ describe("the reviewer row, as the MCP tools read it", () => {
     // Not an asymmetry worth adding: a force-push that drops 1,000 lines really
     // has made this a smaller reading job, and the sweep would write the same
     // number on its next pass.
-    const row = fakeRegistry({ rounds: 1, maxRounds: 4 }, { additions: 20, deletions: 5 });
+    const { registry } = fakeRegistry(
+      { rounds: 1, maxRounds: 4 },
+      { additions: 20, deletions: 5 },
+    );
 
-    expect(await bind(row, DYNAMIC).reviewAgent(7, "o/r")).toMatchObject({ maxRounds: 1 });
+    expect(await bind(registry, DYNAMIC).reviewAgent(7, "o/r")).toMatchObject({ maxRounds: 1 });
   });
 
   it("leaves a row that never recorded a cap alone", async () => {
     // "We don't know" must not become a confident refusal — `roundsSpent` is
     // false without a cap, and inventing one here would flip that.
-    const row = fakeRegistry({ rounds: 3 }, { additions: 10, deletions: 0 });
+    const { registry } = fakeRegistry({ rounds: 3 }, { additions: 10, deletions: 0 });
 
-    expect(await bind(row, DYNAMIC).reviewAgent(7, "o/r")).toEqual({ rounds: 3 });
+    expect(await bind(registry, DYNAMIC).reviewAgent(7, "o/r")).toEqual({ rounds: 3 });
   });
 
   it("does not touch the cap under a static policy", async () => {
-    const row = fakeRegistry({ rounds: 1, maxRounds: 4 }, { additions: 9000, deletions: 0 });
+    const { registry } = fakeRegistry(
+      { rounds: 1, maxRounds: 4 },
+      { additions: 9000, deletions: 0 },
+    );
 
-    expect(await bind(row, POLICY()).reviewAgent(7, "o/r")).toMatchObject({ maxRounds: 4 });
+    expect(await bind(registry, POLICY()).reviewAgent(7, "o/r")).toMatchObject({ maxRounds: 4 });
     // Nor when the session has no reviewer policy at all.
-    expect(await bind(row, undefined).reviewAgent(7, "o/r")).toMatchObject({ maxRounds: 4 });
+    expect(await bind(registry, undefined).reviewAgent(7, "o/r")).toMatchObject({ maxRounds: 4 });
+  });
+
+  it("confirms a SPENT cap against GitHub, because the row's diff size is stale too", async () => {
+    // The hole the first pass left: the catalog row is what the last sweep saw,
+    // so in the push-then-request window its `additions` are the pre-push ones.
+    // Recomputing off them reproduces the old cap exactly and refuses a PR that
+    // has just earned another round.
+    const { registry, refreshes } = fakeRegistry(
+      { rounds: 1, maxRounds: 1 },
+      { additions: 400, deletions: 0 }, // catalog: before the push
+      { additions: 600, deletions: 0 }, // GitHub: after it
+    );
+
+    expect(await bind(registry, DYNAMIC).reviewAgent(7, "o/r")).toMatchObject({ maxRounds: 2 });
+    expect(refreshes()).toBe(1);
+  });
+
+  it("does not spend a GitHub call when the free answer is not a stop", async () => {
+    // `watch_pr` makes this read every 20 seconds. A poll per read would be a
+    // poll per 20s per watched PR, for an answer that was already correct.
+    const { registry, refreshes } = fakeRegistry(
+      { rounds: 1, maxRounds: 4 },
+      { additions: 1200, deletions: 0 },
+    );
+
+    expect(await bind(registry, DYNAMIC).reviewAgent(7, "o/r")).toMatchObject({ maxRounds: 3 });
+    expect(refreshes()).toBe(0);
+  });
+
+  it("keeps the stored answer when the refresh fails", async () => {
+    // "GitHub was unreadable" is not evidence that the diff grew.
+    const { registry } = fakeRegistry(
+      { rounds: 1, maxRounds: 1 },
+      { additions: 400, deletions: 0 },
+      null,
+    );
+
+    expect(await bind(registry, DYNAMIC).reviewAgent(7, "o/r")).toMatchObject({ maxRounds: 1 });
+  });
+
+  it("counts a per-PR extraRounds grant into the headroom", async () => {
+    // The question the poll is gated on is "would this be a STOP" — and a grant
+    // raises the effective cap, so a PR sitting on one still has a round left
+    // and needs no confirming.
+    const { registry, refreshes } = fakeRegistry(
+      { rounds: 1, maxRounds: 1, extraRounds: 1 },
+      { additions: 400, deletions: 0 },
+    );
+
+    await bind(registry, DYNAMIC).reviewAgent(7, "o/r");
+    expect(refreshes()).toBe(0);
+
+    // Spend that round too and it IS a stop, grant included — so it is worth a
+    // call to find out whether the diff has grown since the last sweep.
+    const spent = fakeRegistry(
+      { rounds: 2, maxRounds: 1, extraRounds: 1 },
+      { additions: 400, deletions: 0 },
+    );
+    await bind(spent.registry, DYNAMIC).reviewAgent(7, "o/r");
+    expect(spent.refreshes()).toBe(1);
   });
 });
