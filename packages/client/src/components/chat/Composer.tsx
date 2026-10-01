@@ -40,6 +40,7 @@ import {
 import type { Chat, Effort, AgentConfig, ModeConfig, ImageRef } from "@dispatch/shared";
 import {
   DEFAULT_HARNESS,
+  isGlobalProject,
   accountLabel,
   chatAccountOf,
   defaultModelFor,
@@ -1730,6 +1731,12 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
               onChange={setMode}
               size={sizes.mode as "lg" | "md" | "sm"}
               inherit={modeInherit}
+              // The server pins the global chat's posture and refuses any
+              // other id — and this control writes its selection optimistically,
+              // so an offered-but-refused switch would leave the badge lying
+              // about what the session is running as.
+              locked={isGlobalProject(chat.projectId)}
+              lockedHint="The global chat always runs in Global mode — it has no project to be safe in."
             />
           )}
 
