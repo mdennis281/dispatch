@@ -11,7 +11,10 @@ import * as z from "zod";
 import { AttentionItemSchema } from "@dispatch/shared";
 
 const ClearQuery = z.object({
-  chatId: z.string().optional(),
+  // `min(1)`, so `?chatId=` is a 400 rather than a global clear. An empty value
+  // is what a half-built scoped request looks like, and the one thing it must
+  // not silently become is the destructive unscoped one.
+  chatId: z.string().min(1).optional(),
   /**
    * Comma-separated kinds to dismiss. Omitted = the retrospective ones only
    * (`DISMISSIBLE_ATTENTION_KINDS`), because a permission/question item is a blocked agent
