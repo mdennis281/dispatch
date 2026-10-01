@@ -98,6 +98,11 @@ class FakeAgent {
   frameFor(method: string): Record<string, unknown> | undefined {
     return this.sent.find((f) => f.method === method);
   }
+
+  /** The most recent one — for anything the session re-sends on a change. */
+  lastFrameFor(method: string): Record<string, unknown> | undefined {
+    return [...this.sent].reverse().find((f) => f.method === method);
+  }
 }
 
 function spec(over: Partial<HarnessSessionSpec> = {}): HarnessSessionSpec {
@@ -164,6 +169,30 @@ describe("AcpSession", () => {
     session.send({ text: "hi" });
     await drain();
     expect(agent.frameFor("session/set_mode")?.params).toMatchObject({ modeId: "approve" });
+  });
+
+  it("tightens on a mid-session switch INTO a gated mode, without a rebuild", async () => {
+    // The broker deliberately does not rebuild the runtime mid-turn, so a
+    // `restricted` snapshotted at construction would leave this session in
+    // `auto` — no permission requests, and therefore nothing for the guard
+    // the broker just tightened to act on.
+    const { agent, session, drain } = build({ permissionMode: "bypassPermissions" });
+    session.send({ text: "hi" });
+    await drain();
+    expect(agent.frameFor("session/set_mode")?.params).toMatchObject({ modeId: "auto" });
+
+    await session.setPermissionMode("bypassPermissions", { disallowedTools: ["Bash"] });
+    expect(agent.lastFrameFor("session/set_mode")?.params).toMatchObject({ modeId: "approve" });
+
+    // And loosens again on the way out.
+    await session.setPermissionMode("bypassPermissions", {});
+    expect(agent.lastFrameFor("session/set_mode")?.params).toMatchObject({ modeId: "auto" });
+
+    // A caller that says nothing about the policy must not be read as "no
+    // policy" — that would silently unrestrict on an unrelated switch.
+    await session.setPermissionMode("bypassPermissions", { allowedTools: [] });
+    await session.setPermissionMode("bypassPermissions");
+    expect(agent.lastFrameFor("session/set_mode")?.params).toMatchObject({ modeId: "approve" });
   });
 
   it("resumes an existing session rather than starting a new one", async () => {

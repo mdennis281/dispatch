@@ -3064,7 +3064,12 @@ export class SessionBroker {
     }
     const mode = await this.resolvePermissionMode(session.modeId);
     if (session.harnessSession) {
-      await session.harnessSession.setPermissionMode(mode).catch((err) => {
+      // The freshly stamped gate travels with the mode. An adapter whose only
+      // interception point is its own permission prompt (ACP) has to know the
+      // policy moved, because the deferred restart above may be a whole turn
+      // away and the spec's copy was frozen at construction.
+      const policy = { allowedTools: session.allowedTools, disallowedTools: session.deniedTools };
+      await session.harnessSession.setPermissionMode(mode, policy).catch((err) => {
         this.bus.publish({
           type: "error",
           chatId,

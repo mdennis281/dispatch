@@ -237,6 +237,16 @@ export type HarnessToolGuard = (
 ) => string | null;
 
 /** Everything needed to open a session, in neutral terms. */
+/**
+ * A mode's tool gate: an allowlist (absent = everything) and a denylist over
+ * it. An allowlist that is DEFINED BUT EMPTY permits nothing — the strictest
+ * policy expressible, and the one a `.length` check turns into the loosest.
+ */
+export interface HarnessToolPolicy {
+  allowedTools?: string[];
+  disallowedTools?: string[];
+}
+
 export interface HarnessSessionSpec {
   /** Working directory for the session. */
   cwd?: string;
@@ -571,8 +581,16 @@ export interface HarnessSession {
   pending(): number;
   /** Stop the current turn but keep the session alive. */
   interrupt(): Promise<void>;
-  /** Switch posture mid-session, where supported. */
-  setPermissionMode(mode: PermissionMode): Promise<void>;
+  /**
+   * Switch posture mid-session, where supported.
+   *
+   * `policy` is the newly resolved mode's tool gate, passed because a mode
+   * switch can change it and the spec's copy was fixed at construction. Most
+   * adapters ignore it — the host guard is the enforcement. ACP does not have
+   * that luxury: its only interception point is the agent's own permission
+   * request, so it has to know whether to keep asking for one.
+   */
+  setPermissionMode(mode: PermissionMode, policy?: HarnessToolPolicy): Promise<void>;
   /** Switch model mid-session, where supported. */
   setModel(model: string): Promise<void>;
   /** Switch effort mid-session. */

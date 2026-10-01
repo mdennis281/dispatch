@@ -35,6 +35,7 @@ import type {
   HarnessQuestionAnswer,
   HarnessSession,
   HarnessSessionSpec,
+  HarnessToolPolicy,
 } from "../types.js";
 import { readFileSync } from "node:fs";
 import type { ImageRef, SlashCommandInfo } from "@dispatch/shared";
@@ -84,8 +85,15 @@ export class AcpSession implements HarnessSession {
   private commands: SlashCommandInfo[] = [];
   private model?: string;
   private mode: PermissionMode;
-  /** The mode gates tools, so every call has to surface for the guard to see. */
-  private readonly restricted: boolean;
+  /**
+   * The mode gates tools, so every call has to surface for the guard to see.
+   *
+   * Mutable, and it has to be: a mode switch deliberately does NOT rebuild the
+   * runtime mid-turn, so a snapshot taken at construction would leave a chat
+   * switched INTO a restricted mode sitting in `auto` — raising no permission
+   * requests, and therefore never reaching the guard that was just tightened.
+   */
+  private restricted: boolean;
 
   /* ------------------------------------------------- the event stream */
 
@@ -100,10 +108,7 @@ export class AcpSession implements HarnessSession {
     this.genId = opts.genId;
     this.model = opts.spec.model;
     this.mode = opts.spec.permissionMode;
-    // An allowlist counts even when empty — defined-but-empty is the strictest
-    // policy expressible, not an absent one.
-    this.restricted =
-      opts.spec.allowedTools !== undefined || (opts.spec.disallowedTools?.length ?? 0) > 0;
+    this.restricted = gatesTools(opts.spec);
     this.decoder = new AcpStreamDecoder({ genId: opts.genId });
 
     opts.spec.abortSignal?.addEventListener("abort", () => void this.dispose(), { once: true });
@@ -393,8 +398,11 @@ export class AcpSession implements HarnessSession {
     });
   }
 
-  async setPermissionMode(mode: PermissionMode): Promise<void> {
+  async setPermissionMode(mode: PermissionMode, policy?: HarnessToolPolicy): Promise<void> {
     this.mode = mode;
+    // The gate moves with the mode. Only when the broker said so: a caller
+    // with nothing to say about the policy must not be read as "no policy".
+    if (policy) this.restricted = gatesTools(policy);
     await this.applyMode(mode);
   }
 
@@ -591,4 +599,15 @@ export function toImageBlock(img: ImageRef): Record<string, unknown> | undefined
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Does this policy gate tools at all?
+ *
+ * An allowlist counts even when EMPTY — defined-but-empty permits nothing,
+ * which is the strictest policy there is and the one a `.length` check
+ * silently turns into the loosest.
+ */
+function gatesTools(policy: HarnessToolPolicy): boolean {
+  return policy.allowedTools !== undefined || (policy.disallowedTools?.length ?? 0) > 0;
 }
