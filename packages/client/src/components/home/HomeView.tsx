@@ -43,7 +43,12 @@
  */
 import { Activity, Clock, FolderGit2, Inbox, RefreshCw, Zap } from "lucide-react";
 import { useEffect, useState } from "react";
-import { HOME_WINDOW_LABELS, type HomeProject, type HomeWindow } from "@dispatch/shared";
+import {
+  HOME_SPARK_UNIT,
+  HOME_WINDOW_LABELS,
+  type HomeProject,
+  type HomeWindow,
+} from "@dispatch/shared";
 import { ScrollArea } from "../ui/ScrollArea.js";
 import { IconButton } from "../ui/IconButton.js";
 import { Tabs } from "../ui/Tabs.js";
@@ -205,7 +210,9 @@ export function HomeView() {
               </p>
             ) : (
               <div className="grid gap-px bg-line sm:grid-cols-2 lg:grid-cols-3">
-                {overview?.projects.map((p) => <ProjectCard key={p.id} project={p} />)}
+                {overview?.projects.map((p) => (
+                  <ProjectCard key={p.id} project={p} window={window} />
+                ))}
               </div>
             )}
           </Card>
@@ -262,7 +269,7 @@ export function HomeView() {
  * because picking a project is the only thing anyone does here and a 240px card
  * with a 60px hit area is a worse version of the sidebar's menu.
  */
-function ProjectCard({ project: p }: { project: HomeProject }) {
+function ProjectCard({ project: p, window }: { project: HomeProject; window: HomeWindow }) {
   return (
     <button
       onClick={() => openProject(p.id)}
@@ -297,7 +304,7 @@ function ProjectCard({ project: p }: { project: HomeProject }) {
         )}
       </div>
 
-      <Sparkline values={p.spark} />
+      <Sparkline values={p.spark} label={HOME_SPARK_UNIT[window]} />
 
       <div className="flex items-center gap-3 text-2xs text-muted">
         <span className="flex items-center gap-1" title="Agent runtime in this window">

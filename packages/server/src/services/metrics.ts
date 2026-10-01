@@ -924,25 +924,41 @@ export class MetricsService {
   projectRollup(
     from: number,
     to: number,
+    bucketMs: number,
   ): {
     byProject: Record<string, { events: number; runtimeMs: number; lastAt: number }>;
-    /** project id → (day index, `ts / 86_400_000` floored) → count. */
+    /** project id → bucket index (0 = oldest, measured from `from`) → count. */
     spark: Record<string, Record<number, number>>;
   } {
     this.flush();
     const at = this.now();
     // ONE pass for the counts, the spark AND the recency stamp, grouped by
-    // (project, day). Three separate aggregates was the obvious shape and cost
-    // roughly three times as much: `metric_ts` locates the window but the group
-    // key lives in the table, so each statement re-walked the same rows. Summing
-    // the days back up in JS is a few hundred tuples.
+    // (project, bucket). Three separate aggregates was the obvious shape and
+    // cost roughly three times as much: `metric_ts` locates the window but the
+    // group key lives in the table, so each statement re-walked the same rows.
+    // Summing the buckets back up in JS is a few hundred tuples.
+    //
+    // The bucket is measured FROM `from`, not from the epoch. Flooring `ts` to
+    // a calendar day is the obvious key and it skews both ends of the shape: a
+    // trailing 24-hour window read at 01:00 lands 23 hours in one bucket and 1
+    // in the next, so steady activity draws a cliff. Offsetting by `from` makes
+    // every bucket exactly `bucketMs` wide, because the window is an exact
+    // multiple of it.
+    //
+    // The CAST is load-bearing, not decoration. `/` in SQLite is integer
+    // division only when BOTH operands are INTEGER, and a bound parameter
+    // arrives as a double — so without it the bucket key came back as 5.9999
+    // and every lookup against an integer index missed, which reads as a
+    // sparkline that is flat at zero while the totals beside it are right.
+    // Truncation is floor here because the window predicate makes `ts - from`
+    // non-negative.
     const eventRows = this.db
       .prepare(
-        `SELECT COALESCE(project_id, '') AS g, ts / 86400000 AS d,
+        `SELECT COALESCE(project_id, '') AS g, CAST((ts - ?) / ? AS INTEGER) AS d,
                 COUNT(*) AS c, MAX(ts) AS last
            FROM metric WHERE ts >= ? AND ts < ? GROUP BY g, d`,
       )
-      .all(from, to) as { g: string; d: number; c: number; last: number }[];
+      .all(from, bucketMs, from, to) as { g: string; d: number; c: number; last: number }[];
     // Selected by `start_ts` ALONE. The overlap predicate every other span read
     // uses (`start_ts < to AND COALESCE(end_ts, now) > from`) cannot use the
     // index on a window that ends at now — `start_ts < now` matches the whole

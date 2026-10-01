@@ -38,6 +38,7 @@
  * to need a progress bar.
  */
 import {
+  HOME_SPARK_BUCKETS,
   HOME_WINDOW_MS,
   isChatWorking,
   type HomeActivity,
@@ -125,6 +126,20 @@ export class HomeService {
    */
   start(): void {
     void this.overview("7d").catch(this.onError);
+  }
+
+  /**
+   * Drop every cached snapshot, so the next read recomputes from scratch.
+   *
+   * Exists for the metrics BACKFILL, which runs un-awaited at boot and imports
+   * history one chat at a time. Without this, {@link start} could cache a
+   * rollup taken a second into that import — on a fresh install, an empty one —
+   * and then serve it for the whole TTL. The page fetches once on arrival and
+   * never polls, so "empty" is what the first visitor would see and keep
+   * seeing. Cheap: it throws away three small objects.
+   */
+  invalidate(): void {
+    this.cache.clear();
   }
 
   /**
@@ -217,12 +232,18 @@ export class HomeService {
       );
     }
 
-    const { byProject, spark } = this.metrics.projectRollup(from, to);
-    const days = dayRange(from, to);
+    // Equal-width buckets measured from `from`, so none is partial — see
+    // HOME_SPARK_BUCKETS for why calendar days were the wrong key.
+    const buckets = HOME_SPARK_BUCKETS[window];
+    const { byProject, spark } = this.metrics.projectRollup(
+      from,
+      to,
+      HOME_WINDOW_MS[window] / buckets,
+    );
 
     const rows: HomeProject[] = projects.map((p) => {
       const ledger = byProject[p.id];
-      const perDay = spark[p.id] ?? {};
+      const perBucket = spark[p.id] ?? {};
       return {
         id: p.id,
         name: p.name,
@@ -232,7 +253,7 @@ export class HomeService {
         attention: attentionByProject.get(p.id) ?? 0,
         events: ledger?.events ?? 0,
         runtimeMs: ledger?.runtimeMs ?? 0,
-        spark: days.map((d) => perDay[d] ?? 0),
+        spark: Array.from({ length: buckets }, (_, i) => perBucket[i] ?? 0),
         // The ledger's newest row OR the newest chat touch, whichever is later:
         // a project whose last act was a human sending a message has no ledger
         // row for it, and reading "3 days ago" on a chat you typed in this
@@ -282,20 +303,4 @@ export class HomeService {
       recent,
     };
   }
-}
-
-/**
- * The day indices (`ts / 86_400_000`, floored) the window spans, oldest first.
- *
- * Computed from the window rather than from the rows so every project's spark
- * has the SAME length and the same x-axis — sparklines built from "the days
- * this project had activity" are not comparable to each other, which is the
- * only thing a column of them is for. A quiet day is a zero, not a gap.
- */
-export function dayRange(from: number, to: number): number[] {
-  const first = Math.floor(from / 86_400_000);
-  const last = Math.floor((to - 1) / 86_400_000);
-  const out: number[] = [];
-  for (let d = first; d <= last; d++) out.push(d);
-  return out;
 }

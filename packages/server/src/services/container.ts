@@ -1161,6 +1161,13 @@ export function createServices(
             console.log(
               `[Dispatch] metrics: imported ${r.rows} row(s) from ${r.chats} chat(s).`,
             );
+            // The homepage warm-up below starts while this is still importing,
+            // so whatever it cached was taken mid-import — on a fresh install,
+            // of an empty ledger. The page fetches once on arrival and never
+            // polls, so that snapshot is what the first visitor would see and
+            // keep seeing for the whole TTL. Throw it away now that the real
+            // history is in.
+            home.invalidate();
           }
         },
         (err: unknown) => console.error("[Dispatch] metrics backfill failed:", err),

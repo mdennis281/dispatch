@@ -6,7 +6,7 @@ import { Store } from "../store/index.js";
 import { EventBus } from "../bus.js";
 import { MetricsService, type MetricInput, type MetricSpanInput } from "./metrics.js";
 import { AttentionQueue } from "./attention.js";
-import { HomeService, dayRange } from "./home.js";
+import { HomeService } from "./home.js";
 import type { AttentionItem, Chat, Project } from "@dispatch/shared";
 
 const DAY = 86_400_000;
@@ -78,16 +78,43 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-describe("dayRange", () => {
-  it("covers every day the window touches, oldest first, with no gaps", () => {
-    const to = NOW + 1;
-    const days = dayRange(to - 7 * DAY, to);
-    expect(days).toHaveLength(8); // seven whole days plus the partial today
-    for (let i = 1; i < days.length; i++) expect(days[i]! - days[i - 1]!).toBe(1);
+describe("the sparkline's buckets", () => {
+  it("is one point per day over a week, and per hour over a day", async () => {
+    await store.saveProject(project("p1", "Alpha"));
+    const home = makeHome();
+    expect((await home.overview("7d")).projects[0]!.spark).toHaveLength(7);
+    expect((await home.overview("30d")).projects[0]!.spark).toHaveLength(30);
+    expect((await home.overview("24h")).projects[0]!.spark).toHaveLength(24);
   });
 
-  it("is one day wide for a window inside a single day", () => {
-    expect(dayRange(NOW, NOW + 1)).toHaveLength(1);
+  it("buckets from the window start, so no bucket is partial", async () => {
+    // THE BUG THIS GUARDS: with calendar-day keys, a 24h window read at
+    // 12:00 UTC splits evenly but one read at 01:00 puts 23 hours in one
+    // bucket and 1 in the next, so steady traffic draws a cliff. Here the
+    // clock is deliberately NOT on a day boundary and the load is uniform —
+    // one event per hour — so every bucket must read exactly 1.
+    await store.saveProject(project("p1", "Alpha"));
+    metrics.recordMany(
+      Array.from({ length: 24 }, (_, i) => event({ ts: NOW - i * HOUR, identifier: `t${i}` })),
+    );
+
+    const out = await makeHome().overview("24h");
+    const spark = out.projects[0]!.spark;
+    expect(spark).toHaveLength(24);
+    expect(spark.every((n) => n === 1)).toBe(true);
+  });
+
+  it("places the oldest event first and the newest last", async () => {
+    await store.saveProject(project("p1", "Alpha"));
+    metrics.recordMany([
+      event({ ts: NOW - 6 * DAY, identifier: "old" }),
+      event({ ts: NOW - 1000, identifier: "new" }),
+    ]);
+
+    const spark = (await makeHome().overview("7d")).projects[0]!.spark;
+    expect(spark[0]).toBe(1);
+    expect(spark[spark.length - 1]).toBe(1);
+    expect(spark.reduce((a, b) => a + b, 0)).toBe(2);
   });
 });
 
@@ -318,6 +345,21 @@ describe("HomeService — cache behaviour", () => {
     // 30-day walks is the case this guard exists for.
     expect(a).toBe(b);
     expect(b).toBe(c);
+  });
+
+  it("drops every window on invalidate, so a backfill's rows are picked up", async () => {
+    // The boot race: `start()` warms 7d while `MetricsBackfill` is still
+    // importing, so the cached rollup can be of an empty ledger. The page
+    // fetches once and never polls, so without this the first visitor sees
+    // zeros for the whole TTL.
+    await store.saveProject(project("p1", "Alpha"));
+    const home = makeHome();
+    expect((await home.overview("7d")).totals.events).toBe(0);
+
+    metrics.record(event({ ts: NOW - DAY })); // the backfill lands
+    home.invalidate();
+
+    expect((await home.overview("7d")).totals.events).toBe(1);
   });
 
   it("reports a failed background refresh instead of leaving it unhandled", async () => {

@@ -14,6 +14,13 @@
  * answers the comparison question the numbers beside it already answer, and
  * destroys the only question this mark is here for. The numbers compare; the
  * shape describes.
+ *
+ * IT IS NOT DECORATIVE, which is what it was first marked. The card prints the
+ * window TOTAL beside it, never the shape, so `aria-hidden` deleted the only
+ * thing this element contributes — "warming up or cooling down" — from anyone
+ * reading by voice. It is a `role="img"` with the series spelled out instead:
+ * the counts are the information, and there is no honest way to summarise a
+ * trend in fewer words that does not also editorialise.
  */
 import { useId } from "react";
 import { cn } from "../../lib/cn.js";
@@ -23,9 +30,12 @@ const H = 22;
 
 export function Sparkline({
   values,
+  label,
   className,
 }: {
   values: readonly number[];
+  /** What one bucket spans ("hourly" / "daily"), for the text alternative. */
+  label: string;
   className?: string;
 }) {
   // The gradient needs a document-unique id — several of these render at once.
@@ -49,9 +59,12 @@ export function Sparkline({
   return (
     <svg
       viewBox={`0 0 ${W} ${H}`}
-      // Decorative: every figure it encodes is printed beside it in words, so a
-      // screen reader gains nothing from a 30-number list.
-      aria-hidden
+      role="img"
+      aria-label={
+        values.some((v) => v > 0)
+          ? `${label} activity, oldest to newest: ${values.join(", ")}`
+          : `No ${label} activity in this window`
+      }
       preserveAspectRatio="none"
       className={cn("h-5 w-full", className)}
     >
