@@ -1300,6 +1300,14 @@ function toolPolicyKey(s: { allowedTools?: string[]; deniedTools?: string[] }): 
   return JSON.stringify([s.allowedTools ?? null, s.deniedTools ?? null]);
 }
 
+/** Statuses in which a turn is in flight — see `setMode`'s deferred restart. */
+const ACTIVE_STATUSES: ReadonlySet<string> = new Set([
+  "running",
+  "queued",
+  "waiting",
+  "awaiting-input",
+]);
+
 export const BUILTIN_MODE_PERMISSION: Record<string, PermissionMode> = {
   default: "default",
   ask: "default",
@@ -3031,7 +3039,26 @@ export class SessionBroker {
     // `setPersona` makes for the same reason (instructions are fixed at
     // startup too). Only when the policy actually MOVED: most mode switches
     // change nothing here and must not cost a restart.
-    if (session.started && toolPolicyKey(session) !== policyBefore) {
+    //
+    // NEVER MID-TURN, though — and not merely as a courtesy. `chat_set_mode`
+    // is a tool the agent can call on its OWN chat, from inside its own turn:
+    // `stop()` waits for that run loop, the run loop is waiting for this tool
+    // handler to return, and the call hangs until the stop timeout fires and
+    // aborts the turn it was serving. A human switching mode on a running
+    // chat would lose the turn the same way, just without the deadlock.
+    //
+    // Deferring is safe because the two halves have different jobs. The GUARD
+    // is the enforcement and it is already updated above, synchronously, so
+    // the very next call is judged by the new policy. The CATALOGUE is only
+    // what the model can see, and a stale one costs a refusal it could have
+    // been spared — never a tool it should not have had. It corrects itself
+    // on the next session build.
+    if (
+      session.started &&
+      !session.turnOpen &&
+      !ACTIVE_STATUSES.has(session.status) &&
+      toolPolicyKey(session) !== policyBefore
+    ) {
       session.switching = true;
       await this.stop(chatId);
     }
@@ -7521,6 +7548,17 @@ export class SessionBroker {
     // refreshed from the SDK after init; for a local model nothing upstream
     // ever supplies a true one, so this is it.
     if (contextWindow !== undefined) session.contextWindow = contextWindow;
+    // The browser pair is attached to a global chat like any other, and that
+    // is a deliberate call rather than an oversight.
+    //
+    // Review raised that `browser_click` could drive github.com's merge
+    // button and so route around "never land". True in principle, and
+    // declined: the posture exists to stop an agent CASUALLY damaging a repo
+    // — the one-command `sed -i`, the reflexive `approve_pr`, the write into
+    // the wrong worktree. Driving a browser to a merge button is not a thing
+    // a model does by accident, and withholding browser automation costs a
+    // chat whose entire job is looking at things the ability to look at
+    // things. Michael's call; recording it so nobody re-derives the ban.
     const browserMcp = buildBrowserMcpServers({
       contextWindow,
       config: projectId ? this.projectConfig?.getBrowserConfig?.(projectId) : undefined,

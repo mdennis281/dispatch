@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, mkdir, rm, readdir } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, readdir, readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -342,6 +342,61 @@ describe("Store projects/chats CRUD", () => {
         expect((await b.getChat("chat-b"))!.projectId).toBe(target);
         expect(realProjects(await b.listProjects()).map((p) => p.id)).toEqual([target]);
         expect(await b.listChats(GLOBAL_PROJECT_ID)).toHaveLength(0);
+      } finally {
+        b.close();
+      }
+    } finally {
+      for (const d of [cfg, dataA, dataB]) await rm(d, { recursive: true, force: true });
+    }
+  });
+
+  it("serialises the migration decision when two instances race", async () => {
+    // Both read `decided === null` before either writes. Without an exclusive
+    // claim the slower one overwrites the winner's record and the two remap
+    // their chats to different projects — the split again, by a narrower
+    // door. `init()` concurrently on one shared config is the whole test.
+    const cfg = await mkdtemp(join(tmpdir(), "cm-race-cfg-"));
+    const dataA = await mkdtemp(join(tmpdir(), "cm-race-a-"));
+    const dataB = await mkdtemp(join(tmpdir(), "cm-race-b-"));
+    try {
+      await mkdir(join(cfg, "projects"), { recursive: true });
+      await writeJsonAtomic(join(cfg, "projects", `${GLOBAL_PROJECT_ID}.json`), {
+        ...project(GLOBAL_PROJECT_ID),
+        name: "Acme Billing",
+        createdAt: 1,
+      });
+      for (const [dir, id] of [[dataA, "race-a"], [dataB, "race-b"]] as const) {
+        await mkdir(join(dir, "chats", id), { recursive: true });
+        await writeJsonAtomic(join(dir, "chats", id, "chat.json"), chat(id, GLOBAL_PROJECT_ID));
+      }
+
+      const a = new Store(dataA, cfg);
+      await a.init();
+      const aTarget = (await a.getChat("race-a"))!.projectId;
+      a.close();
+
+      // B as it would be having read BEFORE A wrote: its view of the shared
+      // decision is stale-empty, and the legacy row A removed is gone — so
+      // left to itself it invents a "Recovered project" and clobbers the
+      // record. Stubbing that one read is the whole race, deterministically.
+      const b = new Store(dataB, cfg);
+      let firstRead = true;
+      const realRead = (b as unknown as { readGlobalReservation: () => unknown })
+        .readGlobalReservation.bind(b);
+      (b as unknown as { readGlobalReservation: () => unknown }).readGlobalReservation = () => {
+        if (firstRead) {
+          firstRead = false;
+          return null;
+        }
+        return realRead();
+      };
+      await b.init();
+      try {
+        // The exclusive claim fails, B re-reads, and joins A's decision.
+        expect((await b.getChat("race-b"))!.projectId).toBe(aTarget);
+        expect(JSON.parse(await readFile(join(cfg, "global-reservation.json"), "utf8")).movedTo)
+          .toBe(aTarget);
+        expect(realProjects(await b.listProjects()).map((p) => p.id)).toEqual([aTarget]);
       } finally {
         b.close();
       }

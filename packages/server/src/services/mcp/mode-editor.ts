@@ -34,6 +34,7 @@ import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { loadManifest, type ProjectPaths } from "@dispatch/cli/core";
 import {
+  migrateToolList,
   BUILTIN_MODE_CONFIGS,
   isProtectedMode,
   DEFAULT_MODES_DIR,
@@ -332,11 +333,22 @@ export async function readModesDir(dir: string): Promise<ModeRecord[]> {
   return out;
 }
 
-/** A YAML tool list, kept only when it really is a list of strings. */
+/**
+ * A YAML tool list, kept only when it really is a list of strings — and run
+ * through the manager-server rename, exactly as the broker-facing loader does
+ * (`project-config.ts`'s `toToolList`).
+ *
+ * Without the migration this surface and the broker disagree about the same
+ * file: a mode carrying a legacy `mcp__manager__worktree` would be ENFORCED as
+ * `mcp__dispatch-workspace__worktree` and REPORTED as the old name, and
+ * `mode_write` would faithfully write the stale name back. A catalogue that
+ * describes a different policy from the one in force is the failure this
+ * editor has already been corrected for twice.
+ */
 function toolList(v: unknown): string[] | undefined {
   if (!Array.isArray(v)) return undefined;
   const out = v.filter((e): e is string => typeof e === "string" && e.trim().length > 0);
   // `[]` is preserved: a defined-but-empty allowlist permits nothing, which is
   // a real policy. Only a non-array is "unset".
-  return out;
+  return out.length ? migrateToolList(out).tools : [];
 }

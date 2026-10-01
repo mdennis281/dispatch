@@ -934,19 +934,32 @@ export class Store {
         subApps: [],
         createdAt: Date.now(),
       };
-      movedId = this.reservedMigrationTarget(project);
 
-      // 1. The project under its new id, and the SHARED note of where it
-      //    went. Both before anything is removed: the note is what a second
-      //    instance reads, and writing it late would leave a window in which
-      //    the row is gone and the decision unrecorded.
-      await this.writeEntity(
-        `project:${movedId}`,
-        this.entityFile(this.projectsDir(), movedId),
-        ProjectSchema,
-        { ...project, id: movedId },
-      );
-      await this.writeGlobalReservation(movedId);
+      // 1. CLAIM the decision before writing anything under it. Two instances
+      //    upgrading at the same moment both read `decided === null`; the
+      //    exclusive create is the one serialising point, and exactly one of
+      //    them wins it.
+      //
+      //    Claiming BEFORE the project record, not after, because the loser
+      //    must not leave its own record behind: a second instance that
+      //    arrives after the row is gone computes "Recovered project", and
+      //    writing that first would litter the user's project list with an
+      //    empty row that is never used again.
+      movedId = await this.claimGlobalReservation(this.reservedMigrationTarget(project));
+
+      // 2. The project under its new id — but only if nothing is there. On
+      //    the winning path this writes the record; on the losing path the
+      //    winner already has, and this leaves it alone. It still runs on the
+      //    losing path deliberately: a winner that died between claiming and
+      //    writing would otherwise leave every instance pointing at an id
+      //    with no record behind it, and this repairs that.
+      const targetFile = this.entityFile(this.projectsDir(), movedId);
+      if (!existsSync(targetFile)) {
+        await this.writeEntity(`project:${movedId}`, targetFile, ProjectSchema, {
+          ...project,
+          id: movedId,
+        });
+      }
     }
 
     // 2. THIS instance's chats. Every one has to land before the source row
@@ -1024,8 +1037,31 @@ export class Store {
     }
   }
 
-  private async writeGlobalReservation(movedTo: string): Promise<void> {
-    await writeJsonAtomic(this.globalReservationRecord(), { movedTo, at: Date.now() });
+  /**
+   * Record `movedTo` as THE migration target, or discover who got there
+   * first. Returns the id that actually won.
+   *
+   * `wx` rather than {@link writeJsonAtomic}: an atomic write still clobbers,
+   * and clobbering is precisely the failure here — the slower instance would
+   * replace the winner's decision and the two would remap their chats to
+   * different projects. An exclusive create makes this the one serialising
+   * point, with no lock file to leak and nothing to clean up.
+   */
+  private async claimGlobalReservation(movedTo: string): Promise<string> {
+    const path = this.globalReservationRecord();
+    try {
+      await fsWriteFile(path, JSON.stringify({ movedTo, at: Date.now() }), {
+        encoding: "utf8",
+        flag: "wx",
+      });
+      return movedTo;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") throw err;
+      // Lost the race (or a previous boot of ours wrote it). Join whoever
+      // won; an unreadable record leaves us on our own deterministic answer,
+      // which for the same legacy row is the same id anyway.
+      return this.readGlobalReservation()?.movedTo ?? movedTo;
+    }
   }
 
   /**
