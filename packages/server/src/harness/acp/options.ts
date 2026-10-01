@@ -41,8 +41,19 @@ export type AcpModeId = "auto" | "approve" | "smart_approve" | "chat";
  * "sensitive". It is the closest honest mapping; the alternative — mapping
  * `acceptEdits` to `auto` — would silently auto-approve COMMANDS too, which is
  * a safety regression, so we bias toward asking.
+ *
+ * `restricted` says the session carries a mode TOOL POLICY (an allowlist, or a
+ * non-empty denylist). It forces `approve` for everything that still uses
+ * tools, because this adapter's only interception point is
+ * `session/request_permission` — and `auto` emits none at all while
+ * `smart_approve` emits them only for calls the AGENT judges sensitive. Under
+ * either, a denied tool simply runs and the host never gets a vote, which
+ * would make the policy advisory on this runtime and enforced on the others.
+ * Asking about every call is the price of the veto being real; a session with
+ * no policy keeps the mapping it had, since there is nothing to enforce.
  */
-export function toAcpMode(mode: PermissionMode): AcpModeId {
+export function toAcpMode(mode: PermissionMode, restricted = false): AcpModeId {
+  if (restricted && mode !== "plan") return "approve";
   switch (mode) {
     case "plan":
       // Hard read-only: the agent refuses to call tools at all.

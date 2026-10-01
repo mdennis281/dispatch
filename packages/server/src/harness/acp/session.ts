@@ -84,6 +84,8 @@ export class AcpSession implements HarnessSession {
   private commands: SlashCommandInfo[] = [];
   private model?: string;
   private mode: PermissionMode;
+  /** The mode gates tools, so every call has to surface for the guard to see. */
+  private readonly restricted: boolean;
 
   /* ------------------------------------------------- the event stream */
 
@@ -98,6 +100,10 @@ export class AcpSession implements HarnessSession {
     this.genId = opts.genId;
     this.model = opts.spec.model;
     this.mode = opts.spec.permissionMode;
+    // An allowlist counts even when empty — defined-but-empty is the strictest
+    // policy expressible, not an absent one.
+    this.restricted =
+      opts.spec.allowedTools !== undefined || (opts.spec.disallowedTools?.length ?? 0) > 0;
     this.decoder = new AcpStreamDecoder({ genId: opts.genId });
 
     opts.spec.abortSignal?.addEventListener("abort", () => void this.dispose(), { once: true });
@@ -383,7 +389,7 @@ export class AcpSession implements HarnessSession {
     if (!this.sessionId) return;
     await this.conn.call("session/set_mode", {
       sessionId: this.sessionId,
-      modeId: toAcpMode(mode),
+      modeId: toAcpMode(mode, this.restricted),
     });
   }
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, mkdir, rm, readdir, readFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, readdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -402,6 +402,87 @@ describe("Store projects/chats CRUD", () => {
       }
     } finally {
       for (const d of [cfg, dataA, dataB]) await rm(d, { recursive: true, force: true });
+    }
+  });
+
+  it("rebuilds a decided target whose record the winner died before writing", async () => {
+    // The claim is exclusive, so the decision survives a crash — but the
+    // project record written under it does not. A later instance reads the
+    // decision, and if it trusts the target blindly it remaps its chats onto
+    // an id with no record behind it and then deletes the legacy row: the
+    // last copy of the data, gone, in the name of a migration.
+    const cfg = await mkdtemp(join(tmpdir(), "cm-halfclaim-cfg-"));
+    const data = await mkdtemp(join(tmpdir(), "cm-halfclaim-data-"));
+    try {
+      await mkdir(join(cfg, "projects"), { recursive: true });
+      await writeJsonAtomic(join(cfg, "projects", `${GLOBAL_PROJECT_ID}.json`), {
+        ...project(GLOBAL_PROJECT_ID),
+        name: "Acme Billing",
+        createdAt: 1,
+      });
+      // Claimed, never followed through: no `projects/acme-billing.json`.
+      await writeJsonAtomic(join(cfg, "global-reservation.json"), {
+        movedTo: "acme-billing",
+        at: 1,
+      });
+      await mkdir(join(data, "chats", "orphan"), { recursive: true });
+      await writeJsonAtomic(
+        join(data, "chats", "orphan", "chat.json"),
+        chat("orphan", GLOBAL_PROJECT_ID),
+      );
+
+      const store2 = new Store(data, cfg);
+      await store2.init();
+      try {
+        expect((await store2.getChat("orphan"))!.projectId).toBe("acme-billing");
+        // Repaired from the legacy row that was still there, not invented.
+        expect((await store2.getProject("acme-billing"))?.name).toBe("Acme Billing");
+      } finally {
+        store2.close();
+      }
+    } finally {
+      for (const d of [cfg, data]) await rm(d, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to boot on a shared reservation record it cannot read", async () => {
+    // Present-but-corrupt is not "undecided". Treating it as undecided is the
+    // split again: this instance invents a target, the exclusive claim fails
+    // against the corrupt file, it rereads the same garbage, and falls back to
+    // its invented id while the other instance uses the real one.
+    const cfg = await mkdtemp(join(tmpdir(), "cm-badres-cfg-"));
+    const data = await mkdtemp(join(tmpdir(), "cm-badres-data-"));
+    try {
+      await mkdir(join(cfg, "projects"), { recursive: true });
+      await writeFile(join(cfg, "global-reservation.json"), "{ movedTo: ", "utf8");
+      await mkdir(join(data, "chats", "orphan"), { recursive: true });
+      await writeJsonAtomic(
+        join(data, "chats", "orphan", "chat.json"),
+        chat("orphan", GLOBAL_PROJECT_ID),
+      );
+
+      const store2 = new Store(data, cfg);
+      await expect(store2.init()).rejects.toThrow(/unreadable/);
+      store2.close();
+
+      // A VALID file naming nothing usable is the same refusal, and an
+      // install with nothing under the reserved id is not affected by either
+      // — it never has to read the record at all.
+      await writeJsonAtomic(join(cfg, "global-reservation.json"), { movedTo: 42 });
+      const store3 = new Store(data, cfg);
+      await expect(store3.init()).rejects.toThrow(/no valid project id/);
+      store3.close();
+
+      const clean = await mkdtemp(join(tmpdir(), "cm-badres-clean-"));
+      try {
+        const store4 = new Store(clean, cfg);
+        await store4.init();
+        store4.close();
+      } finally {
+        await rm(clean, { recursive: true, force: true });
+      }
+    } finally {
+      for (const d of [cfg, data]) await rm(d, { recursive: true, force: true });
     }
   });
 

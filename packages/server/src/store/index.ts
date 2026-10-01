@@ -885,9 +885,6 @@ export class Store {
     // left exactly where they are.
     if (existsSync(this.globalReservationMarker())) return;
 
-    // What some instance already decided, if any. SHARED, and that is the
-    // whole point of it — see `globalReservationRecord`.
-    const decided = this.readGlobalReservation();
     const legacy = this.entityFile(this.projectsDir(), GLOBAL_PROJECT_ID);
     const legacyExists = existsSync(legacy);
 
@@ -906,12 +903,36 @@ export class Store {
       );
     }
 
-    // Nothing to move and nobody has moved anything: a normal install meeting
-    // the reservation for the first time.
-    if (!decided && !legacyExists && !chats.length) {
+    // Nothing here to move: a normal install meeting the reservation for the
+    // first time, or a second instance that simply had no chats under the id.
+    // Checked BEFORE the shared record is read, so an install with nothing at
+    // stake never has to care whether that record is intact.
+    if (!legacyExists && !chats.length) {
       await this.markGlobalIdReserved();
       return;
     }
+
+    // What some instance already decided, if any. SHARED, and that is the
+    // whole point of it — see `globalReservationRecord`.
+    const decided = this.readGlobalReservation();
+
+    // The record the target is built from. An unreadable (or absent) row is
+    // still migrated rather than skipped: the project is already broken, but
+    // its CHATS are the thing at risk — left pointing at the reserved id they
+    // become global chats, which is the whole hazard. They get attached to a
+    // placeholder the operator has to fix: a visible problem rather than a
+    // silent posture change.
+    const stored = legacyExists
+      ? await this.readEntity(legacy, ProjectSchema).catch(() => null)
+      : null;
+    const project: Project = stored ?? {
+      id: GLOBAL_PROJECT_ID,
+      name: "Recovered project",
+      repoPath: join(this.dataDir, "recovered-project"),
+      worktreeRoot: join(this.dataDir, "recovered-project"),
+      subApps: [],
+      createdAt: Date.now(),
+    };
 
     let movedId: string;
     if (decided) {
@@ -920,46 +941,38 @@ export class Store {
       // how one project's conversations end up split across two records.
       movedId = decided.movedTo;
     } else {
-      const stored = await this.readEntity(legacy, ProjectSchema).catch(() => null);
-      // An unreadable row is still migrated rather than skipped. The project
-      // is already broken, but its CHATS are the thing at risk: left pointing
-      // at the reserved id they become global chats, which is the whole
-      // hazard. They get attached to a placeholder the operator has to fix —
-      // a visible problem rather than a silent posture change.
-      const project: Project = stored ?? {
-        id: GLOBAL_PROJECT_ID,
-        name: "Recovered project",
-        repoPath: join(this.dataDir, "recovered-project"),
-        worktreeRoot: join(this.dataDir, "recovered-project"),
-        subApps: [],
-        createdAt: Date.now(),
-      };
-
-      // 1. CLAIM the decision before writing anything under it. Two instances
-      //    upgrading at the same moment both read `decided === null`; the
-      //    exclusive create is the one serialising point, and exactly one of
-      //    them wins it.
+      // CLAIM the decision before writing anything under it. Two instances
+      // upgrading at the same moment both read `decided === null`; the
+      // exclusive create is the one serialising point, and exactly one of
+      // them wins it.
       //
-      //    Claiming BEFORE the project record, not after, because the loser
-      //    must not leave its own record behind: a second instance that
-      //    arrives after the row is gone computes "Recovered project", and
-      //    writing that first would litter the user's project list with an
-      //    empty row that is never used again.
+      // Claiming BEFORE the project record, not after, because the loser must
+      // not leave its own record behind: a second instance that arrives after
+      // the row is gone computes "Recovered project", and writing that first
+      // would litter the user's project list with an empty row that is never
+      // used again.
       movedId = await this.claimGlobalReservation(this.reservedMigrationTarget(project));
+    }
 
-      // 2. The project under its new id — but only if nothing is there. On
-      //    the winning path this writes the record; on the losing path the
-      //    winner already has, and this leaves it alone. It still runs on the
-      //    losing path deliberately: a winner that died between claiming and
-      //    writing would otherwise leave every instance pointing at an id
-      //    with no record behind it, and this repairs that.
-      const targetFile = this.entityFile(this.projectsDir(), movedId);
-      if (!existsSync(targetFile)) {
-        await this.writeEntity(`project:${movedId}`, targetFile, ProjectSchema, {
-          ...project,
-          id: movedId,
-        });
-      }
+    // 1. The project under its new id — but only if nothing is there.
+    //
+    //    This runs on BOTH branches, which is the point of it. A process that
+    //    won the claim and then died before writing leaves the decision
+    //    recorded and the record missing; every later instance reads
+    //    `decided`, and if the repair only lived on the claiming branch they
+    //    would each remap their chats onto an id with nothing behind it and
+    //    then delete the last copy of the data. Rebuilding from the still
+    //    present legacy row — or from the placeholder, when that is gone too
+    //    — keeps the chats attached to something that exists. Not fatal:
+    //    refusing to boot would be the louder failure, but here the migration
+    //    is moving chats OFF the reserved id, which is the safe direction, and
+    //    a visible placeholder project is fixable where a dead install is not.
+    const targetFile = this.entityFile(this.projectsDir(), movedId);
+    if (!existsSync(targetFile)) {
+      await this.writeEntity(`project:${movedId}`, targetFile, ProjectSchema, {
+        ...project,
+        id: movedId,
+      });
     }
 
     // 2. THIS instance's chats. Every one has to land before the source row
@@ -1021,20 +1034,31 @@ export class Store {
     return join(this.configDir, "global-reservation.json");
   }
 
+  /**
+   * The recorded decision, or `null` for "nobody has decided yet".
+   *
+   * Present-but-unreadable is NOT null, and that distinction is load-bearing.
+   * Treating it as undecided was wrong in exactly the case the record exists
+   * for: the first instance has already moved the shared row and deleted it,
+   * so a second instance with its own legacy chats no longer has the project
+   * to derive a matching id from. It computes "Recovered project", hits
+   * `EEXIST` on the claim, rereads this same corrupt file, and falls back to
+   * its own invented id — one project's conversations split across two
+   * records, silently. There is no safe guess available, so it refuses.
+   */
   private readGlobalReservation(): { movedTo: string } | null {
     const path = this.globalReservationRecord();
     if (!existsSync(path)) return null;
+    let raw: { movedTo?: unknown };
     try {
-      const raw = JSON.parse(readFileSync(path, "utf8")) as { movedTo?: unknown };
-      return typeof raw.movedTo === "string" && isEntityId(raw.movedTo)
-        ? { movedTo: raw.movedTo }
-        : null;
-    } catch {
-      // Unreadable: treat as undecided. The worst case is this instance makes
-      // its own (deterministic) choice, which `reservedMigrationTarget`
-      // resolves to the same id anyway when the project matches.
-      return null;
+      raw = JSON.parse(readFileSync(path, "utf8")) as { movedTo?: unknown };
+    } catch (err) {
+      throw new ReservedProjectMigrationError(`${path} is unreadable`, { cause: err });
     }
+    if (typeof raw.movedTo !== "string" || !isEntityId(raw.movedTo)) {
+      throw new ReservedProjectMigrationError(`${path} names no valid project id`);
+    }
+    return { movedTo: raw.movedTo };
   }
 
   /**
@@ -1058,9 +1082,13 @@ export class Store {
     } catch (err) {
       if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") throw err;
       // Lost the race (or a previous boot of ours wrote it). Join whoever
-      // won; an unreadable record leaves us on our own deterministic answer,
-      // which for the same legacy row is the same id anyway.
-      return this.readGlobalReservation()?.movedTo ?? movedTo;
+      // won. `readGlobalReservation` throws rather than answering `null` for
+      // a file that exists but says nothing usable — falling back to our own
+      // id there is how the two instances end up in different projects.
+      const won = this.readGlobalReservation();
+      /* c8 ignore next */
+      if (!won) throw new ReservedProjectMigrationError(`${path} vanished mid-claim`);
+      return won.movedTo;
     }
   }
 

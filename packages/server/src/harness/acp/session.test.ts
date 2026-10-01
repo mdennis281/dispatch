@@ -153,6 +153,19 @@ describe("AcpSession", () => {
     expect(init).toMatchObject({ type: "init", sessionId: "20260923_1", permissionMode: "plan" });
   });
 
+  it("downgrades a non-asking posture to per-call approval when the mode gates tools", async () => {
+    // `bypassPermissions` alone is `auto` — no permission requests at all,
+    // and therefore no interception point, so the denylist would be advisory
+    // on this runtime and enforced on every other one.
+    const { agent, session, drain } = build({
+      permissionMode: "bypassPermissions",
+      disallowedTools: ["Bash"],
+    });
+    session.send({ text: "hi" });
+    await drain();
+    expect(agent.frameFor("session/set_mode")?.params).toMatchObject({ modeId: "approve" });
+  });
+
   it("resumes an existing session rather than starting a new one", async () => {
     const { agent, session, drain } = build({ resumeSessionId: "20260101_9" });
     session.send({ text: "again" });
