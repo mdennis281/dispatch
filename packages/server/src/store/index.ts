@@ -123,6 +123,7 @@ import {
   readJsonlLines,
   readJsonlTail,
   isMissing,
+  renameWithRetry,
 } from "./fsq.js";
 import { StateDb, assertStateMigrated } from "./db.js";
 
@@ -999,7 +1000,36 @@ export class Store {
       );
     }
 
-    // 3. Only now is the id free here. The row removal is idempotent: the
+    // 3. The project's ENTITY DIRECTORY — `projects/<id>/`, the sibling of
+    //    `projects/<id>.json`. That is where its memories live, and its whole
+    //    external `.dispatch/` tree when it keeps config out of the repo
+    //    (`projectMemoryDir` / `projectConfigDir`). Moving the row without it
+    //    loses the migrated project its memory AND hands that memory to the
+    //    global chat, which reads the same path under the reserved id.
+    //
+    //    Only on the branch that still had the ROW. The directory lives beside
+    //    it in the shared `configDir`, so whichever instance found the row owns
+    //    moving it; a later joiner that moved it anyway would be carting off
+    //    the memories the global chat has accumulated since.
+    if (legacyExists) {
+      const fromDir = this.projectConfigDir(GLOBAL_PROJECT_ID);
+      const toDir = this.projectConfigDir(movedId);
+      if (existsSync(fromDir)) {
+        // Unreachable by design — `reservedMigrationTarget` only returns an id
+        // that is free or this migration's own prior output, and that output
+        // took the directory with it. Refusing beats the two ways of guessing:
+        // clobbering somebody's memories, or leaving them under the reserved
+        // id for the global chat to adopt.
+        if (existsSync(toDir)) {
+          throw new ReservedProjectMigrationError(
+            `cannot move "${fromDir}" to "${toDir}": the destination already exists`,
+          );
+        }
+        await renameWithRetry(fromDir, toDir);
+      }
+    }
+
+    // 4. Only now is the id free here. The row removal is idempotent: the
     //    instance that went first already did it.
     if (legacyExists) await rm(legacy, { force: true });
     await this.markGlobalIdReserved();

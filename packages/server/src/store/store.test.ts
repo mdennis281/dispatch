@@ -405,6 +405,40 @@ describe("Store projects/chats CRUD", () => {
     }
   });
 
+  it("takes the project's memory directory with it, and never leaves it under the reserved id", async () => {
+    // `projects/<id>/` is the sibling of `projects/<id>.json` — the project's
+    // memories and, for an external-config project, its whole `.dispatch/`
+    // tree. Left behind it is lost to the migrated project AND inherited by
+    // the global chat, which resolves the same path under the reserved id.
+    const cfg = await mkdtemp(join(tmpdir(), "cm-memdir-cfg-"));
+    const data = await mkdtemp(join(tmpdir(), "cm-memdir-data-"));
+    try {
+      await mkdir(join(cfg, "projects", GLOBAL_PROJECT_ID, "memory"), { recursive: true });
+      await writeJsonAtomic(join(cfg, "projects", `${GLOBAL_PROJECT_ID}.json`), {
+        ...project(GLOBAL_PROJECT_ID),
+        name: "Acme Billing",
+        createdAt: 1,
+      });
+      await writeFile(
+        join(cfg, "projects", GLOBAL_PROJECT_ID, "memory", "a-fact.md"),
+        "the deploy key rotates on the first\n",
+        "utf8",
+      );
+
+      const store2 = new Store(data, cfg);
+      await store2.init();
+      try {
+        expect(await readFile(join(cfg, "projects", "acme-billing", "memory", "a-fact.md"), "utf8"))
+          .toContain("deploy key");
+        expect(existsSync(join(cfg, "projects", GLOBAL_PROJECT_ID))).toBe(false);
+      } finally {
+        store2.close();
+      }
+    } finally {
+      for (const d of [cfg, data]) await rm(d, { recursive: true, force: true });
+    }
+  });
+
   it("rebuilds a decided target whose record the winner died before writing", async () => {
     // The claim is exclusive, so the decision survives a crash — but the
     // project record written under it does not. A later instance reads the
