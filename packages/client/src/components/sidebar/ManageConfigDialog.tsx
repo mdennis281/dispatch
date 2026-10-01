@@ -21,7 +21,7 @@ import { SegmentedControl } from "../ui/SegmentedControl.js";
 import { Chip } from "../ui/Chip.js";
 import { cn } from "../../lib/cn.js";
 import { api } from "../../lib/api.js";
-import { useProjects } from "../../stores/projects.js";
+import { useProjects, useRealProjects } from "../../stores/projects.js";
 import { useOverlay } from "../../stores/view.js";
 
 type Tab = "agents" | "modes";
@@ -120,7 +120,9 @@ export function ManageConfigDialog() {
   const { open, close: onClose } = useOverlay("agents");
   const agents = useProjects((s) => s.agents);
   const modes = useProjects((s) => s.modes);
-  const projects = useProjects((s) => s.projects);
+  // A project-scoped agent or mode is written into that repo's `.dispatch/`.
+  // The pseudo-project has no repo, so it is not a scope anything can target.
+  const projects = useRealProjects();
 
   const [tab, setTab] = useState<Tab>("agents");
   const [form, setForm] = useState<FormState | null>(null);

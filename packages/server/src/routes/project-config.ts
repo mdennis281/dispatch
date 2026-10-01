@@ -25,6 +25,7 @@ import type { FastifyInstance } from "fastify";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import {
+  isGlobalProject,
   ProjectAgentContextSchema,
   ProjectConfigLocationSchema,
   ShellTranscriptFilterSchema,
@@ -42,6 +43,38 @@ import { safeArchivePath } from "../services/project-config-archive.js";
 export function registerProjectConfigRoutes(app: FastifyInstance): void {
   const { store } = app.cm;
   const { projectConfig, projectConfigArchive } = app.services;
+
+  /**
+   * The reserved pseudo-project has no config, and must not acquire one.
+   *
+   * `store.getProject` SYNTHESIZES a record for it, so every route in this
+   * file passed its "does the project exist" check and treated it as ordinary.
+   * `scaffold` and `import` would then create
+   * `<configDir>/projects/__global__/project.yaml`, a reload would cache its
+   * instructions, skills and — the part that matters — its MCP servers, and
+   * the broker would attach those to global sessions. Their tool names are
+   * arbitrary, so the fixed denylist cannot cover them: that is write-capable
+   * tooling re-entering the project-less chat through its own config.
+   *
+   * A HOOK, not a check in eleven handlers, because the failure mode is a
+   * twelfth route added later without one. Matched on the route PATTERN, so it
+   * cannot widen to anything else in the app.
+   *
+   * Refuses READS too, which is the part worth justifying: `GET …/config`
+   * loads the config when nothing is cached, so leaving it open leaves the
+   * load path — and therefore the MCP attachment — reachable. A global chat
+   * has no config surface in the UI to break, and `GET /api/projects/:id`
+   * still answers for chat rendering.
+   */
+  app.addHook("preHandler", async (req, reply) => {
+    const pattern = req.routeOptions?.url;
+    if (!pattern?.startsWith("/api/projects/:id/config")) return;
+    const id = (req.params as { id?: string } | undefined)?.id;
+    if (!isGlobalProject(id)) return;
+    return reply
+      .code(400)
+      .send({ error: `"${id}" is the global chat and has no project config` });
+  });
 
   app.get<{ Params: { id: string } }>(
     "/api/projects/:id/config",

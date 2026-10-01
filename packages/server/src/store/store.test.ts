@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm, readdir } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, readdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +9,7 @@ import { DatabaseSync } from "node:sqlite";
 import { renameWithRetry, writeJsonAtomic, readJson } from "./fsq.js";
 import type { Project, Chat, ChatMessage, RunnerInstance, Checkpoint, PrRecord, IssueClaim } from "@dispatch/shared";
 import { PrRecordSchema } from "@dispatch/shared";
+import { GLOBAL_PROJECT_ID, realProjects } from "@dispatch/shared";
 
 let dir: string;
 let store: Store;
@@ -65,10 +66,197 @@ describe("Store projects/chats CRUD", () => {
   it("saves, reads, lists, and deletes a project", async () => {
     await store.saveProject(project("p1"));
     expect(await store.getProject("p1")).toMatchObject({ id: "p1", name: "Project p1" });
-    expect(await store.listProjects()).toHaveLength(1);
+    expect(realProjects(await store.listProjects())).toHaveLength(1);
     await store.deleteProject("p1");
     expect(await store.getProject("p1")).toBeNull();
-    expect(await store.listProjects()).toHaveLength(0);
+    expect(realProjects(await store.listProjects())).toHaveLength(0);
+  });
+
+  it("always resolves the reserved pseudo-project, and never writes one", async () => {
+    // It exists without anybody creating it — that is what lets a global chat
+    // resolve its project on an install that has never heard of one.
+    const g = await store.getProject(GLOBAL_PROJECT_ID);
+    expect(g).toMatchObject({ id: GLOBAL_PROJECT_ID, name: "Global" });
+    expect(g!.repoPath).toBe(store.globalProjectDir());
+    expect((await store.listProjects()).map((p) => p.id)).toContain(GLOBAL_PROJECT_ID);
+
+    // …and it cannot be turned into a record pointing at a real checkout,
+    // which is what would hand a project-less chat a repo.
+    await expect(store.saveProject({ ...g!, repoPath: "C:/repos/real" })).rejects.toThrow(
+      /reserved/,
+    );
+    await expect(store.deleteProject(GLOBAL_PROJECT_ID)).rejects.toThrow(/reserved/);
+    expect(await store.getProject(GLOBAL_PROJECT_ID)).toMatchObject({
+      repoPath: store.globalProjectDir(),
+    });
+  });
+
+  it("refuses to boot on an install that already used the reserved id", async () => {
+    // This USED to migrate — rename the row, remap the chats, move the entity
+    // dir, coordinate the target between instances. Review found two
+    // data-loss bugs in that machinery, and a third would have been silent.
+    // Nothing derives this id (seeding creates no projects, the new-project
+    // form sends none, every other `saveProject` caller updates an existing
+    // row), so the install being refused takes a hand-written POST naming the
+    // literal. One loud rename beats a silent overwrite.
+    const cfg = await mkdtemp(join(tmpdir(), "cm-reserved-row-"));
+    try {
+      await mkdir(join(cfg, "projects"), { recursive: true });
+      await writeJsonAtomic(join(cfg, "projects", `${GLOBAL_PROJECT_ID}.json`), {
+        ...project(GLOBAL_PROJECT_ID),
+        name: "Acme Billing",
+      });
+      const store2 = new Store(cfg);
+      // It states the conflict and the paths, and stops. It used to be a
+      // numbered runbook; three review rounds found a defect in it (a step
+      // that moved the global chat's memories onto an unrelated project, an
+      // instruction to use an app that had already refused to start, an
+      // alternative numbered as a step). Reaching this state needs a
+      // hand-written POST, so the runbook was polish on an unreachable case.
+      const err = await store2.init().then(
+        () => null,
+        (e: Error) => e,
+      );
+      store2.close();
+      const msg = err!.message;
+      expect(msg).toContain('"__global__" is reserved for the global chat');
+      expect(msg).toContain("Dispatch has changed nothing");
+      expect(msg).toContain(join(cfg, "projects", `${GLOBAL_PROJECT_ID}.json`));
+      // No procedure: these are the three shapes that were each wrong once.
+      expect(msg).not.toMatch(/To fix it by hand/);
+      expect(msg).not.toMatch(/[0-9]\. /);
+      expect(msg).not.toMatch(/legacy-project/);
+      // And it points at asking rather than guessing, because the right answer
+      // depends on history the message cannot see.
+      expect(msg).toContain("ask before changing anything");
+      // And it touched nothing — the record is exactly as the operator left it.
+      expect(
+        ((await readJson(join(cfg, "projects", `${GLOBAL_PROJECT_ID}.json`))) as Project).name,
+      ).toBe("Acme Billing");
+      expect(await readdir(join(cfg, "projects"))).toEqual([`${GLOBAL_PROJECT_ID}.json`]);
+    } finally {
+      await rm(cfg, { recursive: true, force: true });
+    }
+  });
+
+  it("notices a row written AFTER this instance marked the id reserved", async () => {
+    // The marker is per-`dataDir`; the row lives in the shared `configDir`. A
+    // sibling instance on an older build can still write that row, and a
+    // marker-first fast path would return before ever noticing — `getProject`
+    // answering with the synthesized record and hiding a real project, and
+    // `listProjects` returning the id twice, on every boot from then on.
+    const d = await mkdtemp(join(tmpdir(), "cm-late-row-"));
+    try {
+      const first = new Store(d);
+      await first.init(); // clean install: writes the marker
+      await first.saveChat(chat("global-1", GLOBAL_PROJECT_ID));
+      first.close();
+
+      // The sibling's handiwork, after the fact.
+      await writeJsonAtomic(join(d, "projects", `${GLOBAL_PROJECT_ID}.json`), {
+        ...project(GLOBAL_PROJECT_ID),
+        name: "Acme Billing",
+      });
+
+      const store2 = new Store(d);
+      const err = await store2.init().then(
+        () => null,
+        (e: Error) => e,
+      );
+      store2.close();
+      // Its own lead: nothing of the operator's is being reinterpreted here —
+      // the chats really are the global chat's. What is wrong is that the
+      // synthesized record SHADOWS their row.
+      const msg = err!.message;
+      expect(msg).toContain(join(d, "projects", `${GLOBAL_PROJECT_ID}.json`));
+      // The genuine global chat is NOT listed. By now it really is a global
+      // chat, and naming it in the conflict points the reader at the one
+      // thing they must not touch — the caller decides which facts to pass.
+      expect(msg).not.toContain("global-1");
+      expect(msg).not.toMatch(/chat {2,}/);
+    } finally {
+      await rm(d, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses on orphaned chats too, where there is no row to notice", async () => {
+    // Deleting a project removes its row and leaves its chats, so an install
+    // that created `__global__`, chatted in it and deleted it has no file to
+    // find — and those chats would silently become global chats on upgrade.
+    const data = await mkdtemp(join(tmpdir(), "cm-reserved-orphan-"));
+    try {
+      await mkdir(join(data, "chats", "orphan"), { recursive: true });
+      await writeJsonAtomic(
+        join(data, "chats", "orphan", "chat.json"),
+        chat("orphan", GLOBAL_PROJECT_ID),
+      );
+      const store2 = new Store(data);
+      const err = await store2.init().then(
+        () => null,
+        (e: Error) => e,
+      );
+      store2.close();
+      const msg = err!.message;
+      // Different instructions from the row case, deliberately: there is no
+      // project here, so "rename the project" would send the reader looking
+      // for a file that does not exist.
+      // Same frame as the row case — only the facts listed differ. There is
+      // no per-state clause left to be wrong in, which is the point.
+      expect(msg).toContain('"__global__" is reserved for the global chat');
+      expect(msg).toContain("Dispatch has changed nothing");
+      expect(msg).toContain(join(data, "chats", "orphan", "chat.json"));
+      expect(msg).not.toMatch(/To fix it by hand/);
+      expect(msg).not.toMatch(/in the app/);
+      expect(msg).not.toMatch(/"worktreeRoot"/);
+      // Still pointing where it was: the refusal is not a half-migration.
+      expect(
+        ((await readJson(join(data, "chats", "orphan", "chat.json"))) as Chat).projectId,
+      ).toBe(GLOBAL_PROJECT_ID);
+    } finally {
+      await rm(data, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves genuine global chats alone once the id is reserved", async () => {
+    // The counterpart: after the reservation is established, a chat under the
+    // reserved id IS a global chat and must not be migrated anywhere. The
+    // marker is what distinguishes the two, since they look identical.
+    const dir2 = await mkdtemp(join(tmpdir(), "cm-global-chats-"));
+    try {
+      const first = new Store(dir2);
+      await first.init(); // establishes the reservation on an empty store
+      await first.saveChat(chat("global-1", GLOBAL_PROJECT_ID));
+      first.close();
+
+      const reopened = new Store(dir2);
+      await reopened.init();
+      try {
+        expect((await reopened.getChat("global-1"))!.projectId).toBe(GLOBAL_PROJECT_ID);
+        expect(realProjects(await reopened.listProjects())).toHaveLength(0);
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      await rm(dir2, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to reserve the id when it cannot see whether legacy chats exist", async () => {
+    // `listChats` throws on EACCES/IO rather than reporting an empty store, so
+    // that a caller cannot mistake "cannot see" for "nothing there". Swallowing
+    // it here would write the marker and classify any unseen legacy chat as a
+    // genuine global chat PERMANENTLY — the marker is what the next boot trusts.
+    const dir2 = await mkdtemp(join(tmpdir(), "cm-legacy-blind-"));
+    try {
+      const store2 = new Store(dir2);
+      (store2 as unknown as { listChats: () => Promise<never> }).listChats = async () => {
+        throw new Error("EACCES");
+      };
+      await expect(store2.init()).rejects.toThrow(/could not scan for chats/);
+      store2.close();
+    } finally {
+      await rm(dir2, { recursive: true, force: true });
+    }
   });
 
   it("scopes listChats by projectId and deletes chat dir", async () => {
@@ -384,7 +572,7 @@ describe("Store config/state split", () => {
       const other = new Store(otherState, configDir);
       await other.init();
       // Sees the shared project...
-      expect(await other.listProjects()).toHaveLength(1);
+      expect(realProjects(await other.listProjects())).toHaveLength(1);
       // ...but not the first instance's chats.
       expect(await other.listChats()).toHaveLength(0);
       other.close();

@@ -96,6 +96,23 @@ export interface HarnessCapabilities {
    */
   preToolGuard: boolean;
   /**
+   * True when the guard sees an MCP call under its QUALIFIED
+   * `mcp__<server>__<tool>` name.
+   *
+   * Separate from {@link preToolGuard} because they fail independently, and
+   * ACP is the proof: it vetoes before the call (so `preToolGuard` is true and
+   * earns its name), but its permission requests carry no extension/server —
+   * only a title like `worktree · …` — so `worktree` is the most it can
+   * recover. A denylist entry of `mcp__dispatch-workspace__worktree` simply
+   * does not match, and the call becomes a prompt a human can approve.
+   *
+   * It matters because a posture is mostly a list of MCP tools. `Bash` and
+   * `Edit` are named the same everywhere and are caught on every runtime;
+   * everything that moves a PR, cuts a worktree or writes config is namespaced
+   * and is only enforceable where this is true.
+   */
+  guardsMcpToolNames: boolean;
+  /**
    * How this runtime wants Dispatch's own `mcp__dispatch-*__*` tools attached.
    *
    * The one place a runtime difference legitimately reaches the broker, because
@@ -220,6 +237,16 @@ export type HarnessToolGuard = (
 ) => string | null;
 
 /** Everything needed to open a session, in neutral terms. */
+/**
+ * A mode's tool gate: an allowlist (absent = everything) and a denylist over
+ * it. An allowlist that is DEFINED BUT EMPTY permits nothing — the strictest
+ * policy expressible, and the one a `.length` check turns into the loosest.
+ */
+export interface HarnessToolPolicy {
+  allowedTools?: string[];
+  disallowedTools?: string[];
+}
+
 export interface HarnessSessionSpec {
   /** Working directory for the session. */
   cwd?: string;
@@ -243,6 +270,24 @@ export interface HarnessSessionSpec {
   systemPromptAppends: string[];
   /** The single agent this session runs as, when one is pinned. */
   agent?: HarnessAgentSpec;
+  /**
+   * Tool gating from the selected MODE: an allowlist (absent = everything) and
+   * a denylist over it, in the runtime's own tool names.
+   *
+   * ADVISORY, and measured as such. Handing these to the runtime does drop the
+   * named BUILT-IN tools from the model's catalogue, which is the cheap win —
+   * no description in context, and nothing to reach for. It does NOT reliably
+   * drop MCP tools: a global chat given `mcp__dispatch-github__request_review`
+   * on this list still reported seeing it in its toolbox.
+   *
+   * So the enforcement is {@link HarnessSessionSpec.toolGuard}, which runs as a
+   * PreToolUse veto, fires for subagent calls too, and is not skipped under
+   * `bypassPermissions`. Both are set from one resolved mode, so the catalogue
+   * the model sees and the rule applied to it cannot disagree about intent —
+   * only about how early the refusal lands.
+   */
+  allowedTools?: string[];
+  disallowedTools?: string[];
   /** External MCP servers to attach, by name. */
   mcpServers: Record<string, McpServerConfig>;
   /**
@@ -536,8 +581,16 @@ export interface HarnessSession {
   pending(): number;
   /** Stop the current turn but keep the session alive. */
   interrupt(): Promise<void>;
-  /** Switch posture mid-session, where supported. */
-  setPermissionMode(mode: PermissionMode): Promise<void>;
+  /**
+   * Switch posture mid-session, where supported.
+   *
+   * `policy` is the newly resolved mode's tool gate, passed because a mode
+   * switch can change it and the spec's copy was fixed at construction. Most
+   * adapters ignore it — the host guard is the enforcement. ACP does not have
+   * that luxury: its only interception point is the agent's own permission
+   * request, so it has to know whether to keep asking for one.
+   */
+  setPermissionMode(mode: PermissionMode, policy?: HarnessToolPolicy): Promise<void>;
   /** Switch model mid-session, where supported. */
   setModel(model: string): Promise<void>;
   /** Switch effort mid-session. */

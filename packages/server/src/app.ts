@@ -26,6 +26,7 @@ import { isManagerBridgePath } from "./services/mcp/manager-http.js";
 import { healthReport } from "./health.js";
 import { startPerfMonitor } from "./perf.js";
 import { AuthService, type RequestIdentity } from "./services/auth.js";
+import { realProjects } from "@dispatch/shared";
 
 /** Wired context shared across routes/services via `app.cm`. */
 export interface CmContext {
@@ -193,7 +194,9 @@ export async function buildApp(
   // strictly better than a server that will not boot.
   await migrateManagerToolNames(
     store,
-    (await store.listProjects().catch(() => [])).map((p) => p.repoPath).filter(Boolean),
+    realProjects(await store.listProjects().catch(() => []))
+      .map((p) => p.repoPath)
+      .filter(Boolean),
   ).catch(() => undefined);
   try {
     const moved = services.metrics.migrateLegacyManagerDetail();

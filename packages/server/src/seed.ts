@@ -17,6 +17,7 @@
  */
 import type { Store } from "./store/index.js";
 import type { ModeConfig, AgentConfig } from "@dispatch/shared";
+import { realProjects } from "@dispatch/shared";
 
 const DEFAULT_MODES: ModeConfig[] = [
   { id: "plan", name: "Plan", permissionMode: "plan", scope: "global" },
@@ -53,8 +54,11 @@ function defaultAgents(now: number): AgentConfig[] {
  * false when the store already had projects or modes (no-op).
  */
 export async function seedDefaultsIfEmpty(store: Store): Promise<boolean> {
+  // `realProjects`: the reserved pseudo-project is always in the list, so a
+  // raw length check would make every install look already-seeded and skip the
+  // defaults entirely.
   const [projects, modes] = await Promise.all([
-    store.listProjects(),
+    store.listProjects().then(realProjects),
     store.listModes(),
   ]);
   if (projects.length > 0 || modes.length > 0) return false;

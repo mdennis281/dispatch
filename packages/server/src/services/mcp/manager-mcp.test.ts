@@ -4538,6 +4538,50 @@ describe("manager-mcp — server factory", () => {
     }
   });
 
+  it("does not REGISTER a tool the mode's policy denies", () => {
+    // Structural, not a refusal. A veto needs the runtime to report the call
+    // under a name the policy recognises — a capability ACP cannot provide
+    // and a future adapter might not either. Absence needs nothing from the
+    // runtime and cannot be misnamed.
+    const bound = {
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      github: fakeGitHub([]),
+      prCreate: fakePrCreate(readyBranch()).binding,
+      prApproval: fakeApproval(readyPr()).binding,
+      chats: fakeChats({}).binding,
+    };
+    // Bound, so present…
+    expect(registeredNames(bound)).toEqual(expect.arrayContaining(["create_pr", "watch_pr"]));
+
+    const denied = registeredNames({
+      ...bound,
+      toolPolicy: {
+        disallowedTools: [
+          "mcp__dispatch-github__create_pr",
+          "mcp__dispatch-github__approve_pr",
+        ],
+      },
+    });
+    expect(denied).not.toContain("create_pr");
+    expect(denied).not.toContain("approve_pr");
+    // …and the rest of the same category is untouched: this is per TOOL, not
+    // per binding. `watch_pr` is observation and the global posture keeps it.
+    expect(denied).toContain("watch_pr");
+    expect(denied).toContain("spawn_chat");
+  });
+
+  it("drops everything outside an allowlist, including the empty one", () => {
+    const bound = { chatId: "c1", bus, broker: fakeBroker({}), chats: fakeChats({}).binding };
+    expect(
+      registeredNames({ ...bound, toolPolicy: { allowedTools: ["mcp__dispatch-chat__spawn_chat"] } }),
+    ).toEqual(["spawn_chat"]);
+    // Defined-but-empty permits nothing — the distinction a `.length` check
+    // would quietly turn into "no policy at all".
+    expect(registeredNames({ ...bound, toolPolicy: { allowedTools: [] } })).toEqual([]);
+  });
+
   it("serves every tool from exactly one category server", () => {
     const servers = createManagerMcpServers({
       chatId: "c1",
@@ -4983,6 +5027,8 @@ describe("manager-mcp — mode tools and chat posture", () => {
       name: "Careful review",
       permissionMode: "default" as const,
       description: undefined,
+      allowedTools: undefined,
+      disallowedTools: undefined,
       instructions: undefined,
       scope: undefined,
     };

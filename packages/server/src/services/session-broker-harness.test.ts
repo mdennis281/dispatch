@@ -16,8 +16,16 @@ import { Store } from "../store/index.js";
 import { EventBus } from "../bus.js";
 import { AuthoredConfigService } from "./authored-config.js";
 import { SessionBroker } from "./session-broker.js";
+import { GLOBAL_MODE_ID, GLOBAL_PROJECT_ID } from "@dispatch/shared";
 
 let transfers: unknown[][] = [];
+/**
+ * The fake runtime's capabilities, mutable so a test can model a DIFFERENT
+ * runtime's. The global-chat suite needs one that can veto a tool call before
+ * it runs, because the broker refuses a protected posture on one that can't —
+ * and the default here models Codex, which can't.
+ */
+let caps: { preToolGuard: boolean; guardsMcpToolNames: boolean } & Record<string, unknown>;
 let transferResult: Promise<boolean> = Promise.resolve(false);
 let specs: HarnessSessionSpec[];
 
@@ -116,22 +124,24 @@ describe("SessionBroker neutral harness path", () => {
     await store.init();
     session = new FakeHarnessSession();
     specs = [];
+    caps = {
+      toolPermissions: false,
+      questions: true,
+      subagents: false,
+      skills: true,
+      compaction: true,
+      fork: true,
+      usageLimits: true,
+      liveModelSwitch: true,
+      livePermissionSwitch: true,
+      efforts: ["low", "medium", "high"],
+      preToolGuard: false,
+      guardsMcpToolNames: true,
+      managerTransport: "http",
+    };
     const codex: Harness = {
       kind: "codex",
-      capabilities: {
-        toolPermissions: false,
-        questions: true,
-        subagents: false,
-        skills: true,
-        compaction: true,
-        fork: true,
-        usageLimits: true,
-        liveModelSwitch: true,
-        livePermissionSwitch: true,
-        efforts: ["low", "medium", "high"],
-        preToolGuard: false,
-        managerTransport: "http",
-      },
+      capabilities: caps as unknown as Harness["capabilities"],
       runtime: () => ({ kind: "codex", source: "installed", available: true }),
       listModels: async () => [],
       readLimits: async () => null,
@@ -168,6 +178,214 @@ describe("SessionBroker neutral harness path", () => {
     expect(specs[0]!.agent).toBeUndefined();
     await broker.setHarness(chat.id, "claude");
     expect((await store.getChat(chat.id))!.personaId).toBe("product-owner");
+  });
+
+  it("pays off a mid-turn policy switch once the turn settles, not 'eventually'", async () => {
+    // The catalogue a runtime is built with is fixed, so a policy change owes
+    // it a restart — and `setMode` cannot take one on the spot, because
+    // `chat_set_mode` is a tool the agent can call on its own chat and
+    // `stop()` would wait on the run loop waiting on that handler. Skipping it
+    // is only safe if something later actually does it: otherwise a chat
+    // switched OUT of a restrictive mode keeps its newly allowed tools
+    // unregistered for the rest of the runtime's life.
+    session = new FakeHarnessSession(true);
+    await store.saveMode({
+      id: "audit",
+      name: "Audit",
+      permissionMode: "default",
+      disallowedTools: ["Bash"],
+      scope: "global",
+    });
+    const chat = await store.saveChat({
+      id: "policy-switch",
+      projectId: "p1",
+      title: "Audit",
+      modeId: "audit",
+      harness: "codex",
+      worktrees: [],
+      prs: [],
+      createdAt: 1,
+    });
+    broker.create(chat);
+    await broker.sendMessage(chat.id, "look around");
+    await waitUntil(() => specs.length === 1);
+    expect(specs[0]!.disallowedTools).toContain("Bash");
+    expect(broker.getSession(chat.id)?.status).toBe("running");
+
+    // Mid-turn: the runtime must survive the switch rather than be torn down
+    // under the turn it is serving.
+    await broker.setMode(chat.id, "plan");
+    expect(broker.getSession(chat.id)?.started).toBe(true);
+
+    session.emit({ type: "turn-end", ok: true, subtype: "success", result: "done" });
+    await waitUntil(() => broker.getSession(chat.id)?.started === false);
+    // And the next turn is built without the denylist it was carrying.
+    await broker.sendMessage(chat.id, "again");
+    await waitUntil(() => specs.length === 2);
+    expect(specs[1]!.disallowedTools).toBeUndefined();
+  });
+
+  /**
+   * The global chat's posture, proven rather than asserted.
+   *
+   * These go through the real broker: a chat whose `projectId` is the reserved
+   * id resolves the `global` mode through the ordinary posture chain, and the
+   * session spec it produces is what any runtime receives. The guard is called
+   * the way a PreToolUse hook calls it.
+   */
+  describe("the global chat", () => {
+    // The fake runtime models Codex, which cannot veto a call before it runs
+    // — and the broker refuses a protected posture there (see below, and
+    // `requiresPreToolGuard` in the broker). Every other test in this suite
+    // wants a runtime that CAN, so it is granted here rather than globally.
+    beforeEach(() => {
+      caps.preToolGuard = true;
+      caps.guardsMcpToolNames = true;
+    });
+
+    const globalChat = () =>
+      store.saveChat({
+        id: "global-1",
+        projectId: GLOBAL_PROJECT_ID,
+        title: "Global",
+        harness: "codex",
+        worktrees: [],
+        prs: [],
+        createdAt: 1,
+      });
+
+    it("lands in the global mode with nothing pinned, and refuses to leave it", async () => {
+      const chat = await globalChat();
+      broker.create(chat);
+      // Deliberately NOT asserted after a turn: `setMode(null)` walks the same
+      // posture chain `buildOptions` does, synchronously, so this proves the
+      // resolution without depending on how long a fake turn takes to settle.
+      await broker.setMode(chat.id, null);
+      expect(broker.getSession(chat.id)?.modeId).toBe(GLOBAL_MODE_ID);
+      await expect(broker.setMode(chat.id, "yolo")).rejects.toThrow(/always runs in global/);
+      expect(broker.getSession(chat.id)?.modeId).toBe(GLOBAL_MODE_ID);
+    });
+
+    it("hands the runtime a denylist, so the tools are never offered at all", async () => {
+      const chat = await globalChat();
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "hello");
+      await broker.waitFor(chat.id, "idle");
+      const denied = specs[0]!.disallowedTools ?? [];
+      expect(denied).toContain("Bash");
+      expect(denied).toContain("Edit");
+      expect(denied).toContain("mcp__dispatch-workspace__worktree");
+      expect(denied).toContain("mcp__dispatch-github__approve_pr");
+      expect(denied).not.toContain("mcp__dispatch-chat__spawn_chat");
+    });
+
+    it("refuses a worktree, a merge and an edit at the guard — and lets a spawn through", async () => {
+      const chat = await globalChat();
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "hello");
+      await broker.waitFor(chat.id, "idle");
+      const guard = specs[0]!.toolGuard!;
+
+      // The three the posture exists to stop…
+      expect(guard("mcp__dispatch-workspace__worktree", { action: "create" })).toMatch(
+        /not available in Global mode/,
+      );
+      expect(guard("mcp__dispatch-github__approve_pr", { number: 1 })).toMatch(
+        /not available in Global mode/,
+      );
+      expect(guard("Edit", { file_path: "C:/x.ts" })).toMatch(/not available in Global mode/);
+      // …and the shell, which is otherwise all three in one command.
+      expect(guard("Bash", { command: "echo hi" })).toMatch(/not available in Global mode/);
+
+      // …and the one it exists to ENABLE.
+      expect(guard("mcp__dispatch-chat__spawn_chat", { prompt: "go" })).toBeNull();
+      expect(guard("Read", { file_path: "C:/x.ts" })).toBeNull();
+    });
+
+    it("ignores a mode pinned on the row, however it got there", async () => {
+      // `PUT /api/chats/:id` merges its body over the row and saves directly —
+      // no posture resolution, no broker — so `{ modeId: "yolo" }` lands as a
+      // pin. `refreshInheritedPosture` then sees a defined pin and never
+      // re-resolves: the chat would come up on `bypassPermissions` with
+      // `resolveMode("yolo")` returning null, i.e. no denylist at all. A row
+      // can also predate this change or be edited by hand, so the broker drops
+      // the pin rather than trusting whoever wrote it.
+      const chat = await store.saveChat({
+        id: "global-poisoned",
+        projectId: GLOBAL_PROJECT_ID,
+        title: "Global",
+        harness: "codex",
+        modeId: "yolo",
+        worktrees: [],
+        prs: [],
+        createdAt: 1,
+      });
+      broker.create(chat);
+      expect(broker.getSession(chat.id)?.modeId).toBe(GLOBAL_MODE_ID);
+      await broker.sendMessage(chat.id, "hello");
+      await broker.waitFor(chat.id, "idle");
+      expect(specs[0]!.disallowedTools).toContain("Bash");
+      expect(specs[0]!.permissionMode).not.toBe("bypassPermissions");
+      expect(specs[0]!.toolGuard!("Bash", { command: "echo hi" })).toMatch(/not available/);
+    });
+
+    it("refuses a runtime that cannot name an MCP call, even if it vetoes in time", async () => {
+      // The two capabilities fail independently. ACP is the real case: it
+      // refuses BEFORE the call, but its permission requests carry no server
+      // name, so `mcp__dispatch-workspace__worktree` never matches — and
+      // nearly everything this posture denies is namespaced. In time but
+      // unnamed is not enforcement.
+      caps.preToolGuard = true;
+      caps.guardsMcpToolNames = false;
+      const chat = await globalChat();
+      const errors: string[] = [];
+      bus.subscribe((e) => {
+        if (e.type === "error") errors.push(`${e.message} ${e.detail ?? ""}`);
+      });
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "hello");
+      await waitUntil(() => errors.some((m) => /which MCP tool a call is for/.test(m)));
+      expect(specs).toHaveLength(0);
+    });
+
+    it("refuses to start on a runtime that can only catch a violation late", async () => {
+      // The posture IS its denylist. A runtime that notices a `worktree` call
+      // only once it has started notices it after the worktree exists, so
+      // running there would be a posture that isn't holding — and silence
+      // about that is worse than a refusal that names the fix.
+      caps.preToolGuard = false;
+      const chat = await globalChat();
+      const errors: string[] = [];
+      bus.subscribe((e) => {
+        if (e.type === "error") errors.push(`${e.message} ${e.detail ?? ""}`);
+      });
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "hello");
+      await waitUntil(() => errors.some((m) => /cannot run on codex/.test(m)));
+      expect(specs).toHaveLength(0);
+    });
+
+    it("carries the project index and the posture overlay, and nothing bigger", async () => {
+      await store.saveProject({
+        id: "alpha",
+        name: "Alpha",
+        repoPath: "C:/repos/alpha",
+        worktreeRoot: "C:/repos/alpha-trees",
+        subApps: [],
+        createdAt: 1,
+      });
+      const chat = await globalChat();
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "hello");
+      await broker.waitFor(chat.id, "idle");
+      const appended = specs[0]!.systemPromptAppends.join("\n\n");
+      expect(appended).toContain("## Projects on this install");
+      expect(appended).toContain("- Alpha `alpha` — C:/repos/alpha");
+      // The pseudo-project must not offer itself as somewhere to spawn into.
+      expect(appended).not.toContain(GLOBAL_PROJECT_ID);
+      // And the posture explains itself in the transcript's own terms.
+      expect(appended).toContain("You are the GLOBAL chat");
+    });
   });
 
   it("persists neutral Codex events and keeps the native thread id", async () => {
@@ -972,6 +1190,7 @@ describe("SessionBroker neutral harness path", () => {
           livePermissionSwitch: true,
           efforts: [],
           preToolGuard: true,
+          guardsMcpToolNames: true,
           managerTransport: "http",
         },
         runtime: () => ({ kind: "goose", source: "installed", available: true }),
@@ -1112,6 +1331,7 @@ describe("SessionBroker neutral harness path", () => {
           livePermissionSwitch: true,
           efforts: [],
           preToolGuard: true,
+          guardsMcpToolNames: true,
           managerTransport: "http",
         },
         // The CLI is NOT installed — this is what makes the broker fall back.
@@ -1154,6 +1374,7 @@ describe("SessionBroker neutral harness path", () => {
           livePermissionSwitch: true,
           efforts: ["low", "medium", "high"],
           preToolGuard: true,
+          guardsMcpToolNames: true,
           managerTransport: "in-process",
         },
         runtime: () => ({ kind: "claude", source: "installed", available: true }),

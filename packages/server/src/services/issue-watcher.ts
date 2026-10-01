@@ -35,6 +35,7 @@ import {
   type IssueConfig,
   type IssueWatch,
   type ResolvedIssuePolicy,
+  realProjects,
 } from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
 import type { Store } from "../store/index.js";
@@ -219,7 +220,7 @@ export class IssueWatcher {
   private async runSweep(): Promise<IssuePollResult[]> {
     if (this.disposed) return [];
     const out: IssuePollResult[] = [];
-    for (const project of await this.store.listProjects().catch(() => [])) {
+    for (const project of realProjects(await this.store.listProjects().catch(() => []))) {
       if (this.disposed) break;
       out.push(await this.pollProject(project.id, { force: false }));
     }

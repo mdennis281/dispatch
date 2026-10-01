@@ -46,6 +46,8 @@ export const CLAUDE_CAPABILITIES: HarnessCapabilities = {
   livePermissionSwitch: true,
   efforts: ["low", "medium", "high", "xhigh", "max"],
   preToolGuard: true,
+  // PreToolUse reports the real tool name, `mcp__server__tool` included.
+  guardsMcpToolNames: true,
   managerTransport: "in-process",
 };
 

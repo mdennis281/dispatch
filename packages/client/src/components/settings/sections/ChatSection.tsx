@@ -16,7 +16,7 @@ import { Switch } from "../../ui/Switch.js";
 import { ShellFilterPanel } from "../../chat/ShellFilterPanel.js";
 import { modeLabel } from "../../chat/ModeControl.js";
 import { EFFORT_OPTIONS } from "../../../lib/efforts.js";
-import { useProjects } from "../../../stores/projects.js";
+import { useProjects, useRealProjects } from "../../../stores/projects.js";
 import { useSubscriptions } from "../../../stores/subscriptions.js";
 import { useView } from "../../../stores/view.js";
 import { Button } from "../../ui/Button.js";
@@ -55,7 +55,7 @@ export function ChatSection({ draft, patch, harnesses, catalogs }: AppPaneProps)
   // an array returns a new identity on every store read, which zustand reads as
   // "changed" and re-renders into — "Maximum update depth exceeded", the whole
   // settings panel replaced by the error boundary.
-  const projects = useProjects((s) => s.projects);
+  const projects = useRealProjects();
   const overriding = useMemo(
     () => projects.filter((p) => p.shellFilter !== undefined),
     [projects],

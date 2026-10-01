@@ -13,7 +13,8 @@ import {
   rowText,
   type RawRow,
 } from "./inspect.js";
-import { renderFind, renderRead, renderProject } from "./inspect-render.js";
+import { renderFind, renderRead, renderProject, renderProjectList } from "./inspect-render.js";
+import { GLOBAL_PROJECT_ID } from "@dispatch/shared";
 import { parseTimeBound } from "./mcp/manager-mcp.js";
 
 /**
@@ -396,6 +397,70 @@ describe("projectInfo", () => {
   it("errors when there is nothing to describe", async () => {
     await expect(service().projectInfo({})).rejects.toThrow(/No project to describe/);
     await expect(service().projectInfo({ project: "ghost" })).rejects.toThrow(/No project matching/);
+  });
+});
+
+describe("projectList", () => {
+  beforeEach(async () => {
+    await seedProject("p1", "Dispatch");
+    await seedProject("p2", "The Salesman");
+    await seedChat("c1", { projectId: "p1", updatedAt: T0 + DAY }, []);
+    await seedChat("c2", { projectId: "p1", updatedAt: T0 + 2 * DAY }, []);
+    // Archived chats are not "open chats" and must not inflate the count, nor
+    // stand in as the project's last activity after everyone moved on.
+    await seedChat("c3", { projectId: "p1", updatedAt: T0 + 9 * DAY, archived: true }, []);
+    // A chat filed against the pseudo-project — the global chat's own. It must
+    // not conjure a row for a project that is not in the list.
+    await seedChat("c4", { projectId: GLOBAL_PROJECT_ID, updatedAt: T0 + DAY }, []);
+  });
+
+  it("never lists the reserved pseudo-project", async () => {
+    // The whole approach's predictable failure is a leak into one listing, and
+    // this is the listing a cross-project chat reads FIRST.
+    const ids = (await service().projectList()).map((p) => p.id);
+    expect(ids).toEqual(["p1", "p2"]);
+    expect(ids).not.toContain(GLOBAL_PROJECT_ID);
+  });
+
+  it("counts only open chats, and dates each project by its newest", async () => {
+    const byId = new Map((await service().projectList()).map((p) => [p.id, p]));
+    expect(byId.get("p1")!.chats).toBe(2);
+    expect(byId.get("p1")!.lastActiveAt).toBe(T0 + 2 * DAY);
+    // A project with no chats reports zero and volunteers no date at all,
+    // rather than an epoch-0 one that would render as 1970.
+    expect(byId.get("p2")!.chats).toBe(0);
+    expect(byId.get("p2")!.lastActiveAt).toBeUndefined();
+  });
+
+  it("reports each project's workflow and the config it carries", async () => {
+    const svc = new InspectService({
+      store,
+      projectConfig: {
+        get: () => ({
+          sourceDir: "/cfg",
+          errors: [],
+          config: {
+            agents: [{ id: "a1", name: "Reviewer" }],
+            modes: [],
+            skills: [{ name: "deploy" }],
+            mcpServers: { linear: { transport: "http" } },
+          },
+        }),
+      },
+    });
+    const entry = (await svc.projectList()).find((p) => p.id === "p1")!;
+    // Sub-apps and MCP servers by NAME — "which project has the Linear MCP" is
+    // the question this tier exists to answer in one call, and a count can't.
+    expect(entry.mcpServers).toEqual(["linear"]);
+    expect(entry.agents).toBe(1);
+    expect(entry.skills).toBe(1);
+    expect(entry.workflow).toBe("none");
+    expect(entry.defaultBranch).toBe("main");
+    expect(renderProjectList(await svc.projectList())).toContain("MCP: linear");
+  });
+
+  it("says so rather than rendering an empty document", async () => {
+    expect(renderProjectList([])).toBe("No projects on this install yet.");
   });
 });
 

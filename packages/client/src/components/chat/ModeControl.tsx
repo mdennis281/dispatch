@@ -12,6 +12,7 @@ import {
   RotateCcw,
 } from "lucide-react";
 import type { ModeConfig } from "@dispatch/shared";
+import { BUILTIN_MODE_CONFIGS } from "@dispatch/shared";
 import { Popover, MenuItem } from "../ui/Popover.js";
 import type { SelectInherit } from "../ui/Select.js";
 import { Tooltip } from "../ui/Tooltip.js";
@@ -82,6 +83,10 @@ export function modeLabel(modes: ModeConfig[], modeId: string): string {
     modes.find((m) => m.id === modeId)?.name ??
     PRIMARY_MODE_LABEL[modeId] ??
     BUILTIN_POSTURES.find((b) => b.id === modeId)?.name ??
+    // The built-in modes that are a full record rather than a bare posture —
+    // `global` is one, and without this the composer bottomed out at the raw
+    // id and labelled the global chat's badge "global" in lowercase.
+    BUILTIN_MODE_CONFIGS[modeId]?.name ??
     modeId
   );
 }
@@ -214,9 +219,29 @@ export interface ModeControlProps {
    * the name in the tooltip. The toolbar never renders it at all below that.
    */
   size?: "lg" | "md" | "sm";
+  /**
+   * Render as a read-only badge: the chat's mode is not the user's to change.
+   *
+   * True for the global chat, whose posture the server pins — `setMode`
+   * refuses any other id. The picker has to go rather than merely fail,
+   * because `Composer.setMode` writes the selection optimistically and the
+   * refusal arrives with no corrective `chat-update`: the badge would sit
+   * there claiming "Plan" forever while the session stayed in Global.
+   */
+  locked?: boolean;
+  /** Why it is locked — shown on hover in place of the menu. */
+  lockedHint?: string;
 }
 
-export function ModeControl({ modes, value, onChange, size = "lg", inherit }: ModeControlProps) {
+export function ModeControl({
+  modes,
+  value,
+  onChange,
+  size = "lg",
+  inherit,
+  locked,
+  lockedHint,
+}: ModeControlProps) {
   // Touch gets the taller box and the roomier menu; `Tooltip` is hover/focus, so
   // at `sm` on a phone the tap-to-open menu is what tells you the current mode.
   const phone = useLayoutMode() === "sm";
@@ -241,9 +266,10 @@ export function ModeControl({ modes, value, onChange, size = "lg", inherit }: Mo
       trigger={({ open, toggle }) => {
         const btn = (
           <button
-            onClick={toggle}
-            aria-expanded={open}
-            aria-label={tip}
+            onClick={locked ? undefined : toggle}
+            aria-expanded={locked ? undefined : open}
+            aria-disabled={locked || undefined}
+            aria-label={locked ? lockedHint ?? tip : tip}
             className={cn(
               "inline-flex items-center gap-1.5 rounded-md border text-sm font-medium " +
                 "transition-colors [&_svg]:size-3.5",
@@ -265,12 +291,12 @@ export function ModeControl({ modes, value, onChange, size = "lg", inherit }: Mo
                 <span className={cn("truncate", size === "md" || phone ? "max-w-16" : "max-w-[84px]")}>
                   {label}
                 </span>
-                {size === "lg" && <ChevronsUpDown className="text-faint" />}
+                {size === "lg" && !locked && <ChevronsUpDown className="text-faint" />}
               </>
             )}
           </button>
         );
-        return size === "lg" ? btn : <Tooltip label={tip}>{btn}</Tooltip>;
+        return size === "lg" && !locked ? btn : <Tooltip label={locked ? lockedHint ?? tip : tip}>{btn}</Tooltip>;
       }}
     >
       {(close) => (

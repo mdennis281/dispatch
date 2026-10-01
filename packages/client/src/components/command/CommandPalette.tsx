@@ -32,6 +32,7 @@ import {
   Plus,
   FolderGit2,
   FolderPlus,
+  Globe,
   MessageSquare,
   SlidersHorizontal,
   GitBranch,
@@ -53,8 +54,8 @@ import { actions } from "../../lib/actions.js";
 import { api } from "../../lib/api.js";
 import { openCodeViewer } from "../monaco/store.js";
 import { useChats } from "../../stores/chats.js";
-import { useProjects } from "../../stores/projects.js";
-import { selectChat, selectProject } from "../../stores/navigation.js";
+import { useProjects, useRealProjects } from "../../stores/projects.js";
+import { selectChat, selectGlobalChat, selectProject } from "../../stores/navigation.js";
 import {
   useView,
   openOverlay,
@@ -206,7 +207,7 @@ export function CommandPalette({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
-  const projects = useProjects((s) => s.projects);
+  const projects = useRealProjects();
   const activeProjectId = useProjects((s) => s.activeProjectId);
   const chatsById = useChats((s) => s.byId);
   const chatOrder = useChats((s) => s.order);
@@ -428,6 +429,19 @@ export function CommandPalette({
       icon: <FolderPlus />,
       keywords: "add create project repo directory setup init clone import scaffold",
       run: () => useView.getState().setView("new-project"),
+    });
+
+    // The global chat is reachable from here too, but as its OWN command: it
+    // is not a project you switch to, and filing it under "Projects" beside
+    // real repos is the leak `realProjects` exists to prevent.
+    list.push({
+      id: "global-chat",
+      title: "Global chat",
+      subtitle: "cross-project overview — spawn and observe, never land",
+      group: "Navigate",
+      icon: <Globe />,
+      keywords: "global cross project overview spawn everything all",
+      run: () => selectGlobalChat(),
     });
 
     for (const p of projects) {

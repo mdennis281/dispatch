@@ -35,6 +35,7 @@
  */
 import type { HookCallback, HookJSONOutput } from "@anthropic-ai/claude-agent-sdk";
 import { looksLikeWorktreeCreate } from "./worktree-detector.js";
+import { deniedToolRefusal, isToolAllowed } from "@dispatch/shared";
 
 /** Pass-through: the hook takes no position on this call. */
 const ALLOW: HookJSONOutput = {};
@@ -160,6 +161,50 @@ export function createWorktreeGuardHook(deps: WorktreeGuardDeps): HookCallback {
         hookEventName: "PreToolUse",
         permissionDecision: "deny",
         permissionDecisionReason: worktreeCommandRefusal(),
+      },
+    };
+  };
+}
+
+/* ------------------------------------------------------- the mode tool policy */
+
+/**
+ * Enforce the selected MODE's tool policy as a PreToolUse veto.
+ *
+ * The broker builds the same rule into `HarnessSessionSpec.toolGuard`, which
+ * covers every runtime reached through the neutral harness layer. The DIRECT
+ * Claude path does not go through that: `startQuery` hands `buildOptions`'
+ * `Options` straight to the SDK, so the spec's guard is never constructed and
+ * the only thing standing between a denied tool and a call was the SDK's own
+ * `disallowedTools`.
+ *
+ * That is not enough to rest a posture on. It is advisory by the SDK's own
+ * account, it does not filter MCP tools out of the catalogue (a global chat
+ * reported still seeing `request_review` with that name on the list), and
+ * `canUseTool` — the other gate on that path — is skipped entirely under
+ * `bypassPermissions`. A hook is not: PreToolUse fires for subagent calls too
+ * and runs whatever the permission mode. Same rule, same refusal text, both
+ * paths.
+ */
+export interface ModePolicyGuardDeps {
+  /** The policy in force RIGHT NOW — read per call, so a live `setMode` lands. */
+  policy: () => { allowedTools?: string[]; disallowedTools?: string[] };
+  /** Mode name and id, for the refusal text. */
+  mode: () => { name: string; id: string };
+  onBlocked?: (tool: string) => void;
+}
+
+export function createModePolicyHook(deps: ModePolicyGuardDeps): HookCallback {
+  return async (input): Promise<HookJSONOutput> => {
+    if (input.hook_event_name !== "PreToolUse") return ALLOW;
+    if (isToolAllowed(input.tool_name, deps.policy())) return ALLOW;
+    const { name, id } = deps.mode();
+    deps.onBlocked?.(input.tool_name);
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: deniedToolRefusal(input.tool_name, name, id),
       },
     };
   };

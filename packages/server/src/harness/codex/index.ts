@@ -53,6 +53,10 @@ export const CODEX_CAPABILITIES: HarnessCapabilities = {
   // No host-side pre-tool callback; see CodexSession's module header for what
   // the workflow guard degrades to.
   preToolGuard: false,
+  // `codexToolCall` builds the qualified name for every mapped item, so a
+  // denylist entry matches — the weakness here is WHEN (on sighting, see
+  // `preToolGuard`), not what the tool is called.
+  guardsMcpToolNames: true,
   // Codex only reaches MCP servers over stdio or streamable HTTP, so Dispatch's
   // own tools are served from services/mcp/manager-http.ts rather than passed
   // in-process the way the Agent SDK accepts them.

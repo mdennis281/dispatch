@@ -24,7 +24,7 @@
  */
 import { execBinary } from "./exec-binary.js";
 import { isAbsolute, relative } from "node:path";
-import { resolveWorkflow } from "@dispatch/shared";
+import { resolveWorkflow, realProjects} from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
 import type { Store } from "../store/index.js";
 import { KeyedMutex } from "../store/fsq.js";
@@ -144,7 +144,9 @@ export class MemoryCommitter {
 
   /** Flush every project once (used at boot). Never throws. */
   async sweep(): Promise<MemoryCommitResult[]> {
-    const projects = await this.store.listProjects().catch(() => []);
+    // The pseudo-project's memory dir is not in a git repo, so there is
+    // nothing here to commit.
+    const projects = realProjects(await this.store.listProjects().catch(() => []));
     const out: MemoryCommitResult[] = [];
     for (const p of projects) {
       out.push(await this.flush(p.id).catch(() => ({ status: "failed" as const, files: [] })));

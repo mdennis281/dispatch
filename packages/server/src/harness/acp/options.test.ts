@@ -36,6 +36,21 @@ describe("toAcpMode", () => {
     expect(toAcpMode("auto")).toBe("smart_approve");
     expect(toAcpMode("default")).toBe("smart_approve");
   });
+
+  it("asks about EVERY call once the mode gates tools, whatever it otherwise meant", () => {
+    // `session/request_permission` is this adapter's only interception point,
+    // and `auto` raises none while `smart_approve` raises them only for calls
+    // the AGENT thinks are sensitive. Under either, a denied tool just runs.
+    // So a tool policy forces `approve`: the veto is worth more here than the
+    // quiet.
+    expect(toAcpMode("bypassPermissions", true)).toBe("approve");
+    expect(toAcpMode("dontAsk", true)).toBe("approve");
+    expect(toAcpMode("default", true)).toBe("approve");
+    expect(toAcpMode("acceptEdits", true)).toBe("approve");
+    // Except plan, which already calls no tools at all — "ask" would be a
+    // downgrade from "cannot".
+    expect(toAcpMode("plan", true)).toBe("chat");
+  });
 });
 
 describe("pickPermissionOption", () => {

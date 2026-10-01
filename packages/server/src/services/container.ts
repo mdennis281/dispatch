@@ -30,6 +30,7 @@ import {
   type PrRecord,
   type PrSnapshot,
   expandSecretsOnly,
+  realProjects,
 } from "@dispatch/shared";
 import { launchAgentTask } from "./agent-tasks.js";
 import { SecretsService } from "./secrets.js";
@@ -723,7 +724,7 @@ export function createServices(
       // repo we can't resolve (no remote, no auth) simply contributes nothing.
       discover: async () => {
         const out: Array<{ projectId: string; ref: PRRef }> = [];
-        for (const project of await store.listProjects().catch(() => [])) {
+        for (const project of realProjects(await store.listProjects().catch(() => []))) {
           const repo = await github.repoForProject(project).catch(() => null);
           if (!repo) continue;
           const prs = await github.projectOpenPrs(repo).catch(() => []);

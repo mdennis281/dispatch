@@ -30,6 +30,7 @@ import {
   BROWSER_MCP_SERVERS,
   harnessEnablementLayers,
   isAlwaysOnMcpServer,
+  isGlobalProject,
   mcpEnablementKeys,
   resolveWorkflow,
 } from "@dispatch/shared";
@@ -291,6 +292,25 @@ export function registerMcpRoutes(app: FastifyInstance): void {
     if (!project) return reply.code(404).send({ error: "project not found" });
 
     const scope = req.body?.scope;
+    // The reserved pseudo-project has no committed config and must not acquire
+    // one. `scope: "project"` writes `.dispatch/project.yaml` under
+    // `projectConfigDir(projectId)`, so for this id it would create
+    // `projects/__global__/project.yaml` — whose MCP servers the broker then
+    // attaches to global sessions, under tool names no fixed denylist covers.
+    //
+    // The `/config` routes are guarded by a hook keyed on their shared route
+    // PATTERN; this route is `:projectId`, not `:id`, so the pattern did not
+    // reach it. Review found that, and it is worth naming: a guard keyed on a
+    // path only covers the paths someone remembered to spell the same way.
+    //
+    // Only the PROJECT scope. `app`/`harness`/`model` write install settings,
+    // not this project's config dir, and a global chat looking at the MCP
+    // catalogue is reading — the hazard is specifically creating the manifest.
+    if (scope === "project" && isGlobalProject(projectId)) {
+      return reply
+        .code(400)
+        .send({ error: `"${projectId}" is the global chat and has no project config` });
+    }
     if (scope !== "app" && scope !== "project" && scope !== "harness" && scope !== "model") {
       return reply
         .code(400)

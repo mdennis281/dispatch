@@ -73,6 +73,12 @@ export const ACP_CAPABILITIES: HarnessCapabilities = {
   // The permission request BLOCKS the agent until answered, so a host-side
   // veto really does stop the call before it runs.
   preToolGuard: true,
+  // FALSE, and this is the one runtime where it matters. A permission request
+  // carries no extension/server — only a title like `worktree · …` — so the
+  // most this adapter can recover is `worktree`, never
+  // `mcp__dispatch-workspace__worktree`. Shells and edits are named the same
+  // everywhere and ARE guarded; the namespaced half of any denylist is not.
+  guardsMcpToolNames: false,
   // `mcpCapabilities.http` is what lets Dispatch's own tools be served from
   // services/mcp/manager-http.ts — the same bridge the Codex adapter uses.
   managerTransport: "http",

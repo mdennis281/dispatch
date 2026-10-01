@@ -102,6 +102,7 @@ import {
   prReviewAgentView,
   MANAGER_TOOL_CATEGORY,
   managerServerName,
+  isToolAllowed,
   managerToolQualifiedName,
   AuthoredKindSchema,
   AuthoredScopeSchema,
@@ -162,12 +163,14 @@ import type { BoundIssueTracker } from "../issues/service.js";
 import { clampBody } from "../memory.js";
 import type { MemoryGrepMatch, MemoryInventoryEntry } from "../memory.js";
 import type { MemoryHistoryResult } from "../memory-history.js";
-import { renderFind, renderProject, renderRead } from "../inspect-render.js";
+import { renderFind, renderProject, renderProjectList, renderRead } from "../inspect-render.js";
 import type {
   FindChatsQuery,
   FindChatsResult,
+  InspectInstance,
   ProjectInfoQuery,
   ProjectInfoResult,
+  ProjectListEntry,
   ReadChatQuery,
   ReadChatResult,
 } from "../inspect.js";
@@ -1806,6 +1809,8 @@ export interface ManagerMcpInspect {
   readChat(q: ReadChatQuery): Promise<ReadChatResult>;
   /** Project resolution falls back to the CALLER's project when none is named. */
   projectInfo(q: ProjectInfoQuery): Promise<ProjectInfoResult>;
+  /** Every real project at a glance — see `InspectService.projectList`. */
+  projectList(instance?: InspectInstance): Promise<ProjectListEntry[]>;
 }
 
 /**
@@ -1900,6 +1905,22 @@ export interface ManagerMcpExemptions {
 export interface ManagerMcpContext {
   /** The chat this session drives (for the waiting status label). */
   chatId: string;
+  /**
+   * The selected MODE's tool policy. A tool it denies is NOT REGISTERED —
+   * the session never sees it rather than seeing it and being refused.
+   *
+   * This is the structural half of a mode's gating, and for Dispatch's own
+   * tools it is the better half. A guard has to be given the call under a
+   * name it recognises, which costs a runtime capability
+   * (`guardsMcpToolNames`) that ACP cannot provide and that a future adapter
+   * may not either. Absence costs nothing and cannot be misnamed: there is no
+   * `worktree` tool to call.
+   *
+   * It does not replace the guard, which still covers the harness-native
+   * tools nothing here can unregister (`Bash`, `Edit`, …) and still backstops
+   * these. Two mechanisms because they fail differently.
+   */
+  toolPolicy?: { allowedTools?: string[]; disallowedTools?: string[] };
   bus: EventBus;
   broker: ManagerMcpBroker;
   /** Persistent-terminal runner for this session (omitted → no `terminal` tool). */
@@ -6513,6 +6534,15 @@ ${look}` : "")
           `name: ${found.name}`,
           `permissionMode: ${found.permissionMode}`,
           ...(found.description ? [`description: ${found.description}`] : []),
+          // The gate is part of what a mode IS, and `mode_write` replaces the
+          // whole definition — so an agent extending a mode has to be able to
+          // see the lists here in order to pass them back.
+          ...(found.allowedTools
+            ? [`allowedTools: ${found.allowedTools.join(", ") || "(none — permits nothing)"}`]
+            : []),
+          ...(found.disallowedTools?.length
+            ? [`disallowedTools: ${found.disallowedTools.join(", ")}`]
+            : []),
           ...(found.path ? [found.path] : []),
         ];
         return textResult(
@@ -6549,6 +6579,23 @@ ${look}` : "")
         .string()
         .optional()
         .describe("One line on WHEN to pick this mode. Shown in listings, never injected."),
+      allowedTools: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Only these tools may be called in this mode, by exact name (`Read`, " +
+            "`mcp__dispatch-chat__chat_find`). Omit for 'every tool'. An EMPTY array " +
+            "permits nothing, which is different from omitting it.",
+        ),
+      disallowedTools: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Tools this mode refuses, by exact name. Applied over `allowedTools`, so a " +
+            "name here wins. Remember that a shell (`Bash`, `PowerShell`, " +
+            "`mcp__dispatch-workspace__terminal`) can do almost anything the other " +
+            "entries deny — denying `Edit` while allowing `Bash` stops nothing.",
+        ),
       instructions: z
         .string()
         .optional()
@@ -6577,6 +6624,8 @@ ${look}` : "")
           name,
           permissionMode: args.permissionMode,
           description: args.description?.trim() || undefined,
+          allowedTools: args.allowedTools,
+          disallowedTools: args.disallowedTools,
           instructions: args.instructions?.trim() || undefined,
         });
         return textResult(
@@ -6806,6 +6855,29 @@ ${look}` : "")
       } catch (err) {
         return textResult(
           `Could not describe that project: ${err instanceof Error ? err.message : String(err)}`,
+          true,
+        );
+      }
+    },
+  );
+
+  const projectList = tool(
+    "project_list",
+    "Every project on this install at a glance — repo path, workflow profile, trunk, " +
+      "its sub-apps and MCP servers BY NAME, how much config it carries and how " +
+      "recently it was worked in. One call instead of project_info per project: use it " +
+      "to find WHICH project has the thing you are after (a Playwright MCP, a dev " +
+      "server, a skill), then project_info that one for the detail.",
+    { instance: inspectInstance },
+    async (args): Promise<CallToolResult> => {
+      if (!ctx.inspect) {
+        return textResult("Chat inspection is not available in this session.", true);
+      }
+      try {
+        return textResult(renderProjectList(await ctx.inspect.projectList(args.instance)));
+      } catch (err) {
+        return textResult(
+          `Could not list projects: ${err instanceof Error ? err.message : String(err)}`,
           true,
         );
       }
@@ -7497,6 +7569,7 @@ ${look}` : "")
     chatSetMode,
     chatSetPersona,
     projectInfo,
+    projectList,
   };
 }
 
@@ -7577,6 +7650,7 @@ const TOOL_WIRE_NAME: Record<ManagerToolKey, ManagerToolName> = {
   chatSetMode: "chat_set_mode",
   chatSetPersona: "chat_set_persona",
   projectInfo: "project_info",
+  projectList: "project_list",
 };
 
 /**
@@ -7635,6 +7709,7 @@ const MANAGER_TOOL_GATE: Record<ManagerToolName, ManagerToolBinding | null> = {
   chat_set_mode: "messaging",
   chat_set_persona: "messaging",
   project_info: "inspect",
+  project_list: "inspect",
   secret_request: "secrets",
   secret_list: "secrets",
   secret_delete: "secrets",
@@ -7743,6 +7818,7 @@ function boundTools(ctx: ManagerMcpContext): Record<ManagerToolName, boolean> {
     chat_find: Boolean(ctx.inspect),
     chat_read: Boolean(ctx.inspect),
     project_info: Boolean(ctx.inspect),
+    project_list: Boolean(ctx.inspect),
     secret_request: Boolean(ctx.secrets),
     secret_list: Boolean(ctx.secrets),
     secret_delete: Boolean(ctx.secrets),
@@ -7865,6 +7941,12 @@ function boundToolsByCategory(
     const name = TOOL_WIRE_NAME[key];
     if (!bound[name]) continue;
     const category = MANAGER_TOOL_CATEGORY[name];
+    // The mode's policy, by the QUALIFIED name the agent would call — the
+    // same string a denylist is written in. A denied tool is dropped here,
+    // so it is never registered on its category server at all.
+    if (!isToolAllowed(`mcp__${managerServerName(category)}__${name}`, ctx.toolPolicy)) {
+      continue;
+    }
     const list = byCategory.get(category);
     if (list) list.push(tools[key]);
     else byCategory.set(category, [tools[key]]);

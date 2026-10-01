@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "./store/index.js";
 import { seedDefaultsIfEmpty } from "./seed.js";
+import { realProjects } from "@dispatch/shared";
 
 let dir: string;
 let store: Store;
@@ -44,7 +45,8 @@ describe("seedDefaultsIfEmpty", () => {
    */
   it("seeds NO project", async () => {
     expect(await seedDefaultsIfEmpty(store)).toBe(true);
-    expect(await store.listProjects()).toEqual([]);
+    // `realProjects`: the reserved pseudo-project is always in the list.
+    expect(realProjects(await store.listProjects())).toEqual([]);
   });
 
   it("is idempotent — a second run is a no-op", async () => {

@@ -15,7 +15,7 @@
  * actions use (publishing `worktree-update` / `chat-update` / `notice`).
  */
 import type { FastifyInstance } from "fastify";
-import { parseRegistryQuery, RegistryQueryError } from "@dispatch/shared";
+import { parseRegistryQuery, RegistryQueryError, realProjects} from "@dispatch/shared";
 import {
   isDenied,
   openFsAsset,
@@ -52,7 +52,7 @@ export function registerWorktreeRoutes(app: FastifyInstance): void {
         if (!project) return reply.code(404).send({ error: "project not found" });
         return await worktrees.listAll([project], query);
       }
-      return await worktrees.listAll(await store.listProjects(), query);
+      return await worktrees.listAll(realProjects(await store.listProjects()), query);
     } catch (err) {
       if (err instanceof RegistryQueryError) {
         return reply.code(400).send({ error: err.message });

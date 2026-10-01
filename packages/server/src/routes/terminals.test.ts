@@ -21,6 +21,7 @@ import { loadConfig } from "../config.js";
 import { EventBus } from "../bus.js";
 import { Store } from "../store/index.js";
 import { TerminalService, type ShellProcess, type SpawnShell } from "../services/terminal.js";
+import { GLOBAL_PROJECT_ID } from "@dispatch/shared";
 
 /** A shell that only knows how to echo the service's sentinel marker back. */
 class FakeShell extends EventEmitter implements ShellProcess {
@@ -111,6 +112,32 @@ describe("POST /api/terminals", () => {
     // And it shows up in the chat's list, exactly like an agent-opened one.
     const list = await app.inject({ method: "GET", url: `/api/terminals?chatId=${chatId}` });
     expect((list.json() as TerminalInfo[]).map((t) => t.name)).toEqual(["shell"]);
+  });
+
+  it("refuses a shell for the global chat — both write routes", async () => {
+    // The mode denies `mcp__dispatch-workspace__terminal` to the agent; these
+    // routes are a thin wrapper over the same service, so leaving them open
+    // would be a working route around the posture.
+    const chat = await app.inject({
+      method: "POST",
+      url: "/api/chats",
+      payload: { projectId: GLOBAL_PROJECT_ID, title: "Global" },
+    });
+    const chatId = chat.json().id as string;
+    const opened = await app.inject({
+      method: "POST",
+      url: "/api/terminals",
+      payload: { chatId, name: "shell" },
+    });
+    expect(opened.statusCode).toBe(400);
+    expect(opened.json().error).toMatch(/no repository/i);
+    const ran = await app.inject({
+      method: "POST",
+      url: "/api/terminals/run",
+      payload: { chatId, name: "shell", command: "echo hi" },
+    });
+    expect(ran.statusCode).toBe(400);
+    expect(shells).toHaveLength(0);
   });
 
   it("400s without a chatId or a name; 404s for an unknown chat", async () => {
