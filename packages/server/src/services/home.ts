@@ -45,16 +45,33 @@ import type { MetricsService } from "./metrics.js";
 import type { AttentionQueue } from "./attention.js";
 
 /**
- * How long a snapshot is served before a refresh is scheduled behind it.
+ * How long a snapshot is served before a refresh is scheduled behind it, PER
+ * WIDTH — because the three widths do not cost the same and do not go stale at
+ * the same rate.
  *
- * Ten seconds rather than one. Nothing on this page is a live readout — the
- * counts are "how much happened in the last week" and the running-chat tally
- * moves on the order of minutes — and the recompute blocks the event loop for
- * its duration, on the same loop every streaming chat shares. A page that is
- * ten seconds behind and never stutters is the better product than one that is
- * current and makes the transcript hitch.
+ * Measured on the real install (338 MB, 298k events, 400k spans): the rollup is
+ * 10 ms over 24 hours, 50 ms over 7 days and ~600 ms over 30 days, which is the
+ * honest price of walking a quarter-million rows and is not something a covering
+ * index can be added for in passing — migrating a ledger this size at boot is
+ * its own (already-bitten) failure mode.
+ *
+ * But a 30-day total is also the figure that moves LEAST: one more tool call
+ * shifts it by a part in a hundred thousand. So the wider and more expensive the
+ * window, the longer its answer stands. The user never waits for any of it —
+ * stale is served immediately and the refresh happens behind the response — so
+ * what this table really buys is not latency, it is how often the event loop
+ * every streaming chat shares gives up half a second.
+ *
+ * Nothing here is a live readout, which is what makes all three defensible: the
+ * counts are "how much happened lately", and the one number that does move on
+ * human timescales — chats working right now — is cheap and rides along with
+ * whichever width is showing.
  */
-const TTL_MS = 10_000;
+const TTL_MS: Record<HomeWindow, number> = {
+  "24h": 10_000,
+  "7d": 30_000,
+  "30d": 120_000,
+};
 
 /** How many lines the cross-project activity tail carries. */
 const RECENT = 12;
@@ -104,7 +121,7 @@ export class HomeService {
   async overview(window: HomeWindow): Promise<HomeOverview> {
     const hit = this.cache.get(window);
     if (!hit) return this.refresh(window);
-    if (!hit.refreshing && this.now() - hit.overview.computedAt > TTL_MS) {
+    if (!hit.refreshing && this.now() - hit.overview.computedAt > TTL_MS[window]) {
       hit.refreshing = true;
       // Behind the response, not in front of it. `setTimeout(0)` rather than an
       // un-awaited call so the reply is flushed before the recompute takes the

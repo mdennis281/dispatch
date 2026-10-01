@@ -902,16 +902,17 @@ export class MetricsService {
    * Per-project event counts, attributed runtime and a daily spark, for ONE
    * window — the homepage's whole read of the ledger, in three statements.
    *
+   * TWO statements, and both shapes were measured against the real install
+   * (338 MB, 298k events, 400k spans) rather than reasoned about.
+   *
    * Deliberately not `totals({ groupBy: "projectId" })` +
    * `spanTotals({ groupBy: "projectId" })`, for the same reason
    * {@link chatRuntime} is not `spanTotals({ groupBy: "chatId" })`: `spanTotals`
    * ships every clipped span row out of SQLite into Node so it can union the
-   * intervals into `busyMs`. Measured on the 338 MB install (400k spans, a 7-day
-   * window): the aggregate alone is ~110 ms and the row shipment another
-   * ~140 ms, against ~30 ms for the three sums below. A quarter-second of
-   * blocked event loop is not what a page whose headline feature is arriving
-   * instantly should cost, and it would be paid by every live chat streaming
-   * through the same loop.
+   * intervals into `busyMs`. Over a 7-day window the aggregate alone is ~110 ms
+   * and the row shipment another ~140 ms — a quarter-second of blocked event
+   * loop, paid by every live chat streaming through the same loop, for a page
+   * whose headline feature is arriving instantly.
    *
    * What that trade gives up is EXACTNESS of the time figure, and only of that
    * figure: this returns ATTRIBUTED ms (the plain sum of span durations), so a
@@ -930,12 +931,18 @@ export class MetricsService {
   } {
     this.flush();
     const at = this.now();
-    const events = this.db
+    // ONE pass for the counts, the spark AND the recency stamp, grouped by
+    // (project, day). Three separate aggregates was the obvious shape and cost
+    // roughly three times as much: `metric_ts` locates the window but the group
+    // key lives in the table, so each statement re-walked the same rows. Summing
+    // the days back up in JS is a few hundred tuples.
+    const eventRows = this.db
       .prepare(
-        `SELECT COALESCE(project_id, '') AS g, COUNT(*) AS c, MAX(ts) AS last
-           FROM metric WHERE ts >= ? AND ts < ? GROUP BY g`,
+        `SELECT COALESCE(project_id, '') AS g, ts / 86400000 AS d,
+                COUNT(*) AS c, MAX(ts) AS last
+           FROM metric WHERE ts >= ? AND ts < ? GROUP BY g, d`,
       )
-      .all(from, to) as { g: string; c: number; last: number }[];
+      .all(from, to) as { g: string; d: number; c: number; last: number }[];
     // Selected by `start_ts` ALONE. The overlap predicate every other span read
     // uses (`start_ts < to AND COALESCE(end_ts, now) > from`) cannot use the
     // index on a window that ends at now — `start_ts < now` matches the whole
@@ -950,24 +957,19 @@ export class MetricsService {
            FROM metric_span WHERE start_ts >= ? AND start_ts < ? GROUP BY g`,
       )
       .all(at, from, to) as { g: string; ms: number | null }[];
-    const sparkRows = this.db
-      .prepare(
-        `SELECT COALESCE(project_id, '') AS g, ts / 86400000 AS d, COUNT(*) AS c
-           FROM metric WHERE ts >= ? AND ts < ? GROUP BY g, d`,
-      )
-      .all(from, to) as { g: string; d: number; c: number }[];
 
     const byProject: Record<string, { events: number; runtimeMs: number; lastAt: number }> = {};
     const row = (g: string): { events: number; runtimeMs: number; lastAt: number } =>
       (byProject[g] ??= { events: 0, runtimeMs: 0, lastAt: 0 });
-    for (const r of events) {
+    const spark: Record<string, Record<number, number>> = {};
+    for (const r of eventRows) {
       const e = row(r.g);
-      e.events = Number(r.c);
-      e.lastAt = Number(r.last ?? 0);
+      const c = Number(r.c);
+      e.events += c;
+      e.lastAt = Math.max(e.lastAt, Number(r.last ?? 0));
+      (spark[r.g] ??= {})[Number(r.d)] = c;
     }
     for (const r of runtime) row(r.g).runtimeMs = Math.max(0, Number(r.ms ?? 0));
-    const spark: Record<string, Record<number, number>> = {};
-    for (const r of sparkRows) (spark[r.g] ??= {})[Number(r.d)] = Number(r.c);
     return { byProject, spark };
   }
 

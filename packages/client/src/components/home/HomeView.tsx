@@ -105,15 +105,21 @@ export function HomeView() {
             </p>
           )}
 
-          {/* One column at `sm`. The hero would otherwise be a 5xl number in a
-              90px box with the four tiles squeezed beside it. */}
-          <div className="grid gap-2 sm:grid-cols-[minmax(0,1.4fr)_minmax(0,2fr)]">
+          {/* FOUR tiles, in one row beside the hero. It was five — a Projects
+              count was in here — and that count is the grid directly below this
+              row, stated as nine cards. Dropping it is what lets the tiles sit
+              on a single line, which in turn stops the hero from being a 5xl
+              number stranded in the top third of a double-height box.
+
+              One column at `sm`, where the hero would otherwise be that number
+              in a 90px box with four tiles squeezed beside it. */}
+          <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,2.2fr)]">
             <Hero
               label={`Agent runtime · ${HOME_WINDOW_LABELS[window]}`}
               value={totals ? formatDuration(totals.runtimeMs) : "—"}
               hint="attributed — parallel tool calls each count"
             />
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
               <StatTile
                 label="Working now"
                 value={totals ? count(totals.working) : "—"}
@@ -148,13 +154,9 @@ export function HomeView() {
                 hint="tool calls, skills, MCP"
               />
               <StatTile
-                label="Projects"
-                value={totals ? count(totals.projects) : "—"}
-              />
-              <StatTile
                 label="Chats"
                 value={totals ? count(totals.chats) : "—"}
-                hint="archived excluded"
+                hint={totals ? `across ${count(totals.projects)} projects` : "archived excluded"}
               />
             </div>
           </div>
