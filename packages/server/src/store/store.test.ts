@@ -237,6 +237,18 @@ describe("Store projects/chats CRUD", () => {
       // clarity is not good enough.
       expect(msg).toContain(join(data, "chats", "orphan", "chat.json"));
       expect(msg).toContain("1 chat filed under it");
+      // The procedure has to be EXECUTABLE in the state that produced it.
+      // `init()` has aborted, so "create a new project in the app" was
+      // circular — there is no app. It now gives the record to write by hand,
+      // with every field `ProjectSchema` requires.
+      expect(msg).not.toMatch(/in the app/);
+      for (const field of ['"id"', '"name"', '"repoPath"', '"worktreeRoot"', '"createdAt"']) {
+        expect(msg, field).toContain(field);
+      }
+      // And the "just delete them" option is NOT a numbered step: as one it
+      // read as "set projectId, then delete the chats".
+      expect(msg).toContain(`\n\nOr, if you do not want these conversations kept`);
+      expect(msg).not.toMatch(/[0-9]\. Or, if you do not want/);
       // Still pointing where it was: the refusal is not a half-migration.
       expect(
         ((await readJson(join(data, "chats", "orphan", "chat.json"))) as Chat).projectId,

@@ -1031,15 +1031,39 @@ export class Store {
       }
     } else {
       steps.push(
-        `  1. Decide which project ${plural(chats.length, "chat")} ` +
-          `belong${chats.length === 1 ? "s" : ""} to. Any id\n` +
-          `     that has a record in this directory will do, or create a new\n` +
-          `     project in the app first:\n` +
-          `     ${this.projectsDir()}`,
+        `  1. Pick the project these ${plural(chats.length, "chat")} belong to.\n` +
+          `     The ids available are the .json filenames in:\n` +
+          `     ${this.projectsDir()}\n` +
+          `\n` +
+          // Deliberately NOT "create one in the app": `init()` has already
+          // aborted, so there is no app to create it in. That instruction was
+          // circular, and this is the state where the reader has the least
+          // room to work out a way round it.
+          `     If that directory is EMPTY there is no project to pick, and\n` +
+          `     Dispatch cannot start for you to make one — so write the\n` +
+          `     record by hand. Save this as <some-id>.json in that\n` +
+          `     directory, with a path to the checkout it belongs to:\n` +
+          `\n` +
+          `       {\n` +
+          `         "id": "<some-id>",\n` +
+          `         "name": "<some name>",\n` +
+          `         "repoPath": "<absolute path to the repo>",\n` +
+          `         "worktreeRoot": "<absolute path for worktrees>",\n` +
+          `         "createdAt": ${Date.now()}\n` +
+          `       }`,
         `  2. Set "projectId" to that id in each of:\n${chatList}${more}`,
       );
     }
     steps.push(`  ${steps.length + 1}. Start Dispatch again.`);
+
+    // An ALTERNATIVE, deliberately not a numbered step. Rendering it as one
+    // made the list read as "set projectId, then delete the chats" — a
+    // procedure that contradicts itself, which is the same failure this
+    // message has already been fixed for once.
+    const alternative = hasRow
+      ? ""
+      : `\nOr, if you do not want these conversations kept, delete the directory ` +
+        `each of those chat.json files sits in and start Dispatch again.\n`;
 
     // Two leads, not one with optional clauses. "already uses it AND has N
     // chats filed under it" is a redundant way to describe the orphan case,
@@ -1067,7 +1091,9 @@ export class Store {
           `was deleted.\nDispatch refuses to start rather than reinterpret those ` +
           `conversations as the global chat's.`;
 
-    return new ReservedProjectIdError(`${lead}\n\nTo fix it by hand:\n\n${steps.join("\n")}\n`);
+    return new ReservedProjectIdError(
+      `${lead}\n\nTo fix it by hand:\n\n${steps.join("\n")}\n${alternative}`,
+    );
   }
 
   /**
