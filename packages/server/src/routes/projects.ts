@@ -81,12 +81,6 @@ export function registerProjectRoutes(app: FastifyInstance): void {
     // too, and that is the real guard — but it runs after `ensureRepo` has
     // already made a directory and `git init`ed it, so refusing only there
     // leaves a repo behind for a request that was never going to succeed.
-
-
-    // The reserved id BEFORE any side effect. `store.saveProject` refuses it
-    // too, and that is the real guard — but it runs after `ensureRepo` has
-    // already made a directory and `git init`ed it, so refusing only there
-    // leaves a repo behind for a request that was never going to succeed.
     if (isGlobalProject(parsed.data.id)) {
       return reply
         .code(400)

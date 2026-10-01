@@ -146,6 +146,13 @@ export const GLOBAL_MODE_DISALLOWED_TOOLS: readonly string[] = [
   "PowerShell",
   "mcp__dispatch-workspace__terminal",
   "mcp__dispatch-workspace__run_subapp",
+  // `prewarm_mcp` is a shell too, which is not obvious from its name. It runs
+  // the project's configured prewarm command through `McpPrewarmService` with
+  // `shell: true` — a command STRING, so anything a shell can express. The
+  // broker binds it for any session with a project id and a cwd, and a global
+  // chat has both. Review found it; it belongs with the shells, above the
+  // things that merely write.
+  "mcp__dispatch-mcp__prewarm_mcp",
   // code edits
   "Edit",
   "Write",

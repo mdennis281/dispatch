@@ -626,6 +626,53 @@ describe("routes — REST CRUD", () => {
     expect(res.json().error).toMatch(/reserved/);
   });
 
+  it("gives the reserved pseudo-project no config surface at all", async () => {
+    // `store.getProject` SYNTHESIZES a record for the reserved id, so every
+    // route under /config treated it as an ordinary project. `scaffold` and
+    // `import` would create `projects/__global__/project.yaml`, whose MCP
+    // servers the broker then attaches to global sessions — arbitrary tool
+    // names the fixed denylist cannot cover, which is write-capable tooling
+    // back inside the project-less chat by way of its own config.
+    const paths: [string, string][] = [
+      ["POST", "scaffold"],
+      ["POST", "import"],
+      ["POST", "reload"],
+      ["POST", "location"],
+      ["PUT", "workflow"],
+      ["PUT", "defaults"],
+      ["PUT", "agent-context"],
+      ["PUT", "shell-filter"],
+      ["DELETE", "item"],
+      ["GET", "export"],
+    ];
+    for (const [method, leaf] of paths) {
+      const res = await app.inject({
+        method: method as "GET",
+        url: `/api/projects/${GLOBAL_PROJECT_ID}/config/${leaf}`,
+        payload: method === "GET" || method === "DELETE" ? undefined : {},
+      });
+      expect(res.statusCode, `${method} ${leaf}`).toBe(400);
+      expect(res.json().error, `${method} ${leaf}`).toMatch(/no project config/);
+    }
+    // The bare GET too: it LOADS the config when nothing is cached, so leaving
+    // it open leaves the attachment path reachable.
+    const get = await app.inject({ url: `/api/projects/${GLOBAL_PROJECT_ID}/config` });
+    expect(get.statusCode).toBe(400);
+    // And nothing was written for it.
+    expect(existsSync(join(dir, "projects", GLOBAL_PROJECT_ID))).toBe(false);
+
+    // A real project is untouched by the guard.
+    const real = await app.inject({
+      method: "POST",
+      url: "/api/projects",
+      payload: { name: "Real", repoPath: join(dir, "real-repo"), worktreeRoot: "wt" },
+    });
+    expect(real.statusCode).toBe(201);
+    expect(
+      (await app.inject({ url: `/api/projects/${real.json().id}/config` })).statusCode,
+    ).toBe(200);
+  });
+
   it("initRepo leaves an existing checkout's git dir alone", async () => {
     const repo = await mkdtemp(join(tmpdir(), "cm-existing-"));
     try {

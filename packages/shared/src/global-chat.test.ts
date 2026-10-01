@@ -87,6 +87,10 @@ describe("the global posture", () => {
       "Bash",
       "PowerShell",
       "mcp__dispatch-workspace__terminal",
+      // `prewarm_mcp` is a shell wearing another name: it runs the project's
+      // configured command with `shell: true`. Review caught it; this is what
+      // notices if it ever comes off the list.
+      "mcp__dispatch-mcp__prewarm_mcp",
       // …and the direct routes.
       "Edit",
       "Write",

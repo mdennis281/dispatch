@@ -138,6 +138,67 @@ describe("Store projects/chats CRUD", () => {
     }
   });
 
+  it("notices a row written AFTER this instance marked the id reserved", async () => {
+    // The marker is per-`dataDir`; the row lives in the shared `configDir`. A
+    // sibling instance on an older build can still write that row, and a
+    // marker-first fast path would return before ever noticing — `getProject`
+    // answering with the synthesized record and hiding a real project, and
+    // `listProjects` returning the id twice, on every boot from then on.
+    const d = await mkdtemp(join(tmpdir(), "cm-late-row-"));
+    try {
+      const first = new Store(d);
+      await first.init(); // clean install: writes the marker
+      await first.saveChat(chat("global-1", GLOBAL_PROJECT_ID));
+      first.close();
+
+      // The sibling's handiwork, after the fact.
+      await writeJsonAtomic(join(d, "projects", `${GLOBAL_PROJECT_ID}.json`), {
+        ...project(GLOBAL_PROJECT_ID),
+        name: "Acme Billing",
+      });
+
+      const store2 = new Store(d);
+      const err = await store2.init().then(
+        () => null,
+        (e: Error) => e,
+      );
+      store2.close();
+      expect(err!.message).toContain("already uses it for a project");
+      // The genuine global chat is NOT offered for remapping: by now it really
+      // is a global chat, and refiling it would break the thing being fixed.
+      expect(err!.message).not.toContain("chats filed under it");
+      expect(err!.message).not.toContain("global-1");
+    } finally {
+      await rm(d, { recursive: true, force: true });
+    }
+  });
+
+  it("suggests a rename target whose DIRECTORY is free, not just its row", async () => {
+    // Deleting a project leaves `projects/<id>/` behind, so a row-only check
+    // can name an id whose directory already holds somebody's memories — and
+    // the printed procedure would then have the operator move a directory
+    // right on top of it.
+    const cfg = await mkdtemp(join(tmpdir(), "cm-sugg-dir-"));
+    try {
+      await mkdir(join(cfg, "projects", "legacy-project", "memory"), { recursive: true });
+      await writeFile(join(cfg, "projects", "legacy-project", "memory", "a.md"), "keep", "utf8");
+      await writeJsonAtomic(join(cfg, "projects", `${GLOBAL_PROJECT_ID}.json`), {
+        ...project(GLOBAL_PROJECT_ID),
+        name: "Acme Billing",
+      });
+      const store2 = new Store(cfg);
+      const err = await store2.init().then(
+        () => null,
+        (e: Error) => e,
+      );
+      store2.close();
+      expect(err!.message).toContain(join(cfg, "projects", "legacy-project-1"));
+      expect(err!.message).not.toContain(`${join(cfg, "projects", "legacy-project")}.json`);
+    } finally {
+      await rm(cfg, { recursive: true, force: true });
+    }
+  });
+
   it("refuses on orphaned chats too, where there is no row to notice", async () => {
     // Deleting a project removes its row and leaves its chats, so an install
     // that created `__global__`, chatted in it and deleted it has no file to

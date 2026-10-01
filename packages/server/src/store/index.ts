@@ -895,19 +895,56 @@ export class Store {
    * Costs one `existsSync` per boot once established.
    */
   private async freeReservedProjectId(): Promise<void> {
-    // Already reserved HERE: anything under the id is the global chat's.
-    if (existsSync(this.globalReservationMarker())) return;
-
     const legacy = this.entityFile(this.projectsDir(), GLOBAL_PROJECT_ID);
+
+    // The ROW is checked on EVERY boot, ahead of the marker, because the two
+    // live in different stores: the marker is per-instance under `dataDir`,
+    // the row is in the SHARED `configDir`. A sibling instance on an older
+    // build — one that still lets `POST /api/projects` take the id — can
+    // write that row after this instance has already marked the id reserved,
+    // and a marker-first fast path would then return before noticing it
+    // forever: `getProject` would answer with the synthesized record and hide
+    // a real project, and `listProjects` would return the id twice.
+    //
+    // Unconditional because there is no longer any such thing as a legitimate
+    // row here — the store and `POST /api/projects` both refuse to write one.
+    // Its presence is always somebody else's mistake, so always say so.
+    if (existsSync(legacy)) {
+      // Chats are NOT offered for remapping once the marker exists: they are
+      // genuine global chats by then, and telling the operator to refile them
+      // would be telling them to break the global chat to fix the row.
+      const reserved = existsSync(this.globalReservationMarker());
+      throw this.reservedIdRefusal(legacy, true, reserved ? [] : await this.scanReservedChats());
+    }
+
+    // Already reserved HERE: anything else under the id is the global chat's.
+    if (existsSync(this.globalReservationMarker())) return;
 
     // NOT `.catch(() => [])`. `listChats` throws on EACCES/IO rather than
     // reporting an empty store precisely so a caller cannot mistake "cannot
     // see" for "nothing there" — and here that mistake writes the marker and
     // classifies every unseen legacy chat as a genuine global chat
     // PERMANENTLY, since the marker is what the next boot trusts.
-    let chats: Chat[];
+    const chats = await this.scanReservedChats();
+
+    const hasRow = existsSync(legacy);
+    if (hasRow || chats.length) throw this.reservedIdRefusal(legacy, hasRow, chats);
+
+    await this.markGlobalIdReserved();
+  }
+
+  /**
+   * Chats filed under the reserved id.
+   *
+   * NOT `.catch(() => [])`. `listChats` throws on EACCES/IO rather than
+   * reporting an empty store precisely so a caller cannot mistake "cannot
+   * see" for "nothing there" — and here that mistake writes the marker and
+   * classifies every unseen legacy chat as a genuine global chat
+   * PERMANENTLY, since the marker is what the next boot trusts.
+   */
+  private async scanReservedChats(): Promise<Chat[]> {
     try {
-      chats = await this.listChats(GLOBAL_PROJECT_ID);
+      return await this.listChats(GLOBAL_PROJECT_ID);
     } catch (err) {
       throw new ReservedProjectIdError(
         `Dispatch could not scan for chats under the reserved project id ` +
@@ -918,11 +955,6 @@ export class Store {
         { cause: err },
       );
     }
-
-    const hasRow = existsSync(legacy);
-    if (hasRow || chats.length) throw this.reservedIdRefusal(legacy, hasRow, chats);
-
-    await this.markGlobalIdReserved();
   }
 
   /**
@@ -1010,7 +1042,16 @@ export class Store {
   private reservedIdSuggestion(): string {
     for (let n = 0; ; n++) {
       const id = n === 0 ? "legacy-project" : `legacy-project-${n}`;
-      if (!existsSync(this.entityFile(this.projectsDir(), id))) return id;
+      // BOTH the row and the entity directory. Deleting a project removes the
+      // row and leaves `projects/<id>/`, so a row-only check can suggest an id
+      // whose directory already holds somebody's memories — and the printed
+      // procedure would then have the operator move a directory onto it.
+      if (
+        !existsSync(this.entityFile(this.projectsDir(), id)) &&
+        !existsSync(this.projectConfigDir(id))
+      ) {
+        return id;
+      }
     }
   }
 
