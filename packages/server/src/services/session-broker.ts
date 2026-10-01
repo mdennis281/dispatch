@@ -894,7 +894,12 @@ export interface SessionPrRegistry {
   ): Promise<unknown>;
 }
 
-function makePrRegistryBinding(
+/**
+ * Exported for its own test: the cap refresh below is read by three tools that
+ * each decide whether another review can ever happen, and driving that through
+ * a live broker would test the wiring rather than the rule.
+ */
+export function makePrRegistryBinding(
   registry: SessionPrRegistry,
   github: GitHubService,
   dirs: SessionDirs,
@@ -910,6 +915,17 @@ function makePrRegistryBinding(
    * problem, and recording it as a reviewer fault would cry wolf.
    */
   reviewerLogin: string | undefined,
+  /**
+   * The resolved round policy, so a READ of the reviewer row can report the cap
+   * that is actually in force rather than the one the last sweep happened to
+   * write.
+   *
+   * It has to be here and not at each call site because three tools decide
+   * "can another round still happen" off this one read — `request_review`'s
+   * spent-cap refusal, `watch_pr`'s `reviewsSpent`, and `approve_pr` — and
+   * under a `dynamic` policy the stored cap is a function of a diff that moves.
+   */
+  reviewPolicy: ResolvedReviewAgent | undefined,
 ): ManagerMcpPrRegistry {
   const repoFor = makeRepoResolver(github, dirs);
   // Every method degrades to null rather than throwing: a card is a nicety, and
@@ -944,7 +960,31 @@ function makePrRegistryBinding(
     },
     reviewAgent: async (n, repo) => {
       const r = await repoFor(repo);
-      return r ? registry.reviewAgent(r, n) : null;
+      if (!r) return null;
+      const state = await registry.reviewAgent(r, n);
+      // The cap, recomputed from the diff as it is NOW.
+      //
+      // The sweep writes `maxRounds` onto the row every ~90s, which is fine
+      // while the number is a constant and wrong the moment it is a function of
+      // the diff. The sequence the `wake()` prompt in `pr-review-watcher.ts`
+      // actually tells an agent to follow is: push the fix, then call
+      // `request_review` — so a push that grows the PR past the next bracket
+      // lands squarely in the stale window. Read off the row, the cap is the
+      // pre-push one, `request_review` refuses `rounds-spent` without ever
+      // setting `requestedAt`, and the sweep that follows raises the
+      // denominator onto a row with no request left to claim. The PR then
+      // strands on a manual `extraRounds` grant — which is the exact failure
+      // dynamic sizing exists to remove.
+      //
+      // Only when the row ALREADY carries a cap: a row that never recorded one
+      // cannot say the cap is reached, and inventing a number here would turn
+      // "we don't know" into a confident refusal.
+      if (!state || state.maxRounds == null || reviewPolicy?.rounds.mode !== "dynamic") {
+        return state;
+      }
+      const row = await registry.snapshot(r, n).catch(() => null);
+      const cap = reviewRoundCap(reviewPolicy, row ? changedLines(row) : undefined);
+      return cap === state.maxRounds ? state : { ...state, maxRounds: cap };
     },
     raiseReviewRoundCap: async (n, repo, extra) => {
       const r = await repoFor(repo);
@@ -7481,6 +7521,7 @@ export class SessionBroker {
                 dirs,
                 session.chatId,
                 reviewer?.policy.login,
+                reviewer?.policy,
               )
             : undefined,
         github: github
