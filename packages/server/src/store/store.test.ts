@@ -91,176 +91,56 @@ describe("Store projects/chats CRUD", () => {
     });
   });
 
-  it("moves a legacy project off the reserved id at init, taking its chats", async () => {
-    // `__global__` passes the entity-id allowlist and `POST /api/projects`
-    // takes a caller-supplied id, so an install made before the reservation
-    // could hold this row. The upgrade must not quietly reinterpret that
-    // project — and its conversations — as the global chat.
-    const dir2 = await mkdtemp(join(tmpdir(), "cm-legacy-global-"));
+  it("refuses to boot on an install that already used the reserved id", async () => {
+    // This USED to migrate — rename the row, remap the chats, move the entity
+    // dir, coordinate the target between instances. Review found two
+    // data-loss bugs in that machinery, and a third would have been silent.
+    // Nothing derives this id (seeding creates no projects, the new-project
+    // form sends none, every other `saveProject` caller updates an existing
+    // row), so the install being refused takes a hand-written POST naming the
+    // literal. One loud rename beats a silent overwrite.
+    const cfg = await mkdtemp(join(tmpdir(), "cm-reserved-row-"));
     try {
-      // Both written by hand, as an older version would have left them —
-      // the migration runs during `init`, so neither may be created through
-      // a Store that has already migrated.
-      await mkdir(join(dir2, "projects"), { recursive: true });
-      await writeJsonAtomic(join(dir2, "projects", `${GLOBAL_PROJECT_ID}.json`), {
+      await mkdir(join(cfg, "projects"), { recursive: true });
+      await writeJsonAtomic(join(cfg, "projects", `${GLOBAL_PROJECT_ID}.json`), {
         ...project(GLOBAL_PROJECT_ID),
         name: "Acme Billing",
       });
-      await mkdir(join(dir2, "chats", "legacy-chat"), { recursive: true });
-      await writeJsonAtomic(
-        join(dir2, "chats", "legacy-chat", "chat.json"),
-        chat("legacy-chat", GLOBAL_PROJECT_ID),
-      );
-
-      const reopened = new Store(dir2);
-      await reopened.init();
-      try {
-        const real = realProjects(await reopened.listProjects());
-        expect(real).toHaveLength(1);
-        expect(real[0]!.id).toBe("acme-billing");
-        expect(real[0]!.name).toBe("Acme Billing");
-        // The reserved id is the synthesized record and nothing else.
-        expect((await reopened.getProject(GLOBAL_PROJECT_ID))!.name).toBe("Global");
-        // …and the chat went with its project rather than becoming global.
-        expect((await reopened.getChat("legacy-chat"))!.projectId).toBe("acme-billing");
-        expect(await reopened.listChats(GLOBAL_PROJECT_ID)).toHaveLength(0);
-      } finally {
-        reopened.close();
-      }
+      const store2 = new Store(cfg);
+      // Actionable: it names the file and says what to do with it.
+      await expect(store2.init()).rejects.toThrow(/reserved for the global chat/);
+      await expect(store2.init()).rejects.toThrow(/Rename that project/);
+      store2.close();
+      // And it touched nothing — the record is exactly as the operator left it.
+      expect(
+        ((await readJson(join(cfg, "projects", `${GLOBAL_PROJECT_ID}.json`))) as Project).name,
+      ).toBe("Acme Billing");
+      expect(await readdir(join(cfg, "projects"))).toEqual([`${GLOBAL_PROJECT_ID}.json`]);
     } finally {
-      await rm(dir2, { recursive: true, force: true });
+      await rm(cfg, { recursive: true, force: true });
     }
   });
 
-  it("keeps the legacy row when a chat cannot be moved, and retries cleanly", async () => {
-    // Swallowing a remap failure and removing the source anyway would leave
-    // the chat pointing at the reserved id — i.e. silently global on the next
-    // boot, which is the exact outcome the migration exists to prevent. The
-    // retry must also land on the SAME target rather than minting a copy.
-    const dir2 = await mkdtemp(join(tmpdir(), "cm-legacy-retry-"));
-    try {
-      await mkdir(join(dir2, "projects"), { recursive: true });
-      await writeJsonAtomic(join(dir2, "projects", `${GLOBAL_PROJECT_ID}.json`), {
-        ...project(GLOBAL_PROJECT_ID),
-        name: "Acme Billing",
-      });
-      await mkdir(join(dir2, "chats", "legacy-chat"), { recursive: true });
-      await writeJsonAtomic(
-        join(dir2, "chats", "legacy-chat", "chat.json"),
-        chat("legacy-chat", GLOBAL_PROJECT_ID),
-      );
-
-      const failing = new Store(dir2);
-      // Make the one chat unmovable for this attempt only.
-      const realPatch = failing.patchChat.bind(failing);
-      failing.patchChat = async () => {
-        throw new Error("disk full");
-      };
-      // Boot FAILS rather than continuing: in this process the reserved id
-      // already resolves to the synthesized record, so a chat still pointing
-      // at it would be running under the cross-project posture until someone
-      // restarted. Refusing is the louder and safer failure.
-      await expect(failing.init()).rejects.toThrow(/could not free the reserved project id/);
-      failing.patchChat = realPatch;
-      try {
-        // The target record exists (step 1 ran)…
-        expect((await failing.getProject("acme-billing"))?.name).toBe("Acme Billing");
-        // …and the legacy row is STILL THERE, so nothing has been orphaned.
-        expect(existsSync(join(dir2, "projects", `${GLOBAL_PROJECT_ID}.json`))).toBe(true);
-      } finally {
-        failing.close();
-      }
-
-      const retried = new Store(dir2);
-      await retried.init();
-      try {
-        // The retry reuses `acme-billing` rather than minting `acme-billing-1`.
-        expect(realProjects(await retried.listProjects()).map((p) => p.id)).toEqual([
-          "acme-billing",
-        ]);
-        expect((await retried.getChat("legacy-chat"))!.projectId).toBe("acme-billing");
-        expect(existsSync(join(dir2, "projects", `${GLOBAL_PROJECT_ID}.json`))).toBe(false);
-      } finally {
-        retried.close();
-      }
-    } finally {
-      await rm(dir2, { recursive: true, force: true });
-    }
-  });
-
-  it("does not adopt a different project that happens to sit on the slug", async () => {
-    // Duplicate rows are allowed, so two projects can legitimately point at
-    // one checkout. Matching the retry target on `repoPath` alone would adopt
-    // such a row and then overwrite it — merging two records and their chats.
-    const dir2 = await mkdtemp(join(tmpdir(), "cm-legacy-collide-"));
-    try {
-      await mkdir(join(dir2, "projects"), { recursive: true });
-      await writeJsonAtomic(join(dir2, "projects", `${GLOBAL_PROJECT_ID}.json`), {
-        ...project(GLOBAL_PROJECT_ID),
-        name: "Acme Billing",
-        // `createdAt` pinned on BOTH records: `project()` uses `Date.now()`,
-        // so leaving it would make them differ for a reason that has nothing
-        // to do with what this test is about, and the comparison would take
-        // the suffix path even when broken.
-        createdAt: 1,
-        workflow: { profile: "none" },
-      });
-      // Same name, same repoPath, same KEYS — differing only in a value
-      // NESTED one level down. Deliberately not a top-level or
-      // key-presence difference: the first version of this comparison used
-      // `JSON.stringify`'s replacer array, which filters at every level, so
-      // both of these serialised `"workflow":{}` and compared EQUAL. Anything
-      // shallower would have passed against the buggy implementation too.
-      await writeJsonAtomic(join(dir2, "projects", "acme-billing.json"), {
-        ...project("acme-billing"),
-        name: "Acme Billing",
-        createdAt: 1,
-        workflow: { profile: "review" },
-      });
-
-      const store2 = new Store(dir2);
-      await store2.init();
-      try {
-        const ids = realProjects(await store2.listProjects()).map((p) => p.id).sort();
-        expect(ids).toEqual(["acme-billing", "acme-billing-1"]);
-        // The incumbent is untouched…
-        expect((await store2.getProject("acme-billing"))!.workflow?.profile).toBe("review");
-        // …and the migrated one is beside it, not merged into it.
-        expect((await store2.getProject("acme-billing-1"))!.workflow?.profile).toBe("none");
-      } finally {
-        store2.close();
-      }
-    } finally {
-      await rm(dir2, { recursive: true, force: true });
-    }
-  });
-
-  it("rescues orphaned chats left by a DELETED legacy project", async () => {
+  it("refuses on orphaned chats too, where there is no row to notice", async () => {
     // Deleting a project removes its row and leaves its chats, so an install
-    // that created `__global__`, chatted in it and deleted it has chats under
-    // the reserved id and no file to notice them by. Keying the migration off
-    // the row alone would file them as global chats on upgrade.
-    const dir2 = await mkdtemp(join(tmpdir(), "cm-legacy-orphan-"));
+    // that created `__global__`, chatted in it and deleted it has no file to
+    // find — and those chats would silently become global chats on upgrade.
+    const data = await mkdtemp(join(tmpdir(), "cm-reserved-orphan-"));
     try {
-      await mkdir(join(dir2, "chats", "orphan"), { recursive: true });
+      await mkdir(join(data, "chats", "orphan"), { recursive: true });
       await writeJsonAtomic(
-        join(dir2, "chats", "orphan", "chat.json"),
+        join(data, "chats", "orphan", "chat.json"),
         chat("orphan", GLOBAL_PROJECT_ID),
       );
-
-      const store2 = new Store(dir2);
-      await store2.init();
-      try {
-        const real = realProjects(await store2.listProjects());
-        expect(real).toHaveLength(1);
-        expect(real[0]!.name).toBe("Recovered project");
-        expect((await store2.getChat("orphan"))!.projectId).toBe(real[0]!.id);
-        expect(await store2.listChats(GLOBAL_PROJECT_ID)).toHaveLength(0);
-      } finally {
-        store2.close();
-      }
+      const store2 = new Store(data);
+      await expect(store2.init()).rejects.toThrow(/1 chat\(s\) filed under it/);
+      store2.close();
+      // Still pointing where it was: the refusal is not a half-migration.
+      expect(
+        ((await readJson(join(data, "chats", "orphan", "chat.json"))) as Chat).projectId,
+      ).toBe(GLOBAL_PROJECT_ID);
     } finally {
-      await rm(dir2, { recursive: true, force: true });
+      await rm(data, { recursive: true, force: true });
     }
   });
 
@@ -303,220 +183,6 @@ describe("Store projects/chats CRUD", () => {
       store2.close();
     } finally {
       await rm(dir2, { recursive: true, force: true });
-    }
-  });
-
-  it("keeps a split-store install's chats on ONE project across both instances", async () => {
-    // The documented layout: `configDir` shared between the stable app and
-    // dev, `dataDir` per-instance. The project row is shared; the chats and
-    // the reservation marker are not. Without a shared note of where the row
-    // went, the second instance finds no row, sees its own chats under the
-    // reserved id, and files them under a fresh "Recovered project" — one
-    // project's conversations across two records, with no error anywhere.
-    const cfg = await mkdtemp(join(tmpdir(), "cm-split-cfg-"));
-    const dataA = await mkdtemp(join(tmpdir(), "cm-split-a-"));
-    const dataB = await mkdtemp(join(tmpdir(), "cm-split-b-"));
-    try {
-      await mkdir(join(cfg, "projects"), { recursive: true });
-      await writeJsonAtomic(join(cfg, "projects", `${GLOBAL_PROJECT_ID}.json`), {
-        ...project(GLOBAL_PROJECT_ID),
-        name: "Acme Billing",
-        createdAt: 1,
-      });
-      for (const [dir, id] of [[dataA, "chat-a"], [dataB, "chat-b"]] as const) {
-        await mkdir(join(dir, "chats", id), { recursive: true });
-        await writeJsonAtomic(join(dir, "chats", id, "chat.json"), chat(id, GLOBAL_PROJECT_ID));
-      }
-
-      const a = new Store(dataA, cfg);
-      await a.init();
-      const target = realProjects(await a.listProjects())[0]!.id;
-      expect((await a.getChat("chat-a"))!.projectId).toBe(target);
-      a.close();
-
-      // Second instance, shared config, its OWN data. It must land on the
-      // SAME project rather than inventing one.
-      const b = new Store(dataB, cfg);
-      await b.init();
-      try {
-        expect((await b.getChat("chat-b"))!.projectId).toBe(target);
-        expect(realProjects(await b.listProjects()).map((p) => p.id)).toEqual([target]);
-        expect(await b.listChats(GLOBAL_PROJECT_ID)).toHaveLength(0);
-      } finally {
-        b.close();
-      }
-    } finally {
-      for (const d of [cfg, dataA, dataB]) await rm(d, { recursive: true, force: true });
-    }
-  });
-
-  it("serialises the migration decision when two instances race", async () => {
-    // Both read `decided === null` before either writes. Without an exclusive
-    // claim the slower one overwrites the winner's record and the two remap
-    // their chats to different projects — the split again, by a narrower
-    // door. `init()` concurrently on one shared config is the whole test.
-    const cfg = await mkdtemp(join(tmpdir(), "cm-race-cfg-"));
-    const dataA = await mkdtemp(join(tmpdir(), "cm-race-a-"));
-    const dataB = await mkdtemp(join(tmpdir(), "cm-race-b-"));
-    try {
-      await mkdir(join(cfg, "projects"), { recursive: true });
-      await writeJsonAtomic(join(cfg, "projects", `${GLOBAL_PROJECT_ID}.json`), {
-        ...project(GLOBAL_PROJECT_ID),
-        name: "Acme Billing",
-        createdAt: 1,
-      });
-      for (const [dir, id] of [[dataA, "race-a"], [dataB, "race-b"]] as const) {
-        await mkdir(join(dir, "chats", id), { recursive: true });
-        await writeJsonAtomic(join(dir, "chats", id, "chat.json"), chat(id, GLOBAL_PROJECT_ID));
-      }
-
-      const a = new Store(dataA, cfg);
-      await a.init();
-      const aTarget = (await a.getChat("race-a"))!.projectId;
-      a.close();
-
-      // B as it would be having read BEFORE A wrote: its view of the shared
-      // decision is stale-empty, and the legacy row A removed is gone — so
-      // left to itself it invents a "Recovered project" and clobbers the
-      // record. Stubbing that one read is the whole race, deterministically.
-      const b = new Store(dataB, cfg);
-      let firstRead = true;
-      const realRead = (b as unknown as { readGlobalReservation: () => unknown })
-        .readGlobalReservation.bind(b);
-      (b as unknown as { readGlobalReservation: () => unknown }).readGlobalReservation = () => {
-        if (firstRead) {
-          firstRead = false;
-          return null;
-        }
-        return realRead();
-      };
-      await b.init();
-      try {
-        // The exclusive claim fails, B re-reads, and joins A's decision.
-        expect((await b.getChat("race-b"))!.projectId).toBe(aTarget);
-        expect(JSON.parse(await readFile(join(cfg, "global-reservation.json"), "utf8")).movedTo)
-          .toBe(aTarget);
-        expect(realProjects(await b.listProjects()).map((p) => p.id)).toEqual([aTarget]);
-      } finally {
-        b.close();
-      }
-    } finally {
-      for (const d of [cfg, dataA, dataB]) await rm(d, { recursive: true, force: true });
-    }
-  });
-
-  it("takes the project's memory directory with it, and never leaves it under the reserved id", async () => {
-    // `projects/<id>/` is the sibling of `projects/<id>.json` — the project's
-    // memories and, for an external-config project, its whole `.dispatch/`
-    // tree. Left behind it is lost to the migrated project AND inherited by
-    // the global chat, which resolves the same path under the reserved id.
-    const cfg = await mkdtemp(join(tmpdir(), "cm-memdir-cfg-"));
-    const data = await mkdtemp(join(tmpdir(), "cm-memdir-data-"));
-    try {
-      await mkdir(join(cfg, "projects", GLOBAL_PROJECT_ID, "memory"), { recursive: true });
-      await writeJsonAtomic(join(cfg, "projects", `${GLOBAL_PROJECT_ID}.json`), {
-        ...project(GLOBAL_PROJECT_ID),
-        name: "Acme Billing",
-        createdAt: 1,
-      });
-      await writeFile(
-        join(cfg, "projects", GLOBAL_PROJECT_ID, "memory", "a-fact.md"),
-        "the deploy key rotates on the first\n",
-        "utf8",
-      );
-
-      const store2 = new Store(data, cfg);
-      await store2.init();
-      try {
-        expect(await readFile(join(cfg, "projects", "acme-billing", "memory", "a-fact.md"), "utf8"))
-          .toContain("deploy key");
-        expect(existsSync(join(cfg, "projects", GLOBAL_PROJECT_ID))).toBe(false);
-      } finally {
-        store2.close();
-      }
-    } finally {
-      for (const d of [cfg, data]) await rm(d, { recursive: true, force: true });
-    }
-  });
-
-  it("rebuilds a decided target whose record the winner died before writing", async () => {
-    // The claim is exclusive, so the decision survives a crash — but the
-    // project record written under it does not. A later instance reads the
-    // decision, and if it trusts the target blindly it remaps its chats onto
-    // an id with no record behind it and then deletes the legacy row: the
-    // last copy of the data, gone, in the name of a migration.
-    const cfg = await mkdtemp(join(tmpdir(), "cm-halfclaim-cfg-"));
-    const data = await mkdtemp(join(tmpdir(), "cm-halfclaim-data-"));
-    try {
-      await mkdir(join(cfg, "projects"), { recursive: true });
-      await writeJsonAtomic(join(cfg, "projects", `${GLOBAL_PROJECT_ID}.json`), {
-        ...project(GLOBAL_PROJECT_ID),
-        name: "Acme Billing",
-        createdAt: 1,
-      });
-      // Claimed, never followed through: no `projects/acme-billing.json`.
-      await writeJsonAtomic(join(cfg, "global-reservation.json"), {
-        movedTo: "acme-billing",
-        at: 1,
-      });
-      await mkdir(join(data, "chats", "orphan"), { recursive: true });
-      await writeJsonAtomic(
-        join(data, "chats", "orphan", "chat.json"),
-        chat("orphan", GLOBAL_PROJECT_ID),
-      );
-
-      const store2 = new Store(data, cfg);
-      await store2.init();
-      try {
-        expect((await store2.getChat("orphan"))!.projectId).toBe("acme-billing");
-        // Repaired from the legacy row that was still there, not invented.
-        expect((await store2.getProject("acme-billing"))?.name).toBe("Acme Billing");
-      } finally {
-        store2.close();
-      }
-    } finally {
-      for (const d of [cfg, data]) await rm(d, { recursive: true, force: true });
-    }
-  });
-
-  it("refuses to boot on a shared reservation record it cannot read", async () => {
-    // Present-but-corrupt is not "undecided". Treating it as undecided is the
-    // split again: this instance invents a target, the exclusive claim fails
-    // against the corrupt file, it rereads the same garbage, and falls back to
-    // its invented id while the other instance uses the real one.
-    const cfg = await mkdtemp(join(tmpdir(), "cm-badres-cfg-"));
-    const data = await mkdtemp(join(tmpdir(), "cm-badres-data-"));
-    try {
-      await mkdir(join(cfg, "projects"), { recursive: true });
-      await writeFile(join(cfg, "global-reservation.json"), "{ movedTo: ", "utf8");
-      await mkdir(join(data, "chats", "orphan"), { recursive: true });
-      await writeJsonAtomic(
-        join(data, "chats", "orphan", "chat.json"),
-        chat("orphan", GLOBAL_PROJECT_ID),
-      );
-
-      const store2 = new Store(data, cfg);
-      await expect(store2.init()).rejects.toThrow(/unreadable/);
-      store2.close();
-
-      // A VALID file naming nothing usable is the same refusal, and an
-      // install with nothing under the reserved id is not affected by either
-      // — it never has to read the record at all.
-      await writeJsonAtomic(join(cfg, "global-reservation.json"), { movedTo: 42 });
-      const store3 = new Store(data, cfg);
-      await expect(store3.init()).rejects.toThrow(/no valid project id/);
-      store3.close();
-
-      const clean = await mkdtemp(join(tmpdir(), "cm-badres-clean-"));
-      try {
-        const store4 = new Store(clean, cfg);
-        await store4.init();
-        store4.close();
-      } finally {
-        await rm(clean, { recursive: true, force: true });
-      }
-    } finally {
-      for (const d of [cfg, data]) await rm(d, { recursive: true, force: true });
     }
   });
 

@@ -123,7 +123,6 @@ import {
   readJsonlLines,
   readJsonlTail,
   isMissing,
-  renameWithRetry,
 } from "./fsq.js";
 import { StateDb, assertStateMigrated } from "./db.js";
 
@@ -852,47 +851,56 @@ export class Store {
   /* ---------------------------------------------------------- projects */
 
   /**
-   * Move a pre-existing project off the now-reserved id, with its chats.
+   * Refuse to boot on an install that already used the now-reserved id.
    *
    * `__global__` passes the entity-id allowlist and `POST /api/projects`
    * accepts a caller-supplied id, so an install made before this landed COULD
    * hold `projects/__global__.json`. Left alone the upgrade is silent and
    * nasty: `getProject` answers with the synthesized record instead of the
-   * user's project, `listProjects` returns the id twice, and every chat filed
-   * under it is reinterpreted as a global chat — i.e. a real repo's
-   * conversations quietly acquire the cross-project posture.
+   * user's project, and every chat filed under it is reinterpreted as a
+   * global chat — a real repo's conversations quietly acquiring the
+   * cross-project posture.
    *
-   * So the row is RENAMED rather than refused. Refusing would mean a boot
-   * failure over a name, and deleting would lose a project; renaming keeps
-   * both the data and the reservation. Chats move with it, because a chat
-   * pointing at the vacated id is exactly the hijack this prevents.
+   * THIS USED TO MIGRATE instead: rename the row, remap the chats, move the
+   * entity directory, coordinate the chosen id between instances through a
+   * shared record. ~140 lines, and review found two data-loss bugs in them —
+   * a project-comparison that ignored nested fields and so overwrote an
+   * unrelated row, and an entity directory left behind so the migrated
+   * project lost its memories to the global chat. The asymmetry decided it: a
+   * third bug of that shape destroys a real project's data silently, while
+   * refusing costs an install that cannot plausibly exist one rename.
    *
-   * The ROW IS NOT THE ONLY EVIDENCE. Deleting a project removes its row and
+   * Cannot plausibly exist, specifically: nothing DERIVES this id. Seeding
+   * creates no projects, the new-project form never sends an `id`, and every
+   * other `saveProject` caller updates a row that already exists. It takes a
+   * hand-written `POST`/`PUT` naming the literal, before the literal meant
+   * anything.
+   *
+   * THE ROW IS NOT THE ONLY EVIDENCE. Deleting a project removes its row and
    * leaves its chats (`routes/projects.ts`), so an install that once created
-   * `__global__`, chatted in it, and deleted it has orphaned chats under the
-   * reserved id and no file to notice them by. Those are migrated too, onto a
-   * placeholder.
+   * `__global__`, chatted in it and deleted it has orphaned chats under the
+   * reserved id and no file to notice them by. Both are checked.
    *
    * Which needs a way to tell a legacy orphan from a LEGITIMATE global chat,
-   * because after this ships they look identical. Hence the marker: it is
-   * written once the reservation has been established cleanly, and its
-   * absence is what says "any chat under this id predates the reservation".
-   * Written only after a successful pass, so a failed migration retries.
+   * because once this ships they look identical. Hence the marker: written
+   * the first time a boot finds the id clean, and its absence is what says
+   * "anything under this id predates the reservation". Per-instance, under
+   * `dataDir`, because it is a statement about chats and chats are
+   * per-instance — and with nothing to move there is nothing to coordinate
+   * between instances, which is the whole reason this is now short.
    *
    * Costs one `existsSync` per boot once established.
    */
   private async freeReservedProjectId(): Promise<void> {
-    // Already reserved HERE: chats under the id are global chats, and must be
-    // left exactly where they are.
+    // Already reserved HERE: anything under the id is the global chat's.
     if (existsSync(this.globalReservationMarker())) return;
 
     const legacy = this.entityFile(this.projectsDir(), GLOBAL_PROJECT_ID);
-    const legacyExists = existsSync(legacy);
 
     // NOT `.catch(() => [])`. `listChats` throws on EACCES/IO rather than
     // reporting an empty store precisely so a caller cannot mistake "cannot
-    // see" for "nothing there" — and here that mistake would write the marker
-    // and classify every unseen legacy chat as a genuine global chat
+    // see" for "nothing there" — and here that mistake writes the marker and
+    // classifies every unseen legacy chat as a genuine global chat
     // PERMANENTLY, since the marker is what the next boot trusts.
     let chats: Chat[];
     try {
@@ -904,229 +912,27 @@ export class Store {
       );
     }
 
-    // Nothing here to move: a normal install meeting the reservation for the
-    // first time, or a second instance that simply had no chats under the id.
-    // Checked BEFORE the shared record is read, so an install with nothing at
-    // stake never has to care whether that record is intact.
-    if (!legacyExists && !chats.length) {
-      await this.markGlobalIdReserved();
-      return;
-    }
-
-    // What some instance already decided, if any. SHARED, and that is the
-    // whole point of it — see `globalReservationRecord`.
-    const decided = this.readGlobalReservation();
-
-    // The record the target is built from. An unreadable (or absent) row is
-    // still migrated rather than skipped: the project is already broken, but
-    // its CHATS are the thing at risk — left pointing at the reserved id they
-    // become global chats, which is the whole hazard. They get attached to a
-    // placeholder the operator has to fix: a visible problem rather than a
-    // silent posture change.
-    const stored = legacyExists
-      ? await this.readEntity(legacy, ProjectSchema).catch(() => null)
-      : null;
-    const project: Project = stored ?? {
-      id: GLOBAL_PROJECT_ID,
-      name: "Recovered project",
-      repoPath: join(this.dataDir, "recovered-project"),
-      worktreeRoot: join(this.dataDir, "recovered-project"),
-      subApps: [],
-      createdAt: Date.now(),
-    };
-
-    let movedId: string;
-    if (decided) {
-      // Another instance already migrated the SHARED project row. Join its
-      // decision rather than making a second one — inventing a target here is
-      // how one project's conversations end up split across two records.
-      movedId = decided.movedTo;
-    } else {
-      // CLAIM the decision before writing anything under it. Two instances
-      // upgrading at the same moment both read `decided === null`; the
-      // exclusive create is the one serialising point, and exactly one of
-      // them wins it.
-      //
-      // Claiming BEFORE the project record, not after, because the loser must
-      // not leave its own record behind: a second instance that arrives after
-      // the row is gone computes "Recovered project", and writing that first
-      // would litter the user's project list with an empty row that is never
-      // used again.
-      movedId = await this.claimGlobalReservation(this.reservedMigrationTarget(project));
-    }
-
-    // 1. The project under its new id — but only if nothing is there.
-    //
-    //    This runs on BOTH branches, which is the point of it. A process that
-    //    won the claim and then died before writing leaves the decision
-    //    recorded and the record missing; every later instance reads
-    //    `decided`, and if the repair only lived on the claiming branch they
-    //    would each remap their chats onto an id with nothing behind it and
-    //    then delete the last copy of the data. Rebuilding from the still
-    //    present legacy row — or from the placeholder, when that is gone too
-    //    — keeps the chats attached to something that exists. Not fatal:
-    //    refusing to boot would be the louder failure, but here the migration
-    //    is moving chats OFF the reserved id, which is the safe direction, and
-    //    a visible placeholder project is fixable where a dead install is not.
-    const targetFile = this.entityFile(this.projectsDir(), movedId);
-    if (!existsSync(targetFile)) {
-      await this.writeEntity(`project:${movedId}`, targetFile, ProjectSchema, {
-        ...project,
-        id: movedId,
-      });
-    }
-
-    // 2. THIS instance's chats. Every one has to land before the source row
-    //    goes — a failure here used to be swallowed and the row removed
-    //    anyway, which left exactly the chat-reinterpreted-as-global outcome
-    //    this exists to prevent.
-    const failed: string[] = [];
-    for (const chat of chats) {
-      const moved = await this.patchChat(chat.id, { projectId: movedId }).catch(() => null);
-      if (!moved) failed.push(chat.id);
-    }
-    // THROW, rather than returning and letting boot continue. Keeping the old
-    // row only protects the NEXT start: in this process `getProject` already
-    // answers the reserved id with the synthesized record, so every chat still
-    // pointing at it is a real project's conversation running under the
-    // cross-project posture — the precise outcome this migration exists to
-    // prevent, live until someone restarts. Refusing to come up is the louder
-    // and safer failure, and it is reachable only by a disk error during a
-    // collision that should not exist in the first place.
-    if (failed.length) {
+    if (existsSync(legacy) || chats.length) {
+      // Actionable, because the fix is manual and one step. Naming both files
+      // matters: the reader may have only one of them.
       throw new ReservedProjectMigrationError(
-        `${failed.length} chat(s) could not be moved off "${GLOBAL_PROJECT_ID}" ` +
-          `(${failed.join(", ")})`,
+        `"${GLOBAL_PROJECT_ID}" is reserved for the global chat, but this install ` +
+          `already uses it` +
+          (existsSync(legacy) ? ` (${legacy})` : "") +
+          (chats.length ? ` (${chats.length} chat(s) filed under it)` : "") +
+          `. Rename that project to any other id — move the record and its ` +
+          `directory under "${this.projectsDir()}", and set "projectId" on those ` +
+          `chats to match — then start Dispatch again.`,
       );
     }
 
-    // 3. The project's ENTITY DIRECTORY — `projects/<id>/`, the sibling of
-    //    `projects/<id>.json`. That is where its memories live, and its whole
-    //    external `.dispatch/` tree when it keeps config out of the repo
-    //    (`projectMemoryDir` / `projectConfigDir`). Moving the row without it
-    //    loses the migrated project its memory AND hands that memory to the
-    //    global chat, which reads the same path under the reserved id.
-    //
-    //    Only on the branch that still had the ROW. The directory lives beside
-    //    it in the shared `configDir`, so whichever instance found the row owns
-    //    moving it; a later joiner that moved it anyway would be carting off
-    //    the memories the global chat has accumulated since.
-    if (legacyExists) {
-      const fromDir = this.projectConfigDir(GLOBAL_PROJECT_ID);
-      const toDir = this.projectConfigDir(movedId);
-      if (existsSync(fromDir)) {
-        // Unreachable by design — `reservedMigrationTarget` only returns an id
-        // that is free or this migration's own prior output, and that output
-        // took the directory with it. Refusing beats the two ways of guessing:
-        // clobbering somebody's memories, or leaving them under the reserved
-        // id for the global chat to adopt.
-        if (existsSync(toDir)) {
-          throw new ReservedProjectMigrationError(
-            `cannot move "${fromDir}" to "${toDir}": the destination already exists`,
-          );
-        }
-        await renameWithRetry(fromDir, toDir);
-      }
-    }
-
-    // 4. Only now is the id free here. The row removal is idempotent: the
-    //    instance that went first already did it.
-    if (legacyExists) await rm(legacy, { force: true });
     await this.markGlobalIdReserved();
-    // eslint-disable-next-line no-console
-    console.warn(
-      `[store] "${GLOBAL_PROJECT_ID}" is reserved for the global chat; ` +
-        `${decided ? "joined the existing move of" : "moved"} the project` +
-        `${chats.length ? ` and ${chats.length} of this instance's chat(s)` : ""} ` +
-        `to "${movedId}".`,
-    );
-  }
-
-  /**
-   * Where a migrated legacy project went, recorded in the SHARED config root.
-   *
-   * The marker that says "reserved" is per-instance, under `dataDir`, because
-   * it is a statement about chats and chats are per-instance. This is the
-   * opposite: the project ROW lives in the shared `configDir`, so the decision
-   * about where it moved is shared too.
-   *
-   * Without it the two-instance layout splits a project in half. Stable boots,
-   * moves the shared row to `acme-billing`, remaps its own chats, deletes the
-   * row. Dev boots later, finds no row, sees its own chats under the reserved
-   * id, and — with no way to know a migration already happened — files them
-   * under a fresh "Recovered project". One project's conversations, two
-   * records, no error.
-   *
-   * Kept forever rather than cleaned up: a third instance added next year has
-   * to be able to join the same decision.
-   */
-  private globalReservationRecord(): string {
-    return join(this.configDir, "global-reservation.json");
-  }
-
-  /**
-   * The recorded decision, or `null` for "nobody has decided yet".
-   *
-   * Present-but-unreadable is NOT null, and that distinction is load-bearing.
-   * Treating it as undecided was wrong in exactly the case the record exists
-   * for: the first instance has already moved the shared row and deleted it,
-   * so a second instance with its own legacy chats no longer has the project
-   * to derive a matching id from. It computes "Recovered project", hits
-   * `EEXIST` on the claim, rereads this same corrupt file, and falls back to
-   * its own invented id — one project's conversations split across two
-   * records, silently. There is no safe guess available, so it refuses.
-   */
-  private readGlobalReservation(): { movedTo: string } | null {
-    const path = this.globalReservationRecord();
-    if (!existsSync(path)) return null;
-    let raw: { movedTo?: unknown };
-    try {
-      raw = JSON.parse(readFileSync(path, "utf8")) as { movedTo?: unknown };
-    } catch (err) {
-      throw new ReservedProjectMigrationError(`${path} is unreadable`, { cause: err });
-    }
-    if (typeof raw.movedTo !== "string" || !isEntityId(raw.movedTo)) {
-      throw new ReservedProjectMigrationError(`${path} names no valid project id`);
-    }
-    return { movedTo: raw.movedTo };
-  }
-
-  /**
-   * Record `movedTo` as THE migration target, or discover who got there
-   * first. Returns the id that actually won.
-   *
-   * `wx` rather than {@link writeJsonAtomic}: an atomic write still clobbers,
-   * and clobbering is precisely the failure here — the slower instance would
-   * replace the winner's decision and the two would remap their chats to
-   * different projects. An exclusive create makes this the one serialising
-   * point, with no lock file to leak and nothing to clean up.
-   */
-  private async claimGlobalReservation(movedTo: string): Promise<string> {
-    const path = this.globalReservationRecord();
-    try {
-      await fsWriteFile(path, JSON.stringify({ movedTo, at: Date.now() }), {
-        encoding: "utf8",
-        flag: "wx",
-      });
-      return movedTo;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") throw err;
-      // Lost the race (or a previous boot of ours wrote it). Join whoever
-      // won. `readGlobalReservation` throws rather than answering `null` for
-      // a file that exists but says nothing usable — falling back to our own
-      // id there is how the two instances end up in different projects.
-      const won = this.readGlobalReservation();
-      /* c8 ignore next */
-      if (!won) throw new ReservedProjectMigrationError(`${path} vanished mid-claim`);
-      return won.movedTo;
-    }
   }
 
   /**
    * The flag that says the reserved id belongs to the global chat on this
    * install, so chats filed under it are global chats rather than a deleted
-   * project's orphans. Written only after a clean pass; see
-   * `freeReservedProjectId`.
+   * project's orphans. See `freeReservedProjectId`.
    */
   private globalReservationMarker(): string {
     return join(this.globalProjectDir(), ".reserved");
@@ -1137,46 +943,9 @@ export class Store {
     await fsWriteFile(
       this.globalReservationMarker(),
       "The global chat owns the reserved project id. Do not delete: without this, " +
-        "chats under that id are taken for a deleted project's orphans and migrated away.\n",
+        "chats under that id are taken for a pre-reservation project's and refused.\n",
       "utf8",
     );
-  }
-
-  /**
-   * Where the legacy project is being moved to — the SAME answer every time
-   * for the same project, which is what makes an interrupted migration safe
-   * to retry.
-   *
-   * A slug of its name, and if something already sits there, that record is
-   * reused when it is this very project (same `repoPath`) — i.e. a previous
-   * attempt that wrote step 1 and died before step 3. Only a genuinely
-   * different project forces a suffix; otherwise every retry would mint
-   * `-1`, `-2`, … and litter the store with copies.
-   */
-  private reservedMigrationTarget(project: Project): string {
-    const base =
-      (project.name.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") ||
-        "project").slice(0, 48);
-    for (let n = 0; ; n++) {
-      const id = n === 0 ? base : `${base}-${n}`;
-      if (id === GLOBAL_PROJECT_ID) continue;
-      const path = this.entityFile(this.projectsDir(), id);
-      if (!existsSync(path)) return id;
-      // Read raw: a half-written or older record must not throw the
-      // migration off, it just means "not the same project, try the next id".
-      let existing: Record<string, unknown> | null = null;
-      try {
-        existing = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
-      } catch {
-        /* unreadable — treat as somebody else's */
-      }
-      // EVERY field but `id`, not just `repoPath`. Two distinct projects may
-      // legitimately point at one checkout (duplicate rows are allowed), and
-      // matching on the path alone would adopt such a row as this migration's
-      // half-finished output and then overwrite it in step 1 — merging two
-      // separate records, and their chats, into one.
-      if (existing && sameProjectExceptId(existing, project)) return id;
-    }
   }
 
   /**
@@ -2385,44 +2154,4 @@ export class Store {
       await rm(this.reviewerFile(), { force: true });
     });
   }
-}
-
-/**
- * Is this stored row the same project as `project`, ignoring `id`?
- *
- * Compared as canonical JSON, so a field added to `ProjectSchema` later is
- * part of the comparison automatically — the failure mode to avoid is a check
- * that silently stops distinguishing two projects because nobody told it
- * about a new field.
- *
- * NOT `JSON.stringify(rest, Object.keys(rest).sort())`. That second argument
- * is a property ALLOWLIST applied at every nesting level, not a key order:
- * `workflow: { profile: "review" }` came out as `workflow: {}` and
- * `subApps: [{ id, name }]` lost its `id`, so two projects differing only in
- * nested config compared EQUAL and the migration would have adopted and
- * overwritten the incumbent row. Recursion is the only way to normalise key
- * order without also filtering.
- */
-function sameProjectExceptId(stored: Record<string, unknown>, project: Project): boolean {
-  const withoutId = (o: Record<string, unknown>): unknown => {
-    const { id: _id, ...rest } = o;
-    return rest;
-  };
-  return (
-    canonicalJson(withoutId(stored)) ===
-    canonicalJson(withoutId(project as unknown as Record<string, unknown>))
-  );
-}
-
-/** JSON with object keys sorted at EVERY level; arrays keep their order. */
-function canonicalJson(value: unknown): string {
-  const canon = (v: unknown): unknown => {
-    if (Array.isArray(v)) return v.map(canon);
-    if (v && typeof v === "object") {
-      const o = v as Record<string, unknown>;
-      return Object.fromEntries(Object.keys(o).sort().map((k) => [k, canon(o[k])]));
-    }
-    return v;
-  };
-  return JSON.stringify(canon(value));
 }
