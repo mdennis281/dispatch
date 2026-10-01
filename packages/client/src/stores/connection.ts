@@ -120,6 +120,16 @@ interface ConnectionStore {
    * for. Clearing it on a drop would put the splash back up on a reconnect.
    */
   hydrated: boolean;
+  /**
+   * A REST snapshot is being fetched RIGHT NOW.
+   *
+   * A boot MILESTONE for the splash, which needs to know the socket's work is
+   * under way — see `bootMilestones`. Deliberately not derivable from
+   * `hydrated`, which only flips when the snapshot has fully landed: the window
+   * between the two is a round trip, and the splash has to count it as progress
+   * rather than as silence.
+   */
+  hydrating: boolean;
   setState: (s: ConnState) => void;
   noteAttempt: () => void;
   setNextRetry: (at?: number) => void;
@@ -128,6 +138,7 @@ interface ConnectionStore {
   setProbe: (probe: ServerProbe) => void;
   setOnline: (online: boolean) => void;
   noteHydrated: () => void;
+  noteHydrating: (hydrating: boolean) => void;
   noteMockSeeded: () => void;
   noteLiveStarted: () => void;
   noteLiveStopped: () => void;
@@ -152,6 +163,7 @@ export const useConnection = create<ConnectionStore>((set) => ({
   badFrameTypes: [],
   online: typeof navigator === "undefined" ? true : navigator.onLine,
   hydrated: false,
+  hydrating: false,
   mockSeeded: false,
   liveStarted: false,
   stopped: false,
@@ -174,6 +186,7 @@ export const useConnection = create<ConnectionStore>((set) => ({
   setProbe: (probe) => set({ probe }),
   setOnline: (online) => set({ online }),
   noteHydrated: () => set({ hydrated: true }),
+  noteHydrating: (hydrating) => set({ hydrating }),
   noteMockSeeded: () => set({ mockSeeded: true }),
   noteLiveStarted: () => set({ liveStarted: true }),
   noteLiveStopped: () => set({ liveStarted: false }),

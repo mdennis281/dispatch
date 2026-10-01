@@ -31,6 +31,68 @@ describe("auth bootstrap state", () => {
     expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({ headers: { "x-dispatch-session": "refresh" } });
   });
 
+  it("never publishes a signed-out answer while the cookie refresh is still running", async () => {
+    // The boot splash lifts on the FIRST moment `isBootReady` is true and never
+    // reconsiders, and "auth enabled, nobody signed in" is one of those moments
+    // — correctly, because the sign-in form is a finished screen with no
+    // snapshot coming. The trap is that a returning user passes THROUGH that
+    // exact state: `/api/auth/status` is asked with no bearer, so it answers
+    // `user: null` for the two round trips it takes the refresh to prove
+    // otherwise. Publishing it made every authenticated load uncover an empty
+    // shell — invisible on loopback, seconds of it over a slow link.
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ enabled: true, configured: true, firstRunDismissed: true, user: null }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ accessToken: "memory-only", expiresIn: 600,
+        user: { id: "u1", username: "owner", displayName: "Owner", owner: true, disabled: false,
+          createdAt: 1, hasPassword: true, passkeyCount: 0, totpEnabled: false } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ enabled: true, configured: true, firstRunDismissed: true,
+        user: { id: "u1", username: "owner", displayName: "Owner", owner: true, disabled: false,
+          createdAt: 1, hasPassword: true, passkeyCount: 0, totpEnabled: false } }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const signedOutWhileReady: unknown[] = [];
+    const stop = useAuth.subscribe((s) => {
+      if (s.ready && s.status?.enabled && !s.user) signedOutWhileReady.push(s.status);
+    });
+    await initializeAuth();
+    stop();
+
+    expect(signedOutWhileReady).toEqual([]);
+    expect(useAuth.getState()).toMatchObject({ ready: true, user: { username: "owner" } });
+  });
+
+  it("falls back to the sign-in form when the refresh really has expired", async () => {
+    // The other side of the branch above: once the refresh says no, the first
+    // answer was right and withholding it would hang the splash on a login that
+    // is never coming.
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ enabled: true, configured: true, firstRunDismissed: true, user: null }), { status: 200 }))
+      .mockResolvedValueOnce(new Response("{}", { status: 401 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await initializeAuth();
+    expect(useAuth.getState()).toMatchObject({ ready: true, user: null, status: { enabled: true } });
+  });
+
+  it("keeps the session when the refresh succeeds but the re-ask fails", async () => {
+    // The refresh is the call that decides whether there IS a session, and it
+    // said yes — `applySession` has already installed the token and the user.
+    // Falling back to the anonymous first answer here would show a signed-in
+    // user the sign-in form while holding a valid token, and `main.tsx` would
+    // never start the live app.
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ enabled: true, configured: true, firstRunDismissed: true, user: null }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ accessToken: "memory-only", expiresIn: 600,
+        user: { id: "u1", username: "owner", displayName: "Owner", owner: true, disabled: false,
+          createdAt: 1, hasPassword: true, passkeyCount: 0, totpEnabled: false } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response("nope", { status: 503 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await initializeAuth();
+    expect(useAuth.getState()).toMatchObject({
+      ready: true, accessToken: "memory-only", user: { username: "owner" },
+      status: { enabled: true, configured: true, user: { username: "owner" } },
+    });
+  });
+
   it("adds the non-simple CSRF header to public authentication posts", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
