@@ -704,7 +704,12 @@ export function createServices(
     raiseReviewRoundCap: async (repo, number, extra) => {
       await prRegistry.raiseReviewRoundCap(repo, number, extra);
     },
-    requestReviewAgent: (repo, number, by) => prRegistry.requestReviewAgent(repo, number, by),
+    // BOUND, not re-wrapped. The hand-written arrow dropped the options
+    // argument the day one was added — and silently, because a function of
+    // fewer parameters is assignable to one of more, so the fresh round cap
+    // `request_review` computes was discarded here while every type checked.
+    // Binding forwards whatever the interface grows next by construction.
+    requestReviewAgent: prRegistry.requestReviewAgent.bind(prRegistry),
     notePostedReview: (repo, number, by) => prRegistry.notePostedReview(repo, number, by),
     noteReviewRequestError: (repo, number, error) =>
       prRegistry.noteReviewRequestError(repo, number, error),
@@ -789,7 +794,10 @@ export function createServices(
           const out = await launchAgentTask(services, {
             projectId,
             taskId: "pr:review",
-            effort: project?.workflow?.pr?.reviewAgent?.effort,
+            // `?? undefined`: the field is nullable on the wire (null = "clear
+            // this pin"), and both spellings mean the same thing here — let
+            // `launchAgentTask` walk provider default → task default.
+            effort: project?.workflow?.pr?.reviewAgent?.effort ?? undefined,
             harness: policy.harness,
             model: policy.model,
             agentId: policy.agentId,

@@ -88,8 +88,21 @@ function mergeBlocks(
   const out: Record<string, unknown> = { ...prev };
   for (const [k, v] of Object.entries(next)) {
     if (v === undefined) continue;
+    // `null` is the DELETE, matching `saveProjectDefaults` below. Absent cannot
+    // be: over JSON it is indistinguishable from "not mentioned", which is why
+    // this merge exists at all — but then a control offering "inherit from the
+    // app" had no way to say so, and un-pinning silently restored the old value
+    // on the next load.
+    if (v === null) {
+      delete out[k];
+      continue;
+    }
     const before = out[k];
-    out[k] = isBlock(v) && isBlock(before) ? mergeBlocks(before, v) : v;
+    const merged = isBlock(v) && isBlock(before) ? mergeBlocks(before, v) : v;
+    // A block emptied by its last delete goes too: `rounds: {}` reads as
+    // authored config in the file and as nothing in the loader.
+    if (isBlock(merged) && Object.keys(merged).length === 0) delete out[k];
+    else out[k] = merged;
   }
   return out;
 }
@@ -112,11 +125,34 @@ function isBlock(v: unknown): v is Record<string, unknown> {
 function applyAuthored(doc: LoadedManifest["doc"], path: string[], value: unknown): void {
   // Absent is not a deletion request — see `saveProjectWorkflow`'s docblock.
   if (value === undefined) return;
+  // `null` is, and it is the only way a control can say "inherit this again".
+  if (value === null) {
+    doc.deleteIn(path);
+    pruneEmpty(doc, path.slice(0, -1));
+    return;
+  }
   if (isBlock(value)) {
     for (const [k, v] of Object.entries(value)) applyAuthored(doc, [...path, k], v);
     return;
   }
   doc.setIn(path, value);
+}
+
+/**
+ * Drop a block the last delete just emptied, and any parent it empties in turn.
+ *
+ * Same reasoning as `saveProjectDefaults`: `rounds: {}` left in the file reads
+ * as authored config to a human and as nothing to the loader, which is the kind
+ * of gap someone then "fixes" by guessing at keys. Stops at `workflow` itself —
+ * an empty top-level block is the manifest's own business.
+ */
+function pruneEmpty(doc: LoadedManifest["doc"], path: string[]): void {
+  while (path.length > 1) {
+    const node = doc.getIn(path, true);
+    if (!isMap(node) || node.items.length > 0) return;
+    doc.deleteIn(path);
+    path = path.slice(0, -1);
+  }
 }
 
 /**

@@ -78,6 +78,7 @@ const SECTION_SLICE: Record<
     s.issueWatcher,
     s.harness?.defaultHarness,
     s.harness?.defaults,
+    s.reviewAgent,
   ],
   context: (s) => [s.autoCompact, s.harness?.contextLimits, s.maxActiveSessions],
   notifications: (s) => s.webhook,

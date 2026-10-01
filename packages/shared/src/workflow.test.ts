@@ -1,6 +1,10 @@
 import { describe, it, expect } from "vitest";
 import {
+  DEFAULT_REVIEW_MAX_ROUNDS,
+  DEFAULT_REVIEW_ROUNDS,
+  applyReviewAgentDefaults,
   resolveWorkflow,
+  reviewRoundCap,
   classifyWorkflowViolation,
   authorReviewerRoster,
   normalizeReviewerRoster,
@@ -119,6 +123,7 @@ describe("resolveWorkflow", () => {
         login: undefined,
         effort: "high",
         maxRounds: 4,
+        rounds: DEFAULT_REVIEW_ROUNDS,
         post: true,
       },
     });
@@ -151,6 +156,7 @@ describe("resolveWorkflow", () => {
         login: undefined,
         effort: "high",
         maxRounds: 4,
+        rounds: DEFAULT_REVIEW_ROUNDS,
         post: true,
       },
     });
@@ -171,6 +177,7 @@ describe("resolveWorkflow", () => {
       login: undefined,
       effort: "max",
       maxRounds: 4,
+      rounds: DEFAULT_REVIEW_ROUNDS,
       post: true,
     });
   });
@@ -276,6 +283,7 @@ describe("resolveWorkflow", () => {
           login: undefined,
           effort: "high",
           maxRounds: 4,
+          rounds: DEFAULT_REVIEW_ROUNDS,
           post: true,
         },
       });
@@ -453,5 +461,96 @@ describe("the reviewer roster", () => {
       { login: "octocat", enabled: true },
       { login: COPILOT_LOGIN, enabled: false },
     ]);
+  });
+});
+
+describe("review round sizing", () => {
+  /** A resolved policy with just the two fields the cap is a function of. */
+  const policy = (
+    maxRounds: number,
+    rounds: Partial<typeof DEFAULT_REVIEW_ROUNDS> = {},
+  ) => ({ maxRounds, rounds: { ...DEFAULT_REVIEW_ROUNDS, ...rounds } });
+
+  it("ignores the diff entirely in static mode", () => {
+    // The whole point of `static` — a 9,000-line PR is still worth 4 rounds and
+    // no more, which is what every project had before this setting existed.
+    expect(reviewRoundCap(policy(4), 9000)).toBe(4);
+    expect(reviewRoundCap(policy(4), 0)).toBe(4);
+    expect(reviewRoundCap(policy(4))).toBe(4);
+  });
+
+  it("grants one more round per bracket of diff, FLOORED", () => {
+    const p = policy(4, { mode: "dynamic", base: 1, linesPerRound: 500, max: 8 });
+    // 0-499 is the round `base` already granted: ceil would hand a one-line
+    // typo fix the same two rounds as a 501-line change.
+    expect(reviewRoundCap(p, 0)).toBe(1);
+    expect(reviewRoundCap(p, 499)).toBe(1);
+    expect(reviewRoundCap(p, 500)).toBe(2);
+    expect(reviewRoundCap(p, 1200)).toBe(3);
+  });
+
+  it("counts deletions with additions, and clamps at the ceiling", () => {
+    const p = policy(4, { mode: "dynamic", base: 1, linesPerRound: 500, max: 3 });
+    // 90,000 lines of generated file would otherwise authorise 181 reviews.
+    expect(reviewRoundCap(p, 90_000)).toBe(3);
+    // The ceiling wins even over a base above it — a misconfiguration either
+    // way, and honouring the ceiling is the half that cannot overspend.
+    expect(reviewRoundCap(policy(4, { mode: "dynamic", base: 6, max: 2 }), 0)).toBe(2);
+  });
+
+  it("falls back to `base`, not the ceiling, when the diff size is unknown", () => {
+    // A size we could not read is not evidence of a big diff, and the sweep
+    // rewrites the cap from the next poll that does know — so under-granting
+    // self-corrects, where over-granting has already spent the quota.
+    const p = policy(4, { mode: "dynamic", base: 2, linesPerRound: 500, max: 8 });
+    expect(reviewRoundCap(p, undefined)).toBe(2);
+    expect(reviewRoundCap(p, Number.NaN)).toBe(2);
+  });
+
+  it("resolves an authored block over the profile default, field by field", () => {
+    const wf = resolveWorkflow({
+      workflow: {
+        profile: "review",
+        pr: { reviewAgent: { enabled: true, rounds: { mode: "dynamic", max: 6 } } },
+      },
+    });
+    // The two fields it did NOT author keep the shipped values rather than
+    // resolving to undefined and handing a consumer an unbounded loop.
+    expect(wf.pr.reviewAgent.rounds).toEqual({
+      mode: "dynamic",
+      base: DEFAULT_REVIEW_ROUNDS.base,
+      linesPerRound: DEFAULT_REVIEW_ROUNDS.linesPerRound,
+      max: 6,
+    });
+  });
+
+  it("slots the app default under the project, and the project over it", () => {
+    const authored = { enabled: true, rounds: { linesPerRound: 250 } } as const;
+    const resolved = resolveWorkflow({
+      workflow: { profile: "review", pr: { reviewAgent: { ...authored } } },
+    }).pr.reviewAgent;
+
+    const out = applyReviewAgentDefaults(resolved, authored, {
+      maxRounds: 2,
+      rounds: { mode: "dynamic", linesPerRound: 1000, max: 5 },
+    });
+
+    // Authored wins; unauthored falls to the app; unmentioned to the shipped.
+    expect(out.rounds.linesPerRound).toBe(250);
+    expect(out.rounds.mode).toBe("dynamic");
+    expect(out.rounds.max).toBe(5);
+    expect(out.rounds.base).toBe(DEFAULT_REVIEW_ROUNDS.base);
+    expect(out.maxRounds).toBe(2);
+  });
+
+  it("leaves the project's own pin alone — an authored value is not an omission", () => {
+    const authored = { enabled: true, maxRounds: DEFAULT_REVIEW_MAX_ROUNDS } as const;
+    const resolved = resolveWorkflow({
+      workflow: { profile: "review", pr: { reviewAgent: { ...authored } } },
+    }).pr.reviewAgent;
+
+    // 4 authored and 4 inherited are the same number by the time it reaches
+    // `resolved` — which is exactly why the overlay takes `authored` too.
+    expect(applyReviewAgentDefaults(resolved, authored, { maxRounds: 12 }).maxRounds).toBe(4);
   });
 });

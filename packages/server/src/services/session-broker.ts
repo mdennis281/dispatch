@@ -135,8 +135,10 @@ import {
   SECRET_ANSWERS,
   type SecretRequestPayload,
   type SecretScope,
+  changedLines,
   prReviewAgentView,
   resolveWorkflow,
+  reviewRoundCap,
   type McpEnablementLayers,
   type MetricEvent,
   type ResolvedAgentContext,
@@ -881,6 +883,12 @@ export interface SessionPrRegistry {
     repo: string,
     prNumber: number,
     by: string,
+    /**
+     * The cap recomputed from THIS diff, when the caller knows it. Consulted
+     * ahead of the row's stored copy, which under a `dynamic` round policy is
+     * only as fresh as the last sweep — see the registry's own comment.
+     */
+    opts?: { maxRounds?: number },
   ): Promise<{ armed: boolean; reason: string } | null>;
   /**
    * Record that this chat's review actually landed — the completion signal the
@@ -899,7 +907,63 @@ export interface SessionPrRegistry {
   ): Promise<unknown>;
 }
 
-function makePrRegistryBinding(
+/**
+ * This PR's round cap, confirmed against GitHub only when the cheap answer
+ * would be a permanent stop.
+ *
+ * The catalog row is the free read, and under a `dynamic` policy its
+ * `additions`/`deletions` are stale in exactly the window this exists for: the
+ * push-then-`request_review` sequence the watcher's own wake() prompt
+ * prescribes. Computing the cap off that row would recompute the PRE-PUSH size
+ * and refuse a PR that had just earned another round.
+ *
+ * So the live poll is spent only on the case where it can change the answer —
+ * when the row says every round is gone. That is the one verdict with no way
+ * back (no further round can spawn, and `watch_pr` stops waiting), so it is
+ * worth one GraphQL call to be sure of; every other read stays free, which
+ * matters because `watch_pr` makes this one every 20 seconds.
+ *
+ * A failed refresh keeps the stored answer rather than inventing a bigger cap:
+ * "GitHub was unreadable" is not evidence that the diff grew.
+ */
+export async function freshReviewRoundCap(
+  registry: SessionPrRegistry,
+  repo: string,
+  prNumber: number,
+  policy: ResolvedReviewAgent,
+  /** Rounds already spent out of the POLICY's allowance — per-PR grants removed. */
+  spent: number,
+  opts: {
+    /**
+     * Poll first, whatever the stored row says. For the paths that ACT on the
+     * answer — arming a request spends a round — where the conditional poll
+     * below is not enough: a force-push that SHRANK the diff leaves a stale cap
+     * that is too big, which reads as headroom, so nothing triggers the
+     * confirmation and a round gets armed that the policy would not allow.
+     *
+     * Not the default, because `watch_pr` makes the passive read every 20
+     * seconds per watched PR and over-granting by one round until the next
+     * sweep is a far smaller problem than a poll per PR per 20s.
+     */
+    force?: boolean;
+  } = {},
+): Promise<number> {
+  if (policy.rounds.mode !== "dynamic") return policy.maxRounds;
+  const live = opts.force ? await registry.refresh(repo, prNumber).catch(() => null) : null;
+  if (live) return reviewRoundCap(policy, changedLines(live));
+  const stored = await registry.snapshot(repo, prNumber).catch(() => null);
+  const cap = reviewRoundCap(policy, stored ? changedLines(stored) : undefined);
+  if (spent < cap) return cap;
+  const fresh = await registry.refresh(repo, prNumber).catch(() => null);
+  return fresh ? reviewRoundCap(policy, changedLines(fresh)) : cap;
+}
+
+/**
+ * Exported for its own test: the cap refresh below is read by three tools that
+ * each decide whether another review can ever happen, and driving that through
+ * a live broker would test the wiring rather than the rule.
+ */
+export function makePrRegistryBinding(
   registry: SessionPrRegistry,
   github: GitHubService,
   dirs: SessionDirs,
@@ -915,6 +979,17 @@ function makePrRegistryBinding(
    * problem, and recording it as a reviewer fault would cry wolf.
    */
   reviewerLogin: string | undefined,
+  /**
+   * The resolved round policy, so a READ of the reviewer row can report the cap
+   * that is actually in force rather than the one the last sweep happened to
+   * write.
+   *
+   * It has to be here and not at each call site because three tools decide
+   * "can another round still happen" off this one read — `request_review`'s
+   * spent-cap refusal, `watch_pr`'s `reviewsSpent`, and `approve_pr` — and
+   * under a `dynamic` policy the stored cap is a function of a diff that moves.
+   */
+  reviewPolicy: ResolvedReviewAgent | undefined,
 ): ManagerMcpPrRegistry {
   const repoFor = makeRepoResolver(github, dirs);
   // Every method degrades to null rather than throwing: a card is a nicety, and
@@ -949,7 +1024,36 @@ function makePrRegistryBinding(
     },
     reviewAgent: async (n, repo) => {
       const r = await repoFor(repo);
-      return r ? registry.reviewAgent(r, n) : null;
+      if (!r) return null;
+      const state = await registry.reviewAgent(r, n);
+      // The cap, recomputed from the diff as it is NOW.
+      //
+      // The sweep writes `maxRounds` onto the row every ~90s, which is fine
+      // while the number is a constant and wrong the moment it is a function of
+      // the diff. The sequence the `wake()` prompt in `pr-review-watcher.ts`
+      // actually tells an agent to follow is: push the fix, then call
+      // `request_review` — so a push that grows the PR past the next bracket
+      // lands squarely in the stale window. Read off the row, the cap is the
+      // pre-push one, `request_review` refuses `rounds-spent` without ever
+      // setting `requestedAt`, and the sweep that follows raises the
+      // denominator onto a row with no request left to claim. The PR then
+      // strands on a manual `extraRounds` grant — which is the exact failure
+      // dynamic sizing exists to remove.
+      //
+      // Only when the row ALREADY carries a cap: a row that never recorded one
+      // cannot say the cap is reached, and inventing a number here would turn
+      // "we don't know" into a confident refusal.
+      if (!state || state.maxRounds == null || reviewPolicy?.rounds.mode !== "dynamic") {
+        return state;
+      }
+      const cap = await freshReviewRoundCap(
+        registry,
+        r,
+        n,
+        reviewPolicy,
+        (state.rounds ?? 0) - (state.extraRounds ?? 0),
+      );
+      return cap === state.maxRounds ? state : { ...state, maxRounds: cap };
     },
     raiseReviewRoundCap: async (n, repo, extra) => {
       const r = await repoFor(repo);
@@ -7794,6 +7898,7 @@ export class SessionBroker {
                 dirs,
                 session.chatId,
                 reviewer?.policy.login,
+                reviewer?.policy,
               )
             : undefined,
         github: github
@@ -7814,17 +7919,40 @@ export class SessionBroker {
                     // review.
                     requestLocal:
                       reviewer.policy.identity === "self" && this.prRegistry
-                        ? async (repo, n) =>
+                        ? async (repo, n) => {
+                            // The cap, recomputed from the diff THIS request is
+                            // about. Under a `dynamic` policy the row's copy is
+                            // only as fresh as the last sweep, and the order a
+                            // growing PR arrives in — push, then request — is
+                            // exactly the one that lands inside that window, so
+                            // this confirms a spent cap against GitHub before
+                            // letting it refuse.
+                            const registry = this.prRegistry;
+                            const state = registry
+                              ? await registry.reviewAgent(repo, n).catch(() => null)
+                              : null;
                             // The REASON, not truthiness of the result: the
                             // registry answers with an object on every path now,
                             // so `Boolean(result)` called a spent cap a success —
                             // and a bare `.armed` would call an already-queued
                             // request a failure. Only the reason tells them apart.
-                            (await this.prRegistry?.requestReviewAgent(
-                              repo,
-                              n,
-                              session.chatId,
-                            )) ?? { armed: false, reason: "unknown-pr" }
+                            return (
+                              (await registry?.requestReviewAgent(repo, n, session.chatId, {
+                                maxRounds: registry
+                                  ? await freshReviewRoundCap(
+                                      registry,
+                                      repo,
+                                      n,
+                                      reviewer.policy,
+                                      (state?.rounds ?? 0) - (state?.extraRounds ?? 0),
+                                      // This one ARMS a round. Worth a poll
+                                      // every time, in both directions.
+                                      { force: true },
+                                    )
+                                  : undefined,
+                              })) ?? { armed: false, reason: "unknown-pr" }
+                            );
+                          }
                         : undefined,
                   }
                 : undefined,

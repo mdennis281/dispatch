@@ -41,6 +41,7 @@ import type {
   ResolvedReviewAgent,
   ReviewKind,
 } from "@dispatch/shared";
+import { changedLines, reviewRoundCap } from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
 import type { Store } from "../store/index.js";
 import type { PrPollSnapshot } from "./github.js";
@@ -104,6 +105,16 @@ export interface ReviewCandidate {
   isDraft: boolean;
   /** Logins with an OUTSTANDING review request. */
   requested: string[];
+  /**
+   * The diff's size, when the source knows it — what a `dynamic` round policy
+   * sizes the cap off (see {@link reviewRoundCap}).
+   *
+   * Optional because both sources may be missing it and neither failure should
+   * stop a review: a poll that could not read the counts, and a catalog row
+   * written before they were recorded. Absent resolves to the policy's `base`.
+   */
+  additions?: number;
+  deletions?: number;
 }
 
 /**
@@ -526,6 +537,8 @@ export class PrReviewWatcher {
         // The same derivation `pollPrState` makes — the row stores the queue as
         // reviewer states, and the two must not drift.
         requested: row.reviewers.filter((r) => r.state === "requested").map((r) => r.login),
+        additions: row.additions,
+        deletions: row.deletions,
       },
       scope,
     );
@@ -559,13 +572,25 @@ export class PrReviewWatcher {
     const projectId = scope.projectId;
     if (!projectId) return;
     const resolved = await hooks.policyFor(projectId);
+    // The cap for THIS pull request, which under a `dynamic` policy is a
+    // function of its diff and therefore moves as the branch grows. Computed
+    // once here and then carried everywhere — onto the row, into the claim, and
+    // into the reviewer's own briefing — because a second derivation anywhere
+    // downstream is a PR whose chip says spent while the sweep keeps spawning.
+    //
+    // Recomputing it every pass is a feature, not churn: push another 600 lines
+    // onto a PR that had used its last round and the next sweep re-arms it,
+    // which is exactly the behaviour "size the cap to the diff" promises.
+    const maxRounds = resolved
+      ? reviewRoundCap(resolved.policy, changedLines(snapshot))
+      : undefined;
     // BEFORE the enabled gate, and on every pass: the state most worth showing
     // is the one where the reviewer is disabled by a missing credential, and
     // that is exactly the case in which nothing further down ever writes a row.
     // `notePolicy` no-ops unless something actually changed.
     await registry
       .notePolicy(snapshot.repo, snapshot.number, {
-        maxRounds: resolved?.policy.maxRounds,
+        maxRounds,
         problem: resolved?.problem,
       })
       .catch(() => undefined);
@@ -583,7 +608,7 @@ export class PrReviewWatcher {
     }
 
     const claimed = await registry.claimReviewAgent(snapshot.repo, snapshot.number, {
-      maxRounds: policy.maxRounds,
+      maxRounds: maxRounds ?? policy.maxRounds,
     });
     if (!claimed) return;
 
@@ -593,7 +618,11 @@ export class PrReviewWatcher {
       repo: snapshot.repo,
       number: snapshot.number,
       round,
-      policy,
+      // The EFFECTIVE cap, not the static one. This is what reaches the
+      // reviewer's briefing ("round 2 of at most 3"), and a reviewer told it has
+      // four rounds when the row will only grant two writes a first pass that
+      // defers the hard half of the diff to a round that never comes.
+      policy: { ...policy, maxRounds: maxRounds ?? policy.maxRounds },
     });
     if (chat) {
       await registry
@@ -604,7 +633,7 @@ export class PrReviewWatcher {
         level: "info",
         text:
           `Reviewing PR #${snapshot.number} in ${snapshot.repo} ` +
-          `(round ${round} of ${policy.maxRounds})`,
+          `(round ${round} of ${maxRounds ?? policy.maxRounds})`,
       });
     }
   }
