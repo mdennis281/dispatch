@@ -886,9 +886,25 @@ export class Store {
     if (existsSync(this.globalReservationMarker())) return;
 
     const legacy = this.entityFile(this.projectsDir(), GLOBAL_PROJECT_ID);
-    if (!existsSync(legacy) && !(await this.listChats(GLOBAL_PROJECT_ID).catch(() => [])).length) {
-      await this.markGlobalIdReserved();
-      return;
+    if (!existsSync(legacy)) {
+      // NOT `.catch(() => [])`. `listChats` throws on EACCES/IO rather than
+      // reporting an empty store precisely so a caller cannot mistake "cannot
+      // see" for "nothing there" — and here that mistake would write the
+      // marker and classify every unseen legacy chat as a genuine global chat
+      // PERMANENTLY, since the marker is what the next boot trusts.
+      let orphans: Chat[];
+      try {
+        orphans = await this.listChats(GLOBAL_PROJECT_ID);
+      } catch (err) {
+        throw new ReservedProjectMigrationError(
+          `could not scan for chats under "${GLOBAL_PROJECT_ID}"`,
+          { cause: err },
+        );
+      }
+      if (!orphans.length) {
+        await this.markGlobalIdReserved();
+        return;
+      }
     }
     const stored = await this.readEntity(legacy, ProjectSchema).catch(() => null);
     // An unreadable row is still migrated rather than skipped. The project is

@@ -242,6 +242,53 @@ describe("AcpSession", () => {
     });
   });
 
+  it("declines a guard-forbidden call at the protocol level, with no card", async () => {
+    // This adapter advertises `preToolGuard: true`. Until the guard was wired
+    // in here that was a lie: a call the host forbids arrived as an ordinary
+    // approval prompt, so a mode's denylist became something a human could
+    // click through — for the global posture, the whole thing undone by one
+    // "Allow". The agent is blocked on this RPC, so it is declined rather
+    // than silently not shown.
+    const { agent, session, events, drain } = build({
+      toolGuard: (name) => (name === "Bash" ? "not available in Global mode" : null),
+    });
+    agent.onRequest = (method, _p, id) => {
+      if (method !== "session/prompt") return undefined;
+      setTimeout(() => {
+        agent.ask("perm-g", "session/request_permission", {
+          sessionId: "20260923_1",
+          toolCall: {
+            toolCallId: "t1",
+            kind: "other",
+            status: "pending",
+            title: "shell · rm -rf /",
+            rawInput: { command: "rm -rf /" },
+          },
+          options: [
+            { optionId: "allow_once", kind: "allow_once" },
+            { optionId: "reject_once", kind: "reject_once" },
+          ],
+        });
+        setTimeout(() => agent.reply(id, { stopReason: "end_turn" }), 20);
+      }, 1);
+      return undefined;
+    };
+    session.send({ text: "go" });
+    await drain();
+
+    // No card was ever offered…
+    expect(events.find((e) => e.type === "permission-request")).toBeUndefined();
+    // …the refusal is reported…
+    expect(events.find((e) => e.type === "guard-blocked")).toMatchObject({
+      toolName: "Bash",
+      reason: "not available in Global mode",
+    });
+    // …and the agent got a real answer rather than being left hanging.
+    expect(agent.sent.find((f) => f.id === "perm-g")?.result).toEqual({
+      outcome: { outcome: "selected", optionId: "reject_once" },
+    });
+  });
+
   it("raises a permission request and answers it with the once option", async () => {
     const { agent, session, events, drain } = build();
     agent.onRequest = (method, _p, id) => {

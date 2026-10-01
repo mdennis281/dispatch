@@ -40,6 +40,7 @@ import { readFileSync } from "node:fs";
 import type { ImageRef, SlashCommandInfo } from "@dispatch/shared";
 import type { AcpConnection, AgentRequest, RpcFrame } from "./rpc.js";
 import { AcpStreamDecoder, turnEndOf, toolNameOf, remapInput } from "./stream.js";
+import { catchToolGuard } from "../guard.js";
 import {
   toAcpMode,
   toEnvironmentBlock,
@@ -318,11 +319,36 @@ export class AcpSession implements HarnessSession {
     // name from it is what lets the guard and the approval card see the same
     // `Bash` that the transcript row will show a moment later.
     const { rawName, target } = splitPermissionTitle(title);
+    const toolName = toolNameOf(rawName, "developer");
+    const input = remapInput(rawName ?? "", rawInput);
+
+    // THE GUARD RUNS BEFORE THE CARD. This adapter advertises
+    // `preToolGuard: true`, and until now that was a lie: a call the host
+    // forbids arrived as an ordinary approval prompt, so a mode's denylist
+    // became something the human could click through. For the global posture
+    // that is the whole thing defeated by one "Allow".
+    //
+    // Declined at the protocol level rather than by not showing the card: the
+    // agent is blocked on this RPC and has to be answered either way.
+    const blocked = catchToolGuard(this.spec.toolGuard, toolName, input, "in-place");
+    if (blocked) {
+      this.pendingAsks.delete(requestId);
+      const rejectId = pickPermissionOption(options, "deny");
+      this.conn.respond(
+        req.id,
+        rejectId
+          ? { outcome: { outcome: "selected", optionId: rejectId } }
+          : { outcome: { outcome: "cancelled" } },
+      );
+      this.emit(blocked);
+      return;
+    }
+
     this.emit({
       type: "permission-request",
       requestId,
-      toolName: toolNameOf(rawName, "developer"),
-      input: remapInput(rawName ?? "", rawInput),
+      toolName,
+      input,
       ...(target ? { target } : {}),
     });
   }

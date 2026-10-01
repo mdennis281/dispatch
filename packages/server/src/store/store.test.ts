@@ -276,6 +276,24 @@ describe("Store projects/chats CRUD", () => {
     }
   });
 
+  it("refuses to reserve the id when it cannot see whether legacy chats exist", async () => {
+    // `listChats` throws on EACCES/IO rather than reporting an empty store, so
+    // that a caller cannot mistake "cannot see" for "nothing there". Swallowing
+    // it here would write the marker and classify any unseen legacy chat as a
+    // genuine global chat PERMANENTLY — the marker is what the next boot trusts.
+    const dir2 = await mkdtemp(join(tmpdir(), "cm-legacy-blind-"));
+    try {
+      const store2 = new Store(dir2);
+      (store2 as unknown as { listChats: () => Promise<never> }).listChats = async () => {
+        throw new Error("EACCES");
+      };
+      await expect(store2.init()).rejects.toThrow(/could not scan for chats/);
+      store2.close();
+    } finally {
+      await rm(dir2, { recursive: true, force: true });
+    }
+  });
+
   it("scopes listChats by projectId and deletes chat dir", async () => {
     await store.saveChat(chat("c1", "p1"));
     await store.saveChat(chat("c2", "p2"));
