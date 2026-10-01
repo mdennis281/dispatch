@@ -163,11 +163,21 @@ describe("Store projects/chats CRUD", () => {
         (e: Error) => e,
       );
       store2.close();
-      expect(err!.message).toContain("already uses it for a project");
+      // Its own lead: nothing of the operator's is being reinterpreted here —
+      // the chats really are the global chat's. What is wrong is that the
+      // synthesized record SHADOWS their row.
+      expect(err!.message).toContain("would hide that project");
+      expect(err!.message).not.toContain("already uses it for a project");
       // The genuine global chat is NOT offered for remapping: by now it really
       // is a global chat, and refiling it would break the thing being fixed.
       expect(err!.message).not.toContain("chats filed under it");
       expect(err!.message).not.toContain("global-1");
+      // And NOT told to move the entity directory. `remember` writes the
+      // global chat's memories there under this id, so the ordinary step 2
+      // would hand them to the legacy project — the procedure itself would be
+      // the data loss.
+      expect(err!.message).toContain("Do NOT move this directory");
+      expect(err!.message).not.toMatch(/2\. Rename its directory/);
     } finally {
       await rm(d, { recursive: true, force: true });
     }
