@@ -461,15 +461,41 @@ export class CodexSession implements HarnessSession {
     }
   }
 
-  /** Interrupt a command that started despite violating the workflow contract. */
+  /**
+   * Interrupt an item that started despite violating the host's rules.
+   *
+   * Codex has no PreToolUse equivalent (`capabilities.preToolGuard: false`),
+   * so for anything that does not route through an approval request this is
+   * the only enforcement point there is — and it fires on SIGHTING, i.e.
+   * after the call has begun. That is a real and documented degradation.
+   *
+   * MCP calls are covered here as well as shell commands. They were not, and
+   * the gap was load-bearing: Codex never asks for approval on an
+   * `mcpToolCall`, so a mode denylist naming `mcp__dispatch-workspace__worktree`
+   * had NOTHING enforcing it on this runtime. See `requiresPreToolGuard` in
+   * the broker for the other half of that fix — a posture whose whole point is
+   * the denylist refuses to run on a runtime that can only catch it late.
+   */
   private guardStartedItem(frame: RpcFrame): void {
     const item = (frame.params as { item?: Record<string, unknown> } | undefined)?.item;
-    if (!item || item.type !== "commandExecution") return;
-    const input = {
-      command: String(item.command ?? ""),
-      ...(typeof item.cwd === "string" ? { cwd: item.cwd } : {}),
-    };
-    const blocked = catchToolGuard(this.spec.toolGuard, "Bash", input, "restart-turn");
+    if (!item) return;
+    let toolName: string;
+    let input: Record<string, unknown>;
+    if (item.type === "commandExecution") {
+      toolName = "Bash";
+      input = {
+        command: String(item.command ?? ""),
+        ...(typeof item.cwd === "string" ? { cwd: item.cwd } : {}),
+      };
+    } else if (item.type === "mcpToolCall") {
+      // The same wire name the stream mapper builds, so a denylist entry and
+      // a sighting agree about what the tool is called.
+      toolName = `mcp__${String(item.server ?? "")}__${String(item.tool ?? "")}`;
+      input = (item.arguments ?? {}) as Record<string, unknown>;
+    } else {
+      return;
+    }
+    const blocked = catchToolGuard(this.spec.toolGuard, toolName, input, "restart-turn");
     if (!blocked) return;
     this.emit(blocked);
     void this.interrupt();

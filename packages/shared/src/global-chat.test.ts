@@ -10,6 +10,9 @@
 import { describe, it, expect } from "vitest";
 import {
   GLOBAL_MODE,
+  enforceGlobalPosture,
+  isProtectedMode,
+  isToolAllowed,
   GLOBAL_MODE_DISALLOWED_TOOLS,
   GLOBAL_MODE_ID,
   GLOBAL_PROJECT_ID,
@@ -124,10 +127,68 @@ describe("the global posture", () => {
     expect(GLOBAL_MODE.scope).toBe("global");
     expect(GLOBAL_MODE.instructions).toContain("spawn_chat");
   });
+});
 
-  it("points a refusal at the sanctioned path instead of just saying no", () => {
-    const text = deniedToolRefusal("Edit", "Global");
-    expect(text).toContain("`Edit`");
+describe("the posture cannot be escaped at creation", () => {
+  it("drops a mode asked for above the project layer, for the global project", () => {
+    // The hole this closes: `POST /api/chats { projectId: "__global__",
+    // modeId: "yolo" }` resolved to `yolo` — the chat layer outranks the
+    // project layer — so the chat was BORN with a shell and `setMode` never
+    // got a look in.
+    const layers = enforceGlobalPosture(GLOBAL_PROJECT_ID, {
+      chat: { modeId: "yolo" },
+      parent: { harness: "claude", modeId: "yolo" },
+      project: { mode: "plan" },
+    });
+    expect(layers.chat?.modeId).toBeUndefined();
+    expect(layers.parent?.modeId).toBeUndefined();
+    expect(layers.project?.mode).toBe(GLOBAL_MODE_ID);
+  });
+
+  it("leaves a real project's chain exactly as it was", () => {
+    const layers = enforceGlobalPosture("dispatch", {
+      chat: { modeId: "yolo" },
+      project: { mode: "plan" },
+    });
+    expect(layers.chat?.modeId).toBe("yolo");
+    expect(layers.project?.mode).toBe("plan");
+  });
+
+  it("marks the global mode as one no project or store copy may shadow", () => {
+    // A writable `global` mode would let any repo ship `modes/global.yaml`
+    // with no denylist and unrestrict every global chat on the install.
+    expect(isProtectedMode(GLOBAL_MODE_ID)).toBe(true);
+    expect(isProtectedMode("plan")).toBe(false);
+  });
+});
+
+describe("a mode's tool policy", () => {
+  it("treats an absent allowlist and an empty one as different things", () => {
+    expect(isToolAllowed("Read", {})).toBe(true);
+    // Defined but empty permits NOTHING — the strictest policy expressible,
+    // and the one a `.length` check silently turns into the loosest.
+    expect(isToolAllowed("Read", { allowedTools: [] })).toBe(false);
+    expect(isToolAllowed("Read", { allowedTools: ["Read"] })).toBe(true);
+    expect(isToolAllowed("Write", { allowedTools: ["Read"] })).toBe(false);
+  });
+
+  it("lets the denylist win over the allowlist", () => {
+    expect(isToolAllowed("Bash", { allowedTools: ["Bash"], disallowedTools: ["Bash"] })).toBe(false);
+  });
+});
+
+describe("the refusal text", () => {
+  it("claims nothing about repositories for an ordinary mode", () => {
+    // The broker applies denylists to EVERY mode now. A custom mode that
+    // denies one unrelated tool must not tell the agent it cannot edit code.
+    const text = deniedToolRefusal("WebFetch", "Audit");
+    expect(text).toContain("Audit mode");
+    expect(text).not.toContain("spawn_chat");
+    expect(text).not.toContain("belongs to no project");
+  });
+
+  it("adds the redirect only for the global posture", () => {
+    const text = deniedToolRefusal("Edit", "Global", GLOBAL_MODE_ID);
     expect(text).toContain("spawn_chat");
   });
 });

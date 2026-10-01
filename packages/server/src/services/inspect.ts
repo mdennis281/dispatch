@@ -814,6 +814,20 @@ export class InspectService {
   async projectList(instance?: InspectInstance): Promise<ProjectListEntry[]> {
     const store = this.storeFor(instance);
     const projects = realProjects(await store.listProjects());
+    // ONE listing for every project, not one per project. `listChats(id)`
+    // reads the whole chats directory and filters afterwards, so the per-
+    // project form makes this overview O(projects × chats) — and this is the
+    // call a cross-project chat reaches for first, on a cold cache.
+    const allChats = (await store.listChats().catch(() => [])).filter((c) => !c.archived);
+    const chatsByProject = new Map<string, number>();
+    const lastActiveByProject = new Map<string, number>();
+    for (const c of allChats) {
+      chatsByProject.set(c.projectId, (chatsByProject.get(c.projectId) ?? 0) + 1);
+      const at = c.updatedAt ?? c.createdAt;
+      if (at > (lastActiveByProject.get(c.projectId) ?? 0)) {
+        lastActiveByProject.set(c.projectId, at);
+      }
+    }
     return Promise.all(
       projects.map(async (project): Promise<ProjectListEntry> => {
         const cfg = instance === "stable" ? undefined : this.projectConfig?.get(project.id);
@@ -823,13 +837,7 @@ export class InspectService {
           skills?: unknown[];
           mcpServers?: Record<string, unknown>;
         } | null;
-        const chats = (await store.listChats(project.id).catch(() => [])).filter(
-          (c) => !c.archived,
-        );
-        const lastActiveAt = chats.reduce(
-          (max, c) => Math.max(max, c.updatedAt ?? c.createdAt),
-          0,
-        );
+        const lastActiveAt = lastActiveByProject.get(project.id) ?? 0;
         return {
           id: project.id,
           name: project.name,
@@ -841,7 +849,7 @@ export class InspectService {
           agents: config?.agents?.length ?? 0,
           modes: config?.modes?.length ?? 0,
           skills: config?.skills?.length ?? 0,
-          chats: chats.length,
+          chats: chatsByProject.get(project.id) ?? 0,
           ...(lastActiveAt ? { lastActiveAt } : {}),
         };
       }),

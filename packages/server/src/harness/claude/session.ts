@@ -425,8 +425,12 @@ export class ClaudeSession implements HarnessSession {
 
     // Mode tool gating — see `HarnessSessionSpec.allowedTools`. Keeps a denied
     // tool out of the catalogue entirely; `toolGuard` above is what enforces it.
-    if (this.spec.allowedTools?.length) options.allowedTools = this.spec.allowedTools;
-    if (this.spec.disallowedTools?.length) options.disallowedTools = this.spec.disallowedTools;
+    // `!== undefined`, not `.length` — see the broker's `stampModeGate`: a
+    // defined-but-empty allowlist permits nothing and must survive the trip.
+    if (this.spec.allowedTools !== undefined) options.allowedTools = this.spec.allowedTools;
+    if (this.spec.disallowedTools !== undefined) {
+      options.disallowedTools = this.spec.disallowedTools;
+    }
 
     return options;
   }

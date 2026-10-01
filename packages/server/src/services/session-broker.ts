@@ -108,8 +108,9 @@ import {
   GLOBAL_MODE,
   GLOBAL_MODE_ID,
   isGlobalProject,
-  isToolDenied,
-  projectPostureLayer,
+  isProtectedMode,
+  isToolAllowed,
+  enforceGlobalPosture,
   deniedToolRefusal,
   buildGlobalProjectIndex,
   realProjects,
@@ -2984,6 +2985,12 @@ export class SessionBroker {
       session.pins.modeId = modeId;
       session.modeId = modeId;
     }
+    // Re-stamp the tool gate, not just the permission mode. Without this a
+    // chat switched INTO a restricted mode kept running under the previous
+    // mode's (absent) denylist until its next session build, and a chat
+    // switched OUT of one stayed restricted — in both directions the guard
+    // was enforcing a mode the chat was no longer in.
+    this.stampModeGate(session, await this.resolveMode(session.modeId));
     const mode = await this.resolvePermissionMode(session.modeId);
     if (session.harnessSession) {
       await session.harnessSession.setPermissionMode(mode).catch((err) => {
@@ -4299,11 +4306,22 @@ export class SessionBroker {
         abortSignal: session.abortController.signal,
         account: session.account,
         toolGuard: (toolName, input) => {
-          // The MODE's denylist is checked first and is unconditional: unlike
-          // the workflow guard below it has no `off` setting, because the mode
-          // that uses it is the one a chat with no project runs under.
-          if (isToolDenied(toolName, session.deniedTools)) {
-            return deniedToolRefusal(toolName, session.modeName ?? session.modeId);
+          // The MODE's tool policy is checked first and is unconditional:
+          // unlike the workflow guard below it has no `off` setting, because
+          // the mode that uses it is the one a chat with no project runs
+          // under. Both halves are enforced here — a runtime that ignores the
+          // SDK allowlist must not thereby be unrestricted.
+          if (
+            !isToolAllowed(toolName, {
+              allowedTools: session.allowedTools,
+              disallowedTools: session.deniedTools,
+            })
+          ) {
+            return deniedToolRefusal(
+              toolName,
+              session.modeName ?? session.modeId,
+              session.modeId,
+            );
           }
           if (toolName !== "Bash" || session.workflow?.guard === "off") return null;
           const command = typeof input.command === "string" ? input.command : "";
@@ -4336,6 +4354,22 @@ export class SessionBroker {
         },
       };
 
+      // A posture whose entire point is its denylist must not run on a runtime
+      // that can only catch a violation AFTER the call has started. Codex and
+      // the ACP adapters report `preToolGuard: false` and enforce by sighting
+      // + interrupt, which is an acceptable degradation for the workflow guard
+      // (a `git push` that gets interrupted has still been seen) and NOT an
+      // acceptable one here: by the time a `worktree` call is sighted, the
+      // worktree exists. Refuse loudly, naming the fix, rather than running a
+      // project-less chat under a posture that isn't actually holding.
+      if (isProtectedMode(session.modeId) && !resolved.harness.capabilities.preToolGuard) {
+        throw new Error(
+          `${session.modeName ?? session.modeId} mode cannot run on ${resolved.harness.kind}: ` +
+            "that runtime cannot refuse a tool call before it runs, and this posture is " +
+            "nothing but a list of calls to refuse. Switch this chat to a runtime that can " +
+            "(Claude) from the composer's provider picker.",
+        );
+      }
       session.harnessSession = resolved.harness.createSession(spec);
       session.resumeSessionId = undefined;
       session.forkAtUuid = undefined;
@@ -6852,13 +6886,16 @@ export class SessionBroker {
    * (the source of truth) wins over a `.data`-defined one on id collision.
    */
   private async resolveMode(modeId: string): Promise<ModeConfig | null> {
+    // A PROTECTED built-in wins over both authored layers, which inverts this
+    // method's usual rule. It has to: `global` is writable as a project mode
+    // and as a store row, so under the normal order any repo could ship a
+    // `modes/global.yaml` with no denylist and silently unrestrict every
+    // global chat on the install. See `PROTECTED_MODE_IDS`.
+    if (isProtectedMode(modeId)) return BUILTIN_MODE_CONFIGS[modeId] ?? null;
     return (
       this.projectConfig?.getMode(modeId) ??
       (await this.store.getMode(modeId).catch(() => null)) ??
-      // The built-in configured modes come LAST so a project or the store can
-      // still refine one — except `global`, which nothing may override because
-      // it is the only thing standing between a project-less chat and a shell.
-      // See `BUILTIN_MODE_CONFIGS`.
+      // Other built-ins come LAST, so a project or the store can refine them.
       BUILTIN_MODE_CONFIGS[modeId] ??
       null
     );
@@ -6890,18 +6927,17 @@ export class SessionBroker {
    */
   private async resolvePosture(session: LiveSession): Promise<ChatPosture> {
     const settings = await this.store.getSettings().catch(() => undefined);
-    return resolveChatPosture({
-      chat: {
-        harness: session.harnessKind,
-        subscriptionId: session.subscriptionId,
-        ...session.pins,
-      },
-      project: projectPostureLayer(
-        session.projectId,
-        this.projectConfig?.getDefaults?.(session.projectId),
-      ),
-      settings,
-    });
+    return resolveChatPosture(
+      enforceGlobalPosture(session.projectId, {
+        chat: {
+          harness: session.harnessKind,
+          subscriptionId: session.subscriptionId,
+          ...session.pins,
+        },
+        project: this.projectConfig?.getDefaults?.(session.projectId),
+        settings,
+      }),
+    );
   }
 
   /**
@@ -6920,6 +6956,20 @@ export class SessionBroker {
     if (pins.modeId === undefined) session.modeId = posture.modeId.effective;
     if (pins.effort === undefined) session.effort = posture.effort.effective;
     if (pins.model === undefined) session.modelOverride = posture.model.effective;
+  }
+
+  /**
+   * Copy the resolved mode's tool policy onto the session, where the guard
+   * reads it.
+   *
+   * One function because two callers need it at different times — the session
+   * build, and a live `setMode` — and a gate that only one of them refreshed
+   * is a gate enforcing the wrong mode.
+   */
+  private stampModeGate(session: LiveSession, mode: ModeConfig | null): void {
+    session.modeName = mode?.name ?? session.modeId;
+    session.allowedTools = mode?.allowedTools;
+    session.deniedTools = mode?.disallowedTools;
   }
 
   private async buildOptions(session: LiveSession): Promise<Options> {
@@ -7025,11 +7075,12 @@ export class SessionBroker {
     // The mode's tool gating, applied two ways — see `LiveSession.deniedTools`.
     // Handing it to the SDK thins the catalogue where the SDK honours it
     // (built-ins reliably, MCP tools not); the guard below is the enforcement.
-    session.modeName = mode?.name ?? session.modeId;
-    session.allowedTools = mode?.allowedTools;
-    session.deniedTools = mode?.disallowedTools;
-    if (mode?.allowedTools?.length) options.allowedTools = mode.allowedTools;
-    if (mode?.disallowedTools?.length) options.disallowedTools = mode.disallowedTools;
+    this.stampModeGate(session, mode);
+    // `!== undefined`, never `.length`: a DEFINED but empty allowlist permits
+    // nothing, and collapsing it to "absent" would turn the strictest policy
+    // expressible into the loosest one.
+    if (session.allowedTools !== undefined) options.allowedTools = session.allowedTools;
+    if (session.deniedTools !== undefined) options.disallowedTools = session.deniedTools;
 
     // The workflow contract — how change ships in THIS project. Resolved BEFORE
     // the tools directive because it decides one of the session's capabilities:

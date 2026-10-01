@@ -19,7 +19,7 @@ import {
   layerSourceLabel,
   layerSourceShort,
   resolveChatPosture,
-  projectPostureLayer,
+  enforceGlobalPosture,
   type ChatPosture,
   type PostureSource,
 } from "@dispatch/shared";
@@ -32,19 +32,21 @@ export function useChatPosture(chatId: string | null): ChatPosture {
   const chat = useChats((s) => (chatId ? s.byId[chatId] : undefined));
   const project = useProjectLayer(chat?.projectId);
   const settings = useSettings((s) => s.app);
-  return resolveChatPosture({
-    chat: chat
-      ? {
-          harness: chat.harness ?? DEFAULT_HARNESS,
-          subscriptionId: chat.subscriptionId,
-          modeId: chat.modeId,
-          effort: chat.effort,
-          model: chat.model,
-        }
-      : undefined,
-    project: projectPostureLayer(chat?.projectId, project),
-    settings,
-  });
+  return resolveChatPosture(
+    enforceGlobalPosture(chat?.projectId, {
+      chat: chat
+        ? {
+            harness: chat.harness ?? DEFAULT_HARNESS,
+            subscriptionId: chat.subscriptionId,
+            modeId: chat.modeId,
+            effort: chat.effort,
+            model: chat.model,
+          }
+        : undefined,
+      project,
+      settings,
+    }),
+  );
 }
 
 /**

@@ -6517,6 +6517,15 @@ ${look}` : "")
           `name: ${found.name}`,
           `permissionMode: ${found.permissionMode}`,
           ...(found.description ? [`description: ${found.description}`] : []),
+          // The gate is part of what a mode IS, and `mode_write` replaces the
+          // whole definition — so an agent extending a mode has to be able to
+          // see the lists here in order to pass them back.
+          ...(found.allowedTools
+            ? [`allowedTools: ${found.allowedTools.join(", ") || "(none — permits nothing)"}`]
+            : []),
+          ...(found.disallowedTools?.length
+            ? [`disallowedTools: ${found.disallowedTools.join(", ")}`]
+            : []),
           ...(found.path ? [found.path] : []),
         ];
         return textResult(
@@ -6553,6 +6562,23 @@ ${look}` : "")
         .string()
         .optional()
         .describe("One line on WHEN to pick this mode. Shown in listings, never injected."),
+      allowedTools: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Only these tools may be called in this mode, by exact name (`Read`, " +
+            "`mcp__dispatch-chat__chat_find`). Omit for 'every tool'. An EMPTY array " +
+            "permits nothing, which is different from omitting it.",
+        ),
+      disallowedTools: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Tools this mode refuses, by exact name. Applied over `allowedTools`, so a " +
+            "name here wins. Remember that a shell (`Bash`, `PowerShell`, " +
+            "`mcp__dispatch-workspace__terminal`) can do almost anything the other " +
+            "entries deny — denying `Edit` while allowing `Bash` stops nothing.",
+        ),
       instructions: z
         .string()
         .optional()
@@ -6581,6 +6607,8 @@ ${look}` : "")
           name,
           permissionMode: args.permissionMode,
           description: args.description?.trim() || undefined,
+          allowedTools: args.allowedTools,
+          disallowedTools: args.disallowedTools,
           instructions: args.instructions?.trim() || undefined,
         });
         return textResult(

@@ -56,6 +56,14 @@ export interface ModeRecord {
   scope: ModeScope;
   permissionMode: PermissionMode;
   description?: string;
+  /**
+   * The mode's tool gate. Carried through read AND write because a `mode_write`
+   * is a REPLACE: without these an agent editing a mode's instructions would
+   * silently strip the allow/deny lists that made it safe, and `mode_read`
+   * would never have shown them to be preserved.
+   */
+  allowedTools?: string[];
+  disallowedTools?: string[];
   instructions?: string;
   /** Absolute file for a project mode; absent for the other two scopes. */
   path?: string;
@@ -90,6 +98,8 @@ export interface ManagerMcpModes {
     name: string;
     permissionMode: PermissionMode;
     description?: string;
+    allowedTools?: string[];
+    disallowedTools?: string[];
     instructions?: string;
   }): Promise<ModeRecord>;
   remove(id: string, scope: WritableModeScope): Promise<boolean>;
@@ -131,6 +141,8 @@ export function createModeEditor(deps: ModeEditorDeps): ManagerMcpModes {
         scope: "builtin" as const,
         permissionMode,
         ...(full?.description ? { description: full.description } : {}),
+        ...(full?.allowedTools ? { allowedTools: [...full.allowedTools] } : {}),
+        ...(full?.disallowedTools ? { disallowedTools: [...full.disallowedTools] } : {}),
         ...(full?.instructions ? { instructions: full.instructions } : {}),
       };
     });
@@ -153,7 +165,7 @@ export function createModeEditor(deps: ModeEditorDeps): ManagerMcpModes {
       return null;
     },
 
-    async write({ scope, name, permissionMode, description, instructions }) {
+    async write({ scope, name, permissionMode, description, allowedTools, disallowedTools, instructions }) {
       const id = modeIdFor(name);
       if (!id) throw new Error(`"${name}" leaves nothing to make a mode id from.`);
       if (scope === "project") {
@@ -173,15 +185,29 @@ export function createModeEditor(deps: ModeEditorDeps): ManagerMcpModes {
         const doc: Record<string, unknown> = { name };
         if (description) doc.description = description;
         doc.permissionMode = permissionMode;
+        if (allowedTools) doc.allowedTools = allowedTools;
+        if (disallowedTools) doc.disallowedTools = disallowedTools;
         if (instructions) doc.instructions = instructions;
         await writeFile(path, stringifyYaml(doc), "utf8");
-        return { id, name, scope, permissionMode, description, instructions, path };
+        return {
+          id,
+          name,
+          scope,
+          permissionMode,
+          description,
+          allowedTools,
+          disallowedTools,
+          instructions,
+          path,
+        };
       }
       const saved = await store.saveMode({
         id,
         name,
         description,
         permissionMode,
+        allowedTools,
+        disallowedTools,
         instructions,
         scope: "global",
       });
@@ -219,6 +245,8 @@ function fromStore(m: ModeConfig): ModeRecord {
     scope: "global",
     permissionMode: m.permissionMode,
     description: m.description,
+    allowedTools: m.allowedTools,
+    disallowedTools: m.disallowedTools,
     instructions: m.instructions,
   };
 }
@@ -267,6 +295,8 @@ export async function readModesDir(dir: string): Promise<ModeRecord[]> {
         scope: "project",
         permissionMode: perm.data,
         description: typeof data.description === "string" ? data.description.trim() || undefined : undefined,
+        allowedTools: toolList(data.allowedTools),
+        disallowedTools: toolList(data.disallowedTools),
         instructions:
           typeof data.instructions === "string" ? data.instructions.trim() || undefined : undefined,
         path: join(dir, file),
@@ -275,5 +305,14 @@ export async function readModesDir(dir: string): Promise<ModeRecord[]> {
       /* skip */
     }
   }
+  return out;
+}
+
+/** A YAML tool list, kept only when it really is a list of strings. */
+function toolList(v: unknown): string[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const out = v.filter((e): e is string => typeof e === "string" && e.trim().length > 0);
+  // `[]` is preserved: a defined-but-empty allowlist permits nothing, which is
+  // a real policy. Only a non-array is "unset".
   return out;
 }

@@ -31,7 +31,7 @@
  * rule across every handler and leave the next tool ungated by default.
  */
 import type { ModeConfig, Project } from "./domain.js";
-import type { PostureProject } from "./chat-posture.js";
+import type { PostureLayers, PostureProject } from "./chat-posture.js";
 
 /* ----------------------------------------------------------- the pseudo-project */
 
@@ -227,6 +227,36 @@ export function projectPostureLayer(
   return isGlobalProject(projectId) ? { ...(layer ?? {}), mode: GLOBAL_MODE_ID } : layer;
 }
 
+/**
+ * The whole posture chain, with the global project's mode made unavoidable.
+ *
+ * {@link projectPostureLayer} alone is NOT enough, and the gap is the obvious
+ * attack on it: the project layer sits BELOW the chat and parent layers, so
+ * `POST /api/chats` (or `spawn_chat`) with
+ * `{ projectId: "__global__", modeId: "yolo" }` resolved to `yolo` and came up
+ * with a shell. `setMode` never got a look in — the chat was born that way.
+ *
+ * So a conflicting mode above the project layer is DROPPED rather than
+ * rejected. Dropping keeps a spawn into the global project working when the
+ * parent happens to be in some other mode (a rejection there would be a
+ * confusing failure for a caller who never asked for a mode at all), and it
+ * leaves the project layer to answer — so the UI's "inherited from" label
+ * credits the layer that actually states the rule.
+ */
+export function enforceGlobalPosture(
+  projectId: string | null | undefined,
+  layers: PostureLayers,
+): PostureLayers {
+  const project = projectPostureLayer(projectId, layers.project);
+  if (!isGlobalProject(projectId)) return { ...layers, project };
+  return {
+    ...layers,
+    project,
+    ...(layers.chat ? { chat: { ...layers.chat, modeId: undefined } } : {}),
+    ...(layers.parent ? { parent: { ...layers.parent, modeId: undefined } } : {}),
+  };
+}
+
 /* ---------------------------------------------------------- the always-on index */
 
 /** The shape {@link buildGlobalProjectIndex} needs from a project. */
@@ -282,16 +312,48 @@ export function isToolDenied(tool: string, disallowed: readonly string[] | undef
   return Boolean(disallowed?.includes(tool));
 }
 
-/** What the agent is told when the posture refuses a call. */
-export function deniedToolRefusal(tool: string, modeName: string): string {
+/**
+ * What the agent is told when the selected mode refuses a call.
+ *
+ * Generic by default, because the broker applies mode denylists to EVERY mode
+ * now, not just this one: a custom mode that denies one unrelated tool while
+ * happily allowing edits must not be told it cannot change repositories.
+ *
+ * The global posture gets an extra paragraph, and it earns it. Without it the
+ * model treats a refusal as an obstacle and goes looking for a way around —
+ * which, in a chat where every route is closed, is a whole turn spent
+ * rediscovering that. Naming `spawn_chat` turns the refusal into a redirect.
+ */
+export function deniedToolRefusal(tool: string, modeName: string, modeId?: string): string {
+  const base =
+    `\`${tool}\` is not available in ${modeName} mode — the mode's tool policy ` +
+    `denies it. Another tool, a shell, or a subagent calling it on your behalf is ` +
+    `refused the same way, so do not look for a route around it.`;
+  if (modeId !== GLOBAL_MODE_ID) return base;
   return (
-    `\`${tool}\` is not available in ${modeName} mode. This chat can read, search, ` +
-    `inspect and spawn — it cannot change a repository or land a change. ` +
-    `Do NOT look for another way to run it: a shell, a second tool and a subagent ` +
-    `are all refused the same way. If this task needs code changed, scope it and ` +
-    `start it where it belongs with ` +
+    `${base} This chat belongs to no project: it can read, search, inspect and ` +
+    `spawn, but it cannot change a repository or land a change. If this task ` +
+    `needs code changed, scope it and start it where it belongs with ` +
     `\`mcp__dispatch-chat__spawn_chat({ projectId, prompt })\`.`
   );
+}
+
+/**
+ * The tool policy a mode imposes, resolved to a yes/no for one tool name.
+ *
+ * An allowlist is "only these", a denylist is "not these", and the denylist
+ * wins — the same precedence `AgentConfig` has always had. An allowlist that
+ * is DEFINED BUT EMPTY permits nothing, which is a real (if drastic) policy
+ * and must not be confused with an absent one; `[]` and `undefined` differ
+ * here on purpose, so neither this nor its callers may test it with `.length`.
+ */
+export function isToolAllowed(
+  tool: string,
+  policy: { allowedTools?: readonly string[]; disallowedTools?: readonly string[] } | undefined,
+): boolean {
+  if (!policy) return true;
+  if (policy.allowedTools !== undefined && !policy.allowedTools.includes(tool)) return false;
+  return !isToolDenied(tool, policy.disallowedTools);
 }
 
 /**
@@ -308,3 +370,21 @@ export function deniedToolRefusal(tool: string, modeName: string): string {
 export const BUILTIN_MODE_CONFIGS: Record<string, ModeConfig> = {
   [GLOBAL_MODE_ID]: GLOBAL_MODE,
 };
+
+/**
+ * Built-in modes that nothing may redefine — resolved BEFORE a project's
+ * `.dispatch/modes/` and before the store, which is the opposite of the
+ * normal precedence.
+ *
+ * The normal precedence (authored wins) is right for a mode that is a
+ * convenience. It is wrong for one that is a SECURITY BOUNDARY: `global` is
+ * writable at both of those layers today, so any project could ship a
+ * `modes/global.yaml` with no denylist and every global chat on the install
+ * would come up with a shell. Nobody would see it happen.
+ */
+export const PROTECTED_MODE_IDS: readonly string[] = [GLOBAL_MODE_ID];
+
+/** True when `modeId` names a mode no project or store copy may shadow. */
+export function isProtectedMode(modeId: string): boolean {
+  return PROTECTED_MODE_IDS.includes(modeId);
+}

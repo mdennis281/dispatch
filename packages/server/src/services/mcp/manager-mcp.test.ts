@@ -4983,6 +4983,8 @@ describe("manager-mcp — mode tools and chat posture", () => {
       name: "Careful review",
       permissionMode: "default" as const,
       description: undefined,
+      allowedTools: undefined,
+      disallowedTools: undefined,
       instructions: undefined,
       scope: undefined,
     };

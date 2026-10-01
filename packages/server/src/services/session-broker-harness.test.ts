@@ -19,6 +19,13 @@ import { SessionBroker } from "./session-broker.js";
 import { GLOBAL_MODE_ID, GLOBAL_PROJECT_ID } from "@dispatch/shared";
 
 let transfers: unknown[][] = [];
+/**
+ * The fake runtime's capabilities, mutable so a test can model a DIFFERENT
+ * runtime's. The global-chat suite needs one that can veto a tool call before
+ * it runs, because the broker refuses a protected posture on one that can't —
+ * and the default here models Codex, which can't.
+ */
+let caps: { preToolGuard: boolean } & Record<string, unknown>;
 let transferResult: Promise<boolean> = Promise.resolve(false);
 let specs: HarnessSessionSpec[];
 
@@ -117,22 +124,23 @@ describe("SessionBroker neutral harness path", () => {
     await store.init();
     session = new FakeHarnessSession();
     specs = [];
+    caps = {
+      toolPermissions: false,
+      questions: true,
+      subagents: false,
+      skills: true,
+      compaction: true,
+      fork: true,
+      usageLimits: true,
+      liveModelSwitch: true,
+      livePermissionSwitch: true,
+      efforts: ["low", "medium", "high"],
+      preToolGuard: false,
+      managerTransport: "http",
+    };
     const codex: Harness = {
       kind: "codex",
-      capabilities: {
-        toolPermissions: false,
-        questions: true,
-        subagents: false,
-        skills: true,
-        compaction: true,
-        fork: true,
-        usageLimits: true,
-        liveModelSwitch: true,
-        livePermissionSwitch: true,
-        efforts: ["low", "medium", "high"],
-        preToolGuard: false,
-        managerTransport: "http",
-      },
+      capabilities: caps as unknown as Harness["capabilities"],
       runtime: () => ({ kind: "codex", source: "installed", available: true }),
       listModels: async () => [],
       readLimits: async () => null,
@@ -180,6 +188,14 @@ describe("SessionBroker neutral harness path", () => {
    * the way a PreToolUse hook calls it.
    */
   describe("the global chat", () => {
+    // The fake runtime models Codex, which cannot veto a call before it runs
+    // — and the broker refuses a protected posture there (see below, and
+    // `requiresPreToolGuard` in the broker). Every other test in this suite
+    // wants a runtime that CAN, so it is granted here rather than globally.
+    beforeEach(() => {
+      caps.preToolGuard = true;
+    });
+
     const globalChat = () =>
       store.saveChat({
         id: "global-1",
@@ -237,6 +253,23 @@ describe("SessionBroker neutral harness path", () => {
       // …and the one it exists to ENABLE.
       expect(guard("mcp__dispatch-chat__spawn_chat", { prompt: "go" })).toBeNull();
       expect(guard("Read", { file_path: "C:/x.ts" })).toBeNull();
+    });
+
+    it("refuses to start on a runtime that can only catch a violation late", async () => {
+      // The posture IS its denylist. A runtime that notices a `worktree` call
+      // only once it has started notices it after the worktree exists, so
+      // running there would be a posture that isn't holding — and silence
+      // about that is worse than a refusal that names the fix.
+      caps.preToolGuard = false;
+      const chat = await globalChat();
+      const errors: string[] = [];
+      bus.subscribe((e) => {
+        if (e.type === "error") errors.push(`${e.message} ${e.detail ?? ""}`);
+      });
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "hello");
+      await waitUntil(() => errors.some((m) => /cannot run on codex/.test(m)));
+      expect(specs).toHaveLength(0);
     });
 
     it("carries the project index and the posture overlay, and nothing bigger", async () => {

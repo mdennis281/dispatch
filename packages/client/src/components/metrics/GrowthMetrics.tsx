@@ -305,7 +305,15 @@ export function GrowthMetrics() {
   // DEFAULT rather than on the store's pick, so a project chosen from the
   // Select does not re-run this and walk twice — and so a project list that
   // arrives after mount still starts the walk when it lands.
-  const fallback = activeProjectId ?? projects[0]?.id ?? null;
+  // `projects` is already the REAL ones, and the active id has to be checked
+  // against it rather than trusted: opening Metrics from the global chat makes
+  // `activeProjectId` the pseudo-project, and this report is per-repository —
+  // it would walk a directory that is not a repo and leave the Select showing
+  // no option at all.
+  const fallback =
+    (activeProjectId && projects.some((p) => p.id === activeProjectId) ? activeProjectId : null) ??
+    projects[0]?.id ??
+    null;
   useEffect(() => {
     const pick = useGrowth.getState().projectId ?? fallback;
     if (pick) open(pick);
