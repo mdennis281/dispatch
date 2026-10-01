@@ -388,8 +388,13 @@ export class ClaudeSession implements HarnessSession {
     // canUseTool so it still fires under bypassPermissions, which is exactly
     // when an unattended agent is most likely to reach for `git push origin
     // main`.
+    // No matcher: the guard answers for the MODE's tool denylist as well as the
+    // workflow contract, and a denylist that only fired for `Bash` would gate
+    // the shell while waving `Edit` and `approve_pr` through. The broker's
+    // guard returns null for anything it has no rule about, so the extra calls
+    // cost a function call each.
     if (this.spec.toolGuard) {
-      hooks.PreToolUse!.push({ matcher: "Bash", hooks: [this.guardHook()] });
+      hooks.PreToolUse!.push({ hooks: [this.guardHook()] });
     }
     options.hooks = hooks;
 
@@ -417,6 +422,11 @@ export class ClaudeSession implements HarnessSession {
     }
 
     options.mcpServers = this.mcpServerSet();
+
+    // Mode tool gating — see `HarnessSessionSpec.allowedTools`. Keeps a denied
+    // tool out of the catalogue entirely; `toolGuard` above is what enforces it.
+    if (this.spec.allowedTools?.length) options.allowedTools = this.spec.allowedTools;
+    if (this.spec.disallowedTools?.length) options.disallowedTools = this.spec.disallowedTools;
 
     return options;
   }
@@ -478,7 +488,15 @@ export class ClaudeSession implements HarnessSession {
       >;
       const guardInput =
         typeof input.cwd === "string" ? { ...toolInput, cwd: input.cwd } : toolInput;
-      const blocked = catchToolGuard(this.spec.toolGuard, "Bash", guardInput, "in-place");
+      // The real tool name, not a hardcoded "Bash": the hook is unmatched now,
+      // so the guard must be told which tool it is being asked about.
+      const toolName = (input as unknown as { tool_name?: unknown }).tool_name;
+      const blocked = catchToolGuard(
+        this.spec.toolGuard,
+        typeof toolName === "string" ? toolName : "Bash",
+        guardInput,
+        "in-place",
+      );
       if (!blocked) return {};
       this.emit(blocked);
       return {

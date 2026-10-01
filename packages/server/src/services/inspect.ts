@@ -33,6 +33,7 @@ import { createInterface } from "node:readline";
 import { basename, isAbsolute, join, resolve } from "node:path";
 
 import type { Chat, ImageRef, Project } from "@dispatch/shared";
+import { realProjects, resolveWorkflow } from "@dispatch/shared";
 
 import type { Store } from "../store/index.js";
 
@@ -212,6 +213,24 @@ export interface ProjectInfoResult {
   mcpServers: string[];
   memoryIndex?: string;
   recentChats: ChatSummary[];
+}
+
+/** One project's line in {@link InspectService.projectList}. */
+export interface ProjectListEntry {
+  id: string;
+  name: string;
+  repoPath: string;
+  /** Resolved workflow profile — how change ships there. */
+  workflow: string;
+  defaultBranch: string;
+  subApps: string[];
+  mcpServers: string[];
+  agents: number;
+  modes: number;
+  skills: number;
+  /** Open (non-archived) chats, and when the most recent one last moved. */
+  chats: number;
+  lastActiveAt?: number;
 }
 
 /* -------------------------------------------------------------- collaborators */
@@ -776,6 +795,58 @@ export class InspectService {
   }
 
   /* ------------------------------------------------------- projectInfo */
+
+  /**
+   * Every real project at a glance — the tier between the global chat's
+   * always-on index (names and paths only) and `projectInfo` (one project in
+   * full).
+   *
+   * It exists because the question a cross-project chat actually asks is
+   * "which of these has the thing I'm after" — a Playwright MCP, a sub-app on
+   * a port, a skill — and answering that by calling `projectInfo` once per
+   * project costs a dozen round trips and most of a context window. One line
+   * per project with the NAMES of what it has is enough to pick, and picking
+   * is what the detailed call is for.
+   *
+   * The reserved pseudo-project is not listed: it is where the caller already
+   * is, and it has no repo to describe.
+   */
+  async projectList(instance?: InspectInstance): Promise<ProjectListEntry[]> {
+    const store = this.storeFor(instance);
+    const projects = realProjects(await store.listProjects());
+    return Promise.all(
+      projects.map(async (project): Promise<ProjectListEntry> => {
+        const cfg = instance === "stable" ? undefined : this.projectConfig?.get(project.id);
+        const config = (cfg?.config ?? null) as {
+          agents?: unknown[];
+          modes?: unknown[];
+          skills?: unknown[];
+          mcpServers?: Record<string, unknown>;
+        } | null;
+        const chats = (await store.listChats(project.id).catch(() => [])).filter(
+          (c) => !c.archived,
+        );
+        const lastActiveAt = chats.reduce(
+          (max, c) => Math.max(max, c.updatedAt ?? c.createdAt),
+          0,
+        );
+        return {
+          id: project.id,
+          name: project.name,
+          repoPath: project.repoPath,
+          workflow: resolveWorkflow(project).profile,
+          defaultBranch: project.defaultBranch ?? "main",
+          subApps: (project.subApps ?? []).map((a) => a.name),
+          mcpServers: Object.keys(config?.mcpServers ?? {}),
+          agents: config?.agents?.length ?? 0,
+          modes: config?.modes?.length ?? 0,
+          skills: config?.skills?.length ?? 0,
+          chats: chats.length,
+          ...(lastActiveAt ? { lastActiveAt } : {}),
+        };
+      }),
+    );
+  }
 
   async projectInfo(q: ProjectInfoQuery, callerProjectId?: string): Promise<ProjectInfoResult> {
     const store = this.storeFor(q.instance);

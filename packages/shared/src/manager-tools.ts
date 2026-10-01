@@ -182,6 +182,7 @@ export const MANAGER_TOOL_CATEGORY = {
 
   /* project — what Dispatch knows about a project as a whole. */
   project_info: "project",
+  project_list: "project",
 
   /* secrets — asking the human for a credential and naming the ones stored. No
      tool here returns a value: `secret_request` collects one on a card that

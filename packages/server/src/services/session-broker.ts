@@ -104,6 +104,14 @@ import type {
   PrReviewAgentState,
 } from "@dispatch/shared";
 import {
+  BUILTIN_MODE_CONFIGS,
+  GLOBAL_MODE,
+  GLOBAL_MODE_ID,
+  isGlobalProject,
+  isToolDenied,
+  deniedToolRefusal,
+  buildGlobalProjectIndex,
+  realProjects,
   DEFAULT_HARNESS,
   DEFAULT_MAX_ACTIVE_SESSIONS,
   composeMessageText,
@@ -150,8 +158,10 @@ import type { MemoryHistoryService } from "./memory-history.js";
 import type {
   FindChatsQuery,
   FindChatsResult,
+  InspectInstance,
   ProjectInfoQuery,
   ProjectInfoResult,
+  ProjectListEntry,
   ReadChatQuery,
   ReadChatResult,
 } from "./inspect.js";
@@ -1122,6 +1132,7 @@ export interface BrokerInspect {
   findChats(q: FindChatsQuery): Promise<FindChatsResult>;
   readChat(q: ReadChatQuery): Promise<ReadChatResult>;
   projectInfo(q: ProjectInfoQuery, callerProjectId?: string): Promise<ProjectInfoResult>;
+  projectList(instance?: InspectInstance): Promise<ProjectListEntry[]>;
 }
 
 export interface SessionBrokerOptions {
@@ -1283,6 +1294,10 @@ export const BUILTIN_MODE_PERMISSION: Record<string, PermissionMode> = {
   bypass: "bypassPermissions",
   bypassPermissions: "bypassPermissions",
   dontAsk: "dontAsk",
+  // The global chat's posture. Listed here as well as in `BUILTIN_MODE_CONFIGS`
+  // so it shows up wherever built-in mode IDS are enumerated (`mode_list`, the
+  // mode picker) rather than only where full records are resolved.
+  [GLOBAL_MODE_ID]: GLOBAL_MODE.permissionMode,
 };
 
 /**
@@ -1866,6 +1881,21 @@ interface LiveSession {
    * the prompt and the rules enforced on tool calls can never disagree.
    */
   workflow?: ResolvedWorkflow;
+  /**
+   * The tool gating the selected MODE imposes, stamped alongside `workflow` in
+   * `buildOptions` and read by the same guard.
+   *
+   * Both halves are handed to the runtime as well (`HarnessSessionSpec`), which
+   * is what keeps a denied tool out of the model's catalogue entirely. This copy
+   * is the BACKSTOP: the runtime's own gating is advisory from Dispatch's side
+   * (a harness may not implement it, and a subagent definition can re-widen its
+   * own list), whereas the guard runs as a PreToolUse veto that fires even under
+   * `bypassPermissions`. For the global chat's posture — the one that makes a
+   * project-less chat safe — advisory is not enough.
+   */
+  modeName?: string;
+  allowedTools?: string[];
+  deniedTools?: string[];
   /** The protected trunk for this project (`defaultBranch`, default "main"). */
   trunk?: string;
   /** Branch at the session cwd, or null when detached / unknown. */
@@ -2932,6 +2962,18 @@ export class SessionBroker {
    */
   async setMode(chatId: string, modeId: string | null): Promise<PermissionMode> {
     const session = this.mustGet(chatId);
+    // A global chat's posture is not a preference. Everything that makes it
+    // safe to be project-less — no shell, no edits, no worktree, no merge —
+    // lives in that one mode, so letting the picker move off it would turn the
+    // cross-project chat into an unanchored agent with a shell. `null` is
+    // allowed because unpinning resolves straight back to `global`.
+    if (isGlobalProject(session.projectId) && modeId !== null && modeId !== GLOBAL_MODE_ID) {
+      throw new Error(
+        `The global chat always runs in ${GLOBAL_MODE_ID} mode — it has no project, so ` +
+          "there is nothing for another posture to be safe in. Spawn a chat into a " +
+          "project to work there.",
+      );
+    }
     if (modeId === null) {
       delete session.pins.modeId;
       session.modeId = (await this.resolvePosture(session)).modeId.effective;
@@ -4238,6 +4280,8 @@ export class SessionBroker {
           : undefined,
         mcpServers,
         managerMcp,
+        allowedTools: session.allowedTools,
+        disallowedTools: session.deniedTools,
         skills: (session.materializedSkillDirs ?? []).map((dir) => ({
           dir,
           name: dir.split(/[\\/]/).pop() ?? dir,
@@ -4252,6 +4296,12 @@ export class SessionBroker {
         abortSignal: session.abortController.signal,
         account: session.account,
         toolGuard: (toolName, input) => {
+          // The MODE's denylist is checked first and is unconditional: unlike
+          // the workflow guard below it has no `off` setting, because the mode
+          // that uses it is the one a chat with no project runs under.
+          if (isToolDenied(toolName, session.deniedTools)) {
+            return deniedToolRefusal(toolName, session.modeName ?? session.modeId);
+          }
           if (toolName !== "Bash" || session.workflow?.guard === "off") return null;
           const command = typeof input.command === "string" ? input.command : "";
           // The call's real cwd outranks the directory the chat started in. This
@@ -6801,7 +6851,13 @@ export class SessionBroker {
   private async resolveMode(modeId: string): Promise<ModeConfig | null> {
     return (
       this.projectConfig?.getMode(modeId) ??
-      (await this.store.getMode(modeId).catch(() => null))
+      (await this.store.getMode(modeId).catch(() => null)) ??
+      // The built-in configured modes come LAST so a project or the store can
+      // still refine one — except `global`, which nothing may override because
+      // it is the only thing standing between a project-less chat and a shell.
+      // See `BUILTIN_MODE_CONFIGS`.
+      BUILTIN_MODE_CONFIGS[modeId] ??
+      null
     );
   }
 
@@ -6837,7 +6893,12 @@ export class SessionBroker {
         subscriptionId: session.subscriptionId,
         ...session.pins,
       },
-      project: this.projectConfig?.getDefaults?.(session.projectId),
+      // The pseudo-project has no manifest to read defaults from, so it states
+      // its own: the global posture arrives through the normal project layer
+      // rather than as a special case somewhere downstream.
+      project: isGlobalProject(session.projectId)
+        ? { mode: GLOBAL_MODE_ID }
+        : this.projectConfig?.getDefaults?.(session.projectId),
       settings,
     });
   }
@@ -6960,6 +7021,16 @@ export class SessionBroker {
     const mode = await this.resolveMode(session.modeId);
     const agent = session.agentId ? await this.resolveAgent(session.agentId) : null;
 
+    // The mode's tool gating, applied two ways — see `LiveSession.deniedTools`.
+    // Handing it to the SDK keeps a denied tool out of the catalogue, which is
+    // both cheaper (no description in context) and kinder (the model never
+    // reaches for something it will be refused).
+    session.modeName = mode?.name ?? session.modeId;
+    session.allowedTools = mode?.allowedTools;
+    session.deniedTools = mode?.disallowedTools;
+    if (mode?.allowedTools?.length) options.allowedTools = mode.allowedTools;
+    if (mode?.disallowedTools?.length) options.disallowedTools = mode.disallowedTools;
+
     // The workflow contract — how change ships in THIS project. Resolved BEFORE
     // the tools directive because it decides one of the session's capabilities:
     // `approve_pr` exists only where the project opted into auto-merge, so the
@@ -6999,6 +7070,24 @@ export class SessionBroker {
       memory: Boolean(this.memory && session.projectId),
     });
     if (workflowDirective) appends.push(workflowDirective);
+
+    // The global chat's one standing block: what projects exist, and where.
+    //
+    // Deliberately the SMALLEST thing that makes the install navigable — a
+    // name and a path each, ~12 tokens per project. Everything deeper
+    // (workflow, sub-apps, MCP servers, skills, recent chats) is a tool call
+    // away and is paid for only when it is wanted; see
+    // `buildGlobalProjectIndex`. The alternative — injecting the overview —
+    // charges every turn of every global chat for every project Michael has
+    // ever onboarded, and that bill only goes up.
+    if (isGlobalProject(session.projectId)) {
+      const all = await this.store.listProjects().catch(() => []);
+      appends.push(
+        buildGlobalProjectIndex(
+          realProjects(all).map((p) => ({ id: p.id, name: p.name, repoPath: p.repoPath })),
+        ),
+      );
+    }
 
     // Learn the effort the runtime is REALLY running each thread at. Hook inputs
     // are the only place that number surfaces (the message stream never carries
@@ -7717,6 +7806,7 @@ export class SessionBroker {
               findChats: (q) => this.inspect!.findChats(q),
               readChat: (q) => this.inspect!.readChat(q),
               projectInfo: (q) => this.inspect!.projectInfo(q, projectId),
+              projectList: (instance) => this.inspect!.projectList(instance),
             }
           : undefined,
         // Cross-chat messaging. `from` is CLOSED OVER rather than passed as an

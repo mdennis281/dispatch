@@ -169,6 +169,8 @@ export function configModeToModeConfig(
     name: mode.name,
     description: mode.description,
     permissionMode: mode.permissionMode,
+    allowedTools: mode.allowedTools,
+    disallowedTools: mode.disallowedTools,
     instructions: mode.instructions,
     scope: "project",
     projectId,

@@ -243,6 +243,17 @@ export interface HarnessSessionSpec {
   systemPromptAppends: string[];
   /** The single agent this session runs as, when one is pinned. */
   agent?: HarnessAgentSpec;
+  /**
+   * Tool gating from the selected MODE: an allowlist (absent = everything) and
+   * a denylist over it, in the runtime's own tool names.
+   *
+   * Advertised to the runtime so a denied tool is never offered to the model.
+   * It is not the enforcement — `toolGuard` is, because a runtime may ignore
+   * these and a subagent definition can widen its own list. Both are set from
+   * one resolved mode, so they cannot disagree.
+   */
+  allowedTools?: string[];
+  disallowedTools?: string[];
   /** External MCP servers to attach, by name. */
   mcpServers: Record<string, McpServerConfig>;
   /**

@@ -34,6 +34,7 @@ import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { loadManifest, type ProjectPaths } from "@dispatch/cli/core";
 import {
+  BUILTIN_MODE_CONFIGS,
   DEFAULT_MODES_DIR,
   PermissionModeSchema,
   type ModeConfig,
@@ -117,13 +118,22 @@ export function createModeEditor(deps: ModeEditorDeps): ManagerMcpModes {
       .filter((m) => m.scope !== "project")
       .map((m) => fromStore(m));
 
+  // A built-in is usually nothing but an id and a posture. The few that are a
+  // full record (`global`) carry a name, a description and tool gating, and
+  // must report those — an agent asking `mode_read("global")` to find out what
+  // it is allowed to do should not be told only "permissionMode: default".
   const builtinModes = (): ModeRecord[] =>
-    Object.entries(builtin).map(([id, permissionMode]) => ({
-      id,
-      name: id,
-      scope: "builtin" as const,
-      permissionMode,
-    }));
+    Object.entries(builtin).map(([id, permissionMode]) => {
+      const full = BUILTIN_MODE_CONFIGS[id];
+      return {
+        id,
+        name: full?.name ?? id,
+        scope: "builtin" as const,
+        permissionMode,
+        ...(full?.description ? { description: full.description } : {}),
+        ...(full?.instructions ? { instructions: full.instructions } : {}),
+      };
+    });
 
   return {
     hasProject: Boolean(configPaths),

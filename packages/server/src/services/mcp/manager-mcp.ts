@@ -162,12 +162,14 @@ import type { BoundIssueTracker } from "../issues/service.js";
 import { clampBody } from "../memory.js";
 import type { MemoryGrepMatch, MemoryInventoryEntry } from "../memory.js";
 import type { MemoryHistoryResult } from "../memory-history.js";
-import { renderFind, renderProject, renderRead } from "../inspect-render.js";
+import { renderFind, renderProject, renderProjectList, renderRead } from "../inspect-render.js";
 import type {
   FindChatsQuery,
   FindChatsResult,
+  InspectInstance,
   ProjectInfoQuery,
   ProjectInfoResult,
+  ProjectListEntry,
   ReadChatQuery,
   ReadChatResult,
 } from "../inspect.js";
@@ -1806,6 +1808,8 @@ export interface ManagerMcpInspect {
   readChat(q: ReadChatQuery): Promise<ReadChatResult>;
   /** Project resolution falls back to the CALLER's project when none is named. */
   projectInfo(q: ProjectInfoQuery): Promise<ProjectInfoResult>;
+  /** Every real project at a glance — see `InspectService.projectList`. */
+  projectList(instance?: InspectInstance): Promise<ProjectListEntry[]>;
 }
 
 /**
@@ -6812,6 +6816,29 @@ ${look}` : "")
     },
   );
 
+  const projectList = tool(
+    "project_list",
+    "Every project on this install at a glance — repo path, workflow profile, trunk, " +
+      "its sub-apps and MCP servers BY NAME, how much config it carries and how " +
+      "recently it was worked in. One call instead of project_info per project: use it " +
+      "to find WHICH project has the thing you are after (a Playwright MCP, a dev " +
+      "server, a skill), then project_info that one for the detail.",
+    { instance: inspectInstance },
+    async (args): Promise<CallToolResult> => {
+      if (!ctx.inspect) {
+        return textResult("Chat inspection is not available in this session.", true);
+      }
+      try {
+        return textResult(renderProjectList(await ctx.inspect.projectList(args.instance)));
+      } catch (err) {
+        return textResult(
+          `Could not list projects: ${err instanceof Error ? err.message : String(err)}`,
+          true,
+        );
+      }
+    },
+  );
+
   const chatSend = tool(
     "chat_send",
     "Send a message to ANOTHER Dispatch chat — hand a task to a chat that is already " +
@@ -7497,6 +7524,7 @@ ${look}` : "")
     chatSetMode,
     chatSetPersona,
     projectInfo,
+    projectList,
   };
 }
 
@@ -7577,6 +7605,7 @@ const TOOL_WIRE_NAME: Record<ManagerToolKey, ManagerToolName> = {
   chatSetMode: "chat_set_mode",
   chatSetPersona: "chat_set_persona",
   projectInfo: "project_info",
+  projectList: "project_list",
 };
 
 /**
@@ -7635,6 +7664,7 @@ const MANAGER_TOOL_GATE: Record<ManagerToolName, ManagerToolBinding | null> = {
   chat_set_mode: "messaging",
   chat_set_persona: "messaging",
   project_info: "inspect",
+  project_list: "inspect",
   secret_request: "secrets",
   secret_list: "secrets",
   secret_delete: "secrets",
@@ -7743,6 +7773,7 @@ function boundTools(ctx: ManagerMcpContext): Record<ManagerToolName, boolean> {
     chat_find: Boolean(ctx.inspect),
     chat_read: Boolean(ctx.inspect),
     project_info: Boolean(ctx.inspect),
+    project_list: Boolean(ctx.inspect),
     secret_request: Boolean(ctx.secrets),
     secret_list: Boolean(ctx.secrets),
     secret_delete: Boolean(ctx.secrets),

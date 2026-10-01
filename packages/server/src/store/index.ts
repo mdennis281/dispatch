@@ -103,6 +103,9 @@ import {
   McpEnabledMapSchema,
   ProjectConfigLocationSchema,
   SendModeSchema,
+  GLOBAL_PROJECT_ID,
+  globalProject,
+  isGlobalProject,
 } from "@dispatch/shared";
 import {
   AgentContextSettingsSchema,
@@ -444,6 +447,19 @@ export function isEntityId(id: unknown): id is string {
 }
 
 /**
+ * Raised when a write targets the reserved pseudo-project, which has no row on
+ * disk and must not acquire one. A 400 rather than a 403: the id is simply not
+ * a project anybody may create or remove.
+ */
+export class ReservedProjectError extends Error {
+  readonly statusCode = 400;
+  constructor() {
+    super(`"${GLOBAL_PROJECT_ID}" is reserved and cannot be created, edited or deleted`);
+    this.name = "ReservedProjectError";
+  }
+}
+
+/**
  * Raised when an id that is about to become a path is not one. Carries no path,
  * so echoing it back to a client cannot confirm what does or doesn't exist on
  * disk.
@@ -747,6 +763,7 @@ export class Store {
       mkdir(this.agentsDir(), { recursive: true }),
       mkdir(this.modesDir(), { recursive: true }),
       mkdir(this.chatsDir(), { recursive: true }),
+      mkdir(this.globalProjectDir(), { recursive: true }),
     ]);
     this.db.open();
   }
@@ -810,15 +827,44 @@ export class Store {
 
   /* ---------------------------------------------------------- projects */
 
+  /**
+   * The global chat's working directory — a real directory that is NOT a git
+   * repo. See `globalProject` in shared for why both halves of that matter.
+   */
+  globalProjectDir(): string {
+    return join(this.dataDir, "global");
+  }
+
+  /**
+   * Every project, with the reserved pseudo-project appended.
+   *
+   * It is in the list rather than bolted on by the HTTP route because every
+   * reader of this method — the broker, the MCP spawner, `GET /api/projects` —
+   * needs the record to exist for a global chat to resolve at all. The places
+   * that want REAL repos filter with `realProjects`; it is last in the list so
+   * nothing that takes `[0]` lands on it.
+   */
   async listProjects(): Promise<Project[]> {
     const ids = await this.listDir(this.projectsDir());
     const all = await Promise.all(ids.map((id) => this.getProject(id)));
-    return all.filter((p): p is Project => p !== null);
+    return [...all.filter((p): p is Project => p !== null), this.globalProjectRecord()];
   }
   async getProject(id: string): Promise<Project | null> {
+    if (isGlobalProject(id)) return this.globalProjectRecord();
     return this.readEntity(this.entityFile(this.projectsDir(), id), ProjectSchema);
   }
+  /** Synthesized, never read from disk — nothing persists the pseudo-project. */
+  private globalProjectRecord(): Project {
+    return globalProject(this.globalProjectDir());
+  }
   async saveProject(project: Project): Promise<Project> {
+    // The pseudo-project grants a chat its cross-project posture. A row on disk
+    // would be editable into a record pointing at a real checkout, which is a
+    // project-less chat holding a repo — so there is no row, and the write that
+    // would create one fails loudly rather than being silently dropped.
+    if (isGlobalProject(project.id)) {
+      throw new ReservedProjectError();
+    }
     return this.writeEntity(
       `project:${project.id}`,
       this.entityFile(this.projectsDir(), project.id),
@@ -827,6 +873,7 @@ export class Store {
     );
   }
   async deleteProject(id: string): Promise<void> {
+    if (isGlobalProject(id)) throw new ReservedProjectError();
     // Resolve (and so VALIDATE) before taking the lock: `mutex.run` interns its
     // key forever, so validating inside the task would let a caller mint an
     // unbounded number of dead map entries with ids that were never legal.
