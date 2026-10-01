@@ -125,8 +125,10 @@ import {
   SECRET_ANSWERS,
   type SecretRequestPayload,
   type SecretScope,
+  changedLines,
   prReviewAgentView,
   resolveWorkflow,
+  reviewRoundCap,
   type McpEnablementLayers,
   type MetricEvent,
   type ResolvedAgentContext,
@@ -868,6 +870,12 @@ export interface SessionPrRegistry {
     repo: string,
     prNumber: number,
     by: string,
+    /**
+     * The cap recomputed from THIS diff, when the caller knows it. Consulted
+     * ahead of the row's stored copy, which under a `dynamic` round policy is
+     * only as fresh as the last sweep — see the registry's own comment.
+     */
+    opts?: { maxRounds?: number },
   ): Promise<{ armed: boolean; reason: string } | null>;
   /**
    * Record that this chat's review actually landed — the completion signal the
@@ -7493,17 +7501,28 @@ export class SessionBroker {
                     // review.
                     requestLocal:
                       reviewer.policy.identity === "self" && this.prRegistry
-                        ? async (repo, n) =>
+                        ? async (repo, n) => {
+                            // The cap, recomputed from the diff THIS request is
+                            // about. Under a `dynamic` policy the row's copy is
+                            // only as fresh as the last sweep, and the order a
+                            // growing PR arrives in — push, then request — is
+                            // exactly the one that lands inside that window.
+                            const row = await this.prRegistry
+                              ?.snapshot(repo, n)
+                              .catch(() => null);
                             // The REASON, not truthiness of the result: the
                             // registry answers with an object on every path now,
                             // so `Boolean(result)` called a spent cap a success —
                             // and a bare `.armed` would call an already-queued
                             // request a failure. Only the reason tells them apart.
-                            (await this.prRegistry?.requestReviewAgent(
-                              repo,
-                              n,
-                              session.chatId,
-                            )) ?? { armed: false, reason: "unknown-pr" }
+                            return (
+                              (await this.prRegistry?.requestReviewAgent(repo, n, session.chatId, {
+                                maxRounds: row
+                                  ? reviewRoundCap(reviewer.policy, changedLines(row))
+                                  : undefined,
+                              })) ?? { armed: false, reason: "unknown-pr" }
+                            );
+                          }
                         : undefined,
                   }
                 : undefined,

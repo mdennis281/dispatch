@@ -93,6 +93,14 @@ function normalize(s: AppSettings): AppSettings {
       graceMinutes: s.worktreeCleanup?.graceMinutes,
     },
     issueWatcher: { enabled: s.issueWatcher?.enabled ?? true },
+    // Carried through RAW, unlike the blocks above — and that is the point.
+    // `normalize` drops anything it does not name, and PUT /api/settings is a
+    // full replace, so an omitted field is a field being deleted: saving a
+    // theme would have wiped the round policy. Not spelled out to its effective
+    // values either, because "unset" here means "inherit the shipped default",
+    // and materialising that would pin every install to today's numbers the
+    // first time anyone saved anything.
+    reviewAgent: s.reviewAgent,
     harness: {
       defaultHarness: s.harness?.defaultHarness ?? DEFAULT_HARNESS,
       defaults: s.harness?.defaults ?? {},

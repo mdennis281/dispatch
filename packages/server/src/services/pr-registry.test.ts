@@ -533,6 +533,41 @@ describe("PrRegistry — Dispatch's own reviewer", () => {
     expect(res.record?.reviewAgent?.requestedAt).toBeUndefined();
   });
 
+  it("honours a caller's fresh cap over the stale one on the row", async () => {
+    // A `dynamic` round policy makes the cap a function of the diff, so the
+    // row's copy is only as current as the last sweep — up to 90 seconds old.
+    // The order a growing PR actually arrives in is push, then `request_review`
+    // immediately after, which lands squarely inside that window. Judged on the
+    // stored cap the request is refused, and the sweep that follows raises the
+    // denominator onto a row with no `requestedAt` left to claim — so the round
+    // the growth just earned could never be spent.
+    const reg = makeRegistry();
+    await reg.record(snapshot({ headRefOid: "sha-1" }), { chatId: "c1" });
+    await reg.requestReviewAgent(REPO, 42, "c1");
+    await reg.claimReviewAgent(REPO, 42, { maxRounds: 1 });
+    await reg.record(snapshot({ headRefOid: "sha-2" }), { chatId: "c1" });
+
+    // Same row, same spent round — the only new fact is a bigger diff.
+    const res = await reg.requestReviewAgent(REPO, 42, "c1", { maxRounds: 3 });
+
+    expect(res).toMatchObject({ armed: true, reason: "armed" });
+    // And recorded, so the chip's denominator agrees with the test just made.
+    expect(res.record?.reviewAgent).toMatchObject({ maxRounds: 3, requestedSha: "sha-2" });
+  });
+
+  it("still refuses when the fresh cap is no bigger than the rounds already spent", async () => {
+    const reg = makeRegistry();
+    await reg.record(snapshot({ headRefOid: "sha-1" }), { chatId: "c1" });
+    await reg.requestReviewAgent(REPO, 42, "c1");
+    await reg.claimReviewAgent(REPO, 42, { maxRounds: 1 });
+    await reg.record(snapshot({ headRefOid: "sha-2" }), { chatId: "c1" });
+
+    // The PR did not grow, so the recomputed cap is the same 1 it always was.
+    const res = await reg.requestReviewAgent(REPO, 42, "c1", { maxRounds: 1 });
+
+    expect(res).toMatchObject({ armed: false, reason: "rounds-spent" });
+  });
+
   it("raiseReviewRoundCap buys a round the SWEEP can actually claim", async () => {
     // The sweep only ever passes the PROJECT's cap — `maybeSpawnReview` reads
     // `policy.maxRounds` from config and has no way to produce a raised number.

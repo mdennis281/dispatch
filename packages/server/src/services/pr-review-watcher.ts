@@ -41,7 +41,7 @@ import type {
   ResolvedReviewAgent,
   ReviewKind,
 } from "@dispatch/shared";
-import { reviewRoundCap } from "@dispatch/shared";
+import { changedLines, reviewRoundCap } from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
 import type { Store } from "../store/index.js";
 import type { PrPollSnapshot } from "./github.js";
@@ -178,22 +178,6 @@ export interface PrReviewAgentHooks {
     round: number;
     policy: ResolvedReviewAgent;
   }): Promise<{ chatId: string } | null>;
-}
-
-/**
- * The diff size a round policy sizes off: additions plus deletions.
- *
- * Both halves count. A review reads what changed, and 500 deleted lines are as
- * much to check as 500 added ones — a pure deletion is exactly where "is
- * anything still calling this" gets missed.
- *
- * `undefined` when NEITHER is known, rather than 0: zero is a real diff size
- * (an empty PR) and would silently mean the same thing here, but keeping them
- * distinct is what lets `reviewRoundCap` document its own fallback.
- */
-function changedLines(snapshot: ReviewCandidate): number | undefined {
-  if (snapshot.additions == null && snapshot.deletions == null) return undefined;
-  return (snapshot.additions ?? 0) + (snapshot.deletions ?? 0);
 }
 
 /** Per-(chat, PR) dedup memory — what we have ALREADY told this chat about. */

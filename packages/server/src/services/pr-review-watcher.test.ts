@@ -1046,7 +1046,7 @@ describe("PrReviewWatcher — Dispatch's own reviewer", () => {
     ]);
   });
 
-  it("falls back to the static cap when the poll could not read the diff size", async () => {
+  it("falls back to the policy's `base` when the poll could not read the diff size", async () => {
     // Absent counts are not evidence of a small diff OR a big one. `base` is
     // the honest floor, and the next poll that knows raises it within a sweep.
     await makeChat("c1", [REF]);

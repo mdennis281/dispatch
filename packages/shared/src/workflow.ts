@@ -731,6 +731,29 @@ function resolveReviewAgent(
 }
 
 /**
+ * The diff size a round policy sizes off: additions plus deletions.
+ *
+ * Both halves count. A review reads what CHANGED, and 500 deleted lines are as
+ * much to check as 500 added ones — a pure deletion is exactly where "is
+ * anything still calling this" gets missed.
+ *
+ * `undefined` when NEITHER is known, rather than 0: zero is a real diff size
+ * and would silently mean the same thing here, but keeping them distinct is
+ * what lets {@link reviewRoundCap} document its own fallback.
+ *
+ * Here rather than beside either caller because there are two — the sweep and
+ * `request_review` — and they must agree on what a PR's size is or the same PR
+ * gets two different caps depending on which one looked last.
+ */
+export function changedLines(pr: {
+  additions?: number;
+  deletions?: number;
+}): number | undefined {
+  if (pr.additions == null && pr.deletions == null) return undefined;
+  return (pr.additions ?? 0) + (pr.deletions ?? 0);
+}
+
+/**
  * The cap in force for ONE pull request — the single place `static` and
  * `dynamic` are reconciled.
  *

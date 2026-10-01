@@ -333,6 +333,7 @@ export class PrRegistry {
     repo: string,
     number: number,
     by: string,
+    opts: { maxRounds?: number } = {},
   ): Promise<RequestReviewAgentResult> {
     const key = prRecordKey(repo, number);
     const prev = await this.store.getPrRecord(key);
@@ -363,10 +364,17 @@ export class PrRegistry {
     // Every allowed round is claimed. Same rule `claimReviewAgent` refuses on —
     // spelled here too because a request the sweep will silently drop reads to
     // the caller exactly like one it is about to serve.
-    if (
-      state?.maxRounds != null &&
-      (state.rounds ?? 0) >= state.maxRounds + (state.extraRounds ?? 0)
-    ) {
+    //
+    // `opts.maxRounds` is the caller's FRESHLY computed cap, and it has to be
+    // consulted ahead of the stored one. Under a `dynamic` round policy the cap
+    // is a function of the diff, so the row's copy is only as current as the
+    // last sweep — up to 90 seconds stale. The order a growing PR actually
+    // arrives in is: push, then `request_review` immediately after. Judged on
+    // the stored cap that request is refused `rounds-spent`, and the sweep that
+    // follows raises the denominator onto a row with no `requestedAt` left to
+    // claim — so the extra round the growth just earned can never be spent.
+    const cap = opts.maxRounds ?? state?.maxRounds;
+    if (cap != null && (state?.rounds ?? 0) >= cap + (state?.extraRounds ?? 0)) {
       return { armed: false, reason: "rounds-spent", record: prev };
     }
     // Already asked at this head, and nothing has served it yet. A parked
@@ -385,6 +393,10 @@ export class PrRegistry {
         await this.store.upsertPrRecord(key, { ...prev }, {
           reviewAgent: {
             ...(state ?? { rounds: 0 }),
+            // Recorded with the request, so every surface that renders the
+            // denominator agrees with the test just applied above rather than
+            // showing "2 of 2" beside a review that is on its way.
+            ...(opts.maxRounds != null ? { maxRounds: opts.maxRounds } : {}),
             requestedSha: sha,
             requestedAt: now,
             requestedBy: by,
