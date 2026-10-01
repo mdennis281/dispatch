@@ -73,6 +73,26 @@ describe("auth bootstrap state", () => {
     expect(useAuth.getState()).toMatchObject({ ready: true, user: null, status: { enabled: true } });
   });
 
+  it("keeps the session when the refresh succeeds but the re-ask fails", async () => {
+    // The refresh is the call that decides whether there IS a session, and it
+    // said yes — `applySession` has already installed the token and the user.
+    // Falling back to the anonymous first answer here would show a signed-in
+    // user the sign-in form while holding a valid token, and `main.tsx` would
+    // never start the live app.
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ enabled: true, configured: true, firstRunDismissed: true, user: null }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ accessToken: "memory-only", expiresIn: 600,
+        user: { id: "u1", username: "owner", displayName: "Owner", owner: true, disabled: false,
+          createdAt: 1, hasPassword: true, passkeyCount: 0, totpEnabled: false } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response("nope", { status: 503 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await initializeAuth();
+    expect(useAuth.getState()).toMatchObject({
+      ready: true, accessToken: "memory-only", user: { username: "owner" },
+      status: { enabled: true, configured: true, user: { username: "owner" } },
+    });
+  });
+
   it("adds the non-simple CSRF header to public authentication posts", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);

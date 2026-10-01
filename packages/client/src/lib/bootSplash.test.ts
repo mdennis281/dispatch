@@ -19,6 +19,7 @@ import {
   BOOT_SPLASH_HARD_MAX_MS,
   BOOT_SPLASH_MAX_MS,
   BOOT_SPLASH_STALL_MS,
+  bootMilestones,
   capExtension,
   isBootReady,
   type BootState,
@@ -31,6 +32,8 @@ const BOOTED: BootState = {
   signedIn: false,
   setupPending: false,
   hydrated: true,
+  socketOpen: true,
+  hydrating: false,
   mockSeeded: false,
 };
 
@@ -129,5 +132,61 @@ describe("capExtension", () => {
     expect(capExtension(BOOT_SPLASH_HARD_MAX_MS - 400, 0)).toBe(400);
     expect(capExtension(BOOT_SPLASH_HARD_MAX_MS, 0)).toBeNull();
     expect(capExtension(BOOT_SPLASH_HARD_MAX_MS + 5_000, 0)).toBeNull();
+  });
+});
+
+/**
+ * What the cap counts as the boot getting somewhere.
+ *
+ * The distinction this suite exists for: a FAILING boot is the noisiest thing in
+ * the app — `ConnectingScreen` re-probes every four seconds and the socket's
+ * retry loop churns `useConnection` on every attempt, both well inside
+ * `BOOT_SPLASH_STALL_MS`. A watchdog that counted store writes would read all of
+ * that as health and hide a dead boot behind the splash for the entire hard
+ * ceiling, which is precisely backwards.
+ */
+describe("bootMilestones", () => {
+  const nothing = state({
+    authReady: false,
+    setupPending: null,
+    hydrated: false,
+    socketOpen: false,
+    hydrating: false,
+  });
+
+  it("rises once per checkpoint, over a whole healthy boot", () => {
+    const steps = [
+      nothing,
+      { ...nothing, authReady: true },
+      { ...nothing, authReady: true, setupPending: false },
+      { ...nothing, authReady: true, setupPending: false, socketOpen: true },
+      { ...nothing, authReady: true, setupPending: false, socketOpen: true, hydrating: true },
+      { ...nothing, authReady: true, setupPending: false, socketOpen: true, hydrated: true },
+    ].map(bootMilestones);
+    expect(steps).toEqual([0, 1, 2, 3, 4, 5]);
+  });
+
+  it("does not dip when the snapshot stops being in flight by LANDING", () => {
+    // `hydrating` goes false and `hydrated` goes true in the same breath. If
+    // that read as a step backwards the counter would stop being monotonic and
+    // the caller could not treat "it went up" as the whole test.
+    const inFlight = { ...nothing, authReady: true, setupPending: false, socketOpen: true, hydrating: true };
+    expect(bootMilestones({ ...inFlight, hydrating: false, hydrated: true })).toBeGreaterThan(
+      bootMilestones(inFlight),
+    );
+  });
+
+  it("cannot be moved by retry or probe bookkeeping", () => {
+    // The structural guarantee, stated as a test: none of what a failing boot
+    // churns — `probe`, `attempts`, `nextRetryAt`, `downSince`, `state` short of
+    // "open" — is part of `BootState`, so there is nothing a retry loop can
+    // touch that this function can see. A stalled boot therefore holds one
+    // number and the cap expires on it.
+    const stalled = { ...nothing, authReady: true, setupPending: null };
+    expect(bootMilestones(stalled)).toBe(bootMilestones({ ...stalled }));
+    expect(Object.keys(stalled).sort()).toEqual([
+      "authEnabled", "authReady", "hydrated", "hydrating", "mockSeeded",
+      "setupPending", "signedIn", "socketOpen", "unreachable",
+    ]);
   });
 });

@@ -88,9 +88,22 @@ export async function initializeAuth(): Promise<void> {
           useAuth.getState().applyStatus(await response.json() as AuthStatus);
           return;
         }
+        // The re-ask failed, but the REFRESH did not — and that is the one that
+        // decides whether there is a session. `applySession` already installed
+        // its access token and its user, so publishing the anonymous first
+        // answer here would show a signed-in user the sign-in form while
+        // holding a perfectly good token, and `main.tsx` would never start the
+        // live app. Take the refresh's word for the user and the first status
+        // for everything else; the re-ask exists only to pick up fields that
+        // may have changed, and losing it costs nothing a reload won't fix.
+        const user = useAuth.getState().user;
+        if (user) {
+          useAuth.getState().applyStatus({ ...status, user });
+          return;
+        }
       }
-      // Fell through: the refresh failed, or the re-ask did. The first answer
-      // was right after all and the sign-in form is where this goes.
+      // The refresh itself said no. The first answer was right after all, and
+      // the sign-in form is where this goes.
     }
     useAuth.getState().applyStatus(status);
   } catch {

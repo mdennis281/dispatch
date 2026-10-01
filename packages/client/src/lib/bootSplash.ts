@@ -184,15 +184,19 @@ export const BOOT_SPLASH_MAX_MS = 9_000;
  * entirely healthy boot, so the cap fired on an ordinary bad-signal load and
  * uncovered the empty shell the splash exists to hide.
  *
- * So the cap asks the question that actually separates the two: is anything
- * still MOVING? Every step of the boot writes to one of the three stores the
- * splash subscribes to, so a boot that is progressing cannot be silent and one
- * that is wedged cannot be noisy.
+ * So the cap asks the question that actually separates the two: is the boot
+ * still REACHING somewhere it has not been? Not "did a store change" — a failing
+ * boot is the noisiest thing in the app, with `ConnectingScreen` re-probing
+ * every four seconds and the socket's retry loop churning `useConnection`
+ * underneath it, all of it comfortably inside this window. That version of the
+ * question would have kept a dead boot behind the splash for the full hard
+ * ceiling, which is the opposite of what the cap is for. `bootMilestones`
+ * counts only the things a boot passes once.
  *
- * Sized against the longest legitimate gap between two of those writes, which is
- * the ws-ticket POST plus the socket upgrade — two round trips with no store
- * update in between, so ~4s on a 2s-RTT link. Five leaves that headroom without
- * making a genuinely dead boot sit around.
+ * Sized against the longest legitimate gap between two MILESTONES, which is the
+ * ws-ticket POST plus the socket upgrade — two round trips that reach no
+ * milestone in between, so ~4s on a 2s-RTT link. Five leaves that headroom
+ * without making a genuinely dead boot sit around.
  */
 export const BOOT_SPLASH_STALL_MS = 5_000;
 /**
@@ -220,6 +224,11 @@ export interface BootState {
   setupPending: boolean | null;
   /** The REST snapshot has landed, so the shell has rows to render. */
   hydrated: boolean;
+  /** The socket is up, so the snapshot has been asked for. */
+  socketOpen: boolean;
+  /** That snapshot is outstanding — a milestone the `hydrated` flag is a round
+   *  trip too late to report. */
+  hydrating: boolean;
   /** Dev-only: the offline mock was seeded instead, which is also real content. */
   mockSeeded: boolean;
 }
@@ -273,6 +282,33 @@ export function isBootReady(s: BootState): boolean {
  * within `BOOT_SPLASH_STALL_MS` of going quiet rather than at whatever the next
  * deadline happened to be.
  */
+/**
+ * How many of the boot's one-way checkpoints have been passed.
+ *
+ * The cap's definition of progress, and it counts MILESTONES rather than store
+ * writes for a specific reason: a boot that is failing writes constantly.
+ * `ConnectingScreen` re-probes every four seconds, the socket's retry loop
+ * updates `useConnection` on every attempt and backoff, and both are inside
+ * `BOOT_SPLASH_STALL_MS`. Treating any of that as forward motion would let a
+ * dead boot hold the splash up for the entire hard ceiling, hiding the very
+ * diagnostics the user needs — the exact opposite of the cap's job.
+ *
+ * None of that bookkeeping is in `BootState`, so it cannot be counted here even
+ * by accident; and because the result only ever RISES during a boot, the caller
+ * can treat "the number went up" as the whole test. A reconnect can take
+ * `socketOpen` down again, but by then `hydrated` is set and the splash is long
+ * gone.
+ */
+export function bootMilestones(s: BootState): number {
+  return (
+    (s.authReady ? 1 : 0) +
+    (s.setupPending !== null ? 1 : 0) +
+    (s.socketOpen ? 1 : 0) +
+    (s.hydrating || s.hydrated ? 1 : 0) +
+    (s.hydrated ? 1 : 0)
+  );
+}
+
 export function capExtension(elapsed: number, sinceProgress: number): number | null {
   const stall = BOOT_SPLASH_STALL_MS - sinceProgress;
   if (stall <= 0) return null;
@@ -290,6 +326,8 @@ function readBootState(): BootState {
     signedIn: !!auth.user,
     setupPending: useSetup.getState().pending,
     hydrated: conn.hydrated,
+    socketOpen: conn.state === "open",
+    hydrating: conn.hydrating,
     mockSeeded: conn.mockSeeded,
   };
 }
@@ -412,14 +450,21 @@ export function startBootSplash(): void {
     );
   };
 
-  // Any write to the three stores subscribed below is the boot making progress:
-  // no step of it advances without one. The cap reads this to tell "slow" from
-  // "stuck" — see `capExtension`.
+  // How far the boot has got, and when it last got further. ONLY a rise counts:
+  // the stores churn hardest when the boot is failing (see `BOOT_SPLASH_STALL_MS`),
+  // so "a store changed" would read a retry loop as healthy progress and hide a
+  // dead boot behind the splash for the full hard ceiling.
+  let milestones = 0;
   let progressAt = startedAt;
 
   const check = () => {
-    progressAt = performance.now();
-    if (isBootReady(readBootState())) lift();
+    const state = readBootState();
+    const reached = bootMilestones(state);
+    if (reached > milestones) {
+      milestones = reached;
+      progressAt = performance.now();
+    }
+    if (isBootReady(state)) lift();
   };
 
   // `useConnection` is in here because the REST snapshot is now part of the

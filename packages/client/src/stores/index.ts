@@ -420,6 +420,9 @@ function scheduleTurnEndRefresh(chatId: string): void {
  */
 export async function hydrateFromServer(): Promise<boolean> {
   let projects, agents, modes, chats, attention, runners, terminals, prs;
+  // A boot milestone for the splash: the socket's work is under way, which is a
+  // round trip before `noteHydrated` below can say it finished.
+  useConnection.getState().noteHydrating(true);
   try {
     [projects, agents, modes, chats, attention, runners, terminals, prs] = await Promise.all([
       api.projects.list(),
@@ -435,6 +438,7 @@ export async function hydrateFromServer(): Promise<boolean> {
       api.prs.list().catch(() => []),
     ]);
   } catch {
+    useConnection.getState().noteHydrating(false);
     return false;
   }
 
@@ -536,6 +540,7 @@ export async function hydrateFromServer(): Promise<boolean> {
   // sidebar mid-populate. The best-effort loads kicked off above are deliberately
   // NOT waited on — they are the ones that may never answer.
   useConnection.getState().noteHydrated();
+  useConnection.getState().noteHydrating(false);
 
   return true;
 }
