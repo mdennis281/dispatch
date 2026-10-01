@@ -89,6 +89,13 @@ export function RightPanel({ chat }: { chat: Chat }) {
   ];
   const runTabs: TabDef[] = [
     { id: "agents", label: "Agents", icon: <Bot />, count: counts.agents },
+    // Terminals and Apps are repo-shaped too, and Terminals especially: the
+    // panel OPENS a shell, which is the one thing the global posture exists
+    // to prevent. The server refuses it as well (`resolveCwd` in
+    // routes/terminals.ts) — a tab that always errors is worse than no tab.
+    ...(shipless
+      ? []
+      : [
     { id: "terminals", label: "Terminals", icon: <SquareTerminal />, count: counts.terminals },
     {
       id: "apps",
@@ -99,6 +106,7 @@ export function RightPanel({ chat }: { chat: Chat }) {
       // it is orphans.
       tip: appsTip(counts),
     },
+        ] as TabDef[]),
   ];
 
   const tabs = group === "ship" ? shipTabs : runTabs;

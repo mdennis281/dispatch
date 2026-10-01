@@ -61,6 +61,117 @@ export interface CodexStreamDecoderOpts {
  * deltas keyed by `itemId` and must finalize under the same id so the client
  * can swap the live buffer for the persisted row in place.
  */
+/**
+ * The name + input a Codex tool item should present as.
+ *
+ * See the module header for why these borrow Claude's tool names.
+ *
+ * Module-level and exported because TWO things need it and they must not
+ * disagree: the stream decoder, which labels the row a human reads, and
+ * `CodexSession.guardStartedItem`, which decides whether the call is allowed.
+ * A guard that mapped names itself would cover whichever item types somebody
+ * remembered — which is exactly how `fileChange`, `dynamicToolCall`,
+ * `collabAgentToolCall` and `webSearch` went unguarded while `commandExecution`
+ * was handled. Routing both through one mapper makes the coverage structural.
+ */
+export function codexToolCall(
+  item: Item,
+): { name: string; input: Record<string, unknown>; server?: string } | null {
+  switch (item.type) {
+    case "commandExecution": {
+      const command = String(item.command ?? "");
+      return {
+        name: "Bash",
+        input: {
+          command,
+          // `cwd` rides along so a row for a command run in a worktree says so.
+          ...(typeof item.cwd === "string" ? { cwd: item.cwd } : {}),
+          description: firstLine(command),
+        },
+      };
+    }
+    case "fileChange": {
+      const changes = Array.isArray(item.changes) ? (item.changes as Record<string, unknown>[]) : [];
+      const first = changes[0];
+      const path = typeof first?.path === "string" ? first.path : undefined;
+      return {
+        name: changes.length > 1 ? "MultiEdit" : "Edit",
+        input: {
+          // `file_path` is what derives the "editing app.ts" working label.
+          ...(path ? { file_path: path } : {}),
+          edits: changes.map((c) => ({
+            path: c.path,
+            kind: (c.kind as { type?: string } | undefined)?.type ?? "update",
+            diff: c.diff,
+          })),
+        },
+      };
+    }
+    case "mcpToolCall": {
+      const server = String(item.server ?? "");
+      const tool = String(item.tool ?? "");
+      return {
+        name: `mcp__${server}__${tool}`,
+        server: server || undefined,
+        input: (item.arguments ?? {}) as Record<string, unknown>,
+      };
+    }
+    case "dynamicToolCall": {
+      const ns = typeof item.namespace === "string" && item.namespace ? item.namespace : undefined;
+      const tool = String(item.tool ?? "");
+      return {
+        name: ns ? `mcp__${ns}__${tool}` : tool,
+        server: ns,
+        input: (item.arguments ?? {}) as Record<string, unknown>,
+      };
+    }
+    case "collabAgentToolCall": {
+      const tool = String(item.tool ?? "");
+      const receivers = Array.isArray(item.receiverThreadIds)
+        ? item.receiverThreadIds.filter((id): id is string => typeof id === "string")
+        : [];
+      const prompt = typeof item.prompt === "string" ? item.prompt : "";
+      if (tool === "spawnAgent") {
+        return {
+          // `Agent` is already the provider-neutral spawn vocabulary consumed
+          // by SubagentCard/AgentsPanel. The child thread gets attached to
+          // this toolUseId by CodexSession.
+          name: "Agent",
+          input: {
+            description: firstLine(prompt),
+            prompt,
+            ...(typeof item.model === "string" ? { model: item.model } : {}),
+            ...(typeof item.reasoningEffort === "string"
+              ? { effort: item.reasoningEffort }
+              : {}),
+            ...(receivers.length ? { agent_ids: receivers } : {}),
+          },
+        };
+      }
+      const names: Record<string, string> = {
+        sendInput: "SendMessage",
+        resumeAgent: "AgentResume",
+        wait: "TaskOutput",
+        closeAgent: "TaskStop",
+      };
+      return {
+        name: names[tool] ?? "AgentControl",
+        input: {
+          ...(prompt ? { prompt } : {}),
+          ...(receivers.length ? { agent_ids: receivers } : {}),
+        },
+      };
+    }
+    case "webSearch":
+      return {
+        name: "WebSearch",
+        input: { query: item.query ?? (item.action as { query?: unknown } | undefined)?.query ?? "" },
+      };
+    default:
+      return null;
+  }
+}
+
 export class CodexStreamDecoder {
   private readonly genId: () => string;
   /** Context window reported for the running model, for the meter denominator. */
@@ -172,7 +283,7 @@ export class CodexStreamDecoder {
       case "collabAgentToolCall":
       case "webSearch": {
         if (item.type === "collabAgentToolCall") this.sawStructuredCollaboration = true;
-        const call = this.toolCallOf(item);
+        const call = codexToolCall(item);
         if (!call) return [];
         this.startedTools.add(id);
         return [{ type: "tool-use", toolUseId: id, ...call }];
@@ -249,7 +360,7 @@ export class CodexStreamDecoder {
         // history) still needs its call row, or the result has nothing to
         // attach to and renders as an orphan.
         if (!this.startedTools.has(id)) {
-          const call = this.toolCallOf(item);
+          const call = codexToolCall(item);
           if (call) out.push({ type: "tool-use", toolUseId: id, ...call });
         }
         this.startedTools.delete(id);
@@ -295,111 +406,10 @@ export class CodexStreamDecoder {
     if (item.type !== "collabAgentToolCall" || item.tool !== "wait" || !this.itemOk(item)) {
       return false;
     }
-    const call = this.toolCallOf(item);
+    const call = codexToolCall(item);
     if (!call || Object.keys(call.input).length !== 0) return false;
     const content = this.resultContentOf(item);
     return typeof content === "string" && content.trim().length === 0;
-  }
-
-  /**
-   * The name + input a Codex tool item should present as.
-   *
-   * See the module header for why these borrow Claude's tool names.
-   */
-  private toolCallOf(item: Item): { name: string; input: Record<string, unknown>; server?: string } | null {
-    switch (item.type) {
-      case "commandExecution": {
-        const command = String(item.command ?? "");
-        return {
-          name: "Bash",
-          input: {
-            command,
-            // `cwd` rides along so a row for a command run in a worktree says so.
-            ...(typeof item.cwd === "string" ? { cwd: item.cwd } : {}),
-            description: firstLine(command),
-          },
-        };
-      }
-      case "fileChange": {
-        const changes = Array.isArray(item.changes) ? (item.changes as Record<string, unknown>[]) : [];
-        const first = changes[0];
-        const path = typeof first?.path === "string" ? first.path : undefined;
-        return {
-          name: changes.length > 1 ? "MultiEdit" : "Edit",
-          input: {
-            // `file_path` is what derives the "editing app.ts" working label.
-            ...(path ? { file_path: path } : {}),
-            edits: changes.map((c) => ({
-              path: c.path,
-              kind: (c.kind as { type?: string } | undefined)?.type ?? "update",
-              diff: c.diff,
-            })),
-          },
-        };
-      }
-      case "mcpToolCall": {
-        const server = String(item.server ?? "");
-        const tool = String(item.tool ?? "");
-        return {
-          name: `mcp__${server}__${tool}`,
-          server: server || undefined,
-          input: (item.arguments ?? {}) as Record<string, unknown>,
-        };
-      }
-      case "dynamicToolCall": {
-        const ns = typeof item.namespace === "string" && item.namespace ? item.namespace : undefined;
-        const tool = String(item.tool ?? "");
-        return {
-          name: ns ? `mcp__${ns}__${tool}` : tool,
-          server: ns,
-          input: (item.arguments ?? {}) as Record<string, unknown>,
-        };
-      }
-      case "collabAgentToolCall": {
-        const tool = String(item.tool ?? "");
-        const receivers = Array.isArray(item.receiverThreadIds)
-          ? item.receiverThreadIds.filter((id): id is string => typeof id === "string")
-          : [];
-        const prompt = typeof item.prompt === "string" ? item.prompt : "";
-        if (tool === "spawnAgent") {
-          return {
-            // `Agent` is already the provider-neutral spawn vocabulary consumed
-            // by SubagentCard/AgentsPanel. The child thread gets attached to
-            // this toolUseId by CodexSession.
-            name: "Agent",
-            input: {
-              description: firstLine(prompt),
-              prompt,
-              ...(typeof item.model === "string" ? { model: item.model } : {}),
-              ...(typeof item.reasoningEffort === "string"
-                ? { effort: item.reasoningEffort }
-                : {}),
-              ...(receivers.length ? { agent_ids: receivers } : {}),
-            },
-          };
-        }
-        const names: Record<string, string> = {
-          sendInput: "SendMessage",
-          resumeAgent: "AgentResume",
-          wait: "TaskOutput",
-          closeAgent: "TaskStop",
-        };
-        return {
-          name: names[tool] ?? "AgentControl",
-          input: {
-            ...(prompt ? { prompt } : {}),
-            ...(receivers.length ? { agent_ids: receivers } : {}),
-          },
-        };
-      }
-      case "webSearch":
-        return {
-          name: "WebSearch",
-          input: { query: item.query ?? (item.action as { query?: unknown } | undefined)?.query ?? "" },
-        };
-      default:
-        return null;
-    }
   }
 
   /** The content payload a completed tool item should carry. */

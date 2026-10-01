@@ -21,7 +21,7 @@
  * agent-opened one are the same object, visible to both.
  */
 import type { FastifyInstance } from "fastify";
-import { parseRegistryQuery, RegistryQueryError } from "@dispatch/shared";
+import { isGlobalProject, parseRegistryQuery, RegistryQueryError } from "@dispatch/shared";
 import { chatRoot } from "./files.js";
 
 /** Resolve the chat + its default shell cwd, or an HTTP-shaped failure. */
@@ -34,6 +34,19 @@ async function resolveCwd(
   if (!chat) return { code: 404, error: "chat not found" };
   const project = await app.cm.store.getProject(chat.projectId);
   if (!project) return { code: 404, error: "project not found" };
+  // The global chat has no repo, and a shell there would be a working route
+  // around the posture that makes a project-less chat safe — the mode denies
+  // `mcp__dispatch-workspace__terminal`, and these routes are a thin wrapper
+  // over the same service that tool uses. Refused at the ONE place both write
+  // routes resolve through, rather than on each of them.
+  if (isGlobalProject(project.id)) {
+    return {
+      code: 400,
+      error:
+        "The global chat has no repository to open a shell in. Spawn a chat into the " +
+        "project you want to work in and run it there.",
+    };
+  }
   return { cwd: chatRoot(chat, project), projectId: project.id };
 }
 

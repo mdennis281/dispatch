@@ -38,7 +38,7 @@ import type {
   HarnessSession,
   HarnessSessionSpec,
 } from "../types.js";
-import { CodexStreamDecoder, legacySubagentToolUseId, questionsOf } from "./stream.js";
+import { CodexStreamDecoder, codexToolCall, legacySubagentToolUseId, questionsOf } from "./stream.js";
 import { toCodexPosture, toDeveloperInstructions, clampEffort } from "./options.js";
 import { catchToolGuard } from "../guard.js";
 import { codexCompactNote, normalizeCompactFocus } from "../compact.js";
@@ -479,23 +479,15 @@ export class CodexSession implements HarnessSession {
   private guardStartedItem(frame: RpcFrame): void {
     const item = (frame.params as { item?: Record<string, unknown> } | undefined)?.item;
     if (!item) return;
-    let toolName: string;
-    let input: Record<string, unknown>;
-    if (item.type === "commandExecution") {
-      toolName = "Bash";
-      input = {
-        command: String(item.command ?? ""),
-        ...(typeof item.cwd === "string" ? { cwd: item.cwd } : {}),
-      };
-    } else if (item.type === "mcpToolCall") {
-      // The same wire name the stream mapper builds, so a denylist entry and
-      // a sighting agree about what the tool is called.
-      toolName = `mcp__${String(item.server ?? "")}__${String(item.tool ?? "")}`;
-      input = (item.arguments ?? {}) as Record<string, unknown>;
-    } else {
-      return;
-    }
-    const blocked = catchToolGuard(this.spec.toolGuard, toolName, input, "restart-turn");
+    // EVERY mapped item type, through the same mapper the stream decoder uses
+    // to label the row. Hand-rolling the name here is what left `fileChange`,
+    // `dynamicToolCall`, `collabAgentToolCall` and `webSearch` unguarded while
+    // `commandExecution` was covered — and now that any mode can carry a tool
+    // policy, an unguarded item type is an unenforced policy, not just a
+    // missing workflow warning.
+    const call = codexToolCall(item);
+    if (!call) return;
+    const blocked = catchToolGuard(this.spec.toolGuard, call.name, call.input, "restart-turn");
     if (!blocked) return;
     this.emit(blocked);
     void this.interrupt();
