@@ -62,3 +62,34 @@ describe("AttentionQueue — triage order", () => {
     expect(queue.size()).toBe(0);
   });
 });
+
+describe("AttentionQueue — clear", () => {
+  it("dismisses the retrospective kinds and leaves the blocking ones", () => {
+    for (const kind of ["permission", "question", "idle", "done", "review"] as const) {
+      queue.add(item(kind));
+    }
+    // The two blocking kinds are a live agent waiting on an answer — and what
+    // puts the chat under "Needs input" — so a plain clear must not take them.
+    expect(queue.clear().map((r) => r.id).sort()).toEqual(["done-0", "idle-0", "review-0"]);
+    expect(queue.list().map((i) => i.kind)).toEqual(["permission", "question"]);
+  });
+
+  it("carries each item's chatId out, so the caller can broadcast the resolve", () => {
+    queue.add(item("done", { id: "d1", chatId: "c2" }));
+    expect(queue.clear()).toEqual([{ id: "d1", chatId: "c2" }]);
+  });
+
+  it("takes a blocking kind only when asked for it by name", () => {
+    queue.add(item("permission", { id: "p1" }));
+    queue.add(item("idle", { id: "i1" }));
+    expect(queue.clear({ kinds: ["permission"] }).map((r) => r.id)).toEqual(["p1"]);
+    expect(queue.list().map((i) => i.id)).toEqual(["i1"]);
+  });
+
+  it("scopes to one chat when given one", () => {
+    queue.add(item("done", { id: "mine", chatId: "c1" }));
+    queue.add(item("done", { id: "theirs", chatId: "c2" }));
+    expect(queue.clear({ chatId: "c1" }).map((r) => r.id)).toEqual(["mine"]);
+    expect(queue.list().map((i) => i.id)).toEqual(["theirs"]);
+  });
+});

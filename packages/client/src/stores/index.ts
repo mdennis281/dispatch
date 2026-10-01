@@ -119,7 +119,7 @@ export function hydrateFromMock(): void {
  * sorted). Drives the "+N more" count on that chat's single OS notification.
  */
 function itemsForChat(chatId: string): AttentionItem[] {
-  return useAttention.getState().items.filter((i) => i.chatId === chatId);
+  return useAttention.getState().visible.filter((i) => i.chatId === chatId);
 }
 
 /**
@@ -211,10 +211,25 @@ export function applyServerEvent(evt: WsServerEvent): void {
       // happens to be mounted. Never awaited: delivery is best-effort.
       const title = useChats.getState().byId[evt.item.chatId]?.title;
       const outstanding = itemsForChat(evt.item.chatId).length;
-      void notifyAttention(evt.item, title, outstanding);
-      void setAttentionBadge(useAttention.getState().items.length);
+      // Nothing the queue filter hides may raise a toast: a kind muted out of
+      // the inbox that still buzzed the OS would be the one alert you cannot
+      // find the row for. (The per-device notification filter is separate and
+      // stricter — `notifyAttention` applies it on top.)
+      if (useAttention.getState().visible.some((i) => i.id === evt.item.id)) {
+        void notifyAttention(evt.item, title, outstanding);
+      }
+      void setAttentionBadge(useAttention.getState().visible.length);
       return;
     }
+
+    case "attention-filter":
+      // Another window (or another device) saved the app-wide queue filter.
+      // Re-stamping the badge is the point as much as the list is: muting a kind
+      // that already has rows must take them off the OS icon now, not whenever
+      // the next attention event happens to arrive.
+      useAttention.getState().setFilter(evt.filter);
+      void setAttentionBadge(useAttention.getState().visible.length);
+      return;
 
     case "attention-resolve": {
       // The event's chatId is optional, so read the owner off the item we still
@@ -229,7 +244,7 @@ export function applyServerEvent(evt: WsServerEvent): void {
         const title = useChats.getState().byId[chatId]?.title;
         void syncChatNotification(chatId, itemsForChat(chatId), title);
       }
-      void setAttentionBadge(useAttention.getState().items.length);
+      void setAttentionBadge(useAttention.getState().visible.length);
       return;
     }
 
@@ -297,7 +312,7 @@ export function applyServerEvent(evt: WsServerEvent): void {
       void closeChatNotification(evt.chatId);
       useAttention.getState().clearChat(evt.chatId);
       useChats.getState().removeChat(evt.chatId);
-      void setAttentionBadge(useAttention.getState().items.length);
+      void setAttentionBadge(useAttention.getState().visible.length);
       return;
 
     case "project-update":
@@ -470,6 +485,10 @@ export async function hydrateFromServer(): Promise<boolean> {
     .get()
     .then((s) => {
       useSettings.getState().apply(s);
+      // `apply` hands the queue filter to the attention store, which may have
+      // hydrated before this request landed — so the badge is re-stamped off the
+      // newly filtered list rather than the unfiltered one it was set from.
+      void setAttentionBadge(useAttention.getState().visible.length);
       const harness = s.harness?.defaultHarness ?? DEFAULT_HARNESS;
       return api.models
         .list(harness)
@@ -487,7 +506,7 @@ export async function hydrateFromServer(): Promise<boolean> {
   useAttention.getState().hydrate(attention);
   // The badge is OS state that outlives the page: a launch that found nothing
   // waiting has to actively clear the count a previous session left on the icon.
-  void setAttentionBadge(attention.length);
+  void setAttentionBadge(useAttention.getState().visible.length);
   useRunners.getState().hydrate(runners, {});
   useTerminals.getState().hydrate(terminals, {});
   usePrs.getState().hydrate(prs);

@@ -31,6 +31,7 @@ import {
   AttentionItemSchema,
   MessagePartSchema,
 } from "./messages.js";
+import { AttentionFilterSchema } from "./notify.js";
 import { ProjectConfigSchema, ProjectConfigErrorSchema } from "./project-config.js";
 import { UsageSnapshotSchema } from "./usage.js";
 import { WorkflowExemptionSchema } from "./workflow.js";
@@ -156,6 +157,19 @@ export const AttentionResolveEventSchema = z.object({
   type: z.literal("attention-resolve"),
   id: z.string(),
   chatId: z.string().optional(),
+});
+
+/**
+ * The app-wide Attention Queue filter changed (`PUT /api/settings`).
+ *
+ * It is broadcast rather than left for each client to notice on its next
+ * startup fetch because the filter is app-wide BY DESIGN — the whole argument
+ * for storing it server-side is that two open windows must not disagree about
+ * how many chats are waiting, which a reload-to-find-out would reintroduce.
+ */
+export const AttentionFilterEventSchema = z.object({
+  type: z.literal("attention-filter"),
+  filter: AttentionFilterSchema,
 });
 
 /** A line of subApp runner output. */
@@ -535,6 +549,7 @@ export const WsServerEventSchema = z.discriminatedUnion("type", [
   PermissionResolvedEventSchema,
   AttentionAddEventSchema,
   AttentionResolveEventSchema,
+  AttentionFilterEventSchema,
   RunnerLogEventSchema,
   RunnerUpdateEventSchema,
   PrUpdateEventSchema,

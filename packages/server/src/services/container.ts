@@ -1103,6 +1103,10 @@ export function createServices(
         .then((s) => {
           broker.setCap(s.maxActiveSessions);
           broker.setIdleTimeout(s.idleSessionMinutes);
+          // Same arrangement for the Attention Queue filter: the push service
+          // holds it (its bus handler is synchronous), `PUT /api/settings` hands
+          // it over on every save, and this is where it starts out.
+          push.setQueueFilter(s.attentionQueue);
         })
         .catch(() => {
           /* best-effort: an unreadable config leaves the env/default cap in force */

@@ -231,7 +231,7 @@ export function BottomNav({ chat }: { chat: Chat | null }) {
   // off-canvas.
   const attention = useAttention(
     (s) =>
-      s.items.filter((i) => i.kind === "permission" || i.kind === "question")
+      s.visible.filter((i) => i.kind === "permission" || i.kind === "question")
         .length,
   );
 

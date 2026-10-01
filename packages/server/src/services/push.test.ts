@@ -282,6 +282,92 @@ describe("PushService", () => {
     expect(sent).toHaveLength(1);
   });
 
+  it("never pushes a kind the Attention Queue is hiding", async () => {
+    // A push you cannot find the row for is the worst of both. The gate is on
+    // the BUS path (not `fanOut`), because it also has to keep the muted item
+    // out of the outstanding counts the payload carries.
+    const { svc, sent } = make();
+    svc.start();
+    await svc.subscribe(sub(1));
+    svc.setQueueFilter({ kinds: { done: false }, reviewKinds: {} });
+    bus.publish({ type: "attention-add", item: attn("done") });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(sent).toHaveLength(0);
+
+    svc.setQueueFilter({ kinds: {}, reviewKinds: {} });
+    bus.publish({ type: "attention-add", item: attn("done") });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(sent).toHaveLength(1);
+    svc.stop();
+  });
+
+  it("counts the badge and '+N more' through the filter, in both directions", async () => {
+    const { svc, sent } = make();
+    svc.start();
+    await svc.subscribe(sub(1));
+    // Arrives while `done` is muted: tracked, not sent — and NOT lost, which is
+    // what lets unmuting bring it back into the counts.
+    svc.setQueueFilter({ kinds: { done: false }, reviewKinds: {} });
+    bus.publish({ type: "attention-add", item: attn("done", { id: "d1" }) });
+    bus.publish({ type: "attention-add", item: attn("permission", { id: "p1" }) });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(sent).toHaveLength(1);
+    // The muted item is not in the badge the permission push carries.
+    expect(JSON.parse(sent[0]!.payload)).toMatchObject({ outstanding: 1, badge: 1 });
+
+    svc.setQueueFilter({ kinds: {}, reviewKinds: {} });
+    bus.publish({ type: "attention-add", item: attn("question", { id: "q1" }) });
+    await new Promise((r) => setTimeout(r, 10));
+    // …and after unmuting it counts again, with nothing to reconcile.
+    expect(JSON.parse(sent[1]!.payload)).toMatchObject({ outstanding: 3, badge: 3 });
+    svc.stop();
+  });
+
+  it("withdraws when the last VISIBLE item goes, even with a muted one left behind", async () => {
+    const { svc, sent } = make();
+    svc.start();
+    await svc.subscribe(sub(1));
+    svc.setQueueFilter({ kinds: { done: false }, reviewKinds: {} });
+    bus.publish({ type: "attention-add", item: attn("done", { id: "d1" }) });
+    bus.publish({ type: "attention-add", item: attn("permission", { id: "p1" }) });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(sent).toHaveLength(1);
+
+    // The muted `done` is still tracked (it has to be, for unmuting), but the
+    // phone is holding a sticky permission toast for a chat with nothing left
+    // to show — so the withdrawal must still fire.
+    bus.publish({ type: "attention-resolve", id: "p1", chatId: "c1" });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(sent).toHaveLength(2);
+    expect(JSON.parse(sent[1]!.payload)).toMatchObject({ outstanding: 0 });
+
+    // …and resolving the hidden one after that sends nothing more: `withdraw`
+    // already cleared `shown`, so the second pass has no device to wake.
+    bus.publish({ type: "attention-resolve", id: "d1", chatId: "c1" });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(sent).toHaveLength(2);
+    svc.stop();
+  });
+
+  it("still withdraws an item whose push went out before its kind was muted", async () => {
+    // The filter can change between the push and the resolve, which is exactly
+    // the case a "was this item visible?" check in `untrack` would skip — and
+    // the toast is already on the phone.
+    const { svc, sent } = make();
+    svc.start();
+    await svc.subscribe(sub(1));
+    bus.publish({ type: "attention-add", item: attn("done", { id: "d1" }) });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(sent).toHaveLength(1);
+
+    svc.setQueueFilter({ kinds: { done: false }, reviewKinds: {} });
+    bus.publish({ type: "attention-resolve", id: "d1", chatId: "c1" });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(sent).toHaveLength(2);
+    expect(JSON.parse(sent[1]!.payload)).toMatchObject({ id: "withdraw-c1", outstanding: 0 });
+    svc.stop();
+  });
+
   it("setPrefs retunes a registered device and reports an unknown one", async () => {
     const { svc, sent } = make();
     await svc.subscribe(sub(1));
