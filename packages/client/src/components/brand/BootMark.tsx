@@ -37,7 +37,7 @@
  * so is always there in a real page, but a vitest render of a component that
  * happens to contain this has no <head> at all.
  */
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { BootMarkArt } from "./BootMarkArt.js";
 // For the `Window.__dispatchBootMark` declaration, which lives with the module
 // that owns the splash's lifetime.
@@ -49,7 +49,50 @@ const DEFAULT_SIZE = 72;
 
 export function BootMark({ size = DEFAULT_SIZE }: { size?: number }) {
   useEffect(() => window.__dispatchBootMark?.hold(), []);
-  // `--boot-mark-size` is what `.boot-splash__mark` reads for its box; the
-  // splash leaves it unset and gets the 116px default.
-  return <BootMarkArt style={{ ["--boot-mark-size" as string]: `${size}px` }} />;
+
+  const host = useRef<HTMLDivElement>(null);
+
+  /*
+   * THE CANVAS RENDERER, NOT JUST THE SVG.
+   *
+   * The SVG loop is main-thread-only by construction (see the note at the top
+   * of index.html's worker script), and the two screens that show this mark are
+   * precisely the two where the main thread is not idle: a connect, and an
+   * update whose installer is saturating the disk while the SPA polls through
+   * it. Those are wait-of-unknown-length screens, so a frozen mark is worse
+   * than no mark — it reads as the app having hung.
+   *
+   * The canvas is CREATED HERE rather than rendered, because
+   * `transferControlToOffscreen` is a one-way door per element: a remount
+   * (StrictMode's double-effect, a size change) handing back the same element
+   * would throw. A fresh one every time is the only version that is always
+   * right. Until the worker has a frame up, `data-canvas` is unset and the SVG
+   * is what you are watching — and if there is no worker to be had it stays
+   * that way for good.
+   */
+  useEffect(() => {
+    const el = host.current;
+    if (!el) return;
+    const canvas = document.createElement("canvas");
+    canvas.className = "boot-mark__canvas";
+    canvas.setAttribute("aria-hidden", "true");
+    el.appendChild(canvas);
+    const handle = window.__dispatchBootMark?.attachCanvas?.(canvas, size, () =>
+      el.setAttribute("data-canvas", ""),
+    );
+    return () => {
+      el.removeAttribute("data-canvas");
+      handle?.stop();
+      canvas.remove();
+    };
+  }, [size]);
+
+  // The host carries the box, because the SVG leaves the flow once the canvas
+  // takes over. `--boot-mark-size` is what `.boot-splash__mark` reads for its
+  // own; the splash leaves it unset and gets the 116px default.
+  return (
+    <div ref={host} className="boot-mark" style={{ width: size, height: size }}>
+      <BootMarkArt style={{ ["--boot-mark-size" as string]: `${size}px` }} />
+    </div>
+  );
 }
