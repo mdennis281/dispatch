@@ -1465,7 +1465,9 @@ export const api = {
    * for why, and for what is deliberately not in it.
    */
   home: {
-    overview: (window: HomeWindow) => get<HomeOverview>(`/api/home?window=${window}`),
+    /** `force` bypasses the server's cache and waits for a fresh rollup. */
+    overview: (window: HomeWindow, force = false) =>
+      get<HomeOverview>(`/api/home?window=${window}${force ? "&force=1" : ""}`),
   },
 
   usage: {

@@ -68,11 +68,17 @@ describe("currentSlot", () => {
     expect(currentSlot(at({ view: "home", pane: "ship" }))).toBeNull();
   });
 
-  it("still lets the transient chrome win over the homepage", () => {
+  it("still lets the More sheet win over the homepage", () => {
     // Same precedence as everywhere else: what is in FRONT of you is what the
-    // bar names, and both of these can be up over a full-bleed view.
+    // bar names, and the sheet can be pulled up over a full-bleed view.
+    //
+    // Its sibling case — `leftOpen` over `home` — is deliberately NOT asserted:
+    // `goHome` closes the picker precisely so that state cannot arise, because
+    // `App` stops rendering the drawer on this view and a flag claiming an
+    // invisible picker would cost the first Chats tap. The rule here stays
+    // general; the combination is prevented at the source rather than
+    // special-cased in a pure function.
     expect(currentSlot(at({ view: "home", moreOpen: true }))).toBe("more");
-    expect(currentSlot(at({ view: "home", leftOpen: true }))).toBe("chats");
   });
 
   it("resolves view-vs-pane rather than letting both answer", () => {

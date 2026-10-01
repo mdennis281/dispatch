@@ -34,7 +34,8 @@ interface HomeStore {
   error: string | null;
   /** Round-trip of the last fetch, ms. Shown in the footer, and honest. */
   fetchMs: number | null;
-  load: () => Promise<void>;
+  /** `force` bypasses the server's cache and waits — see `services/home.ts`. */
+  load: (opts?: { force?: boolean }) => Promise<void>;
   setWindow: (window: HomeWindow) => void;
 }
 
@@ -47,6 +48,17 @@ interface HomeStore {
  */
 const seen = new Map<HomeWindow, HomeOverview>();
 
+/**
+ * Bumped by every `load()`; a response from an older one may still be CACHED
+ * but must not touch the current view's state.
+ *
+ * The specific bug: switch from a cold 7d to 24h and let 7d land first. Without
+ * this the 7d response clears `loading`, so the 24h skeleton vanishes while its
+ * own request is still in flight — and a 7d failure would be shown as the 24h
+ * error. Module-level, like `stores/metrics`, so bumping it re-renders nothing.
+ */
+let generation = 0;
+
 export const useHome = create<HomeStore>((set, get) => ({
   window: "7d",
   overview: null,
@@ -55,26 +67,27 @@ export const useHome = create<HomeStore>((set, get) => ({
   error: null,
   fetchMs: null,
 
-  load: async () => {
+  load: async ({ force = false } = {}) => {
+    const gen = ++generation;
     const window = get().window;
     const had = get().overview !== null;
     set(had ? { refetching: true } : { loading: true, error: null });
     const started = performance.now();
     try {
-      const overview = await api.home.overview(window);
-      // A width switch mid-flight means this answer is for a page that is no
-      // longer showing. Cache it — it is still correct for its own width — but
-      // don't paint it over the one the user is now looking at.
+      const overview = await api.home.overview(window, force);
+      // Still worth caching even if it is no longer the width on screen: it is
+      // correct for its OWN width, and the user may well switch back to it.
       seen.set(overview.window, overview);
-      const current = get().window;
+      if (gen !== generation) return; // a newer load is already in flight
       set({
-        ...(current === overview.window ? { overview } : {}),
+        overview,
         loading: false,
         refetching: false,
         error: null,
         fetchMs: Math.round(performance.now() - started),
       });
     } catch (err) {
+      if (gen !== generation) return;
       set({
         loading: false,
         refetching: false,

@@ -900,7 +900,7 @@ export class MetricsService {
 
   /**
    * Per-project event counts, attributed runtime and a daily spark, for ONE
-   * window — the homepage's whole read of the ledger, in three statements.
+   * window — the homepage's whole read of the ledger, in two statements.
    *
    * TWO statements, and both shapes were measured against the real install
    * (338 MB, 298k events, 400k spans) rather than reasoned about.

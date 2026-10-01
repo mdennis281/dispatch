@@ -22,6 +22,7 @@ import type { Chat } from "@dispatch/shared";
 import { useChats, chatsForProject } from "./chats.js";
 import { useProjects } from "./projects.js";
 import { useView } from "./view.js";
+import { useLayout } from "./layout.js";
 
 /**
  * Focus a project. Switching AWAY closes the open chat: it belongs to the
@@ -189,7 +190,16 @@ export function lastPlace(): LastPlace {
   return place;
 }
 
-/** Go to the overview, snapshotting where you were so the toggle can return. */
+/**
+ * Go to the overview, snapshotting where you were so the toggle can return.
+ *
+ * Also closes the chat picker, because the overview is full-bleed and `App`
+ * stops rendering the drawer entirely — leaving `leftOpen` set would mean
+ * `currentSlot` reporting a visible picker that isn't on screen, so the first
+ * Chats tap on a phone would spend itself clearing an invisible flag instead of
+ * leaving. The flag is shell state, not a place, so it is cleared rather than
+ * remembered.
+ */
 export function goHome(): void {
   if (useView.getState().view !== "home") {
     rememberPlace({
@@ -197,6 +207,7 @@ export function goHome(): void {
       chatId: useChats.getState().activeChatId,
     });
   }
+  useLayout.getState().setLeftOpen(false);
   useView.getState().setView("home");
 }
 
@@ -205,14 +216,24 @@ export function goHome(): void {
  *
  * Three fallbacks, narrowest first, and the last one is what makes this
  * unconditionally safe: the remembered chat if it still exists, else the
- * remembered project, else the project already in focus. `setView("chat")` runs
- * in every branch — including the one with no project at all, where it lands on
- * the empty state WITH the sidebar, which is a place you can navigate from. The
- * one thing this must never do is leave you on `home` after you asked to leave.
+ * remembered project, else the project already in focus. The view ends on
+ * `chat` in every branch — including the one with no project at all, where it
+ * lands on the empty state WITH the sidebar, which is a place you can navigate
+ * from. The one thing this must never do is leave you on `home` after you asked
+ * to leave.
+ *
+ * `pane` resets too, and that is not tidiness. Below `lg` the Ship/Run pane is
+ * a sheet over the main area — at `sm` it IS the main area — so going home from
+ * Run and pressing the control that says "Back to your chat" would put you back
+ * on the Run panel with the transcript behind it. The view and the pane are two
+ * axes over the same real estate (see BottomNav's `goView`, which resolves it
+ * the same way), and a navigation that sets one and not the other is only ever
+ * half a navigation.
  */
 export function leaveHome(): void {
   const { projectId, chatId } = lastPlace();
   const chats = useChats.getState();
+  useLayout.getState().setPane("chat");
   if (chatId && chats.byId[chatId]) {
     selectChat(chatId); // brings its project along, and sets the view itself
     return;
@@ -234,9 +255,12 @@ export function leaveHome(): void {
  * project from a grid of them reads as "take me in", so it takes you in.
  *
  * Routed through `selectChat`/`selectProject` rather than setting either store
- * directly, which is this module's whole rule.
+ * directly, which is this module's whole rule. The pane resets for the same
+ * reason it does in {@link leaveHome}: at `sm` a stale Ship/Run selection would
+ * render full-width over the chat you just picked.
  */
 export function openProject(projectId: string): void {
+  useLayout.getState().setPane("chat");
   const recent = chatsForProject(useChats.getState(), projectId)[0];
   if (recent) selectChat(recent.id);
   else {

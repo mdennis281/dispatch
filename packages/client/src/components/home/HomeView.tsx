@@ -42,7 +42,7 @@
  * top bar — and nothing here touches the shell's geometry or the viewport.
  */
 import { Activity, Clock, FolderGit2, Inbox, RefreshCw, Zap } from "lucide-react";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { HOME_WINDOW_LABELS, type HomeProject, type HomeWindow } from "@dispatch/shared";
 import { ScrollArea } from "../ui/ScrollArea.js";
 import { IconButton } from "../ui/IconButton.js";
@@ -77,6 +77,22 @@ export function HomeView() {
     void load();
   }, [load]);
 
+  // A clock, NOT a poll. Every relative stamp on this page — the footer's "as
+  // of", each card's last-touched, every line of the tail — is computed during
+  // render from `Date.now()`, and nothing on a page that deliberately doesn't
+  // refetch ever causes another render. So a tab left open kept insisting the
+  // reading was from "just now" an hour later, which is worse than no stamp:
+  // the footer exists to admit the numbers are slightly old.
+  //
+  // One `setState` a minute, and it fetches nothing. `ago()` is minute-grained
+  // above the first minute, so that is exactly the rate at which its output can
+  // change.
+  const [, tick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => tick((n) => n + 1), 60_000);
+    return () => clearInterval(id);
+  }, []);
+
   const totals = overview?.totals;
 
   return (
@@ -90,7 +106,11 @@ export function HomeView() {
           tabs={WINDOWS.map((w) => ({ id: w, label: HOME_WINDOW_LABELS[w] }))}
         />
         <div className="flex-1" />
-        <IconButton size="sm" tip="Reload" onClick={() => void load()}>
+        {/* FORCED. The server answers every ordinary request from its cache —
+            that is the whole design — so an unforced reload would return the
+            same snapshot it started with and the button would be a spinner
+            that changes nothing. See `HomeService.overview`. */}
+        <IconButton size="sm" tip="Reload" onClick={() => void load({ force: true })}>
           <RefreshCw className={cn(refetching && "animate-spin")} />
         </IconButton>
       </div>

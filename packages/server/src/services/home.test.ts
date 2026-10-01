@@ -4,12 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../store/index.js";
 import { EventBus } from "../bus.js";
-import { MetricsService, type MetricInput } from "./metrics.js";
+import { MetricsService, type MetricInput, type MetricSpanInput } from "./metrics.js";
 import { AttentionQueue } from "./attention.js";
 import { HomeService, dayRange } from "./home.js";
 import type { AttentionItem, Chat, Project } from "@dispatch/shared";
 
 const DAY = 86_400_000;
+const HOUR = 3_600_000;
+const MINUTE = 60_000;
 const NOW = Date.UTC(2026, 7, 18, 12, 0, 0);
 
 let dir: string;
@@ -193,5 +195,132 @@ describe("HomeService.overview", () => {
     const out = await makeHome().overview("7d");
     expect(out.projects[0]!.events).toBe(0);
     expect(out.projects[0]!.lastActivityAt).toBeGreaterThan(0);
+  });
+});
+
+function span(over: Partial<MetricSpanInput> & { startTs: number }): MetricSpanInput {
+  return {
+    state: "tool",
+    identifier: "Bash",
+    projectId: "p1",
+    chatId: "c1",
+    endTs: over.startTs + MINUTE,
+    // Like `toolUseId` above, this is the dedup key — vary it with everything
+    // a fixture varies, or two spans collapse into one.
+    spanKey: `sp-${over.startTs}-${over.projectId ?? "p1"}-${over.chatId ?? "c1"}`,
+    ...over,
+  };
+}
+
+describe("HomeService — runtime", () => {
+  it("attributes span time to the project that owns it", async () => {
+    await store.saveProject(project("p1", "Alpha"));
+    await store.saveProject(project("p2", "Beta"));
+    metrics.recordSpans([
+      span({ startTs: NOW - 2 * HOUR }),
+      span({ startTs: NOW - 3 * HOUR }),
+      span({ startTs: NOW - 2 * HOUR, projectId: "p2", chatId: "c3" }),
+    ]);
+
+    const out = await makeHome().overview("7d");
+    const byId = Object.fromEntries(out.projects.map((p) => [p.id, p.runtimeMs]));
+    expect(byId.p1).toBe(2 * MINUTE);
+    expect(byId.p2).toBe(MINUTE);
+    expect(out.totals.runtimeMs).toBe(3 * MINUTE);
+  });
+
+  it("counts a span that is still running up to now", async () => {
+    await store.saveProject(project("p1", "Alpha"));
+    // A four-hour sleep that has not finished is exactly the span this page
+    // most needs to show, so `end_ts IS NULL` is clipped to the clock rather
+    // than skipped.
+    metrics.recordSpans([span({ startTs: NOW - 4 * HOUR, endTs: null, state: "sleeping" })]);
+
+    const out = await makeHome().overview("7d");
+    expect(out.projects[0]!.runtimeMs).toBe(4 * HOUR);
+  });
+
+  it("is ATTRIBUTED time — two overlapping spans count twice", async () => {
+    await store.saveProject(project("p1", "Alpha"));
+    // A turn that ran two tool calls at once. The Metrics view would union
+    // these into one minute of wall clock; the overview deliberately does not,
+    // and the tile says "attributed" because of this.
+    metrics.recordSpans([
+      span({ startTs: NOW - HOUR, chatId: "c1" }),
+      span({ startTs: NOW - HOUR, chatId: "c2" }),
+    ]);
+
+    const out = await makeHome().overview("7d");
+    expect(out.projects[0]!.runtimeMs).toBe(2 * MINUTE);
+  });
+
+  it("excludes a span that STARTED before the window, as documented", async () => {
+    await store.saveProject(project("p1", "Alpha"));
+    metrics.recordSpans([
+      span({ startTs: NOW - 8 * DAY }), // outside a 7-day window
+      span({ startTs: NOW - 2 * DAY }), // inside it
+    ]);
+
+    const out = await makeHome().overview("7d");
+    // Not split across the boundary — whole, and booked to the window it began
+    // in. That is the trade `projectRollup` takes to stay on the index.
+    expect(out.projects[0]!.runtimeMs).toBe(MINUTE);
+  });
+});
+
+describe("HomeService — cache behaviour", () => {
+  it("recomputes when a caller forces it", async () => {
+    await store.saveProject(project("p1", "Alpha"));
+    const home = makeHome();
+    const first = await home.overview("7d");
+
+    metrics.record(event({ ts: NOW }));
+    now += 1_000; // still well inside the TTL
+    const forced = await home.overview("7d", { force: true });
+
+    // The Reload button's whole job. An unforced call here returns `first`.
+    expect(forced.computedAt).toBe(now);
+    expect(forced.totals.events).toBe(first.totals.events + 1);
+  });
+
+  it("shares one recompute between callers racing a cold window", async () => {
+    await store.saveProject(project("p1", "Alpha"));
+    const home = makeHome();
+    const [a, b, c] = await Promise.all([
+      home.overview("30d"),
+      home.overview("30d"),
+      home.overview("30d"),
+    ]);
+    // One object, not three equal ones: the rollup ran once. Three independent
+    // 30-day walks is the case this guard exists for.
+    expect(a).toBe(b);
+    expect(b).toBe(c);
+  });
+
+  it("reports a failed background refresh instead of leaving it unhandled", async () => {
+    await store.saveProject(project("p1", "Alpha"));
+    const errors: unknown[] = [];
+    const home = new HomeService({
+      store,
+      metrics,
+      attention,
+      now: () => now,
+      onError: (err) => errors.push(err),
+    });
+    await home.overview("7d");
+
+    // The store goes away under it — a stand-in for any transient failure.
+    const boom = new Error("store is gone");
+    const listChats = store.listChats.bind(store);
+    store.listChats = () => Promise.reject(boom);
+    now += 60_000; // past the 7d TTL
+
+    // Still answers, from the stale snapshot, rather than rejecting.
+    const stale = await home.overview("7d");
+    expect(stale.totals.projects).toBe(1);
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(errors).toEqual([boom]);
+    store.listChats = listChats;
   });
 });

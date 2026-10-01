@@ -21,6 +21,11 @@
  * nobody. The snapshot carries `computedAt`, so a reading a few seconds old is
  * a reading the page can label rather than a lie.
  *
+ * The one caller that DOES wait is the Reload button, which passes `force`.
+ * Everything above is why it has to: without it, a control whose entire job is
+ * "give me a newer number" would answer from the same cache as everything else
+ * and finish holding the snapshot it started with.
+ *
  * ONE WINDOW CACHED PER WIDTH. The window picker offers three widths and each
  * gets its own slot, because switching width must not evict the one you came
  * back to.
@@ -76,18 +81,14 @@ const TTL_MS: Record<HomeWindow, number> = {
 /** How many lines the cross-project activity tail carries. */
 const RECENT = 12;
 
-interface Snapshot {
-  overview: HomeOverview;
-  /** In flight, so concurrent callers share one recompute rather than racing. */
-  refreshing: boolean;
-}
-
 export interface HomeServiceDeps {
   store: Store;
   metrics: MetricsService;
   attention: AttentionQueue;
   /** Injectable clock, for tests. */
   now?: () => number;
+  /** Where a failed background refresh is reported. Injectable for tests. */
+  onError?: (err: unknown) => void;
 }
 
 export class HomeService {
@@ -95,13 +96,25 @@ export class HomeService {
   private readonly metrics: MetricsService;
   private readonly attention: AttentionQueue;
   private readonly now: () => number;
-  private readonly cache = new Map<HomeWindow, Snapshot>();
+  private readonly onError: (err: unknown) => void;
+  private readonly cache = new Map<HomeWindow, HomeOverview>();
+  /**
+   * The recompute currently running for each width, so callers SHARE one.
+   *
+   * Keyed before the first `await`, which is the whole point: without it two
+   * requests that arrive for a cold width — or a visitor who beats the boot
+   * warm-up — each run the rollup, and over 30 days that is half a second of
+   * blocked event loop twice over for one answer.
+   */
+  private readonly inFlight = new Map<HomeWindow, Promise<HomeOverview>>();
 
   constructor(deps: HomeServiceDeps) {
     this.store = deps.store;
     this.metrics = deps.metrics;
     this.attention = deps.attention;
     this.now = deps.now ?? (() => Date.now());
+    this.onError =
+      deps.onError ?? ((err) => console.error("[Dispatch] home overview failed:", err));
   }
 
   /**
@@ -111,40 +124,56 @@ export class HomeService {
    * costs one slow first load rather than a server that won't start.
    */
   start(): void {
-    void this.overview("7d").catch(() => {});
+    void this.overview("7d").catch(this.onError);
   }
 
   /**
    * The page. Returns the cached snapshot the instant one exists; computes
-   * synchronously only when there is nothing at all to serve.
+   * (and waits) only when there is nothing at all to serve, or when the caller
+   * explicitly asked for a fresh one.
+   *
+   * `force` is what the Reload button sends. Without it that button cannot do
+   * anything: a fresh cache answers from memory and a stale one answers from
+   * memory too, refreshing behind the response — so one click always finished
+   * holding exactly the snapshot it started with, which is a control that lies.
+   * Forcing waits for the recompute, which is the one place on this surface
+   * where waiting is what was asked for.
    */
-  async overview(window: HomeWindow): Promise<HomeOverview> {
+  async overview(window: HomeWindow, opts: { force?: boolean } = {}): Promise<HomeOverview> {
     const hit = this.cache.get(window);
-    if (!hit) return this.refresh(window);
-    if (!hit.refreshing && this.now() - hit.overview.computedAt > TTL_MS[window]) {
-      hit.refreshing = true;
+    if (opts.force || !hit) return this.refresh(window);
+    if (this.now() - hit.computedAt > TTL_MS[window]) {
       // Behind the response, not in front of it. `setTimeout(0)` rather than an
       // un-awaited call so the reply is flushed before the recompute takes the
       // loop — otherwise "serve stale immediately" is only true on paper.
-      setTimeout(() => {
-        void this.refresh(window).finally(() => {
-          const slot = this.cache.get(window);
-          if (slot) slot.refreshing = false;
-        });
-      }, 0);
+      //
+      // `refresh` dedupes against `inFlight`, so a burst of stale requests
+      // schedules one recompute, and its rejection is handled HERE: a `void`
+      // on a promise with only a `finally` leaves a transient SQLite error as
+      // an unhandled rejection, which under `--unhandled-rejections=strict`
+      // takes the server down rather than continuing to serve the stale copy
+      // that is sitting right there.
+      setTimeout(() => void this.refresh(window).catch(this.onError), 0);
     }
-    return hit.overview;
+    return hit;
   }
 
-  /** Recompute one window and replace its slot. */
-  private async refresh(window: HomeWindow): Promise<HomeOverview> {
+  /**
+   * Recompute one window and replace its slot — or join the recompute already
+   * running for it.
+   */
+  private refresh(window: HomeWindow): Promise<HomeOverview> {
+    const running = this.inFlight.get(window);
+    if (running) return running;
     const started = this.now();
-    const overview = await this.compute(window, started);
-    this.cache.set(window, {
-      overview,
-      refreshing: this.cache.get(window)?.refreshing ?? false,
-    });
-    return overview;
+    const task = this.compute(window, started)
+      .then((overview) => {
+        this.cache.set(window, overview);
+        return overview;
+      })
+      .finally(() => this.inFlight.delete(window));
+    this.inFlight.set(window, task);
+    return task;
   }
 
   private async compute(window: HomeWindow, startedAt: number): Promise<HomeOverview> {
