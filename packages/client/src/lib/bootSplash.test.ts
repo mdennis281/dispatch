@@ -15,7 +15,14 @@
  * `MAX_MS` and then uncover exactly the same thing.
  */
 import { describe, it, expect } from "vitest";
-import { isBootReady, type BootState } from "./bootSplash.js";
+import {
+  BOOT_SPLASH_HARD_MAX_MS,
+  BOOT_SPLASH_MAX_MS,
+  BOOT_SPLASH_STALL_MS,
+  capExtension,
+  isBootReady,
+  type BootState,
+} from "./bootSplash.js";
 
 const BOOTED: BootState = {
   authReady: true,
@@ -85,5 +92,42 @@ describe("isBootReady", () => {
     expect(isBootReady(state({ authReady: false, unreachable: true, setupPending: null }))).toBe(
       false,
     );
+  });
+});
+
+/**
+ * What the `MAX_MS` cap does when it expires on a boot that is slow rather than
+ * broken.
+ *
+ * With auth on, a load is six serialized round trips before the first row can
+ * exist, which runs past nine seconds on an ordinary bad-signal link — so the
+ * cap was firing on healthy boots and uncovering the empty shell the splash
+ * exists to hide. The fix is that it extends while the boot is still visibly
+ * advancing, and both directions are a visible bug: too eager shows the empty
+ * shell, too patient pins the app behind a logo that will never lift.
+ */
+describe("capExtension", () => {
+  it("lifts once the boot has gone silent — nothing is coming", () => {
+    expect(capExtension(BOOT_SPLASH_MAX_MS, BOOT_SPLASH_STALL_MS)).toBeNull();
+  });
+
+  it("waits while the boot is still advancing", () => {
+    // Something wrote to a boot store a moment ago, so the next step is in
+    // flight and the splash is seconds from lifting onto a finished screen.
+    expect(capExtension(BOOT_SPLASH_MAX_MS, 0)).toBe(BOOT_SPLASH_STALL_MS);
+  });
+
+  it("re-arms only for what the stall window has left", () => {
+    // So a boot that goes quiet is noticed within `STALL_MS` of going quiet,
+    // rather than at whatever the next deadline happened to be.
+    expect(capExtension(BOOT_SPLASH_MAX_MS, BOOT_SPLASH_STALL_MS - 300)).toBe(300);
+  });
+
+  it("never extends past the hard ceiling, however lively the boot looks", () => {
+    // The ceiling is absolute and measured from the splash's own start, so a
+    // boot that keeps emitting progress cannot buy itself an unbounded wait.
+    expect(capExtension(BOOT_SPLASH_HARD_MAX_MS - 400, 0)).toBe(400);
+    expect(capExtension(BOOT_SPLASH_HARD_MAX_MS, 0)).toBeNull();
+    expect(capExtension(BOOT_SPLASH_HARD_MAX_MS + 5_000, 0)).toBeNull();
   });
 });

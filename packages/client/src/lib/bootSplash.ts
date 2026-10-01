@@ -173,6 +173,36 @@ export const BOOT_SPLASH_MIN_MS = 3_660;
  * still filling in — which is what this change is fixing.
  */
 export const BOOT_SPLASH_MAX_MS = 9_000;
+/**
+ * How long the boot may go without anything happening before we call it stuck.
+ *
+ * `MAX_MS` above asks "how long has this taken", which cannot tell a slow boot
+ * from a broken one — and that is exactly the confusion this fixes. With auth on
+ * a load is SIX serialized round trips before the first row can exist:
+ * `/api/auth/status`, the cookie refresh, status again, the ws-ticket, the
+ * socket's hello, and only then the REST snapshot. At a 1.2s RTT that is ~10s of
+ * entirely healthy boot, so the cap fired on an ordinary bad-signal load and
+ * uncovered the empty shell the splash exists to hide.
+ *
+ * So the cap asks the question that actually separates the two: is anything
+ * still MOVING? Every step of the boot writes to one of the three stores the
+ * splash subscribes to, so a boot that is progressing cannot be silent and one
+ * that is wedged cannot be noisy.
+ *
+ * Sized against the longest legitimate gap between two of those writes, which is
+ * the ws-ticket POST plus the socket upgrade — two round trips with no store
+ * update in between, so ~4s on a 2s-RTT link. Five leaves that headroom without
+ * making a genuinely dead boot sit around.
+ */
+export const BOOT_SPLASH_STALL_MS = 5_000;
+/**
+ * The ceiling that is never extended, however well the boot is progressing.
+ *
+ * Past this, waiting has stopped being kind: whatever is behind the splash —
+ * `ConnectingScreen`, a placeholder — says more about a boot this slow than a
+ * logo does.
+ */
+export const BOOT_SPLASH_HARD_MAX_MS = 25_000;
 /** Must outlast the exit in index.html: the 480ms mold, the aperture open that
  *  follows it, and the corners of the plate gone by 1060ms. */
 export const BOOT_SPLASH_EXIT_MS = 1_140;
@@ -223,6 +253,31 @@ export function isBootReady(s: BootState): boolean {
   if (s.setupPending === null) return false;
   if (s.setupPending) return true;
   return s.hydrated || s.mockSeeded;
+}
+
+/**
+ * The cap expired. Lift, or wait a little longer?
+ *
+ * Pure, and tested, for the same reason `isBootReady` is: the two ways to get
+ * this wrong are both invisible to anyone on a fast link. Lift too eagerly and
+ * the splash uncovers the empty shell it exists to hide; extend without a
+ * ceiling and a wedged server pins the app behind a logo forever.
+ *
+ * `sinceProgress` — how long the three boot stores have been silent — is the
+ * whole judgement; see `BOOT_SPLASH_STALL_MS`. `elapsed` runs from the splash's
+ * own start, so `HARD_MAX_MS` bounds the entire wait rather than handing out a
+ * fresh budget on every extension.
+ *
+ * Returns the delay to re-arm for, or null to lift now. A re-arm is never longer
+ * than the stall window has left to run, so a boot that goes quiet is noticed
+ * within `BOOT_SPLASH_STALL_MS` of going quiet rather than at whatever the next
+ * deadline happened to be.
+ */
+export function capExtension(elapsed: number, sinceProgress: number): number | null {
+  const stall = BOOT_SPLASH_STALL_MS - sinceProgress;
+  if (stall <= 0) return null;
+  const remaining = BOOT_SPLASH_HARD_MAX_MS - elapsed;
+  return remaining > 0 ? Math.min(stall, remaining) : null;
 }
 
 function readBootState(): BootState {
@@ -357,7 +412,13 @@ export function startBootSplash(): void {
     );
   };
 
+  // Any write to the three stores subscribed below is the boot making progress:
+  // no step of it advances without one. The cap reads this to tell "slow" from
+  // "stuck" — see `capExtension`.
+  let progressAt = startedAt;
+
   const check = () => {
+    progressAt = performance.now();
     if (isBootReady(readBootState())) lift();
   };
 
@@ -372,7 +433,17 @@ export function startBootSplash(): void {
 
   // `MAX_MS` measured from boot, not from readiness — it is the ceiling on the
   // whole splash, and `lift()` short-circuits once it has already fired.
-  const cap = setTimeout(lift, BOOT_SPLASH_MAX_MS);
+  //
+  // It is EXTENDED, not simply enforced: expiring while the boot is still
+  // visibly advancing uncovers an app that is seconds from being ready, which is
+  // strictly worse than waiting those seconds out. `capExtension` owns that
+  // judgement and `BOOT_SPLASH_HARD_MAX_MS` bounds it either way.
+  let cap = setTimeout(function expire() {
+    const now = performance.now();
+    const again = capExtension(now - startedAt, now - progressAt);
+    if (again === null) return lift();
+    cap = setTimeout(expire, again);
+  }, BOOT_SPLASH_MAX_MS);
 
   // Both stores may already hold the answer: `initializeAuth` can resolve from
   // cache faster than this module is reached, and a subscription only fires on

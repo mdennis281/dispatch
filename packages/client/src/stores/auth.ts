@@ -67,14 +67,32 @@ export async function initializeAuth(): Promise<void> {
   try {
     const first = await fetch("/api/auth/status", { credentials: "same-origin" });
     const status = await first.json() as AuthStatus;
-    useAuth.getState().applyStatus(status);
+    // DON'T PUBLISH THIS ONE YET when a cookie refresh is still to come.
+    //
+    // `/api/auth/status` is asked without a bearer — there isn't one yet — so a
+    // returning user whose refresh cookie is perfectly good gets back
+    // `{ enabled: true, user: null }`: signed out, for the two round trips it
+    // takes to prove otherwise. Publishing that is not a cosmetic flicker. It is
+    // precisely the state `isBootReady` reads as "the sign-in form is the
+    // finished screen", and `startBootSplash` LATCHES on the first `true` — so
+    // the splash stopped waiting for the REST snapshot on every authenticated
+    // load and lifted at `MIN_MS` onto a shell with nothing in it. On loopback
+    // the data beat it anyway and nothing showed; over a slow link it is
+    // seconds of empty app. Leaving `ready` false until we actually know is
+    // what the splash and the "Starting Dispatch…" placeholder are both for.
     if (status.enabled && !status.user) {
       if (await refresh()) {
         const token = useAuth.getState().accessToken;
         const response = await fetch("/api/auth/status", { headers: token ? { authorization: `Bearer ${token}` } : undefined });
-        if (response.ok) useAuth.getState().applyStatus(await response.json() as AuthStatus);
+        if (response.ok) {
+          useAuth.getState().applyStatus(await response.json() as AuthStatus);
+          return;
+        }
       }
+      // Fell through: the refresh failed, or the re-ask did. The first answer
+      // was right after all and the sign-in form is where this goes.
     }
+    useAuth.getState().applyStatus(status);
   } catch {
     // Keep the normal reconnecting shell when the server is temporarily down —
     // but FLAG it, because this answer is a guess. `ConnectingScreen` re-runs
