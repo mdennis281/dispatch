@@ -16,9 +16,12 @@ function fetchMock() {
 }
 
 /** Minimal Store stub exposing only the getSettings the notifier uses. */
-function storeWith(webhook?: AppSettings["webhook"]): Store {
+function storeWith(
+  webhook?: AppSettings["webhook"],
+  attentionQueue?: AppSettings["attentionQueue"],
+): Store {
   return {
-    getSettings: async (): Promise<AppSettings> => ({ theme: "dark", webhook }),
+    getSettings: async (): Promise<AppSettings> => ({ theme: "dark", webhook, attentionQueue }),
   } as unknown as Store;
 }
 
@@ -91,6 +94,23 @@ describe("Notifier.handle — no-op when unconfigured", () => {
     const n = new Notifier({ bus: new EventBus(), store: storeWith(undefined), fetch: f });
     await n.handle(attn("permission"));
     expect(f).not.toHaveBeenCalled();
+  });
+
+  it("does not fetch for a kind the Attention Queue is hiding", async () => {
+    // Same rule as the push path: muted out of the inbox means muted everywhere.
+    const f = fetchMock();
+    const n = new Notifier({
+      bus: new EventBus(),
+      store: storeWith({ kind: "ntfy", url: "https://ntfy.sh/cm", enabled: true }, {
+        kinds: { done: false },
+        reviewKinds: {},
+      }),
+      fetch: f,
+    });
+    await n.handle(attn("done"));
+    expect(f).not.toHaveBeenCalled();
+    await n.handle(attn("permission"));
+    expect(f).toHaveBeenCalledTimes(1);
   });
 
   it("does not fetch when the webhook is disabled", async () => {

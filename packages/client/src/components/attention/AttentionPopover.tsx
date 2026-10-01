@@ -1,13 +1,17 @@
+import { useState } from "react";
 import {
   Inbox,
+  CheckCheck,
   ShieldQuestion,
   MessageCircleQuestion,
   CheckCircle2,
   GitPullRequestArrow,
   ArrowRight,
 } from "lucide-react";
-import type { AttentionItem } from "@dispatch/shared";
+import { DISMISSIBLE_ATTENTION_KINDS, type AttentionItem } from "@dispatch/shared";
+import { api } from "../../lib/api.js";
 import { Popover } from "../ui/Popover.js";
+import { Button } from "../ui/Button.js";
 import { Badge, Chip } from "../ui/Chip.js";
 import { StatusDot } from "../ui/StatusDot.js";
 import { relTime } from "../../lib/format.js";
@@ -109,10 +113,38 @@ export function AttentionPopover({
   variant?: "pill" | "icon";
 }) {
   const icon = variant === "icon";
-  const items = useAttention((s) => s.items);
+  const items = useAttention((s) => s.visible);
+  // How many the filter is holding back, so an empty popover with a muted kind
+  // outstanding can say which it is rather than claim nothing is happening.
+  const hidden = useAttention((s) => s.items.length - s.visible.length);
   const blocking = items.filter(
     (i) => i.kind === "permission" || i.kind === "question",
   ).length;
+  const [clearing, setClearing] = useState(false);
+  // What Clear would actually take — counted off the RAW list, not the visible
+  // one, because the request clears what the server holds: a tooltip promising
+  // "1 item" while three more are cleared unseen, or a disabled button over rows
+  // that a muted kind is hiding, would both be lies. The blocking items are
+  // deliberately excluded — see DISMISSIBLE_ATTENTION_KINDS — so the button has
+  // to say so rather than appear to have done nothing on a queue of permissions.
+  const dismissible = useAttention(
+    (s) =>
+      s.items.filter((i) =>
+        (DISMISSIBLE_ATTENTION_KINDS as readonly string[]).includes(i.kind),
+      ).length,
+  );
+
+  const clear = async () => {
+    setClearing(true);
+    try {
+      // The rows leave on the `attention-resolve` events the server broadcasts,
+      // not here: that is the same path every other device gets, so one clear
+      // empties every open window instead of just this one.
+      await api.attention.clear();
+    } finally {
+      setClearing(false);
+    }
+  };
 
   return (
     <Popover
@@ -168,18 +200,39 @@ export function AttentionPopover({
     >
       {(close) => (
         <div className="w-full">
-          <div className="flex items-center justify-between px-3 py-2.5 cm-hairline-b">
+          <div className="flex items-center justify-between gap-2 px-3 py-2.5 cm-hairline-b">
             <span className="text-sm font-semibold text-primary">
               Attention Queue
             </span>
-            <Chip tone={blocking > 0 ? "warn" : "muted"}>
-              {blocking} need you
-            </Chip>
+            <div className="flex items-center gap-1.5">
+              <Chip tone={blocking > 0 ? "warn" : "muted"}>
+                {blocking} need you
+              </Chip>
+              <Button
+                size="sm"
+                variant="ghost"
+                leftIcon={<CheckCheck className="size-3" />}
+                onClick={() => void clear()}
+                disabled={clearing || dismissible === 0}
+                title={
+                  dismissible === 0
+                    ? "Nothing to clear — permissions and questions go when you answer them."
+                    : `Clear ${dismissible} finished ${dismissible === 1 ? "item" : "items"}`
+                }
+              >
+                {clearing ? "Clearing…" : "Clear"}
+              </Button>
+            </div>
           </div>
           <div className="max-h-[380px] cm-scroll overflow-y-auto p-1.5">
             {items.length === 0 ? (
               <div className="px-3 py-8 text-center text-sm text-muted">
                 Nothing needs you right now.
+                {hidden > 0 ? (
+                  <span className="mt-1 block text-xs text-faint">
+                    {hidden} hidden by your queue filter.
+                  </span>
+                ) : null}
               </div>
             ) : (
               items.map((item) => (

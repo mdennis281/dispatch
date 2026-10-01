@@ -17,6 +17,7 @@ import type {
   AgentConfig,
   AgentConfigInput,
   ModeConfig,
+  AttentionFilter,
   AttentionItem,
   NotificationPrefs,
   PermissionRequest,
@@ -235,6 +236,16 @@ export interface AppSettings {
     maxRounds?: number;
     rounds?: ReviewRoundsPolicy;
   };
+  /**
+   * Which attention kinds reach the Attention Queue — the inbox's own filter,
+   * app-wide so the phone and the desktop agree on how many chats are waiting
+   * (the per-device notification filter in lib/webPush.ts is a separate, and
+   * stricter, question). Unset = nothing muted.
+   *
+   * Muting only HIDES: the server keeps every item, so turning a kind back on
+   * shows what arrived while it was off.
+   */
+  attentionQueue?: AttentionFilter;
   /**
    * What Dispatch puts in front of an agent before the task — the house-rules
    * cap and how much durable memory surfaces per turn. Every field optional:
@@ -911,6 +922,23 @@ export const api = {
   attention: {
     list: (chatId?: string) =>
       get<AttentionItem[]>(`/api/attention${qs({ chatId })}`),
+    /**
+     * Dismiss outstanding items. `kinds` omitted clears only the retrospective
+     * ones (idle / done / review) — a permission or question is a blocked agent,
+     * and it is what marks that chat "Needs input" in the sidebar.
+     *
+     * Server-side rather than a local hide: every device reads the same queue,
+     * and a client-only drop comes straight back on the next reload.
+     */
+    clear: (opts: { chatId?: string; kinds?: Array<AttentionItem["kind"]> } = {}) =>
+      // An EMPTY `kinds` means "clear nothing", and is answered without a
+      // request: serialized it would vanish from the query string and arrive as
+      // the omitted-kinds default, which is the broad clear — the exact opposite.
+      opts.kinds && opts.kinds.length === 0
+        ? Promise.resolve({ cleared: 0, ids: [] as string[] })
+        : del<{ cleared: number; ids: string[] }>(
+            `/api/attention${qs({ chatId: opts.chatId, kinds: opts.kinds?.join(",") })}`,
+          ),
     /** Open permission/question requests to re-materialize inline cards on (re)connect. */
     pendingPermissions: () =>
       get<PermissionRequest[]>("/api/attention/permissions"),

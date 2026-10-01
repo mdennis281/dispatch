@@ -43,12 +43,19 @@ export interface StatusDotProps {
   tone: DotTone;
   /** Emit a soft expanding ring (for live/working states). */
   pulse?: boolean;
+  /**
+   * Draw the dot as an outline rather than a disc — "this state is pending, not
+   * live". The distinction exists because `queued` and `running` share the
+   * accent family, so colour alone cannot separate them; filled-vs-hollow can,
+   * and still reads at a glance with no legend.
+   */
+  hollow?: boolean;
   size?: number;
   className?: string;
 }
 
 /** A single presence dot; optionally pulsing for live states. */
-export function StatusDot({ tone, pulse, size = 7, className }: StatusDotProps) {
+export function StatusDot({ tone, pulse, hollow, size = 7, className }: StatusDotProps) {
   return (
     <span
       className={cn("relative inline-flex shrink-0", className)}
@@ -64,7 +71,12 @@ export function StatusDot({ tone, pulse, size = 7, className }: StatusDotProps) 
         />
       )}
       <span
-        className={cn("relative rounded-full transition-colors duration-300", toneClass[tone].bg)}
+        className={cn(
+          "relative rounded-full transition-colors duration-300",
+          hollow
+            ? cn("border-[1.5px] border-current", toneClass[tone].text)
+            : toneClass[tone].bg,
+        )}
         style={{ width: size, height: size }}
       />
     </span>

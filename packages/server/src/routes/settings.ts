@@ -6,12 +6,12 @@
  */
 import type { FastifyInstance } from "fastify";
 import * as z from "zod";
-import { SendModeSchema } from "@dispatch/shared";
+import { DEFAULT_ATTENTION_FILTER, SendModeSchema } from "@dispatch/shared";
 import { AppSettingsSchema } from "../store/index.js";
 
 export function registerSettingsRoutes(app: FastifyInstance): void {
-  const { store, config } = app.cm;
-  const { broker } = app.services;
+  const { store, config, bus } = app.cm;
+  const { broker, push } = app.services;
 
   app.get("/api/settings", async () => store.getSettings());
 
@@ -80,6 +80,15 @@ export function registerSettingsRoutes(app: FastifyInstance): void {
     broker.setCap(saved.maxActiveSessions);
     // Same reason: the idle window lives on the live broker's sweep timer.
     broker.setIdleTimeout(saved.idleSessionMinutes);
+    // The Attention Queue filter has two live readers that are NOT this request:
+    // the push service (which must not ring a phone about a kind the queue is
+    // hiding), and every other open window. The filter is app-wide by design —
+    // two windows disagreeing about how many chats are waiting is the thing it
+    // exists to prevent — so it is broadcast rather than left for each client to
+    // discover on its next startup fetch.
+    const filter = saved.attentionQueue ?? DEFAULT_ATTENTION_FILTER;
+    push.setQueueFilter(filter);
+    bus.publish({ type: "attention-filter", filter });
     return saved;
   });
 

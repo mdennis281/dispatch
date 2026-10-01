@@ -10,6 +10,7 @@
  * to remember what is currently outstanding and answer `list()` queries. On
  * `attention-resolve` (or when a chat is deleted) the matching item(s) drop out.
  */
+import { DISMISSIBLE_ATTENTION_KINDS } from "@dispatch/shared";
 import type { AttentionItem, WsServerEvent } from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
 
@@ -90,6 +91,32 @@ export class AttentionQueue {
 
   size(): number {
     return this.items.size;
+  }
+
+  /**
+   * Dismiss outstanding items — the Attention Queue's "clear" action. Returns
+   * the rows it removed so the caller can broadcast an `attention-resolve` per
+   * id (same contract as `clearChat`: a client holding the item from its original
+   * `attention-add` would otherwise keep showing it).
+   *
+   * `kinds` defaults to `DISMISSIBLE_ATTENTION_KINDS` — the retrospective ones.
+   * Callers that really mean to drop a blocking item can pass its kind
+   * explicitly.
+   */
+  clear(
+    opts: { kinds?: Array<AttentionItem["kind"]>; chatId?: string } = {},
+  ): Array<{ id: string; chatId: string }> {
+    const kinds = new Set<AttentionItem["kind"]>(opts.kinds ?? DISMISSIBLE_ATTENTION_KINDS);
+    const removed: Array<{ id: string; chatId: string }> = [];
+    for (const [id, item] of this.items) {
+      if (!kinds.has(item.kind)) continue;
+      if (opts.chatId && item.chatId !== opts.chatId) continue;
+      this.items.delete(id);
+      // The chat id travels with the id because the resolve event carries it and
+      // the item is gone by the time the caller broadcasts.
+      removed.push({ id, chatId: item.chatId });
+    }
+    return removed;
   }
 
   /**
