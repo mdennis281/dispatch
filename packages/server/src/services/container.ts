@@ -73,6 +73,7 @@ import { IssueWatcher } from "./issue-watcher.js";
 import { Notifier } from "./notifier.js";
 import { PushService } from "./push.js";
 import { AttentionQueue } from "./attention.js";
+import { HomeService } from "./home.js";
 import { UsageRegistry, UsageService } from "./usage.js";
 import { chatSubscription } from "./subscriptions.js";
 import { ReleaseService } from "./release.js";
@@ -132,6 +133,7 @@ export interface ServiceOverrides {
   notifier?: Notifier;
   push?: PushService;
   attention?: AttentionQueue;
+  home?: HomeService;
   usage?: UsageService;
   release?: ReleaseService;
   resume?: ResumeScheduler;
@@ -203,6 +205,8 @@ export interface Services extends ServiceBase {
   /** Server-sent Web Push — the only delivery path an iOS home-screen app has. */
   push: PushService;
   attention: AttentionQueue;
+  /** The cross-project overview behind the homepage. */
+  home: HomeService;
   usage: UsageService;
   /** Per-account Claude usage pollers; `usage` is its default-account member. */
   accountUsage: UsageRegistry;
@@ -582,6 +586,10 @@ export function createServices(
       onError: (err) => console.error("[Dispatch] web push failed:", err),
     });
   const attention = overrides.attention ?? new AttentionQueue({ bus });
+  // The homepage rollup. Reads the ledger and the (already in-memory) chat
+  // records; spawns nothing. See `home.ts` for why it is cached rather than
+  // computed per request.
+  const home = overrides.home ?? new HomeService({ store, metrics, attention });
   // Subscription usage (5h + weekly) for the header meter. Polls the account
   // OAuth usage endpoint once (server-side) and fans snapshots to every client.
   const usage = overrides.usage ?? new UsageService({ bus });
@@ -1080,6 +1088,7 @@ export function createServices(
     notifier,
     push,
     attention,
+    home,
     usage,
     accountUsage,
     release,
@@ -1161,12 +1170,22 @@ export function createServices(
             console.log(
               `[Dispatch] metrics: imported ${r.rows} row(s) from ${r.chats} chat(s).`,
             );
+            // The homepage warm-up below starts while this is still importing,
+            // so whatever it cached was taken mid-import — on a fresh install,
+            // of an empty ledger. The page fetches once on arrival and never
+            // polls, so that snapshot is what the first visitor would see and
+            // keep seeing for the whole TTL. Throw it away now that the real
+            // history is in.
+            home.invalidate();
           }
         },
         (err: unknown) => console.error("[Dispatch] metrics backfill failed:", err),
       );
 
       safeStart("attention", () => attention.start());
+      // Warms the default window so the first visit to the homepage doesn't
+      // pay for the cold read. Fire-and-forget inside; boot never waits.
+      safeStart("home", () => home.start());
       safeStart("memoryCommitter", () => memoryCommitter.start());
       safeStart("notifier", () => notifier.start());
       safeStart("push", () => push.start());

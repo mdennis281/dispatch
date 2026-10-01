@@ -65,6 +65,10 @@ export function isGlobalProject(projectId: string | null | undefined): boolean {
  *             metrics project labels, and `initialProject` (which would
  *             otherwise open a fresh browser on the global project whenever it
  *             sorted first).
+ *   server  — the homepage rollup's project GRID (`services/home.ts`), which is
+ *             a list of repos to go and work in. Its activity TAIL is built
+ *             from the unfiltered list on purpose: that one names where a row
+ *             came from rather than offering it as a destination.
  *   server  — `GET /api/projects` keeps it (the client needs the record to
  *             render the chat at all), but the repo-walking services skip it:
  *             the worktree detector, the PR registry and trunk sync all take

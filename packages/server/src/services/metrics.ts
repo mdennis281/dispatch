@@ -899,6 +899,107 @@ export class MetricsService {
   }
 
   /**
+   * Per-project event counts, attributed runtime and a daily spark, for ONE
+   * window — the homepage's whole read of the ledger, in two statements.
+   *
+   * TWO statements, and both shapes were measured against the real install
+   * (338 MB, 298k events, 400k spans) rather than reasoned about.
+   *
+   * Deliberately not `totals({ groupBy: "projectId" })` +
+   * `spanTotals({ groupBy: "projectId" })`, for the same reason
+   * {@link chatRuntime} is not `spanTotals({ groupBy: "chatId" })`: `spanTotals`
+   * ships every clipped span row out of SQLite into Node so it can union the
+   * intervals into `busyMs`. Over a 7-day window the aggregate alone is ~110 ms
+   * and the row shipment another ~140 ms — a quarter-second of blocked event
+   * loop, paid by every live chat streaming through the same loop, for a page
+   * whose headline feature is arriving instantly.
+   *
+   * What that trade gives up is EXACTNESS of the time figure, and only of that
+   * figure: this returns ATTRIBUTED ms (the plain sum of span durations), so a
+   * turn that ran five tool calls at once books all five. The Metrics view
+   * still reports the union — that is the page you open when the number has to
+   * be defensible. Here it is a glance, and a glance that over-reports parallel
+   * work by a roughly constant factor still ranks the projects correctly.
+   */
+  projectRollup(
+    from: number,
+    to: number,
+    bucketMs: number,
+  ): {
+    byProject: Record<string, { events: number; runtimeMs: number; lastAt: number }>;
+    /** project id → bucket index (0 = oldest, measured from `from`) → count. */
+    spark: Record<string, Record<number, number>>;
+  } {
+    this.flush();
+    const at = this.now();
+    // ONE pass for the counts, the spark AND the recency stamp, grouped by
+    // (project, bucket). Three separate aggregates was the obvious shape and
+    // cost roughly three times as much: `metric_ts` locates the window but the
+    // group key lives in the table, so each statement re-walked the same rows.
+    // Summing the buckets back up in JS is a few hundred tuples.
+    //
+    // The bucket is measured FROM `from`, not from the epoch. Flooring `ts` to
+    // a calendar day is the obvious key and it skews both ends of the shape: a
+    // trailing 24-hour window read at 01:00 lands 23 hours in one bucket and 1
+    // in the next, so steady activity draws a cliff. Offsetting by `from` makes
+    // every bucket exactly `bucketMs` wide, because the window is an exact
+    // multiple of it.
+    //
+    // The CAST is load-bearing, not decoration. `/` in SQLite is integer
+    // division only when BOTH operands are INTEGER, and a bound parameter
+    // arrives as a double — so without it the bucket key came back as 5.9999
+    // and every lookup against an integer index missed, which reads as a
+    // sparkline that is flat at zero while the totals beside it are right.
+    // Truncation is floor here because the window predicate makes `ts - from`
+    // non-negative.
+    const eventRows = this.db
+      .prepare(
+        `SELECT COALESCE(project_id, '') AS g, CAST((ts - ?) / ? AS INTEGER) AS d,
+                COUNT(*) AS c, MAX(ts) AS last
+           FROM metric WHERE ts >= ? AND ts < ? GROUP BY g, d`,
+      )
+      .all(from, bucketMs, from, to) as { g: string; d: number; c: number; last: number }[];
+    // Selected by `start_ts` ALONE. The overlap predicate every other span read
+    // uses (`start_ts < to AND COALESCE(end_ts, now) > from`) cannot use the
+    // index on a window that ends at now — `start_ts < now` matches the whole
+    // table — and measured 112 ms where this measures 30. The cost is that a
+    // span which began before the window is attributed to the window it STARTED
+    // in rather than split across both; at the widths this page offers that
+    // moves a handful of long sleeps and nothing else.
+    const runtime = this.db
+      .prepare(
+        `SELECT COALESCE(project_id, '') AS g,
+                SUM(MAX(COALESCE(end_ts, ?), start_ts) - start_ts) AS ms
+           FROM metric_span WHERE start_ts >= ? AND start_ts < ? GROUP BY g`,
+      )
+      .all(at, from, to) as { g: string; ms: number | null }[];
+
+    // NULL-PROTOTYPE, both of them. The key is a project id, and a project id
+    // can be authored rather than generated ("hivebreak", "zomboid-rcon" are
+    // real ones) — so `__proto__` is a legal id. On a `{}` literal
+    // `byProject[g] ??= …` would then resolve the INHERITED property instead of
+    // creating a row, writing through to `Object.prototype` and reporting
+    // garbage totals for everything else.
+    const byProject: Record<string, { events: number; runtimeMs: number; lastAt: number }> =
+      Object.create(null) as Record<string, { events: number; runtimeMs: number; lastAt: number }>;
+    const row = (g: string): { events: number; runtimeMs: number; lastAt: number } =>
+      (byProject[g] ??= { events: 0, runtimeMs: 0, lastAt: 0 });
+    const spark: Record<string, Record<number, number>> = Object.create(null) as Record<
+      string,
+      Record<number, number>
+    >;
+    for (const r of eventRows) {
+      const e = row(r.g);
+      const c = Number(r.c);
+      e.events += c;
+      e.lastAt = Math.max(e.lastAt, Number(r.last ?? 0));
+      (spark[r.g] ??= Object.create(null) as Record<number, number>)[Number(r.d)] = c;
+    }
+    for (const r of runtime) row(r.g).runtimeMs = Math.max(0, Number(r.ms ?? 0));
+    return { byProject, spark };
+  }
+
+  /**
    * Drop rows older than `before`. Deliberately NOT on a timer: a metrics ledger
    * that silently forgets last quarter is worse than a large one, so retention
    * is a button someone presses, not a policy that runs behind them.

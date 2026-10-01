@@ -32,6 +32,7 @@ import { registerSecretRoutes } from "./secrets.js";
 import { registerIssueRoutes } from "./issues.js";
 import { registerUsageRoutes } from "./usage.js";
 import { registerMetricsRoutes } from "./metrics.js";
+import { registerHomeRoutes } from "./home.js";
 import { registerResourceRoutes } from "./resources.js";
 import { registerFileRoutes } from "./files.js";
 import { registerFsRoutes } from "./fs.js";
@@ -73,6 +74,7 @@ export function registerRoutes(app: FastifyInstance): void {
   registerIssueRoutes(app);
   registerUsageRoutes(app);
   registerMetricsRoutes(app);
+  registerHomeRoutes(app);
   registerResourceRoutes(app);
   registerFileRoutes(app);
   registerFsRoutes(app);

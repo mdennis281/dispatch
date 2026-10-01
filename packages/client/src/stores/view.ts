@@ -1,7 +1,8 @@
 import { create } from "zustand";
 import type { ConfigSection } from "@dispatch/shared";
 
-/** The app's primary surface. "chat" = the transcript workspace; "memory" = the
+/** The app's primary surface. "home" = the cross-project overview and project
+ *  picker; "chat" = the transcript workspace; "memory" = the
  *  top-level, chat-independent memory browser (list+search + viewer); "git" =
  *  the project's Source Control cockpit (changes, history, branches, stashes);
  *  "files" = the filesystem browser (this machine's disks, not just the repo);
@@ -10,11 +11,16 @@ import type { ConfigSection } from "@dispatch/shared";
  *  "new-project" = the full-bleed project setup page;
  *  "project-settings" / "app-settings" = the two settings pages.
  *
- *  "new-project" is the one view that also hides the SIDEBAR. It isn't scoped to
- *  the active project — it's how a project comes to exist — so a rail of the
- *  current project's chats and apps beside it is noise at best and a misread at
- *  worst ("am I editing that one?"). Everything else keeps its chrome. */
+ *  "home" and "new-project" are the two views that also hide the SIDEBAR.
+ *  Neither is scoped to the active project — one is how a project comes to
+ *  exist, the other is how you choose between them — so a rail of the current
+ *  project's chats and apps beside either is noise at best and a misread at
+ *  worst ("am I editing that one?"). The homepage carries its own project grid,
+ *  which IS the picker, so a sidebar beside it would also be two project
+ *  pickers on one screen disagreeing about which project is "active".
+ *  Everything else keeps its chrome. */
 export type AppView =
+  | "home"
   | "chat"
   | "memory"
   | "git"

@@ -23,6 +23,7 @@ import type { Chat } from "@dispatch/shared";
 import { useChats, chatsForProject } from "./chats.js";
 import { useProjects } from "./projects.js";
 import { useView } from "./view.js";
+import { useLayout } from "./layout.js";
 
 /**
  * Focus a project. Switching AWAY closes the open chat: it belongs to the
@@ -120,4 +121,178 @@ export function reconcileActiveChat(): void {
   const active = chats.activeChatId ? chats.byId[chats.activeChatId] : undefined;
   if (active && active.projectId === activeProjectId) return;
   chats.setActiveChat(chatsForProject(chats, activeProjectId)[0]?.id ?? null);
+}
+
+/* ------------------------------------------------------------------- home */
+
+/**
+ * Where you were before you went home.
+ *
+ * THE HOMEPAGE MUST NOT BE A DEAD END, and it is full-bleed — there is no
+ * sidebar beside it to climb back out through, so the control that brought you
+ * there has to be the one that takes you back. That makes it a TOGGLE, and a
+ * toggle needs somewhere to toggle back TO.
+ *
+ * The obvious source for that is the live selection, and it is the wrong one:
+ * both `selectProject` and `selectChat` are invariant-preserving, so arriving
+ * home with a chat open and then clicking a DIFFERENT project's card from the
+ * grid has already moved the selection by the time the toggle is pressed. The
+ * place is therefore snapshotted at the moment of leaving.
+ *
+ * Persisted in localStorage, on the same reasoning as `cm:last-project`
+ * (stores/projects): where you are is a fact about this browser, not the
+ * account. It also means arriving at a fresh tab ON the homepage — which is
+ * what a reload mid-visit gives you — still has a way back rather than only the
+ * grid.
+ *
+ * `chatId` can be null: you can be looking at the empty state, or at Memory, or
+ * at Source Control, and all of those return to the project without a chat.
+ */
+const LAST_PLACE_KEY = "cm:home-return";
+
+interface LastPlace {
+  projectId: string | null;
+  chatId: string | null;
+}
+
+/** Guarded, the house pattern — localStorage throws under a blocking cookie
+ *  policy and does not exist at all in the node test environment. */
+function placeBacking(): Storage | null {
+  try {
+    return globalThis.localStorage ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The return address, held in memory with localStorage as a CACHE of it rather
+ * than as the record — the same relationship `stores/theme` has with its own key.
+ *
+ * In-memory is the source of truth because this value is read inside a click
+ * handler and must be there whether or not storage is available: a blocking
+ * cookie policy, private mode, or the node test environment all produce a
+ * `null` backing, and in every one of those the toggle still has to work for the
+ * length of the session.
+ *
+ * Shape-checked on the way in rather than trusted. The entry survives upgrades,
+ * so a malformed one (hand-edited, written by an older build) must degrade to
+ * "no return address" instead of throwing.
+ */
+let place: LastPlace = readPlace();
+
+function readPlace(): LastPlace {
+  const none: LastPlace = { projectId: null, chatId: null };
+  try {
+    const raw = placeBacking()?.getItem(LAST_PLACE_KEY);
+    if (!raw) return none;
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return none;
+    const { projectId, chatId } = parsed as Partial<LastPlace>;
+    return {
+      projectId: typeof projectId === "string" ? projectId : null,
+      chatId: typeof chatId === "string" ? chatId : null,
+    };
+  } catch {
+    return none;
+  }
+}
+
+function rememberPlace(next: LastPlace): void {
+  place = next;
+  try {
+    placeBacking()?.setItem(LAST_PLACE_KEY, JSON.stringify(next));
+  } catch {
+    /* quota / private mode — a lost return address beats a thrown save */
+  }
+}
+
+/** Where the toggle will take you back to. Exported for the tests and the tip. */
+export function lastPlace(): LastPlace {
+  return place;
+}
+
+/**
+ * Go to the overview, snapshotting where you were so the toggle can return.
+ *
+ * Also closes the chat picker, because the overview is full-bleed and `App`
+ * stops rendering the drawer entirely — leaving `leftOpen` set would mean
+ * `currentSlot` reporting a visible picker that isn't on screen, so the first
+ * Chats tap on a phone would spend itself clearing an invisible flag instead of
+ * leaving. The flag is shell state, not a place, so it is cleared rather than
+ * remembered.
+ */
+export function goHome(): void {
+  if (useView.getState().view !== "home") {
+    rememberPlace({
+      projectId: useProjects.getState().activeProjectId,
+      chatId: useChats.getState().activeChatId,
+    });
+  }
+  useLayout.getState().setLeftOpen(false);
+  useView.getState().setView("home");
+}
+
+/**
+ * Leave the overview for wherever you came from.
+ *
+ * Three fallbacks, narrowest first, and the last one is what makes this
+ * unconditionally safe: the remembered chat if it still exists, else the
+ * remembered project, else the project already in focus. The view ends on
+ * `chat` in every branch — including the one with no project at all, where it
+ * lands on the empty state WITH the sidebar, which is a place you can navigate
+ * from. The one thing this must never do is leave you on `home` after you asked
+ * to leave.
+ *
+ * `pane` resets too, and that is not tidiness. Below `lg` the Ship/Run pane is
+ * a sheet over the main area — at `sm` it IS the main area — so going home from
+ * Run and pressing the control that says "Back to your chat" would put you back
+ * on the Run panel with the transcript behind it. The view and the pane are two
+ * axes over the same real estate (see BottomNav's `goView`, which resolves it
+ * the same way), and a navigation that sets one and not the other is only ever
+ * half a navigation.
+ */
+export function leaveHome(): void {
+  const { projectId, chatId } = lastPlace();
+  const chats = useChats.getState();
+  useLayout.getState().setPane("chat");
+  if (chatId && chats.byId[chatId]) {
+    selectChat(chatId); // brings its project along, and sets the view itself
+    return;
+  }
+  if (projectId && useProjects.getState().projects.some((p) => p.id === projectId)) {
+    selectProject(projectId);
+  }
+  useView.getState().setView("chat");
+}
+
+/**
+ * Enter a project from the overview's grid.
+ *
+ * Opens its most recent chat when it has one, rather than `selectProject`'s bare
+ * focus-switch. The difference matters here and nowhere else: the sidebar's
+ * picker leaves you looking at the rail you just used, so the empty state beside
+ * it is a list to choose from — but the homepage UNMOUNTS on the way out, so the
+ * same landing is an empty panel with a sidebar you have not seen yet. Picking a
+ * project from a grid of them reads as "take me in", so it takes you in.
+ *
+ * Routed through `selectChat`/`selectProject` rather than setting either store
+ * directly, which is this module's whole rule. The pane resets for the same
+ * reason it does in {@link leaveHome}: at `sm` a stale Ship/Run selection would
+ * render full-width over the chat you just picked.
+ */
+export function openProject(projectId: string): void {
+  useLayout.getState().setPane("chat");
+  const recent = chatsForProject(useChats.getState(), projectId)[0];
+  if (recent) selectChat(recent.id);
+  else {
+    selectProject(projectId);
+    useView.getState().setView("chat");
+  }
+}
+
+/** The brand lockup and the project selector's Home row both press this. */
+export function toggleHome(): void {
+  if (useView.getState().view === "home") leaveHome();
+  else goHome();
 }

@@ -32,6 +32,7 @@ import { useProjects } from "../../stores/projects.js";
 import { useGitChangeCount } from "../../stores/git.js";
 import { useViewport } from "../../stores/viewport.js";
 import { currentSlot, chatsAction } from "./navState.js";
+import { leaveHome } from "../../stores/navigation.js";
 import { LAYER } from "../../lib/layers.js";
 import { cn } from "../../lib/cn.js";
 
@@ -287,7 +288,12 @@ export function BottomNav({ chat }: { chat: Chat | null }) {
         setLeftOpen(false);
         break;
       case "go-chat":
-        if (view !== "chat") setView("chat");
+        // From the homepage this is the SAME return the brand lockup performs —
+        // back to the project and chat you were on when you left, not just
+        // whatever the selection happens to be now. One definition of "back",
+        // in stores/navigation.
+        if (view === "home") leaveHome();
+        else if (view !== "chat") setView("chat");
         setPane("chat");
         dismissSheets();
         break;

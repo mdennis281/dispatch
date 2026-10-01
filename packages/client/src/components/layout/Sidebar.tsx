@@ -2,6 +2,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import {
   ChevronRight,
   ChevronsUpDown,
+  LayoutGrid,
   Plus,
   Play,
   Square,
@@ -71,7 +72,12 @@ import {
 } from "../../stores/chatProcesses.js";
 import { useView, openOverlay } from "../../stores/view.js";
 import { useLayout, dismissLeftDrawer } from "../../stores/layout.js";
-import { selectChat, selectGlobalChat, selectProject } from "../../stores/navigation.js";
+import {
+  goHome,
+  selectChat,
+  selectGlobalChat,
+  selectProject,
+} from "../../stores/navigation.js";
 import { useProjectMemories } from "../../stores/memory.js";
 import { useGit, useGitChangeCount } from "../../stores/git.js";
 import { useRunners } from "../../stores/runners.js";
@@ -248,6 +254,31 @@ function ProjectSelector({
     >
       {(close) => (
         <div className="flex flex-col">
+          {/* The overview leads the menu, above the projects rather than below
+              them with the actions.
+              It is the SECOND of its two entry points — the brand mark in the
+              top bar is the first — and it is here because this control is
+              already "which project am I in", so "all of them" is the same
+              question one level up. Putting it under a divider with "New
+              project…" would have filed a destination among the verbs.
+
+              Unlike picking a project, this DOES dismiss the chat picker on a
+              phone — `goHome` clears `leftOpen` itself. The overview is
+              full-bleed, so `App` stops rendering the drawer entirely, and a
+              flag left set would have `currentSlot` reporting a picker that
+              isn't on screen. Picking a project keeps the drawer open because
+              it leaves you IN the sidebar with a list to choose from; this
+              replaces the sidebar outright. */}
+          <MenuItem
+            icon={<LayoutGrid />}
+            onClick={() => {
+              goHome();
+              close();
+            }}
+          >
+            Overview &mdash; all projects
+          </MenuItem>
+          <div className="my-1 h-px bg-line" />
           {projects.length === 0 && (
             <p className="px-2 py-1.5 text-xs text-faint">No projects yet.</p>
           )}

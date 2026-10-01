@@ -11,6 +11,9 @@ import { cn } from "../../lib/cn.js";
 import { DispatchMark } from "../ui/DispatchMark.js";
 import { HoverCard } from "../ui/HoverCard.js";
 import { StatusDot, type DotTone } from "../ui/StatusDot.js";
+import { Tooltip } from "../ui/Tooltip.js";
+import { toggleHome } from "../../stores/navigation.js";
+import { useView } from "../../stores/view.js";
 
 export const CONN_META: Record<ConnState, { tone: DotTone; label: string; pulse: boolean; text: string }> = {
   open: { tone: "success", label: "Connected", pulse: false, text: "text-secondary" },
@@ -102,14 +105,18 @@ export function BrandLockup({ size }: { size: LockupSize }) {
   const stale = isStaleBundle(clientVersion, serverVersion);
 
   return (
+    <div className={cn("flex shrink-0 items-center", size === "tall" ? "pl-2" : undefined)}>
+      <HomeToggle size={size} />
     <HoverCard
       label={`Connection: ${c.label}`}
       width={252}
       openDelay={300}
       onOpenChange={setOpen}
       className={cn(
-        "flex shrink-0 items-center rounded-md text-left",
-        size === "tall" ? "gap-2.5 pl-2 pr-3" : "gap-2 pr-1",
+        // `min-w`/`px` rather than hugging its content: at `mark` size the only
+        // thing left in here is a 7px dot, and a 7px tap target is not one.
+        "flex h-full shrink-0 items-center rounded-md text-left",
+        size === "tall" ? "gap-2 pr-3 pl-1.5" : "gap-2 px-1.5",
       )}
       card={() => (
         <>
@@ -147,11 +154,11 @@ export function BrandLockup({ size }: { size: LockupSize }) {
         </>
       )}
     >
-      <DispatchMark className={cn("shrink-0", size === "tall" ? "size-12" : "size-8")} />
-
-      {/* The wordmark drops on a phone: the mark is the same brand in a quarter
-          of the width, and on a home-screen PWA the app's name is already under
-          the icon you tapped. */}
+      {/* The wordmark drops on a phone: the mark — which is now the control
+          beside this one — is the same brand in a quarter of the width, and on a
+          home-screen PWA the app's name is already under the icon you tapped.
+          What is left in here at that size is the connection, which is the only
+          thing this trigger was ever FOR. */}
       {size === "tall" && (
         <span className="text-xl font-semibold tracking-tight text-primary">Dispatch</span>
       )}
@@ -163,5 +170,52 @@ export function BrandLockup({ size }: { size: LockupSize }) {
         <span className={cn("text-xs font-medium", c.text)}>{c.label}</span>
       )}
     </HoverCard>
+    </div>
+  );
+}
+
+/**
+ * The mark, as the button that takes you to the overview and back.
+ *
+ * ── WHY THE MARK, AND WHY IT IS ITS OWN CONTROL ──────────────────────────────
+ *
+ * Clicking the logo to get home is the one navigation convention every web app
+ * shares, so the mark is where someone will look for it whether or not we put it
+ * there. But the lockup as a whole is the connection HoverCard's trigger, and
+ * that card is reachable by TAP on a touch screen where hover does not exist —
+ * so overloading the one trigger would have meant choosing which of the two a
+ * phone gets. Splitting them costs a seam nobody can see and keeps both.
+ *
+ * ── WHY IT IS A TOGGLE ───────────────────────────────────────────────────────
+ *
+ * The overview is full-bleed: there is no sidebar beside it to climb back out
+ * through, so the control that got you there has to be the one that brings you
+ * back. `toggleHome` owns both halves, and the return address is snapshotted on
+ * the way out — see `stores/navigation`.
+ *
+ * The tooltip says which direction the press will go, because a toggle whose
+ * glyph never changes is otherwise a coin flip.
+ */
+function HomeToggle({ size }: { size: LockupSize }) {
+  const home = useView((s) => s.view === "home");
+  return (
+    <Tooltip label={home ? "Back to your chat" : "Overview — every project"}>
+      <button
+        type="button"
+        onClick={toggleHome}
+        aria-label={home ? "Back to your chat" : "Overview"}
+        aria-current={home ? "page" : undefined}
+        className={cn(
+          "flex shrink-0 items-center justify-center rounded-md transition-colors hover:bg-hover",
+          // Bare padding rather than a fixed box: the mark is 48px in the
+          // installed title bar and 32px everywhere else, and the hit area
+          // should follow it rather than crop it.
+          size === "tall" ? "p-0.5" : "p-1",
+          home && "bg-active",
+        )}
+      >
+        <DispatchMark className={cn("shrink-0", size === "tall" ? "size-12" : "size-8")} />
+      </button>
+    </Tooltip>
   );
 }
