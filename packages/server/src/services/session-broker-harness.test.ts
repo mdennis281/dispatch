@@ -255,6 +255,33 @@ describe("SessionBroker neutral harness path", () => {
       expect(guard("Read", { file_path: "C:/x.ts" })).toBeNull();
     });
 
+    it("ignores a mode pinned on the row, however it got there", async () => {
+      // `PUT /api/chats/:id` merges its body over the row and saves directly —
+      // no posture resolution, no broker — so `{ modeId: "yolo" }` lands as a
+      // pin. `refreshInheritedPosture` then sees a defined pin and never
+      // re-resolves: the chat would come up on `bypassPermissions` with
+      // `resolveMode("yolo")` returning null, i.e. no denylist at all. A row
+      // can also predate this change or be edited by hand, so the broker drops
+      // the pin rather than trusting whoever wrote it.
+      const chat = await store.saveChat({
+        id: "global-poisoned",
+        projectId: GLOBAL_PROJECT_ID,
+        title: "Global",
+        harness: "codex",
+        modeId: "yolo",
+        worktrees: [],
+        prs: [],
+        createdAt: 1,
+      });
+      broker.create(chat);
+      expect(broker.getSession(chat.id)?.modeId).toBe(GLOBAL_MODE_ID);
+      await broker.sendMessage(chat.id, "hello");
+      await broker.waitFor(chat.id, "idle");
+      expect(specs[0]!.disallowedTools).toContain("Bash");
+      expect(specs[0]!.permissionMode).not.toBe("bypassPermissions");
+      expect(specs[0]!.toolGuard!("Bash", { command: "echo hi" })).toMatch(/not available/);
+    });
+
     it("refuses to start on a runtime that can only catch a violation late", async () => {
       // The posture IS its denylist. A runtime that notices a `worktree` call
       // only once it has started notices it after the worktree exists, so

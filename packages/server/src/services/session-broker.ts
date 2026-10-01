@@ -2258,12 +2258,27 @@ export class SessionBroker {
         worktreeCwd,
         // Placeholders until the first `buildOptions`, which resolves the
         // inherited chain asynchronously — `create` is sync and only has the row.
-        modeId: chat.modeId ?? DEFAULT_MODE_ID,
+        modeId: isGlobalProject(chat.projectId)
+          ? GLOBAL_MODE_ID
+          : (chat.modeId ?? DEFAULT_MODE_ID),
         agentId: chat.agentId,
         personaId: chat.personaId,
         effort: chat.effort ?? DEFAULT_EFFORT,
         pins: {
-          ...(chat.modeId !== undefined ? { modeId: chat.modeId } : {}),
+          // A mode pin on a GLOBAL chat is ignored, whatever the row says.
+          //
+          // This is the chokepoint, and it has to be here rather than only on
+          // the routes that write the row. `PUT /api/chats/:id` merges its
+          // body and saves directly — no posture resolution, no broker — so a
+          // `{ modeId: "yolo" }` lands as a pin; `refreshInheritedPosture`
+          // then sees a defined pin and never re-resolves, and the chat comes
+          // up with `bypassPermissions` and no denylist at all. A row can also
+          // predate this change, or be edited by hand. Dropping the pin here
+          // means the posture holds no matter how the row got written, and the
+          // project layer (`enforceGlobalPosture`) answers instead.
+          ...(chat.modeId !== undefined && !isGlobalProject(chat.projectId)
+            ? { modeId: chat.modeId }
+            : {}),
           ...(chat.effort !== undefined ? { effort: chat.effort } : {}),
           ...(chat.model !== undefined ? { model: chat.model } : {}),
         },
