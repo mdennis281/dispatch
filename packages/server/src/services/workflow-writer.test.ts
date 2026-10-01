@@ -227,6 +227,72 @@ describe("workflow-writer", () => {
     expect(yaml).toContain("enabled: true");
   });
 
+  it("null un-pins a key, so an `App default` option can actually clear one", async () => {
+    // The merge means an omitted key KEEPS its old value — correct, because
+    // `undefined` and "not mentioned" are the same thing over JSON. The cost
+    // was that a control offering "inherit from the app" had nothing to send:
+    // it dropped the key, the merge restored the pin, and the choice silently
+    // undid itself on the next load.
+    await writeManifest(
+      "name: Seed\nworkflow:\n  profile: review\n  pr:\n    reviewAgent:\n      enabled: true\n      maxRounds: 6\n      rounds:\n        mode: dynamic\n        linesPerRound: 250\n",
+    );
+    await seedProject();
+
+    await saveProjectWorkflow(deps(), "p1", {
+      profile: "review",
+      pr: { reviewAgent: { maxRounds: null, rounds: { linesPerRound: null } } },
+    });
+
+    const yaml = await readFile(join(repoDir, ".dispatch", "project.yaml"), "utf8");
+    expect(yaml).not.toContain("maxRounds");
+    expect(yaml).not.toContain("linesPerRound");
+    // Only what was cleared — the untouched pins stay put.
+    expect(yaml).toContain("mode: dynamic");
+    expect(yaml).toContain("enabled: true");
+  });
+
+  it("removes a block its last key was cleared out of", async () => {
+    // `rounds: {}` left behind reads as authored config to a human and as
+    // nothing to the loader — the gap someone then 'fixes' by guessing at keys.
+    await writeManifest(
+      "name: Seed\nworkflow:\n  profile: review\n  pr:\n    reviewAgent:\n      enabled: true\n      rounds:\n        mode: dynamic\n",
+    );
+    await seedProject();
+
+    await saveProjectWorkflow(deps(), "p1", {
+      profile: "review",
+      pr: { reviewAgent: { rounds: { mode: null } } },
+    });
+
+    const yaml = await readFile(join(repoDir, ".dispatch", "project.yaml"), "utf8");
+    expect(yaml).not.toContain("rounds");
+    expect(yaml).toContain("enabled: true");
+  });
+
+  it("un-pins on a project with no manifest too", async () => {
+    // The store path has to make the same promise as the manifest one, or the
+    // inherit option works or doesn't depending on whether the repo happens to
+    // carry a `.dispatch/`.
+    await seedProject({
+      workflow: {
+        profile: "review",
+        pr: { reviewAgent: { enabled: true, maxRounds: 6, rounds: { mode: "dynamic" } } },
+      },
+    });
+
+    await saveProjectWorkflow(deps(), "p1", {
+      profile: "review",
+      pr: { reviewAgent: { maxRounds: null, rounds: { mode: null } } },
+    });
+
+    const saved = await store.getProject("p1");
+    expect(saved?.workflow?.pr?.reviewAgent?.maxRounds).toBeUndefined();
+    expect(saved?.workflow?.pr?.reviewAgent?.rounds).toBeUndefined();
+    expect(saved?.workflow?.pr?.reviewAgent?.enabled).toBe(true);
+    // And the resolved policy is back on the shipped defaults.
+    expect(resolveWorkflow(saved).pr.reviewAgent.maxRounds).toBe(4);
+  });
+
   it("writes an empty reviewer list as the decision it is, not as an unset key", async () => {
     await writeManifest("name: Seed\nworkflow:\n  profile: review\n");
     await seedProject();

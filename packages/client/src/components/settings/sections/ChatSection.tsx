@@ -84,7 +84,15 @@ export function ChatSection({ draft, patch, harnesses, catalogs }: AppPaneProps)
   // belongs to one catalogue), and the account and its token are a secret that
   // never goes near a settings PUT.
   const reviewAgent = draft.reviewAgent ?? {};
-  const appRounds = { ...DEFAULT_REVIEW_ROUNDS, ...reviewAgent.rounds };
+  // Field by field with `??`, not a spread: the stored fields are nullable
+  // (null = "clear this pin" on the project side) and a spread would let a null
+  // overwrite the shipped default instead of falling back to it.
+  const appRounds = {
+    mode: reviewAgent.rounds?.mode ?? DEFAULT_REVIEW_ROUNDS.mode,
+    base: reviewAgent.rounds?.base ?? DEFAULT_REVIEW_ROUNDS.base,
+    linesPerRound: reviewAgent.rounds?.linesPerRound ?? DEFAULT_REVIEW_ROUNDS.linesPerRound,
+    max: reviewAgent.rounds?.max ?? DEFAULT_REVIEW_ROUNDS.max,
+  };
   const patchRounds = (p: Partial<ReviewRoundsPolicy>) =>
     patch({ reviewAgent: { ...reviewAgent, rounds: { ...reviewAgent.rounds, ...p } } });
 

@@ -793,7 +793,10 @@ export function createServices(
           const out = await launchAgentTask(services, {
             projectId,
             taskId: "pr:review",
-            effort: project?.workflow?.pr?.reviewAgent?.effort,
+            // `?? undefined`: the field is nullable on the wire (null = "clear
+            // this pin"), and both spellings mean the same thing here — let
+            // `launchAgentTask` walk provider default → task default.
+            effort: project?.workflow?.pr?.reviewAgent?.effort ?? undefined,
             harness: policy.harness,
             model: policy.model,
             agentId: policy.agentId,

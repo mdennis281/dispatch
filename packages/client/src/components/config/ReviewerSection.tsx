@@ -197,6 +197,9 @@ export function ReviewerSection({
   // not silently pin `linesPerRound` to whatever was on screen at the time.
   const patchRounds = (p: Partial<ReviewRoundsPolicy>) =>
     patch({ rounds: { ...authored?.rounds, ...p } });
+  // `null` survives the spread above and reaches the writer, which deletes the
+  // key — see `WorkflowReviewAgentConfigSchema`. `undefined` would not: it is
+  // dropped by JSON, read as "not mentioned", and merged back to the old pin.
 
   const { harnesses, catalogs } = useProviderCatalogs();
   const providerOptions = [
@@ -310,9 +313,12 @@ export function ReviewerSection({
                     // Claude model id onto Codex is the mismatch this pairing
                     // exists to prevent. Re-picking the same one keeps it.
                     onChange={(v) => {
-                      const harness = (v || undefined) as HarnessKind | undefined;
+                      const harness = (v || null) as HarnessKind | null;
                       if (harness === resolved.harness) return;
-                      patch({ harness, model: undefined });
+                      // `null`, not `undefined`: the save MERGES, so an omitted
+                      // key keeps its old value and "Same as the project" would
+                      // silently leave the old pin in `project.yaml`.
+                      patch({ harness, model: null });
                     }}
                     leftIcon={<Cpu />}
                     width={220}
@@ -324,7 +330,7 @@ export function ReviewerSection({
                     <Select
                       options={modelOptions}
                       value={resolved.model ?? ""}
-                      onChange={(v) => patch({ model: v || undefined })}
+                      onChange={(v) => patch({ model: v || null })}
                       width={220}
                     />
                   </label>
@@ -342,7 +348,7 @@ export function ReviewerSection({
                       ...EFFORT_OPTIONS,
                     ]}
                     value={value.pr?.reviewAgent?.effort ?? ""}
-                    onChange={(v) => patch({ effort: v || undefined })}
+                    onChange={(v) => patch({ effort: v || null })}
                     leftIcon={<Gauge />}
                     width={170}
                   />
@@ -362,7 +368,7 @@ export function ReviewerSection({
                     ]}
                     value={authored?.rounds?.mode ?? ""}
                     onChange={(v) =>
-                      patchRounds({ mode: (v || undefined) as ReviewRoundsPolicy["mode"] })
+                      patchRounds({ mode: (v || null) as ReviewRoundsPolicy["mode"] })
                     }
                     leftIcon={<Ruler />}
                     width={190}
@@ -388,7 +394,7 @@ export function ReviewerSection({
                         ...ROUND_OPTIONS,
                       ]}
                       value={authored?.maxRounds != null ? String(authored.maxRounds) : ""}
-                      onChange={(v) => patch({ maxRounds: v ? Number(v) : undefined })}
+                      onChange={(v) => patch({ maxRounds: v ? Number(v) : null })}
                       width={180}
                     />
                   </label>
@@ -405,7 +411,7 @@ export function ReviewerSection({
                           })),
                         ]}
                         value={authored?.rounds?.base != null ? String(authored.rounds.base) : ""}
-                        onChange={(v) => patchRounds({ base: v ? Number(v) : undefined })}
+                        onChange={(v) => patchRounds({ base: v ? Number(v) : null })}
                         width={160}
                       />
                     </label>
@@ -425,7 +431,7 @@ export function ReviewerSection({
                             ? String(authored.rounds.linesPerRound)
                             : ""
                         }
-                        onChange={(v) => patchRounds({ linesPerRound: v ? Number(v) : undefined })}
+                        onChange={(v) => patchRounds({ linesPerRound: v ? Number(v) : null })}
                         width={170}
                       />
                     </label>
@@ -437,7 +443,7 @@ export function ReviewerSection({
                           ...ROUND_OPTIONS,
                         ]}
                         value={authored?.rounds?.max != null ? String(authored.rounds.max) : ""}
-                        onChange={(v) => patchRounds({ max: v ? Number(v) : undefined })}
+                        onChange={(v) => patchRounds({ max: v ? Number(v) : null })}
                         width={180}
                       />
                     </label>

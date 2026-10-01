@@ -170,13 +170,13 @@ export type ReviewRoundsMode = z.infer<typeof ReviewRoundsModeSchema>;
  */
 export const ReviewRoundsPolicySchema = z.object({
   /** `static` uses `maxRounds` verbatim; `dynamic` computes the cap per PR. */
-  mode: ReviewRoundsModeSchema.optional(),
+  mode: ReviewRoundsModeSchema.nullish(),
   /** Rounds the smallest possible diff still gets. */
-  base: z.number().int().min(1).max(20).optional(),
+  base: z.number().int().min(1).max(20).nullish(),
   /** Lines of diff (additions + deletions) that buy one more round. */
-  linesPerRound: z.number().int().min(1).max(100000).optional(),
+  linesPerRound: z.number().int().min(1).max(100000).nullish(),
   /** The ceiling no diff can push the cap past. */
-  max: z.number().int().min(1).max(20).optional(),
+  max: z.number().int().min(1).max(20).nullish(),
 });
 export type ReviewRoundsPolicy = z.infer<typeof ReviewRoundsPolicySchema>;
 
@@ -209,13 +209,22 @@ export const DEFAULT_REVIEW_ROUNDS: ResolvedReviewRounds = {
   max: 8,
 };
 
+/**
+ * Every optional field here is `nullish`, not merely optional, and the
+ * difference is load-bearing: `undefined` cannot travel over JSON, so a pane
+ * offering "App default" had no way to say *un-pin this*. `saveProjectWorkflow`
+ * merges rather than replaces (for good reasons — see its docblock), so an
+ * omitted key silently kept the old value and the inherit option did nothing.
+ * `null` is the explicit clear. Every resolver reads these with `??`, which
+ * already treats null as absent, so nothing downstream has to know.
+ */
 export const WorkflowReviewAgentConfigSchema = z.object({
   /** Spawn a reviewer when one is requested here. Off unless a project says so. */
   enabled: z.boolean().optional(),
   /** Who the review is posted as (see the docblock). Default `self`. */
-  identity: ReviewerIdentitySchema.optional(),
+  identity: ReviewerIdentitySchema.nullish(),
   /** Reasoning effort the reviewer runs at. Reviewing well is not a cheap job. */
-  effort: EffortSchema.optional(),
+  effort: EffortSchema.nullish(),
   /**
    * The provider the reviewer runs on. Absent = the project's own provider.
    *
@@ -226,7 +235,7 @@ export const WorkflowReviewAgentConfigSchema = z.object({
    * that fails on its first turn, which is exactly how `spawn_chat` children
    * broke before they carried a provider of their own.
    */
-  harness: HarnessKindSchema.optional(),
+  harness: HarnessKindSchema.nullish(),
   /**
    * The model the reviewer runs on. Absent = that provider's default.
    *
@@ -235,9 +244,9 @@ export const WorkflowReviewAgentConfigSchema = z.object({
    * the project switches. The Reviewer pane enforces that; a hand-written
    * manifest with `model` and no `harness` keeps its old meaning.
    */
-  model: z.string().optional(),
+  model: z.string().nullish(),
   /** A configured agent (`.dispatch/agents/`) to run the review as. */
-  agentId: z.string().optional(),
+  agentId: z.string().nullish(),
   /** House rules appended to the briefing — what to be strict about, what to skip. */
   instructions: z.string().optional(),
   /**
@@ -248,7 +257,7 @@ export const WorkflowReviewAgentConfigSchema = z.object({
    * rounds that never converges is the failure mode worth capping, because it
    * spends quota indefinitely and looks like progress the whole time.
    */
-  maxRounds: z.number().int().min(1).max(20).optional(),
+  maxRounds: z.number().int().min(1).max(20).nullish(),
   /**
    * How that cap is ARRIVED AT — fixed, or sized to the diff.
    *
