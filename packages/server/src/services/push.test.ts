@@ -301,6 +301,28 @@ describe("PushService", () => {
     svc.stop();
   });
 
+  it("counts the badge and '+N more' through the filter, in both directions", async () => {
+    const { svc, sent } = make();
+    svc.start();
+    await svc.subscribe(sub(1));
+    // Arrives while `done` is muted: tracked, not sent — and NOT lost, which is
+    // what lets unmuting bring it back into the counts.
+    svc.setQueueFilter({ kinds: { done: false }, reviewKinds: {} });
+    bus.publish({ type: "attention-add", item: attn("done", { id: "d1" }) });
+    bus.publish({ type: "attention-add", item: attn("permission", { id: "p1" }) });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(sent).toHaveLength(1);
+    // The muted item is not in the badge the permission push carries.
+    expect(JSON.parse(sent[0]!.payload)).toMatchObject({ outstanding: 1, badge: 1 });
+
+    svc.setQueueFilter({ kinds: {}, reviewKinds: {} });
+    bus.publish({ type: "attention-add", item: attn("question", { id: "q1" }) });
+    await new Promise((r) => setTimeout(r, 10));
+    // …and after unmuting it counts again, with nothing to reconcile.
+    expect(JSON.parse(sent[1]!.payload)).toMatchObject({ outstanding: 3, badge: 3 });
+    svc.stop();
+  });
+
   it("setPrefs retunes a registered device and reports an unknown one", async () => {
     const { svc, sent } = make();
     await svc.subscribe(sub(1));
