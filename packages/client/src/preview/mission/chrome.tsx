@@ -8,10 +8,15 @@
  * So every such value goes through Tunable now: it renders as an affordance,
  * and when `onEdit` is wired it simply starts working.
  */
-import type { ButtonHTMLAttributes, ReactNode } from "react";
+import type { ReactNode } from "react";
 import { ArrowLeft, ChevronDown, ChevronRight, Home, Lock, Minus, Pencil, Plus } from "lucide-react";
 import { cn } from "../../lib/cn.js";
 import type { Tone } from "../../components/ui/index.js";
+// Re-exported so the board's screens keep importing their furniture from one
+// module. `RowButton` itself moved into the primitive kit: it is the answer to
+// "a whole row that happens to be clickable" everywhere, not only here, and the
+// homepage's four lists are built out of it.
+export { RowButton } from "../../components/ui/index.js";
 import { Button, Chip, IconButton } from "../../components/ui/index.js";
 import type { ActorStatus, RunStatus, TaskStatus } from "./types.js";
 import type { SectionState } from "./sections.js";
@@ -458,33 +463,3 @@ export function LockedRow({ value, why }: { value: ReactNode; why: string }) {
   );
 }
 
-/**
- * A whole row that happens to be clickable — the drill-in board's dominant
- * interaction, and the reason this module is not full of bare button elements.
- *
- * `Button` and `IconButton` are the right primitives for an ACTION: they own
- * their height, padding and variant, which is exactly what makes them wrong
- * here. A navigation row owns none of those — it is a full-width, left-aligned,
- * often multi-line target whose layout IS the content (a title over a progress
- * bar, an icon beside two lines of status). Forcing it into a variant would
- * mean fighting the variant at every call site.
- *
- * So the answer the primitive kit wants is one bare element, wrapped once, in
- * place of the same bare element written out at fifteen call sites — see
- * `components/ui/rawButtons.test.ts`, which counts exactly that.
- */
-export function RowButton({
-  className,
-  children,
-  ...rest
-}: ButtonHTMLAttributes<HTMLButtonElement>) {
-  return (
-    <button
-      type="button"
-      className={cn("text-left transition-colors", className)}
-      {...rest}
-    >
-      {children}
-    </button>
-  );
-}

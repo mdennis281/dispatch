@@ -624,7 +624,40 @@ const branchSince = (b: ChatBranch, at: (c: Chat) => number): number => {
  * `Minified React error #185` that `stores/prs.ts` documents at length.
  */
 export function useProjectChatTree(projectId: string | null): ChatBranch[] {
-  const chats = useProjectChats(projectId);
+  return useChatTree(useProjectChats(projectId));
+}
+
+/**
+ * Selector: EVERY project's chats as one tree — the homepage's chat list.
+ *
+ * The same `buildChatTree` the sidebar uses, handed the unscoped list instead
+ * of one project's. There is deliberately no second tree builder and no server
+ * endpoint behind this: the store already holds every chat in the install and
+ * follows them live, so a cross-project list is a different ARGUMENT to the
+ * existing fold rather than a different implementation of it. Anything else
+ * would be a second definition of "what files under what", and the two would
+ * disagree the first time either moved.
+ *
+ * Nesting works unchanged across the boundary, and in one place works BETTER:
+ * a chat spawned into another project (`spawn_chat` takes a `projectId`) has a
+ * parent the project-scoped sidebar cannot see, so `ancestorPath` ends the walk
+ * and draws it at the top level. Here the parent is present, so the row files
+ * under it — which is the relationship the homepage exists to show.
+ *
+ * Archived chats are dropped, matching the homepage's own totals
+ * (`services/home.ts` excludes them from every count). The sidebar does not
+ * filter them, but the sidebar is a working surface for one project; this is a
+ * census, and a census whose rows and whose counts disagree is worse than
+ * either.
+ */
+export function useAllChatTree(): ChatBranch[] {
+  const chats = useProjectChats(null);
+  const open = useMemo(() => chats.filter((c) => !c.archived), [chats]);
+  return useChatTree(open);
+}
+
+/** The `useMemo` both tree selectors share. See {@link useProjectChatTree}. */
+function useChatTree(chats: Chat[]): ChatBranch[] {
   const sectionSince = useChats((s) => s.sectionSince);
   const prsByKey = usePrs((s) => s.byKey);
   return useMemo(

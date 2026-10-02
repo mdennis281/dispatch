@@ -29,6 +29,7 @@ import {
 } from "@dispatch/shared";
 import { Chip, type Tone } from "../../ui/Chip.js";
 import { ReviewAgentChip } from "../../pr/ReviewAgentChip.js";
+import { checkIsFailing } from "../../pr/checks.js";
 import { cn } from "../../../lib/cn.js";
 import { dur } from "../../../lib/format.js";
 import { useNowTick } from "../../../stores/agentRun.js";
@@ -273,12 +274,7 @@ function runtimeLabel(r: { ms: number; partial: boolean }): string {
 
 function JobRow({ check, now }: { check: CheckRun; now: number | null }) {
   const done = check.status === "completed";
-  const failed =
-    done &&
-    (check.conclusion === "failure" ||
-      check.conclusion === "timed_out" ||
-      check.conclusion === "cancelled" ||
-      check.conclusion === "action_required");
+  const failed = checkIsFailing(check);
   const icon = !done ? (
     <Loader2 className="size-3 shrink-0 animate-spin text-accent-hi" />
   ) : failed ? (

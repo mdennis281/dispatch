@@ -3,9 +3,13 @@ import type { Chat, Project } from "@dispatch/shared";
 import { useChats } from "./chats.js";
 import { useProjects } from "./projects.js";
 import { useView } from "./view.js";
+import { useLayout } from "./layout.js";
 import {
   selectProject,
   selectChat,
+  selectGlobalChat,
+  openChat,
+  openProject,
   reconcileActiveChat,
   visibleChat,
   goHome,
@@ -366,5 +370,51 @@ describe("the homepage toggle", () => {
     toggleHome();
     expect(useView.getState().view).toBe("chat");
     expect(lastPlace()).toEqual({ projectId: "p1", chatId: "c1" });
+  });
+});
+
+/* ------------------------------------------------------- the stale pane */
+
+/**
+ * Below `lg` a Ship/Run pane REPLACES the transcript, and the homepage is
+ * full-bleed — you reach it from wherever you were, with whatever pane you had
+ * open still selected. Every navigation that lands on a chat has to put that
+ * back, or the click navigates correctly and looks like it did nothing.
+ */
+describe("navigating to a chat clears a stale Ship/Run pane", () => {
+  const onRun = () => useLayout.setState({ pane: "run" });
+  const pane = () => useLayout.getState().pane;
+
+  it("openChat — the homepage's three lists", () => {
+    seed({ chats: [chat("c1", "p1"), chat("c2", "p2")], activeChatId: "c1" });
+    onRun();
+    openChat("c2");
+    expect(pane()).toBe("chat");
+    expect(useChats.getState().activeChatId).toBe("c2");
+    expect(useProjects.getState().activeProjectId).toBe("p2");
+  });
+
+  it("selectGlobalChat — the homepage button, the sidebar row, the palette", () => {
+    seed({ chats: [chat("c1", "p1")], activeChatId: "c1" });
+    onRun();
+    selectGlobalChat();
+    expect(pane()).toBe("chat");
+    expect(useView.getState().view).toBe("chat");
+    expect(useProjects.getState().activeProjectId).toBe("__global__");
+  });
+
+  it("openProject — unchanged, and asserted beside the two above", () => {
+    seed({ chats: [chat("c1", "p1"), chat("c2", "p2")], activeChatId: "c1" });
+    onRun();
+    openProject("p2");
+    expect(pane()).toBe("chat");
+    expect(useChats.getState().activeChatId).toBe("c2");
+  });
+
+  it("selectChat on its own does NOT — it is pressed from inside panels too", () => {
+    seed({ chats: [chat("c1", "p1"), chat("c2", "p2")], activeChatId: "c1" });
+    onRun();
+    selectChat("c2");
+    expect(pane()).toBe("run");
   });
 });

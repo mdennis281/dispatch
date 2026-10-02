@@ -30,6 +30,8 @@ import type {
 import { usePanels } from "../../stores/panels.js";
 import { usePrReviewAgent } from "../../stores/prs.js";
 import { ReviewAgentChip, ReviewerProblemNotice } from "../pr/ReviewAgentChip.js";
+import { checkIsFailing, checksVerdict, summarizeChecks } from "../pr/checks.js";
+import { reviewVerdict } from "../pr/reviewDecision.js";
 import { actions } from "../../lib/actions.js";
 import { api } from "../../lib/api.js";
 import { worktreeMatchesChat } from "./panelBus.js";
@@ -102,60 +104,24 @@ function usePrDetailSync(projectId: string, primary: PRInfo | undefined) {
 
 /* -------------------------------------------------------- check aggregation */
 
-interface CheckSummary {
-  passed: number;
-  failed: number;
-  pending: number;
-  neutral: number;
-  total: number;
-}
-
-/** A completed check that needs attention (failed / cancelled / action-required). */
-function checkIsFailing(c: CheckRun): boolean {
-  return (
-    c.status === "completed" &&
-    (c.conclusion === "failure" ||
-      c.conclusion === "timed_out" ||
-      c.conclusion === "cancelled" ||
-      c.conclusion === "action_required")
-  );
-}
-
-/** Fold a check list into pass/fail/pending/neutral counts for the rollup line. */
-function summarizeChecks(checks: CheckRun[]): CheckSummary {
-  const s: CheckSummary = { passed: 0, failed: 0, pending: 0, neutral: 0, total: checks.length };
-  for (const c of checks) {
-    if (c.status !== "completed") s.pending++;
-    else if (c.conclusion === "success") s.passed++;
-    else if (checkIsFailing(c)) s.failed++;
-    else s.neutral++; // skipped / neutral / stale / null
-  }
-  return s;
-}
-
-/** The one-word rollup verdict + tone for a check summary. */
-function checksVerdict(s: CheckSummary): { tone: Tone; label: string } {
-  if (s.total === 0) return { tone: "muted", label: "no checks" };
-  if (s.failed > 0) return { tone: "danger", label: "failing" };
-  if (s.pending > 0) return { tone: "warn", label: "running" };
-  return { tone: "success", label: "passing" };
-}
-
 /** Review-decision → chip (null/absent = awaiting, only meaningful while open). */
+const DECISION_ICON: Record<string, LucideIcon> = {
+  approved: Check,
+  "changes requested": X,
+  "review required": CircleDot,
+  "awaiting review": Clock,
+};
+
 function reviewDecisionChip(
   d: ReviewDecision | null | undefined,
   open: boolean,
 ): { tone: Tone; label: string; Icon: LucideIcon } | null {
-  switch (d) {
-    case "approved":
-      return { tone: "success", label: "approved", Icon: Check };
-    case "changes_requested":
-      return { tone: "danger", label: "changes requested", Icon: X };
-    case "review_required":
-      return { tone: "warn", label: "review required", Icon: CircleDot };
-    default:
-      return open ? { tone: "muted", label: "awaiting review", Icon: Clock } : null;
-  }
+  // Tone and wording come from `pr/reviewVerdict`, which the homepage's PR
+  // rows read too — a decision that is red in one list and amber in another is
+  // a difference the reader will try to interpret. Only the glyph is this
+  // panel's, because it is the only surface with room for one.
+  const v = reviewVerdict(d, open);
+  return v ? { ...v, Icon: DECISION_ICON[v.label] ?? CircleDot } : null;
 }
 
 /** Mergeable state → chip, folding in GitHub's mergeStateStatus (open PRs only). */
