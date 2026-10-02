@@ -179,10 +179,21 @@ jobs:
   # is a human decision taken once in a while, and ten minutes is nothing
   # against shipping a broken Recycle Bin path to every stable install.
   #
-  # The file list lives in `packages/server/vitest.windows.config.ts` rather
-  # than inline here, because when it WAS inline in two workflows this copy fell
-  # two files behind the other one and the stable gate silently stopped checking
-  # them. Add new Windows-sensitive tests there.
+  # THE FILE LIST STAYS INLINE, AND THAT IS NOW THE SAFE CHOICE. While the same
+  # list was inline in ci.yml too, the two copies drifted — this one had fallen
+  # two files behind, so the stable gate had silently stopped checking
+  # `fs-explorer.test.ts` and `harness/acp/index.test.ts` (both are back below).
+  # Factoring it into a committed vitest config looked like the fix, and is the
+  # wrong one HERE: this job checks out a RELEASE TAG that may be weeks old, so
+  # a config file living in the tree would be absent from every tag cut before
+  # it and the step would die on a missing file, blocking promotion of a build
+  # that is otherwise perfectly good. Inline, the list comes from the workflow
+  # revision and the SOURCES come from the tag, which is exactly the split this
+  # job wants — and the arguments are vitest FILENAME FILTERS, so a file a tag
+  # predates simply matches nothing instead of failing.
+  #
+  # There is only one copy of this list left in the repo, so there is nothing
+  # left for it to drift against. Add new Windows-sensitive tests right here.
   # ---------------------------------------------------------------------------
   windows:
     name: windows-specific tests
@@ -213,7 +224,19 @@ jobs:
         run: pnpm --filter @dispatch/shared --filter @dispatch/cli build
 
       - name: Test (windows-sensitive files)
-        run: pnpm --filter @dispatch/server test:windows
+        run: >
+          pnpm --filter @dispatch/server exec vitest run
+          src/store/store.test.ts
+          src/services/agent-cwd.test.ts
+          src/services/runtime.test.ts
+          src/services/processes.test.ts
+          src/services/terminal.test.ts
+          src/services/file-index.test.ts
+          src/services/runner.test.ts
+          src/routes/fs.test.ts
+          src/services/fs-explorer.test.ts
+          src/services/mcp/manager-mcp.integration.test.ts
+          src/harness/acp/index.test.ts
 
       - name: Test release installer (Windows)
         run: node --test tools/install.test.mjs

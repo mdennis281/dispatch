@@ -72,8 +72,9 @@ jobs:
   # documented reason for saying not to do this. `.dispatch/` is gitignored
   # "ahead of open-sourcing", so this is a live concern, not a hypothetical.
   # The `if:` below is the guard: a pull request from a FORK does not run on
-  # this runner. Before flipping the repo public, decide deliberately what
-  # should gate fork PRs — an ephemeral GitHub-hosted job, or nothing.
+  # this runner. The repo IS public now, and the answer to "then what gates a
+  # fork PR" is the `test-fork` job below — the same work on an ephemeral
+  # `ubuntu-latest`, which is the only place fork code is allowed to execute.
   # ---------------------------------------------------------------------------
   test:
     name: build + typecheck + test (linux, self-hosted)
@@ -189,6 +190,61 @@ jobs:
       # Run them locally against a real cockpit: pnpm --filter @dispatch/client e2e
 
   # ---------------------------------------------------------------------------
+  # FORK PRs. The gate above refuses to run on a self-hosted box for code that
+  # came from a fork, which is correct and non-negotiable — see the warning on
+  # that job. The consequence is that a fork PR runs NO tests there, and this
+  # job is what keeps that from meaning "no tests at all".
+  #
+  # It only ever runs for fork PRs, so it costs a hosted runner on exactly the
+  # pull requests that cannot use the free one. It is the same work as the gate
+  # on an ephemeral `ubuntu-latest`, with `cache: pnpm` because unlike the
+  # self-hosted box this runner has no store to reuse.
+  #
+  # NOT a replacement for the gate: when it IS the only Linux leg, nobody with
+  # commit access has run the suite on this change yet, so read its result
+  # before merging a fork PR rather than trusting the badge.
+  # ---------------------------------------------------------------------------
+  test-fork:
+    name: build + typecheck + test (linux, hosted fork PRs)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify no stale tool names
+        run: node tools/verify/no-stale-tool-names.mjs
+
+      # Build before typecheck — shared/cli expose their types from dist/. See
+      # the long note on the gate; it is load-bearing in both jobs.
+      - name: Build
+        run: pnpm build
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test (shared, cli, server)
+        run: pnpm test
+
+      - name: Test (client)
+        run: pnpm --filter @dispatch/client exec vitest run
+
+  # ---------------------------------------------------------------------------
   # WHERE THE WINDOWS LEG WENT. There used to be a `windows: windows-latest` job
   # here running the platform-sensitive subset on every PR. It now runs ONLY in
   # `promote.yml`, immediately before a build is flipped to the stable channel.
@@ -199,13 +255,13 @@ jobs:
   # platform). What a real Windows host adds is proof about the HOST: the drive
   # probe, the `Get-Acl` owner lookup, the Recycle Bin path, `netstat` parsing,
   # the `.cmd`-shim spawn, the EPERM-on-rename retry. That proof matters when
-  # bits are about to reach the machines people run Dispatch on; on a PR it is a
-  # hosted-runner round trip (cold pnpm install, queue wait) on the critical
+  # bits are about to reach the machines people run Dispatch on; on a PR it was
+  # a hosted-runner round trip (cold pnpm install, queue wait) on the critical
   # path of every merge, several times a minute, to re-answer the same question.
   #
-  # So: unstable is gated by the self-hosted Linux run above and ships on merge;
-  # stable is gated by Linux AND Windows. A Windows-only regression can reach
-  # the unstable channel — that is the deliberate trade, and it is what the
-  # unstable channel is for. The list of files lives in
-  # `packages/server/vitest.windows.config.ts`, which is also where to add one.
+  # So: unstable is gated by Linux and ships on merge; stable is gated by Linux
+  # AND Windows. A Windows-only regression can reach the unstable channel —
+  # that is the deliberate trade, and it is what the unstable channel is for.
+  # The list of files lives in the `windows` job of `promote.yml`, which is also
+  # where to add one.
   # ---------------------------------------------------------------------------

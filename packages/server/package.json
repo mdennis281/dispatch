@@ -8,8 +8,7 @@
     "build": "tsc -p tsconfig.json && node scripts/copy-mjs-assets.mjs",
     "start": "node dist/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run",
-    "test:windows": "vitest run --config vitest.windows.config.ts"
+    "test": "vitest run"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.222",
