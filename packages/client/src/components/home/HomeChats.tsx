@@ -58,7 +58,7 @@ import {
 } from "../../stores/chats.js";
 import { usePrs } from "../../stores/prs.js";
 import { useProjects } from "../../stores/projects.js";
-import { selectChat } from "../../stores/navigation.js";
+import { openChat } from "../../stores/navigation.js";
 import { StatusDot, statusMeta, toneText } from "../ui/StatusDot.js";
 import { TitleLine } from "../ui/TitleText.js";
 import { RowButton } from "../ui/RowButton.js";
@@ -310,7 +310,7 @@ function ChatRow({ chat, depth, folded }: { chat: Chat; depth: number; folded: n
   return (
     <RowButton
       data-testid="home-chat-row"
-      onClick={() => selectChat(chat.id)}
+      onClick={() => openChat(chat.id)}
       title={chat.title}
       className={cn(
         "flex w-full items-center gap-2 py-1.5 pr-3 hover:bg-hover",
@@ -358,8 +358,18 @@ function ChatRow({ chat, depth, folded }: { chat: Chat; depth: number; folded: n
           tone already carries the status, and the project is the one column this
           page has that the sidebar's rows don't — dropping it on a phone would
           leave a list of titles from nowhere in particular. It just gets less
-          width to say it in. */}
-      <span className={cn("hidden shrink-0 text-2xs opacity-80 sm:block", toneText(meta.tone))}>
+          width to say it in.
+
+          The sr-only copy is NOT a duplicate: the visual one is behind a
+          breakpoint and the glyph beside it says "needs input" in colour alone,
+          so a phone reader would get an unlabelled marker. Stated once for
+          assistive tech at every width, `aria-hidden` on the one that comes and
+          goes — the same split the sidebar's `MarkerLabel` makes. */}
+      <span className="sr-only">{meta.label}</span>
+      <span
+        aria-hidden
+        className={cn("hidden shrink-0 text-2xs opacity-80 sm:block", toneText(meta.tone))}
+      >
         {meta.label}
       </span>
       <span className="flex min-w-0 shrink-0 items-center gap-1 text-2xs text-faint">

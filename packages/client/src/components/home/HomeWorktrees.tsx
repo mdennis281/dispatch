@@ -23,7 +23,7 @@ import { useMemo, useState } from "react";
 import { FolderTree } from "lucide-react";
 import { useChats, useProjectChats } from "../../stores/chats.js";
 import { useProjects } from "../../stores/projects.js";
-import { selectChat } from "../../stores/navigation.js";
+import { openChat } from "../../stores/navigation.js";
 import { Card } from "../metrics/chrome.js";
 import { TitleLine } from "../ui/TitleText.js";
 import { RowButton } from "../ui/RowButton.js";
@@ -75,7 +75,7 @@ function WorktreeRow({ row }: { row: ReturnType<typeof worktreeRows>[number] }) 
   return (
     <RowButton
       data-testid="home-worktree-row"
-      onClick={() => selectChat(row.chatId)}
+      onClick={() => openChat(row.chatId)}
       title={row.path}
       className="flex w-full items-center gap-2 px-3 py-1.5 hover:bg-hover"
     >

@@ -146,6 +146,10 @@ export function HomeView() {
         {/* `max-w` with auto margins: these are rows in cards, and a row stretched
             across a 2560px monitor puts its two ends in different postcodes. */}
         <div className="mx-auto flex max-w-5xl flex-col gap-3 p-3 sm:p-4">
+          <HomeChats />
+          <HomeWorktrees />
+          <HomePrs />
+
           {/* Shown whenever there IS an error, not only when there is nothing to
               paint under it. Once the first load succeeds the store keeps the
               last snapshot forever, so gating the banner on `!overview` meant a
@@ -153,10 +157,11 @@ export function HomeView() {
               nothing — the one case where the user explicitly asked for a newer
               number and silently did not get one.
 
-              It is about the ROLLUP only. The lists below are live from the
-              stores and are unaffected by a failed overview fetch, which is why
-              this sits above the activity card rather than at the top of the
-              page where it would read as "this page is broken". */}
+              It is about the ROLLUP only, which is why it sits HERE — directly
+              above the Activity card and below the three lists. Those are live
+              from the stores and are unaffected by a failed overview fetch, so
+              a banner at the top of the page would have claimed the whole
+              surface was broken when nothing above it was. */}
           {error && (
             <p
               role="alert"
@@ -167,10 +172,6 @@ export function HomeView() {
                 : error}
             </p>
           )}
-
-          <HomeChats />
-          <HomeWorktrees />
-          <HomePrs />
 
           {/* THE DEMOTED ROLLUP. One card, one column, stacked: the totals as a
               strip of small figures, then one row per project with its shape
@@ -348,12 +349,18 @@ function ProjectRow({ project: p, window }: { project: HomeProject; window: Home
       {p.attention > 0 && (
         <span className={cn("flex shrink-0 items-center gap-1 text-2xs", toneText("warn"))}>
           <StatusDot tone="warn" pulse size={5} />
+          {/* The dot says WHICH of the two this is, in colour only, and the
+              number beside it says nothing on its own — a reader would get
+              "2 2" off a row with both. Named for assistive tech, exactly as
+              the sidebar's `MarkerLabel` names its own markers. */}
+          <span className="sr-only">needing input:</span>
           {p.attention}
         </span>
       )}
       {p.working > 0 && (
         <span className={cn("flex shrink-0 items-center gap-1 text-2xs", toneText("working"))}>
           <StatusDot tone="working" pulse size={5} />
+          <span className="sr-only">working:</span>
           {p.working}
         </span>
       )}

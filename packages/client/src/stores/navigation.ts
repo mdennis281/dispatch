@@ -77,6 +77,13 @@ export function selectChat(chatId: string): void {
  * sitting right there is the same bad landing here.
  */
 export function selectGlobalChat(): void {
+  // Same reason `openProject` and `leaveHome` do it: at `sm` a Ship/Run pane
+  // REPLACES the transcript, so a selection left over from wherever you were
+  // renders full-width over the chat you just asked for. This is the shared
+  // path — the sidebar's row, the command palette and the homepage's button
+  // all land here — so resetting it once covers every entry point rather than
+  // leaving the next one to remember.
+  useLayout.getState().setPane("chat");
   selectProject(GLOBAL_PROJECT_ID);
   reconcileActiveChat();
   useView.getState().setView("chat");
@@ -289,6 +296,27 @@ export function openProject(projectId: string): void {
     selectProject(projectId);
     useView.getState().setView("chat");
   }
+}
+
+/**
+ * Open a chat FROM THE HOMEPAGE — `openProject`'s counterpart for the three
+ * cross-project lists (chats, worktrees, pull requests).
+ *
+ * `selectChat` alone is not enough from here, for exactly the reason
+ * `openProject` resets the pane: the homepage is full-bleed and is reached
+ * from anywhere, so the Ship or Run pane you had open before you came is still
+ * selected — and below `lg` that pane renders over (at `sm`, instead of) the
+ * transcript. The row would have navigated correctly and looked like it had
+ * done nothing.
+ *
+ * Not folded into `selectChat` itself: that is the invariant-keeping primitive
+ * every cross-project entry point goes through (the attention queue, a
+ * notification click, a deep link), and some of those are pressed from inside
+ * a panel the reader means to keep.
+ */
+export function openChat(chatId: string): void {
+  useLayout.getState().setPane("chat");
+  selectChat(chatId);
 }
 
 /** The brand lockup and the project selector's Home row both press this. */

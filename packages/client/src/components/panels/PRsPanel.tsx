@@ -31,6 +31,7 @@ import { usePanels } from "../../stores/panels.js";
 import { usePrReviewAgent } from "../../stores/prs.js";
 import { ReviewAgentChip, ReviewerProblemNotice } from "../pr/ReviewAgentChip.js";
 import { checkIsFailing, checksVerdict, summarizeChecks } from "../pr/checks.js";
+import { reviewVerdict } from "../pr/reviewDecision.js";
 import { actions } from "../../lib/actions.js";
 import { api } from "../../lib/api.js";
 import { worktreeMatchesChat } from "./panelBus.js";
@@ -104,20 +105,23 @@ function usePrDetailSync(projectId: string, primary: PRInfo | undefined) {
 /* -------------------------------------------------------- check aggregation */
 
 /** Review-decision → chip (null/absent = awaiting, only meaningful while open). */
+const DECISION_ICON: Record<string, LucideIcon> = {
+  approved: Check,
+  "changes requested": X,
+  "review required": CircleDot,
+  "awaiting review": Clock,
+};
+
 function reviewDecisionChip(
   d: ReviewDecision | null | undefined,
   open: boolean,
 ): { tone: Tone; label: string; Icon: LucideIcon } | null {
-  switch (d) {
-    case "approved":
-      return { tone: "success", label: "approved", Icon: Check };
-    case "changes_requested":
-      return { tone: "danger", label: "changes requested", Icon: X };
-    case "review_required":
-      return { tone: "warn", label: "review required", Icon: CircleDot };
-    default:
-      return open ? { tone: "muted", label: "awaiting review", Icon: Clock } : null;
-  }
+  // Tone and wording come from `pr/reviewVerdict`, which the homepage's PR
+  // rows read too — a decision that is red in one list and amber in another is
+  // a difference the reader will try to interpret. Only the glyph is this
+  // panel's, because it is the only surface with room for one.
+  const v = reviewVerdict(d, open);
+  return v ? { ...v, Icon: DECISION_ICON[v.label] ?? CircleDot } : null;
 }
 
 /** Mergeable state → chip, folding in GitHub's mergeStateStatus (open PRs only). */

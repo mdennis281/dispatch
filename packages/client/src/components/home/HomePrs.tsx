@@ -21,12 +21,13 @@ import type { PrRecord } from "@dispatch/shared";
 import { useAllPrs } from "../../stores/prs.js";
 import { useChats } from "../../stores/chats.js";
 import { useProjects } from "../../stores/projects.js";
-import { selectChat } from "../../stores/navigation.js";
+import { openChat } from "../../stores/navigation.js";
 import { Card } from "../metrics/chrome.js";
 import { Chip, type Tone } from "../ui/Chip.js";
 import { TitleLine } from "../ui/TitleText.js";
 import { RowButton } from "../ui/RowButton.js";
 import { checksVerdict, summarizeChecks } from "../pr/checks.js";
+import { reviewVerdict } from "../pr/reviewDecision.js";
 import { relTimeShort } from "../../lib/format.js";
 import { cn } from "../../lib/cn.js";
 import { prRows } from "./derive.js";
@@ -81,7 +82,12 @@ function PrRow({ pr }: { pr: PrRecord }) {
   const project = useProjects((s) =>
     s.projects.find((p) => p.id === (pr.projectId ?? chat?.projectId)),
   );
+  const open = pr.state === "open";
   const checks = checksVerdict(summarizeChecks(pr.checks));
+  // Review state only while it is still a question. On a merged PR the decision
+  // is history, and a settled row carrying "approved" crowds out the open ones
+  // these two columns exist to flag.
+  const review = open ? reviewVerdict(pr.reviewDecision, true) : null;
 
   // A DIV with a button inside, not a button wrapping a link: a link nested in a
   // button is invalid and swallows its own clicks — the same reason the sidebar's
@@ -98,6 +104,11 @@ function PrRow({ pr }: { pr: PrRecord }) {
         target="_blank"
         rel="noreferrer"
         title={`${pr.repo}#${pr.number} on GitHub`}
+        // The visible text is a bare `#751`, and this list is cross-repository —
+        // two rows can legitimately read `#97`. `title` is not reliably
+        // announced, so the repo goes in the accessible name or a screen reader
+        // gets a column of indistinguishable links.
+        aria-label={`${pr.repo}#${pr.number} on GitHub`}
         className="flex shrink-0 items-center gap-1 cm-mono !text-2xs text-secondary transition-colors hover:text-accent"
       >
         #{pr.number}
@@ -109,7 +120,7 @@ function PrRow({ pr }: { pr: PrRecord }) {
           isn't. */}
       {chat ? (
         <RowButton
-          onClick={() => selectChat(chat.id)}
+          onClick={() => openChat(chat.id)}
           title={`Open ${chat.title}`}
           className="min-w-0 flex-1 truncate text-xs text-primary"
         >
@@ -122,13 +133,16 @@ function PrRow({ pr }: { pr: PrRecord }) {
       )}
       {pr.isDraft && <Chip tone="muted">draft</Chip>}
       {pr.hold && <Chip tone="warn">hold</Chip>}
-      {/* CI only while it still matters. A merged PR's last check run is a fact
-          about history, and a column of green on settled rows crowds out the
-          open ones it exists to flag. */}
-      {pr.state === "open" && checks.tone !== "muted" && (
-        <span className={cn("hidden shrink-0 text-2xs sm:block", TONE_TEXT[checks.tone])}>
-          {checks.label}
-        </span>
+      {/* The two verdicts, review first: "changes requested" is a thing somebody
+          has to do and a red CI run is a thing somebody has to fix, and of the
+          two the human one is the one that stalls.
+
+          Both drop their VISIBLE copy at `sm` and keep an sr-only one, for the
+          reason the chat rows do — a column removed by a breakpoint must not
+          take the fact with it. */}
+      {review && <Verdict label={review.label} tone={review.tone} />}
+      {open && checks.tone !== "muted" && (
+        <Verdict label={checks.label} tone={checks.tone} />
       )}
       <Chip tone={STATE_TONE[pr.state]}>{pr.state}</Chip>
       <span className="hidden max-w-[9rem] shrink-0 truncate text-2xs text-faint sm:block">
@@ -142,13 +156,34 @@ function PrRow({ pr }: { pr: PrRecord }) {
 }
 
 /**
+ * One verdict column — stated once for assistive tech at every width, drawn
+ * only where there is room for it.
+ */
+function Verdict({ label, tone }: { label: string; tone: VerdictTone }) {
+  return (
+    <>
+      <span className="sr-only">{label}</span>
+      <span aria-hidden className={cn("hidden shrink-0 text-2xs sm:block", TONE_TEXT[tone])}>
+        {label}
+      </span>
+    </>
+  );
+}
+
+type VerdictTone = "muted" | "danger" | "warn" | "success" | "neutral" | "accent" | "agent" | "info";
+
+/**
  * The verdict tones as text colours. Spelled out rather than templated, for the
  * reason `StatusDot`'s table is: Tailwind scans for literal class names, and a
  * `text-${tone}` compiles to no CSS at all.
  */
-const TONE_TEXT: Record<"muted" | "danger" | "warn" | "success", string> = {
+const TONE_TEXT: Record<VerdictTone, string> = {
   muted: "text-faint",
   danger: "text-danger",
   warn: "text-warn",
   success: "text-success",
+  neutral: "text-secondary",
+  accent: "text-accent",
+  agent: "text-accent-2",
+  info: "text-info",
 };
