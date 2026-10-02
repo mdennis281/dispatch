@@ -21,6 +21,7 @@ import type { Chat, PrRecord } from "@dispatch/shared";
 import { worktreeKey } from "@dispatch/shared";
 import type { DotTone } from "../ui/StatusDot.js";
 import { summarizeChecks } from "../pr/checks.js";
+import { reviewVerdict } from "../pr/reviewDecision.js";
 
 /* ------------------------------------------------------------- worktrees */
 
@@ -168,12 +169,31 @@ export function prMark(pr: PrRecord): { tone: DotTone; label: string } {
   if (pr.state === "closed") return { tone: "muted", label: "closed" };
   if (pr.isDraft) return { tone: "muted", label: "draft" };
   if (pr.hold) return { tone: "warn", label: "on hold" };
-  if (pr.reviewDecision === "changes_requested") {
-    return { tone: "warn", label: "changes requested" };
-  }
+
+  // Tone AND wording from the shared mapping, never spelled again here: this
+  // function previously called requested changes `warn` where `reviewVerdict`
+  // (and therefore the PRs panel, the Workspace roster and the transcript) call
+  // it `danger`, which is exactly the drift `pr/reviewDecision.ts` was extracted
+  // to prevent. Only the PRECEDENCE below is this surface's own.
+  const review = reviewVerdict(pr.reviewDecision, true);
   const checks = summarizeChecks(pr.checks);
+
+  // THE PRECEDENCE, stated once. Requested changes outranks a red run: both are
+  // work somebody has to do, and the human one is the one that stalls — CI
+  // reruns itself on a push, a reviewer does not.
+  // `review` is non-null for an open PR by construction, and the guards say so
+  // rather than asserting it: a `!` here would be claiming something about
+  // another module's branches that only holds until someone edits them.
+  if (review && pr.reviewDecision === "changes_requested") return review;
   if (checks.failed > 0) return { tone: "danger", label: "CI failing" };
   if (checks.pending > 0) return { tone: "info", label: "CI running" };
-  if (pr.reviewDecision === "approved") return { tone: "success", label: "approved" };
+  if (review && pr.reviewDecision === "approved") return review;
+
+  // `review_required` and "no decision yet" deliberately read as plain `open`.
+  // They are the DEFAULT state of an open pull request — on a repo whose policy
+  // requires a review, every PR has one of them for most of its life — and a
+  // mark that fires on everything carries no information at the glance this
+  // column exists for. The full phrase is still in the tooltip and the
+  // accessible name, which is where a reader who wants it looks.
   return { tone: "accent", label: "open" };
 }

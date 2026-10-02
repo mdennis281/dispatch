@@ -162,13 +162,21 @@ export function HomeChats() {
 
   // Built ONCE here and handed down, not looked up per row. A row doing its own
   // `prs.find(p => p.chatId === id)` is O(rows × PRs) — 757 × 1301 on the
-  // install this was built against, on every render of a live page.
-  const worktrees = useMemo(() => worktreesByChat(worktreeRows(chats)), [chats]);
+  // install this was built against, on every render of a live page. The
+  // worktree scan is memoized ONCE and read twice (the map and the count), for
+  // the same reason: it walks every chat's history and dedupes by path.
+  const trees = useMemo(() => worktreeRows(chats), [chats]);
+  const worktrees = useMemo(() => worktreesByChat(trees), [trees]);
   const prsOf = useMemo(() => prsByChat(prs), [prs]);
-  const orphans = useMemo(
-    () => orphanPrs(prs, new Set(chats.map((c) => c.id))),
-    [prs, chats],
+  // THE SAME POPULATION THE TREE DREW FROM, archived excluded. `useAllChatTree`
+  // drops archived chats, so a `known` set built from the unfiltered list made
+  // a PR on an archived chat invisible twice over: no row carries it, and it is
+  // not an orphan either — while the header above still counts it.
+  const onPage = useMemo(
+    () => new Set(chats.filter((c) => !c.archived).map((c) => c.id)),
+    [chats],
   );
+  const orphans = useMemo(() => orphanPrs(prs, onPage), [prs, onPage]);
   const ctx: RowContext = { worktrees, prsOf };
 
   const grouped = useMemo(() => {
@@ -190,7 +198,6 @@ export function HomeChats() {
   // note ("77 live", "6 open · 1301 tracked"); folded into the one list they are
   // the one line that says how much of each thing there is.
   const openPrs = prs.filter((p) => p.state === "open").length;
-  const trees = worktreeRows(chats).length;
 
   return (
     <Card
@@ -202,14 +209,19 @@ export function HomeChats() {
           : [
               live > 0 ? `${live} live` : null,
               `${branches.length} threads`,
-              trees > 0 ? `${trees} worktrees` : null,
+              trees.length > 0 ? `${trees.length} worktrees` : null,
               openPrs > 0 ? `${openPrs} open PRs` : null,
             ]
               .filter(Boolean)
               .join(" · ")
       }
     >
-      {branches.length === 0 ? (
+      {/* The empty state needs BOTH to be empty. Gating it on the chats alone
+          put the orphan fold inside the branch that never renders, so a install
+          with tracked PRs and no chats of its own — a fresh one that has just
+          imported a repo — said "no chats yet" and silently dropped every PR it
+          was counting a line above. */}
+      {branches.length === 0 && orphans.length === 0 ? (
         <p className="px-3 py-6 text-center text-xs text-faint">
           No chats yet. Pick a project below, or start a global chat.
         </p>

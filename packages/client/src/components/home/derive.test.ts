@@ -7,6 +7,7 @@ import {
   worktreeRows,
   worktreesByChat,
 } from "./derive.js";
+import { reviewVerdict } from "../pr/reviewDecision.js";
 
 const chat = (over: Partial<Chat> & Pick<Chat, "id">): Chat =>
   ({
@@ -205,6 +206,25 @@ describe("prMark — a whole pull request as one tone and one word", () => {
       checks: [run({ conclusion: "failure" })],
     });
     expect(prMark(both).label).toBe("changes requested");
+  });
+
+  it("takes the review tone and wording from the SHARED mapping, not its own", () => {
+    // The regression this guards: `prMark` spelled requested changes `warn`
+    // while `reviewVerdict` — and therefore the PRs panel, the Workspace roster
+    // and the transcript — called it `danger`. One pull request, two colours.
+    for (const decision of ["changes_requested", "approved"] as const) {
+      expect(prMark(pr({ key: "k", reviewDecision: decision }))).toEqual(
+        reviewVerdict(decision, true),
+      );
+    }
+  });
+
+  it("leaves 'review required' and 'no decision yet' as plain open", () => {
+    // Deliberate: both are the DEFAULT state of an open PR on a repo that
+    // requires review, so a mark that fired on them would fire on everything.
+    // The phrase is still in the tooltip and the accessible name.
+    expect(prMark(pr({ key: "k", reviewDecision: "review_required" })).label).toBe("open");
+    expect(prMark(pr({ key: "k", reviewDecision: null })).label).toBe("open");
   });
 
   it("reports failing CI over a run still going", () => {

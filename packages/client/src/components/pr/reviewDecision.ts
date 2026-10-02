@@ -14,10 +14,16 @@
  * `open` is a parameter rather than something the caller filters for.
  */
 import type { ReviewDecision } from "@dispatch/shared";
-import type { Tone } from "../ui/Chip.js";
 
 export interface ReviewVerdict {
-  tone: Tone;
+  /**
+   * Narrowed to the four this actually returns, rather than the full chip
+   * palette. That is what lets a caller rendering a DOT read the same mapping a
+   * caller rendering a CHIP does — `Tone` carries members `DotTone` has no
+   * equivalent for, so a wider type here would force one of the two to invent
+   * its own colours, which is the drift this module exists to stop.
+   */
+  tone: "success" | "danger" | "warn" | "muted";
   label: string;
 }
 
