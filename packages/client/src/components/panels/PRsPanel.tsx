@@ -30,6 +30,7 @@ import type {
 import { usePanels } from "../../stores/panels.js";
 import { usePrReviewAgent } from "../../stores/prs.js";
 import { ReviewAgentChip, ReviewerProblemNotice } from "../pr/ReviewAgentChip.js";
+import { checkIsFailing, checksVerdict, summarizeChecks } from "../pr/checks.js";
 import { actions } from "../../lib/actions.js";
 import { api } from "../../lib/api.js";
 import { worktreeMatchesChat } from "./panelBus.js";
@@ -101,45 +102,6 @@ function usePrDetailSync(projectId: string, primary: PRInfo | undefined) {
 }
 
 /* -------------------------------------------------------- check aggregation */
-
-interface CheckSummary {
-  passed: number;
-  failed: number;
-  pending: number;
-  neutral: number;
-  total: number;
-}
-
-/** A completed check that needs attention (failed / cancelled / action-required). */
-function checkIsFailing(c: CheckRun): boolean {
-  return (
-    c.status === "completed" &&
-    (c.conclusion === "failure" ||
-      c.conclusion === "timed_out" ||
-      c.conclusion === "cancelled" ||
-      c.conclusion === "action_required")
-  );
-}
-
-/** Fold a check list into pass/fail/pending/neutral counts for the rollup line. */
-function summarizeChecks(checks: CheckRun[]): CheckSummary {
-  const s: CheckSummary = { passed: 0, failed: 0, pending: 0, neutral: 0, total: checks.length };
-  for (const c of checks) {
-    if (c.status !== "completed") s.pending++;
-    else if (c.conclusion === "success") s.passed++;
-    else if (checkIsFailing(c)) s.failed++;
-    else s.neutral++; // skipped / neutral / stale / null
-  }
-  return s;
-}
-
-/** The one-word rollup verdict + tone for a check summary. */
-function checksVerdict(s: CheckSummary): { tone: Tone; label: string } {
-  if (s.total === 0) return { tone: "muted", label: "no checks" };
-  if (s.failed > 0) return { tone: "danger", label: "failing" };
-  if (s.pending > 0) return { tone: "warn", label: "running" };
-  return { tone: "success", label: "passing" };
-}
 
 /** Review-decision → chip (null/absent = awaiting, only meaningful while open). */
 function reviewDecisionChip(

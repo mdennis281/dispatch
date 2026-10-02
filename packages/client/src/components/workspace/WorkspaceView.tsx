@@ -73,6 +73,7 @@ import { useProjects } from "../../stores/projects.js";
 import { useAllPrs } from "../../stores/prs.js";
 import { selectChat } from "../../stores/navigation.js";
 import { ReviewAgentChip, ReviewerProblemNotice } from "../pr/ReviewAgentChip.js";
+import { checkIsFailing } from "../pr/checks.js";
 import {
   useWorkspace,
   type WorkspaceFilters,
@@ -381,14 +382,7 @@ function KillAllButton({
 function ChecksChip({ checks }: { checks: CheckRun[] }) {
   if (checks.length === 0) return <Chip tone="neutral">no checks</Chip>;
   const running = checks.filter((c) => c.status !== "completed").length;
-  const failed = checks.filter(
-    (c) =>
-      c.status === "completed" &&
-      (c.conclusion === "failure" ||
-        c.conclusion === "timed_out" ||
-        c.conclusion === "cancelled" ||
-        c.conclusion === "action_required"),
-  ).length;
+  const failed = checks.filter(checkIsFailing).length;
   if (failed > 0) return <Chip tone="danger">{failed} failed</Chip>;
   if (running > 0) return <Chip tone="accent">{running} running</Chip>;
   return <Chip tone="success">{checks.length} passed</Chip>;
