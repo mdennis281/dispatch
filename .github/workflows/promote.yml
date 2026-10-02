@@ -17,8 +17,13 @@
 # PR's merge commit; this runs on a tag that may be days old and several merges
 # back. A `workflow_run` dependency cannot express "that sha, now", and a
 # reusable workflow would couple the stable gate to a file whose whole job is to
-# be tuned for PR latency. The steps below are deliberately the same steps in
-# the same order — if you change one, change the other.
+# be tuned for PR latency. The Linux steps below are deliberately the same steps
+# in the same order — if you change one, change the other.
+#
+# WHAT THIS GATE CHECKS THAT ci.yml DOES NOT. The `windows` job. It is not a
+# duplicate of anything: per-PR CI is Linux-only, so this is the one and only
+# run of the Windows-sensitive suite in the whole pipeline. Unstable ships on
+# merge gated by Linux; stable additionally has to survive Windows.
 name: Promote
 
 on:
@@ -165,8 +170,19 @@ jobs:
         run: pnpm --filter @dispatch/client exec vitest run
 
   # ---------------------------------------------------------------------------
-  # The Windows leg, same subset as ci.yml. Dispatch runs on Windows; a stable
-  # gate that skips the platform the app actually lives on is not a gate.
+  # THE WINDOWS LEG, AND THE ONLY PLACE IT RUNS. Dispatch runs on Windows; a
+  # stable gate that skips the platform the app actually lives on is not a gate.
+  # `ci.yml` deliberately does not have this job — per-PR it was a cold hosted
+  # runner on the critical path of every merge, re-answering a question only the
+  # host can change the answer to. That makes this the LAST line of defence for
+  # the Windows-only surface, so it must not be trimmed for speed: a promotion
+  # is a human decision taken once in a while, and ten minutes is nothing
+  # against shipping a broken Recycle Bin path to every stable install.
+  #
+  # The file list lives in `packages/server/vitest.windows.config.ts` rather
+  # than inline here, because when it WAS inline in two workflows this copy fell
+  # two files behind the other one and the stable gate silently stopped checking
+  # them. Add new Windows-sensitive tests there.
   # ---------------------------------------------------------------------------
   windows:
     name: windows-specific tests
@@ -197,17 +213,7 @@ jobs:
         run: pnpm --filter @dispatch/shared --filter @dispatch/cli build
 
       - name: Test (windows-sensitive files)
-        run: >
-          pnpm --filter @dispatch/server exec vitest run
-          src/store/store.test.ts
-          src/services/agent-cwd.test.ts
-          src/services/runtime.test.ts
-          src/services/processes.test.ts
-          src/services/terminal.test.ts
-          src/services/file-index.test.ts
-          src/services/runner.test.ts
-          src/routes/fs.test.ts
-          src/services/mcp/manager-mcp.integration.test.ts
+        run: pnpm --filter @dispatch/server test:windows
 
       - name: Test release installer (Windows)
         run: node --test tools/install.test.mjs
