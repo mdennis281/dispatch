@@ -1,47 +1,59 @@
 /**
- * The homepage — what Dispatch has been doing across every project, and where
- * you pick the one you want.
+ * The homepage — what is happening across every project, and where you pick the
+ * one you want.
+ *
+ * ── WHAT THIS PAGE LEADS WITH, AND WHY IT CHANGED ────────────────────────────
+ *
+ * It led with numbers: a 5xl runtime hero, four stat tiles, and a grid of nine
+ * project cards each with a sparkline. The verdict was "looks like another
+ * metrics page", and that was right — the figures were all true and none of them
+ * answered the question you actually arrive with, which is *what is going on
+ * right now*. Three agents running, one blocked on a question, four worktrees
+ * checked out and two PRs waiting on CI is the state of the install; a tool-call
+ * count for the last seven days is trivia beside it.
+ *
+ * So the order is now: the CHATS (nested, grouped by what they're doing — see
+ * `HomeChats`), the WORKTREES, the PULL REQUESTS, and only then the rollup, as a
+ * single stacked column in a smaller footprint. The numbers are all still here.
+ * They have simply stopped being the page.
+ *
+ * ── THE THREE NEW LISTS COST NOTHING ─────────────────────────────────────────
+ *
+ * None of them is behind `GET /api/home` and none of them should be. Every chat
+ * in the install is already in `stores/chats` and every tracked PR in
+ * `stores/prs`, both hydrated on connect and both following live events — so the
+ * lists are a fold over memory that updates as things happen, where a copy on
+ * the overview endpoint would have been a second, staler answer sitting behind a
+ * TTL. The endpoint still owns exactly what only the ledger can answer: the
+ * rollup. It remains one request, one pass over `data/state.db`, and zero
+ * subprocesses.
  *
  * ── WHY IT IS FULL-BLEED ─────────────────────────────────────────────────────
  *
- * No sidebar, like `new-project` and for a sharper version of the same reason:
- * the sidebar's top control IS a project picker, and this page's grid is also a
- * project picker. Two of them side by side would disagree about which project is
- * "active" — the rail is scoped to one, the grid is scoped to none — and the
- * reader would have to work out which one their click meant.
+ * No sidebar, like `new-project`: the sidebar's top control IS a project picker
+ * and this page's project list is also one. Two of them side by side would
+ * disagree about which project is "active" — the rail is scoped to one, this
+ * page is scoped to none — and the reader would have to work out which one their
+ * click meant.
  *
- * ── WHY THESE NUMBERS ────────────────────────────────────────────────────────
- *
- * A FEW figures that arrive instantly, not a dense dashboard. The brief for this
- * surface was "snappy", and the honest reading of that is a budget: anything
- * that can't be answered from the state database and memory doesn't go on it.
- * So what's here is the five questions a glance at the top of the app is for:
- *
- *   Runtime        how much agent time the window actually cost. The one
- *                  figure that is a RESOURCE rather than a count, so it leads.
- *   Working now    is anything running. The only live number on the page.
- *   Needs you      is anything BLOCKED on you — the one thing here that is a
- *                  call to action rather than a reading.
- *   Activity       tool calls, as the sense of scale the runtime figure needs.
- *   Per project    the same four, one card each, with a daily shape beside them.
+ * That is also why the GLOBAL CHAT button is in this header. The global chat
+ * shipped with exactly one entry point, a row in the sidebar's project selector;
+ * this page hides the sidebar, so the one surface in the app that is
+ * conceptually global had no way to open the one chat that is. It routes through
+ * `selectGlobalChat` like every other navigation — the pseudo-project is a
+ * project id as far as the stores are concerned, and the project↔chat invariant
+ * applies to it unchanged.
  *
  * ── WHAT IS DELIBERATELY ABSENT ──────────────────────────────────────────────
  *
- * OPEN PRs AND CI STATE. They are the obvious thing to want here and the single
- * most expensive thing the app can ask for — a `gh` call per repo, seconds when
- * the network is slow, and this page's whole premise is that it is already there
- * when you arrive. The Workspace modal's PR roster answers it on demand. If it
- * ever belongs here it arrives lazily after first paint and never blocks a
- * number beside it.
- *
- * THE GROWTH CURVE, for the same reason squared: it walks git history and
- * streams NDJSON because it needs a progress bar.
- *
- * MOBILE SWIPE GESTURES. Out of scope by decision, deferred. The homepage is
- * reached on a phone the way every other destination is — the brand mark in the
- * top bar — and nothing here touches the shell's geometry or the viewport.
+ * LIVE PR AND CI READS. The PR card above is the registry's own cached snapshot,
+ * never a `gh` call — see `HomePrs`. THE GROWTH CURVE, which walks git history
+ * and streams NDJSON because it needs a progress bar. MOBILE SWIPE GESTURES,
+ * out of scope by decision: the homepage is reached on a phone the way every
+ * other destination is, through the brand mark in the top bar, and nothing here
+ * touches the shell's geometry or the viewport.
  */
-import { Activity, Clock, FolderGit2, Inbox, RefreshCw, Zap } from "lucide-react";
+import { Activity, Clock, FolderGit2, Globe, Inbox, RefreshCw, Zap } from "lucide-react";
 import { useEffect, useState } from "react";
 import {
   HOME_SPARK_UNIT,
@@ -51,14 +63,19 @@ import {
 } from "@dispatch/shared";
 import { ScrollArea } from "../ui/ScrollArea.js";
 import { IconButton } from "../ui/IconButton.js";
+import { Button } from "../ui/Button.js";
+import { RowButton } from "../ui/RowButton.js";
 import { Tabs } from "../ui/Tabs.js";
 import { DispatchMark } from "../ui/DispatchMark.js";
 import { StatusDot, toneText } from "../ui/StatusDot.js";
-import { Hero, StatTile, Card, compact, count, ago } from "../metrics/chrome.js";
+import { Card, compact, count, ago } from "../metrics/chrome.js";
 import { formatDuration } from "../metrics/duration.js";
 import { Sparkline } from "./Sparkline.js";
+import { HomeChats } from "./HomeChats.js";
+import { HomeWorktrees } from "./HomeWorktrees.js";
+import { HomePrs } from "./HomePrs.js";
 import { useHome } from "../../stores/home.js";
-import { openProject } from "../../stores/navigation.js";
+import { openProject, selectGlobalChat } from "../../stores/navigation.js";
 import { midTruncate } from "../../lib/format.js";
 import { cn } from "../../lib/cn.js";
 
@@ -82,12 +99,14 @@ export function HomeView() {
     void load();
   }, [load]);
 
-  // A clock, NOT a poll. Every relative stamp on this page — the footer's "as
-  // of", each card's last-touched, every line of the tail — is computed during
-  // render from `Date.now()`, and nothing on a page that deliberately doesn't
-  // refetch ever causes another render. So a tab left open kept insisting the
-  // reading was from "just now" an hour later, which is worse than no stamp:
-  // the footer exists to admit the numbers are slightly old.
+  // A clock, NOT a poll. Every relative stamp fed by the SNAPSHOT — the footer's
+  // "as of", each project row's last-touched, every line of the tail — is
+  // computed during render from `Date.now()`, and a page that deliberately
+  // doesn't refetch would otherwise keep insisting the reading was from "just
+  // now" an hour later, which is worse than no stamp at all.
+  //
+  // The lists above it don't need this: they are driven by live store events and
+  // re-render when their own rows move.
   //
   // One `setState` a minute, and it fetches nothing. `ago()` is minute-grained
   // above the first minute, so that is exactly the rate at which its output can
@@ -105,103 +124,108 @@ export function HomeView() {
       <div className="flex h-12 shrink-0 items-center gap-2 px-3 cm-hairline-b">
         <DispatchMark className="size-5 shrink-0" />
         <span className="text-base font-semibold text-primary">Overview</span>
-        <Tabs
-          value={window}
-          onChange={(id) => setWindow(id as HomeWindow)}
-          tabs={WINDOWS.map((w) => ({ id: w, label: HOME_WINDOW_LABELS[w] }))}
-        />
         <div className="flex-1" />
+        {/* THE GLOBAL CHAT'S ONLY ENTRY POINT WITHOUT A SIDEBAR. See the module
+            docblock. Labelled rather than an icon button: it STARTS something,
+            and the one other control up here (Reload) is a glyph precisely
+            because it doesn't. The label survives at `sm` — it is three words
+            and this bar has nothing else competing for the width. */}
+        <Button size="sm" leftIcon={<Globe />} onClick={() => selectGlobalChat()}>
+          Global chat
+        </Button>
         {/* FORCED. The server answers every ordinary request from its cache —
             that is the whole design — so an unforced reload would return the
-            same snapshot it started with and the button would be a spinner
-            that changes nothing. See `HomeService.overview`. */}
+            same snapshot it started with and the button would be a spinner that
+            changes nothing. See `HomeService.overview`. */}
         <IconButton size="sm" tip="Reload" onClick={() => void load({ force: true })}>
           <RefreshCw className={cn(refetching && "animate-spin")} />
         </IconButton>
       </div>
 
       <ScrollArea className="min-h-0 flex-1">
-        {/* `max-w` with auto margins: the grid below is cards, and cards stretched
-            across a 2560px monitor stop reading as a set. */}
+        {/* `max-w` with auto margins: these are rows in cards, and a row stretched
+            across a 2560px monitor puts its two ends in different postcodes. */}
         <div className="mx-auto flex max-w-5xl flex-col gap-3 p-3 sm:p-4">
-          {/* Shown whenever there IS an error, not only when there is nothing
-              to paint under it. Once the first load succeeds the store keeps
-              the last snapshot forever, so gating the banner on `!overview`
-              meant a failed Reload stopped the spinner, left the old figures up
-              and said nothing — the one case where the user explicitly asked
-              for a newer number and silently did not get one. The stale figures
-              stay on screen (they are still the best answer available); the
-              banner says they are stale, and the footer's "as of" says how. */}
+          {/* Shown whenever there IS an error, not only when there is nothing to
+              paint under it. Once the first load succeeds the store keeps the
+              last snapshot forever, so gating the banner on `!overview` meant a
+              failed Reload stopped the spinner, left the old figures up and said
+              nothing — the one case where the user explicitly asked for a newer
+              number and silently did not get one.
+
+              It is about the ROLLUP only. The lists below are live from the
+              stores and are unaffected by a failed overview fetch, which is why
+              this sits above the activity card rather than at the top of the
+              page where it would read as "this page is broken". */}
           {error && (
             <p
               role="alert"
               className="rounded-lg border border-danger-line bg-danger-ghost px-3 py-2 text-xs text-danger"
             >
-              {overview ? `Could not refresh: ${error}. Showing the last reading.` : error}
+              {overview
+                ? `Could not refresh the rollup: ${error}. Showing the last reading.`
+                : error}
             </p>
           )}
 
-          {/* FOUR tiles, in one row beside the hero. It was five — a Projects
-              count was in here — and that count is the grid directly below this
-              row, stated as nine cards. Dropping it is what lets the tiles sit
-              on a single line, which in turn stops the hero from being a 5xl
-              number stranded in the top third of a double-height box.
+          <HomeChats />
+          <HomeWorktrees />
+          <HomePrs />
 
-              One column at `sm`, where the hero would otherwise be that number
-              in a 90px box with four tiles squeezed beside it. */}
-          <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,2.2fr)]">
-            <Hero
-              label={`Agent runtime · ${HOME_WINDOW_LABELS[window]}`}
-              value={totals ? formatDuration(totals.runtimeMs) : "—"}
-              hint="attributed — parallel tool calls each count"
-            />
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-              <StatTile
-                label="Working now"
-                value={totals ? count(totals.working) : "—"}
-                hint={
-                  totals && totals.working > 0 ? (
-                    <span className={cn("flex items-center gap-1", toneText("working"))}>
-                      <StatusDot tone="working" pulse size={5} />
-                      live
-                    </span>
-                  ) : (
-                    "nothing running"
-                  )
-                }
+          {/* THE DEMOTED ROLLUP. One card, one column, stacked: the totals as a
+              strip of small figures, then one row per project with its shape
+              beside it. It was a hero plus four tiles plus a three-across card
+              grid, which is the same information in four times the height and
+              read as the point of the page. */}
+          <Card
+            title="Activity"
+            icon={<Activity />}
+            controls={
+              <Tabs
+                value={window}
+                onChange={(id) => setWindow(id as HomeWindow)}
+                tabs={WINDOWS.map((w) => ({ id: w, label: HOME_WINDOW_LABELS[w] }))}
               />
-              <StatTile
-                label="Needs you"
-                value={totals ? count(totals.attention) : "—"}
-                hint={
-                  totals && totals.attention > 0 ? (
-                    <span className={cn("flex items-center gap-1", toneText("warn"))}>
-                      <StatusDot tone="warn" pulse size={5} />
-                      blocked
-                    </span>
-                  ) : (
-                    "clear"
-                  )
-                }
+            }
+            note={overview ? "busiest project first" : undefined}
+          >
+            {/* FOUR figures on one line, not four boxes. Runtime still leads —
+                it is the only one that is a RESOURCE rather than a count — but
+                as the first item in a strip instead of a 5xl number with a
+                paragraph of white space under it. */}
+            <div className="flex flex-wrap items-baseline gap-x-5 gap-y-1 px-3 py-2 cm-hairline-b">
+              <Figure
+                label="Runtime"
+                value={totals ? formatDuration(totals.runtimeMs) : "—"}
+                title="Agent runtime in this window — attributed, so parallel tool calls each count"
               />
-              <StatTile
-                label="Activity"
+              <Figure
+                label="Tool calls"
                 value={totals ? compact(totals.events) : "—"}
-                hint="tool calls, skills, MCP"
+                title="Recorded activity in this window: tool calls, skills, MCP"
               />
-              <StatTile
+              <Figure
                 label="Chats"
                 value={totals ? count(totals.chats) : "—"}
-                hint={totals ? `across ${count(totals.projects)} projects` : "archived excluded"}
+                title={totals ? `across ${count(totals.projects)} projects` : undefined}
               />
+              {/* The two LIVE figures sit at the far end with their dots, which
+                  is the one piece of emphasis left in this card: everything
+                  beside them is a reading, and these two are a state. */}
+              <div className="ml-auto flex items-baseline gap-x-5">
+                <Figure
+                  label="Working"
+                  value={totals ? count(totals.working) : "—"}
+                  tone={totals && totals.working > 0 ? "working" : undefined}
+                />
+                <Figure
+                  label="Needs you"
+                  value={totals ? count(totals.attention) : "—"}
+                  tone={totals && totals.attention > 0 ? "warn" : undefined}
+                />
+              </div>
             </div>
-          </div>
 
-          <Card
-            title="Projects"
-            icon={<FolderGit2 />}
-            note={overview ? "busiest first" : undefined}
-          >
             {loading && !overview ? (
               <Skeleton rows={3} />
             ) : overview && overview.projects.length === 0 ? (
@@ -209,15 +233,13 @@ export function HomeView() {
                 No projects yet. Add one from the sidebar&rsquo;s project menu.
               </p>
             ) : (
-              <div className="grid gap-px bg-line sm:grid-cols-2 lg:grid-cols-3">
-                {overview?.projects.map((p) => (
-                  <ProjectCard key={p.id} project={p} window={window} />
-                ))}
-              </div>
+              overview?.projects.map((p) => (
+                <ProjectRow key={p.id} project={p} window={window} />
+              ))
             )}
           </Card>
 
-          <Card title="Recent activity" icon={<Activity />}>
+          <Card title="Recent activity" icon={<Zap />}>
             {loading && !overview ? (
               <Skeleton rows={5} />
             ) : overview && overview.recent.length === 0 ? (
@@ -248,8 +270,8 @@ export function HomeView() {
 
           {/* The page's own receipt. A cached snapshot is served in single-digit
               milliseconds and may be a few seconds old (see server/services/home),
-              so saying how old and how long it took is cheaper than pretending
-              it is live. */}
+              so saying how old and how long it took is cheaper than pretending it
+              is live. It covers the rollup only — the lists above are live. */}
           {overview && (
             <p className="cm-mono px-1 pb-1 !text-2xs text-faint">
               rolled up in {overview.computeMs}ms
@@ -263,51 +285,88 @@ export function HomeView() {
 }
 
 /**
- * One project.
+ * One figure in the totals strip — label above, value below, inline.
  *
- * A BUTTON, not a card with a link in the corner: the whole tile is the target,
- * because picking a project is the only thing anyone does here and a 240px card
- * with a 60px hit area is a worse version of the sidebar's menu.
+ * Deliberately not `StatTile`: that is a bordered box with a hint line, built
+ * for a row of four across the top of the Metrics page, and four of them here
+ * would reinstate exactly the footprint this rework was asked to shrink.
  */
-function ProjectCard({ project: p, window }: { project: HomeProject; window: HomeWindow }) {
+function Figure({
+  label,
+  value,
+  hint,
+  tone,
+  title,
+}: {
+  label: string;
+  value: string;
+  hint?: string;
+  /** Set only when the figure is non-zero and LIVE — gets a pulsing dot. */
+  tone?: "working" | "warn";
+  title?: string;
+}) {
   return (
-    <button
+    <span className="flex flex-col" title={title}>
+      <span className="text-2xs text-muted">{label}</span>
+      <span className="flex items-center gap-1.5">
+        {tone && <StatusDot tone={tone} pulse size={5} />}
+        <span className={cn("text-sm font-semibold", tone ? toneText(tone) : "text-primary")}>
+          {value}
+        </span>
+        {hint && <span className="text-2xs text-faint">{hint}</span>}
+      </span>
+    </span>
+  );
+}
+
+/**
+ * One project, as a ROW.
+ *
+ * It was a 240px card in a three-across grid. Same figures, same sparkline, same
+ * whole-tile hit area — one line instead of five, so nine projects are a block
+ * you scan rather than a screenful you scroll. Stacking them also puts the
+ * sparklines in a COLUMN, which is the one arrangement where their shapes can
+ * actually be compared against each other.
+ */
+function ProjectRow({ project: p, window }: { project: HomeProject; window: HomeWindow }) {
+  return (
+    <RowButton
       onClick={() => openProject(p.id)}
-      // `bg-panel` over the grid's `gap-px bg-line`: the gaps ARE the hairlines,
-      // so the cards need no borders of their own and nothing doubles up at the
-      // seams.
-      className="flex flex-col gap-2 bg-panel px-3 py-2.5 text-left transition-colors hover:bg-hover"
+      className="flex w-full items-center gap-3 px-3 py-1.5 hover:bg-hover"
     >
-      <div className="flex min-w-0 items-center gap-2">
-        <span className="flex size-5 shrink-0 items-center justify-center text-accent [&_svg]:size-3.5">
-          <FolderGit2 />
+      <span className="flex size-4 shrink-0 items-center justify-center text-accent [&_svg]:size-3.5">
+        <FolderGit2 />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-xs font-semibold text-primary">{p.name}</span>
+        <span className="block truncate cm-mono !text-2xs text-faint">
+          {midTruncate(p.repoPath, 34)}
         </span>
-        <span className="min-w-0 flex-1">
-          <span className="block truncate text-sm font-semibold text-primary">{p.name}</span>
-          <span className="block truncate cm-mono !text-2xs text-faint">
-            {midTruncate(p.repoPath, 30)}
-          </span>
+      </span>
+      {/* The two markers that mean "look at this one". Same tones and the same
+          pulse as the sidebar's rows, so they read as one vocabulary. */}
+      {p.attention > 0 && (
+        <span className={cn("flex shrink-0 items-center gap-1 text-2xs", toneText("warn"))}>
+          <StatusDot tone="warn" pulse size={5} />
+          {p.attention}
         </span>
-        {/* The two markers that mean "look at this one". Same tones and the same
-            pulse as the sidebar's rows, so they read as one vocabulary. */}
-        {p.attention > 0 && (
-          <span className={cn("flex shrink-0 items-center gap-1 text-2xs", toneText("warn"))}>
-            <StatusDot tone="warn" pulse size={5} />
-            {p.attention}
-          </span>
-        )}
-        {p.working > 0 && (
-          <span className={cn("flex shrink-0 items-center gap-1 text-2xs", toneText("working"))}>
-            <StatusDot tone="working" pulse size={5} />
-            {p.working}
-          </span>
-        )}
-      </div>
-
-      <Sparkline values={p.spark} label={HOME_SPARK_UNIT[window]} />
-
-      <div className="flex items-center gap-3 text-2xs text-muted">
-        <span className="flex items-center gap-1" title="Agent runtime in this window">
+      )}
+      {p.working > 0 && (
+        <span className={cn("flex shrink-0 items-center gap-1 text-2xs", toneText("working"))}>
+          <StatusDot tone="working" pulse size={5} />
+          {p.working}
+        </span>
+      )}
+      {/* The shape drops at `sm`, where a 64px sparkline between two number
+          columns is a smudge rather than a trend. */}
+      <span className="hidden w-28 shrink-0 sm:block">
+        <Sparkline values={p.spark} label={HOME_SPARK_UNIT[window]} />
+      </span>
+      <span className="flex shrink-0 items-center gap-2.5 text-2xs text-muted">
+        <span
+          className="hidden items-center gap-1 sm:flex"
+          title="Agent runtime in this window"
+        >
           <Clock className="size-3 text-faint" />
           {formatDuration(p.runtimeMs)}
         </span>
@@ -319,11 +378,13 @@ function ProjectCard({ project: p, window }: { project: HomeProject; window: Hom
           <Inbox className="size-3 text-faint" />
           {count(p.chats)}
         </span>
-        <span className="ml-auto shrink-0 text-faint">
-          {p.lastActivityAt ? ago(p.lastActivityAt) : "never"}
-        </span>
-      </div>
-    </button>
+      </span>
+      {/* Wide enough for `ago`'s widest output — past 30 days it falls back to a
+          locale date, and a column sized for "3d ago" clipped it. */}
+      <span className="w-16 shrink-0 truncate text-right text-2xs text-faint">
+        {p.lastActivityAt ? ago(p.lastActivityAt) : "never"}
+      </span>
+    </RowButton>
   );
 }
 

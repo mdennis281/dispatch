@@ -149,8 +149,22 @@ const ALLOWED_DIR = join(SRC, "components", "ui");
  * either from `className` leaves both declarations in the class list and lets
  * stylesheet order decide which mark size you get. A bare button with the
  * tooltip wrapped around it says what it is instead of fighting a box.
+ *
+ * 90 → 88: the homepage rework, which added four cross-project lists — chats
+ * (nested), worktrees, pull requests, projects — and pays for all of them plus
+ * two that were already here.
+ *
+ * `RowButton` moved out of `preview/mission/chrome.tsx` and into `components/ui`.
+ * That entry three paragraphs up already made the argument — "a whole row that
+ * happens to be clickable" is not an action and cannot be `Button` without
+ * overriding its height, padding and `justify-center` — and the only thing wrong
+ * with it was WHERE it lived: a row primitive sitting outside the kit is itself a
+ * counted bypass, so every surface that wanted one wrote its own. It is in the
+ * kit now, the mission board re-exports it from there, and the homepage's four
+ * lists (plus its project row, which was the `ProjectCard` entry above) are built
+ * out of it. Thirty-odd rows, one bare element, counted nowhere.
  */
-const BASELINE = 90;
+const BASELINE = 88;
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {
