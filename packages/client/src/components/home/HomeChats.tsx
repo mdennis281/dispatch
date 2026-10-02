@@ -36,7 +36,8 @@
  * another repo is not that. The tree's own sort is untouched — the branches are
  * grouped and the groups drawn in this page's order.
  *
- * Idle is capped, because it is unbounded and the rest of the page is below it.
+ * New and Idle are capped for the same reason — both are unbounded history, and
+ * the rest of the page sits below them. See HISTORY_SHOWN.
  */
 import { useMemo, useState } from "react";
 import {
@@ -77,18 +78,29 @@ const GROUPS: { section: ChatSection; label: string }[] = [
 ];
 
 /**
- * How many idle branches are drawn before the fold.
+ * How many branches a HISTORY group draws before the fold, and which groups
+ * those are.
  *
- * Idle is the one group with no natural bound — it is every chat that has ever
- * run and finished — and everything else on the page sits underneath it. Eight
- * is about a screen's worth beside the three live groups; the rest are one click
- * away and the button says how many.
+ * Needs input and Working are uncapped: they are bounded by how much is
+ * actually happening, and they are the reason to come here. New and Idle are
+ * not bounded by anything — Idle is every chat that has ever run and finished
+ * (737 of them on the install this was built against) and New is every empty
+ * chat anyone has ever opened and walked away from (16, all of them months
+ * old). Uncapped, those two pushed the worktrees, the PRs and the rollup off
+ * the bottom of a page whose whole point is the first screenful.
+ *
+ * Six is about as much history as fits beside the live groups without the
+ * worktrees below starting the page off-screen. The rest are one click away and
+ * the button says how many.
  */
-const IDLE_SHOWN = 8;
+const HISTORY_SHOWN = 6;
+const CAPPED: ReadonlySet<ChatSection> = new Set<ChatSection>(["new", "idle"]);
 
 export function HomeChats() {
   const branches = useAllChatTree();
-  const [allIdle, setAllIdle] = useState(false);
+  // Which capped groups the reader has opened. A set rather than a flag per
+  // group, so adding one to CAPPED needs no new state.
+  const [opened, setOpened] = useState<ReadonlySet<ChatSection>>(new Set());
 
   const grouped = useMemo(() => {
     const by = new Map<ChatSection, ChatBranch[]>();
@@ -114,8 +126,8 @@ export function HomeChats() {
         branches.length === 0
           ? undefined
           : live > 0
-            ? `${live} live · ${branches.length} total`
-            : `${branches.length} total`
+            ? `${live} live · ${branches.length} threads`
+            : `${branches.length} threads`
       }
     >
       {branches.length === 0 ? (
@@ -127,8 +139,8 @@ export function HomeChats() {
           {GROUPS.map(({ section, label }) => {
             const all = grouped.get(section) ?? [];
             if (all.length === 0) return null;
-            const capped = section === "idle" && !allIdle;
-            const shown = capped ? all.slice(0, IDLE_SHOWN) : all;
+            const capped = CAPPED.has(section) && !opened.has(section);
+            const shown = capped ? all.slice(0, HISTORY_SHOWN) : all;
             return (
               <div key={section}>
                 <div className="flex items-center gap-2 bg-panel-2/40 px-3 py-1 cm-hairline-b">
@@ -140,12 +152,12 @@ export function HomeChats() {
                 {shown.map((b) => (
                   <BranchRows key={b.chat.id} branch={b} depth={0} />
                 ))}
-                {capped && all.length > IDLE_SHOWN && (
+                {capped && all.length > HISTORY_SHOWN && (
                   <RowButton
-                    onClick={() => setAllIdle(true)}
+                    onClick={() => setOpened((s) => new Set(s).add(section))}
                     className="w-full px-3 py-1.5 text-2xs text-muted hover:bg-hover hover:text-primary"
                   >
-                    Show {all.length - IDLE_SHOWN} more idle
+                    Show {all.length - HISTORY_SHOWN} more {label.toLowerCase()}
                   </RowButton>
                 )}
               </div>
@@ -190,16 +202,33 @@ function isLive(chat: Chat): boolean {
 /**
  * A branch and the rows under it.
  *
- * Collapsed by default — except that a branch with anything LIVE inside it opens
- * itself, because a parent filed under "Needs input" for a reviewer two levels
- * down, with that reviewer folded away, is a row pointing at nothing you can
- * see. Same rule the sidebar's `isLive` encodes, stated here in the one line
- * this page needs of it: every row here is a plain link, so there is no fold
- * state to coordinate with anything.
+ * Collapsed by default, with ONE exception: a child branch that has something
+ * live inside it is drawn through the fold anyway. A parent filed under "Needs
+ * input" for a reviewer two levels down, with that reviewer folded away, is a
+ * row pointing at nothing you can see.
+ *
+ * Only the live sub-branches, though — not the whole fold. The chat that
+ * spawned eleven children and has errors in two of them shows the two; the nine
+ * that finished stay behind the chevron, where the reader who wants them finds
+ * them. That is exactly what the sidebar's `visibleChildren` does and for the
+ * same reason, restated here in the three lines this page needs of it — the
+ * sidebar's version also coordinates an action tray and an active-row highlight
+ * that no row on this page has.
  */
 function BranchRows({ branch, depth }: { branch: ChatBranch; depth: number }) {
   const { chat, children, descendants } = branch;
-  const [open, setOpen] = useState(() => descendants.some(isLive));
+  const [open, setOpen] = useState(false);
+  const live = children.filter((b) => [b.chat, ...b.descendants].some(isLive));
+  const shown = open ? children : live;
+  // What the chevron is still hiding — every chat under here, minus the ones
+  // currently drawn and their own descendants.
+  const drawn = new Set(shown.flatMap((b) => [b.chat.id, ...b.descendants.map((c) => c.id)]));
+  const hidden = descendants.filter((c) => !drawn.has(c.id)).length;
+  const label = open
+    ? live.length > 0
+      ? "Show live chats only"
+      : "Hide nested chats"
+    : `Show ${hidden} more nested chat${hidden === 1 ? "" : "s"}`;
 
   return (
     <div>
@@ -207,22 +236,29 @@ function BranchRows({ branch, depth }: { branch: ChatBranch; depth: number }) {
         {children.length > 0 && (
           <RowButton
             aria-expanded={open}
-            aria-label={open ? "Hide nested chats" : `Show ${descendants.length} nested chats`}
-            title={open ? "Hide nested chats" : `Show ${descendants.length} nested chats`}
+            aria-label={label}
+            title={label}
             onClick={() => setOpen((v) => !v)}
             className={cn(
               "absolute inset-y-0 z-10 flex w-4 items-center justify-center text-muted hover:text-primary [&_svg]:size-2.5",
               depth === 0 ? "left-0" : "left-[14px]",
             )}
           >
+            {/* Half-turned when live rows show under a closed fold: rows below a
+                closed chevron read as someone else's, and a fully open one
+                promises there is nothing more to see. The sidebar's chevron
+                says the same thing the same way. */}
             <ChevronRight
-              className={cn("transition-transform duration-150", open && "rotate-90")}
+              className={cn(
+                "transition-transform duration-150",
+                open ? "rotate-90" : live.length > 0 && "rotate-45",
+              )}
             />
           </RowButton>
         )}
-        <ChatRow chat={chat} depth={depth} folded={open ? 0 : descendants.length} />
+        <ChatRow chat={chat} depth={depth} folded={hidden} />
       </div>
-      {open && children.length > 0 && (
+      {shown.length > 0 && (
         <div className="relative">
           {/* Drawn absolutely rather than as a border on a padded wrapper: the
               padding would inset the rows, and a nested row's hover has to reach
@@ -234,7 +270,7 @@ function BranchRows({ branch, depth }: { branch: ChatBranch; depth: number }) {
               atDepth(RAIL_INSET, depth),
             )}
           />
-          {children.map((c) => (
+          {shown.map((c) => (
             <BranchRows key={c.chat.id} branch={c} depth={depth + 1} />
           ))}
         </div>
