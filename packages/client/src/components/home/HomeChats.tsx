@@ -38,6 +38,19 @@
  *
  * New and Idle fold, for the same reason and to different depths — both are
  * unbounded history and the rest of the page sits below them. See GROUPS.
+ *
+ * ── WHY THE WORKTREES AND THE PRs ARE ON THESE ROWS ──────────────────────────
+ *
+ * They were two more cards under this one. Three stacked lists meant the same
+ * piece of work appeared three times — the chat, the branch it cut, the PR it
+ * opened — each in its own block with its own header, and the reader had to
+ * join them by eye across half a screen. A worktree and a pull request BELONG
+ * to a chat; they are not peers of it. So they ride on its row (see
+ * `rowBits.tsx`) and this page is one list.
+ *
+ * The one case that does not fit is a PR with no chat — dependabot's, a
+ * human's, one whose chat was deleted. It gets the same treatment as the
+ * never-started chats: a muted line at the foot that opens. See `orphanPrs`.
  */
 import { useMemo, useState } from "react";
 import {
@@ -46,7 +59,7 @@ import {
   GitPullRequestArrow,
   MessagesSquare,
 } from "lucide-react";
-import type { Chat } from "@dispatch/shared";
+import type { Chat, PrRecord } from "@dispatch/shared";
 import { isGlobalProject, GLOBAL_PROJECT_NAME } from "@dispatch/shared";
 import {
   chatSection,
@@ -57,7 +70,7 @@ import {
   type ChatBranch,
   type ChatSection,
 } from "../../stores/chats.js";
-import { usePrs } from "../../stores/prs.js";
+import { usePrs, useAllPrs } from "../../stores/prs.js";
 import { useProjects } from "../../stores/projects.js";
 import { openChat } from "../../stores/navigation.js";
 import { StatusDot, statusMeta, toneText } from "../ui/StatusDot.js";
@@ -66,6 +79,15 @@ import { RowButton } from "../ui/RowButton.js";
 import { Card } from "../metrics/chrome.js";
 import { relTimeShort } from "../../lib/format.js";
 import { cn } from "../../lib/cn.js";
+import { useProjectChats } from "../../stores/chats.js";
+import { BranchMark, OrphanPrRow, PrMark } from "./rowBits.js";
+import {
+  orphanPrs,
+  prsByChat,
+  worktreeRows,
+  worktreesByChat,
+  type HomeWorktreeRow,
+} from "./derive.js";
 
 /**
  * The groups, in the order this page reads them, and HOW MANY ROWS each is
@@ -131,9 +153,23 @@ const GROUPS: Group[] = [
 
 export function HomeChats() {
   const branches = useAllChatTree();
+  const chats = useProjectChats(null);
+  const prs = useAllPrs();
   // Which folded groups the reader has opened. A set rather than a flag per
   // group, so giving another group a `preview` needs no new state.
   const [opened, setOpened] = useState<ReadonlySet<ChatSection>>(new Set());
+  const [showOrphans, setShowOrphans] = useState(false);
+
+  // Built ONCE here and handed down, not looked up per row. A row doing its own
+  // `prs.find(p => p.chatId === id)` is O(rows × PRs) — 757 × 1301 on the
+  // install this was built against, on every render of a live page.
+  const worktrees = useMemo(() => worktreesByChat(worktreeRows(chats)), [chats]);
+  const prsOf = useMemo(() => prsByChat(prs), [prs]);
+  const orphans = useMemo(
+    () => orphanPrs(prs, new Set(chats.map((c) => c.id))),
+    [prs, chats],
+  );
+  const ctx: RowContext = { worktrees, prsOf };
 
   const grouped = useMemo(() => {
     const by = new Map<ChatSection, ChatBranch[]>();
@@ -150,6 +186,11 @@ export function HomeChats() {
   // it had three times the work in flight.
   const live =
     (grouped.get("attention")?.length ?? 0) + (grouped.get("working")?.length ?? 0);
+  // The header is where the two dead cards' counts went. They were each a card
+  // note ("77 live", "6 open · 1301 tracked"); folded into the one list they are
+  // the one line that says how much of each thing there is.
+  const openPrs = prs.filter((p) => p.state === "open").length;
+  const trees = worktreeRows(chats).length;
 
   return (
     <Card
@@ -158,9 +199,14 @@ export function HomeChats() {
       note={
         branches.length === 0
           ? undefined
-          : live > 0
-            ? `${live} live · ${branches.length} threads`
-            : `${branches.length} threads`
+          : [
+              live > 0 ? `${live} live` : null,
+              `${branches.length} threads`,
+              trees > 0 ? `${trees} worktrees` : null,
+              openPrs > 0 ? `${openPrs} open PRs` : null,
+            ]
+              .filter(Boolean)
+              .join(" · ")
       }
     >
       {branches.length === 0 ? (
@@ -189,7 +235,7 @@ export function HomeChats() {
                   </div>
                 )}
                 {shown.map((b) => (
-                  <BranchRows key={b.chat.id} branch={b} depth={0} />
+                  <BranchRows key={b.chat.id} branch={b} depth={0} ctx={ctx} />
                 ))}
                 {hidden > 0 && (
                   <RowButton
@@ -202,10 +248,34 @@ export function HomeChats() {
               </div>
             );
           })}
+
+          {/* The one thing on this list that is not a chat. See `orphanPrs` for
+              why it is here at all rather than dropped, and `OrphanPrRow` for
+              why it is the only row that opens GitHub. */}
+          {orphans.length > 0 &&
+            (showOrphans ? (
+              orphans.map((pr) => <OrphanPrRow key={pr.key} pr={pr} />)
+            ) : (
+              <RowButton
+                onClick={() => setShowOrphans(true)}
+                className="w-full px-3 py-1.5 text-2xs text-faint hover:bg-hover hover:text-primary"
+              >
+                {orphans.length} pull request{orphans.length === 1 ? "" : "s"} with no chat
+              </RowButton>
+            ))}
         </div>
       )}
     </Card>
   );
+}
+
+/**
+ * What every row needs that is not on the chat record — built once at the top
+ * of the list and passed down, like the sidebar's own `RowContext`.
+ */
+interface RowContext {
+  worktrees: Map<string, HomeWorktreeRow[]>;
+  prsOf: Map<string, PrRecord[]>;
 }
 
 /**
@@ -254,7 +324,15 @@ function isLive(chat: Chat): boolean {
  * sidebar's version also coordinates an action tray and an active-row highlight
  * that no row on this page has.
  */
-function BranchRows({ branch, depth }: { branch: ChatBranch; depth: number }) {
+function BranchRows({
+  branch,
+  depth,
+  ctx,
+}: {
+  branch: ChatBranch;
+  depth: number;
+  ctx: RowContext;
+}) {
   const { chat, children, descendants } = branch;
   const [open, setOpen] = useState(false);
   const live = children.filter((b) => [b.chat, ...b.descendants].some(isLive));
@@ -295,7 +373,7 @@ function BranchRows({ branch, depth }: { branch: ChatBranch; depth: number }) {
             />
           </RowButton>
         )}
-        <ChatRow chat={chat} depth={depth} folded={hidden} />
+        <ChatRow chat={chat} depth={depth} folded={hidden} ctx={ctx} />
       </div>
       {shown.length > 0 && (
         <div className="relative">
@@ -310,7 +388,7 @@ function BranchRows({ branch, depth }: { branch: ChatBranch; depth: number }) {
             )}
           />
           {shown.map((c) => (
-            <BranchRows key={c.chat.id} branch={c} depth={depth + 1} />
+            <BranchRows key={c.chat.id} branch={c} depth={depth + 1} ctx={ctx} />
           ))}
         </div>
       )}
@@ -333,7 +411,17 @@ function BranchRows({ branch, depth }: { branch: ChatBranch; depth: number }) {
  * to use. The global chat's rows name themselves `Global` with a globe — it is
  * not a repo, and a blank there would read as a missing value.
  */
-function ChatRow({ chat, depth, folded }: { chat: Chat; depth: number; folded: number }) {
+function ChatRow({
+  chat,
+  depth,
+  folded,
+  ctx,
+}: {
+  chat: Chat;
+  depth: number;
+  folded: number;
+  ctx: RowContext;
+}) {
   const projects = useProjects((s) => s.projects);
   // The UNFILTERED list, on purpose: this resolves `chat.projectId` to a name
   // rather than offering a repo to work in, and the global pseudo-project is
@@ -352,6 +440,11 @@ function ChatRow({ chat, depth, folded }: { chat: Chat; depth: number; folded: n
   // same reason `ReviewRow`/`SpawnRow` do: a reviewer's PR is somebody else's.
   const prSettled = useChats((s) => (depth === 0 ? (s.prSettled[chat.id] ?? false) : false));
   const meta = statusMeta(chat.status, prSettled);
+  const worktrees = ctx.worktrees.get(chat.id) ?? EMPTY_TREES;
+  // A reviewer's `#139` is the PR it is READING, which the column below already
+  // draws from `reviewTargetKey`. Its own `prs` would be empty anyway, but
+  // asking for them would put two different PR columns on one row.
+  const ownPrs = reviewer ? EMPTY_PRS : (ctx.prsOf.get(chat.id) ?? EMPTY_PRS);
 
   return (
     <RowButton
@@ -391,15 +484,33 @@ function ChatRow({ chat, depth, folded }: { chat: Chat; depth: number; folded: n
           depth === 0 ? "text-xs text-primary" : "text-2xs text-secondary",
         )}
       />
-      {folded > 0 && (
-        <span
-          className="hidden shrink-0 items-center gap-0.5 text-2xs text-faint sm:flex"
-          title={`${folded} nested chat${folded === 1 ? "" : "s"}`}
-        >
-          <MessagesSquare className="size-3" />
-          {folded}
-        </span>
-      )}
+      {/* ── THE FIXED COLUMNS ──────────────────────────────────────────────
+          Every slot from here to the right edge is a fixed width, present
+          whether or not the row has anything to put in it. That is what makes
+          hundreds of rows read as a TABLE rather than as hundreds of
+          separately-tidy lines: a branch column whose x depends on the length
+          of the title beside it is a column you cannot scan down.
+
+          The cost is real — an empty slot is reserved space on a row with
+          nothing to say — and it is the right trade here. The title takes the
+          flex; these take the alignment. */}
+      <span className="hidden w-48 shrink-0 justify-end lg:flex">
+        <BranchMark worktrees={worktrees} />
+      </span>
+      <span className="flex w-14 shrink-0 justify-end">
+        <PrMark prs={ownPrs} />
+      </span>
+      <span className="hidden w-7 shrink-0 items-center justify-end gap-0.5 text-2xs text-faint sm:flex">
+        {folded > 0 && (
+          <>
+            <MessagesSquare aria-hidden className="size-3" />
+            {folded}
+            <span className="sr-only">
+              {folded} nested chat{folded === 1 ? "" : "s"}
+            </span>
+          </>
+        )}
+      </span>
       {/* The status WORD drops at `sm` and the project name does not. The glyph's
           tone already carries the status, and the project is the one column this
           page has that the sidebar's rows don't — dropping it on a phone would
@@ -414,13 +525,16 @@ function ChatRow({ chat, depth, folded }: { chat: Chat; depth: number; folded: n
       <span className="sr-only">{meta.label}</span>
       <span
         aria-hidden
-        className={cn("hidden shrink-0 text-2xs opacity-80 sm:block", toneText(meta.tone))}
+        className={cn(
+          "hidden w-16 shrink-0 truncate text-right text-2xs opacity-80 sm:block",
+          toneText(meta.tone),
+        )}
       >
         {meta.label}
       </span>
-      <span className="flex min-w-0 shrink-0 items-center gap-1 text-2xs text-faint">
-        {global && <Globe className="size-3" />}
-        <span className="max-w-[4.5rem] truncate sm:max-w-[9rem]">
+      <span className="flex w-[4.5rem] shrink-0 items-center justify-end gap-1 text-2xs text-faint sm:w-28">
+        {global && <Globe aria-hidden className="size-3 shrink-0" />}
+        <span className="truncate">
           {global ? GLOBAL_PROJECT_NAME : (project?.name ?? chat.projectId)}
         </span>
       </span>
@@ -430,3 +544,11 @@ function ChatRow({ chat, depth, folded }: { chat: Chat; depth: number; folded: n
     </RowButton>
   );
 }
+
+/**
+ * Shared empties. A fresh `[]` per render is a new reference for every chat
+ * that owns nothing, which is most of them — and these are read by components
+ * one `React.memo` away from mattering.
+ */
+const EMPTY_TREES: readonly HomeWorktreeRow[] = [];
+const EMPTY_PRS: readonly PrRecord[] = [];

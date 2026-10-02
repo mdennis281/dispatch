@@ -12,21 +12,27 @@
  * checked out and two PRs waiting on CI is the state of the install; a tool-call
  * count for the last seven days is trivia beside it.
  *
- * So the order is now: the CHATS (nested, grouped by what they're doing — see
- * `HomeChats`), the WORKTREES, the PULL REQUESTS, and only then the rollup, as a
+ * So the page is ONE LIST — every chat in the install, nested, grouped by what
+ * it is doing, each row carrying the worktree it is standing in and the pull
+ * request it opened (see `HomeChats`). Then, and only then, the rollup, as a
  * single stacked column in a smaller footprint. The numbers are all still here.
  * They have simply stopped being the page.
  *
- * ── THE THREE NEW LISTS COST NOTHING ─────────────────────────────────────────
+ * It was three lists for a day: chats, then worktrees, then pull requests. The
+ * same piece of work appeared in all three, and the reader had to join them by
+ * eye across half a screen. A worktree and a PR BELONG to a chat rather than
+ * standing beside it, so they are columns on its row now and the two cards are
+ * gone.
  *
- * None of them is behind `GET /api/home` and none of them should be. Every chat
- * in the install is already in `stores/chats` and every tracked PR in
- * `stores/prs`, both hydrated on connect and both following live events — so the
- * lists are a fold over memory that updates as things happen, where a copy on
- * the overview endpoint would have been a second, staler answer sitting behind a
- * TTL. The endpoint still owns exactly what only the ledger can answer: the
- * rollup. It remains one request, one pass over `data/state.db`, and zero
- * subprocesses.
+ * ── THE LIST COSTS NOTHING ───────────────────────────────────────────────────
+ *
+ * It is not behind `GET /api/home` and it should not be. Every chat in the
+ * install is already in `stores/chats` and every tracked PR in `stores/prs`,
+ * both hydrated on connect and both following live events — so the list is a
+ * fold over memory that updates as things happen, where a copy on the overview
+ * endpoint would have been a second, staler answer sitting behind a TTL. The
+ * endpoint still owns exactly what only the ledger can answer: the rollup. It
+ * remains one request, one pass over `data/state.db`, and zero subprocesses.
  *
  * ── WHY IT IS FULL-BLEED ─────────────────────────────────────────────────────
  *
@@ -46,8 +52,8 @@
  *
  * ── WHAT IS DELIBERATELY ABSENT ──────────────────────────────────────────────
  *
- * LIVE PR AND CI READS. The PR card above is the registry's own cached snapshot,
- * never a `gh` call — see `HomePrs`. THE GROWTH CURVE, which walks git history
+ * LIVE PR AND CI READS. The PR state on a chat row is the registry's own cached
+ * snapshot, never a `gh` call. THE GROWTH CURVE, which walks git history
  * and streams NDJSON because it needs a progress bar. MOBILE SWIPE GESTURES,
  * out of scope by decision: the homepage is reached on a phone the way every
  * other destination is, through the brand mark in the top bar, and nothing here
@@ -72,8 +78,6 @@ import { Card, compact, count, ago } from "../metrics/chrome.js";
 import { formatDuration } from "../metrics/duration.js";
 import { Sparkline } from "./Sparkline.js";
 import { HomeChats } from "./HomeChats.js";
-import { HomeWorktrees } from "./HomeWorktrees.js";
-import { HomePrs } from "./HomePrs.js";
 import { useHome } from "../../stores/home.js";
 import { openProject, selectGlobalChat } from "../../stores/navigation.js";
 import { midTruncate } from "../../lib/format.js";
@@ -147,8 +151,6 @@ export function HomeView() {
             across a 2560px monitor puts its two ends in different postcodes. */}
         <div className="mx-auto flex max-w-5xl flex-col gap-3 p-3 sm:p-4">
           <HomeChats />
-          <HomeWorktrees />
-          <HomePrs />
 
           {/* Shown whenever there IS an error, not only when there is nothing to
               paint under it. Once the first load succeeds the store keeps the
@@ -158,10 +160,10 @@ export function HomeView() {
               number and silently did not get one.
 
               It is about the ROLLUP only, which is why it sits HERE — directly
-              above the Activity card and below the three lists. Those are live
-              from the stores and are unaffected by a failed overview fetch, so
-              a banner at the top of the page would have claimed the whole
-              surface was broken when nothing above it was. */}
+              above the Activity card and below the list. That list is live from
+              the stores and is unaffected by a failed overview fetch, so a
+              banner at the top of the page would have claimed the whole surface
+              was broken when nothing above it was. */}
           {error && (
             <p
               role="alert"

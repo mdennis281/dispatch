@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
-import type { Chat, PrRecord } from "@dispatch/shared";
-import { prRows, worktreeRows } from "./derive.js";
+import type { Chat, CheckRun, PrRecord } from "@dispatch/shared";
+import {
+  orphanPrs,
+  prMark,
+  prsByChat,
+  worktreeRows,
+  worktreesByChat,
+} from "./derive.js";
 
 const chat = (over: Partial<Chat> & Pick<Chat, "id">): Chat =>
   ({
@@ -108,29 +114,62 @@ describe("worktreeRows — the live set, named by the history", () => {
   });
 });
 
-describe("prRows — open first, then most recently changed", () => {
-  it("puts every open PR above every settled one, whatever the clock says", () => {
-    const rows = prRows(
+describe("prsByChat — what each chat opened, most live first", () => {
+  it("keys off the registry's own attribution and skips the unattributed", () => {
+    const by = prsByChat([
+      pr({ key: "o/r#1", number: 1, chatId: "c1", lastChangedAt: 10 }),
+      pr({ key: "o/r#2", number: 2, lastChangedAt: 99 }),
+    ]);
+    expect([...by.keys()]).toEqual(["c1"]);
+    expect(by.get("c1")?.map((r) => r.number)).toEqual([1]);
+  });
+
+  it("puts an open PR first even when a merged one changed more recently", () => {
+    const by = prsByChat([
+      pr({ key: "o/r#1", number: 1, chatId: "c1", state: "merged", lastChangedAt: 900 }),
+      pr({ key: "o/r#2", number: 2, chatId: "c1", state: "open", lastChangedAt: 100 }),
+      pr({ key: "o/r#3", number: 3, chatId: "c1", state: "closed", lastChangedAt: 50 }),
+    ]);
+    expect(by.get("c1")?.map((r) => r.number)).toEqual([2, 1, 3]);
+  });
+});
+
+describe("worktreesByChat", () => {
+  it("groups the live trees by their owner", () => {
+    const rows = worktreeRows([
+      chat({ id: "c1", worktrees: ["C:/wt/a", "C:/wt/b"] }),
+      chat({ id: "c2", worktrees: ["C:/wt/c"] }),
+    ]);
+    const by = worktreesByChat(rows);
+    expect(by.get("c1")).toHaveLength(2);
+    expect(by.get("c2")).toHaveLength(1);
+    expect(by.get("nobody")).toBeUndefined();
+  });
+});
+
+describe("orphanPrs — the ones no row on the page can carry", () => {
+  it("takes both the never-attributed and the chat-since-deleted", () => {
+    const rows = orphanPrs(
+      [
+        pr({ key: "o/r#1", number: 1 }), // dependabot: no chatId at all
+        pr({ key: "o/r#2", number: 2, chatId: "gone" }), // chat deleted
+        pr({ key: "o/r#3", number: 3, chatId: "here" }), // has a row
+      ],
+      new Set(["here"]),
+    );
+    expect(rows.map((r) => r.number)).toEqual([1, 2]);
+  });
+
+  it("orders open first, then most recently changed", () => {
+    const rows = orphanPrs(
       [
         pr({ key: "o/r#1", number: 1, state: "merged", lastChangedAt: 900 }),
         pr({ key: "o/r#2", number: 2, state: "open", lastChangedAt: 100 }),
+        pr({ key: "o/r#3", number: 3, state: "open", lastChangedAt: 300 }),
       ],
-      10,
+      new Set(),
     );
-    expect(rows.map((r) => r.number)).toEqual([2, 1]);
-  });
-
-  it("orders within each half by last change", () => {
-    const rows = prRows(
-      [
-        pr({ key: "o/r#1", number: 1, state: "open", lastChangedAt: 100 }),
-        pr({ key: "o/r#2", number: 2, state: "open", lastChangedAt: 300 }),
-        pr({ key: "o/r#3", number: 3, state: "closed", lastChangedAt: 50 }),
-        pr({ key: "o/r#4", number: 4, state: "merged", lastChangedAt: 80 }),
-      ],
-      10,
-    );
-    expect(rows.map((r) => r.number)).toEqual([2, 1, 4, 3]);
+    expect(rows.map((r) => r.number)).toEqual([3, 2, 1]);
   });
 
   it("does not mutate the input", () => {
@@ -138,15 +177,56 @@ describe("prRows — open first, then most recently changed", () => {
       pr({ key: "o/r#1", number: 1, state: "merged", lastChangedAt: 900 }),
       pr({ key: "o/r#2", number: 2, state: "open", lastChangedAt: 100 }),
     ];
-    prRows(input, 1);
+    orphanPrs(input, new Set());
     expect(input.map((r) => r.number)).toEqual([1, 2]);
   });
+});
 
-  it("caps at the limit", () => {
-    const rows = prRows(
-      [1, 2, 3, 4].map((n) => pr({ key: `o/r#${n}`, number: n, lastChangedAt: n })),
-      2,
-    );
-    expect(rows.map((r) => r.number)).toEqual([4, 3]);
+describe("prMark — a whole pull request as one tone and one word", () => {
+  const run = (over: Partial<CheckRun>): CheckRun =>
+    ({ name: "job", status: "completed", conclusion: "success", ...over }) as CheckRun;
+
+  it("reads a settled PR off its state and stops there", () => {
+    // Even with CI red underneath it: a merged PR's last run is history, and
+    // this is a four-character column.
+    expect(
+      prMark(pr({ key: "k", state: "merged", checks: [run({ conclusion: "failure" })] })),
+    ).toEqual({ tone: "success", label: "merged" });
+    expect(prMark(pr({ key: "k", state: "closed" }))).toEqual({
+      tone: "muted",
+      label: "closed",
+    });
+  });
+
+  it("ranks the things that stop a merge: requested changes over failing CI", () => {
+    const both = pr({
+      key: "k",
+      reviewDecision: "changes_requested",
+      checks: [run({ conclusion: "failure" })],
+    });
+    expect(prMark(both).label).toBe("changes requested");
+  });
+
+  it("reports failing CI over a run still going", () => {
+    const mixed = pr({
+      key: "k",
+      checks: [run({ conclusion: "failure" }), run({ status: "in_progress" })],
+    });
+    expect(prMark(mixed)).toEqual({ tone: "danger", label: "CI failing" });
+  });
+
+  it("calls a draft a draft and a held PR held, before it looks at CI at all", () => {
+    expect(prMark(pr({ key: "k", isDraft: true, checks: [run({})] })).label).toBe("draft");
+    expect(prMark(pr({ key: "k", hold: true, checks: [run({})] })).label).toBe("on hold");
+  });
+
+  it("is plain 'open' with nothing to report — not green", () => {
+    // No checks is not the same as passing: a PR opened a minute ago has no
+    // runs yet, and a green mark there is a claim about CI that hasn't started.
+    expect(prMark(pr({ key: "k" }))).toEqual({ tone: "accent", label: "open" });
+    expect(prMark(pr({ key: "k", reviewDecision: "approved", checks: [run({})] }))).toEqual({
+      tone: "success",
+      label: "approved",
+    });
   });
 });
