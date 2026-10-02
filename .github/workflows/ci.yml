@@ -7,13 +7,17 @@
 # gating on nothing at all. This file is what turns that policy from a
 # description into an enforcement.
 #
-# WHY IT IS SHAPED LIKE THIS. The bulk of the work runs on a SELF-HOSTED Linux
-# box, because this repo is private and GitHub bills private-repo minutes at 1×
-# for Linux and 2× for Windows. The previous layout ran the whole suite on
-# `windows-latest` plus a second `ubuntu-latest` leg, which was the single
-# largest line on the Actions bill. The self-hosted leg is free; what remains on
-# GitHub's dime is one small Windows job covering only what Linux physically
-# cannot check.
+# WHY IT IS SHAPED LIKE THIS. Essentially all of the work runs on a SELF-HOSTED
+# Linux box. That started as a billing decision — the repo was private, and
+# GitHub charges private-repo minutes at 1× for Linux and 2× for Windows, so the
+# original `windows-latest` full suite was the largest line on the bill. The
+# repo is public now and hosted minutes are free, but the shape stayed, because
+# the self-hosted box is also the FAST path: a warm pnpm store on local disk and
+# no queue, versus a cold hosted runner on the critical path of every merge.
+#
+# The one Windows job that survived the billing cut has since moved to
+# `promote.yml` — see the note at the bottom of this file for why. Everything
+# below runs on Linux.
 name: CI
 
 on:
@@ -68,8 +72,9 @@ jobs:
   # documented reason for saying not to do this. `.dispatch/` is gitignored
   # "ahead of open-sourcing", so this is a live concern, not a hypothetical.
   # The `if:` below is the guard: a pull request from a FORK does not run on
-  # this runner. Before flipping the repo public, decide deliberately what
-  # should gate fork PRs — an ephemeral GitHub-hosted job, or nothing.
+  # this runner. The repo IS public now, and the answer to "then what gates a
+  # fork PR" is the `test-fork` job below — the same work on an ephemeral
+  # `ubuntu-latest`, which is the only place fork code is allowed to execute.
   # ---------------------------------------------------------------------------
   test:
     name: build + typecheck + test (linux, self-hosted)
@@ -185,38 +190,25 @@ jobs:
       # Run them locally against a real cockpit: pnpm --filter @dispatch/client e2e
 
   # ---------------------------------------------------------------------------
-  # THE WINDOWS SURFACE. The only job that costs money, so it buys exactly one
-  # thing: running the platform-branching code on a real Windows host. This
-  # application lives on Windows and the Windows-only surface is load-bearing —
-  # `needsShell` exists for pnpm's `.cmd` shims, services/processes.ts parses
-  # `netstat`, tools/app/paths.mjs resolves %LOCALAPPDATA%, stop-over-stdin
-  # exists because Windows has no SIGTERM, and store/fsq.ts retries an
-  # EPERM-on-rename that only occurs against a Windows filesystem.
+  # FORK PRs. The gate above refuses to run on a self-hosted box for code that
+  # came from a fork, which is correct and non-negotiable — see the warning on
+  # that job. The consequence is that a fork PR runs NO tests there, and this
+  # job is what keeps that from meaning "no tests at all".
   #
-  # WHAT IT DOES NOT DO, AND WHY. It does not run the full suite and it does not
-  # run `pnpm build`. Measured on windows-latest, the old job spent 2m38s in
-  # `Test (shared, cli, server)` and 1m21s in `Build` — and at the 2×
-  # private-repo multiplier both were re-checking what the Linux gate had
-  # already checked on hardware that costs nothing. The full build is skipped
-  # because the client's vite bundle is imported by no server test; only
-  # `@dispatch/shared` and `@dispatch/cli` are built, because the server's types
-  # resolve from their dist/. Net: the Windows leg went 5m31s → 1m10s.
+  # It only ever runs for fork PRs, so it costs a hosted runner on exactly the
+  # pull requests that cannot use the free one. It is the same work as the gate
+  # on an ephemeral `ubuntu-latest`, with `cache: pnpm` because unlike the
+  # self-hosted box this runner has no store to reuse.
   #
-  # The subset below is the set of test files that either branch on
-  # `process.platform` or touch a real filesystem — ~230 tests in ~10 seconds.
-  # Everything else is platform-agnostic and is covered by the Linux gate.
-  # If you add a test that asserts Windows-specific behaviour, add its file here
-  # or it will only ever run on a developer's machine.
-  #
-  # `fs-explorer.test.ts` is the one that most needs BOTH legs: its pure helpers
-  # are platform-parameterized so each OS's branches run everywhere, but the
-  # drive probe, the `Get-Acl` owner lookup and the Recycle Bin path can only be
-  # exercised for real on this runner.
+  # NOT a replacement for the gate: when it IS the only Linux leg, nobody with
+  # commit access has run the suite on this change yet, so read its result
+  # before merging a fork PR rather than trusting the badge.
   # ---------------------------------------------------------------------------
-  windows:
-    name: windows-specific tests
-    runs-on: windows-latest
-    timeout-minutes: 15
+  test-fork:
+    name: build + typecheck + test (linux, hosted fork PRs)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
 
     steps:
       - uses: actions/checkout@v4
@@ -229,34 +221,47 @@ jobs:
       - name: Install Node
         uses: actions/setup-node@v4
         with:
-          # See the note on the self-hosted leg: 24 is the floor `node:sqlite`
-          # needs for FTS5, not a preference.
           node-version: 24
-          # Kept here, unlike the self-hosted leg: this runner IS ephemeral, so
-          # without the cache every run pays a cold pnpm install at 2× billing.
           cache: pnpm
 
       - name: Install
         run: pnpm install --frozen-lockfile
 
-      # shared + cli only — see the note above on skipping the client build.
-      - name: Build (shared + cli)
-        run: pnpm --filter @dispatch/shared --filter @dispatch/cli build
+      - name: Verify no stale tool names
+        run: node tools/verify/no-stale-tool-names.mjs
 
-      - name: Test (windows-sensitive files)
-        run: >
-          pnpm --filter @dispatch/server exec vitest run
-          src/store/store.test.ts
-          src/services/agent-cwd.test.ts
-          src/services/runtime.test.ts
-          src/services/processes.test.ts
-          src/services/terminal.test.ts
-          src/services/file-index.test.ts
-          src/services/runner.test.ts
-          src/routes/fs.test.ts
-          src/services/fs-explorer.test.ts
-          src/services/mcp/manager-mcp.integration.test.ts
-          src/harness/acp/index.test.ts
+      # Build before typecheck — shared/cli expose their types from dist/. See
+      # the long note on the gate; it is load-bearing in both jobs.
+      - name: Build
+        run: pnpm build
 
-      - name: Test release installer (Windows)
-        run: node --test tools/install.test.mjs
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test (shared, cli, server)
+        run: pnpm test
+
+      - name: Test (client)
+        run: pnpm --filter @dispatch/client exec vitest run
+
+  # ---------------------------------------------------------------------------
+  # WHERE THE WINDOWS LEG WENT. There used to be a `windows: windows-latest` job
+  # here running the platform-sensitive subset on every PR. It now runs ONLY in
+  # `promote.yml`, immediately before a build is flipped to the stable channel.
+  #
+  # WHY. Nothing in the subset can fail on account of a change the Linux gate
+  # cannot see — it is the same source, and the platform branches it covers are
+  # exercised on Linux too (`fs-explorer.test.ts` parameterizes them by
+  # platform). What a real Windows host adds is proof about the HOST: the drive
+  # probe, the `Get-Acl` owner lookup, the Recycle Bin path, `netstat` parsing,
+  # the `.cmd`-shim spawn, the EPERM-on-rename retry. That proof matters when
+  # bits are about to reach the machines people run Dispatch on; on a PR it was
+  # a hosted-runner round trip (cold pnpm install, queue wait) on the critical
+  # path of every merge, several times a minute, to re-answer the same question.
+  #
+  # So: unstable is gated by Linux and ships on merge; stable is gated by Linux
+  # AND Windows. A Windows-only regression can reach the unstable channel —
+  # that is the deliberate trade, and it is what the unstable channel is for.
+  # The list of files lives in the `windows` job of `promote.yml`, which is also
+  # where to add one.
+  # ---------------------------------------------------------------------------
