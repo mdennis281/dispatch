@@ -31,13 +31,13 @@
  *
  * The sidebar draws New above Needs input, because a chat you just opened is
  * there to be used or deleted and should stay in your face. Here the order is
- * Needs input, Working, New, Idle: this page is read from the top for what wants
+ * Needs you, Working, New, Idle: this page is read from the top for what wants
  * attention across the whole install, and an empty chat somebody opened in
  * another repo is not that. The tree's own sort is untouched — the branches are
  * grouped and the groups drawn in this page's order.
  *
- * New and Idle are capped for the same reason — both are unbounded history, and
- * the rest of the page sits below them. See HISTORY_SHOWN.
+ * New and Idle fold, for the same reason and to different depths — both are
+ * unbounded history and the rest of the page sits below them. See GROUPS.
  */
 import { useMemo, useState } from "react";
 import {
@@ -68,39 +68,71 @@ import { relTimeShort } from "../../lib/format.js";
 import { cn } from "../../lib/cn.js";
 
 /**
- * The groups, in the order this page reads them — see the module docblock for
- * why it is not `CHAT_SECTIONS`' order.
+ * The groups, in the order this page reads them, and HOW MANY ROWS each is
+ * worth before it folds.
+ *
+ * ── THE ORDER ────────────────────────────────────────────────────────────────
+ *
+ * Not `CHAT_SECTIONS`' order — see the module docblock.
+ *
+ * ── THE HEADINGS ─────────────────────────────────────────────────────────────
+ *
+ * "Needs you", not the sidebar's "Needs input". The queue is `chatSection`'s
+ * `attention`, which is `awaiting-input` OR `failed` OR `error` — a chat that
+ * died is as stopped as one that asked a question, and nothing moves on either
+ * until a human looks. "Needs input" promised questions and then listed
+ * failures underneath. "Needs you" covers all three, and it is already this
+ * page's own word: the Activity strip's blocked figure is labelled the same.
+ *
+ * ── THE PREVIEW ──────────────────────────────────────────────────────────────
+ *
+ * `preview` is how many rows the group draws before the fold; absent means
+ * uncapped. Needs you and Working are uncapped because they are bounded by how
+ * much is actually happening, and they are the reason to come here.
+ *
+ * Idle gets six. It is every chat that has ever run and finished — 736 of them
+ * on the install this was built against — and uncapped it put the worktrees,
+ * the PRs and the rollup below the bottom of a page whose whole point is the
+ * first screenful.
+ *
+ * NEW GETS ZERO, which is the only entry here that needs defending. A chat with
+ * no session has never run a turn, so it is not something that HAPPENED; on the
+ * real install all sixteen were titled "New chat", a month old, in one project
+ * nobody had touched since. Six rows of that sat directly above Idle as the
+ * second-most prominent block on the page — the same mistake in miniature that
+ * this whole rework exists to undo: prominence spent on something that is not
+ * what is going on.
+ *
+ * They are NOT dropped. The card's own count includes them, and a list that
+ * silently omits rows is worse than one that summarises them — an abandoned
+ * chat is still a thing you might want to go and delete. The group collapses to
+ * one muted line saying how many, and opens on a click.
  */
-const GROUPS: { section: ChatSection; label: string }[] = [
-  { section: "attention", label: "Needs input" },
-  { section: "working", label: "Working" },
-  { section: "new", label: "New" },
-  { section: "idle", label: "Idle" },
-];
+interface Group {
+  section: ChatSection;
+  label: string;
+  /** Rows before the fold. Absent = draw them all. */
+  preview?: number;
+  /** The fold's own line, given how many rows are still hidden. */
+  more: (n: number) => string;
+}
 
-/**
- * How many branches a HISTORY group draws before the fold, and which groups
- * those are.
- *
- * Needs input and Working are uncapped: they are bounded by how much is
- * actually happening, and they are the reason to come here. New and Idle are
- * not bounded by anything — Idle is every chat that has ever run and finished
- * (737 of them on the install this was built against) and New is every empty
- * chat anyone has ever opened and walked away from (16, all of them months
- * old). Uncapped, those two pushed the worktrees, the PRs and the rollup off
- * the bottom of a page whose whole point is the first screenful.
- *
- * Six is about as much history as fits beside the live groups without the
- * worktrees below starting the page off-screen. The rest are one click away and
- * the button says how many.
- */
-const HISTORY_SHOWN = 6;
-const CAPPED: ReadonlySet<ChatSection> = new Set<ChatSection>(["new", "idle"]);
+const GROUPS: Group[] = [
+  { section: "attention", label: "Needs you", more: (n) => `Show ${n} more` },
+  { section: "working", label: "Working", more: (n) => `Show ${n} more` },
+  {
+    section: "new",
+    label: "New",
+    preview: 0,
+    more: (n) => `${n} chat${n === 1 ? "" : "s"} opened and never started`,
+  },
+  { section: "idle", label: "Idle", preview: 6, more: (n) => `Show ${n} more idle` },
+];
 
 export function HomeChats() {
   const branches = useAllChatTree();
-  // Which capped groups the reader has opened. A set rather than a flag per
-  // group, so adding one to CAPPED needs no new state.
+  // Which folded groups the reader has opened. A set rather than a flag per
+  // group, so giving another group a `preview` needs no new state.
   const [opened, setOpened] = useState<ReadonlySet<ChatSection>>(new Set());
 
   const grouped = useMemo(() => {
@@ -137,28 +169,34 @@ export function HomeChats() {
         </p>
       ) : (
         <div>
-          {GROUPS.map(({ section, label }) => {
+          {GROUPS.map(({ section, label, preview, more }) => {
             const all = grouped.get(section) ?? [];
             if (all.length === 0) return null;
-            const capped = CAPPED.has(section) && !opened.has(section);
-            const shown = capped ? all.slice(0, HISTORY_SHOWN) : all;
+            const limit = opened.has(section) ? all.length : (preview ?? all.length);
+            const shown = all.slice(0, limit);
+            const hidden = all.length - shown.length;
             return (
               <div key={section}>
-                <div className="flex items-center gap-2 bg-panel-2/40 px-3 py-1 cm-hairline-b">
-                  <span className="text-2xs font-medium uppercase tracking-wide text-faint">
-                    {label}
-                  </span>
-                  <span className="cm-mono !text-2xs text-faint/70">{all.length}</span>
-                </div>
+                {/* No heading over an empty preview: a `NEW 16` strip above a
+                    line that already reads "16 chats opened and never started"
+                    is the same fact twice, and spends a row saying it. */}
+                {shown.length > 0 && (
+                  <div className="flex items-center gap-2 bg-panel-2/40 px-3 py-1 cm-hairline-b">
+                    <span className="text-2xs font-medium uppercase tracking-wide text-faint">
+                      {label}
+                    </span>
+                    <span className="cm-mono !text-2xs text-faint/70">{all.length}</span>
+                  </div>
+                )}
                 {shown.map((b) => (
                   <BranchRows key={b.chat.id} branch={b} depth={0} />
                 ))}
-                {capped && all.length > HISTORY_SHOWN && (
+                {hidden > 0 && (
                   <RowButton
                     onClick={() => setOpened((s) => new Set(s).add(section))}
-                    className="w-full px-3 py-1.5 text-2xs text-muted hover:bg-hover hover:text-primary"
+                    className="w-full px-3 py-1.5 text-2xs text-faint hover:bg-hover hover:text-primary"
                   >
-                    Show {all.length - HISTORY_SHOWN} more {label.toLowerCase()}
+                    {more(hidden)}
                   </RowButton>
                 )}
               </div>
