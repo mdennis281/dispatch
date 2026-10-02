@@ -50,6 +50,7 @@ import type { Chat } from "@dispatch/shared";
 import { isGlobalProject, GLOBAL_PROJECT_NAME } from "@dispatch/shared";
 import {
   chatSection,
+  useChats,
   isReviewerChat,
   reviewTargetKey,
   useAllChatTree,
@@ -303,9 +304,16 @@ function ChatRow({ chat, depth, folded }: { chat: Chat; depth: number; folded: n
   const global = isGlobalProject(chat.projectId);
   const prKey = reviewTargetKey(chat);
   const prNumber = usePrs((s) => (prKey ? s.byKey[prKey]?.number : undefined));
-  const meta = statusMeta(chat.status);
   const reviewer = isReviewerChat(chat);
   const spawned = depth > 0 && !reviewer;
+  // `prSettled` on the TOP-LEVEL row only, exactly as the sidebar does it: it
+  // turns an idle chat whose `watch_pr` reached a merged/closed PR from a
+  // neutral gray dot into a green "PR done" one. Without it the row that just
+  // landed its change reads here as a chat that never did anything — which is
+  // the one question this page exists to answer. The child rows omit it for the
+  // same reason `ReviewRow`/`SpawnRow` do: a reviewer's PR is somebody else's.
+  const prSettled = useChats((s) => (depth === 0 ? (s.prSettled[chat.id] ?? false) : false));
+  const meta = statusMeta(chat.status, prSettled);
 
   return (
     <RowButton
