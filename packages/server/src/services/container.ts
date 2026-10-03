@@ -39,6 +39,7 @@ import { resolveReviewer } from "./reviewer.js";
 import type { EventBus } from "../bus.js";
 import { createChat, ensureSession } from "../routes/dispatch.js";
 import { ChatMessenger } from "./chat-messenger.js";
+import { ChatCompletionNotices } from "./chat-completion-notice.js";
 import { SessionBroker } from "./session-broker.js";
 import { TerminalService } from "./terminal.js";
 import { MemoryService } from "./memory.js";
@@ -147,6 +148,7 @@ export interface ServiceOverrides {
   issueWatcher?: IssueWatcher;
   prRegistry?: PrRegistry;
   chatMessenger?: ChatMessenger;
+  chatCompletionNotices?: ChatCompletionNotices;
 }
 
 /** Everything the routes/WS layer needs, wired to one bus + store. */
@@ -218,6 +220,7 @@ export interface Services extends ServiceBase {
   restartResume: RestartResumeService;
   /** Chat-to-chat messaging behind `chat_send`/`chat_ask`/`chat_reply`/`chat_state`. */
   chatMessenger: ChatMessenger;
+  chatCompletionNotices: ChatCompletionNotices;
   fileIndex: FileIndexService;
   /** The SQLite usage ledger behind the Metrics view. */
   metrics: MetricsService;
@@ -939,6 +942,24 @@ export function createServices(
       isBlockedOnHuman: (chatId) => broker.getStatus(chatId) === "awaiting-input",
     });
   broker.messenger = chatMessenger;
+  // "The chat you spawned is done" — armed by `broker.spawnChat` below, delivered
+  // over the messenger above. Constructed here because it needs both, and
+  // disposed in `dispose()` so a pending notice is not a reason the process
+  // stays up.
+  const chatCompletionNotices =
+    overrides.chatCompletionNotices ??
+    new ChatCompletionNotices({
+      bus,
+      getTitle: (chatId) =>
+        store
+          .getChat(chatId)
+          .then((c) => c?.title)
+          .catch(() => undefined),
+      send: ({ from, to, message }) =>
+        // `queue`, never `interrupt`: a parent mid-turn on something else must
+        // not have that turn derailed by news it did not ask for right now.
+        chatMessenger.send({ from, to, message, delivery: "queue" }),
+    });
   // The nesting walk needs BOTH parent edges, and the reviewer one is a PR
   // record rather than a chat field — so it is assigned here, where the store
   // is, for the same reason `spawnChat` below is.
@@ -1014,6 +1035,21 @@ export function createServices(
       ...(request.detached ? {} : { parentChatId }),
     });
     await ensureSession(services, chat.id);
+    // ARMED BEFORE THE BRIEF GOES OUT, and that order is load-bearing: the
+    // notice watches for the child's turn ending, and a short turn would
+    // otherwise finish into a bus nobody is subscribed to. Detached spawns get
+    // one too — `detached` is about where the row sits in the sidebar, not about
+    // whether the caller wanted to hear back.
+    if (request.notifyWhenComplete) {
+      chatCompletionNotices.arm({
+        chatId: chat.id,
+        parentChatId,
+        // Only the FALLBACK title: the notice re-reads the live one when it
+        // fires, because at this instant an auto-titled chat is still called
+        // whatever `createChat` named it.
+        title: chat.title,
+      });
+    }
     // Stamped `peer`, exactly like a `chat_send`, because that is what it is: an
     // AGENT wrote this prompt via `spawn_chat` and the human only approved the
     // spawn. Unstamped it landed as the new chat's opening speech bubble — the
@@ -1094,6 +1130,7 @@ export function createServices(
     release,
     resume,
     chatMessenger,
+    chatCompletionNotices,
     fileIndex,
     fsExplorer,
     metrics,
@@ -1361,6 +1398,7 @@ export function createServices(
       // so a waiting session is told the answer is not coming rather than
       // hanging on a promise nothing is left to resolve.
       chatMessenger.dispose();
+      chatCompletionNotices.dispose();
       await runner.stopAll().catch(() => {});
       // ORDER IS LOAD-BEARING: this must read the broker's live sessions BEFORE
       // `dispose()` tears them down. Teardown overwrites every status with

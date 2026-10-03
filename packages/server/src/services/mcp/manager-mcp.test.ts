@@ -4314,11 +4314,39 @@ function spawnArgs(over: Partial<SpawnChatRequest> & { prompt: string }) {
     subscription: undefined,
     reason: undefined,
     detached: undefined,
+    notifyWhenComplete: undefined,
     ...over,
   };
 }
 
 describe("manager-mcp — spawn_chat", () => {
+  it.each([
+    ["omitted", undefined, true],
+    ["true", true, true],
+    ["false", false, false],
+  ] as const)(
+    "completion notice defaults ON — notifyWhenComplete %s",
+    async (_label, arg, expected) => {
+      const chats = fakeChats({});
+      const { spawnChat } = createManagerTools({
+        chatId: "c1",
+        bus,
+        broker: fakeBroker({}),
+        chats: chats.binding,
+      });
+      const result = await spawnChat.handler(
+        spawnArgs({ prompt: "Go do a thing", notifyWhenComplete: arg }),
+        {},
+      );
+      expect(chats.calls.spawned[0].notifyWhenComplete).toBe(expected);
+      // Reported back, so the caller knows whether to park on wait_for_chat.
+      expect(resultText(result)).toContain(`"notifyWhenComplete":${expected}`);
+      expect(resultText(result)).toContain(
+        expected ? "END YOUR TURN" : "NO completion notice",
+      );
+    },
+  );
+
   it.each([false, true])("passes explicit persona to child/detached spawn (%s)", async (detached) => {
     const chats = fakeChats({});
     const { spawnChat } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), chats: chats.binding });
