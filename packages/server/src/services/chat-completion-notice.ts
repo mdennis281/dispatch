@@ -17,6 +17,17 @@
  * WHY A SERVICE RATHER THAN A FEW LINES IN `broker.spawnChat`: the firing rule
  * is the whole subtlety (see {@link ChatCompletionNotices.arm}), and it is
  * untestable inside the container's wiring.
+ *
+ * DURABILITY LIMIT, stated rather than discovered, and the same one
+ * `ChatMessenger.held` documents: an armed notice lives only in this process's
+ * map and is LOST if the server restarts before it fires. A restart kills the
+ * child's live session too, so the turn being watched for does not survive
+ * either — but the honest consequence is that a spawn interrupted by a restart
+ * notifies nobody, and a parent that was told to end its turn is left waiting
+ * for a message that is not coming. Making that survive needs the intent
+ * persisted AND re-armed by restart recovery, which in turn has to reconstruct
+ * whether the child's turn had already ended; that is its own change, not a
+ * flag on this one.
  */
 import type { ChatStatus } from "@dispatch/shared";
 import { isChatWorking } from "@dispatch/shared";
@@ -40,6 +51,25 @@ const AT_REST: ReadonlySet<ChatStatus> = new Set<ChatStatus>([
 
 /** How long an armed notice waits for a child that never comes to rest. */
 export const NOTICE_TTL_MS = 24 * 60 * 60_000;
+
+/**
+ * How long to wait after an at-rest status before believing it — then re-read
+ * the live status and only fire if the chat really did stay put.
+ *
+ * NOT paranoia; `at rest` is genuinely published mid-flight. `onTurnEnd`
+ * publishes `idle` and THEN calls `flushPendingSends`, which starts the next
+ * turn from whatever was queued during the last one, and `ChatMessenger` flushes
+ * its held peer messages off that same event. Firing on the raw edge tells the
+ * parent "nothing is running in it now" about a child that is already a
+ * sentence into its next turn.
+ *
+ * Generous rather than tight, because nothing here is latency-sensitive: a
+ * completion notice that arrives a second late costs nobody anything, and the
+ * flush it is waiting out goes through `sendMessage`, which is several awaits
+ * deep. A working status arriving inside the window cancels the fire outright,
+ * so the timer is the backstop for a flip this never saw an event for.
+ */
+export const NOTICE_SETTLE_MS = 1_500;
 
 /** One child chat being watched on its parent's behalf. */
 export interface ChatCompletionNotice {
@@ -66,10 +96,17 @@ export interface ChatCompletionNoticeOpts {
   send(input: { from: string; to: string; message: string }): Promise<unknown>;
   /** The child's CURRENT title, read when the notice fires. Optional. */
   getTitle?(chatId: string): Promise<string | undefined>;
+  /**
+   * The child's live broker status, re-read after {@link NOTICE_SETTLE_MS} to
+   * confirm it really is at rest. Absent — for a caller that cannot supply one
+   * — means the settle window is still waited out but the raw edge is trusted.
+   */
+  getStatus?(chatId: string): ChatStatus | undefined;
   deps?: {
     setTimer?(fn: () => void, ms: number): unknown;
     clearTimer?(handle: unknown): void;
     ttlMs?: number;
+    settleMs?: number;
   };
 }
 
@@ -80,15 +117,19 @@ interface Armed extends ChatCompletionNotice {
    */
   working: boolean;
   timer: unknown;
+  /** The settle timer, while an at-rest edge is being confirmed. */
+  settle?: unknown;
 }
 
 export class ChatCompletionNotices {
   private readonly bus: EventBus;
   private readonly sendFn: ChatCompletionNoticeOpts["send"];
   private readonly getTitle?: ChatCompletionNoticeOpts["getTitle"];
+  private readonly getStatus?: ChatCompletionNoticeOpts["getStatus"];
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
   private readonly clearTimer: (handle: unknown) => void;
   private readonly ttlMs: number;
+  private readonly settleMs: number;
 
   private readonly armed = new Map<string, Armed>();
   private offStatus?: () => void;
@@ -98,7 +139,9 @@ export class ChatCompletionNotices {
     this.bus = opts.bus;
     this.sendFn = opts.send;
     this.getTitle = opts.getTitle;
+    this.getStatus = opts.getStatus;
     this.ttlMs = opts.deps?.ttlMs ?? NOTICE_TTL_MS;
+    this.settleMs = opts.deps?.settleMs ?? NOTICE_SETTLE_MS;
     this.setTimer =
       opts.deps?.setTimer ??
       ((fn, ms) => {
@@ -152,6 +195,7 @@ export class ChatCompletionNotices {
     if (!entry) return;
     this.armed.delete(chatId);
     this.clearTimer(entry.timer);
+    if (entry.settle !== undefined) this.clearTimer(entry.settle);
     if (this.armed.size === 0) this.unwatch();
   }
 
@@ -180,20 +224,45 @@ export class ChatCompletionNotices {
       if (!entry) return;
       if (isChatWorking(e.status)) {
         entry.working = true;
+        // The child picked work back up inside the settle window — the queued
+        // message it had waiting, most likely. The notice stays armed for
+        // whenever THAT turn ends.
+        if (entry.settle !== undefined) {
+          this.clearTimer(entry.settle);
+          entry.settle = undefined;
+        }
         return;
       }
       if (!entry.working || !AT_REST.has(e.status)) return;
-      // Disarmed BEFORE the await: delivering the notice starts a turn in the
-      // parent, and nothing stops the bus re-entering this handler for the
-      // child in the meantime. Without the handoff the parent gets told twice.
-      this.disarm(e.chatId);
-      void this.fire(entry, e.status);
+      // Already confirming this chat: the pending re-check is authoritative, so
+      // a second at-rest edge needs no second timer.
+      if (entry.settle !== undefined) return;
+      entry.settle = this.setTimer(() => this.confirm(e.chatId, e.status), this.settleMs);
     });
   }
 
   private unwatch(): void {
     this.offStatus?.();
     this.offStatus = undefined;
+  }
+
+  /**
+   * The settle window elapsed. Fire only if the chat is STILL at rest.
+   *
+   * `getStatus` returning undefined counts as at rest: no live session is the
+   * most finished a chat gets.
+   */
+  private confirm(chatId: string, status: ChatStatus): void {
+    const entry = this.armed.get(chatId);
+    if (!entry) return;
+    entry.settle = undefined;
+    const live = this.getStatus?.(chatId);
+    if (live !== undefined && !AT_REST.has(live)) return;
+    // Disarmed BEFORE the await: delivering the notice starts a turn in the
+    // parent, and nothing stops the bus re-entering the handler for the child
+    // in the meantime. Without the handoff the parent gets told twice.
+    this.disarm(chatId);
+    void this.fire(entry, live ?? status);
   }
 
   private async fire(entry: Armed, status: ChatStatus): Promise<void> {

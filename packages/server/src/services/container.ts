@@ -950,6 +950,10 @@ export function createServices(
     overrides.chatCompletionNotices ??
     new ChatCompletionNotices({
       bus,
+      // Re-read after the settle window, so a child that only LOOKED finished
+      // — `onTurnEnd` publishes `idle` before flushing whatever was queued
+      // during the turn — is not announced as done mid-flight.
+      getStatus: (chatId) => broker.getStatus(chatId),
       getTitle: (chatId) =>
         store
           .getChat(chatId)
