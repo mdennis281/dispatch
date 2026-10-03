@@ -1850,6 +1850,49 @@ describe("SessionBroker — steering & concurrency", () => {
     expect(events.filter((e) => e.type === "chat-status").at(-1)).not.toMatchObject({ pending: 1 });
   });
 
+  /**
+   * `onTurnEnd` publishes `idle` and only THEN flushes what was queued during
+   * the turn — so for anyone watching `chat-status`, there is a window where the
+   * status says stopped and another turn is already coming. `hasPendingWork` is
+   * what closes it, and this pins the window itself rather than the flag.
+   */
+  it("reports pending work across the gap between turn-end and the queued flush", async () => {
+    const gate = deferred();
+    const { fn, controllers } = makeFakeQuery(async () => {
+      await gate.promise;
+      return [assistantText("done"), resultMsg()];
+    });
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+
+    expect(broker.hasPendingWork("c1")).toBe(false);
+    await broker.sendMessage("c1", "go");
+    await until(() => controllers[0]?.pushed.length === 1);
+    await broker.sendMessage("c1", "and then tidy up", { sendMode: "queue" });
+    expect(broker.hasPendingWork("c1")).toBe(true);
+
+    // What a `chat-status` subscriber sees AT the turn-end edge.
+    const atIdle: boolean[] = [];
+    const off = bus.on("chat-status", (e) => {
+      if (e.chatId === "c1" && e.status === "idle") atIdle.push(broker.hasPendingWork("c1"));
+    });
+    gate.resolve();
+    await until(() => controllers[0]!.pushed.length === 2);
+    off();
+    expect(atIdle[0]).toBe(true);
+
+    await broker.waitFor("c1", "idle").catch(() => {});
+    await until(() => !broker.hasPendingWork("c1"));
+    expect(broker.hasPendingWork("c1")).toBe(false);
+  });
+
+  /** No live session is the most stopped a chat gets. */
+  it("reports no pending work for a chat with no session", () => {
+    const broker = makeBroker(makeFakeQuery(async () => [resultMsg()]).fn);
+    expect(broker.hasPendingWork("nope")).toBe(false);
+  });
+
   it("an `interrupt` send stops the turn, then sends once it has settled", async () => {
     const gate = deferred();
     const { fn, controllers } = makeFakeQuery(async () => {

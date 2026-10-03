@@ -1728,6 +1728,20 @@ export interface SpawnChatRequest {
    * the target project's list, so there is no row there to fold under.
    */
   detached?: boolean;
+  /**
+   * Message the CALLER once the new chat comes to rest, so it learns the
+   * delegated work is done without blocking on `wait_for_chat`.
+   *
+   * Opt-OUT, like `detached`, and for a sharper reason: a chat that spawns work
+   * and is never told it finished is the common failure, not the rare one. The
+   * parent's turn ends, the child runs for twenty minutes, and the result is
+   * read by nobody. Defaulting this on means delegation has a return path
+   * whether or not the caller remembered to ask for one.
+   *
+   * Honoured by the SPAWNER (see `broker.spawnChat`), not here: the notice is a
+   * peer message from the child, and only the container has the messenger.
+   */
+  notifyWhenComplete?: boolean;
 }
 
 /** The project a spawn targets, resolved to a real record. */
@@ -5689,7 +5703,9 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       "only for work whose life has nothing to do with this chat's. Projects cap how " +
       "deep that filing goes (usually one level), so if YOU are already a spawned " +
       "chat this call is refused and says so — do the work yourself instead. " +
-      "Returns the new chatId; pass it to wait_for_chat to sequence behind it.",
+      "Returns the new chatId. By DEFAULT the new chat messages you back when it " +
+      "finishes, so spawn it and END YOUR TURN — don't park in wait_for_chat for work " +
+      "that will come and find you.",
     {
       prompt: z
         .string()
@@ -5748,6 +5764,15 @@ export function createManagerTools(ctx: ManagerMcpContext) {
             "yours. Default false — a chat you spawned is normally a child of yours. " +
             "Use it for a genuinely independent workstream.",
         ),
+      notifyWhenComplete: z
+        .boolean()
+        .optional()
+        .describe(
+          "Send YOU a message when the new chat finishes its turn, so you hear about " +
+            "it without blocking. Default TRUE — leave it on and end your turn rather " +
+            "than sitting in wait_for_chat. Pass false only for work whose outcome you " +
+            "genuinely never need to see.",
+        ),
     },
     async (args): Promise<CallToolResult> => {
       if (!ctx.chats) {
@@ -5776,6 +5801,9 @@ export function createManagerTools(ctx: ManagerMcpContext) {
           typeof args.subscription === "string" ? args.subscription.trim() || undefined : undefined,
         reason: typeof args.reason === "string" ? args.reason.trim() || undefined : undefined,
         detached: args.detached === true,
+        // Default ON: `=== false` rather than `!== false`-with-a-default so an
+        // omitted argument and an explicit `true` are the same request.
+        notifyWhenComplete: args.notifyWhenComplete !== false,
       };
 
       const project = await ctx.chats.resolveProject(request.projectId);
@@ -5858,8 +5886,17 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         return textResult(
           `Spawned chat "${spawned.title}" in ${spawned.projectName} and sent it the ` +
             `brief${consent.auto ? " (auto-approved by your settings)" : ""}. It runs ` +
-            "independently of this one — use wait_for_chat if you need to sequence " +
-            "behind it.\n" +
+            "independently of this one.\n" +
+            // Spelled out, because the notice is what makes wait_for_chat
+            // unnecessary and a model that is not told about it blocks anyway —
+            // spending its whole turn watching a chat that was going to come back
+            // to it regardless.
+            (request.notifyWhenComplete
+              ? "You will be messaged when it comes to rest, so END YOUR TURN rather " +
+                "than blocking — reach for wait_for_chat only if you genuinely cannot " +
+                "continue until it is done.\n"
+              : "You asked for NO completion notice, so nothing will tell you when it " +
+                "finishes — use wait_for_chat if you need to sequence behind it.\n") +
             JSON.stringify({
               approved: true,
               autoApproved: consent.auto,
@@ -5868,6 +5905,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
               projectId: spawned.projectId,
               provider: spawned.provider,
               model: spawned.model,
+              notifyWhenComplete: request.notifyWhenComplete === true,
             }),
         );
       } catch (err) {

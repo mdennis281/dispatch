@@ -298,6 +298,21 @@ export class ChatMessenger {
    * caller that needs an at-least-once guarantee must not build on this.
    */
   private readonly held = new Map<string, HeldMessage[]>();
+  /**
+   * Flushes in flight per target, as a COUNT.
+   *
+   * `flush` detaches the queue before its first await, so `held` is already
+   * empty while the message it took is still on its way into a turn. Anyone
+   * asking "is this chat about to start working?" needs that window to answer
+   * yes — see {@link ChatMessenger.hasPending}.
+   *
+   * Counted rather than a membership set because flushes for ONE target
+   * overlap: a message delivered here opens a turn, a fresh message is held
+   * during it, and that turn's at-rest edge starts a second flush while the
+   * first is still awaiting a later message. A set would have the first one to
+   * finish clear the entry for both.
+   */
+  private readonly flushing = new Map<string, number>();
   private readonly pendingAsks = new Map<string, PendingAsk>();
   private offStatus?: () => void;
   private disposed = false;
@@ -670,6 +685,28 @@ export class ChatMessenger {
     // handoff the re-entrant call sees the same queue and double-sends it.
     this.held.delete(chatId);
     if (this.held.size === 0) this.unwatch();
+    this.flushing.set(chatId, (this.flushing.get(chatId) ?? 0) + 1);
+    try {
+      await this.deliverQueue(chatId, queue);
+    } finally {
+      const left = (this.flushing.get(chatId) ?? 1) - 1;
+      if (left > 0) this.flushing.set(chatId, left);
+      else this.flushing.delete(chatId);
+    }
+  }
+
+  /**
+   * Whether a peer message for `chatId` is parked or on its way into a turn.
+   *
+   * For callers that treat an at-rest status as "this chat has stopped": a
+   * flush turns a message into a turn, so during one the chat is between turns,
+   * not done. The completion notice is the first caller.
+   */
+  hasPending(chatId: string): boolean {
+    return (this.flushing.get(chatId) ?? 0) > 0 || (this.held.get(chatId)?.length ?? 0) > 0;
+  }
+
+  private async deliverQueue(chatId: string, queue: HeldMessage[]): Promise<void> {
     for (const msg of queue) {
       // Re-checked per message, not just once in `dropHeld`: the queue is
       // detached above, so an ask that expires WHILE this loop is awaiting an
