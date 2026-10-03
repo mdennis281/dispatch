@@ -102,6 +102,16 @@ export interface ChatCompletionNoticeOpts {
    * — means the settle window is still waited out but the raw edge is trusted.
    */
   getStatus?(chatId: string): ChatStatus | undefined;
+  /**
+   * Whether the chat has work that will open a turn even though its status does
+   * not say so yet — a queued message mid-flush, a parked peer message.
+   *
+   * The reason the settle window is not the whole answer: it is elapsed time,
+   * and preparing a turn (posture refresh, rules lookup, the user row) can take
+   * longer than any window worth waiting. This makes the decision on a FACT
+   * instead. Wired to `broker.hasPendingWork` + `ChatMessenger.hasPending`.
+   */
+  hasPendingWork?(chatId: string): boolean;
   deps?: {
     setTimer?(fn: () => void, ms: number): unknown;
     clearTimer?(handle: unknown): void;
@@ -126,6 +136,7 @@ export class ChatCompletionNotices {
   private readonly sendFn: ChatCompletionNoticeOpts["send"];
   private readonly getTitle?: ChatCompletionNoticeOpts["getTitle"];
   private readonly getStatus?: ChatCompletionNoticeOpts["getStatus"];
+  private readonly hasPendingWork?: ChatCompletionNoticeOpts["hasPendingWork"];
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
   private readonly clearTimer: (handle: unknown) => void;
   private readonly ttlMs: number;
@@ -140,6 +151,7 @@ export class ChatCompletionNotices {
     this.sendFn = opts.send;
     this.getTitle = opts.getTitle;
     this.getStatus = opts.getStatus;
+    this.hasPendingWork = opts.hasPendingWork;
     this.ttlMs = opts.deps?.ttlMs ?? NOTICE_TTL_MS;
     this.settleMs = opts.deps?.settleMs ?? NOTICE_SETTLE_MS;
     this.setTimer =
@@ -247,10 +259,17 @@ export class ChatCompletionNotices {
   }
 
   /**
-   * The settle window elapsed. Fire only if the chat is STILL at rest.
+   * The settle window elapsed. Fire only if the chat is STILL at rest and has
+   * nothing queued that is about to open another turn.
    *
    * `getStatus` returning undefined counts as at rest: no live session is the
    * most finished a chat gets.
+   *
+   * Either check failing leaves the notice ARMED and schedules nothing: the
+   * turn that is coming will publish `running` and then its own at-rest edge,
+   * and that edge starts a fresh window. The cost of being wrong that way is a
+   * notice that arrives one turn late; the cost of the other way is telling the
+   * parent its delegated work is finished while the child is mid-sentence.
    */
   private confirm(chatId: string, status: ChatStatus): void {
     const entry = this.armed.get(chatId);
@@ -258,6 +277,7 @@ export class ChatCompletionNotices {
     entry.settle = undefined;
     const live = this.getStatus?.(chatId);
     if (live !== undefined && !AT_REST.has(live)) return;
+    if (this.hasPendingWork?.(chatId)) return;
     // Disarmed BEFORE the await: delivering the notice starts a turn in the
     // parent, and nothing stops the bus re-entering the handler for the child
     // in the meantime. Without the handoff the parent gets told twice.

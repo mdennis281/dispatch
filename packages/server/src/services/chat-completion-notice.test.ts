@@ -22,7 +22,9 @@ interface Sent {
  * claim, so a test cannot accidentally assert on a status the broker would
  * contradict a moment later.
  */
-function harness(opts: { titles?: Record<string, string>; sendFails?: boolean } = {}) {
+function harness(
+  opts: { titles?: Record<string, string>; sendFails?: boolean } = {},
+) {
   const bus = new EventBus();
   // `EventBus.listenerCount()` counts the ALL channel, not per-type
   // subscribers, so the lazy-subscribe assertion counts them here instead.
@@ -39,6 +41,8 @@ function harness(opts: { titles?: Record<string, string>; sendFails?: boolean } 
 
   const sent: Sent[] = [];
   const live = new Map<string, ChatStatus>();
+  /** Chats the broker/messenger say have a turn about to open. */
+  const pending = new Set<string>();
   const timers = new Map<number, { fn: () => void; ms: number }>();
   let nextTimer = 1;
 
@@ -50,6 +54,7 @@ function harness(opts: { titles?: Record<string, string>; sendFails?: boolean } 
     },
     getTitle: async (chatId) => opts.titles?.[chatId],
     getStatus: (chatId) => live.get(chatId),
+    hasPendingWork: (chatId) => pending.has(chatId),
     deps: {
       setTimer: (fn, ms) => {
         const id = nextTimer++;
@@ -96,6 +101,7 @@ function harness(opts: { titles?: Record<string, string>; sendFails?: boolean } 
     quietly,
     settle,
     expire: () => fire(NOTICE_TTL_MS),
+    pending,
     timers,
     subs: () => subs,
   };
@@ -168,6 +174,31 @@ describe("ChatCompletionNotices", () => {
     expect(h.notices.pending("child")).toBe(true);
 
     // …and the notice is still good for whenever THAT turn ends.
+    h.status("child", "idle");
+    await h.settle();
+    expect(h.sent).toHaveLength(1);
+  });
+
+  /**
+   * The case the settle window alone cannot catch: preparing the queued turn
+   * (posture refresh, rules lookup, the user row) outruns any elapsed-time
+   * guess, so the re-read still sees `idle`. The queue itself is the fact that
+   * settles it.
+   */
+  it("does not fire while the broker still has work queued for the child", async () => {
+    const h = harness();
+    h.notices.arm({ chatId: "child", parentChatId: "parent" });
+    h.status("child", "running");
+    h.pending.add("child");
+    h.status("child", "idle");
+
+    await h.settle();
+    expect(h.sent).toEqual([]);
+    expect(h.notices.pending("child")).toBe(true);
+
+    // The queued turn ran and ended; now there is nothing left behind it.
+    h.status("child", "running");
+    h.pending.delete("child");
     h.status("child", "idle");
     await h.settle();
     expect(h.sent).toHaveLength(1);

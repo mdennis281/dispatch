@@ -22,7 +22,12 @@ interface Delivered {
  * `Date.now()` would make those tests either slow or flaky.
  */
 function harness(
-  opts: { chats?: Partial<Chat>[]; contextUsage?: ContextUsage | null } = {},
+  opts: {
+    chats?: Partial<Chat>[];
+    contextUsage?: ContextUsage | null;
+    /** Called from inside the broker send — i.e. DURING a flush. */
+    onSend?: () => void;
+  } = {},
 ) {
   const bus = new EventBus();
   const delivered: Delivered[] = [];
@@ -63,6 +68,7 @@ function harness(
     },
     getStatus: (id) => status.get(id),
     send: async (chatId, text, { peer }) => {
+      opts.onSend?.();
       delivered.push({ chatId, text, peer });
     },
     getContextUsage: async () => opts.contextUsage ?? null,
@@ -198,6 +204,35 @@ describe("ChatMessenger delivery mode", () => {
     await new Promise((r) => setImmediate(r));
 
     expect(h.delivered.map((d) => d.text)).toEqual(["first", "second"]);
+  });
+
+  /**
+   * `hasPending` exists for callers that read an at-rest status as "this chat
+   * has stopped" (the spawn completion notice is the first). A flush turns a
+   * parked message into a turn, so it has to cover the whole window — including
+   * the part after `flush` detaches the queue, when `held` is already empty.
+   */
+  it("reports a parked message as pending, and keeps doing so mid-flush", async () => {
+    const seenMidFlush: boolean[] = [];
+    const h = harness({
+      chats: [
+        { id: "lead", title: "Team lead", projectId: "p1" },
+        { id: "dev", title: "Developer", projectId: "p1" },
+      ],
+      onSend: () => seenMidFlush.push(h.messenger.hasPending("dev")),
+    });
+    h.setStatus("lead", "idle");
+    h.setStatus("dev", "running");
+
+    expect(h.messenger.hasPending("dev")).toBe(false);
+    await h.messenger.send({ from: "lead", to: "dev", message: "first" });
+    expect(h.messenger.hasPending("dev")).toBe(true);
+
+    h.settle("dev", "idle");
+    await new Promise((r) => setImmediate(r));
+
+    expect(seenMidFlush).toEqual([true]);
+    expect(h.messenger.hasPending("dev")).toBe(false);
   });
 
   it("does not flush on a status change that is still mid-turn", async () => {

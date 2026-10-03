@@ -2083,6 +2083,16 @@ interface LiveSession {
    */
   pendingSends: HeldSend[];
   /**
+   * A {@link SessionBroker.flushPendingSends} batch still being delivered.
+   *
+   * Exists because `pendingSends` goes EMPTY the instant the flush starts, while
+   * the turn it is about to open is still several awaits away (posture refresh,
+   * rules lookup, the user row). So between turn-end and the next `running`,
+   * both the status and the queue read "nothing happening here" — which is
+   * exactly the window `hasPendingWork` has to answer `true` for.
+   */
+  flushingSends?: boolean;
+  /**
    * Who to tell when a STEERING message lands. The manager MCP's blocking
    * waits (`watch_pr`, `wait_for_chat`, …) register here so the message ends
    * the wait rather than sitting behind it — see `ManagerMcpContext.onSteer`.
@@ -3928,6 +3938,28 @@ export class SessionBroker {
 
   getStatus(chatId: string): ChatStatus | undefined {
     return this.sessions.get(chatId)?.status;
+  }
+
+  /**
+   * Whether this chat has work that is going to open a turn, even though its
+   * status does not say so yet.
+   *
+   * `getStatus` alone is not enough to conclude a chat has stopped, because
+   * `onTurnEnd` publishes `idle` BEFORE flushing what was queued during the
+   * turn. Anyone acting on "it is at rest" — the completion notice is the first
+   * — has to ask this too, or it acts in the gap.
+   *
+   * False for a chat with no live session: nothing is queued anywhere, and that
+   * is the most stopped a chat gets.
+   */
+  hasPendingWork(chatId: string): boolean {
+    const session = this.sessions.get(chatId);
+    if (!session) return false;
+    return (
+      session.flushingSends === true ||
+      session.pendingSends.length > 0 ||
+      this.queuedCount(session) > 0
+    );
   }
 
   /**
@@ -6671,18 +6703,23 @@ export class SessionBroker {
   private flushPendingSends(session: LiveSession): void {
     if (!session.pendingSends.length) return;
     const batch = session.pendingSends.splice(0);
+    session.flushingSends = true;
     void (async () => {
-      for (const held of batch) {
-        try {
-          await this.sendMessage(session.chatId, held.text, held.opts);
-        } catch (err) {
-          this.bus.publish({
-            type: "error",
-            chatId: session.chatId,
-            message: "a queued message could not be sent",
-            detail: err instanceof Error ? err.message : String(err),
-          });
+      try {
+        for (const held of batch) {
+          try {
+            await this.sendMessage(session.chatId, held.text, held.opts);
+          } catch (err) {
+            this.bus.publish({
+              type: "error",
+              chatId: session.chatId,
+              message: "a queued message could not be sent",
+              detail: err instanceof Error ? err.message : String(err),
+            });
+          }
         }
+      } finally {
+        session.flushingSends = false;
       }
     })();
   }

@@ -954,6 +954,11 @@ export function createServices(
       // — `onTurnEnd` publishes `idle` before flushing whatever was queued
       // during the turn — is not announced as done mid-flight.
       getStatus: (chatId) => broker.getStatus(chatId),
+      // The other half of that re-read, and the half that is a FACT rather than
+      // elapsed time: a queued message mid-flush, or a parked peer message, is
+      // a turn about to open under an `idle` status.
+      hasPendingWork: (chatId) =>
+        broker.hasPendingWork(chatId) || chatMessenger.hasPending(chatId),
       getTitle: (chatId) =>
         store
           .getChat(chatId)
