@@ -71,6 +71,24 @@ export const NOTICE_TTL_MS = 24 * 60 * 60_000;
  */
 export const NOTICE_SETTLE_MS = 1_500;
 
+/**
+ * How many settle windows in a row the notice will wait out while the chat
+ * still has work pending, before it stops re-checking and goes back to waiting
+ * for a status edge.
+ *
+ * A bound is needed because the re-check is the ONLY thing watching some of
+ * these transitions. Both queue flushers swallow a delivery error and just
+ * clear their pending flag — no status event follows — so a send that was
+ * still preparing at the first check and then failed would leave the notice
+ * armed until its 24h TTL with nothing ever looking again. Re-checking turns
+ * that into a notice one window late.
+ *
+ * ~60s of polling at 1.5s. Long enough to outlast any plausible preparation,
+ * short enough that a genuinely stuck chat is not polled for a day; past it the
+ * notice stays armed and the next `running` → at-rest edge opens a fresh budget.
+ */
+export const NOTICE_QUIESCE_TRIES = 40;
+
 /** One child chat being watched on its parent's behalf. */
 export interface ChatCompletionNotice {
   /** The spawned chat whose completion is being waited for. */
@@ -129,6 +147,8 @@ interface Armed extends ChatCompletionNotice {
   timer: unknown;
   /** The settle timer, while an at-rest edge is being confirmed. */
   settle?: unknown;
+  /** Re-checks spent on the current at-rest edge (see NOTICE_QUIESCE_TRIES). */
+  tries: number;
 }
 
 export class ChatCompletionNotices {
@@ -196,6 +216,7 @@ export class ChatCompletionNotices {
     this.armed.set(notice.chatId, {
       ...notice,
       working: false,
+      tries: 0,
       timer: this.setTimer(() => this.disarm(notice.chatId), this.ttlMs),
     });
     this.watch();
@@ -249,6 +270,9 @@ export class ChatCompletionNotices {
       // Already confirming this chat: the pending re-check is authoritative, so
       // a second at-rest edge needs no second timer.
       if (entry.settle !== undefined) return;
+      // A fresh edge, so a fresh re-check budget: the last one was spent on a
+      // turn that has since been and gone.
+      entry.tries = 0;
       entry.settle = this.setTimer(() => this.confirm(e.chatId, e.status), this.settleMs);
     });
   }
@@ -265,19 +289,30 @@ export class ChatCompletionNotices {
    * `getStatus` returning undefined counts as at rest: no live session is the
    * most finished a chat gets.
    *
-   * Either check failing leaves the notice ARMED and schedules nothing: the
-   * turn that is coming will publish `running` and then its own at-rest edge,
-   * and that edge starts a fresh window. The cost of being wrong that way is a
-   * notice that arrives one turn late; the cost of the other way is telling the
-   * parent its delegated work is finished while the child is mid-sentence.
+   * Either check failing leaves the notice ARMED and re-checks, up to
+   * {@link NOTICE_QUIESCE_TRIES} windows. Re-checking rather than simply waiting
+   * for the next status edge because a pending flush can CLEAR without one —
+   * both flushers swallow a delivery error and just drop their pending flag —
+   * and nothing else would ever look again.
+   *
+   * The cost of being wrong this way is a notice that arrives a window or two
+   * late. The cost of the other way is telling the parent its delegated work is
+   * finished while the child is mid-sentence.
    */
   private confirm(chatId: string, status: ChatStatus): void {
     const entry = this.armed.get(chatId);
     if (!entry) return;
     entry.settle = undefined;
     const live = this.getStatus?.(chatId);
-    if (live !== undefined && !AT_REST.has(live)) return;
-    if (this.hasPendingWork?.(chatId)) return;
+    if ((live !== undefined && !AT_REST.has(live)) || this.hasPendingWork?.(chatId)) {
+      // Past the budget, stop polling and fall back to the status edge: a chat
+      // this busy will publish one, and a chat that never does was never going
+      // to be answered by a 41st look.
+      if (entry.tries >= NOTICE_QUIESCE_TRIES) return;
+      entry.tries += 1;
+      entry.settle = this.setTimer(() => this.confirm(chatId, status), this.settleMs);
+      return;
+    }
     // Disarmed BEFORE the await: delivering the notice starts a turn in the
     // parent, and nothing stops the bus re-entering the handler for the child
     // in the meantime. Without the handoff the parent gets told twice.

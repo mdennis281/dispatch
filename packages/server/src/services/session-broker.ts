@@ -2083,15 +2083,22 @@ interface LiveSession {
    */
   pendingSends: HeldSend[];
   /**
-   * A {@link SessionBroker.flushPendingSends} batch still being delivered.
+   * How many {@link SessionBroker.flushPendingSends} batches are still being
+   * delivered.
    *
    * Exists because `pendingSends` goes EMPTY the instant the flush starts, while
    * the turn it is about to open is still several awaits away (posture refresh,
    * rules lookup, the user row). So between turn-end and the next `running`,
    * both the status and the queue read "nothing happening here" — which is
    * exactly the window `hasPendingWork` has to answer `true` for.
+   *
+   * A COUNT rather than a flag, because batches overlap: a later message in one
+   * batch can still be in `sendMessage` preparation when an earlier message's
+   * turn ends, and that turn end starts a second batch. With a boolean,
+   * whichever batch finished first cleared it for both and `hasPendingWork`
+   * went quiet with a send still in flight.
    */
-  flushingSends?: boolean;
+  flushingSends?: number;
   /**
    * Who to tell when a STEERING message lands. The manager MCP's blocking
    * waits (`watch_pr`, `wait_for_chat`, …) register here so the message ends
@@ -3956,7 +3963,7 @@ export class SessionBroker {
     const session = this.sessions.get(chatId);
     if (!session) return false;
     return (
-      session.flushingSends === true ||
+      (session.flushingSends ?? 0) > 0 ||
       session.pendingSends.length > 0 ||
       this.queuedCount(session) > 0
     );
@@ -6703,7 +6710,7 @@ export class SessionBroker {
   private flushPendingSends(session: LiveSession): void {
     if (!session.pendingSends.length) return;
     const batch = session.pendingSends.splice(0);
-    session.flushingSends = true;
+    session.flushingSends = (session.flushingSends ?? 0) + 1;
     void (async () => {
       try {
         for (const held of batch) {
@@ -6719,7 +6726,7 @@ export class SessionBroker {
           }
         }
       } finally {
-        session.flushingSends = false;
+        session.flushingSends = Math.max(0, (session.flushingSends ?? 1) - 1);
       }
     })();
   }

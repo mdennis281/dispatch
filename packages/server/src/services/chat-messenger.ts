@@ -299,14 +299,20 @@ export class ChatMessenger {
    */
   private readonly held = new Map<string, HeldMessage[]>();
   /**
-   * Targets whose held queue is mid-flush.
+   * Flushes in flight per target, as a COUNT.
    *
    * `flush` detaches the queue before its first await, so `held` is already
    * empty while the message it took is still on its way into a turn. Anyone
    * asking "is this chat about to start working?" needs that window to answer
    * yes — see {@link ChatMessenger.hasPending}.
+   *
+   * Counted rather than a membership set because flushes for ONE target
+   * overlap: a message delivered here opens a turn, a fresh message is held
+   * during it, and that turn's at-rest edge starts a second flush while the
+   * first is still awaiting a later message. A set would have the first one to
+   * finish clear the entry for both.
    */
-  private readonly flushing = new Set<string>();
+  private readonly flushing = new Map<string, number>();
   private readonly pendingAsks = new Map<string, PendingAsk>();
   private offStatus?: () => void;
   private disposed = false;
@@ -679,11 +685,13 @@ export class ChatMessenger {
     // handoff the re-entrant call sees the same queue and double-sends it.
     this.held.delete(chatId);
     if (this.held.size === 0) this.unwatch();
-    this.flushing.add(chatId);
+    this.flushing.set(chatId, (this.flushing.get(chatId) ?? 0) + 1);
     try {
       await this.deliverQueue(chatId, queue);
     } finally {
-      this.flushing.delete(chatId);
+      const left = (this.flushing.get(chatId) ?? 1) - 1;
+      if (left > 0) this.flushing.set(chatId, left);
+      else this.flushing.delete(chatId);
     }
   }
 
@@ -695,7 +703,7 @@ export class ChatMessenger {
    * not done. The completion notice is the first caller.
    */
   hasPending(chatId: string): boolean {
-    return this.flushing.has(chatId) || (this.held.get(chatId)?.length ?? 0) > 0;
+    return (this.flushing.get(chatId) ?? 0) > 0 || (this.held.get(chatId)?.length ?? 0) > 0;
   }
 
   private async deliverQueue(chatId: string, queue: HeldMessage[]): Promise<void> {

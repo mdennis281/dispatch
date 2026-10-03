@@ -27,6 +27,8 @@ function harness(
     contextUsage?: ContextUsage | null;
     /** Called from inside the broker send — i.e. DURING a flush. */
     onSend?: () => void;
+    /** Park every send until the test releases it, so flushes can overlap. */
+    gateSends?: boolean;
   } = {},
 ) {
   const bus = new EventBus();
@@ -40,6 +42,8 @@ function harness(
   let nextTimer = 1;
   let nextAsk = 1;
 
+  /** One resolver per gated send, in call order. */
+  const sendGates: (() => void)[] = [];
   const chats = new Map<string, Chat>();
   for (const partial of opts.chats ?? []) {
     const chat = {
@@ -69,6 +73,9 @@ function harness(
     getStatus: (id) => status.get(id),
     send: async (chatId, text, { peer }) => {
       opts.onSend?.();
+      if (opts.gateSends) {
+        await new Promise<void>((resolve) => sendGates.push(resolve));
+      }
       delivered.push({ chatId, text, peer });
     },
     getContextUsage: async () => opts.contextUsage ?? null,
@@ -92,6 +99,7 @@ function harness(
     delivered,
     woken,
     chats,
+    sendGates,
     /** Put a chat into a live status without going through the messenger. */
     setStatus: (id: string, s: ChatStatus) => status.set(id, s),
     /** Drop a chat's session entirely — i.e. make it dormant. */
@@ -232,6 +240,48 @@ describe("ChatMessenger delivery mode", () => {
     await new Promise((r) => setImmediate(r));
 
     expect(seenMidFlush).toEqual([true]);
+    expect(h.messenger.hasPending("dev")).toBe(false);
+  });
+
+  /**
+   * Two flushes for ONE target genuinely overlap: a delivered message opens a
+   * turn, a fresh message is held during it, and that turn's at-rest edge starts
+   * a second flush while the first is still awaiting a later send. `flushing`
+   * counts for this reason — as a membership set, whichever flush finished
+   * first cleared the entry and `hasPending` went quiet with one still live.
+   */
+  it("keeps reporting pending work while a SECOND overlapping flush is in flight", async () => {
+    const h = harness({
+      chats: [
+        { id: "lead", title: "Team lead", projectId: "p1" },
+        { id: "dev", title: "Developer", projectId: "p1" },
+      ],
+      gateSends: true,
+    });
+    h.setStatus("lead", "idle");
+    h.setStatus("dev", "running");
+    const tick = (): Promise<void> => new Promise((r) => setImmediate(r));
+
+    await h.messenger.send({ from: "lead", to: "dev", message: "first" });
+    h.settle("dev", "idle");
+    await tick();
+    expect(h.sendGates).toHaveLength(1);
+
+    // A second message held during the turn the first one opened, then that
+    // turn ending — a second flush, while the first is still gated.
+    h.setStatus("dev", "running");
+    await h.messenger.send({ from: "lead", to: "dev", message: "second" });
+    h.settle("dev", "idle");
+    await tick();
+    expect(h.sendGates).toHaveLength(2);
+
+    h.sendGates[0]!();
+    await tick();
+    // THE ASSERTION: the first flush is done, the second is not.
+    expect(h.messenger.hasPending("dev")).toBe(true);
+
+    h.sendGates[1]!();
+    await tick();
     expect(h.messenger.hasPending("dev")).toBe(false);
   });
 

@@ -3,6 +3,7 @@ import type { ChatStatus } from "@dispatch/shared";
 import { EventBus } from "../bus.js";
 import {
   ChatCompletionNotices,
+  NOTICE_QUIESCE_TRIES,
   NOTICE_SETTLE_MS,
   NOTICE_TTL_MS,
 } from "./chat-completion-notice.js";
@@ -199,6 +200,49 @@ describe("ChatCompletionNotices", () => {
     // The queued turn ran and ended; now there is nothing left behind it.
     h.status("child", "running");
     h.pending.delete("child");
+    h.status("child", "idle");
+    await h.settle();
+    expect(h.sent).toHaveLength(1);
+  });
+
+  /**
+   * The re-check is the only thing watching this transition: both flushers
+   * swallow a delivery error and simply drop their pending flag, so a send that
+   * was preparing at the first check and then FAILED publishes no status at all.
+   * Without re-checking the notice would sit armed until its TTL.
+   */
+  it("re-checks until the queue clears, even with no status event to prompt it", async () => {
+    const h = harness();
+    h.notices.arm({ chatId: "child", parentChatId: "parent" });
+    h.status("child", "running");
+    h.pending.add("child");
+    h.status("child", "idle");
+
+    await h.settle();
+    expect(h.sent).toEqual([]);
+
+    // The send died in preparation: the flag clears, nothing is published.
+    h.pending.delete("child");
+    await h.settle();
+    expect(h.sent).toHaveLength(1);
+  });
+
+  it("stops re-checking after its budget and waits for the next edge", async () => {
+    const h = harness();
+    h.notices.arm({ chatId: "child", parentChatId: "parent" });
+    h.status("child", "running");
+    h.pending.add("child");
+    h.status("child", "idle");
+
+    for (let i = 0; i <= NOTICE_QUIESCE_TRIES; i += 1) await h.settle();
+    expect(h.sent).toEqual([]);
+    // Budget spent: nothing left polling, but the notice is still good.
+    expect([...h.timers.values()].some((t) => t.ms === NOTICE_SETTLE_MS)).toBe(false);
+    expect(h.notices.pending("child")).toBe(true);
+
+    // A fresh edge buys a fresh budget.
+    h.pending.delete("child");
+    h.status("child", "running");
     h.status("child", "idle");
     await h.settle();
     expect(h.sent).toHaveLength(1);
