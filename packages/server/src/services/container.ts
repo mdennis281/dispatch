@@ -1066,9 +1066,19 @@ export function createServices(
     // Denormalised title, per PeerSenderSchema: the parent may be renamed or
     // deleted long before anyone reads this row, and a transcript can't be
     // rewritten. Best-effort — a missing parent must not fail the spawn.
-    await broker.sendMessage(chat.id, request.prompt, {
-      peer: { chatId: parentChatId, title: parent?.title, projectId: parent?.projectId },
-    });
+    try {
+      await broker.sendMessage(chat.id, request.prompt, {
+        peer: { chatId: parentChatId, title: parent?.title, projectId: parent?.projectId },
+      });
+    } catch (err) {
+      // The brief never landed, so this chat was never given the work the notice
+      // would be reporting on — and the tool is about to tell the caller the
+      // spawn failed. Left armed, the notice sits for its whole 24 hours and
+      // then reports an unrelated turn somebody later starts in this blank chat
+      // as the delegated work completing.
+      chatCompletionNotices.disarm(chat.id);
+      throw err;
+    }
     return {
       chatId: chat.id,
       title: chat.title,
