@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  ArrowDownRight,
   CheckCircle2,
   CircleDashed,
   FolderX,
@@ -9,10 +10,12 @@ import {
   Server,
   Trash2,
   Undo2,
+  X,
 } from "lucide-react";
 import {
   PROVIDER_IDS,
   SubscriptionListSchema,
+  accountLabel,
   providerFor,
   type HarnessKind,
   type Subscription,
@@ -51,12 +54,13 @@ export function AccountsSection() {
     () =>
       statuses
         .filter((s) => !s.implicit)
-        .map(({ id, name, provider, configDir, host }) => ({
+        .map(({ id, name, provider, configDir, host, fallbacks }) => ({
           id,
           name,
           provider,
           configDir,
           host,
+          fallbacks,
         })),
     [statuses],
   );
@@ -93,11 +97,19 @@ export function AccountsSection() {
   const submit = async () => {
     // A blank dir or host means "the provider's default", which the schema
     // spells as absent.
-    const list = rows.map((r) => ({
-      ...r,
-      configDir: r.configDir?.trim() || undefined,
-      host: r.host?.trim() || undefined,
-    }));
+    const live = liveAccountIds(rows, statuses);
+    const list = rows.map((r) => {
+      // A fallback naming a row deleted in this same edit is dropped here
+      // rather than saved and skipped at runtime — the pane should not persist
+      // an edge it is about to render as blank.
+      const fallbacks = (r.fallbacks ?? []).filter((id) => id !== r.id && live.has(id));
+      return {
+        ...r,
+        configDir: r.configDir?.trim() || undefined,
+        host: r.host?.trim() || undefined,
+        fallbacks: fallbacks.length > 0 ? fallbacks : undefined,
+      };
+    });
     const parsed = SubscriptionListSchema.safeParse(list);
     if (!parsed.success) {
       setError(parsed.error.issues[0]?.message ?? "Invalid account list");
@@ -205,6 +217,11 @@ export function AccountsSection() {
                       )}
                     </>
                   )}
+                  <FallbackEditor
+                    row={row}
+                    rows={rows}
+                    onChange={(fallbacks) => patchRow(i, { fallbacks })}
+                  />
                 </div>
               );
             })}
@@ -252,7 +269,8 @@ export function AccountsSection() {
         <div className="border-t border-line-soft pt-3">
           <SectionLabel className="mb-1.5 px-0">Defaults</SectionLabel>
           <p className="mb-2 text-2xs leading-snug text-faint">
-            Providers with no account listed run on their default.
+            Providers with no account listed run on their default. Add an account for one to give
+            it a fallback &mdash; leave its directory blank and it stays the same default login.
           </p>
           <div className="space-y-1">
             {implicit.map((s) => {
@@ -308,5 +326,118 @@ function LoginBadge({ status }: { status: SubscriptionStatus | undefined }) {
     <span className={`${cls} text-muted`}>
       <CircleDashed /> not logged in
     </span>
+  );
+}
+
+/**
+ * Every account id a fallback may legally point at after this save.
+ *
+ * The IMPLICIT ones count. `rows` holds only the stored list, but a provider
+ * nobody listed still has a real account at its default directory, and both
+ * `fallbackChain` and the schema accept one as a target. Pruning against the
+ * stored rows alone silently deleted such an edge the next time anything else
+ * on this pane was saved — the list PUT is a full replace, so an edge the user
+ * never touched went with it.
+ */
+export function liveAccountIds(
+  rows: readonly Subscription[],
+  statuses: readonly SubscriptionStatus[],
+): Set<string> {
+  return new Set([
+    ...rows.map((r) => r.id),
+    ...statuses.filter((s) => s.implicit).map((s) => s.id),
+  ]);
+}
+
+/**
+ * Where a chat goes when THIS account runs out of budget, in order.
+ *
+ * Ordered rather than a single pick because a limit can be survived more than
+ * once: with two accounts exhausted there is still a third to reach for. The
+ * list is walked top-down and the first account with budget takes the work.
+ *
+ * An entry may name another provider. That is legal and sometimes exactly what
+ * is wanted (Codex running out should not stop the work when Claude is idle),
+ * but it costs the live session — only two accounts of the SAME provider can
+ * hand the conversation over natively — so the row says so rather than letting
+ * it be discovered mid-task.
+ */
+function FallbackEditor({
+  row,
+  rows,
+  onChange,
+}: {
+  row: Subscription;
+  rows: readonly Subscription[];
+  onChange: (fallbacks: string[] | undefined) => void;
+}) {
+  const chain = row.fallbacks ?? [];
+  // Self is excluded because an account cannot rescue itself, and an id already
+  // in the chain because a repeat would just be skipped.
+  const eligible = rows.filter((r) => r.id !== row.id && !chain.includes(r.id));
+  const nameOf = (id: string) => rows.find((r) => r.id === id);
+  const set = (next: string[]) => onChange(next.length > 0 ? next : undefined);
+  const crossProvider = chain.some((id) => {
+    const target = nameOf(id);
+    return target && target.provider !== row.provider;
+  });
+
+  return (
+    <div className="mt-2 border-t border-line-soft pt-2">
+      <div className="flex items-center gap-1.5 text-2xs text-faint">
+        <ArrowDownRight className="size-3 shrink-0" />
+        <span>Falls back to</span>
+      </div>
+      {chain.length === 0 ? (
+        <p className="mt-1 text-2xs leading-snug text-faint">
+          Nothing — a usage limit on this account parks the chat until its window reopens.
+        </p>
+      ) : (
+        <div className="mt-1.5 space-y-1">
+          {chain.map((id, k) => {
+            const target = nameOf(id);
+            return (
+              <div key={id} className="flex items-center gap-2">
+                <span className="w-4 shrink-0 text-right text-2xs text-faint">{k + 1}.</span>
+                <Select<string>
+                  width={200}
+                  value={id}
+                  onChange={(next) => set(chain.map((c, j) => (j === k ? next : c)))}
+                  options={[...(target ? [target] : []), ...eligible].map((r) => ({
+                    value: r.id,
+                    label: `${accountLabel(r)} · ${providerFor(r.provider).shortLabel}`,
+                  }))}
+                />
+                {target && target.provider !== row.provider && (
+                  <span className="text-2xs text-warn">hands off context</span>
+                )}
+                <IconButton
+                  tip="Remove this fallback"
+                  onClick={() => set(chain.filter((_, j) => j !== k))}
+                >
+                  <X />
+                </IconButton>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {eligible.length > 0 && (
+        <Button
+          variant="ghost"
+          leftIcon={<Plus />}
+          className="mt-1"
+          onClick={() => set([...chain, eligible[0]!.id])}
+        >
+          {chain.length === 0 ? "Add fallback" : "Add another fallback"}
+        </Button>
+      )}
+      {crossProvider && (
+        <p className="mt-1 text-2xs leading-snug text-faint">
+          A fallback on another provider cannot carry the live session, so the chat continues from a
+          transcript handoff instead of its full context.
+        </p>
+      )}
+    </div>
   );
 }

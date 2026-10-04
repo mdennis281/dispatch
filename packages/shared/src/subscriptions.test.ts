@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   chatAccountOf,
   endpointOrigin,
+  fallbackChain,
   resolveSubscriptions,
   subscriptionFor,
   SubscriptionListSchema,
@@ -146,5 +147,99 @@ describe("SubscriptionListSchema", () => {
     const one = { id: "a", name: "A", provider: "claude" };
     expect(SubscriptionListSchema.safeParse([one, one]).success).toBe(false);
     expect(SubscriptionListSchema.safeParse([{ ...one, id: "Has Space" }]).success).toBe(false);
+  });
+});
+
+describe("fallbackChain", () => {
+  const two = {
+    subscriptions: [
+      { id: "claude1", name: "one", provider: "claude" as const, fallbacks: ["claude2"] },
+      { id: "claude2", name: "two", provider: "claude" as const, fallbacks: ["claude1"] },
+    ],
+  };
+
+  it("is empty for an account that names no fallback", () => {
+    expect(fallbackChain({ subscriptions: [{ id: "a", name: "a", provider: "claude" }] }, "a")).toEqual([]);
+    // And for an id that resolves to nothing at all.
+    expect(fallbackChain(two, "gone")).toEqual([]);
+    expect(fallbackChain(two, undefined)).toEqual([]);
+  });
+
+  it("returns the account's own list IN ORDER — the tiers", () => {
+    const chain = fallbackChain(
+      {
+        subscriptions: [
+          { id: "codex1", name: "codex", provider: "codex", fallbacks: ["claude2", "claude1"] },
+          { id: "claude1", name: "one", provider: "claude" },
+          { id: "claude2", name: "two", provider: "claude" },
+        ],
+      },
+      "codex1",
+    );
+    expect(chain.map((s) => s.id)).toEqual(["claude2", "claude1"]);
+  });
+
+  it("never offers the exhausted account back to itself — A↔B cannot loop", () => {
+    // This is the "vice versa" configuration, and the pair is the whole reason
+    // the start account is seeded as visited.
+    expect(fallbackChain(two, "claude1").map((s) => s.id)).toEqual(["claude2"]);
+    expect(fallbackChain(two, "claude2").map((s) => s.id)).toEqual(["claude1"]);
+  });
+
+  it("walks transitively, breadth-first, so direct tiers come first", () => {
+    const chain = fallbackChain(
+      {
+        subscriptions: [
+          { id: "codex1", name: "c", provider: "codex", fallbacks: ["claude1"] },
+          { id: "claude1", name: "one", provider: "claude", fallbacks: ["claude2"] },
+          { id: "claude2", name: "two", provider: "claude", fallbacks: ["claude3"] },
+          { id: "claude3", name: "three", provider: "claude" },
+        ],
+      },
+      "codex1",
+    );
+    expect(chain.map((s) => s.id)).toEqual(["claude1", "claude2", "claude3"]);
+  });
+
+  it("skips an entry naming an account that no longer exists", () => {
+    // Deleting an account must not break every chain that mentioned it.
+    const chain = fallbackChain(
+      {
+        subscriptions: [
+          { id: "claude1", name: "one", provider: "claude", fallbacks: ["deleted", "claude2"] },
+          { id: "claude2", name: "two", provider: "claude" },
+        ],
+      },
+      "claude1",
+    );
+    expect(chain.map((s) => s.id)).toEqual(["claude2"]);
+  });
+
+  it("can name an implicit account as a target", () => {
+    // Two stored Claude logins leave Codex implicit; it is still reachable.
+    const chain = fallbackChain(
+      {
+        subscriptions: [
+          { id: "claude1", name: "one", provider: "claude", fallbacks: ["codex"] },
+          { id: "claude2", name: "two", provider: "claude" },
+        ],
+      },
+      "claude1",
+    );
+    expect(chain.map((s) => [s.id, s.implicit])).toEqual([["codex", true]]);
+  });
+
+  it("accepts a fallbacks list through the stored-list schema", () => {
+    const parsed = SubscriptionListSchema.safeParse([
+      { id: "claude1", name: "one", provider: "claude", fallbacks: ["claude2"] },
+      { id: "claude2", name: "two", provider: "claude" },
+    ]);
+    expect(parsed.success).toBe(true);
+    // Ids only — a fallback is a reference, never an inline account.
+    expect(
+      SubscriptionListSchema.safeParse([
+        { id: "claude1", name: "one", provider: "claude", fallbacks: ["Not An Id"] },
+      ]).success,
+    ).toBe(false);
   });
 });

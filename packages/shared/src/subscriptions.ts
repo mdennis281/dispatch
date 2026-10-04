@@ -46,6 +46,18 @@ export const SubscriptionSchema = z.object({
    * their own Ollama config; normalising to an origin is the reader's job.
    */
   host: z.string().trim().min(1).max(200).optional(),
+  /**
+   * Accounts to move a chat onto when THIS one runs out of budget, in the order
+   * to try them. Empty or absent means a limit on this account does what it
+   * always did: park the chat until the window reopens.
+   *
+   * Ordered rather than a single id so a limit can be survived more than once —
+   * two accounts both exhausted still has a third and fourth to reach for. The
+   * entries may name another provider, which makes "Codex falls back to Claude"
+   * the same kind of edge as "Claude 1 falls back to Claude 2"; the cost differs
+   * (see {@link fallbackChain}), not the configuration.
+   */
+  fallbacks: z.array(SubscriptionIdSchema).max(8).optional(),
 });
 export type Subscription = z.infer<typeof SubscriptionSchema>;
 
@@ -163,6 +175,49 @@ export function findSubscription(
   id: string | null | undefined,
 ): ResolvedSubscription | undefined {
   return id ? resolveSubscriptions(settings).find((s) => s.id === id) : undefined;
+}
+
+/**
+ * The accounts to try, in order, when `fromId` runs out of budget.
+ *
+ * Breadth-first from the starting account, so everything IT names is tried
+ * before anything reached only through one of those — the per-account list is
+ * the tier order, and the transitive walk is what makes a two-account
+ * "A falls back to B, B falls back to A" pair also give a Codex chat pointed at
+ * A a second Claude account to reach for without naming it twice.
+ *
+ * `fromId` is seeded as visited, which is what stops the A↔B pair from
+ * offering the exhausted account back as its own fallback and looping. An entry
+ * naming a subscription that no longer exists is skipped rather than failing:
+ * deleting an account must not break every chain that mentioned it.
+ *
+ * Returns candidates only. Whether an account has budget, is logged in, or can
+ * carry the chat's session across is the server's to decide — this is purely
+ * what the configuration says.
+ */
+export function fallbackChain(
+  settings: SubscriptionSettings | null | undefined,
+  fromId: string | null | undefined,
+): ResolvedSubscription[] {
+  const all = resolveSubscriptions(settings);
+  const byId = new Map(all.map((s) => [s.id, s]));
+  const start = fromId ? byId.get(fromId) : undefined;
+  if (!start) return [];
+  const seen = new Set<string>([start.id]);
+  const out: ResolvedSubscription[] = [];
+  const queue: ResolvedSubscription[] = [start];
+  while (queue.length > 0) {
+    const at = queue.shift()!;
+    for (const id of at.fallbacks ?? []) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const next = byId.get(id);
+      if (!next) continue;
+      out.push(next);
+      queue.push(next);
+    }
+  }
+  return out;
 }
 
 /** A subscription plus what the server can tell about its directory. */

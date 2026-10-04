@@ -79,6 +79,7 @@ import { UsageRegistry, UsageService } from "./usage.js";
 import { chatSubscription } from "./subscriptions.js";
 import { ReleaseService } from "./release.js";
 import { ResumeScheduler } from "./resume-scheduler.js";
+import { FailoverService } from "./failover.js";
 import { RestartResumeService } from "./restart-resume.js";
 import { TrunkSyncService } from "./trunk-sync.js";
 import { PrReviewWatcher } from "./pr-review-watcher.js";
@@ -138,6 +139,7 @@ export interface ServiceOverrides {
   usage?: UsageService;
   release?: ReleaseService;
   resume?: ResumeScheduler;
+  failover?: FailoverService;
   restartResume?: RestartResumeService;
   fileIndex?: FileIndexService;
   metrics?: MetricsService;
@@ -216,6 +218,8 @@ export interface Services extends ServiceBase {
   release: ReleaseService;
   /** Schedules a chat to continue itself once a usage limit lifts. */
   resume: ResumeScheduler;
+  /** Account failover on a usage limit. See services/failover.ts. */
+  failover: FailoverService;
   /** Continues chats a deliberate restart (usually an update) cut short. */
   restartResume: RestartResumeService;
   /** Chat-to-chat messaging behind `chat_send`/`chat_ask`/`chat_reply`/`chat_state`. */
@@ -635,6 +639,19 @@ export function createServices(
   // and hooked back in below, since a limit is only visible on the broker's
   // errored turn-end. `send` goes through the same lazy session path the routes
   // use — by the time a limit lifts the subprocess is long gone.
+  // Falling back to another login when one runs out, which the scheduler
+  // prefers over waiting a window out. `switchTo` is the broker's own account
+  // move — the one the composer's account picker calls — so a failover and a
+  // hand switch cannot diverge in how they carry (or hand off) the session.
+  const failover =
+    overrides.failover ??
+    new FailoverService({
+      store,
+      bus,
+      harnesses,
+      accountUsage,
+      switchTo: (chatId, subscriptionId) => broker.setSubscription(chatId, subscriptionId),
+    });
   const resume =
     overrides.resume ??
     new ResumeScheduler({
@@ -644,9 +661,10 @@ export function createServices(
         await ensureSession(services, chatId);
         await broker.sendMessage(chatId, text, { parts });
       },
+      failover: (chatId, reason, resetsAt) => failover.onLimit(chatId, reason, resetsAt),
     });
-  broker.onTurnError = (chatId, reason) => {
-    void resume.onTurnError(chatId, reason).catch(() => {});
+  broker.onTurnError = (chatId, reason, hit) => {
+    void resume.onTurnError(chatId, reason, hit).catch(() => {});
   };
   // Auto-resume across a DELIBERATE restart — an update, `app:stop`, Settings →
   // Stop. Same lazy-session `send` as above for the same reason. `interrupt`
@@ -1148,6 +1166,7 @@ export function createServices(
     accountUsage,
     release,
     resume,
+    failover,
     chatMessenger,
     chatCompletionNotices,
     fileIndex,
