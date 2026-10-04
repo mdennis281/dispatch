@@ -60,6 +60,18 @@ describe("swipeMove — back", () => {
     expect(swipeMove(at({ view: "home", pane: "run" }), "back")).toBeNull();
   });
 
+  it("leaves the New Project form the way its own Back button does", () => {
+    // `leftOpen` is deliberately still true here: "Add project" is reached FROM
+    // the picker and doesn't dismiss it (Sidebar's `onAddProject`), so on this
+    // full-bleed screen the flag describes a drawer `App` has unmounted. Reading
+    // it before the view sent a back swipe to `goHome`, which unmounts the form
+    // — and the form's name/path/workflow live in local state only.
+    expect(swipeMove(at({ view: "new-project", leftOpen: true }), "back")).toBe(
+      "leave-new-project",
+    );
+    expect(swipeMove(at({ view: "new-project" }), "back")).toBe("leave-new-project");
+  });
+
   it("stands down above sm, where none of these surfaces are off-canvas", () => {
     expect(swipeMove(at({ mode: "md" }), "back")).toBeNull();
     expect(swipeMove(at({ mode: "lg" }), "back")).toBeNull();
@@ -79,6 +91,12 @@ describe("swipeMove — forward", () => {
   it("refuses to navigate out from under the More sheet", () => {
     expect(swipeMove(at({ moreOpen: true, view: "home" }), "forward")).toBeNull();
   });
+
+  it("does nothing on the New Project form, stale picker flag and all", () => {
+    // Otherwise this would "close" a picker that isn't on screen — a gesture
+    // with no visible effect that leaves the list shut for when you come back.
+    expect(swipeMove(at({ view: "new-project", leftOpen: true }), "forward")).toBeNull();
+  });
 });
 
 describe("runSwipe", () => {
@@ -92,6 +110,15 @@ describe("runSwipe", () => {
     expect(useLayout.getState().leftOpen).toBe(true);
     runSwipe("close-picker");
     expect(useLayout.getState().leftOpen).toBe(false);
+  });
+
+  it("returns the New Project form to the chat surface, picker flag untouched", () => {
+    useView.setState({ view: "new-project" });
+    useLayout.setState({ leftOpen: true });
+    runSwipe("leave-new-project");
+    expect(useView.getState().view).toBe("chat");
+    // Left as it was, so the form reached from the picker lands back on it.
+    expect(useLayout.getState().leftOpen).toBe(true);
   });
 
   it("closes the More sheet and a pane", () => {

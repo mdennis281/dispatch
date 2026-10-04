@@ -19,12 +19,14 @@
  */
 import { goHome, leaveHome } from "../../stores/navigation.js";
 import { useLayout } from "../../stores/layout.js";
+import { useView } from "../../stores/view.js";
 import type { SwipeDir } from "../../lib/edgeSwipe.js";
 import type { NavPlace } from "./navState.js";
 
 /** What a committed swipe does. One move per swipe — never two surfaces at once. */
 export type SwipeMove =
   | "close-more"
+  | "leave-new-project"
   | "close-pane"
   | "open-picker"
   | "close-picker"
@@ -64,8 +66,18 @@ export function swipeMove(place: NavPlace, dir: SwipeDir): SwipeMove | null {
 
   if (dir === "back") {
     if (moreOpen) return "close-more";
-    if (leftOpen) return "go-home";
+    // BOTH full-bleed views are resolved before `leftOpen` is consulted, and
+    // that order is the fix for a real sequence rather than tidiness: tapping
+    // "Add project" in the picker sets the view and does NOT dismiss the drawer
+    // (`Sidebar`'s `onAddProject`, unlike the Memory/Files buttons under it), so
+    // on the New Project form `leftOpen` is still true while `App` has unmounted
+    // the drawer it describes. Reading it there sent a back swipe to `goHome`,
+    // which unmounts the form — and the form holds the name, path and workflow
+    // in local state, so a gesture that means "back one step" everywhere else
+    // silently threw the whole thing away.
+    if (view === "new-project") return "leave-new-project";
     if (view === "home") return null;
+    if (leftOpen) return "go-home";
     if (pane !== "chat") return "close-pane";
     return "open-picker";
   }
@@ -73,6 +85,10 @@ export function swipeMove(place: NavPlace, dir: SwipeDir): SwipeMove | null {
   // The More sheet is modal chrome: forward out of it would leave it stranded
   // over a surface it was opened from somewhere else entirely. Back closes it.
   if (moreOpen) return null;
+  // The form is not a rung on the stack — there is nothing to re-enter it FROM,
+  // and the same stale `leftOpen` would otherwise make a forward swipe quietly
+  // close a picker that is not on screen.
+  if (view === "new-project") return null;
   if (view === "home") return "leave-home";
   if (leftOpen) return "close-picker";
   return null;
@@ -92,6 +108,14 @@ export function runSwipe(move: SwipeMove): void {
   switch (move) {
     case "close-more":
       layout.setMoreOpen(false);
+      return;
+    case "leave-new-project":
+      // Exactly what the form's OWN Back button does (`NewProjectView` falls
+      // back to `setView("chat")`), and deliberately not `goHome`: a swipe that
+      // disagreed with the visible control beside it is worse than no swipe.
+      // `leftOpen` is left alone — when the form was reached from the picker it
+      // is still set, so this lands back on the list it was opened from.
+      useView.getState().setView("chat");
       return;
     case "close-pane":
       layout.setPane("chat");
