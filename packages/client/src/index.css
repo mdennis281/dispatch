@@ -393,6 +393,23 @@
      * the document — which is how a swipe inside the transcript ended up moving
      * the shell (and the bottom nav with it) rather than doing nothing. */
     overscroll-behavior: contain;
+    /* Vertical panes are vertical. The same CSS rule the `.cm-scroll-x` comment
+     * below spells out runs in this direction too: `overflow-y: auto` next to an
+     * unset `overflow-x` forces BOTH axes to `auto`, so every pane wearing this
+     * class is a sideways scroll container nobody asked for. One row wide enough
+     * to not fit — a markdown table, a long fenced command — and the whole
+     * reading column pans left/right under a touch drag, carrying the messages
+     * out from under the reader while the chrome around them stays put.
+     *
+     * `clip` rather than `hidden` so a pane that scrolls on NEITHER axis stays
+     * out of the scroll-container business entirely. Where the pane does scroll
+     * vertically — the transcript, every tray — CSS Overflow 3 resolves this to
+     * `hidden`, which is the same thing for a finger: nothing to drag.
+     *
+     * Anything that genuinely scrolls sideways says so with an explicit
+     * `overflow-x` utility, which wins from Tailwind's later `utilities` layer —
+     * see `.cm-scroll-x`, which every such element already pairs with one. */
+    overflow-x: clip;
   }
 
   /*
@@ -415,6 +432,10 @@
    */
   .cm-scroll-x {
     overscroll-behavior-y: auto;
+    /* Takes the axis back from the `overflow-x: clip` above, so this class is
+     * self-sufficient rather than relying on the element also carrying an
+     * `overflow-x-auto` utility. */
+    overflow-x: auto;
   }
 
   .cm-scroll::-webkit-scrollbar {
