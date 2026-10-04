@@ -197,6 +197,13 @@ export function Drawer({
         ref={panelRef}
         role={modal ? "dialog" : "group"}
         aria-modal={modal || undefined}
+        // A drawer is shell CHROME, not somebody else's screen. The edge-swipe
+        // gesture refuses to start inside any `aria-modal` subtree — the code
+        // viewer, the annotator, the file picker all own the window while they
+        // are up — and every drawer in the app is a surface that same gesture
+        // navigates BETWEEN (chat → picker → home), so each one opts back in.
+        // See `startsInHorizontalScroller` in lib/useEdgeSwipe.
+        data-swipe-nav=""
         aria-label={label}
         tabIndex={-1}
         style={{ zIndex: LAYER.drawer }}
