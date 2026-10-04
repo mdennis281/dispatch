@@ -216,12 +216,19 @@ export class FailoverService {
 
 /**
  * When the account becomes usable again: the LATEST reopening among the windows
- * that are actually full. The latest rather than the soonest because an account
- * whose weekly budget is gone is not usable when its 5-hour window rolls over.
+ * that are out. The latest rather than the soonest because an account whose
+ * weekly budget is gone is not usable when its 5-hour window rolls over.
+ *
+ * `reached` widens that to EVERY window, because the runtime's own verdict is
+ * independent of the percentages — Codex sets it from a spend cap or a rate
+ * limit type, which can fire at 60% used. Reading only the full windows there
+ * found nothing and fell back to the one-hour guess, so a spend-capped account
+ * got a fresh forced usage read every hour for as long as the cap held, instead
+ * of waiting for the real reset already sitting in the snapshot.
  */
 export function nextReset(usage: AccountUsage): number | undefined {
   const times = usageWindowsOf(usage.snapshot).flatMap((w) =>
-    w.percent >= 100 && typeof w.resetsAt === "number" ? [w.resetsAt] : [],
+    (usage.reached || w.percent >= 100) && typeof w.resetsAt === "number" ? [w.resetsAt] : [],
   );
   return times.length > 0 ? Math.max(...times) : undefined;
 }

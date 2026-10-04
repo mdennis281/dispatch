@@ -97,7 +97,7 @@ export function AccountsSection() {
   const submit = async () => {
     // A blank dir or host means "the provider's default", which the schema
     // spells as absent.
-    const live = new Set(rows.map((r) => r.id));
+    const live = liveAccountIds(rows, statuses);
     const list = rows.map((r) => {
       // A fallback naming a row deleted in this same edit is dropped here
       // rather than saved and skipped at runtime — the pane should not persist
@@ -327,6 +327,26 @@ function LoginBadge({ status }: { status: SubscriptionStatus | undefined }) {
       <CircleDashed /> not logged in
     </span>
   );
+}
+
+/**
+ * Every account id a fallback may legally point at after this save.
+ *
+ * The IMPLICIT ones count. `rows` holds only the stored list, but a provider
+ * nobody listed still has a real account at its default directory, and both
+ * `fallbackChain` and the schema accept one as a target. Pruning against the
+ * stored rows alone silently deleted such an edge the next time anything else
+ * on this pane was saved — the list PUT is a full replace, so an edge the user
+ * never touched went with it.
+ */
+export function liveAccountIds(
+  rows: readonly Subscription[],
+  statuses: readonly SubscriptionStatus[],
+): Set<string> {
+  return new Set([
+    ...rows.map((r) => r.id),
+    ...statuses.filter((s) => s.implicit).map((s) => s.id),
+  ]);
 }
 
 /**

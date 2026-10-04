@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { Chat, UsageSnapshot } from "@dispatch/shared";
 import { Store } from "../store/index.js";
 import { EventBus } from "../bus.js";
-import { FailoverService } from "./failover.js";
+import { FailoverService, nextReset } from "./failover.js";
 import { usageExhausted, type AccountUsage } from "./usage-read.js";
 
 /**
@@ -33,6 +33,48 @@ describe("usageExhausted", () => {
     // condemn an account that is perfectly usable.
     expect(usageExhausted({ snapshot: { ...FULL, stale: true } })).toBe(false);
     expect(usageExhausted({ snapshot: { ...FULL, error: "429" } })).toBe(false);
+  });
+});
+
+describe("nextReset", () => {
+  const at = (ms: number) => ({ percent: 100, resetsAt: ms });
+
+  it("takes the LATEST full window — a weekly cap outlives a 5-hour rollover", () => {
+    expect(
+      nextReset({ snapshot: { fiveHour: at(1_000), sevenDay: at(9_000), fetchedAt: 0 } }),
+    ).toBe(9_000);
+  });
+
+  it("ignores a window that still has room", () => {
+    expect(
+      nextReset({
+        snapshot: { fiveHour: at(9_000), sevenDay: { percent: 10, resetsAt: 50_000 }, fetchedAt: 0 },
+      }),
+    ).toBe(9_000);
+  });
+
+  it("uses every window's reset when the runtime says `reached`", () => {
+    // Codex sets `reached` from a spend cap, independent of the percentages — a
+    // window can read 60% and still be out. Reading only the full ones found
+    // nothing here and fell back to the one-hour guess, re-reading usage every
+    // hour for as long as the cap held.
+    expect(
+      nextReset({
+        reached: true,
+        snapshot: {
+          fiveHour: { percent: 60, resetsAt: 4_000 },
+          sevenDay: { percent: 12, resetsAt: 80_000 },
+          fetchedAt: 0,
+        },
+      }),
+    ).toBe(80_000);
+  });
+
+  it("is undefined when nothing is out, or when no window named a time", () => {
+    expect(nextReset({ snapshot: FREE })).toBeUndefined();
+    expect(
+      nextReset({ reached: true, snapshot: { fiveHour: { percent: 100, resetsAt: null }, sevenDay: null, fetchedAt: 0 } }),
+    ).toBeUndefined();
   });
 });
 
