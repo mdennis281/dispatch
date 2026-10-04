@@ -6,7 +6,7 @@
  * The config, Store, and EventBus are decorated onto the instance as `app.cm`
  * so downstream route/service registrars share one wired context.
  */
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyServerOptions } from "fastify";
 import fastifyWebsocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import { fileURLToPath } from "node:url";
@@ -26,6 +26,7 @@ import { isManagerBridgePath } from "./services/mcp/manager-http.js";
 import { healthReport } from "./health.js";
 import { startPerfMonitor } from "./perf.js";
 import { registerRequestLog } from "./request-log.js";
+import { parseTrustProxy, trustProxyError } from "./trust-proxy.js";
 import { AuthService, type RequestIdentity } from "./services/auth.js";
 import { realProjects } from "@dispatch/shared";
 
@@ -86,13 +87,41 @@ export async function buildApp(
 
   const services =
     opts.services ?? createServices({ config, store, bus }, opts.serviceOverrides);
-  const auth = new AuthService(store);
+  // Before Fastify, because `trustProxy` is a constructor option: changing the
+  // setting therefore needs a restart, and the session panel says so.
+  const settings = await store.getSettings();
+  const envTrustProxy = config.trustProxy ?? "";
+  // `||`, not `??` — a setting cleared to empty defers to the environment.
+  const wantTrustProxy = settings.auth?.trustedProxies?.trim() || envTrustProxy;
+  const badTrustProxy = trustProxyError(wantTrustProxy);
+  if (badTrustProxy) {
+    // Warn and carry on rather than throw: handing a typo to proxy-addr fails
+    // inside the Fastify constructor, and a server that won't boot is a much
+    // worse answer to a mistyped subnet than one that doesn't trust it.
+    // eslint-disable-next-line no-console
+    console.warn(`[dispatch] ignoring trusted proxies "${wantTrustProxy}" — ${badTrustProxy}`);
+  }
+  const trustProxy = badTrustProxy ? undefined : parseTrustProxy(wantTrustProxy);
+  const auth = new AuthService(store, undefined, {
+    fromEnv: envTrustProxy,
+    active: badTrustProxy ? "" : wantTrustProxy,
+  });
 
   // Base64/data-URL image uploads (POST /api/chats/:id/assets) ride the JSON body,
   // so the body cap must clear the route's MAX_UPLOAD_BYTES (12 MiB) with headroom
   // for base64 (~+34%) + JSON wrapping. Fastify's 1 MiB default would 413 any
   // real screenshot/photo before the handler's own size check ever ran.
-  const app = Fastify({ logger: false, bodyLimit: 16 * 1024 * 1024 });
+  // Annotated rather than inlined: spreading a conditional into the call makes
+  // TypeScript pick the HTTP/2 overload, and every later `app` use stops
+  // type-checking against the plain-HTTP instance the rest of the file expects.
+  const options: FastifyServerOptions = {
+    logger: false,
+    bodyLimit: 16 * 1024 * 1024,
+    // Omitted entirely when unset, so Fastify keeps its own default of `false`
+    // and `req.ip` stays the socket peer. See trust-proxy.ts.
+    ...(trustProxy === undefined ? {} : { trustProxy }),
+  };
+  const app = Fastify(options);
   // Fastify's stock JSON parser answers a bodyless POST that still carries
   // `content-type: application/json` with FST_ERR_CTP_EMPTY_JSON_BODY (400)
   // before any handler runs. Browsers and fetch wrappers send exactly that, and

@@ -425,6 +425,16 @@ export const AppSettingsSchema = z.object({
        * Private and loopback addresses are never looked up whatever this says.
        */
       ipLookup: z.boolean().optional(),
+      /**
+       * Which upstreams may set `X-Forwarded-For`, overriding
+       * `DISPATCH_TRUST_PROXY`. Empty/unset falls back to that variable; `off`
+       * is how you countermand it from here. See `trust-proxy.ts`.
+       *
+       * A plain string rather than an array because that is the shape Fastify,
+       * the environment variable and the text box all already speak — parsing
+       * it in one place keeps the three from disagreeing.
+       */
+      trustedProxies: z.string().optional(),
     })
     .optional(),
 });

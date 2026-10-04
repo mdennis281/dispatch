@@ -40,6 +40,18 @@ export interface ServerConfig {
    * only, same chain as `maxActiveSessions`. `0` switches the sweep off.
    */
   idleSessionMinutes: number;
+  /**
+   * Which upstreams may set `X-Forwarded-For` — the raw, unparsed setting (see
+   * `trust-proxy.ts` for the grammar and for why this is off by default).
+   *
+   * The DEFAULT only: `AppSettings.auth.trustedProxies` overrides it, same chain
+   * as `maxActiveSessions`. Unlike that one it still needs a restart either way,
+   * because Fastify reads `trustProxy` in its constructor.
+   *
+   * Undefined when unset, not `""`: the setting falls back to this, and the two
+   * spellings of empty have to stay distinguishable from "explicitly off".
+   */
+  trustProxy?: string;
 }
 
 const DEFAULT_PORT = 4319;
@@ -125,11 +137,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   // pre-split behaviour. Only the desktop/stable deployment sets it.
   const rawConfigDir = envVar(env, "CONFIG_DIR");
   const configDir = rawConfigDir ? resolve(rawConfigDir) : undefined;
+  const trustProxy = envVar(env, "TRUST_PROXY")?.trim();
   return {
     port: intFromEnv(env, "PORT", DEFAULT_PORT),
     host: envVar(env, "HOST")?.trim() || DEFAULT_HOST,
     dataDir,
     ...(configDir ? { configDir } : {}),
+    ...(trustProxy ? { trustProxy } : {}),
     // Clamped here, not just in the broker: `intFromEnv` accepts any parseable
     // integer, so `DISPATCH_MAX_ACTIVE_SESSIONS=0` — the obvious typo for someone
     // reaching for "unlimited" — used to put a cap in `ServerConfig` that the

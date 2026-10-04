@@ -109,6 +109,14 @@ export async function start({ dev = false }: { dev?: boolean } = {}): Promise<vo
         : `[dispatch] host mode — bound to every interface, but this box has no non-loopback IPv4 address`,
     );
   }
+  // Only when it is on. Worth a line because it decides whether the addresses in
+  // the session list are the client's or the proxy's, and because trusting the
+  // wrong upstream is the kind of thing you want to see printed at boot.
+  const trustProxy = await app.auth.trustProxy();
+  if (trustProxy.active) {
+    // eslint-disable-next-line no-console
+    console.log(`[dispatch] trusting X-Forwarded-For from ${trustProxy.active}`);
+  }
   // Which binary each provider's sessions run on. Worth a line: it decides which
   // models the picker can offer, so "why is Opus 5 missing" is answered here.
   // Every registered provider, the default included — Claude used to be logged

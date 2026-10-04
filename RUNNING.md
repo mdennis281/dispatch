@@ -672,6 +672,7 @@ and is never deleted — it's the only copy of the thing that broke.
 | `DISPATCH_DATA_DIR` | `./.data` | state dir — chats, checkpoints, runners |
 | `DISPATCH_CONFIG_DIR` | = `DISPATCH_DATA_DIR` | config dir — settings, projects, agents, modes |
 | `DISPATCH_MAX_ACTIVE_SESSIONS` | `6` | max concurrently-active chats — the DEFAULT only; **Settings → Context → Max active chats** overrides it and applies without a restart |
+| `DISPATCH_TRUST_PROXY` | unset | upstreams allowed to set `X-Forwarded-For` — see [Behind a reverse proxy](#behind-a-reverse-proxy) |
 | `DISPATCH_IPC` | unset | `1` makes the server accept `shutdown` on stdin (the launcher sets it) |
 | `DISPATCH_HOME` | `%LOCALAPPDATA%\claude-manager` | root for the whole installed layout |
 
@@ -702,6 +703,70 @@ Two things to know:
   service worker, no install prompt and no notifications — the API is withheld entirely.
   The app says so rather than showing dead buttons (Settings → Notifications). If you want
   those on another device, put the LAN origin behind HTTPS.
+
+## Behind a reverse proxy
+
+Putting Dispatch behind HAProxy, nginx, Caddy or a tunnel is the usual answer to the
+second bullet above — it's how the LAN origin gets HTTPS, and with it the service worker,
+the install prompt and notifications.
+
+The cost is that every request now arrives from the proxy. Dispatch reads the peer address
+for two things, and both go wrong quietly:
+
+- **Active sessions** (Settings → Authentication) lists one row per device with where it
+  is on the network. Behind a proxy every row shows the proxy's own address — eight
+  sessions, all claiming `10.0.0.1`, "Local network". They look like perfectly ordinary
+  LAN addresses, which is what makes this worth saying out loud: the panel whose job is to
+  show you an unfamiliar device is the panel that stops being able to.
+- **The refresh cookie's `Secure` attribute** is set when the request was HTTPS. Terminate
+  TLS at the proxy and Dispatch sees plain HTTP on the back end, so it omits `Secure` on a
+  cookie that does travel over TLS.
+
+Both are fixed by the same two settings, one on each side.
+
+**1. Make the proxy send the headers.** On pfSense's HAProxy package, that's the backend's
+**Use "forwardfor" option** checkbox (`option forwardfor` in a hand-written config). For
+HTTPS termination also send the scheme:
+
+```haproxy
+backend dispatch
+    option forwardfor
+    http-request set-header X-Forwarded-Proto https if { ssl_fc }
+    server dispatch 10.0.0.50:4318
+```
+
+nginx: `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;` and
+`proxy_set_header X-Forwarded-Proto $scheme;`. Caddy's `reverse_proxy` sends both already.
+
+**2. Tell Dispatch which upstream to believe.** Either **Settings → Authentication →
+Active sessions → Trusted proxies**, or `DISPATCH_TRUST_PROXY`. The setting wins; leaving
+it empty defers to the variable, and `off` countermands one.
+
+```
+DISPATCH_TRUST_PROXY=10.0.0.1              # the proxy
+DISPATCH_TRUST_PROXY=10.0.0.0/24,loopback  # a range, a list, proxy-addr keywords
+DISPATCH_TRUST_PROXY=true                  # trust whatever connects (see below)
+```
+
+**It is off by default, and naming an address is the form to use.** `X-Forwarded-For` is
+just a header the client sends. With `true`, anyone who can reach the port *directly* —
+which in host mode is the whole LAN — can write their own address into your session list
+and assert `X-Forwarded-Proto: https`, putting `Secure` on a cookie that then vanishes on
+the next plaintext request. Naming the proxy means only the proxy is believed. `true` is
+reasonable only where nothing but the proxy can route to the port at all (a container with
+no published port, a loopback bind).
+
+Fastify reads this at startup, so **a change needs a restart**; the settings panel says so
+rather than pretending otherwise. Existing session rows keep the old address until each
+one next refreshes — sign out and back in on a device to see it immediately. A value that
+isn't an address is rejected by the panel, and ignored with a warning at boot rather than
+crashing the server, so a typo can't leave you with an install that won't start.
+
+When it is on, boot says so:
+
+```
+[dispatch] trusting X-Forwarded-For from 10.0.0.1
+```
 
 ## Notifications
 
