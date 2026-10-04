@@ -31,6 +31,8 @@ import { useProjects, useActiveProject } from "./stores/projects.js";
 import { visibleChat } from "./stores/navigation.js";
 import { useView } from "./stores/view.js";
 import { useLayout } from "./stores/layout.js";
+import { useEdgeSwipe } from "./lib/useEdgeSwipe.js";
+import { swipeMove, runSwipe } from "./components/layout/swipeNav.js";
 import { AuthGate } from "./components/auth/AuthGate.js";
 import { useAuth } from "./stores/auth.js";
 import { SetupWizard } from "./components/setup/SetupWizard.js";
@@ -82,9 +84,30 @@ export default function App() {
   // no transform, the columns hand themselves straight back to the flex row.
   const mode = useLayout((s) => s.mode);
   const leftOpen = useLayout((s) => s.leftOpen);
+  const moreOpen = useLayout((s) => s.moreOpen);
   const pane = useLayout((s) => s.pane);
   const setLeftOpen = useLayout((s) => s.setLeftOpen);
   const setPane = useLayout((s) => s.setPane);
+
+  /**
+   * The phone's back/forward gesture: a swipe from the left edge unwinds the
+   * stack (chat → chat picker → homepage), one from the right edge re-enters it.
+   * See `swipeMove` for the stack itself and `lib/edgeSwipe` for what counts as
+   * a swipe.
+   *
+   * Installed only at `sm` — above it every surface in that stack is inline or
+   * absent — and only while no OVERLAY is up. An overlay (Workspace, MCP tools,
+   * the agent inspector) renders at the dialog layer above the nav, so moving
+   * the shell underneath one would strand it over a screen it has nothing to do
+   * with. Modals that aren't in this store are refused by the gesture itself,
+   * which won't start inside an `aria-modal` subtree.
+   */
+  const overlay = useView((s) => s.overlay);
+  const swipeEnabled = mode === "sm" && overlay === null;
+  useEdgeSwipe(swipeEnabled, (dir) => {
+    const move = swipeMove({ mode, view, pane, leftOpen, moreOpen }, dir);
+    if (move) runSwipe(move);
+  });
 
   // Publishes `--cm-kb` (see below) and the raw readings behind `ViewportDebug`.
   useEffect(startViewportTracking, []);
@@ -258,7 +281,16 @@ export default function App() {
             side="left"
             position="absolute"
             label="Chats and projects"
-            className="w-[86vw] max-w-[320px] cm-safe-x"
+            // FULL WIDTH at `sm`, where this is the only mode it renders in at
+            // all. It used to be an 86vw sheet with a sliver of transcript and
+            // scrim showing down its right-hand side, which cost the list ~54px
+            // of the narrowest screen in the app for a peek at a surface you
+            // left — and chat titles are the one thing in this rail that is
+            // always too long. It is still a row INSIDE the shell, not over it:
+            // the top bar is above and the bottom nav below, so the Chats slot
+            // (now "close-picker") stays on screen as the way out, which matters
+            // more now that the scrim behind it is unreachable.
+            className="w-full cm-safe-x"
           >
             {/* Region-scoped so a sidebar that throws costs you the sidebar,
                 not the window. Keyed on the project: switching project is the

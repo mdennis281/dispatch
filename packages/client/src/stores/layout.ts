@@ -7,6 +7,13 @@
  *                user-set: a "force desktop layout" toggle is a promise the
  *                620px of fixed chrome can't keep on a 390px screen.
  *   `leftOpen` — the off-canvas sidebar, sm only.
+ *   `moreOpen` — the bottom nav's More sheet, sm/md only. Lifted out of
+ *                `BottomNav`'s `useState` when the edge-swipe gesture arrived:
+ *                "back" has to unwind whatever is actually in front of you, and
+ *                the sheet is the topmost thing it can be. `navState` already
+ *                modelled it as shell state (`NavPlace.moreOpen`) while the only
+ *                copy of it lived inside one component — so the nav strip could
+ *                see it and nothing else could.
  *   `pane`     — which surface fills the main area below `lg`. On sm the Ship/Run
  *                panes REPLACE the transcript; on md they open the right panel as
  *                a drawer over it.
@@ -14,9 +21,9 @@
  *                `useState` because the bottom nav lives in `App.tsx`, outside the
  *                `<aside>`, and cannot reach a component's local state.
  *
- * Only `panelTab` persists. `leftOpen` and `pane` deliberately do not: a
- * persisted drawer flag is how an app comes back from a reload with a sheet
- * already open over content the user never asked to leave.
+ * Only `panelTab` persists. `leftOpen`, `moreOpen` and `pane` deliberately do
+ * not: a persisted drawer flag is how an app comes back from a reload with a
+ * sheet already open over content the user never asked to leave.
  *
  * Persistence is the house pattern (`lib/taskPrefs.ts`, `lib/composerPrefs.ts`):
  * a guarded localStorage read/write, no zustand `persist` middleware — that
@@ -89,10 +96,12 @@ function persistTab(tab: FocusPanelTab): void {
 interface LayoutStore {
   mode: LayoutMode;
   leftOpen: boolean;
+  moreOpen: boolean;
   pane: Pane;
   panelTab: FocusPanelTab;
   setMode: (mode: LayoutMode) => void;
   setLeftOpen: (open: boolean) => void;
+  setMoreOpen: (open: boolean) => void;
   setPane: (pane: Pane) => void;
   setPanelTab: (tab: FocusPanelTab) => void;
 }
@@ -100,6 +109,7 @@ interface LayoutStore {
 export const useLayout = create<LayoutStore>((set) => ({
   mode: currentMode(),
   leftOpen: false,
+  moreOpen: false,
   pane: "chat",
   panelTab: loadTab(),
 
@@ -119,6 +129,10 @@ export const useLayout = create<LayoutStore>((set) => ({
         // an earlier visit — and an inline sidebar that becomes a drawer must not
         // appear already-open.
         leftOpen: false,
+        // Same argument, and one more: the sheet is `BottomNav`'s, and that
+        // component returns null at `lg` — a sheet left open there would be a
+        // dialog with no control that can close it.
+        moreOpen: false,
         // Entering lg strands any Ship/Run pane: the right panel is inline there,
         // so a leftover "run" would hide the transcript behind a panel that is
         // already visible beside it.
@@ -127,6 +141,8 @@ export const useLayout = create<LayoutStore>((set) => ({
     }),
 
   setLeftOpen: (leftOpen) => set({ leftOpen }),
+
+  setMoreOpen: (moreOpen) => set({ moreOpen }),
 
   setPane: (pane) =>
     set((s) => {

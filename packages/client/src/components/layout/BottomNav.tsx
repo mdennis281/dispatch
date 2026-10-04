@@ -222,7 +222,11 @@ export function BottomNav({ chat }: { chat: Chat | null }) {
   const typing = focused || kb > 0;
   const debug = useViewport((s) => s.debug);
   const toggleDebug = useViewport((s) => s.toggleDebug);
-  const [moreOpen, setMoreOpen] = useState(false);
+  // In the layout store rather than in a `useState` here, because the edge-swipe
+  // gesture has to know whether this sheet is the thing in front of you before
+  // it can decide what "back" means. See `swipeMove`.
+  const moreOpen = useLayout((s) => s.moreOpen);
+  const setMoreOpen = useLayout((s) => s.setMoreOpen);
 
   const project = useProjects((s) => s.activeProjectId);
   const memCount = useProjectMemories(project).length;
@@ -413,7 +417,7 @@ export function BottomNav({ chat }: { chat: Chat | null }) {
             label="More"
             current={slot === "more"}
             expanded={moreOpen}
-            onClick={() => setMoreOpen((open) => !open)}
+            onClick={() => setMoreOpen(!moreOpen)}
           />
         </div>
       </nav>
