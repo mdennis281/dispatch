@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { startSystemPolling } from "./stores/resources.js";
 import { MessageSquareDashed } from "lucide-react";
 import { TopBar } from "./components/layout/TopBar.js";
@@ -32,6 +32,7 @@ import { visibleChat } from "./stores/navigation.js";
 import { useView } from "./stores/view.js";
 import { useLayout } from "./stores/layout.js";
 import { useEdgeSwipe } from "./lib/useEdgeSwipe.js";
+import { useSurfaceSwap } from "./lib/useSurfaceSwap.js";
 import { swipeMove, runSwipe } from "./components/layout/swipeNav.js";
 import { AuthGate } from "./components/auth/AuthGate.js";
 import { useAuth } from "./stores/auth.js";
@@ -77,6 +78,20 @@ export default function App() {
   // sidebar whose top control is a second project picker beside it would have
   // two controls on one screen disagreeing about which project is active.
   const fullBleed = view === "new-project" || view === "home";
+
+  // Crossing that boundary is the one navigation that replaces EVERY pixel
+  // under the top bar at once, so it gets a 180ms arrival rather than a cut.
+  // Only the crossing: view changes within the shell (git → files) swap one
+  // column, which never read as a glitch and don't need covering.
+  //
+  // The box, not its contents. The chat list on home can run to hundreds of
+  // rows, and a staggered row entrance would both look cheap and animate
+  // hundreds of elements to say one thing.
+  const contentRef = useRef<HTMLDivElement>(null);
+  // Arriving full-bleed comes FORWARD (0.99 → 1); going back to the chat
+  // shell settles BACK (1.01 → 1). Same gesture, opposite depth, so the two
+  // directions don't feel like the same screen flashing twice.
+  useSurfaceSwap(contentRef, fullBleed, fullBleed ? 0.99 : 1.01);
 
   // Breakpoint (see lib/useBreakpoint + stores/layout). `lg` is the layout this
   // app has always had and must stay pixel-identical: both `Drawer`s are
@@ -272,7 +287,7 @@ export default function App() {
           guesses at the same edge — and they disagreed by whatever the layout
           viewport and the dynamic viewport differed by, which is the dead band
           that used to show up between the composer and the bar. */}
-      <div className="relative flex min-h-0 flex-1">
+      <div ref={contentRef} className="relative flex min-h-0 flex-1">
         {!fullBleed && (
           <Drawer
             open={leftOpen}
