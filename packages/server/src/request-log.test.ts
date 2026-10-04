@@ -42,6 +42,15 @@ beforeEach(async () => {
     throw Object.assign(new Error("messages.jsonl is held open"), { code: "EBUSY" });
   });
   app.get("/api/replied", async (_req, reply) => reply.code(503).send({ error: "nope" }));
+  // A THROWN error that resolves to a 4xx via `err.statusCode` — the shape
+  // `InvalidEntityIdError` (400) and the JSON body parser's "Invalid JSON body."
+  // (400) both take through this hook pair.
+  app.get("/api/bad-id/:id", async () => {
+    throw Object.assign(new Error("Invalid entity id"), {
+      statusCode: 400,
+      name: "InvalidEntityIdError",
+    });
+  });
   app.get("/api/slow", async () => {
     await new Promise((r) => setTimeout(r, SLOW_REQUEST_MS + 50));
     return { ok: true };
@@ -107,6 +116,20 @@ describe("requests.log", () => {
     // Also exactly one line, and no stack: nothing was thrown, so there is no
     // call path to report and the line stays a single row.
     expect(text.trimEnd().split("\n")).toHaveLength(1);
+  });
+
+  it("stays quiet about a THROWN error that resolves to a 4xx", async () => {
+    // A malformed chat id is a client mistake, not a server fault, and it
+    // arrives by `throw` exactly like the EBUSY case does. Logging it would put
+    // a stack trace in the file for routine traffic — the same "trains the
+    // reader to skim past the lines that matter" failure the growth-stream
+    // exemption exists to avoid. The gate is on the RESOLVED status, which is
+    // only knowable in `onResponse`; this is a second reason the write lives
+    // there rather than in `onError`.
+    const res = await app.inject({ method: "GET", url: "/api/bad-id/..%2f..%2fevil" });
+    expect(res.statusCode).toBe(400);
+    await app.close();
+    expect(await logText()).toBe("");
   });
 
   it("records a slow SUCCESS — a 200 that never came back in time looks the same from the app", async () => {

@@ -48,6 +48,7 @@ import {
 } from "../../lib/shellFilter.js";
 import { TranscriptSearch } from "./TranscriptSearch.js";
 import { useChatRename } from "./useChatRename.js";
+import { transcriptView } from "./transcriptView.js";
 import { useChatMessages, useChatPage, useMessages } from "../../stores/messages.js";
 import { loadExemptions, loadOlderMessages, reloadChatMessages } from "../../stores/index.js";
 import { useChats } from "../../stores/chats.js";
@@ -169,6 +170,44 @@ function FailedTranscript({ onRetry }: { onRetry: () => void }) {
         Retry
       </Button>
     </TranscriptPlaceholder>
+  );
+}
+
+/**
+ * The same failure, as a strip above the rows — for when the full-height
+ * placeholder would hide something the reader needs.
+ *
+ * Two cases, and review caught that the first version handled NEITHER because
+ * the placeholder was gated on `!running`:
+ *
+ *  - The chat is `running` or `waiting` when the load fails. The placeholder
+ *    cannot take the pane (it would hide the live stream, and a `waiting` chat
+ *    has no stream to hide behind either), so without this the pane rendered
+ *    an empty transcript with no hint anything had gone wrong.
+ *  - Rows arrive afterwards. Once `messages.length > 0` the placeholder can
+ *    never show again, so the failed history was masked permanently — the
+ *    reader saw the newest message or two and no way to ask for the rest,
+ *    which is the exact symptom this PR set out to kill.
+ *
+ * It stays until a load actually succeeds, because until then the history
+ * above these rows is still missing.
+ */
+function FailedTranscriptBanner({ onRetry }: { onRetry: () => void }) {
+  return (
+    <div className="mx-3 my-2 flex items-center gap-2 rounded-sm border border-line bg-panel-2 px-2.5 py-1.5">
+      <AlertTriangle className="size-3.5 shrink-0 text-muted" />
+      <span className="min-w-0 flex-1 text-xs text-secondary">
+        Couldn't load earlier messages — the server was busy.
+      </span>
+      <Button
+        variant="subtle"
+        size="sm"
+        leftIcon={<RefreshCw className="size-3" />}
+        onClick={onRetry}
+      >
+        Retry
+      </Button>
+    </div>
   );
 }
 
@@ -525,13 +564,14 @@ export function ChatView({ chat }: { chat: Chat }) {
     autoChainRef.current = 0;
   }, [chat.id]);
 
-  // Three ways to hold no rows, and they must not look alike — see
-  // `ChatPage.load`. A chat that is RUNNING is never any of them: its rows are
-  // arriving live, so the streaming tail carries the screen.
-  const noRows = messages.length === 0 && !running;
-  const isEmpty = noRows && (load === "ready" || load === "idle");
-  const isLoading = noRows && load === "loading";
-  const isFailed = noRows && load === "failed";
+  // Which body the pane shows, and whether a failure needs saying beside the
+  // rows. Extracted and unit-tested — see `transcriptView.ts` for the two cases
+  // that were wrong when this logic lived inline here.
+  const { view, banner: failedBanner } = transcriptView({
+    rowCount: messages.length,
+    running,
+    load,
+  });
 
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col bg-app">
@@ -773,14 +813,17 @@ export function ChatView({ chat }: { chat: Chat }) {
       <div className="relative min-h-0 flex-1">
         <ScrollArea ref={scrollRef} onScroll={onScroll} data-transcript className="h-full">
           <div className="mx-auto max-w-[860px] py-2">
-            {isLoading ? (
+            {view === "loading" ? (
               <LoadingTranscript />
-            ) : isFailed ? (
+            ) : view === "failed" ? (
               <FailedTranscript onRetry={() => void reloadChatMessages(chat.id)} />
-            ) : isEmpty ? (
+            ) : view === "empty" ? (
               <EmptyTranscript />
             ) : (
               <>
+                {failedBanner && (
+                  <FailedTranscriptBanner onRetry={() => void reloadChatMessages(chat.id)} />
+                )}
                 {/* Older-rows sentinel: pages the previous chunk in on approach. */}
                 {/* Paging is automatic, but this stays clickable on purpose: at
                     scrollTop 0 the browser emits no scroll event however hard you
