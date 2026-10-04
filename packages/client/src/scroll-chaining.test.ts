@@ -94,6 +94,16 @@ describe("scroll chaining", () => {
     expect(css).toMatch(/\.cm-scroll\s*\{[^}]*overscroll-behavior:\s*contain/);
   });
 
+  it("keeps `.cm-scroll` off the horizontal axis", () => {
+    // A vertical pane that is implicitly `overflow-x: auto` pans sideways under
+    // a touch drag the moment one row is too wide, taking the whole reading
+    // column with it. `clip` (not `hidden`) so it is not a scroll container at
+    // all. `.cm-scroll-x` is the opt-in for the elements that mean it.
+    const block = /\.cm-scroll\s*\{([^}]*)\}/.exec(css);
+    expect(block, "`.cm-scroll` is missing from index.css").not.toBeNull();
+    expect(block![1]).toMatch(/overflow-x:\s*clip/);
+  });
+
   it("defines `.cm-scroll-x` releasing ONLY the vertical axis", () => {
     const block = /\.cm-scroll-x\s*\{([^}]*)\}/.exec(css);
     expect(block, "`.cm-scroll-x` is missing from index.css").not.toBeNull();
