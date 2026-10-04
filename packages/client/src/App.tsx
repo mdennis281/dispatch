@@ -32,7 +32,8 @@ import { visibleChat } from "./stores/navigation.js";
 import { useView } from "./stores/view.js";
 import { useLayout } from "./stores/layout.js";
 import { useEdgeSwipe } from "./lib/useEdgeSwipe.js";
-import { swipeMove, runSwipe } from "./components/layout/swipeNav.js";
+import { beginPanelDrag } from "./lib/swipeDrag.js";
+import { swipeMove, runSwipe, swipeDrag } from "./components/layout/swipeNav.js";
 import { AuthGate } from "./components/auth/AuthGate.js";
 import { useAuth } from "./stores/auth.js";
 import { SetupWizard } from "./components/setup/SetupWizard.js";
@@ -104,10 +105,21 @@ export default function App() {
    */
   const overlay = useView((s) => s.overlay);
   const swipeEnabled = mode === "sm" && overlay === null;
-  useEdgeSwipe(swipeEnabled, (dir) => {
-    const move = swipeMove({ mode, view, pane, leftOpen, moreOpen }, dir);
-    if (move) runSwipe(move);
-  });
+  useEdgeSwipe(
+    swipeEnabled,
+    (dir) => {
+      const move = swipeMove({ mode, view, pane, leftOpen, moreOpen }, dir);
+      if (move) runSwipe(move);
+    },
+    // Asked once per gesture, at `touchstart`. The same `place` resolves the
+    // move both here and at the commit — nothing in the shell can change
+    // between them, because the only thing that moves meanwhile is the panel
+    // this returns a grip on, and that is painted outside React.
+    (dir) => {
+      const target = swipeDrag(swipeMove({ mode, view, pane, leftOpen, moreOpen }, dir));
+      return target ? beginPanelDrag(target.panel, target.toOpen) : null;
+    },
+  );
 
   // Publishes `--cm-kb` (see below) and the raw readings behind `ViewportDebug`.
   useEffect(startViewportTracking, []);
@@ -284,6 +296,7 @@ export default function App() {
             enabled={mode === "sm"}
             onClose={() => setLeftOpen(false)}
             side="left"
+            swipeId="picker"
             position="absolute"
             label="Chats and projects"
             // FULL WIDTH at `sm`, where this is the only mode it renders in at
@@ -341,6 +354,7 @@ export default function App() {
                 enabled={mode !== "lg"}
                 onClose={() => setPane("chat")}
                 side="right"
+                swipeId="pane"
                 position="absolute"
                 // At `sm` this fills the main area and the bottom nav switches
                 // away from it, so it is a PANE, not modal chrome — a scrim you

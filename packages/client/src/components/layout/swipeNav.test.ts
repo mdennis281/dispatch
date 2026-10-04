@@ -8,7 +8,7 @@
  * is a rule that can regress without anything failing to compile.
  */
 import { describe, it, expect, beforeEach } from "vitest";
-import { swipeMove, runSwipe } from "./swipeNav.js";
+import { swipeMove, runSwipe, swipeDrag } from "./swipeNav.js";
 import type { NavPlace } from "./navState.js";
 import { useLayout } from "../../stores/layout.js";
 import { useView } from "../../stores/view.js";
@@ -147,5 +147,32 @@ describe("runSwipe", () => {
     // that back walked down, so the NEXT forward swipe is what opens the chat.
     expect(useLayout.getState().leftOpen).toBe(true);
     expect(swipeMove({ ...AT_CHAT, leftOpen: true }, "forward")).toBe("close-picker");
+  });
+});
+
+describe("swipeDrag", () => {
+  it("drags the chat picker both ways", () => {
+    expect(swipeDrag("open-picker")).toEqual({ panel: "picker", toOpen: true });
+    expect(swipeDrag("close-picker")).toEqual({ panel: "picker", toOpen: false });
+  });
+
+  it("drags the Ship/Run pane closed", () => {
+    expect(swipeDrag("close-pane")).toEqual({ panel: "pane", toOpen: false });
+  });
+
+  it("leaves every VIEW swap a threshold flick", () => {
+    // There is no second copy of the homepage mounted to pull in from the edge.
+    // These hand off to the navigation slide in `lib/viewSlide` instead.
+    expect(swipeDrag("go-home")).toBeNull();
+    expect(swipeDrag("leave-home")).toBeNull();
+    expect(swipeDrag("leave-new-project")).toBeNull();
+  });
+
+  it("leaves the More sheet alone — it arrives from the bottom", () => {
+    expect(swipeDrag("close-more")).toBeNull();
+  });
+
+  it("is safe to hand the null that swipeMove returns for 'nothing to do'", () => {
+    expect(swipeDrag(null)).toBeNull();
   });
 });

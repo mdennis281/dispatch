@@ -6,6 +6,7 @@ import {
   type EdgeSwipe,
   type SwipeDir,
 } from "./edgeSwipe.js";
+import type { SwipeDragHandle } from "./swipeDrag.js";
 
 /**
  * The DOM half of the edge swipe. See `edgeSwipe.ts` for the rules and why each
@@ -23,13 +24,24 @@ import {
  * anyway, so a window listener means no ref to thread through `App` and no
  * chance of a stray overlay eating the capture.
  *
- * All four are `{ passive: true }`. Nothing here calls `preventDefault` — the
- * recognizer never moves anything mid-drag (see the "threshold flick" decision),
- * so claiming the touch would only make the page's own scrolling worse, and a
- * non-passive `touchmove` listener on `window` is a documented scroll-jank tax
- * on exactly the device this is for.
+ * All four are STILL `{ passive: true }` now that the gesture moves a panel
+ * mid-drag. Claiming the touch is for stopping a scroll that would otherwise
+ * happen, and none would: a vertical scroller does not scroll sideways, and a
+ * finger that turns vertical hands the gesture over (`CROSS_SLOP`) before it
+ * has moved anything. A non-passive `touchmove` on `window` is a documented
+ * scroll-jank tax on exactly the device this is for, and it would be paid on
+ * every touch in the app to prevent a scroll that never starts.
+ *
+ * `onBegin` is how the caller opts a gesture into following the finger: return
+ * a grip on whatever this swipe will move (see `swipeDrag.ts`), or `null` to
+ * leave it a threshold flick. It is asked ONCE, at `touchstart`, so the gesture
+ * previews the same move it will later commit.
  */
-export function useEdgeSwipe(enabled: boolean, onSwipe: (dir: SwipeDir) => void): void {
+export function useEdgeSwipe(
+  enabled: boolean,
+  onSwipe: (dir: SwipeDir) => void,
+  onBegin?: (dir: SwipeDir) => SwipeDragHandle | null,
+): void {
   // The gesture lives in a ref, not state: `touchmove` fires at refresh rate and
   // re-rendering the whole shell on each one is not a cost the phone can pay.
   // Only the commit — one call, at the end — reaches React.
@@ -38,6 +50,11 @@ export function useEdgeSwipe(enabled: boolean, onSwipe: (dir: SwipeDir) => void)
   // an inline arrow.
   const fire = useRef(onSwipe);
   fire.current = onSwipe;
+  const begin = useRef(onBegin);
+  begin.current = onBegin;
+  // The panel this gesture has hold of, if any. Same reason as `swipe` above:
+  // it changes on every `touchmove` and must never reach React.
+  const drag = useRef<SwipeDragHandle | null>(null);
 
   useEffect(() => {
     if (!enabled) return;
@@ -47,19 +64,34 @@ export function useEdgeSwipe(enabled: boolean, onSwipe: (dir: SwipeDir) => void)
     const onStart = (e: TouchEvent) => {
       const touch = e.touches[0];
       if (!touch) return;
+      // A gesture already in flight that never got a `touchend` (a second
+      // finger, a cancelled sequence) must let go of its panel before this one
+      // takes hold, or the panel is left wherever the last frame put it.
+      drag.current?.settle(false);
+      drag.current = null;
       swipe.current = beginEdgeSwipe({
         ...point(touch),
         width: window.innerWidth,
         touches: e.touches.length,
         inHorizontalScroller: startsInHorizontalScroller(e.target),
       });
+      if (swipe.current) drag.current = begin.current?.(swipe.current.dir) ?? null;
     };
 
     const onMove = (e: TouchEvent) => {
       const live = swipe.current;
       const touch = e.touches[0];
       if (!live || !touch) return;
-      swipe.current = trackEdgeSwipe(live, point(touch), e.touches.length);
+      const next = trackEdgeSwipe(live, point(touch), e.touches.length);
+      swipe.current = next;
+      // `null` means a scroller has claimed the gesture: put the panel back
+      // where it was rather than abandoning it part-way out.
+      if (!next) {
+        drag.current?.settle(false);
+        drag.current = null;
+        return;
+      }
+      drag.current?.move(touch.clientX - live.origin.x);
     };
 
     const onEnd = (e: TouchEvent) => {
@@ -69,13 +101,25 @@ export function useEdgeSwipe(enabled: boolean, onSwipe: (dir: SwipeDir) => void)
       // gone from the live list, so `touches[0]` is either absent or a DIFFERENT
       // finger that was resting on the screen.
       const touch = e.changedTouches[0];
-      if (!live || !touch) return;
+      const grip = drag.current;
+      drag.current = null;
+      if (!live || !touch) {
+        grip?.settle(false);
+        return;
+      }
       const dir = commitEdgeSwipe(live, point(touch));
+      // Settle BEFORE the commit. The panel's landing position is a property of
+      // the gesture, and `fire` re-renders the shell — doing it the other way
+      // round means the panel is still inline-pinned to the finger during the
+      // commit's render, which is the one frame the class position changes in.
+      grip?.settle(dir !== null);
       if (dir) fire.current(dir);
     };
 
     const onCancel = () => {
       swipe.current = null;
+      drag.current?.settle(false);
+      drag.current = null;
     };
 
     window.addEventListener("touchstart", onStart, { passive: true });
@@ -88,6 +132,8 @@ export function useEdgeSwipe(enabled: boolean, onSwipe: (dir: SwipeDir) => void)
       window.removeEventListener("touchend", onEnd);
       window.removeEventListener("touchcancel", onCancel);
       swipe.current = null;
+      drag.current?.settle(false);
+      drag.current = null;
     };
   }, [enabled]);
 }

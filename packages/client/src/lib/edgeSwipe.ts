@@ -141,3 +141,56 @@ export function commitEdgeSwipe(swipe: EdgeSwipe, point: TouchPoint): SwipeDir |
   if (dx >= FLICK_PX && speed >= FLICK_SPEED) return swipe.dir;
   return null;
 }
+
+/**
+ * How hard the panel resists being dragged past its own end (Apple's curve).
+ *
+ * `c` is the resistance at the stop — the first pixel past it still moves
+ * ~0.55px, so nothing jumps — and the curve asymptotes at `dim`, so pulling
+ * forever moves the panel at most its own width past the end rather than
+ * dragging it clean off the other side of the screen. The point
+ * of rubber-banding is not decoration — a panel that simply CLAMPS at its end
+ * stops dead under a finger that is still moving, which reads as the gesture
+ * having been dropped. Resistance says "this is as far as it goes" while
+ * staying attached to the finger.
+ */
+export const RUBBER_C = 0.55;
+
+export function rubberBand(excess: number, dim: number, c = RUBBER_C): number {
+  if (excess === 0 || dim <= 0) return 0;
+  const x = Math.abs(excess);
+  return Math.sign(excess) * ((x * c * dim) / (dim + c * x));
+}
+
+/**
+ * Where a dragged panel should sit right now, in px.
+ *
+ * `from` and `to` are its two resting positions (closed and open, in whichever
+ * order this gesture travels). Inside that span the panel is pinned to the
+ * finger 1:1 — that IS the feature; anything less than 1:1 reads as lag. Past
+ * either end it rubber-bands.
+ *
+ * Pure, and separate from the recognizer above, because this is the half that a
+ * node-environment test can check: the client's vitest renders no JSX, so a
+ * curve written inside a `touchmove` handler can only be checked by a phone in
+ * someone's hand.
+ */
+export function dragPosition(from: number, to: number, travel: number, dim: number): number {
+  const raw = from + travel;
+  const lo = Math.min(from, to);
+  const hi = Math.max(from, to);
+  if (raw < lo) return lo + rubberBand(raw - lo, dim);
+  if (raw > hi) return hi + rubberBand(raw - hi, dim);
+  return raw;
+}
+
+/**
+ * How far open the panel reads as, 0..1 — what the scrim fades on.
+ *
+ * Clamped, because `dragPosition` can be outside the span by design.
+ */
+export function dragOpenness(position: number, closed: number, open: number): number {
+  const span = open - closed;
+  if (span === 0) return 1;
+  return Math.min(1, Math.max(0, (position - closed) / span));
+}
