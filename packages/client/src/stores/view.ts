@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { slideDirection, runViewSlide } from "../lib/viewSlide.js";
 import type { ConfigSection } from "@dispatch/shared";
 
 /** The app's primary surface. "home" = the cross-project overview and project
@@ -111,9 +112,22 @@ interface ViewStore {
 /** Which top-level surface fills the main area, and which overlay (if any) is
  *  on top of it. Sidebar toggles the view; opening a chat snaps back to "chat".
  *  Kept tiny + separate so it doesn't churn the chat or project stores. */
-export const useView = create<ViewStore>((set) => ({
+export const useView = create<ViewStore>((set, get) => ({
   view: "chat",
-  setView: (view) => set({ view }),
+  // Routed through `runViewSlide` HERE rather than at the call sites because
+  // this is the one chokepoint every entry to a full-bleed view goes through —
+  // `goHome`, `leaveHome`, the sidebar's Add project, the command palette and
+  // the edge swipe. A slide wired per caller would be a slide the next caller
+  // forgets. Crossings that aren't travel (git → files) resolve to `null` and
+  // take the plain path, so this costs them nothing.
+  setView: (view) => {
+    const dir = slideDirection(get().view, view);
+    if (!dir) {
+      set({ view });
+      return;
+    }
+    runViewSlide(dir, () => set({ view }));
+  },
   projectSection: "workflow",
   setProjectSection: (projectSection) => set({ projectSection }),
   appSection: "appearance",

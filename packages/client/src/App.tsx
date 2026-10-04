@@ -272,7 +272,12 @@ export default function App() {
           guesses at the same edge — and they disagreed by whatever the layout
           viewport and the dynamic viewport differed by, which is the dead band
           that used to show up between the composer and the bar. */}
-      <div className="relative flex min-h-0 flex-1">
+      {/* `data-cm-surface` is the one box the navigation slide travels — see
+          `lib/viewSlide` and the `::view-transition-*` rules in index.css. The
+          BOX, not its contents: home can list hundreds of chat rows, and a
+          staggered row entrance would look cheap and animate hundreds of
+          elements to say one thing. */}
+      <div data-cm-surface="" className="relative flex min-h-0 flex-1">
         {!fullBleed && (
           <Drawer
             open={leftOpen}
