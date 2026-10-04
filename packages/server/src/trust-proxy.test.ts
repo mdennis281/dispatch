@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import Fastify from "fastify";
-import { parseTrustProxy, trustProxyError } from "./trust-proxy.js";
+import { describeTrustProxy, parseTrustProxy, trustProxyError } from "./trust-proxy.js";
 
 describe("the trusted-proxy setting", () => {
   it("says nothing when unset, so Fastify keeps its own default", () => {
@@ -58,6 +58,39 @@ describe("rejecting a value before it can reach proxy-addr", () => {
     }
     expect(() => Fastify({ trustProxy: ["haproxy.lan"] })).toThrow();
     expect(parseTrustProxy("haproxy.lan")).toBeUndefined();
+  });
+});
+
+/**
+ * The boot banner, the settings panel and the "restart to apply" notice all read
+ * this, and all three were wrong when it echoed the input instead: `off` is a
+ * VALID setting whose outcome is "nobody", so the raw string announced that
+ * `off` was being trusted while Fastify had `trustProxy: false`.
+ */
+describe("describing what is actually trusted", () => {
+  it("is empty whenever the outcome is nobody, however that was spelled", () => {
+    for (const nobody of ["", "   ", undefined, "off", "false", "no", "0", "haproxy.lan", "2"]) {
+      expect(describeTrustProxy(nobody)).toBe("");
+    }
+  });
+
+  it("names the upstreams, and blanket trust in words", () => {
+    expect(describeTrustProxy("10.0.0.1")).toBe("10.0.0.1");
+    expect(describeTrustProxy(" 10.0.0.0/24 ,loopback ")).toBe("10.0.0.0/24, loopback");
+    expect(describeTrustProxy("true")).toBe("any upstream");
+  });
+
+  it("is canonical, so equal outcomes compare equal", () => {
+    // What `pendingRestart` is computed from — a restart notice must not appear
+    // because someone retyped the same value with a space in it.
+    expect(describeTrustProxy(" 10.0.0.1")).toBe(describeTrustProxy("10.0.0.1"));
+    expect(describeTrustProxy("off")).toBe(describeTrustProxy(""));
+  });
+
+  it("never claims trust Fastify was not given", () => {
+    for (const raw of ["", "off", "0", "10.0.0.1", "true", "nonsense"]) {
+      expect(Boolean(describeTrustProxy(raw))).toBe(Boolean(parseTrustProxy(raw)));
+    }
   });
 });
 

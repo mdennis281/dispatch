@@ -147,8 +147,15 @@ function TrustProxyField({ security, onSave }: {
       Addresses allowed to set <span className="cm-mono">X-Forwarded-For</span>. Set this to your reverse
       proxy (<span className="cm-mono">10.0.0.1</span>, a CIDR range, or a comma-separated list) so sessions
       show the real client IP instead of the proxy&rsquo;s. The proxy must send the header — on HAProxy
-      that is <span className="cm-mono">option forwardfor</span>. Leave empty to trust nobody, or type{" "}
-      <span className="cm-mono">off</span> to override an environment setting.
+      that is <span className="cm-mono">option forwardfor</span>.{" "}
+      {/* What empty MEANS depends on the environment, so say which one applies
+          rather than the one that is true more often. Told flatly that empty
+          trusts nobody, an operator with DISPATCH_TRUST_PROXY set would clear
+          the box to turn trust off and it would stay exactly as it was. */}
+      {fromEnv
+        ? <>Leave empty to defer to <span className="cm-mono">DISPATCH_TRUST_PROXY</span>, or type{" "}
+          <span className="cm-mono">off</span> to countermand it and trust nobody.</>
+        : <>Leave empty to trust nobody.</>}
     </p>
     <div className="mt-2 flex gap-2">
       <TextInput

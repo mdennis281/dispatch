@@ -26,7 +26,7 @@ import { isManagerBridgePath } from "./services/mcp/manager-http.js";
 import { healthReport } from "./health.js";
 import { startPerfMonitor } from "./perf.js";
 import { registerRequestLog } from "./request-log.js";
-import { parseTrustProxy, trustProxyError } from "./trust-proxy.js";
+import { describeTrustProxy, parseTrustProxy, trustProxyError } from "./trust-proxy.js";
 import { AuthService, type RequestIdentity } from "./services/auth.js";
 import { realProjects } from "@dispatch/shared";
 
@@ -104,7 +104,10 @@ export async function buildApp(
   const trustProxy = badTrustProxy ? undefined : parseTrustProxy(wantTrustProxy);
   const auth = new AuthService(store, undefined, {
     fromEnv: envTrustProxy,
-    active: badTrustProxy ? "" : wantTrustProxy,
+    // The OUTCOME, not the input: `off` is a valid value that trusts nobody, so
+    // reporting the raw string would have the boot banner and the settings
+    // panel both announce that `off` is being trusted.
+    active: badTrustProxy ? "" : describeTrustProxy(wantTrustProxy),
   });
 
   // Base64/data-URL image uploads (POST /api/chats/:id/assets) ride the JSON body,

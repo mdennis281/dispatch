@@ -93,3 +93,23 @@ export function parseTrustProxy(raw: string | undefined | null): TrustProxy | un
   const list = entries(value);
   return list.length ? list : undefined;
 }
+
+/**
+ * What is actually being trusted, in words — empty when that is nobody.
+ *
+ * Derived from `parseTrustProxy` rather than from the raw string, because the
+ * raw string lies about this in both directions: `off` is a VALID value that
+ * trusts nobody, and a validation failure trusts nobody either. Reading the
+ * input instead of the outcome printed `trusting X-Forwarded-For from off` at
+ * boot and "Trusting `off`" in Settings while Fastify had `trustProxy: false`.
+ *
+ * Also the comparison key for "has the saved setting diverged from the running
+ * process", so it must be canonical: `10.0.0.1` and ` 10.0.0.1 ` are one
+ * answer, and a restart notice must not appear because of a space.
+ */
+export function describeTrustProxy(raw: string | undefined | null): string {
+  const parsed = parseTrustProxy(raw);
+  if (parsed === true) return "any upstream";
+  if (!parsed) return "";
+  return parsed.join(", ");
+}

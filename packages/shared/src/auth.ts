@@ -86,7 +86,11 @@ export interface AuthTrustProxy {
   configured: string;
   /** `DISPATCH_TRUST_PROXY`, the fallback under `configured`. */
   fromEnv: string;
-  /** What this running process resolved at boot — empty if it trusts nobody. */
+  /**
+   * What this running process resolved at boot, in words — empty if it trusts
+   * nobody, `any upstream` for blanket trust. The OUTCOME, never the raw
+   * setting: `off` is a valid value whose outcome is "nobody".
+   */
   active: string;
   /** `configured`/`fromEnv` resolve to something the process isn't running. */
   pendingRestart: boolean;

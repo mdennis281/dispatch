@@ -24,7 +24,7 @@ import type {
 } from "@dispatch/shared";
 import { describeUserAgent } from "@dispatch/shared";
 import { IpGeo } from "./ip-geo.js";
-import { trustProxyError } from "../trust-proxy.js";
+import { describeTrustProxy, trustProxyError } from "../trust-proxy.js";
 import type { Store } from "../store/index.js";
 import { readJson, writeJsonAtomic } from "../store/fsq.js";
 
@@ -555,7 +555,11 @@ export class AuthService {
       configured,
       fromEnv: this.trustProxyBoot.fromEnv,
       active: this.trustProxyBoot.active,
-      pendingRestart: effective !== this.trustProxyBoot.active,
+      // Both sides through the same resolver, so the comparison is between
+      // OUTCOMES. Comparing raw strings made `off` (trusts nobody) look
+      // different from `` (trusts nobody), and a restart notice appeared for a
+      // change that would do nothing.
+      pendingRestart: describeTrustProxy(effective) !== this.trustProxyBoot.active,
     };
   }
 
