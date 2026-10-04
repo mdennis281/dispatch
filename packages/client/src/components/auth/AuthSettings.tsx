@@ -146,6 +146,7 @@ export function AuthSettings() {
         security={security}
         onRevoke={guard(async (id: string) => { await authDelete(`/api/auth/sessions/${id}`); await reload(); })}
         onToggleLookup={guard(async (enabled: boolean) => { await authPut("/api/auth/ip-lookup", { enabled }); await reload(); })}
+        onSaveTrustProxy={guard(async (value: string) => { await authPut("/api/auth/trusted-proxies", { value }); await reload(); })}
       />}
 
       {user?.owner && <div className="rounded-lg border border-line p-3">

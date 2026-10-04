@@ -30,3 +30,17 @@ describe("server bind host", () => {
     expect(loadConfig({ DISPATCH_HOST: "0.0.0.0" }).host).toBe("0.0.0.0");
   });
 });
+
+describe("trusted proxies", () => {
+  it("is absent unless the environment names one", () => {
+    expect(loadConfig({}).trustProxy).toBeUndefined();
+    // Blank reads as unset, not as "", so the setting's `||` fallback can tell
+    // "no environment default" from "an environment default of empty".
+    expect(loadConfig({ DISPATCH_TRUST_PROXY: "  " }).trustProxy).toBeUndefined();
+  });
+
+  it("carries the raw value through for trust-proxy.ts to parse", () => {
+    expect(loadConfig({ DISPATCH_TRUST_PROXY: " 10.0.0.1 " }).trustProxy).toBe("10.0.0.1");
+    expect(loadConfig({ CM_TRUST_PROXY: "loopback" }).trustProxy).toBe("loopback");
+  });
+});

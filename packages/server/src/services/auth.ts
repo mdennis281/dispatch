@@ -18,11 +18,13 @@ import type {
   AuthSetupCode,
   AuthTotpSetup,
   AuthStatus,
+  AuthTrustProxy,
   AuthUserSummary,
   SessionNetwork,
 } from "@dispatch/shared";
 import { describeUserAgent } from "@dispatch/shared";
 import { IpGeo } from "./ip-geo.js";
+import { describeTrustProxy, trustProxyError } from "../trust-proxy.js";
 import type { Store } from "../store/index.js";
 import { readJson, writeJsonAtomic } from "../store/fsq.js";
 
@@ -348,10 +350,17 @@ export class AuthService {
   private settingsCache: { value: Awaited<ReturnType<Store["getSettings"]>>["auth"]; expiresAt: number } | null = null;
   private settingsLoad: Promise<Awaited<ReturnType<Store["getSettings"]>>["auth"]> | null = null;
   private readonly geo: IpGeo;
+  /**
+   * What `buildApp` resolved for `trustProxy` before Fastify was constructed.
+   * Held rather than re-derived because the saved setting can change under a
+   * running process, and the panel's job is to show that it has.
+   */
+  private readonly trustProxyBoot: { fromEnv: string; active: string };
   private lastSeenFlush: NodeJS.Timeout | null = null;
 
-  constructor(private store: Store, geo?: IpGeo) {
+  constructor(private store: Store, geo?: IpGeo, trustProxy?: { fromEnv: string; active: string }) {
     this.geo = geo ?? new IpGeo();
+    this.trustProxyBoot = trustProxy ?? { fromEnv: "", active: "" };
   }
 
   /** Serialize check-then-write credential/session mutations within this process. */
@@ -531,6 +540,43 @@ export class AuthService {
       if (!settings.auth) throw new AuthFailure(409, "Authentication is not configured.");
       await this.saveAuthSettings({ ...settings.auth, ipLookup: enabled });
       return { ipLookup: enabled };
+    });
+  }
+
+  /**
+   * The saved setting, the environment under it, and what this process booted
+   * with. `||` rather than `??` on the fallback: a setting cleared to empty
+   * means "defer to the environment", which is also what an absent key means.
+   */
+  async trustProxy(): Promise<AuthTrustProxy> {
+    const configured = (await this.settings())?.trustedProxies?.trim() ?? "";
+    const effective = configured || this.trustProxyBoot.fromEnv;
+    return {
+      configured,
+      fromEnv: this.trustProxyBoot.fromEnv,
+      active: this.trustProxyBoot.active,
+      // Both sides through the same resolver, so the comparison is between
+      // OUTCOMES. Comparing raw strings made `off` (trusts nobody) look
+      // different from `` (trusts nobody), and a restart notice appeared for a
+      // change that would do nothing.
+      pendingRestart: describeTrustProxy(effective) !== this.trustProxyBoot.active,
+    };
+  }
+
+  async setTrustProxy(identity: RequestIdentity, value: string): Promise<AuthTrustProxy> {
+    return this.sharedMutation(async () => {
+      if (!identity.user.owner) throw new AuthFailure(403, "Owner access required.");
+      const trimmed = value.trim();
+      // Rejected HERE rather than at boot, which is the whole point of
+      // validating: a typo that reaches proxy-addr throws inside the Fastify
+      // constructor, and the operator would discover it as a server that no
+      // longer starts — from a settings panel they can no longer reach.
+      const invalid = trustProxyError(trimmed);
+      if (invalid) throw new AuthFailure(400, `Trusted proxies: ${invalid}`);
+      const settings = await this.store.getSettings();
+      if (!settings.auth) throw new AuthFailure(409, "Authentication is not configured.");
+      await this.saveAuthSettings({ ...settings.auth, trustedProxies: trimmed || undefined });
+      return this.trustProxy();
     });
   }
 
@@ -833,6 +879,7 @@ export class AuthService {
     const networks = await Promise.all(rows.map((row) => this.geo.describe(row.ip, lookup)));
     return { user: userSummary(user),
       ipLookup: lookup,
+      trustProxy: await this.trustProxy(),
       sessions: rows.map((row, index) => sessionSummary(row, networks[index]!, identity.sessionId)),
       passkeys: user.passkeys.map(({ id, name, createdAt, lastUsedAt }) => ({ id, name, createdAt, lastUsedAt })),
     };

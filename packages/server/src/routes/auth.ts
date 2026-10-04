@@ -104,6 +104,14 @@ export function registerAuthRoutes(app: FastifyInstance): void {
     if (typeof enabled !== "boolean") throw new AuthFailure(400, "`enabled` must be true or false.");
     return auth.setIpLookup(identity(req), enabled);
   }, reply));
+  app.put("/api/auth/trusted-proxies", (req, reply) => run(async () => {
+    // A string, and an absent one is not an empty one: clearing the box means
+    // "defer to DISPATCH_TRUST_PROXY", which a malformed body must not say by
+    // accident on a deployment whose session IPs depend on it.
+    const value = (req.body as { value?: unknown } | undefined)?.value;
+    if (typeof value !== "string") throw new AuthFailure(400, "`value` must be a string.");
+    return auth.setTrustProxy(identity(req), value);
+  }, reply));
   app.post("/api/auth/setup-codes", (req, reply) => run(() => auth.createSetupCode(identity(req)), reply));
   app.post("/api/auth/password", (req, reply) => run(async () => {
     await auth.updatePassword(identity(req), req.body as { currentPassword: string; password: string }); return { ok: true };

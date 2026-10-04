@@ -11,7 +11,7 @@ import { Bot, Globe, Laptop, MapPin, Smartphone, Tablet, Trash2 } from "lucide-r
 import { describeSessionClient, type AuthSecurityOverview, type AuthSessionSummary, type SessionNetwork } from "@dispatch/shared";
 import { Button } from "../ui/Button.js";
 import { Switch } from "../ui/Switch.js";
-import { Modal } from "../sidebar/Modal.js";
+import { Modal, TextInput } from "../sidebar/Modal.js";
 import { relTime, untilShort } from "../../lib/format.js";
 
 const SCOPE_LABEL: Record<SessionNetwork["scope"], string> = {
@@ -117,10 +117,69 @@ function SessionDetail({ session, onClose, onRevoke }: {
   </Modal>;
 }
 
-export function SessionList({ security, onRevoke, onToggleLookup }: {
+/**
+ * Behind a reverse proxy, every session arrives from the proxy — so the list
+ * becomes N rows all claiming one private address, which is the one shape that
+ * defeats the whole panel. Detected rather than explained in prose because the
+ * operator reading these identical rows has no reason to suspect the IPs are
+ * wrong; they look like perfectly ordinary LAN addresses.
+ */
+function looksProxied(security: AuthSecurityOverview): boolean {
+  if (security.trustProxy.active) return false;
+  const ips = new Set(security.sessions.filter((s) => s.network.scope === "private").map((s) => s.ip));
+  return ips.size === 1 && security.sessions.length > 2;
+}
+
+function TrustProxyField({ security, onSave }: {
+  security: AuthSecurityOverview;
+  onSave: (value: string) => Promise<void>;
+}) {
+  const { configured, fromEnv, active, pendingRestart } = security.trustProxy;
+  const [value, setValue] = useState(configured);
+  const dirty = value.trim() !== configured;
+
+  return <form
+    className="mt-2.5 cm-hairline-t pt-2.5"
+    onSubmit={(event) => { event.preventDefault(); void onSave(value); }}
+  >
+    <p className="text-xs font-medium text-secondary">Trusted proxies</p>
+    <p className="mt-1 text-2xs leading-relaxed text-faint">
+      Addresses allowed to set <span className="cm-mono">X-Forwarded-For</span>. Set this to your reverse
+      proxy (<span className="cm-mono">10.0.0.1</span>, a CIDR range, or a comma-separated list) so sessions
+      show the real client IP instead of the proxy&rsquo;s. The proxy must send the header — on HAProxy
+      that is <span className="cm-mono">option forwardfor</span>.{" "}
+      {/* What empty MEANS depends on the environment, so say which one applies
+          rather than the one that is true more often. Told flatly that empty
+          trusts nobody, an operator with DISPATCH_TRUST_PROXY set would clear
+          the box to turn trust off and it would stay exactly as it was. */}
+      {fromEnv
+        ? <>Leave empty to defer to <span className="cm-mono">DISPATCH_TRUST_PROXY</span>, or type{" "}
+          <span className="cm-mono">off</span> to countermand it and trust nobody.</>
+        : <>Leave empty to trust nobody.</>}
+    </p>
+    <div className="mt-2 flex gap-2">
+      <TextInput
+        value={value}
+        placeholder={fromEnv ? `${fromEnv} (from DISPATCH_TRUST_PROXY)` : "no proxy trusted"}
+        onChange={(e) => setValue(e.target.value)}
+      />
+      <Button type="submit" disabled={!dirty}>Save</Button>
+    </div>
+    {pendingRestart
+      ? <p className="mt-1 text-2xs text-warning">
+          Saved. Restart Dispatch to apply it{active ? ` — still trusting ${active}` : " — nothing is trusted yet"}.
+        </p>
+      : active && <p className="mt-1 text-2xs text-faint">
+          Trusting <span className="cm-mono">{active}</span>. Addresses below update as each session refreshes.
+        </p>}
+  </form>;
+}
+
+export function SessionList({ security, onRevoke, onToggleLookup, onSaveTrustProxy }: {
   security: AuthSecurityOverview;
   onRevoke: (id: string) => Promise<void>;
   onToggleLookup: (enabled: boolean) => Promise<void>;
+  onSaveTrustProxy: (value: string) => Promise<void>;
 }) {
   const [openId, setOpenId] = useState<string | null>(null);
   const open = security.sessions.find((s) => s.id === openId) ?? null;
@@ -128,6 +187,10 @@ export function SessionList({ security, onRevoke, onToggleLookup }: {
 
   return <div className="rounded-lg border border-line p-3">
     <p className="mb-2 text-xs font-medium text-secondary">Active sessions</p>
+    {looksProxied(security) && <p className="mb-2 rounded bg-inset px-2 py-1.5 text-2xs leading-relaxed text-warning">
+      Every session here is on the same local address. If Dispatch is behind a reverse proxy, that is the
+      proxy&rsquo;s IP, not each device&rsquo;s — name it under Trusted proxies below.
+    </p>}
     <div className="space-y-1">
       {security.sessions.map((session) => <div key={session.id} className="flex items-center gap-2 rounded bg-inset px-2 py-1.5">
         <button
@@ -162,6 +225,8 @@ export function SessionList({ security, onRevoke, onToggleLookup }: {
         {!anyPublic && " No session is currently on a public address."}
       </p>
     </div>
+
+    <TrustProxyField security={security} onSave={onSaveTrustProxy} />
 
     {open && <SessionDetail
       session={open}

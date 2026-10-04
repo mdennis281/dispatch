@@ -74,11 +74,34 @@ export interface AuthSessionResponse {
   user: AuthUserSummary;
 }
 
+/**
+ * Reverse-proxy trust, as the session panel needs to explain it: what is saved,
+ * what the environment supplies underneath it, and what this PROCESS is actually
+ * enforcing. Three values rather than one because the setting only takes effect
+ * at boot — the panel has to be able to say "saved, restart to apply" instead of
+ * claiming a change that is still sitting in config.json.
+ */
+export interface AuthTrustProxy {
+  /** The saved setting. Empty means "whatever the environment says". */
+  configured: string;
+  /** `DISPATCH_TRUST_PROXY`, the fallback under `configured`. */
+  fromEnv: string;
+  /**
+   * What this running process resolved at boot, in words — empty if it trusts
+   * nobody, `any upstream` for blanket trust. The OUTCOME, never the raw
+   * setting: `off` is a valid value whose outcome is "nobody".
+   */
+  active: string;
+  /** `configured`/`fromEnv` resolve to something the process isn't running. */
+  pendingRestart: boolean;
+}
+
 export interface AuthSecurityOverview {
   user: AuthUserSummary;
   sessions: AuthSessionSummary[];
   /** Whether public session IPs are being geolocated (Settings opt-out). */
   ipLookup: boolean;
+  trustProxy: AuthTrustProxy;
   passkeys: Array<{ id: string; name: string; createdAt: number; lastUsedAt?: number }>;
 }
 
