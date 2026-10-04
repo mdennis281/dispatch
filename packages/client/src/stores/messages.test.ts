@@ -93,7 +93,7 @@ describe("messages store — windowed transcript paging", () => {
   it("setForChat seeds the window + its paging state", () => {
     useMessages.getState().setForChat(CHAT, [assistantRow("m3", "c")], { hasMore: true });
     expect(ids()).toEqual(["m3"]);
-    expect(useMessages.getState().pages[CHAT]).toEqual({ hasMore: true, loadingOlder: false });
+    expect(useMessages.getState().pages[CHAT]).toEqual({ hasMore: true, loadingOlder: false, load: "idle" });
   });
 
   it("prepends an older page ABOVE the current window, preserving order", () => {
@@ -104,7 +104,7 @@ describe("messages store — windowed transcript paging", () => {
       loadingOlder: false,
     });
     expect(ids()).toEqual(["m1", "m2", "m3", "m4"]);
-    expect(useMessages.getState().pages[CHAT]).toEqual({ hasMore: false, loadingOlder: false });
+    expect(useMessages.getState().pages[CHAT]).toEqual({ hasMore: false, loadingOlder: false, load: "idle" });
   });
 
   it("a double-fired page cannot duplicate rows", () => {
@@ -166,6 +166,19 @@ describe("messages store — windowed transcript paging", () => {
     expect(streamKeys("old")).toEqual([]);
   });
 
+  it("evictExcept drops a FAILED chat's page, which has no window to find it by", () => {
+    const st = useMessages.getState();
+    st.setForChat(CHAT, [assistantRow("m1", "a")]);
+    // A transcript load that failed leaves a page and no rows at all. Sweeping
+    // `byChat` alone would strand this entry forever — and a stale `failed` is
+    // worse than a leak: it is what the chat renders if it is re-opened before
+    // anything re-fetches it.
+    st.setPage("broken", { load: "failed" });
+
+    st.evictExcept([CHAT]);
+    expect(Object.keys(useMessages.getState().pages)).toEqual([CHAT]);
+  });
+
   it("evictExcept is identity-stable when everything is kept", () => {
     const st = useMessages.getState();
     st.setForChat(CHAT, [assistantRow("m1", "a")]);
@@ -213,7 +226,7 @@ describe("messages store — live window trimming", () => {
     useMessages.getState().trimWindow(CHAT);
     // The chat held its whole history, so `hasMore` was false — trimming is what
     // puts older rows back on the server side of the boundary.
-    expect(useMessages.getState().pages[CHAT]).toEqual({ hasMore: true, loadingOlder: false });
+    expect(useMessages.getState().pages[CHAT]).toEqual({ hasMore: true, loadingOlder: false, load: "idle" });
   });
 
   it("is a no-op (identity-stable) inside the slack — no re-slice per append", () => {

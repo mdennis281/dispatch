@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import {
   MoreHorizontal,
   Activity,
@@ -7,6 +8,8 @@ import {
   ChevronDown,
   MessagesSquare,
   RefreshCw,
+  AlertTriangle,
+  Loader2,
   Pencil,
   Trash2,
   Eye,
@@ -22,6 +25,7 @@ import type {
 } from "@dispatch/shared";
 import { ScrollArea } from "../ui/ScrollArea.js";
 import { IconButton } from "../ui/IconButton.js";
+import { Button } from "../ui/Button.js";
 import { Popover, MenuItem } from "../ui/Popover.js";
 import { StatusDot, statusMeta } from "../ui/StatusDot.js";
 import { TitleText } from "../ui/TitleText.js";
@@ -45,7 +49,7 @@ import {
 import { TranscriptSearch } from "./TranscriptSearch.js";
 import { useChatRename } from "./useChatRename.js";
 import { useChatMessages, useChatPage, useMessages } from "../../stores/messages.js";
-import { loadExemptions, loadOlderMessages } from "../../stores/index.js";
+import { loadExemptions, loadOlderMessages, reloadChatMessages } from "../../stores/index.js";
 import { useChats } from "../../stores/chats.js";
 import { useProjects } from "../../stores/projects.js";
 import { usePanels } from "../../stores/panels.js";
@@ -95,22 +99,82 @@ const MAX_CHAINED_PAGES = 8;
 /** Stable empty array so the selector doesn't hand back a new [] every render. */
 const EMPTY_EXEMPTIONS: WorkflowExemption[] = [];
 
-/** Quiet empty state for a chat with no transcript yet. */
-function EmptyTranscript() {
+/** Shared frame for the three "nothing to show" states below. */
+function TranscriptPlaceholder({
+  icon,
+  title,
+  children,
+}: {
+  icon: ReactNode;
+  title: string;
+  children?: ReactNode;
+}) {
   return (
     <div className="flex flex-col items-center justify-center gap-2 py-24 text-center">
       <span className="flex size-10 items-center justify-center rounded-lg border border-line bg-panel-2 text-muted [&_svg]:size-5">
-        <MessagesSquare />
+        {icon}
       </span>
-      <p className="text-base text-secondary">No messages yet</p>
-      <p className="text-xs text-muted">Send a message below to start the turn.</p>
+      <p className="text-base text-secondary">{title}</p>
+      {children}
     </div>
+  );
+}
+
+/** Quiet empty state for a chat with no transcript yet. */
+function EmptyTranscript() {
+  return (
+    <TranscriptPlaceholder icon={<MessagesSquare />} title="No messages yet">
+      <p className="text-xs text-muted">Send a message below to start the turn.</p>
+    </TranscriptPlaceholder>
+  );
+}
+
+/**
+ * The transcript request is in flight.
+ *
+ * Worth its own state rather than falling back to {@link EmptyTranscript}:
+ * under the load that makes this fetch slow, the empty state would flash
+ * "No messages yet" at someone whose history is about to appear — and it reads
+ * as a verdict, not as a wait.
+ */
+function LoadingTranscript() {
+  return (
+    <TranscriptPlaceholder
+      icon={<Loader2 className="animate-spin" />}
+      title="Loading transcript…"
+    />
+  );
+}
+
+/**
+ * The transcript request failed, after its retries.
+ *
+ * The whole point of the state: this chat's history EXISTS and we could not
+ * fetch it. Saying so — and offering the retry — is the difference between a
+ * transient server hiccup and an app that appears to have lost your work.
+ */
+function FailedTranscript({ onRetry }: { onRetry: () => void }) {
+  return (
+    <TranscriptPlaceholder icon={<AlertTriangle />} title="Couldn't load the transcript">
+      <p className="max-w-[40ch] text-xs text-muted">
+        The server didn't answer in time — usually it's just busy. Your messages are safe.
+      </p>
+      <Button
+        variant="default"
+        size="sm"
+        className="mt-1"
+        leftIcon={<RefreshCw className="size-3" />}
+        onClick={onRetry}
+      >
+        Retry
+      </Button>
+    </TranscriptPlaceholder>
   );
 }
 
 export function ChatView({ chat }: { chat: Chat }) {
   const messages = useChatMessages(chat.id);
-  const { hasMore, loadingOlder } = useChatPage(chat.id);
+  const { hasMore, loadingOlder, load } = useChatPage(chat.id);
   const activity = useChats((s) => s.activity[chat.id]);
   const prSettled = useChats((s) => s.prSettled[chat.id] ?? false);
   const exemptions = useChats((s) => s.exemptions[chat.id] ?? EMPTY_EXEMPTIONS);
@@ -461,7 +525,13 @@ export function ChatView({ chat }: { chat: Chat }) {
     autoChainRef.current = 0;
   }, [chat.id]);
 
-  const isEmpty = messages.length === 0 && !running;
+  // Three ways to hold no rows, and they must not look alike — see
+  // `ChatPage.load`. A chat that is RUNNING is never any of them: its rows are
+  // arriving live, so the streaming tail carries the screen.
+  const noRows = messages.length === 0 && !running;
+  const isEmpty = noRows && (load === "ready" || load === "idle");
+  const isLoading = noRows && load === "loading";
+  const isFailed = noRows && load === "failed";
 
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col bg-app">
@@ -703,7 +773,11 @@ export function ChatView({ chat }: { chat: Chat }) {
       <div className="relative min-h-0 flex-1">
         <ScrollArea ref={scrollRef} onScroll={onScroll} data-transcript className="h-full">
           <div className="mx-auto max-w-[860px] py-2">
-            {isEmpty ? (
+            {isLoading ? (
+              <LoadingTranscript />
+            ) : isFailed ? (
+              <FailedTranscript onRetry={() => void reloadChatMessages(chat.id)} />
+            ) : isEmpty ? (
               <EmptyTranscript />
             ) : (
               <>

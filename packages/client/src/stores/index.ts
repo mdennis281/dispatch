@@ -17,7 +17,7 @@ import type {
 } from "@dispatch/shared";
 import { DEFAULT_HARNESS } from "@dispatch/shared";
 
-import { api } from "../lib/api.js";
+import { api, ApiError } from "../lib/api.js";
 import {
   notifyAttention,
   syncChatNotification,
@@ -590,6 +590,52 @@ export const TRANSCRIPT_PAGE_SIZE = 150;
 /** How many chats' transcripts stay resident (LRU) before older ones are evicted. */
 const TRANSCRIPT_CACHE_SIZE = 3;
 
+/**
+ * Attempts (1 try + 2 retries) and the backoff between them: ~0.3s, then ~0.9s.
+ *
+ * Sized against what actually goes wrong. The server stalls its event loop for
+ * whole seconds under load — `perf.log` on a busy box records single stalls of
+ * 3.7–5.1 s — and a transcript read is the most expensive route it serves, so
+ * the failures this recovers from are transient by construction: a request that
+ * lost a race with a stall, a reverse proxy that gave up, a file momentarily
+ * locked by a scanner. Two retries spans about 1.2 s of that, which is long
+ * enough to outlast the common case and short enough that a genuinely broken
+ * server still reaches the error state promptly rather than spinning.
+ */
+const TRANSCRIPT_RETRY_ATTEMPTS = 3;
+const TRANSCRIPT_RETRY_BASE_MS = 300;
+
+/**
+ * Is this failure worth trying again?
+ *
+ * A 4xx is the server's considered answer — a deleted chat (404), a rejected
+ * token (401) — and will say the same thing three times. A 5xx or a bare
+ * network rejection is the box being overwhelmed, which is precisely the case
+ * that resolves on its own. Retrying the first kind would turn a crisp "this
+ * chat is gone" into a three-second hang.
+ */
+function isRetryable(err: unknown): boolean {
+  return !(err instanceof ApiError) || err.status >= 500;
+}
+
+/**
+ * One transcript fetch, retried through transient failure.
+ *
+ * The server half of this bug got the same treatment (`retryOnContention` in
+ * `store/fsq.ts`), and both are needed: the server can only retry what reaches
+ * it, and a request lost to a stalled loop or a proxy timeout never did.
+ */
+async function withTranscriptRetry<T>(fetchPage: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fetchPage();
+    } catch (err) {
+      if (attempt >= TRANSCRIPT_RETRY_ATTEMPTS - 1 || !isRetryable(err)) throw err;
+      await new Promise((r) => setTimeout(r, TRANSCRIPT_RETRY_BASE_MS * 3 ** attempt));
+    }
+  }
+}
+
 /** Most-recently-opened chat ids, newest first (drives transcript eviction). */
 let recentChats: string[] = [];
 
@@ -642,13 +688,17 @@ export async function ensureChatMessages(chatId: string): Promise<void> {
   touchChat(chatId);
   if (loadedChats.has(chatId)) return;
   loadedChats.add(chatId);
+  useMessages.getState().setPage(chatId, { load: "loading" });
   try {
-    const messages = await api.chats.messages(chatId, { limit: TRANSCRIPT_PAGE_SIZE });
+    const messages = await withTranscriptRetry(() =>
+      api.chats.messages(chatId, { limit: TRANSCRIPT_PAGE_SIZE }),
+    );
     // A FULL page means the window is capped, so assume there's more above; a
     // short page proves we already hold the whole transcript.
-    useMessages
-      .getState()
-      .setForChat(chatId, messages, { hasMore: messages.length >= TRANSCRIPT_PAGE_SIZE });
+    useMessages.getState().setForChat(chatId, messages, {
+      hasMore: messages.length >= TRANSCRIPT_PAGE_SIZE,
+      load: "ready",
+    });
     // The snapshot never contains a still-open permission card, so re-open of a
     // chat blocked on one has to put it back explicitly.
     void restorePendingPermissions(chatId);
@@ -656,7 +706,24 @@ export async function ensureChatMessages(chatId: string): Promise<void> {
     useCheckpoints.getState().hydrate(chatId, checkpoints.map((c) => c.messageId));
   } catch {
     loadedChats.delete(chatId); // allow a retry on the next open
+    // Say so. Leaving this `idle` is what rendered a failed load as "No messages
+    // yet" — see {@link ChatPage.load}.
+    useMessages.getState().setPage(chatId, { load: "failed" });
   }
+}
+
+/**
+ * Re-run a transcript load the user is already looking at (the error state's
+ * "Retry", and the reconnect path).
+ *
+ * Clears the "already loaded" mark first: without that, `ensureChatMessages`
+ * returns immediately and the button does nothing. Separate from the automatic
+ * retries inside the fetch because this one is a deliberate human act — it
+ * starts a fresh budget rather than continuing a spent one.
+ */
+export async function reloadChatMessages(chatId: string): Promise<void> {
+  loadedChats.delete(chatId);
+  await ensureChatMessages(chatId);
 }
 
 /**
