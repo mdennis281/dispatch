@@ -262,6 +262,52 @@ describe("FailoverService", () => {
     expect(await f.onLimit("c1", "limit", clock)).toBeNull();
   });
 
+  /**
+   * Verbatim from chat SbSL5fxXS_QeZVAd5kNyN, which ended on a real Codex
+   * usage limit. Note there is no "resets" in it — `parseSessionLimit` cannot
+   * read this sentence at all, which is why the runtime's own `HarnessLimitHit`
+   * has to be what drives the decision.
+   */
+  const CODEX_LIMIT =
+    "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage " +
+    "to purchase more credits or try again at Oct 9th, 2026 5:12 PM.";
+
+  it("acts on the real Codex limit sentence, which carries no reset time", async () => {
+    await store.saveChat(chat("c2", { harness: "codex", subscriptionId: "codex1" }));
+    const f = makeService();
+    // `resetsAt` undefined is the live case when the rate-limit snapshot has
+    // not arrived — the move must still happen.
+    const moved = await f.onLimit("c2", CODEX_LIMIT, undefined);
+    expect(moved?.to.id).toBe("claude1");
+    expect(switched).toEqual([{ chatId: "c2", subscriptionId: "claude1" }]);
+  });
+
+  it("ignores the SECOND report of one limit instead of burning the new account", async () => {
+    // That transcript ends with `usage_limit` and then `failed` 24ms apart,
+    // both carrying the sentence above. By the second one the chat is already
+    // on claude1, so acting on it would mark claude1 dead and move off it.
+    await store.saveChat(chat("c2", { harness: "codex", subscriptionId: "codex1" }));
+    const f = makeService();
+    expect((await f.onLimit("c2", CODEX_LIMIT, undefined))?.to.id).toBe("claude1");
+    await store.saveChat(chat("c2", { harness: "claude", subscriptionId: "claude1" }));
+    clock += 24;
+    expect(await f.onLimit("c2", CODEX_LIMIT, undefined)).toBeNull();
+    expect(switched).toHaveLength(1);
+    // And claude1 — the account it just moved TO — is still considered usable.
+    await store.saveChat(chat("c3", { subscriptionId: "codex1", harness: "codex" }));
+    clock += 60_001;
+    expect((await f.onLimit("c3", CODEX_LIMIT, undefined))?.to.id).toBe("claude1");
+  });
+
+  it("still acts on a genuine later limit once the cooldown has passed", async () => {
+    const f = makeService();
+    expect((await f.onLimit("c1", "limit", clock + 600_000))?.to.id).toBe("claude2");
+    await store.saveChat(chat("c1", { subscriptionId: "claude2" }));
+    // Far enough out to be a real second limit, and claude1 is free again.
+    clock += 60_001 + 600_000;
+    expect((await f.onLimit("c1", "limit", clock + 600_000))?.to.id).toBe("claude1");
+  });
+
   it("reports a failed switch rather than claiming the chat moved", async () => {
     switchFails = "session transfer exploded";
     const f = makeService();

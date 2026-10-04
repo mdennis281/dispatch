@@ -47,6 +47,23 @@ import { readAccountUsage, usageExhausted, type AccountUsage, type UsageReadDeps
 /** How long an account stays marked dead when the limit named no reset time. */
 const UNKNOWN_RESET_MS = 60 * 60_000;
 
+/**
+ * How long after moving a chat to ignore another limit report for it.
+ *
+ * ONE limit can end a turn TWICE. A real Codex transcript ends with a
+ * `usage_limit` result and a `failed` result 24ms apart, carrying the identical
+ * sentence — the inner turn's error, then the outer turn settling on it. Acting
+ * on the second is actively harmful: by then the chat is already on the
+ * fallback, so `from` resolves to the ACCOUNT WE JUST MOVED TO, which would be
+ * marked dead and moved off again — burning a healthy account and a tier per
+ * duplicate.
+ *
+ * A window rather than de-duplicating on the reason text, because the two rows
+ * are not guaranteed to be identical and a genuine second limit cannot arrive
+ * this fast: the new account would have to run a whole turn first.
+ */
+const MOVE_COOLDOWN_MS = 60_000;
+
 /** A completed move. */
 export interface FailoverResult {
   from: ResolvedSubscription;
@@ -77,6 +94,8 @@ export class FailoverService {
   private readonly now: () => number;
   /** subscription id → epoch ms its window reopens. See the header. */
   private readonly dead = new Map<string, number>();
+  /** chat id → when it last moved. See {@link MOVE_COOLDOWN_MS}. */
+  private readonly moved = new Map<string, number>();
 
   constructor(opts: FailoverServiceOpts) {
     this.store = opts.store;
@@ -162,6 +181,10 @@ export class FailoverService {
   ): Promise<FailoverResult | null> {
     const chat = await this.store.getChat(chatId).catch(() => null);
     if (!chat) return null;
+    // The same limit, reported a second time. Nothing to do and real harm
+    // available if we try — see MOVE_COOLDOWN_MS.
+    const lastMove = this.moved.get(chatId);
+    if (lastMove !== undefined && this.now() - lastMove < MOVE_COOLDOWN_MS) return null;
     const settings = await this.store.getSettings().catch(() => null);
     const from = chatSubscription(settings, {
       harness: chat.harness ?? DEFAULT_HARNESS,
@@ -179,6 +202,7 @@ export class FailoverService {
     );
     try {
       await this.switchTo(chatId, to.id);
+      this.moved.set(chatId, this.now());
     } catch (err) {
       this.notice(
         chatId,
