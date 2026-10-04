@@ -34,11 +34,11 @@ export function Gauge({
   tone: string;
   layout: GaugeLayout;
   className?: string;
-  /** The bar or sparkline. */
-  children: ReactNode;
+  /** The bar or sparkline — absent in the `bare` layout. */
+  children?: ReactNode;
 }) {
   return (
-    <span className={cn("flex items-center", layout === "stacked" ? "gap-2" : "gap-1.5", className)}>
+    <span className={cn("flex items-center", GAUGE_GAP[layout], className)}>
       <span
         className={cn(
           "text-2xs font-semibold uppercase leading-none tracking-[0.09em] text-faint",
@@ -68,8 +68,32 @@ export function Gauge({
  * each line exactly as tall as the bar's own (see `--tb-l1` in index.css), so a
  * reading sits level with the icons beside it instead of floating between them.
  * `inline` is the single row everywhere else.
+ *
+ * `bare` is the same row on a PHONE: label and figure, no chart and no bar. A
+ * 48px sparkline is 13% of a 390px row spent on a trend nobody reads at that
+ * size, and dropping the three shapes is what buys the room to show all three
+ * readings rather than only usage.
  */
-export type GaugeLayout = "stacked" | "inline";
+export type GaugeLayout = "stacked" | "inline" | "bare";
+
+/**
+ * Space between a gauge's label, shape and figure.
+ *
+ * `bare` has no shape between them, so the same 1.5 that separated three parts
+ * reads as a gap in the middle of a two-part reading — it closes up.
+ */
+const GAUGE_GAP: Record<GaugeLayout, string> = {
+  stacked: "gap-2",
+  inline: "gap-1.5",
+  bare: "gap-1",
+};
+
+/**
+ * The layouts that draw a shape at all — everything but `bare`. Typing `CHART`
+ * and `BAR_W` to this is what makes a meter prove it checked for `bare` before
+ * reaching for a width.
+ */
+export type ShapedLayout = Exclude<GaugeLayout, "bare">;
 
 /**
  * Chart size per layout.
@@ -79,13 +103,13 @@ export type GaugeLayout = "stacked" | "inline";
  * trend off and a squiggle. Inline stays short enough for a 44px row to keep its
  * air.
  */
-export const CHART: Record<GaugeLayout, { width: number; height: number }> = {
+export const CHART: Record<ShapedLayout, { width: number; height: number }> = {
   stacked: { width: 76, height: 18 },
   inline: { width: 48, height: 14 },
 };
 
 /** Bar width per layout, matched to the chart so the columns line up. */
-export const BAR_W: Record<GaugeLayout, string> = {
+export const BAR_W: Record<ShapedLayout, string> = {
   stacked: "w-[76px]",
   inline: "w-12",
 };
@@ -108,6 +132,10 @@ export const GAUGE_TRIGGER: Record<GaugeLayout, string> = {
     "before:transition-colors hover:before:bg-active",
   ),
   inline: "flex items-center gap-3 rounded-md px-1.5 py-1 transition-colors hover:bg-active",
+  // Tighter than `inline` on both axes because the row is 390px wide, and
+  // TALLER — `py-1.5` — because on a phone this box is tapped rather than
+  // pointed at, and the hover fill it keeps is never what reveals the card there.
+  bare: "flex items-center gap-2 rounded-md px-1 py-1.5 transition-colors hover:bg-active",
 };
 
 /**

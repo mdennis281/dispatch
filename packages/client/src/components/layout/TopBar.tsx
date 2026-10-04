@@ -60,13 +60,17 @@ import { useWindowControlsOverlay } from "../../lib/windowControls.js";
  * less.
  *
  * A PHONE keeps the single row at touch height and drops to the essentials —
- * the destinations live in the bottom nav's More sheet there.
+ * the destinations live in the bottom nav's More sheet there. The readings stay,
+ * stripped to their figures: CPU, memory and usage are three ~50px words, which
+ * is what a sparkline alone used to cost.
  */
 export function TopBar() {
   const overlay = useWindowControlsOverlay();
   // At phone width the bar has ~390px minus the safe insets to spend, so
-  // everything that repeats information goes. What's left is what nothing else
-  // in the shell says: the mark and its connection, the palette, and usage.
+  // everything that repeats information goes, and what stays loses its chrome:
+  // the mark and its connection, the palette, the attention glyph, and all
+  // three readings as FIGURES — see the `bare` layout in Gauge. The numbers are
+  // what nothing else in the shell says; the sparklines were what did not fit.
   const compact = useLayout((s) => s.mode) === "sm";
   const [paletteOpen, setPaletteOpen] = useState(false);
   const openPalette = () => setPaletteOpen(true);
@@ -158,13 +162,21 @@ function SlimBar({ compact, onSearch }: BarProps) {
       >
         <BrandLockup size={compact ? "mark" : "row"} />
         <div aria-hidden className="min-w-0 flex-1" />
-        {!compact && (
-          <div className="flex items-center @max-[50rem]/topbar:hidden">
-            <ResourceMeter layout="inline" />
-            <GaugeSep layout="inline" />
-          </div>
-        )}
-        <UsageMeter layout="inline" />
+        {/* The same three readings a wide window gets — on a phone as figures
+            only (`bare`). The machine's pair goes first below 22rem: at 320px
+            the mark, usage and two icons already fill the row, and measured
+            there CPU/MEM pushed the search icon off the edge. */}
+        <div
+          className={
+            compact
+              ? "flex items-center @max-[22rem]/topbar:hidden"
+              : "flex items-center @max-[50rem]/topbar:hidden"
+          }
+        >
+          <ResourceMeter layout={compact ? "bare" : "inline"} />
+          <GaugeSep layout={compact ? "bare" : "inline"} />
+        </div>
+        <UsageMeter layout={compact ? "bare" : "inline"} />
         <Actions
           compact={compact}
           onSearch={onSearch}
