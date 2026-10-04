@@ -11,9 +11,22 @@ export interface ChatPage {
   hasMore: boolean;
   /** An older page is in flight (drives the top spinner + dedupes concurrent loads). */
   loadingOlder: boolean;
+  /**
+   * How the NEWEST page — the one `ensureChatMessages` fetches on open — went.
+   *
+   * Exists because `byChat[chatId] === undefined` cannot answer that question.
+   * It is equally "never asked", "asked and still waiting" and "asked and the
+   * request failed", and the transcript rendered all three as the cheerful
+   * empty state: "No messages yet. Send a message below to start the turn." On
+   * a loaded machine, where that fetch fails often enough to notice, the app was
+   * confidently telling people their chat history did not exist.
+   *
+   * `failed` is only reached once the retries in `ensureChatMessages` are spent.
+   */
+  load: "idle" | "loading" | "ready" | "failed";
 }
 
-const DEFAULT_PAGE: ChatPage = { hasMore: false, loadingOlder: false };
+const DEFAULT_PAGE: ChatPage = { hasMore: false, loadingOlder: false, load: "idle" };
 
 /**
  * Ceiling on how many rows a chat's window keeps once live rows start arriving.
@@ -272,7 +285,14 @@ export const useMessages = create<MessagesStore>((set) => ({
   evictExcept: (keep) =>
     set((s) => {
       const keepSet = new Set(keep);
-      const stale = Object.keys(s.byChat).filter((id) => !keepSet.has(id));
+      // The union of both maps, not just `byChat`. A chat whose transcript
+      // FAILED to load has a `pages` entry (holding `load: "failed"`) and no
+      // `byChat` entry at all, so keying the sweep off transcripts alone would
+      // leave those behind forever — and a stale `failed` is worse than a leak:
+      // it is what the chat shows if it is ever re-opened without a re-fetch.
+      const stale = [...new Set([...Object.keys(s.byChat), ...Object.keys(s.pages)])].filter(
+        (id) => !keepSet.has(id),
+      );
       if (stale.length === 0) return {};
       const byChat = { ...s.byChat };
       const pages = { ...s.pages };

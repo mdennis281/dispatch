@@ -48,15 +48,55 @@ async function ensureDir(path: string): Promise<void> {
 }
 
 /**
- * Errors a replace-existing rename raises on Windows when the DESTINATION is
- * momentarily held open by someone else. Not a permissions problem despite the
- * name — retrying is the correct response.
+ * Errors Windows raises when a file is momentarily held open by someone else —
+ * on a replace-existing rename whose DESTINATION is held, and equally on an
+ * `open`/`readFile` of a file held without `FILE_SHARE_READ`. Not a permissions
+ * problem despite the names; retrying is the correct response.
  */
-const RENAME_CONTENTION_CODES = new Set(["EPERM", "EACCES", "EBUSY"]);
+const CONTENTION_CODES = new Set(["EPERM", "EACCES", "EBUSY"]);
 
 /** ~1.3s of total patience: 10, 20, 40, 80, 160, 200, 200, 200, 200, 200 ms. */
-const RENAME_RETRY_ATTEMPTS = 10;
-const RENAME_RETRY_MAX_DELAY_MS = 200;
+const RETRY_ATTEMPTS = 10;
+const RETRY_MAX_DELAY_MS = 200;
+
+/**
+ * Run `op`, retrying through transient Windows file-sharing contention.
+ *
+ * Both halves of the Store need this and only the write half used to have it.
+ * A scanner that holds a file open costs a rename its delete access (see
+ * {@link renameWithRetry}) and costs a READER its open outright — and a reader
+ * that gives up on the first EBUSY is worse than one that gives up on a write,
+ * because the write has a caller who will try again and the read answers an
+ * HTTP request that fails ONCE and is never retried. That is exactly how
+ * opening a chat on a busy box rendered an empty transcript: one transient lock
+ * on `messages.jsonl` became a 500, and the client could not tell the result
+ * apart from a chat with no messages in it.
+ *
+ * Only the SYSCALL belongs inside this. Wrapping the parse too would retry real
+ * corruption ten times before surfacing it.
+ *
+ * Exhaustion rethrows the FIRST error, not the latest: by the time backoff is
+ * done every frame above has unwound, so only the first one still names the
+ * caller whose read was lost.
+ */
+export async function retryOnContention<T>(op: () => Promise<T>): Promise<T> {
+  let delay = 10;
+  let firstErr: unknown;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await op();
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      // Not contention — a real error (ENOENT, ENOSPC…). Surface it as-is and
+      // immediately; it is never the one we are being patient about.
+      if (!code || !CONTENTION_CODES.has(code)) throw err;
+      firstErr ??= err;
+      if (attempt >= RETRY_ATTEMPTS - 1) throw firstErr;
+      await new Promise((r) => setTimeout(r, delay));
+      delay = Math.min(delay * 2, RETRY_MAX_DELAY_MS);
+    }
+  }
+}
 
 /**
  * `rename(tmp, path)`, retried through transient Windows destination-locking.
@@ -104,28 +144,12 @@ export async function renameWithRetry(
   // Windows handle, which is neither cheap nor available on a Linux runner.
   renameFn: (from: string, to: string) => Promise<void> = rename,
 ): Promise<void> {
-  let delay = 10;
-  // The FIRST contention error, kept so exhaustion can rethrow it — see the
-  // docblock. Review caught that this used to throw the latest `err` instead,
-  // which is the one raised ~1.3s into backoff: by then every frame above us
-  // has unwound, so its stack no longer shows which caller's write was lost.
-  // The first one is raised on the original call path and still names it.
-  let firstErr: unknown;
-  for (let attempt = 0; ; attempt++) {
-    try {
-      await renameFn(tmp, path);
-      return;
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      // Not contention — a real error (ENOENT, ENOSPC…). Surface it as-is and
-      // immediately; it is never the one we are being patient about.
-      if (!code || !RENAME_CONTENTION_CODES.has(code)) throw err;
-      firstErr ??= err;
-      if (attempt >= RENAME_RETRY_ATTEMPTS - 1) throw firstErr;
-      await new Promise((r) => setTimeout(r, delay));
-      delay = Math.min(delay * 2, RENAME_RETRY_MAX_DELAY_MS);
-    }
-  }
+  // The backoff, the code set and the rethrow-the-FIRST-error rule all live in
+  // {@link retryOnContention} now, because the read path needs the identical
+  // policy. Review caught that this used to rethrow the LATEST error, which is
+  // the one raised ~1.3s into backoff: by then every frame above has unwound,
+  // so its stack no longer shows which caller's write was lost.
+  await retryOnContention(() => renameFn(tmp, path));
 }
 
 /** Atomically write pretty JSON to `path` (temp file + rename). */
@@ -176,7 +200,7 @@ export function isMissing(err: unknown): boolean {
 export async function readJson<T = unknown>(path: string): Promise<T | undefined> {
   let raw: string;
   try {
-    raw = await readFile(path, "utf8");
+    raw = await retryOnContention(() => readFile(path, "utf8"));
   } catch (err) {
     if (isMissing(err)) return undefined;
     throw err;
@@ -245,7 +269,7 @@ export async function readJsonl(path: string): Promise<unknown[]> {
 export async function readJsonlLines(path: string): Promise<string[]> {
   let raw: string;
   try {
-    raw = await readFile(path, "utf8");
+    raw = await retryOnContention(() => readFile(path, "utf8"));
   } catch (err) {
     if (isMissing(err)) return [];
     throw err;
@@ -368,7 +392,10 @@ export async function readJsonlTail(path: string, n: number): Promise<string[]> 
   if (n <= 0) return [];
   let fh: Awaited<ReturnType<typeof open>>;
   try {
-    fh = await open(path, "r");
+    // Only the OPEN is retried. Once the handle exists the sharing mode is
+    // settled, so the positional reads below cannot hit contention — and
+    // wrapping them would re-read bytes we already hold.
+    fh = await retryOnContention(() => open(path, "r"));
   } catch (err) {
     if (isMissing(err)) return [];
     throw err;

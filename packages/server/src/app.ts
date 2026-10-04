@@ -25,6 +25,7 @@ import { migrateManagerToolNames } from "./services/manager-tool-migration.js";
 import { isManagerBridgePath } from "./services/mcp/manager-http.js";
 import { healthReport } from "./health.js";
 import { startPerfMonitor } from "./perf.js";
+import { registerRequestLog } from "./request-log.js";
 import { AuthService, type RequestIdentity } from "./services/auth.js";
 import { realProjects } from "@dispatch/shared";
 
@@ -104,6 +105,11 @@ export async function buildApp(
     try { done(null, JSON.parse(body) as unknown); }
     catch { done(Object.assign(new Error("Invalid JSON body."), { statusCode: 400 })); }
   });
+
+  // Before the routes, so the hooks see every one of them. The companion to
+  // `perf.log`: that one says the loop stalled, this one says which request it
+  // cost. Neither writes a byte while the server is healthy.
+  registerRequestLog(app, { dataDir: config.dataDir });
 
   app.decorate("cm", { config, store, bus } satisfies CmContext);
   app.decorate("services", services);

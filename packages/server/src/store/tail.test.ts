@@ -19,13 +19,36 @@ import type { Project, Chat } from "@dispatch/shared";
  */
 const hoisted = vi.hoisted(() => ({
   readdirOverride: null as null | (() => Promise<never>),
+  /**
+   * Fail the next N `open`/`readFile` calls with this code, then pass through.
+   * Models the scanner that holds a transcript open for a few hundred ms — the
+   * contention the read path now retries. Counted so a test can assert the
+   * retry actually happened rather than that the read merely succeeded.
+   */
+  failReads: null as null | { code: string; remaining: number; attempts: number },
 }));
+function maybeFailRead(): Error | null {
+  const f = hoisted.failReads;
+  if (!f) return null;
+  f.attempts++;
+  if (f.remaining <= 0) return null;
+  f.remaining--;
+  return Object.assign(new Error(f.code), { code: f.code });
+}
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
   return {
     ...actual,
     readdir: (...args: Parameters<typeof actual.readdir>) =>
       hoisted.readdirOverride ? hoisted.readdirOverride() : actual.readdir(...args),
+    open: (...args: Parameters<typeof actual.open>) => {
+      const err = maybeFailRead();
+      return err ? Promise.reject(err) : actual.open(...args);
+    },
+    readFile: (...args: Parameters<typeof actual.readFile>) => {
+      const err = maybeFailRead();
+      return err ? Promise.reject(err) : actual.readFile(...args);
+    },
   };
 });
 
@@ -39,6 +62,7 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   hoisted.readdirOverride = null;
+  hoisted.failReads = null;
   store.close();
   await rm(dir, { recursive: true, force: true });
 });
@@ -303,5 +327,85 @@ describe("Store.listChats — error handling", () => {
     hoisted.readdirOverride = () =>
       Promise.reject(Object.assign(new Error("permission denied"), { code: "EACCES" }));
     await expect(store.listChats()).rejects.toThrow("permission denied");
+  });
+});
+
+/* ------------------------------------------- read-side contention (Windows) */
+
+/**
+ * The read half of the lesson `renameWithRetry` taught the write half.
+ *
+ * A scanner holding `messages.jsonl` open without FILE_SHARE_READ makes the
+ * reader's `open` fail EBUSY/EPERM/EACCES for as long as it holds on. Writes
+ * have ridden that out since the EPERM-on-rename fix; reads caught only ENOENT
+ * and threw everything else, so one transient lock became a 500 on
+ * `GET /api/chats/:id/messages` — which the client rendered as the chat having
+ * no messages in it. These pin the policy; the real handle was verified by hand
+ * (a PowerShell holder with share mode None), since provoking it costs a second
+ * process and asserts nothing off Windows.
+ */
+describe("transcript reads ride out transient file-sharing contention", () => {
+  const rows = (n: number) =>
+    Array.from({ length: n }, (_, i) => JSON.stringify({ id: `m${i}`, v: i })).join("\n") + "\n";
+
+  it("readJsonlTail retries a locked open and returns the real rows", async () => {
+    const file = join(dir, "t.jsonl");
+    await writeFile(file, rows(5), "utf8");
+
+    hoisted.failReads = { code: "EBUSY", remaining: 2, attempts: 0 };
+    const lines = await readJsonlTail(file, 3);
+
+    expect(lines).toHaveLength(3);
+    expect(JSON.parse(lines[2]!)).toMatchObject({ id: "m4" });
+    // Two rejections plus the one that worked: the retry ran, rather than the
+    // read happening to dodge the lock.
+    expect(hoisted.failReads.attempts).toBe(3);
+  });
+
+  it("readJsonlLines retries a locked read too", async () => {
+    const file = join(dir, "l.jsonl");
+    await writeFile(file, rows(4), "utf8");
+
+    hoisted.failReads = { code: "EPERM", remaining: 2, attempts: 0 };
+    expect(await readJsonlLines(file)).toHaveLength(4);
+    expect(hoisted.failReads.attempts).toBe(3);
+  });
+
+  it("a missing file is still absence, not contention — answered at once", async () => {
+    hoisted.failReads = { code: "ENOENT", remaining: 99, attempts: 0 };
+    expect(await readJsonlTail(join(dir, "nope.jsonl"), 10)).toEqual([]);
+    // ONE attempt. Retrying absence would put ~1.3s of backoff in front of
+    // every read of a chat that has not written its first row yet.
+    expect(hoisted.failReads.attempts).toBe(1);
+  });
+
+  it("gives up on a lock that never clears rather than hanging forever", async () => {
+    const file = join(dir, "held.jsonl");
+    await writeFile(file, rows(2), "utf8");
+
+    hoisted.failReads = { code: "EBUSY", remaining: 99, attempts: 0 };
+    await expect(readJsonlTail(file, 2)).rejects.toMatchObject({ code: "EBUSY" });
+    // The budget is 10 attempts (~1.3s). A file genuinely pinned open is a real
+    // error and must surface as one; hiding it behind an unbounded retry would
+    // move the hang somewhere worse.
+    expect(hoisted.failReads.attempts).toBe(10);
+  });
+
+  it("the whole windowed read survives it — readMessages, not just the primitive", async () => {
+    await store.saveChat(chat("c-busy", "p1"));
+    for (let i = 0; i < 4; i++) {
+      await store.appendMessage({
+        kind: "user",
+        id: `msg-${i}`,
+        chatId: "c-busy",
+        ts: 1000 + i,
+        text: `hello ${i}`,
+      });
+    }
+
+    hoisted.failReads = { code: "EBUSY", remaining: 2, attempts: 0 };
+    const got = await store.readMessages("c-busy", { limit: 2 });
+
+    expect(got.map((m) => m.id)).toEqual(["msg-2", "msg-3"]);
   });
 });
