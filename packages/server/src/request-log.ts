@@ -18,15 +18,16 @@
  * `store/fsq.ts`), but the general lesson is the one worth keeping: a failure
  * nothing writes down is a failure nobody can fix.
  *
- * Output: `<dataDir>/requests.log`, one line per 5xx and per request slower
- * than {@link SLOW_REQUEST_MS}. Rotated past {@link REQUEST_LOG_MAX_BYTES}.
+ * Output: `<dataDir>/requests.log`, ONE line per 5xx and per request slower
+ * than {@link SLOW_REQUEST_MS} — one per REQUEST, not one per hook that saw
+ * it. Rotated past {@link REQUEST_LOG_MAX_BYTES}.
  * A healthy server writes nothing at all, so an idle instance never grows the
  * file — the same bargain `perf.log` makes, and for the same reason: a
  * diagnostic that costs disk when there is nothing wrong gets turned off.
  */
 import { appendFile, rename, stat } from "node:fs/promises";
 import { join } from "node:path";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 
 /**
  * A request slower than this is logged even when it succeeded.
@@ -161,33 +162,49 @@ export function registerRequestLog(
     await log.flush();
   });
 
-  // The error as THROWN, with its stack. `onResponse` sees only the status
-  // code, and "500" without the stack is barely more useful than silence — it
-  // is the difference between knowing a transcript read failed and knowing it
+  // The thrown error, STASHED rather than written.
+  //
+  // Both hooks fire for one request when a handler throws: the default error
+  // handler sets the status and completes the reply, so `onResponse` runs
+  // after `onError`. Writing in both logged every thrown failure twice —
+  // exactly the failures this file exists for, so `requests.log` filled and
+  // rotated at double rate under the overload it is meant to diagnose.
+  //
+  // The write therefore happens in `onResponse` alone, because `onError` has
+  // nothing to report yet: measured against this repo's fastify, `elapsedTime`
+  // is 0 and `statusCode` is still 200 inside it. This hook only carries the
+  // stack forward — "500" without it is barely more useful than silence, being
+  // the difference between knowing a transcript read failed and knowing it
   // failed on EBUSY opening `messages.jsonl`.
+  //
+  // A WeakMap rather than a property on the request: no module augmentation,
+  // and an aborted request that never reaches `onResponse` is collected rather
+  // than retained.
+  const thrown = new WeakMap<FastifyRequest, Error>();
   app.addHook("onError", async (req, _reply, err) => {
+    thrown.set(req, err);
+  });
+
+  // Every outcome, exactly once: a thrown 5xx (with the stack from above), a
+  // REPLIED 5xx (`reply.code(500).send`, which never reaches `onError`), and a
+  // slow success, which reaches neither any other way.
+  app.addHook("onResponse", async (req, reply) => {
+    const ms = Math.round(reply.elapsedTime);
+    const slow = ms >= SLOW_REQUEST_MS && !SLOW_EXEMPT.some((p) => req.url.startsWith(p));
+    if (reply.statusCode < 500 && !slow) return;
+    const err = thrown.get(req);
+    const what = reply.statusCode >= 500 ? "failed" : "slow";
     // ASCII only, including the separator. This file is read with whatever the
     // operator's console defaults to — `Get-Content` on Windows PowerShell is
     // not UTF-8 — and an em-dash came back as mojibake in the middle of the one
     // line you are squinting at.
     log.write(
-      `${stamp()} error ${routeOf(req.method, req.routeOptions?.url, req.url)} - ` +
-        `${describe(err)}\n` +
-        `    ${(err.stack ?? "").split("\n").slice(1).join("\n    ").trimEnd()}`,
-    );
-  });
-
-  // Outcomes. A 5xx that was REPLIED rather than thrown (`reply.code(500).send`)
-  // never reaches `onError`, so this is not redundant with the hook above — and
-  // a slow success reaches neither any other way.
-  app.addHook("onResponse", async (req, reply) => {
-    const ms = Math.round(reply.elapsedTime);
-    const slow = ms >= SLOW_REQUEST_MS && !SLOW_EXEMPT.some((p) => req.url.startsWith(p));
-    if (reply.statusCode < 500 && !slow) return;
-    const what = reply.statusCode >= 500 ? "failed" : "slow";
-    log.write(
       `${stamp()} ${what} ${reply.statusCode} ${ms}ms ` +
-        routeOf(req.method, req.routeOptions?.url, req.url),
+        routeOf(req.method, req.routeOptions?.url, req.url) +
+        (err
+          ? ` - ${describe(err)}\n    ` +
+            (err.stack ?? "").split("\n").slice(1).join("\n    ").trimEnd()
+          : ""),
     );
   });
 

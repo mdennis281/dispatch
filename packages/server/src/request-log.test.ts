@@ -71,12 +71,20 @@ describe("requests.log", () => {
     expect(await logText()).toBe("");
   });
 
-  it("records a THROWN failure with its errno and stack", async () => {
+  it("records a THROWN failure ONCE, with its errno, status, duration and stack", async () => {
     const res = await app.inject({ method: "GET", url: "/api/chats/c1/messages?limit&beforeId" });
     expect(res.statusCode).toBe(500);
     await app.close();
 
     const text = await logText();
+    // ONE line, not two. Fastify runs `onError` AND `onResponse` for a single
+    // thrown request (verified against this repo's fastify), so writing in both
+    // doubled the volume for exactly the failures this file exists to record.
+    // Counted by timestamp, since the stack below is itself multi-line.
+    expect(text.match(/^\[\d{4}-/gm) ?? []).toHaveLength(1);
+    // And the one line is the COMPLETE one: `onError` cannot supply these two —
+    // measured there, `elapsedTime` is 0 and `statusCode` is still 200.
+    expect(text).toMatch(/failed 500 \d+ms GET \/api\/chats\/:id\/messages/);
     // The errno is the point. "500" alone does not distinguish a locked file
     // from a bug, and that distinction is the whole reason this file exists.
     expect(text).toContain("EBUSY: messages.jsonl is held open");
@@ -86,13 +94,19 @@ describe("requests.log", () => {
     // defaults to, which on Windows PowerShell is not UTF-8.
     expect(text).not.toMatch(/[^\x00-\x7F]/);
     expect(text).toMatch(/at .+request-log\.test/); // a real stack, not just the message
-    expect(text).toContain("error GET /api/chats/:id/messages");
+    // The ROUTE pattern, so these lines group — never the interpolated id.
+    expect(text).toContain("GET /api/chats/:id/messages");
   });
 
   it("records a REPLIED 5xx, which never reaches onError", async () => {
     expect((await app.inject({ method: "GET", url: "/api/replied" })).statusCode).toBe(503);
     await app.close();
-    expect(await logText()).toMatch(/failed 503 \d+ms GET \/api\/replied/);
+
+    const text = await logText();
+    expect(text).toMatch(/failed 503 \d+ms GET \/api\/replied/);
+    // Also exactly one line, and no stack: nothing was thrown, so there is no
+    // call path to report and the line stays a single row.
+    expect(text.trimEnd().split("\n")).toHaveLength(1);
   });
 
   it("records a slow SUCCESS — a 200 that never came back in time looks the same from the app", async () => {
