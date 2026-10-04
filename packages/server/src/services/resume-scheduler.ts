@@ -24,6 +24,8 @@ import {
 } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
+import type { HarnessLimitHit } from "../harness/types.js";
+import type { FailoverResult } from "./failover.js";
 
 /** `setTimeout` silently fires immediately past this; re-arm in hops instead. */
 const MAX_TIMER_MS = 2_147_483_000;
@@ -32,6 +34,19 @@ const MAX_TIMER_MS = 2_147_483_000;
 export const RESUME_PROMPT =
   "The usage limit has lifted. Continue where you left off — pick up the task " +
   "you were working on when the session was interrupted.";
+
+/**
+ * What we say after moving the chat to another login instead of waiting.
+ *
+ * Deliberately does NOT name the account. The model has no business adapting to
+ * which subscription is paying — and across providers it has just been handed a
+ * transcript, so "carry on from where the transcript leaves off" is the only
+ * instruction that is true on both paths.
+ */
+export const FAILOVER_PROMPT =
+  "The previous account hit its usage limit, so this chat has been moved to a " +
+  "fallback account. Continue where you left off — pick up the task you were " +
+  "working on when the session was interrupted.";
 
 export interface ResumeSchedulerDeps {
   now?: () => number;
@@ -51,6 +66,20 @@ export interface ResumeSchedulerOpts {
    * DISPATCH talking, and must not be rendered as something the human typed.
    */
   send: (chatId: string, text: string, parts?: MessagePart[]) => Promise<void>;
+  /**
+   * Try another subscription instead of waiting out the window.
+   *
+   * Optional, and absent behaves exactly as this service did before failover
+   * existed. It is consulted FIRST: parking a chat for four hours when a second
+   * login is sitting idle is the worse answer, and it is the one we used to
+   * always give. Resolving null means there was nowhere to go, and the window
+   * timer is armed as usual.
+   */
+  failover?: (
+    chatId: string,
+    reason: string,
+    resetsAt: number | undefined,
+  ) => Promise<FailoverResult | null>;
   deps?: ResumeSchedulerDeps;
 }
 
@@ -62,6 +91,7 @@ export class ResumeScheduler {
     text: string,
     parts?: MessagePart[],
   ) => Promise<void>;
+  private readonly failover?: ResumeSchedulerOpts["failover"];
   private readonly now: () => number;
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
   private readonly clearTimer: (handle: unknown) => void;
@@ -75,6 +105,7 @@ export class ResumeScheduler {
     this.store = opts.store;
     this.bus = opts.bus;
     this.send = opts.send;
+    this.failover = opts.failover;
     this.now = opts.deps?.now ?? (() => Date.now());
     this.setTimer =
       opts.deps?.setTimer ??
@@ -95,14 +126,54 @@ export class ResumeScheduler {
   }
 
   /**
-   * A turn ended with an error — plan a resume if it was a usage limit.
-   * Returns the plan, or null when the error was something else entirely.
+   * A turn ended with an error — act on it if it was a usage limit.
+   *
+   * Two outcomes, in order of preference. If a fallback account can take the
+   * work, the chat MOVES and continues within seconds; nothing is armed, and
+   * this returns null because there is no plan to wait out. Otherwise the
+   * original behaviour: persist a plan and continue when the window reopens.
+   *
+   * `hit` is the runtime's own normalized limit, when it gave one. Codex reports
+   * an exact reset timestamp and a reason that the Claude-shaped regex in
+   * `parseSessionLimit` cannot read, so preferring it is what makes a Codex
+   * limit actionable at all rather than silently falling through as an ordinary
+   * error.
    */
-  async onTurnError(chatId: string, reason: string | undefined): Promise<ResumePlan | null> {
+  async onTurnError(
+    chatId: string,
+    reason: string | undefined,
+    hit?: HarnessLimitHit,
+  ): Promise<ResumePlan | null> {
     if (this.disposed) return null;
-    const limit = parseSessionLimit(reason, this.now());
-    if (!limit || !reason) return null;
-    const plan: ResumePlan = { at: limit.resetsAt, reason, prompt: RESUME_PROMPT };
+    const parsed = parseSessionLimit(reason, this.now());
+    const text = reason ?? hit?.reason;
+    // A limit at all: either the runtime said so outright, or the sentence parsed.
+    const resetsAt = hit?.resetsAt ?? parsed?.resetsAt;
+    if (!text || (!parsed && !hit)) return null;
+
+    const moved = await this.failover?.(chatId, text, resetsAt).catch(() => null);
+    if (moved) {
+      // `setSubscription` has already re-registered the session on the new
+      // account, so this send lands there. A `brief` for the same reason the
+      // window-reopened one is: nobody typed it.
+      try {
+        await this.send(chatId, FAILOVER_PROMPT, [
+          { kind: "brief", label: `Usage limit — continuing on ${moved.to.name}`, text: FAILOVER_PROMPT },
+        ]);
+      } catch (err) {
+        await this.notice(
+          chatId,
+          `Could not continue on ${moved.to.name}: ${err instanceof Error ? err.message : String(err)}`,
+          "error",
+        );
+      }
+      return null;
+    }
+
+    // Nowhere to fall back to. Wait the window out — which needs a reset time,
+    // so a limit whose reset we could not read stays an ordinary error.
+    if (resetsAt === undefined) return null;
+    const plan: ResumePlan = { at: resetsAt, reason: text, prompt: RESUME_PROMPT };
     const chat = await this.patch(chatId, plan);
     if (!chat) return null;
     this.arm(chatId, plan);

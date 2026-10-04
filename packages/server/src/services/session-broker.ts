@@ -227,6 +227,7 @@ import type {
   HarnessAccount,
   HarnessEvent,
   HarnessGuardBlockedEvent,
+  HarnessLimitHit,
   HarnessQuestion,
   HarnessQuestionAnswer,
   HarnessSession,
@@ -1306,9 +1307,14 @@ export interface SessionBrokerOptions {
   /**
    * Called when a turn ends in ERROR, with the SDK's message. The broker doesn't
    * interpret it — the ResumeScheduler decides whether it was a usage limit and
-   * schedules the chat to continue itself (see services/resume-scheduler.ts).
+   * either moves the chat to a fallback account or schedules it to continue
+   * itself (see services/resume-scheduler.ts).
+   *
+   * `hit` is the harness seam's already-normalized limit, forwarded rather than
+   * flattened into `reason`: it carries an exact reset timestamp for the
+   * runtimes that report one, which no amount of parsing the prose recovers.
    */
-  onTurnError?: (chatId: string, reason: string | undefined) => void;
+  onTurnError?: (chatId: string, reason: string | undefined, hit?: HarnessLimitHit) => void;
   deps?: SessionBrokerDeps;
 }
 
@@ -2264,7 +2270,7 @@ export class SessionBroker {
   private readonly inspect?: BrokerInspect;
   private readonly metrics?: MetricsService;
   /** Settable after construction — the scheduler is built after the broker. */
-  onTurnError?: (chatId: string, reason: string | undefined) => void;
+  onTurnError?: (chatId: string, reason: string | undefined, hit?: HarnessLimitHit) => void;
   /**
    * Hand a freshly-created PR to the review watcher. Settable after construction
    * for the same reason as `onTurnError`: the watcher is built after the broker.
@@ -5054,7 +5060,7 @@ export class SessionBroker {
           turnCostUsd: endTurnCost,
         });
         session.turn += 1;
-        if (!ok) this.onTurnError?.(session.chatId, event.result ?? event.limit?.reason);
+        if (!ok) this.onTurnError?.(session.chatId, event.result ?? event.limit?.reason, event.limit);
         // `event.ok`, not `ok`: a stopped turn counts as settled for status, but
         // Stop must not be what kicks off an auto-compact turn.
         await this.compactIfPastThreshold(session, event.ok);

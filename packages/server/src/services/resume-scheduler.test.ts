@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { parseSessionLimit, composeMessageText, type Chat, type MessagePart } from "@dispatch/shared";
 import { Store } from "../store/index.js";
 import { EventBus } from "../bus.js";
-import { ResumeScheduler, RESUME_PROMPT } from "./resume-scheduler.js";
+import { ResumeScheduler, RESUME_PROMPT, FAILOVER_PROMPT } from "./resume-scheduler.js";
 
 /** The sentence the SDK actually ends the turn with (verbatim from a transcript). */
 const LIMIT = "You've hit your session limit · resets 4:50pm (America/Chicago)";
@@ -290,4 +290,148 @@ describe("ResumeScheduler", () => {
   });
 
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
+});
+
+describe("ResumeScheduler — falling back instead of waiting", () => {
+  // Re-declared rather than shared with the block above: these cases all turn
+  // on the failover seam, which the other block deliberately leaves unwired so
+  // it keeps asserting the pre-failover behaviour.
+  let dir: string;
+  let store: Store;
+  let bus: EventBus;
+  let timers: { id: number; fn: () => void; ms: number }[];
+  let sent: { text: string; parts?: MessagePart[] }[];
+  let calls: { reason: string; resetsAt: number | undefined }[];
+  let result: { to: { id: string; name: string } } | null;
+  const NOW = Date.parse("2026-08-01T18:00:00.000Z");
+  const LIMIT_SENTENCE = "You've hit your session limit · resets 4:50pm (America/Chicago)";
+  const RESET = Date.parse("2026-08-01T21:50:00.000Z");
+
+  function make() {
+    let nextId = 1;
+    return new ResumeScheduler({
+      store,
+      bus,
+      send: async (_chatId, text, parts) => void sent.push({ text, parts }),
+      failover: async (_chatId, reason, resetsAt) => {
+        calls.push({ reason, resetsAt });
+        return result as never;
+      },
+      deps: {
+        now: () => NOW,
+        setTimer: (fn, ms) => {
+          const id = nextId++;
+          timers.push({ id, fn, ms });
+          return id;
+        },
+        clearTimer: (h) => {
+          timers = timers.filter((t) => t.id !== h);
+        },
+        genId: () => `n${nextId++}`,
+      },
+    });
+  }
+
+  beforeEach(async () => {
+    dir = mkdtempSync(join(tmpdir(), "cm-resume-fo-"));
+    store = new Store(dir);
+    bus = new EventBus();
+    timers = [];
+    sent = [];
+    calls = [];
+    result = { to: { id: "claude2", name: "Two" } };
+    await store.saveChat({
+      id: "c1",
+      projectId: "p1",
+      title: "Work",
+      worktrees: [],
+      prs: [],
+      createdAt: NOW - 60_000,
+    } as Chat);
+  });
+
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it("prefers a fallback account over waiting out the window", async () => {
+    const s = make();
+    // No plan: there is nothing to wait for, so nothing is persisted or armed.
+    expect(await s.onTurnError("c1", LIMIT_SENTENCE)).toBeNull();
+    expect(s.isArmed("c1")).toBe(false);
+    expect((await store.getChat("c1"))?.resume).toBeUndefined();
+    // It continued immediately, as a brief rather than the human's own bubble.
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.text).toBe(FAILOVER_PROMPT);
+    expect(sent[0]!.parts?.[0]).toMatchObject({ kind: "brief" });
+    expect(sent[0]!.parts?.[0]).toMatchObject({ label: expect.stringContaining("Two") });
+  });
+
+  it("hands the parsed reset time to the failover so it can mark the account dead", async () => {
+    const s = make();
+    await s.onTurnError("c1", LIMIT_SENTENCE);
+    expect(calls).toEqual([{ reason: LIMIT_SENTENCE, resetsAt: RESET }]);
+  });
+
+  it("falls back on WAITING when there is nowhere to fall back to", async () => {
+    result = null;
+    const s = make();
+    const plan = await s.onTurnError("c1", LIMIT_SENTENCE);
+    expect(plan?.at).toBe(RESET);
+    expect(plan?.prompt).toBe(RESUME_PROMPT);
+    expect(s.isArmed("c1")).toBe(true);
+    expect(sent).toEqual([]);
+  });
+
+  it("never consults the failover for an error that isn't a limit", async () => {
+    const s = make();
+    expect(await s.onTurnError("c1", "Error: ECONNRESET")).toBeNull();
+    expect(calls).toEqual([]);
+    expect(sent).toEqual([]);
+  });
+
+  it("acts on a runtime-reported limit the Claude sentence regex cannot read", async () => {
+    // Codex reports a code plus an exact timestamp. Before the hit was
+    // forwarded this fell through as an ordinary error and did nothing at all.
+    const s = make();
+    expect(
+      await s.onTurnError("c1", "usage_limit_reached", {
+        reason: "usage_limit_reached",
+        resetsAt: RESET,
+      }),
+    ).toBeNull();
+    expect(calls).toEqual([{ reason: "usage_limit_reached", resetsAt: RESET }]);
+    expect(sent).toHaveLength(1);
+  });
+
+  it("waits out a runtime-reported limit when no fallback is available", async () => {
+    result = null;
+    const s = make();
+    const plan = await s.onTurnError("c1", "usage_limit_reached", {
+      reason: "usage_limit_reached",
+      resetsAt: RESET,
+    });
+    expect(plan?.at).toBe(RESET);
+  });
+
+  it("leaves a limit with no readable reset as an ordinary error", async () => {
+    // Nowhere to go AND no instant to wake at — there is nothing to schedule.
+    result = null;
+    const s = make();
+    expect(await s.onTurnError("c1", "You've hit your session limit")).toBeNull();
+    expect(s.isArmed("c1")).toBe(false);
+  });
+
+  it("treats a failover that throws as no fallback at all", async () => {
+    const s = new ResumeScheduler({
+      store,
+      bus,
+      send: async (_c, text, parts) => void sent.push({ text, parts }),
+      failover: async () => {
+        throw new Error("usage endpoint down");
+      },
+      deps: { now: () => NOW, setTimer: () => 1, clearTimer: () => {}, genId: () => "n1" },
+    });
+    const plan = await s.onTurnError("c1", LIMIT_SENTENCE);
+    expect(plan?.at).toBe(RESET);
+    expect(sent).toEqual([]);
+  });
 });

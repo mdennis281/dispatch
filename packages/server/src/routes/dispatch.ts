@@ -120,20 +120,47 @@ export async function createChat(
     await resolvePersona(services.authored, input.personaId, paths?.configDir);
   }
   const settings = await store.getSettings().catch(() => null);
-  const posture = resolveChatPosture(
-    enforceGlobalPosture(project.id, {
-      chat: {
-        harness: input.harness,
-        subscriptionId: input.subscriptionId,
-        modeId: input.modeId,
-        effort: input.effort,
-        model: input.model,
-      },
-      parent: input.parent,
-      project: services.projectConfig?.getDefaults(project.id),
-      settings,
-    }),
-  );
+  const resolve = (chat: {
+    harness?: HarnessKind;
+    subscriptionId?: string;
+    modeId?: string;
+    effort?: Effort;
+    model?: string;
+  }) =>
+    resolveChatPosture(
+      enforceGlobalPosture(project.id, {
+        chat,
+        parent: input.parent,
+        project: services.projectConfig?.getDefaults(project.id),
+        settings,
+      }),
+    );
+  const requested = {
+    harness: input.harness,
+    subscriptionId: input.subscriptionId,
+    modeId: input.modeId,
+    effort: input.effort,
+    model: input.model,
+  };
+  let posture = resolve(requested);
+  // Don't open a chat on a login that has nothing left. Without this the chat
+  // is created, the first turn dies on the limit, and the failover path picks it
+  // up a turn later — which works, but means every chat started after a limit
+  // has an error as its first row. See services/failover.ts.
+  const redirect = await services.failover
+    ?.redirectNewChat(posture.subscription.effective)
+    .catch(() => null);
+  if (redirect) {
+    posture = resolve({
+      ...requested,
+      harness: redirect.provider,
+      subscriptionId: redirect.id,
+      // A model id belongs to the provider that advertised it. Falling back
+      // across providers has to drop the pin and let the new one's default
+      // answer, or the first turn fails on an unknown model.
+      ...(redirect.provider === posture.harness.effective ? {} : { model: undefined }),
+    });
+  }
   const harness = posture.harness.effective;
   const now = Date.now();
   const chat: Chat = {
