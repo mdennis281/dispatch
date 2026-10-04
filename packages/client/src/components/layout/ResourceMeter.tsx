@@ -37,6 +37,13 @@
  * happened to leave in the store — is a figure that silently ages for as long as
  * the tab stays open. The split lives in the card, where it is fetched fresh.
  *
+ * ON A PHONE NEITHER LINE IS DRAWN. The `bare` layout keeps the two labels and
+ * the two figures and drops the charts (see `Gauge`): the readings are what the
+ * row has space for, the trend is not, and the card behind a tap still has both
+ * the split and the page link. Previously the whole meter was simply absent
+ * below `sm` — which is the width where "why is this so slow" is hardest to
+ * answer, since there is no task manager a thumb away.
+ *
  * TONE IS DRIVEN BY MEMORY, NOT CPU. Pegged CPU is what a working machine looks
  * like — agents compile things. Exhausted MEMORY is what makes it unusable, and
  * it is the one the reaper on the Resources page can actually do something
@@ -257,7 +264,9 @@ export function ResourceMeter({ layout }: { layout: GaugeLayout }) {
         layout={layout}
         className={layout === "stacked" ? STACK_ROW[0] : undefined}
       >
-        <Sparkline values={cpuHistory} className={CPU_LINE} {...CHART[layout]} />
+        {layout !== "bare" && (
+          <Sparkline values={cpuHistory} className={CPU_LINE} {...CHART[layout]} />
+        )}
       </Gauge>
       <Gauge
         label="Mem"
@@ -266,7 +275,9 @@ export function ResourceMeter({ layout }: { layout: GaugeLayout }) {
         layout={layout}
         className={layout === "stacked" ? STACK_ROW[1] : undefined}
       >
-        <Sparkline values={memHistory} className={t.text} {...CHART[layout]} />
+        {layout !== "bare" && (
+          <Sparkline values={memHistory} className={t.text} {...CHART[layout]} />
+        )}
       </Gauge>
     </HoverCard>
   );

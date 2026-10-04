@@ -103,7 +103,7 @@ function AccountBlock({
   );
 }
 
-/** One window as a gauge: tag, bar, percent. */
+/** One window as a gauge: tag, bar, percent — no bar in the `bare` layout. */
 function WindowGauge({
   tag,
   win,
@@ -125,12 +125,14 @@ function WindowGauge({
       layout={layout}
       className={className}
     >
-      <SplitBar
-        size={layout === "stacked" ? "md" : "xs"}
-        className={BAR_W[layout]}
-        usedPct={win?.percent ?? 0}
-        tone={t.bar}
-      />
+      {layout !== "bare" && (
+        <SplitBar
+          size={layout === "stacked" ? "md" : "xs"}
+          className={BAR_W[layout]}
+          usedPct={win?.percent ?? 0}
+          tone={t.bar}
+        />
+      )}
     </Gauge>
   );
 }
@@ -232,7 +234,7 @@ export function UsageMeter({ layout }: { layout: GaugeLayout }) {
       // ones; the panel says so in words, and the whole gauge dims so you can
       // see it without opening anything.
       className={cn(
-        layout === "stacked" ? GAUGE_LINE_TRIGGER : GAUGE_TRIGGER.inline,
+        layout === "stacked" ? GAUGE_LINE_TRIGGER : GAUGE_TRIGGER[layout],
         (!usage || usage.stale) && "opacity-70",
       )}
       card={() => (
