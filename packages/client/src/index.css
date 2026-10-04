@@ -946,6 +946,106 @@
   }
 }
 
+/*
+ * NAVIGATION SLIDE — the shell's back stack, finally visible.
+ *
+ * The homepage and the project-setup form are full-bleed: arriving at either
+ * replaces the sidebar AND the whole main area in one commit, so the swap used
+ * to be a hard cut of every pixel under the top bar. The stack order is the one
+ * `components/layout/swipeNav.ts` has always walked — home underneath the chat
+ * workspace, the setup form on top of it — so going home travels BACK (the
+ * surface you were on leaves to the right, home comes in from the left) and
+ * leaving home travels FORWARD (the mirror). The edge swipe on the phone moves
+ * in exactly those directions; this is the same motion for everyone else.
+ *
+ * Both halves move, which is why this is the platform's View Transitions and
+ * not an animation we run ourselves: the outgoing surface is unmounted the
+ * moment React commits, and the browser's snapshot is what lets it leave at all
+ * without keeping a second copy of a transcript alive to animate.
+ *
+ * ONE box travels (`[data-cm-surface]`), never its rows — home can list
+ * hundreds of chats.
+ */
+[data-cm-surface] {
+  view-transition-name: cm-surface;
+}
+
+@keyframes cm-surface-from-right {
+  from {
+    transform: translateX(100%);
+  }
+}
+@keyframes cm-surface-to-right {
+  to {
+    transform: translateX(100%);
+  }
+}
+@keyframes cm-surface-from-left {
+  from {
+    transform: translateX(-100%);
+  }
+}
+@keyframes cm-surface-to-left {
+  to {
+    transform: translateX(-100%);
+  }
+}
+
+::view-transition-group(cm-surface) {
+  animation-duration: 200ms;
+}
+::view-transition-old(cm-surface),
+::view-transition-new(cm-surface) {
+  animation-duration: 200ms;
+  animation-timing-function: var(--ease-out);
+  /* The UA default here is a cross-fade under `plus-lighter`, which is right
+     for two fading layers and wrong for two OPAQUE ones sliding past each
+     other — the overlap blows out to white for the length of the travel. */
+  mix-blend-mode: normal;
+  /* And the UA default sizing letterboxes each snapshot into the group's
+     animating box; both surfaces are full-size for the whole travel. */
+  height: 100%;
+  width: 100%;
+  object-fit: none;
+}
+
+html[data-cm-nav="forward"]::view-transition-old(cm-surface) {
+  animation-name: cm-surface-to-left;
+}
+html[data-cm-nav="forward"]::view-transition-new(cm-surface) {
+  animation-name: cm-surface-from-right;
+}
+html[data-cm-nav="back"]::view-transition-old(cm-surface) {
+  animation-name: cm-surface-to-right;
+}
+html[data-cm-nav="back"]::view-transition-new(cm-surface) {
+  animation-name: cm-surface-from-left;
+}
+
+/* Everything OUTSIDE the travelling box — the top bar, the bottom nav — is the
+   same pixels before and after, so the UA's default root cross-fade is a
+   quarter-second of work to redraw what didn't change. It also dims those bars
+   mid-fade, which makes the persistent chrome look like it is navigating too. */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
+}
+
+/*
+ * Reduced motion: `runViewSlide` never starts a transition, so there is nothing
+ * for a rule here to switch off. This block is the belt to that braces — a
+ * transition started by some future caller still arrives instantly rather than
+ * sliding a whole screen past someone who asked it not to.
+ */
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation-duration: 1ms !important;
+  }
+}
+
 .cm-typing-dot {
   animation: cm-typing 1.1s var(--ease-out) infinite;
 }
