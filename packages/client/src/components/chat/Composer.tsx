@@ -71,6 +71,7 @@ import { useFsRoots } from "../../stores/fsRoots.js";
 import { useProjects } from "../../stores/projects.js";
 import { IconButton } from "../ui/IconButton.js";
 import { Button } from "../ui/Button.js";
+import { RowButton } from "../ui/RowButton.js";
 import { Select, type SelectInherit, type SelectOption } from "../ui/Select.js";
 import { EffortGauge } from "../ui/EffortGauge.js";
 import { Chip } from "../ui/Chip.js";
@@ -1551,14 +1552,15 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
             } as CSSProperties
           }
         >
-          <button
-            type="button"
+          {/* `RowButton`, not `Button`: a full-width bar whose height is a
+              CSS variable and whose content is an icon, a label that truncates
+              and a hint pinned right is a ROW, and `Button` is `h-6
+              justify-center whitespace-nowrap` with padding of its own. */}
+          <RowButton
             onClick={onStubTap}
             aria-label={`Answer the question above, or ${reclaimHint} a message anyway`}
-            className={cn(
-              "flex h-[var(--cm-defer-h)] w-full items-center border-t border-line bg-surface/60 px-4",
-              "text-left text-xs text-muted transition-colors hover:text-secondary",
-            )}
+            // `text-left` and the transition come from `RowButton` itself.
+            className="flex h-[var(--cm-defer-h)] w-full items-center border-t border-line bg-surface/60 px-4 text-xs text-muted hover:text-secondary"
           >
             <span className="mx-auto flex w-full max-w-[860px] items-center gap-2 rounded-lg border border-dashed border-line/80 bg-panel-2/40 px-3 py-1.5">
               <ArrowUp className="size-3.5 shrink-0" />
@@ -1567,7 +1569,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
                 {reclaimHint}
               </span>
             </span>
-          </button>
+          </RowButton>
         </div>
       )}
     <div className={cn("border-t border-line bg-surface/80 px-4 py-3", deferred && "hidden")}>
