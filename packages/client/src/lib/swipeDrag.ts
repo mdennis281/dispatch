@@ -26,10 +26,39 @@ interface Registration {
 
 const panels = new Map<SwipePanelId, Registration>();
 
+/**
+ * Who currently owns a panel's inline styles, and the cleanup they scheduled.
+ *
+ * The settle below hands the easing back to the class and then has to remove
+ * the inline values once the transition is over — but the panel is SHARED
+ * state, and a gesture is cheap to start: a swipe that gets handed to a
+ * scroller settles, and the next finger can be down again well inside those
+ * 240ms. Without an owner, that first gesture's timer fires in the middle of
+ * the second one's drag and wipes its inline position while the finger is
+ * still down and the transition is suspended — the panel snapping to its class
+ * position for a frame. Exactly the "gesture dropped" feeling the rubber-band
+ * exists to avoid, except real.
+ */
+interface Owner {
+  token: object;
+  timer: number | null;
+}
+const owners = new Map<SwipePanelId, Owner>();
+
+function clearPending(id: SwipePanelId): void {
+  const owner = owners.get(id);
+  if (owner?.timer !== null && owner?.timer !== undefined) window.clearTimeout(owner.timer);
+}
+
 export function registerSwipePanel(id: SwipePanelId, reg: Registration): () => void {
   panels.set(id, reg);
   return () => {
-    if (panels.get(id) === reg) panels.delete(id);
+    if (panels.get(id) !== reg) return;
+    panels.delete(id);
+    // A drawer that unmounts mid-settle takes its pending cleanup with it —
+    // the node is gone, and on the next mount the styles are fresh anyway.
+    clearPending(id);
+    owners.delete(id);
   };
 }
 
@@ -62,6 +91,12 @@ export function beginPanelDrag(id: SwipePanelId, toOpen: boolean): SwipeDragHand
   const el = reg.panel;
   const width = el.offsetWidth;
   if (width <= 0) return null;
+
+  // This grab now owns the panel's inline styles. Anything the previous one
+  // scheduled is void — it was cleanup for a position this drag is replacing.
+  clearPending(id);
+  const token = {};
+  owners.set(id, { token, timer: null });
 
   const closed = reg.side === "left" ? -width : width;
   const from = toOpen ? closed : 0;
@@ -103,10 +138,16 @@ export function beginPanelDrag(id: SwipePanelId, toOpen: boolean): SwipeDragHand
       el.style.transition = "";
       if (scrim) scrim.style.transition = "";
       paint(landing);
-      window.setTimeout(() => {
+      const owner = owners.get(id);
+      if (owner?.token !== token) return;
+      owner.timer = window.setTimeout(() => {
+        // Re-checked at FIRE time, not only at schedule time: a later grab can
+        // take the panel over during the settle, and it is painting live.
+        if (owners.get(id)?.token !== token) return;
         el.style.translate = "";
         el.style.willChange = "";
         if (scrim) scrim.style.opacity = "";
+        owners.delete(id);
       }, SETTLE_MS + 40);
     },
   };
