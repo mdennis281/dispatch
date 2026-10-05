@@ -22,6 +22,7 @@ import { useLayout } from "../../stores/layout.js";
 import { useView } from "../../stores/view.js";
 import type { SwipeDir } from "../../lib/edgeSwipe.js";
 import type { NavPlace } from "./navState.js";
+import type { SwipePanelId } from "../../lib/swipeDrag.js";
 
 /** What a committed swipe does. One move per swipe — never two surfaces at once. */
 export type SwipeMove =
@@ -141,5 +142,29 @@ export function runSwipe(move: SwipeMove): void {
       leaveHome();
       useLayout.getState().setLeftOpen(true);
       return;
+  }
+}
+
+/**
+ * Which panel (if any) a move drags under the finger, and where it is headed.
+ *
+ * Only three of the seven moves are a PANEL sliding. The rest swap the whole
+ * view — `go-home`, `leave-home`, `leave-new-project` — and there is no second
+ * copy of the homepage mounted to pull in from the edge, so those stay what
+ * they were: a threshold flick, which hands off to the navigation slide that
+ * `lib/viewSlide` plays on the crossing. `close-more` is left out on purpose
+ * too: the More sheet arrives from the BOTTOM, and a horizontal drag has
+ * nothing honest to say about how far up it should be.
+ */
+export function swipeDrag(move: SwipeMove | null): { panel: SwipePanelId; toOpen: boolean } | null {
+  switch (move) {
+    case "open-picker":
+      return { panel: "picker", toOpen: true };
+    case "close-picker":
+      return { panel: "picker", toOpen: false };
+    case "close-pane":
+      return { panel: "pane", toOpen: false };
+    default:
+      return null;
   }
 }

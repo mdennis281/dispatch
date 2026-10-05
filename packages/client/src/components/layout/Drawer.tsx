@@ -2,6 +2,7 @@ import { useEffect, useRef, type ReactNode } from "react";
 import { FOCUSABLE } from "../../lib/focusable.js";
 import { cn } from "../../lib/cn.js";
 import { LAYER } from "../../lib/layers.js";
+import { registerSwipePanel, type SwipePanelId } from "../../lib/swipeDrag.js";
 
 export type DrawerSide = "left" | "right" | "bottom";
 
@@ -41,6 +42,14 @@ export interface DrawerProps {
    * The More sheet is genuinely viewport-level, so it stays `fixed`.
    */
   position?: "fixed" | "absolute";
+  /**
+   * Publishes this panel to the edge swipe so the gesture can drag it under the
+   * finger instead of only flicking it open at the end. Omit for a drawer the
+   * swipe never moves — the More sheet is the one the gesture dismisses but
+   * does not travel, because a horizontal drag has nothing to say about a sheet
+   * that arrives from the bottom.
+   */
+  swipeId?: SwipePanelId;
   /** Sizing + surface classes for the panel itself. */
   className?: string;
   children: ReactNode;
@@ -83,13 +92,30 @@ export function Drawer({
   modal = true,
   label,
   position = "fixed",
+  swipeId,
   className,
   children,
 }: DrawerProps) {
   const pos = position === "fixed" ? "fixed" : "absolute";
   const panelRef = useRef<HTMLDivElement>(null);
+  const scrimRef = useRef<HTMLDivElement>(null);
   const restoreTo = useRef<HTMLElement | null>(null);
   const shown = enabled && open;
+
+  // Only while this really IS a drawer: at `lg` the wrapper is `display:
+  // contents` and there is no panel element at all, so a stale registration
+  // would hand the gesture a node that is no longer in the layout. The scrim is
+  // read lazily rather than captured, because `modal` can change it out from
+  // under a registration that is otherwise still correct.
+  useEffect(() => {
+    const el = panelRef.current;
+    if (!swipeId || !enabled || !el) return;
+    return registerSwipePanel(swipeId, {
+      panel: el,
+      scrim: () => scrimRef.current,
+      side: side === "right" ? "right" : "left",
+    });
+  }, [swipeId, enabled, side]);
 
   // `inert` removes the whole subtree from the tab order and the a11y tree while
   // it's parked off-canvas. Without it, tabbing out of the composer walks
@@ -183,6 +209,7 @@ export function Drawer({
     <>
       {modal && (
         <div
+          ref={scrimRef}
           aria-hidden
           onClick={onClose}
           style={{ zIndex: LAYER.drawerScrim }}
