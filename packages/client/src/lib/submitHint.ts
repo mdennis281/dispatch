@@ -16,7 +16,13 @@
  * `(pointer: coarse)` is the same signal `index.css` uses for its touch rules.
  */
 
-function isTouchPrimary(): boolean {
+/**
+ * Exported for the composer's stand-down stub, which has to name the gesture
+ * that hands the box back — a double TAP or a double CLICK. Same reading of the
+ * pointer as the placeholder's, for the same reason: naming a gesture the
+ * device does not have is worse than naming none.
+ */
+export function isTouchPrimary(): boolean {
   return (
     typeof window !== "undefined" &&
     typeof window.matchMedia === "function" &&
