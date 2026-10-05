@@ -25,6 +25,15 @@ import type { AttentionItem } from "@dispatch/shared";
  * decision about what the Attention Queue lists, and it would be a surprise for
  * it to also change how the composer behaves in a chat you are looking at.
  *
+ * **A `permissionRequestId` is required, not incidental.** `kind: "question"`
+ * is not by itself an ask with a card: `services/restart-resume.ts` raises one
+ * for a chat a restart interrupted, and that item has no request behind it and
+ * no card in the transcript — its own notice says "Send a message to pick it
+ * back up." Standing the composer down there would collapse the box in the one
+ * flow whose whole instruction is to type in it. The id IS the card (see
+ * `attentionCardId`), so requiring it is the same test as "there is something
+ * above to point at".
+ *
  * Oldest first, matching the order the cards appear in the transcript — if two
  * asks are somehow open, the stub should point at the one you reach first.
  */
@@ -36,6 +45,7 @@ export function blockingQuestion(
   let best: AttentionItem | null = null;
   for (const item of items) {
     if (item.kind !== "question" || item.chatId !== chatId) continue;
+    if (!item.permissionRequestId) continue;
     if (!best || item.createdAt < best.createdAt) best = item;
   }
   return best;

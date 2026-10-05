@@ -987,7 +987,22 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     reclaimed,
     !isEmpty || attachments.length > 0 || uploading > 0,
   );
-  const lastStubTapRef = useRef(0);
+  // Scoped to the question it was aimed at, not a bare timestamp: the Composer
+  // is NOT remounted on a chat switch, so one tap on chat A's stub followed
+  // within the window by one on chat B's — exactly what triaging the Attention
+  // Queue looks like — would otherwise read as a double-tap and hand back a
+  // composer nobody asked for.
+  const lastStubTapRef = useRef<{ id: string; at: number }>({ id: "", at: 0 });
+
+  // The phone's "Composer options" sheet is a child of the box we hide, and
+  // `Drawer` renders inline rather than through a portal — `display: none` on
+  // an ancestor takes a `position: fixed` descendant with it, with no CSS
+  // escape. An open sheet would therefore vanish with `moreOpen` still true and
+  // pop back the moment the composer returned, so it stands down WITH the
+  // composer rather than behind it.
+  useEffect(() => {
+    if (deferred) setMoreOpen(false);
+  }, [deferred]);
   // Named per device: there is no "tap" on a desktop and no "click" on a phone,
   // and this hint is the ONLY place the way back is written down.
   const reclaimHint = useMemo(
@@ -1019,14 +1034,16 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
    * scrolls it back into view and flashes it.
    */
   const onStubTap = useCallback(() => {
+    if (!question) return;
     const now = Date.now();
-    if (isDoubleTap(now, lastStubTapRef.current)) {
-      lastStubTapRef.current = 0;
+    const last = lastStubTapRef.current;
+    if (last.id === question.id && isDoubleTap(now, last.at)) {
+      lastStubTapRef.current = { id: "", at: 0 };
       reclaimComposer();
       return;
     }
-    lastStubTapRef.current = now;
-    if (question) focusAttentionItem(question);
+    lastStubTapRef.current = { id: question.id, at: now };
+    focusAttentionItem(question);
   }, [question, reclaimComposer]);
 
   /* ------------------------------------------------------ auto-sizing toolbar */

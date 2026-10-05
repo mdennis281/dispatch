@@ -12,6 +12,7 @@ function item(over: Partial<AttentionItem> & Pick<AttentionItem, "id">): Attenti
     chatId: "c1",
     kind: "question",
     summary: "Which approach?",
+    permissionRequestId: `perm_${over.id}`,
     createdAt: 1_000,
     ...over,
   };
@@ -30,6 +31,13 @@ describe("blockingQuestion", () => {
       item({ id: "review", kind: "review" }),
     ];
     expect(blockingQuestion(items, "c1")).toBeNull();
+  });
+
+  it("ignores a question with no card behind it", () => {
+    // `restart-resume` raises one of these for an interrupted chat; its own
+    // notice tells you to send a message, so the composer must stay up.
+    const resumed = item({ id: "resumed", permissionRequestId: undefined });
+    expect(blockingQuestion([resumed], "c1")).toBeNull();
   });
 
   it("takes the oldest when two are open", () => {
