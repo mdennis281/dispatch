@@ -1,4 +1,5 @@
 import { useEditor, EditorContent, type JSONContent } from "@tiptap/react";
+import { flushSync } from "react-dom";
 import StarterKit from "@tiptap/starter-kit";
 import Placeholder from "@tiptap/extension-placeholder";
 import {
@@ -10,6 +11,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type ReactNode,
 } from "react";
 import {
@@ -76,7 +78,7 @@ import { Tooltip } from "../ui/Tooltip.js";
 import { Spinner } from "../ui/Spinner.js";
 import { Popover, MenuItem } from "../ui/Popover.js";
 import { cn } from "../../lib/cn.js";
-import { composerPlaceholder } from "../../lib/submitHint.js";
+import { composerPlaceholder, isTouchPrimary } from "../../lib/submitHint.js";
 import {
   DEFAULT_SEND_MODE,
   SEND_MODE_LABEL,
@@ -86,6 +88,9 @@ import {
 } from "../../lib/sendMode.js";
 import { SendModeMenu, SEND_MODE_ICON } from "./SendModeMenu.js";
 import { useSettings } from "../../stores/settings.js";
+import { useAttention } from "../../stores/attention.js";
+import { focusAttentionItem } from "../attention/focus.js";
+import { blockingQuestion, composerDeferred, isDoubleTap } from "../../lib/composerDefer.js";
 import { useChats } from "../../stores/chats.js";
 import { useModels } from "../../stores/models.js";
 import { useHarnesses } from "../../stores/harnesses.js";
@@ -970,6 +975,59 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
 
   const canSend = (!isEmpty || attachments.length > 0) && uploading === 0;
 
+  /* ----------------------------------------------- standing down for a question */
+
+  // An open AskUserQuestion on THIS chat, if there is one. See lib/composerDefer
+  // for why the composer gets out of its way, and for the reclaim latch.
+  const question = useAttention((s) => blockingQuestion(s.items, chat.id));
+  const [reclaimed, setReclaimed] = useState<string | null>(null);
+  const deferred = composerDeferred(
+    question,
+    reclaimed,
+    !isEmpty || attachments.length > 0 || uploading > 0,
+  );
+  const lastStubTapRef = useRef(0);
+  // Named per device: there is no "tap" on a desktop and no "click" on a phone,
+  // and this hint is the ONLY place the way back is written down.
+  const reclaimHint = useMemo(
+    () => (isTouchPrimary() ? "double-tap to type" : "double-click to type"),
+    [],
+  );
+
+  /**
+   * Hand the real composer back.
+   *
+   * `flushSync` so the box is out of `display: none` and focusable BEFORE this
+   * handler returns: iOS only raises the keyboard for a focus that happens
+   * inside the gesture that asked for it, and a `requestAnimationFrame` here
+   * would land outside it — giving back a composer with no keyboard, which on a
+   * phone is giving back nothing.
+   */
+  const reclaimComposer = useCallback(() => {
+    if (!question) return;
+    flushSync(() => setReclaimed(question.id));
+    editor?.commands.focus("end");
+  }, [editor, question]);
+
+  /**
+   * One tap points at the card; two give up the nudge and hand the box back.
+   *
+   * The single tap is the whole "push toward answering, don't force it": the
+   * most likely reason to be poking at the bottom of the screen with a question
+   * open is that you have scrolled past the card and lost it, so the first tap
+   * scrolls it back into view and flashes it.
+   */
+  const onStubTap = useCallback(() => {
+    const now = Date.now();
+    if (isDoubleTap(now, lastStubTapRef.current)) {
+      lastStubTapRef.current = 0;
+      reclaimComposer();
+      return;
+    }
+    lastStubTapRef.current = now;
+    if (question) focusAttentionItem(question);
+  }, [question, reclaimComposer]);
+
   /* ------------------------------------------------------ auto-sizing toolbar */
 
   // One measurement step. The row is `flex-nowrap` with non-shrinking children,
@@ -1050,6 +1108,9 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     multiAccount,
     modeLabel(modes, modeId),
     fitVisible,
+    // Hidden behind the question stub the row measures 0, so the fit has to be
+    // re-derived — synchronously, before paint — the moment it comes back.
+    deferred,
   ]);
 
   /* ------------------------------------------------------- shared menu bodies */
@@ -1467,7 +1528,49 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   const closeMore = () => setMoreOpen(false);
 
   return (
-    <div className="border-t border-line bg-surface/80 px-4 py-3">
+    <>
+      {/* The stand-down bar. Rendered BESIDE the real composer rather than
+          instead of it, so the editor keeps its content, its caret and its
+          measured toolbar layout while it waits — the box you get back on a
+          double-tap is the box you had, not a fresh one. */}
+      {deferred && (
+        <div
+          // Why the composer stops following the keyboard here: the shell
+          // shrinks by `--cm-kb` to sit above it (see App.tsx), and a wrapper
+          // that gives up exactly that much height leaves the stub standing
+          // still — it ends up in the band the keyboard now covers, and the
+          // room it vacated goes to the transcript, which is where the question
+          // being answered actually is. The overhang is drawn, not clipped: the
+          // shell's `overflow: hidden` clips at its PADDING box, and the band is
+          // that padding. On desktop `--cm-kb` is always 0, so this is inert.
+          className="shrink-0"
+          style={
+            {
+              "--cm-defer-h": "2.875rem",
+              height: "max(0px, calc(var(--cm-defer-h) - var(--cm-kb, 0px)))",
+            } as CSSProperties
+          }
+        >
+          <button
+            type="button"
+            onClick={onStubTap}
+            aria-label={`Answer the question above, or ${reclaimHint} a message anyway`}
+            className={cn(
+              "flex h-[var(--cm-defer-h)] w-full items-center border-t border-line bg-surface/60 px-4",
+              "text-left text-xs text-muted transition-colors hover:text-secondary",
+            )}
+          >
+            <span className="mx-auto flex w-full max-w-[860px] items-center gap-2 rounded-lg border border-dashed border-line/80 bg-panel-2/40 px-3 py-1.5">
+              <ArrowUp className="size-3.5 shrink-0" />
+              <span className="flex-1 truncate">Answer the question above to continue</span>
+              <span className="shrink-0 text-2xs uppercase tracking-wide text-muted/70">
+                {reclaimHint}
+              </span>
+            </span>
+          </button>
+        </div>
+      )}
+    <div className={cn("border-t border-line bg-surface/80 px-4 py-3", deferred && "hidden")}>
       <div className="mx-auto w-full max-w-[860px]">
       {/* Two different states, deliberately worded as such: a steered message is
           already inside the running turn's input and may be read at any moment,
@@ -2107,5 +2210,6 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
         </Suspense>
       )}
     </div>
+    </>
   );
 }
