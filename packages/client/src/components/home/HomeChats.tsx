@@ -58,6 +58,7 @@ import {
   Globe,
   GitPullRequestArrow,
   MessagesSquare,
+  MessageSquareDashed,
 } from "lucide-react";
 import type { Chat, PrRecord } from "@dispatch/shared";
 import { isGlobalProject, GLOBAL_PROJECT_NAME } from "@dispatch/shared";
@@ -451,7 +452,7 @@ function ChatRow({
   // the one question this page exists to answer. The child rows omit it for the
   // same reason `ReviewRow`/`SpawnRow` do: a reviewer's PR is somebody else's.
   const prSettled = useChats((s) => (depth === 0 ? (s.prSettled[chat.id] ?? false) : false));
-  const meta = statusMeta(chat.status, prSettled);
+  const meta = statusMeta(chat.status, prSettled, !chat.sessionId);
   const worktrees = ctx.worktrees.get(chat.id) ?? EMPTY_TREES;
   // A reviewer's `#139` is the PR it is READING, which the column below already
   // draws from `reviewTargetKey`. Its own `prs` would be empty anyway, but
@@ -475,12 +476,20 @@ function ChatRow({
           meta.pulse && "animate-pulse",
         )}
       >
+        {/* The dashed bubble / hollow dot split is the sidebar's — see `SpawnRow`.
+            It carries further here than there: this page's "New" group is folded
+            to one line by default, so the rows a reader opens it to find are
+            exactly the ones this marker names. */}
         {reviewer ? (
           <GitPullRequestArrow />
         ) : spawned ? (
-          <MessagesSquare />
+          meta.hollow ? (
+            <MessageSquareDashed />
+          ) : (
+            <MessagesSquare />
+          )
         ) : (
-          <StatusDot tone={meta.tone} pulse={meta.pulse} size={7} />
+          <StatusDot tone={meta.tone} pulse={meta.pulse} hollow={meta.hollow} size={7} />
         )}
       </span>
       {/* A reviewer's identity is the PR it read, not its own title — the same

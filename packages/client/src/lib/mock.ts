@@ -126,6 +126,14 @@ export const CHAT_SCRATCH = "chat_scratch";
 /** Spawned BY {@link CHAT_STEAM} — the sidebar's second level. */
 export const CHAT_SPAWN_SAVE = "chat_spawn_save";
 export const CHAT_SPAWN_UI = "chat_spawn_ui";
+/**
+ * Spawned and never run — no `sessionId`, which is the one thing that makes a
+ * child row draw the DASHED bubble instead of the filled one. It earns a place
+ * in the fixture because that render is otherwise unreachable in a screenshot:
+ * every other child here carries a session, and a marker nobody can see is a
+ * marker that silently stops working.
+ */
+export const CHAT_SPAWN_AUDIO = "chat_spawn_audio";
 /** Reviewers of the PR {@link CHAT_SPAWN_SAVE} opened — the sidebar's THIRD level. */
 export const CHAT_REVIEW_82_R2 = "chat_review_82_r2";
 export const CHAT_REVIEW_82_R1 = "chat_review_82_r1";
@@ -252,6 +260,22 @@ export const MOCK_CHATS: Chat[] = [
     status: "awaiting-input",
     createdAt: ago(26),
     updatedAt: ago(11),
+  },
+  {
+    id: CHAT_SPAWN_AUDIO,
+    projectId: "hivebreak",
+    title: "**audio**: boss cue ducking",
+    // No `sessionId`: opened by its parent and never started. See the id's note.
+    agentId: "build",
+    modeId: "edit",
+    effort: "medium",
+    parentChatId: CHAT_STEAM,
+    purpose: { kind: "spawned", label: spawnedPurposeLabel(CHAT_STEAM) },
+    worktrees: [],
+    prs: [],
+    status: "idle",
+    createdAt: ago(1),
+    updatedAt: ago(1),
   },
   {
     id: CHAT_SCRATCH,
