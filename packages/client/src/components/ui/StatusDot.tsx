@@ -90,17 +90,37 @@ export function StatusDot({ tone, pulse, hollow, size = 7, className }: StatusDo
  * been superseded by a new message; on an otherwise-idle chat it flips the dot
  * from neutral gray to green ("PR done"). It's ignored for any active status
  * (running still pulses purple), so the green only shows once the agent is quiet.
+ *
+ * `unstarted` = this chat has never run a turn (`!chat.sessionId`, the same test
+ * {@link chatSection} files a chat under "New" with). It only reaches the dot on
+ * an otherwise-quiet chat, because a FIRST turn is unstarted by this test too —
+ * the session id does not land until the init event — and a row that reads "New"
+ * while it streams is a row describing the wrong thing. Deliberately the same
+ * precedence `chatSection` uses, so the marker can never disagree with the queue
+ * the row is drawn in.
  */
 export function statusMeta(
   status: ChatStatus | undefined,
   prSettled = false,
+  unstarted = false,
 ): {
   tone: DotTone;
   pulse: boolean;
   label: string;
+  /**
+   * Draw the marker as an outline, not a disc. Only "New" sets it: a chat that
+   * has never run shares idle's grey, so FILL is the only axis left to separate
+   * the two — and it is the axis the project badge already spends on
+   * queued-vs-working, so the sidebar keeps one legend rather than gaining a
+   * second colour.
+   */
+  hollow?: boolean;
 } {
   if (status === "idle" && prSettled) {
     return { tone: "success", pulse: false, label: "PR done" };
+  }
+  if ((status === "idle" || status === undefined) && unstarted) {
+    return { tone: "muted", pulse: false, label: "New", hollow: true };
   }
   switch (status) {
     case "running":

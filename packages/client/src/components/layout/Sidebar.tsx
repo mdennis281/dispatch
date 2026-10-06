@@ -15,6 +15,7 @@ import {
   Trash2,
   Pencil,
   MessagesSquare,
+  MessageSquareDashed,
   SquareTerminal,
   BarChart3,
   Brain,
@@ -866,7 +867,7 @@ function ChatRow({
   onClick: () => void;
 }) {
   const prSettled = useChats((s) => s.prSettled[chat.id] ?? false);
-  const meta = statusMeta(chat.status, prSettled);
+  const meta = statusMeta(chat.status, prSettled, !chat.sessionId);
 
   // The action tray, when it was asked for by a HOLD rather than by hovering.
   //
@@ -1026,7 +1027,7 @@ function ChatRow({
             <PurposeIcon />
           </span>
         ) : (
-          <StatusDot tone={meta.tone} pulse={meta.pulse} size={7} />
+          <StatusDot tone={meta.tone} pulse={meta.pulse} hollow={meta.hollow} size={7} />
         )}
         {/* What this row is holding, stacked in its own gutter between the
             status marker and the title.
@@ -1367,7 +1368,10 @@ function ReviewRow({
   const activityAt = useChats(
     (s) => s.lastActivity[chat.id] ?? chat.updatedAt ?? chat.createdAt,
   );
-  const meta = statusMeta(chat.status);
+  // `unstarted` here too, though a reviewer is spawned mid-turn and almost never
+  // sits unstarted: when one does, this row's text column is the only place that
+  // can say so — the PR glyph has no dashed twin to swap in.
+  const meta = statusMeta(chat.status, false, !chat.sessionId);
   const number = record?.number ?? (key ? parsePrRecordKey(key)?.number : undefined);
   const posted = reviewSummary(chat, record);
   const folded = foldedChildrenLabel(childChats);
@@ -1507,7 +1511,7 @@ function SpawnRow({
   const activityAt = useChats(
     (s) => s.lastActivity[chat.id] ?? chat.updatedAt ?? chat.createdAt,
   );
-  const meta = statusMeta(chat.status);
+  const meta = statusMeta(chat.status, false, !chat.sessionId);
   const folded = foldedChildrenLabel(childChats);
 
   return (
@@ -1542,7 +1546,13 @@ function SpawnRow({
             meta.pulse && "animate-pulse",
           )}
         >
-          <MessagesSquare />
+          {/* A child row has no dot to hollow out — it spends the marker slot on
+              the glyph that says what KIND of row this is — so "never run" lands
+              here as the DASHED bubble: the same "outlined, not filled in" read
+              the top-level row gets from `hollow`, in the only vocabulary this
+              row has. Without it a branch dragged into "New" by one unstarted
+              child drew ten identical rows and never said which one. */}
+          {meta.hollow ? <MessageSquareDashed /> : <MessagesSquare />}
         </span>
         <span
           className={cn(
