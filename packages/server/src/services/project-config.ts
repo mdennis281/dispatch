@@ -843,6 +843,7 @@ export class ProjectConfigService {
       workflow: manifest.workflow,
       spawnChat: manifest.spawnChat,
       agentContext: manifest.agentContext,
+      retention: manifest.retention,
       issues: manifest.issues,
       browser: manifest.browser,
       defaults: manifest.defaults,

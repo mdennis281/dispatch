@@ -2,29 +2,52 @@
  * RetentionService — the periodic sweep that deletes what Dispatch keeps and
  * nothing else ever would.
  *
- * Three rules, each from a disk audit of a long-lived install with 30 GB left:
+ * Four rules. The first three come from a disk audit of a long-lived install
+ * with 30 GB left; the fourth is off by default and exists only because someone
+ * asked for it:
  *
  *   1. Checkpoints whose worktree is gone. 13,031 of 24,806 rows named a removed
  *      worktree, and their refs pinned commits `git gc` can never collect —
  *      9.6k refs in one repository. `WorktreeService.remove()` now retires them
  *      at removal; this catches the backlog and removals that bypass it.
- *   2. Reviewer chats, {@link REVIEWER_CHAT_RETENTION_MS} after their PR merged
- *      or closed. 374 of them; their findings already live on GitHub.
- *   3. Tool-output images older than {@link TOOL_IMAGE_RETENTION_MS}. ~420 MB of
- *      the 1.14 GB of chat images. Images the human attached are never touched,
- *      and neither is `messages.jsonl` — once Claude Code's own session cleanup
- *      runs, that transcript is the only copy of the conversation.
+ *   2. Reviewer chats, the reviewer window after their PR merged or closed. 374 of them; their findings already live on GitHub.
+ *   3. Tool-output images older than the image window. ~420 MB of the 1.14 GB of
+ *      chat images. Images the human attached are never touched, and neither is
+ *      `messages.jsonl` — once Claude Code's own session cleanup runs, that
+ *      transcript is the only copy of the conversation.
+ *   4. Chats idle longer than the chat-delete window — OFF unless configured.
+ *      The only rule here that deletes a CONVERSATION rather than something
+ *      derived from one, which is why it defaults to off and why it refuses a
+ *      long list of chats that are merely old (see {@link sweepAgedChats}).
  *
  * Deliberately NOT here: metrics pruning (a manual button on purpose, see
  * services/metrics.ts), and `failed/` upgrade payloads, which belong to the
  * install root rather than this instance and are pruned by tools/app/upgrade.mjs.
  *
- * Windows are constants, not settings: none of these is a thing anyone should
- * have to tune, and a setting is a promise to support every value of it.
+ * Windows are SETTINGS (`AppSettings.retention`, resolved by
+ * `@dispatch/shared/retention.ts`), and the constants here are now their
+ * defaults. This file used to argue the opposite — "none of these is a thing
+ * anyone should have to tune, and a setting is a promise to support every value
+ * of it" — and half of that was right: the promise is real, which is why every
+ * field is bounded and why rule 4 has a floor it validates rather than clamps.
+ * The other half did not survive an install big enough to need them. How much
+ * disk a year of work costs turned out to be exactly the thing someone wants to
+ * move, and moving it meant editing this file.
+ *
+ * The sweep CADENCE below is still a constant: it is an implementation detail of
+ * enforcing the windows, not a window.
  */
 import { stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { TOOL_IMAGE_RETENTION_DAYS, parseReviewingTarget, type Chat } from "@dispatch/shared";
+import {
+  DEFAULT_REVIEWER_CHAT_DAYS,
+  DEFAULT_TOOL_IMAGE_DAYS,
+  isGlobalProject,
+  parseReviewingTarget,
+  resolveRetention,
+  type Chat,
+  type ResolvedRetention,
+} from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import type { CheckpointService } from "./checkpoint.js";
 import { formatBytes, mediaTypeFromName } from "./media-types.js";
@@ -39,10 +62,18 @@ export const RETENTION_SWEEP_MS = 60 * 60_000;
  * short enough that a server restarted every day still gets swept.
  */
 export const RETENTION_FIRST_SWEEP_MS = 5 * 60_000;
-/** A reviewer chat outlives its PR's merge/close by this long. */
-export const REVIEWER_CHAT_RETENTION_MS = 14 * DAY_MS;
-/** A tool-output image outlives the turn that produced it by this long. */
-export const TOOL_IMAGE_RETENTION_MS = TOOL_IMAGE_RETENTION_DAYS * DAY_MS;
+/**
+ * Default windows in ms, for a caller with no settings to hand (tests, and the
+ * `?? ` on the resolve below). The DAY numbers are the shared defaults — these
+ * are derived from them rather than re-stated, so there is one place to change.
+ */
+export const REVIEWER_CHAT_RETENTION_MS = DEFAULT_REVIEWER_CHAT_DAYS * DAY_MS;
+export const TOOL_IMAGE_RETENTION_MS = DEFAULT_TOOL_IMAGE_DAYS * DAY_MS;
+/**
+ * Most chats one pass of rule 4 will delete. See {@link RetentionService.sweepAgedChats}
+ * for why a backlog drains over passes rather than in one tick.
+ */
+export const AGED_CHAT_DELETE_LIMIT = 25;
 
 /**
  * An asset name as the transcript spells it. Stored names are generated
@@ -66,6 +97,8 @@ export interface RetentionReport {
   checkpoints: { rows: number; refs: number; skipped: number };
   reviewerChats: { deleted: string[] };
   images: { files: number; bytes: number; chats: number };
+  /** Rule 4. Always present; `deleted` is empty when the window is off. */
+  agedChats: { deleted: string[]; skipped: number };
 }
 
 export class RetentionService {
@@ -132,6 +165,11 @@ export class RetentionService {
   }
 
   private async runPass(): Promise<RetentionReport> {
+    // Resolved ONCE per pass, not per rule: a settings write landing between two
+    // rules would otherwise have one pass enforcing two different policies, and
+    // the log line would name neither.
+    const settings = await this.store.getSettings().catch(() => null);
+    const policy = resolveRetention(settings?.retention);
     const chats = await this.store.listChats();
     const projects = await this.store.listProjects().catch(() => []);
     const repoByProject = new Map(projects.map((p) => [p.id, p.repoPath]));
@@ -152,7 +190,7 @@ export class RetentionService {
       );
     }
 
-    const deleted = await this.sweepReviewerChats(chats).catch((err: unknown) => {
+    const deleted = await this.sweepReviewerChats(chats, policy.reviewerChatMs).catch((err: unknown) => {
       this.log(`reviewer-chat sweep failed: ${String(err)}`);
       return [] as string[];
     });
@@ -161,7 +199,25 @@ export class RetentionService {
     }
 
     const gone = new Set(deleted);
-    const images = await this.sweepImages(chats.filter((c) => !gone.has(c.id))).catch(
+    const aged = await this.sweepAgedChats(
+      chats.filter((c) => !gone.has(c.id)),
+      policy.chatDeleteMs,
+    ).catch((err: unknown) => {
+      this.log(`aged-chat sweep failed: ${String(err)}`);
+      return { deleted: [] as string[], skipped: 0 };
+    });
+    if (aged.deleted.length) {
+      this.log(
+        `deleted ${aged.deleted.length} chat(s) idle longer than ` +
+          `${policy.chatDeleteDays.effective}d (${aged.skipped} kept as still in use)`,
+      );
+    }
+
+    for (const id of aged.deleted) gone.add(id);
+    const images = await this.sweepImages(
+      chats.filter((c) => !gone.has(c.id)),
+      policy.toolImageMs,
+    ).catch(
       (err: unknown) => {
         this.log(`image sweep failed: ${String(err)}`);
         return { files: 0, bytes: 0, chats: 0 };
@@ -174,7 +230,7 @@ export class RetentionService {
       );
     }
 
-    return { checkpoints, reviewerChats: { deleted }, images };
+    return { checkpoints, reviewerChats: { deleted }, images, agedChats: aged };
   }
 
   /* ------------------------------------------------------ reviewer chats */
@@ -187,8 +243,8 @@ export class RetentionService {
    * cannot name its PR, or whose PR the catalog has never heard of, is kept:
    * nothing says its review is on GitHub.
    */
-  private async sweepReviewerChats(chats: Chat[]): Promise<string[]> {
-    const cutoff = this.now() - REVIEWER_CHAT_RETENTION_MS;
+  private async sweepReviewerChats(chats: Chat[], windowMs: number): Promise<string[]> {
+    const cutoff = this.now() - windowMs;
     const deleted: string[] = [];
     for (const chat of chats) {
       const key =
@@ -206,11 +262,79 @@ export class RetentionService {
     return deleted;
   }
 
+  /* ------------------------------------------------------------ aged chats */
+
+  /**
+   * Chats whose last activity is older than the window. **Off when `windowMs` is
+   * 0, which is the default.**
+   *
+   * This is the only rule that deletes a conversation rather than something
+   * derived from one, and `messages.jsonl` is the only copy of it once Claude
+   * Code's own session cleanup has run. So "old" is necessary but nowhere near
+   * sufficient, and every refusal below is a way a chat can be months idle and
+   * still live work:
+   *
+   *  - **Busy.** Same guard rule 2 uses: never delete a chat under itself.
+   *  - **The global chat.** A singleton surface, not a conversation in a series.
+   *    Idle for a year it is still the thing the next global message lands in.
+   *  - **An unsettled PR.** `PRRef.state` absent counts as unsettled: a chat
+   *    whose PR we cannot classify is a chat whose work we cannot classify. A
+   *    long-running PR that nobody has touched in three months is exactly the
+   *    thing someone comes back to.
+   *  - **A live worktree.** `Chat.worktrees` is rewritten to the LIVE set by the
+   *    detector on every reconcile, so a non-empty list means a checkout exists
+   *    on disk right now — with, as often as not, uncommitted work in it.
+   *
+   * No pass deletes more than {@link AGED_CHAT_DELETE_LIMIT}. A window set for
+   * the first time on this install has 521 chats past 30 days, and deleting 521
+   * conversations inside one hourly tick — each a full `deleteChat` that stops a
+   * session, clears attention and unlinks worktrees — is both a long stall and a
+   * mistake that is maximally expensive if the window was a typo. Spread over
+   * passes, the backlog still drains within a day and the first log line arrives
+   * while there is still something left to keep.
+   */
+  private async sweepAgedChats(
+    chats: Chat[],
+    windowMs: number,
+  ): Promise<{ deleted: string[]; skipped: number }> {
+    if (windowMs <= 0) return { deleted: [], skipped: 0 };
+    const cutoff = this.now() - windowMs;
+    const deleted: string[] = [];
+    let skipped = 0;
+    // Oldest first, so a capped pass takes the chats furthest past the window
+    // rather than whatever order the directory listing happened to produce.
+    const candidates = chats
+      .filter((c) => (c.updatedAt ?? c.createdAt ?? 0) <= cutoff)
+      .sort((a, b) => (a.updatedAt ?? a.createdAt ?? 0) - (b.updatedAt ?? b.createdAt ?? 0));
+    for (const chat of candidates) {
+      if (deleted.length >= AGED_CHAT_DELETE_LIMIT) break;
+      if (!this.mayDeleteAged(chat)) {
+        skipped++;
+        continue;
+      }
+      await this.deleteChat(chat.id);
+      deleted.push(chat.id);
+    }
+    return { deleted, skipped };
+  }
+
+  /** The refusals above, in the order that is cheapest to check. */
+  private mayDeleteAged(chat: Chat): boolean {
+    if (this.isBusy(chat.id)) return false;
+    if (isGlobalProject(chat.projectId)) return false;
+    if (chat.worktrees.length) return false;
+    if (chat.prs.some((pr) => pr.state !== "merged" && pr.state !== "closed")) return false;
+    return true;
+  }
+
   /* --------------------------------------------------------------- images */
 
-  private async sweepImages(chats: Chat[]): Promise<{ files: number; bytes: number; chats: number }> {
+  private async sweepImages(
+    chats: Chat[],
+    windowMs: number,
+  ): Promise<{ files: number; bytes: number; chats: number }> {
     const now = this.now();
-    const cutoff = now - TOOL_IMAGE_RETENTION_MS;
+    const cutoff = now - windowMs;
     let files = 0;
     let bytes = 0;
     let touched = 0;
@@ -238,7 +362,7 @@ export class RetentionService {
         // An image the human attached is theirs, even if a tool also returned it.
         if (attached.has(name) || !sizes.has(name)) continue;
         if (lastTs <= cutoff) expire.push(name);
-        else nextAt = Math.min(nextAt, lastTs + TOOL_IMAGE_RETENTION_MS);
+        else nextAt = Math.min(nextAt, lastTs + windowMs);
       }
       const removed = await this.store.expireChatAssets(chat.id, expire, now);
       if (removed.length) {

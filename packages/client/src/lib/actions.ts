@@ -333,6 +333,43 @@ export async function uploadChatImage(
 }
 
 /**
+ * Load every chat of one project, past the load cap.
+ *
+ * What the sidebar's "N older" footer calls. Merges rather than replaces, and
+ * marks the project loaded so the footer stops offering — until the next
+ * hydrate, which re-applies the cap and brings it back.
+ */
+export async function loadOlderChats(projectId: string): Promise<number> {
+  const chats = await api.chats.list(projectId, { all: true });
+  useChats.getState().mergeChats(chats, { fullyLoadedProject: projectId });
+  return chats.length;
+}
+
+/**
+ * Make sure one chat is in the store, fetching it by id if the cap left it out.
+ *
+ * The cap's one real hazard: a chat reached by something that does NOT go
+ * through the loaded list — a `#chat=` deep link, a `chat_find` result, an
+ * Attention item for a chat whose project is capped — would select an id the
+ * store has never seen, and `visibleChat` renders the empty state for it. One
+ * `GET /api/chats/:id` is cheap and makes "every chat is still reachable" true
+ * rather than nearly true.
+ *
+ * Resolves false when the chat genuinely does not exist (deleted, or a stale
+ * link), so a caller can tell "not loaded" from "not there".
+ */
+export async function ensureChatLoaded(chatId: string): Promise<boolean> {
+  if (useChats.getState().byId[chatId]) return true;
+  try {
+    const chat = await api.chats.get(chatId);
+    useChats.getState().mergeChats([chat]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Delete a chat server-side (DELETE /api/chats/:id): stops its live broker
  * session, clears its Attention Queue items, and removes the transcript +
  * checkpoints on disk. The caller purges the client stores + reselects a chat

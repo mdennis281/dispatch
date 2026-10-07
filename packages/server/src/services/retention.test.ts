@@ -6,6 +6,7 @@ import { join } from "node:path";
 import type { Chat, PrRecord } from "@dispatch/shared";
 import { Store } from "../store/index.js";
 import {
+  AGED_CHAT_DELETE_LIMIT,
   RetentionService,
   REVIEWER_CHAT_RETENTION_MS,
   TOOL_IMAGE_RETENTION_MS,
@@ -245,6 +246,122 @@ describe("checkpoint rule", () => {
     expect(await sweptRepoFor!("c1")).toBe(repo);
     expect(await sweptRepoFor!("unknown-chat")).toBeNull();
     await rm(repo, { recursive: true, force: true });
+  });
+});
+
+describe("aged chats (rule 4)", () => {
+  /** Rule 4 only runs when a window is configured. */
+  async function window(days: number): Promise<void> {
+    await store.saveSettings({ theme: "dark", retention: { chatDeleteDays: days } });
+  }
+
+  it("is OFF by default — an install upgrading into the field loses nothing", async () => {
+    await chat("ancient", { updatedAt: NOW - 400 * DAY });
+
+    const report = await service().sweep();
+
+    expect(report.agedChats.deleted).toEqual([]);
+    expect(deleted).toEqual([]);
+    expect(existsSync(store.chatTranscriptPath("ancient"))).toBe(false); // never had one
+    expect(await store.getChat("ancient")).not.toBeNull();
+  });
+
+  it("deletes a chat idle past the window and keeps one inside it", async () => {
+    await window(30);
+    await chat("old", { updatedAt: NOW - 31 * DAY });
+    await chat("recent", { updatedAt: NOW - 29 * DAY });
+
+    const report = await service().sweep();
+
+    expect(report.agedChats.deleted).toEqual(["old"]);
+    expect(await store.getChat("recent")).not.toBeNull();
+  });
+
+  it("keeps an old chat whose PR has not settled", async () => {
+    await window(30);
+    await chat("open-pr", {
+      updatedAt: NOW - 90 * DAY,
+      prs: [{ number: 7, url: "u", branch: "b", state: "open" }],
+    });
+    // State we could not classify is treated the same way, deliberately.
+    await chat("unknown-pr", {
+      updatedAt: NOW - 90 * DAY,
+      prs: [{ number: 8, url: "u", branch: "b" }],
+    });
+    await chat("merged-pr", {
+      updatedAt: NOW - 90 * DAY,
+      prs: [{ number: 9, url: "u", branch: "b", state: "merged" }],
+    });
+
+    const report = await service().sweep();
+
+    expect(report.agedChats.deleted).toEqual(["merged-pr"]);
+    expect(report.agedChats.skipped).toBe(2);
+  });
+
+  it("keeps an old chat that still has a worktree on disk", async () => {
+    await window(30);
+    await chat("has-tree", { updatedAt: NOW - 90 * DAY, worktrees: ["C:/wt/feat-x"] });
+
+    expect((await service().sweep()).agedChats.deleted).toEqual([]);
+  });
+
+  it("keeps a busy chat, and the global chat however old", async () => {
+    await window(30);
+    await chat("busy-one", { updatedAt: NOW - 90 * DAY });
+    await chat("global-one", { projectId: "__global__", updatedAt: NOW - 90 * DAY });
+    busy.add("busy-one");
+
+    expect((await service().sweep()).agedChats.deleted).toEqual([]);
+  });
+
+  it("caps a pass and takes the oldest first, so a big backlog drains over passes", async () => {
+    await window(30);
+    for (let i = 0; i < AGED_CHAT_DELETE_LIMIT + 5; i++) {
+      await chat(`c${String(i).padStart(2, "0")}`, { updatedAt: NOW - (100 + i) * DAY });
+    }
+
+    const report = await service().sweep();
+
+    expect(report.agedChats.deleted).toHaveLength(AGED_CHAT_DELETE_LIMIT);
+    // `c29` is the oldest (NOW - 129d), so it goes in the first pass and `c00`
+    // (the youngest of the candidates) survives it.
+    expect(report.agedChats.deleted).toContain("c29");
+    expect(await store.getChat("c00")).not.toBeNull();
+  });
+
+  it("does not delete a reviewer chat twice when both rules want it", async () => {
+    await window(30);
+    await pr("o/r#1", { state: "merged", mergedAt: new Date(NOW - 90 * DAY).toISOString() });
+    await chat("reviewer", { updatedAt: NOW - 90 * DAY, reviewOf: "o/r#1" });
+
+    const report = await service().sweep();
+
+    expect(report.reviewerChats.deleted).toEqual(["reviewer"]);
+    expect(report.agedChats.deleted).toEqual([]);
+    expect(deleted).toEqual(["reviewer"]);
+  });
+});
+
+describe("configured windows", () => {
+  it("uses the reviewer window from settings rather than the default", async () => {
+    await store.saveSettings({ theme: "dark", retention: { reviewerChatDays: 1 } });
+    await pr("o/r#2", { state: "merged", mergedAt: new Date(NOW - 2 * DAY).toISOString() });
+    await chat("rev", { updatedAt: NOW - 2 * DAY, reviewOf: "o/r#2" });
+
+    // 2 days settled is inside the 14-day default and past a 1-day setting.
+    expect(REVIEWER_CHAT_RETENTION_MS).toBeGreaterThan(2 * DAY);
+    expect((await service().sweep()).reviewerChats.deleted).toEqual(["rev"]);
+  });
+
+  it("uses the image window from settings rather than the default", async () => {
+    await store.saveSettings({ theme: "dark", retention: { toolImageDays: 1 } });
+    await chat("imgs");
+    await store.writeChatAsset("imgs", "shot.png", PNG);
+    await transcript("imgs", [toolImage("shot.png", NOW - 2 * DAY)]);
+
+    expect(TOOL_IMAGE_RETENTION_MS).toBeGreaterThan(2 * DAY);
+    expect((await service().sweep()).images.files).toBe(1);
   });
 });
 

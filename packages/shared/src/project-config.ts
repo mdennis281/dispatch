@@ -28,6 +28,7 @@ import { SubAppSchema, AgentConfigSchema } from "./domain.js";
 import { WorkflowConfigSchema } from "./workflow.js";
 import { IssueConfigSchema } from "./issues.js";
 import { ProjectAgentContextSchema } from "./agent-context.js";
+import { ProjectRetentionSchema } from "./retention.js";
 
 /* ------------------------------------------------------------ dir defaults */
 
@@ -390,6 +391,19 @@ export const ProjectManifestSchema = z.object({
    * someone happened to raise the app setting.
    */
   agentContext: ProjectAgentContextSchema.optional(),
+  /**
+   * How many of this repo's chats the sidebar loads at a time
+   * ({@link ProjectRetentionSchema}) — the one retention knob a project may set.
+   *
+   * Committed because chat VOLUME is a property of the repo: the project this
+   * was built against holds 874 chats where its neighbour holds ten, and they
+   * want different numbers on screen on every machine, not just the one where
+   * someone edited app settings. The DELETION windows are deliberately absent —
+   * see {@link ProjectRetentionSchema} for why a committed file an agent can
+   * write must not be able to shorten the window on the only copy of a
+   * transcript.
+   */
+  retention: ProjectRetentionSchema.optional(),
   /** Issue-triggered chats (see {@link IssueConfigSchema}). Off unless authored. */
   issues: IssueConfigSchema.optional(),
   defaults: ManifestDefaultsSchema.optional(),
@@ -521,6 +535,8 @@ export const ProjectConfigSchema = z.object({
   spawnChat: ManifestSpawnChatSchema.optional(),
   /** From manifest `agentContext` — this repo's always-on context overrides. */
   agentContext: ProjectAgentContextSchema.optional(),
+  /** From manifest `retention` — this project's chat load cap. */
+  retention: ProjectRetentionSchema.optional(),
   /** From manifest `issues` — issue-triggered chats for this project. */
   issues: IssueConfigSchema.optional(),
   defaults: ProjectConfigDefaultsSchema.optional(),

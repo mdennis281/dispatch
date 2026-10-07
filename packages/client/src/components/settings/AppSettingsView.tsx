@@ -46,6 +46,7 @@ import { AccountsSection } from "./sections/AccountsSection.js";
 import { ChatSection } from "./sections/ChatSection.js";
 import { ContextSection, normalizeContextLimits } from "./sections/ContextSection.js";
 import { AgentContextSection } from "./sections/AgentContextSection.js";
+import { RetentionSection } from "./sections/RetentionSection.js";
 import { NotificationsSection } from "./sections/NotificationsSection.js";
 import { AuthSettings } from "../auth/AuthSettings.js";
 import { UpdateBanner } from "../update/UpdateBanner.js";
@@ -101,6 +102,12 @@ function normalize(s: AppSettings): AppSettings {
     // and materialising that would pin every install to today's numbers the
     // first time anyone saved anything.
     reviewAgent: s.reviewAgent,
+    // Carried RAW for the same reason as `reviewAgent` above: every field in it
+    // means "inherit the shipped default" when unset, and materialising the
+    // effective numbers here would pin this install to today's windows the first
+    // time anyone saved a theme. Naming it at all is the load-bearing part — a
+    // field this function omits is a field the next save DELETES.
+    retention: s.retention,
     // Spelled out for the reason above, and it matters doubly here: a field
     // this function drops is a field the section renders as "nothing muted"
     // whatever is stored, AND one the next save clears.
@@ -323,6 +330,8 @@ export function AppSettingsView() {
           <ContextSection {...paneProps} />
         ) : section === "agent-context" ? (
           <AgentContextSection {...paneProps} />
+        ) : section === "retention" ? (
+          <RetentionSection {...paneProps} />
         ) : (
           <NotificationsSection {...paneProps} />
         )}

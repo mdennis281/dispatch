@@ -66,7 +66,7 @@ interface AppDraftPair {
  * stores them under one key.
  */
 const SECTION_SLICE: Record<
-  "appearance" | "chat" | "context" | "notifications",
+  "appearance" | "chat" | "context" | "retention" | "notifications",
   (s: AppSettings) => unknown
 > = {
   appearance: (s) => s.theme,
@@ -81,6 +81,7 @@ const SECTION_SLICE: Record<
     s.reviewAgent,
   ],
   context: (s) => [s.autoCompact, s.harness?.contextLimits, s.maxActiveSessions],
+  retention: (s) => s.retention,
   notifications: (s) => s.webhook,
 };
 

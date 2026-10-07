@@ -33,6 +33,7 @@ import {
 import { GLOBAL_PROJECT_ID, isGlobalProject, parsePrRecordKey } from "@dispatch/shared";
 import type { Chat, PrRecord, SubApp, RunnerInstance, Project } from "@dispatch/shared";
 import { Popover, MenuItem } from "../ui/Popover.js";
+import { Button } from "../ui/Button.js";
 import { IconButton } from "../ui/IconButton.js";
 import { SectionLabel } from "../ui/Panel.js";
 import { StatusDot, statusMeta, toneText } from "../ui/StatusDot.js";
@@ -55,6 +56,7 @@ import {
   useChats,
   useProjectChatTree,
   useProjectAgentCounts,
+  useUnloadedChatCount,
   isChatWorking,
   isReviewerChat,
   reviewTargetKey,
@@ -83,7 +85,7 @@ import { useProjectMemories } from "../../stores/memory.js";
 import { useGit, useGitChangeCount } from "../../stores/git.js";
 import { useRunners } from "../../stores/runners.js";
 import { useAttention } from "../../stores/attention.js";
-import { actions } from "../../lib/actions.js";
+import { actions, loadOlderChats } from "../../lib/actions.js";
 import { cn } from "../../lib/cn.js";
 import { midTruncate, relTimeShort } from "../../lib/format.js";
 import { useFlipReorder } from "../../lib/useFlip.js";
@@ -1668,6 +1670,39 @@ function createChatAndFocus(input: { projectId: string; modeId?: string }): void
   }, 8000);
 }
 
+/**
+ * "N older chats" — the one thing that keeps the load cap honest.
+ *
+ * The cap bounds what hydrates to the newest N per project (200 by default), and
+ * without this the list just ends: on the install this was built for that is 674
+ * chats of one project silently absent, which is indistinguishable from having
+ * lost them. So the sidebar states the number and loads them on request.
+ *
+ * Renders nothing when there is nothing held back — see
+ * {@link useUnloadedChatCount} for the four ways that happens.
+ */
+function OlderChatsFooter({ projectId }: { projectId: string | null }) {
+  const hidden = useUnloadedChatCount(projectId);
+  const [loading, setLoading] = useState(false);
+  if (!projectId || hidden === 0) return null;
+  return (
+    <Button
+      variant="ghost"
+      disabled={loading}
+      onClick={() => {
+        setLoading(true);
+        // No catch-and-report: the footer simply stays, which is the honest
+        // outcome of a failed load and re-offers the action. A notice for a
+        // read that can be retried by clicking again is noise.
+        void loadOlderChats(projectId).finally(() => setLoading(false));
+      }}
+      className="w-full justify-start px-2.5 text-xs !text-faint hover:!text-primary"
+    >
+      {loading ? "Loading…" : `${hidden} older chat${hidden === 1 ? "" : "s"}`}
+    </Button>
+  );
+}
+
 export function Sidebar() {
   // Below `md` this whole column lives inside an off-canvas `Drawer`, so it
   // fills the drawer instead of carrying its own 260px. At `md` and `lg` the
@@ -1982,6 +2017,9 @@ export function Sidebar() {
             })
           )}
         </div>
+        {/* Outside `chatListRef` deliberately: it is not a chat row, and FLIP
+            would animate it as one sliding into place on every reorder. */}
+        <OlderChatsFooter projectId={project?.id ?? null} />
       </ScrollArea>
 
       {/* new chat */}

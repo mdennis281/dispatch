@@ -475,6 +475,13 @@ export async function hydrateFromServer(): Promise<boolean> {
   // reads the live list off the Claude Code runtime. Kept out of the gating
   // fetch above because that read spawns a short-lived probe subprocess and must
   // never block the app — the store keeps its fallback seed on failure.
+  // What the load cap is holding back, per project. Best-effort and non-gating:
+  // it only decides whether the sidebar offers a "N older" footer, so a failure
+  // costs the affordance and nothing else.
+  void api.chats
+    .totals()
+    .then(({ totals, limit }) => useChats.getState().noteTotals(totals, limit))
+    .catch(() => {});
   void api.models
     .list(DEFAULT_HARNESS)
     .then((m) => useModels.getState().setModels(m, DEFAULT_HARNESS))

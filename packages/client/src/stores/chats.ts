@@ -22,6 +22,19 @@ interface ChatsStore {
   byId: Record<string, Chat>;
   /** display order (most-recent activity first is applied at hydrate time) */
   order: string[];
+  /**
+   * projectId → how many chats that project HAS on the server, against
+   * {@link loadCap} chats loaded per project (0 = uncapped).
+   *
+   * The server ships only the newest `loadCap` per project; the rest are on disk
+   * and reachable, not gone. These two numbers are what lets the sidebar say so
+   * instead of silently ending the list. Absent until `/api/chats/totals`
+   * answers — a missing total renders no footer rather than "0 older".
+   */
+  chatTotals: Record<string, number>;
+  loadCap: number;
+  /** Projects the reader has explicitly loaded past the cap this session. */
+  fullyLoaded: Record<string, boolean>;
   activeChatId: string | null;
   /** derived live activity per chat (from chat-status events) */
   activity: Record<string, AgentActivity | undefined>;
@@ -86,6 +99,19 @@ interface ChatsStore {
    */
   setActiveChat: (id: string | null) => void;
   hydrate: (chats: Chat[]) => void;
+  /** Record what `/api/chats/totals` said. */
+  noteTotals: (totals: Record<string, number>, limit: number) => void;
+  /**
+   * Add chats WITHOUT dropping what is already loaded — the merge behind "show
+   * older" and behind opening a chat the cap did not load.
+   *
+   * Deliberately not `hydrate`, which replaces `byId` wholesale: a hydrate is
+   * the authoritative capped snapshot, so folding these in there would make a
+   * reconnect's result depend on what the reader had expanded. A reconnect does
+   * drop back to the capped view, and that is the intended behaviour — the
+   * footer comes back saying how many are still unloaded.
+   */
+  mergeChats: (chats: Chat[], opts?: { fullyLoadedProject?: string }) => void;
   upsertChat: (chat: Chat) => void;
   /** Advance a chat's last-activity clock (coalesced so bursty chunks don't churn). */
   bumpActivity: (chatId: string, ts?: number) => void;
@@ -108,6 +134,9 @@ interface ChatsStore {
 export const useChats = create<ChatsStore>((set) => ({
   byId: {},
   order: [],
+  chatTotals: {},
+  loadCap: 0,
+  fullyLoaded: {},
   activeChatId: null,
   activity: {},
   queued: {},
@@ -155,7 +184,53 @@ export const useChats = create<ChatsStore>((set) => ({
       // Deliberately dropped, not carried: a reconnect means the sessions that
       // held these may not exist any more (an exemption dies with its session),
       // and `loadExemptions` re-reads the open chat's straight afterwards.
-      return { byId, order, lastActivity, sectionSince, prSettled, exemptions: {}, activeChatId };
+      // `fullyLoaded` resets with the snapshot: the server has just re-applied
+      // the cap, so a project the reader had expanded is capped again and the
+      // footer must come back rather than claiming there is nothing more.
+      return {
+        byId,
+        order,
+        lastActivity,
+        sectionSince,
+        prSettled,
+        exemptions: {},
+        activeChatId,
+        fullyLoaded: {},
+      };
+    }),
+
+  noteTotals: (totals, limit) => set({ chatTotals: totals, loadCap: limit }),
+
+  mergeChats: (chats, opts) =>
+    set((s) => {
+      const byId = { ...s.byId };
+      const lastActivity = { ...s.lastActivity };
+      const sectionSince = { ...s.sectionSince };
+      const prSettled = { ...s.prSettled };
+      for (const c of chats) {
+        // A chat already loaded keeps its live clocks: these arrive from a REST
+        // read, so their `updatedAt` is at best as fresh as the events the store
+        // has been following, and overwriting `lastActivity` with it would sink a
+        // streaming chat back down its section.
+        if (byId[c.id]) continue;
+        byId[c.id] = c;
+        lastActivity[c.id] = c.updatedAt ?? c.createdAt;
+        sectionSince[c.id] = c.updatedAt ?? c.createdAt;
+        if (isPrSettledIdle(c)) prSettled[c.id] = true;
+      }
+      const order = Object.values(byId)
+        .sort((a, b) => (b.updatedAt ?? b.createdAt) - (a.updatedAt ?? a.createdAt))
+        .map((c) => c.id);
+      return {
+        byId,
+        order,
+        lastActivity,
+        sectionSince,
+        prSettled,
+        fullyLoaded: opts?.fullyLoadedProject
+          ? { ...s.fullyLoaded, [opts.fullyLoadedProject]: true }
+          : s.fullyLoaded,
+      };
     }),
 
   upsertChat: (chat) =>
@@ -284,6 +359,41 @@ export function chatsForProject(
 /** Selector: chats for a project, ordered by most-recent activity first. */
 export function useProjectChats(projectId: string | null): Chat[] {
   return useChats(useShallow((s) => chatsForProject(s, projectId)));
+}
+
+/**
+ * How many of a project's chats the load cap is NOT showing.
+ *
+ * `0` whenever there is nothing to offer, and that covers four distinct states
+ * on purpose — no total fetched yet, an uncapped install, a project under its
+ * cap, and a project the reader has already expanded. A footer that renders only
+ * on a positive number needs no knowledge of which of those it is in.
+ *
+ * Derived from the server's total rather than counted locally, because the thing
+ * being reported is precisely what the client does not have.
+ *
+ * Pure, with a hook wrapper below: the client test suite runs in `node` with no
+ * DOM, so a hook-only form could not be tested at all.
+ */
+export function unloadedChatCount(
+  s: Pick<ChatsStore, "byId" | "order" | "chatTotals" | "fullyLoaded">,
+  projectId: string | null,
+): number {
+  if (!projectId || s.fullyLoaded[projectId]) return 0;
+  const total = s.chatTotals[projectId];
+  if (total == null) return 0;
+  let loaded = 0;
+  for (const id of s.order) if (s.byId[id]?.projectId === projectId) loaded++;
+  // `max(0, …)` rather than the raw difference: the totals are fetched
+  // independently of the list, so a chat created between the two reads makes the
+  // loaded count the larger one for a moment. A footer offering "-1 older chats"
+  // is a worse answer than none.
+  return Math.max(0, total - loaded);
+}
+
+/** The hook form of {@link unloadedChatCount}. */
+export function useUnloadedChatCount(projectId: string | null): number {
+  return useChats((s) => unloadedChatCount(s, projectId));
 }
 
 /**

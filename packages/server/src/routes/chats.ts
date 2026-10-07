@@ -1,6 +1,8 @@
 /**
  * REST CRUD for chats + their transcript.
- *   GET    /api/chats?projectId=    → Chat[]
+ *   GET    /api/chats?projectId=&all=  → Chat[] (newest N per project; see
+ *                                     services/chat-load-cap.ts)
+ *   GET    /api/chats/totals        → { totals, limit } — chats per project vs cap
  *   POST   /api/chats               → create (registers a broker session)
  *   GET    /api/chats/:id           → Chat | 404
  *   PUT    /api/chats/:id           → merge metadata (title/mode/agent/effort…)
@@ -19,6 +21,7 @@ import type { FastifyInstance } from "fastify";
 import { ChatSchema } from "@dispatch/shared";
 import { createChat } from "./dispatch.js";
 import { leanRows } from "../services/transcript-lean.js";
+import { chatTotalsByProject, listCappedChats } from "../services/chat-load-cap.js";
 import { deleteChat, reapChatResidual } from "../services/chat-deletion.js";
 import { GLOBAL_MODE_ID, isGlobalProject } from "@dispatch/shared";
 
@@ -35,10 +38,30 @@ export function registerChatRoutes(app: FastifyInstance): void {
   const { broker, chatProcesses, terminals } = app.services;
   const reapResidual = (chatId: string) => reapChatResidual(app.services, chatId);
 
-  app.get<{ Querystring: { projectId?: string } }>(
+  // The load cap's dependencies, in one place: both routes below need the same
+  // view of what is live, and a second spelling of it would mean the totals and
+  // the payload disagreeing about which chats are pinned.
+  const capDeps = {
+    getStatus: (chatId: string) => broker.getStatus(chatId),
+    attention: app.services.attention,
+    projectRetention: (projectId: string) =>
+      app.services.projectConfig.getConfig(projectId)?.retention,
+  };
+
+  app.get<{ Querystring: { projectId?: string; all?: string } }>(
     "/api/chats",
-    async (req) => store.listChats(req.query.projectId),
+    async (req) =>
+      listCappedChats(store, capDeps, {
+        projectId: req.query.projectId,
+        all: isTruthyFlag(req.query.all),
+      }),
   );
+
+  /**
+   * What the cap is hiding. Registered before `/api/chats/:id` for readability
+   * only — a static segment already beats a parametric one in the router.
+   */
+  app.get("/api/chats/totals", async () => chatTotalsByProject(store));
 
   app.post("/api/chats", async (req, reply) => {
     const body = (req.body ?? {}) as Record<string, unknown>;

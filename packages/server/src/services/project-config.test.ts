@@ -460,6 +460,23 @@ describe("ProjectConfigService — reload syncs the store (authored overrides .d
     expect(svc.getConfig("p1")?.name).toBe("Authored");
   });
 
+  it("carries manifest `retention` onto the ProjectConfig", async () => {
+    // `ProjectConfigSchema.parse` copies an EXPLICIT field list off the
+    // manifest, so a key added to the schema and not to that list parses,
+    // typechecks, and is silently `undefined` for every reader. That is exactly
+    // how the per-project chat load cap shipped dead in review on PR #339 —
+    // its own unit tests stubbed `projectRetention` and never went through here.
+    await seedProject();
+    await writeConfig(
+      "project.yaml",
+      ["name: Capped", "retention:", "  maxChatsPerProject: 50", ""].join("\n"),
+    );
+    const svc = new ProjectConfigService({ store, bus });
+    await svc.reload("p1");
+
+    expect(svc.getConfig("p1")?.retention).toEqual({ maxChatsPerProject: 50 });
+  });
+
   it("a second identical reload does NOT re-persist / re-emit project-update", async () => {
     await seedProject({ name: "Seed" });
     await writeConfig("project.yaml", "name: Authored");
