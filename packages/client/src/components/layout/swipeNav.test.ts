@@ -12,6 +12,7 @@ import { swipeMove, runSwipe, swipeDrag } from "./swipeNav.js";
 import type { NavPlace } from "./navState.js";
 import { useLayout } from "../../stores/layout.js";
 import { useView } from "../../stores/view.js";
+import { useChats } from "../../stores/chats.js";
 
 /** The phone, on the transcript, nothing else open. */
 const AT_CHAT: NavPlace = {
@@ -20,6 +21,7 @@ const AT_CHAT: NavPlace = {
   pane: "chat",
   leftOpen: false,
   moreOpen: false,
+  hasChat: true,
 };
 
 const at = (over: Partial<NavPlace>): NavPlace => ({ ...AT_CHAT, ...over });
@@ -84,6 +86,13 @@ describe("swipeMove — forward", () => {
     expect(swipeMove(at({ leftOpen: true }), "forward")).toBe("close-picker");
   });
 
+  it("has no rung below the picker once the chat is closed", () => {
+    // Which is the normal state of the picker now — reaching it closes the chat
+    // it covered. "close-picker" there would uncover the empty state, whose own
+    // way out is the list the gesture just dismissed.
+    expect(swipeMove(at({ leftOpen: true, hasChat: false }), "forward")).toBeNull();
+  });
+
   it("does nothing from the transcript — the bottom of the stack", () => {
     expect(swipeMove(AT_CHAT, "forward")).toBeNull();
   });
@@ -103,12 +112,42 @@ describe("runSwipe", () => {
   beforeEach(() => {
     useLayout.setState({ mode: "sm", leftOpen: false, moreOpen: false, pane: "chat" });
     useView.setState({ view: "chat" });
+    useChats.setState({ activeChatId: null });
   });
 
   it("opens and closes the picker", () => {
     runSwipe("open-picker");
     expect(useLayout.getState().leftOpen).toBe(true);
     runSwipe("close-picker");
+    expect(useLayout.getState().leftOpen).toBe(false);
+  });
+
+  it("closes the chat on the way INTO the picker, not on the way out", () => {
+    // What makes the list a place: the Ship and Run slots beside it are enabled
+    // by the open chat alone, so a picker that left one open kept a nav lit and
+    // badged for a transcript that was no longer on screen.
+    useChats.setState({ activeChatId: "c1" });
+    runSwipe("open-picker");
+    expect(useChats.getState().activeChatId).toBeNull();
+  });
+
+  it("resets a Ship/Run pane when it closes the chat under it", () => {
+    // With no chat open `App` unmounts the pane's drawer entirely, so a pane
+    // left selected here is invisible until it springs back over the next chat
+    // you pick.
+    useChats.setState({ activeChatId: "c1" });
+    useLayout.setState({ pane: "run" });
+    runSwipe("open-picker");
+    expect(useLayout.getState().pane).toBe("chat");
+  });
+
+  it("leaves the chat alone when there is no picker — above sm", () => {
+    // The sidebar is an inline column there, beside the transcript rather than
+    // over it, so glancing at it must not close what you are reading.
+    useLayout.setState({ mode: "md" });
+    useChats.setState({ activeChatId: "c1" });
+    runSwipe("open-picker");
+    expect(useChats.getState().activeChatId).toBe("c1");
     expect(useLayout.getState().leftOpen).toBe(false);
   });
 
@@ -144,9 +183,13 @@ describe("runSwipe", () => {
     runSwipe("leave-home");
     expect(useView.getState().view).toBe("chat");
     // The picker, not the bare transcript — forward walks the same rungs back
-    // that back walked down, so the NEXT forward swipe is what opens the chat.
+    // that back walked down.
     expect(useLayout.getState().leftOpen).toBe(true);
-    expect(swipeMove({ ...AT_CHAT, leftOpen: true }, "forward")).toBe("close-picker");
+    // …and that is where forward STOPS, because arriving at the list closed the
+    // chat `leaveHome` resolved. The rung below the picker is a chat you have
+    // chosen, so from here you choose one.
+    expect(useChats.getState().activeChatId).toBeNull();
+    expect(swipeMove({ ...AT_CHAT, leftOpen: true, hasChat: false }, "forward")).toBeNull();
   });
 });
 

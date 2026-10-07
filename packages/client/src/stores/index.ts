@@ -27,7 +27,7 @@ import {
 import { useConnection } from "./connection.js";
 import { useProjects } from "./projects.js";
 import { useChats, statusIsActivity } from "./chats.js";
-import { reconcileActiveChat } from "./navigation.js";
+import { reconcileActiveChat, openPicker } from "./navigation.js";
 import { useMessages } from "./messages.js";
 import { useAttention } from "./attention.js";
 import { useRunners } from "./runners.js";
@@ -539,6 +539,22 @@ export async function hydrateFromServer(): Promise<boolean> {
   // first load they can land in different projects. Snap the chat back into the
   // focused project.
   reconcileActiveChat();
+  // A PHONE boots onto the list, not into a conversation.
+  //
+  // `reconcileActiveChat` prefers to keep a selection, and on a first load the
+  // only selection there is came from `useChats.hydrate` taking `order[0]` —
+  // the globally most recent chat. On a desktop that lands you beside a sidebar
+  // you can read; at `sm` it lands you INSIDE a transcript you did not ask for,
+  // with the list that would have explained it off-canvas, and it looked for
+  // all the world like the app had restored something. `openPicker` is a no-op
+  // above `sm`, so the wide layouts are untouched.
+  //
+  // Guarded on `prevChat` so this is the FIRST hydrate only. This function also
+  // runs on every WebSocket reconnect, where the two lines above exist
+  // specifically to put the reader back where they were — dropping them onto
+  // the chat list because the socket blipped mid-turn would be far worse than
+  // the landing this fixes.
+  if (!prevChat) openPicker();
 
   const activeProject = useProjects.getState().activeProjectId;
   if (activeProject) void loadProjectPanels(activeProject);

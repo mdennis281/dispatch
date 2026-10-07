@@ -29,6 +29,17 @@ export interface NavPlace {
   leftOpen: boolean;
   /** The More sheet. */
   moreOpen: boolean;
+  /**
+   * Whether a chat is open at all — `visibleChat`, the same bit that decides
+   * whether `App` renders a transcript or the empty state.
+   *
+   * Needed because the picker now closes the chat it was opened over (see
+   * `openPicker` in stores/navigation), so "leave the picker" is no longer
+   * guaranteed to have anywhere to land. Without this the two controls that
+   * close it — the Chats slot and a forward edge swipe — would dismiss the only
+   * list on screen to reveal a panel reading "pick a chat from the sidebar".
+   */
+  hasChat: boolean;
 }
 
 /**
@@ -73,14 +84,21 @@ export function currentSlot({ view, pane, leftOpen, moreOpen }: NavPlace): NavSl
  * were last reading, and only once you're already there does it start toggling
  * the picker over it. That way the first press is never a surprise and the
  * second one is always the same thing.
+ *
+ * There is a fourth answer, and it is "nothing": on the picker with no chat
+ * open, the list is the deepest surface there is. Closing it would reveal the
+ * empty state — a panel whose own copy tells you to pick a chat from the
+ * sidebar you just dismissed — so the press is spent instead, the way a tap on
+ * the tab you are already on is. `currentSlot` already lights this slot there,
+ * so it reads as the current place rather than as a control that failed.
  */
-export type ChatsAction = "go-chat" | "open-picker" | "close-picker";
+export type ChatsAction = "go-chat" | "open-picker" | "close-picker" | "stay";
 
-export function chatsAction({ mode, view, pane, leftOpen, moreOpen }: NavPlace): ChatsAction {
+export function chatsAction({ mode, view, pane, leftOpen, moreOpen, hasChat }: NavPlace): ChatsAction {
   // Above `sm` the sidebar is an inline column, so there is no picker to toggle
   // and the slot is a plain destination.
   if (mode !== "sm") return "go-chat";
-  if (leftOpen) return "close-picker";
+  if (leftOpen) return hasChat ? "close-picker" : "stay";
   if (moreOpen || view !== "chat" || pane !== "chat") return "go-chat";
   return "open-picker";
 }

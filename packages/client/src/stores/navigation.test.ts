@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import type { Chat, Project } from "@dispatch/shared";
 import { useChats } from "./chats.js";
 import { useProjects } from "./projects.js";
@@ -11,6 +11,7 @@ import {
   openChat,
   openProject,
   reconcileActiveChat,
+  openPicker,
   visibleChat,
   goHome,
   leaveHome,
@@ -416,5 +417,108 @@ describe("navigating to a chat clears a stale Ship/Run pane", () => {
     onRun();
     selectChat("c2");
     expect(pane()).toBe("run");
+  });
+});
+
+/* ------------------------------------------------------------- the picker */
+
+/**
+ * The phone's chat list is a PLACE, not a sheet over the transcript — so going
+ * to it closes the chat.
+ *
+ * The visible symptom was in the bottom nav: Ship and Run are enabled by the
+ * open chat alone, so they stayed live, lit and badged for a chat you had left
+ * long enough ago to have forgotten which one it was, and one tap put that
+ * chat's panel over the list you were reading.
+ *
+ * The node test env has no `matchMedia`, so `useLayout` boots at `lg` (see
+ * lib/useBreakpoint) — every test that wants the phone says so, and puts it
+ * back afterwards for the suites that assume the default.
+ */
+describe("openPicker", () => {
+  const onPhone = () => useLayout.setState({ mode: "sm" });
+
+  beforeEach(() => {
+    useLayout.setState({ mode: "lg", leftOpen: false, pane: "chat" });
+  });
+
+  it("shows the list and closes the chat behind it", () => {
+    onPhone();
+    seed({ chats: [chat("c1", "p1")], activeChatId: "c1" });
+
+    openPicker();
+
+    expect(useLayout.getState().leftOpen).toBe(true);
+    expect(activeChat()).toBeNull();
+    // The project stays — the list you land on is this project's list.
+    expect(activeProject()).toBe("p1");
+  });
+
+  it("resets a Ship/Run pane, which nothing renders with no chat open", () => {
+    onPhone();
+    seed({ chats: [chat("c1", "p1")], activeChatId: "c1" });
+    useLayout.setState({ pane: "run" });
+
+    openPicker();
+
+    expect(useLayout.getState().pane).toBe("chat");
+  });
+
+  it("is a no-op above sm, where the sidebar is a column beside the transcript", () => {
+    for (const mode of ["md", "lg"] as const) {
+      useLayout.setState({ mode, leftOpen: false, pane: "chat" });
+      seed({ chats: [chat("c1", "p1")], activeChatId: "c1" });
+
+      openPicker();
+
+      expect(activeChat()).toBe("c1");
+      expect(useLayout.getState().leftOpen).toBe(false);
+    }
+  });
+});
+
+describe("openProject on a phone", () => {
+  beforeEach(() => {
+    useLayout.setState({ mode: "sm", leftOpen: false, pane: "chat" });
+  });
+
+  afterEach(() => {
+    useLayout.setState({ mode: "lg", leftOpen: false, pane: "chat" });
+  });
+
+  it("lands on the project's chat list rather than inside its newest chat", () => {
+    // The homepage grid is how you choose BETWEEN projects; a tap on a card
+    // that re-entered a conversation from days ago reads as the app having
+    // restored something you did not ask for. At `sm` the list is the whole
+    // screen, so showing it IS taking you in.
+    seed({ chats: [chat("c1", "p1"), chat("c2", "p2")], activeChatId: "c1" });
+
+    openProject("p2");
+
+    expect(activeProject()).toBe("p2");
+    expect(activeChat()).toBeNull();
+    expect(useLayout.getState().leftOpen).toBe(true);
+    expect(useView.getState().view).toBe("chat");
+  });
+
+  it("clears the previous chat even when the project is already focused", () => {
+    // `selectProject` short-circuits on a re-select (it is how a config reload
+    // forces itself), so the clearing cannot be left to it.
+    seed({ chats: [chat("c1", "p1")], activeChatId: "c1" });
+
+    openProject("p1");
+
+    expect(activeChat()).toBeNull();
+    expect(useLayout.getState().leftOpen).toBe(true);
+  });
+
+  it("still opens the most recent chat above sm", () => {
+    useLayout.setState({ mode: "md" });
+    seed({ chats: [chat("c1", "p1"), chat("old", "p2", 10), chat("new", "p2", 30)] });
+
+    openProject("p2");
+
+    expect(activeChat()).toBe("new");
+    expect(useLayout.getState().leftOpen).toBe(false);
   });
 });

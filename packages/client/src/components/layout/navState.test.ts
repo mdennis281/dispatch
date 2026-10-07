@@ -16,6 +16,7 @@ const AT_CHAT: NavPlace = {
   pane: "chat",
   leftOpen: false,
   moreOpen: false,
+  hasChat: true,
 };
 
 const at = (over: Partial<NavPlace>): NavPlace => ({ ...AT_CHAT, ...over });
@@ -94,6 +95,14 @@ describe("chatsAction", () => {
 
   it("closes it again on the next press", () => {
     expect(chatsAction(at({ leftOpen: true }))).toBe("close-picker");
+  });
+
+  it("spends the press on the picker when there is no chat behind it", () => {
+    // `openPicker` closes the chat it was opened over, so this is the state you
+    // are in whenever you reached the list rather than merely glanced at it.
+    // Closing it would uncover the empty state and leave the way back out being
+    // the list you just dismissed.
+    expect(chatsAction(at({ leftOpen: true, hasChat: false }))).toBe("stay");
   });
 
   it("returns to the transcript first from anywhere else", () => {

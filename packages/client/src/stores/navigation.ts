@@ -14,6 +14,7 @@
  *   - {@link selectProject} — switch focus; the open chat goes with it.
  *   - {@link selectChat}    — open a chat, bringing its project along.
  *   - {@link reconcileActiveChat} — re-establish the invariant after a hydrate.
+ *   - {@link openPicker}   — show the phone's chat list, which closes the chat.
  *
  * These live outside the stores because the rule spans two of them, and neither
  * store should have to import the other.
@@ -36,6 +37,34 @@ export function selectProject(projectId: string): void {
   const projects = useProjects.getState();
   if (projects.activeProjectId === projectId) return;
   projects.setActiveProject(projectId);
+  useChats.getState().setActiveChat(null);
+}
+
+/**
+ * Show the phone's chat picker — the full-screen sidebar — and CLOSE whatever
+ * chat was open behind it.
+ *
+ * The closing is the point, and it is what makes the picker a place rather than
+ * a sheet over one. At `sm` the picker fills the main area, so the transcript
+ * behind it is not something you are still looking at; but everything else in
+ * the shell went on being scoped to it. The bottom nav's Ship and Run slots are
+ * enabled by `visibleChat` alone, so they stayed live — and lit, and badged —
+ * for a chat you had navigated away from long enough to have forgotten, and one
+ * tap put a Ship panel for it over the list you were reading. `pane` resets for
+ * the same reason it does in {@link leaveHome}: with no chat open `App` stops
+ * rendering the pane's drawer entirely, so a stale `"run"` would spring back
+ * over the next chat you picked.
+ *
+ * A no-op above `sm`, on the same reasoning as `dismissLeftDrawer`: there is no
+ * picker there — the sidebar is an inline column BESIDE the transcript, and
+ * closing a chat because you glanced at the rail next to it would be absurd.
+ * Callers can fire it unconditionally instead of each re-deriving the mode.
+ */
+export function openPicker(): void {
+  const layout = useLayout.getState();
+  if (layout.mode !== "sm") return;
+  layout.setPane("chat");
+  layout.setLeftOpen(true);
   useChats.getState().setActiveChat(null);
 }
 
@@ -283,6 +312,16 @@ export function leaveHome(): void {
  * same landing is an empty panel with a sidebar you have not seen yet. Picking a
  * project from a grid of them reads as "take me in", so it takes you in.
  *
+ * …except on a PHONE, where it lands on the picker instead. The argument above
+ * is about the sidebar being a rail you have not seen yet, and at `sm` the
+ * picker IS the full screen — so taking you in means showing you the list, not
+ * dropping you into whichever chat happens to be newest. Opening one of them
+ * was also the more surprising half of the two: the homepage grid is how you
+ * choose between projects, and a tap on a card that re-entered a conversation
+ * from days ago read as the app having remembered something you did not ask it
+ * to. One more tap from the list is the whole cost, and `openPicker` clears the
+ * previous project's chat on the way so the nav beside it can't be lit for it.
+ *
  * Routed through `selectChat`/`selectProject` rather than setting either store
  * directly, which is this module's whole rule. The pane resets for the same
  * reason it does in {@link leaveHome}: at `sm` a stale Ship/Run selection would
@@ -290,6 +329,12 @@ export function leaveHome(): void {
  */
 export function openProject(projectId: string): void {
   useLayout.getState().setPane("chat");
+  if (useLayout.getState().mode === "sm") {
+    selectProject(projectId);
+    useView.getState().setView("chat");
+    openPicker();
+    return;
+  }
   const recent = chatsForProject(useChats.getState(), projectId)[0];
   if (recent) selectChat(recent.id);
   else {

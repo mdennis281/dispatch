@@ -17,7 +17,7 @@
  * no JSX, so a rule expressed as a ternary inside a touch handler can only be
  * checked on a phone, and a rule expressed here is checked by calling it.
  */
-import { goHome, leaveHome } from "../../stores/navigation.js";
+import { goHome, leaveHome, openPicker } from "../../stores/navigation.js";
 import { useLayout } from "../../stores/layout.js";
 import { useView } from "../../stores/view.js";
 import type { SwipeDir } from "../../lib/edgeSwipe.js";
@@ -62,7 +62,7 @@ export type SwipeMove =
  * same guard `chatsAction` carries.
  */
 export function swipeMove(place: NavPlace, dir: SwipeDir): SwipeMove | null {
-  const { mode, view, pane, leftOpen, moreOpen } = place;
+  const { mode, view, pane, leftOpen, moreOpen, hasChat } = place;
   if (mode !== "sm") return null;
 
   if (dir === "back") {
@@ -91,7 +91,12 @@ export function swipeMove(place: NavPlace, dir: SwipeDir): SwipeMove | null {
   // close a picker that is not on screen.
   if (view === "new-project") return null;
   if (view === "home") return "leave-home";
-  if (leftOpen) return "close-picker";
+  // …and the picker's own forward rung exists only while there is a transcript
+  // UNDER it. Opening the picker closes the chat it covered (see `openPicker`),
+  // so forward out of it would uncover the empty state — and the way back from
+  // there is the very list the gesture just dismissed. `null` leaves the panel
+  // where it is, which is the honest answer: nothing is in front of this one.
+  if (leftOpen) return hasChat ? "close-picker" : null;
   return null;
 }
 
@@ -122,7 +127,11 @@ export function runSwipe(move: SwipeMove): void {
       layout.setPane("chat");
       return;
     case "open-picker":
-      layout.setLeftOpen(true);
+      // Not `setLeftOpen(true)`: arriving at the list closes the chat behind it
+      // so the nav beside it stops being scoped to one you have left. See
+      // `openPicker` in stores/navigation — the one definition of that, shared
+      // with the Chats slot and the homepage grid.
+      openPicker();
       return;
     case "close-picker":
       layout.setLeftOpen(false);
@@ -136,11 +145,16 @@ export function runSwipe(move: SwipeMove): void {
     case "leave-home":
       // `leaveHome` resolves the return address and resets the pane, then the
       // picker goes back up OVER it: the homepage's rung below is the chat list,
-      // not the transcript (see `swipeMove`). Opening it second rather than
-      // instead is what makes the next forward swipe — "close-picker" — land on
-      // the chat `leaveHome` just selected.
+      // not the transcript (see `swipeMove`).
+      //
+      // It is still called rather than skipped, even though `openPicker` then
+      // drops the chat it just selected, because resolving the return address is
+      // how the PROJECT comes back — the list you land on has to be the one you
+      // left from, and `lastPlace` is the only thing that remembers which that
+      // was. The chat going again is the same rule as everywhere else: the
+      // picker is a place, and it doesn't hold a chat open behind it.
       leaveHome();
-      useLayout.getState().setLeftOpen(true);
+      openPicker();
       return;
   }
 }
