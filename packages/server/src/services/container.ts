@@ -240,8 +240,15 @@ export interface Services extends ServiceBase {
   issueWatcher: IssueWatcher;
   /** The tracked-PR catalog — the Workspace view's third registry. */
   prRegistry: PrRegistry;
-  /** Start background wiring (attention, notifier, reconcile, auto-checkpoint). */
+  /** Start background wiring (attention, notifier, auto-checkpoint). Bounded. */
   start(): Promise<void>;
+  /**
+   * The rest of boot — the part whose cost scales with the install. Called from
+   * `start.ts` AFTER `app.listen()`, never from `buildApp()`: awaiting it with
+   * the port shut is what made the updater roll healthy builds back. Memoised
+   * and never rejects.
+   */
+  warm(): Promise<void>;
   /** Tear everything down (broker sessions, runners, subscriptions). */
   dispose(): Promise<void>;
 }
@@ -1121,6 +1128,80 @@ export function createServices(
   let offTitle: (() => void) | undefined;
   let offReap: (() => void) | undefined;
   let offMemoryMigrate: (() => void) | undefined;
+  /** Set by `dispose()`. Read between every await in `warm()` — see both. */
+  let disposed = false;
+  /** The in-flight `warm()`, so `dispose()` can wait for it to unwind. */
+  let warming: Promise<void> | undefined;
+
+  // Arms one best-effort background service. A throw in any ONE of them must
+  // not abort boot and silently skip the wiring AFTER it — that ordering once
+  // risked leaving AI titles + auto-checkpoints un-wired with no error at all.
+  // Isolate + LOG each failure so it's visible, never a silent cascade.
+  // Out here rather than inside `start()` because `warm()` needs it too.
+  const safeStart = (label: string, fn: () => void) => {
+    try {
+      fn();
+    } catch (err) {
+      console.error(`[Dispatch] ${label}.start() failed (continuing):`, err);
+    }
+  };
+
+  /**
+   * The body of `services.warm()`. Out here, not in the object literal, so
+   * `warm()` can memoise it into `warming` and `dispose()` can await that.
+   */
+  const warmOnce = async (): Promise<void> => {
+    // Agent-created worktree detection goes first: its per-project baseline is
+    // what stops worktrees that already existed being reported as newly
+    // created, and a resumed turn is the first thing that can complete and ask.
+    // Nothing can have finished a turn in the milliseconds since `listen`, and
+    // RESUME_START_DELAY_MS holds the resumes off on top of that — but ordering
+    // it ahead of `resume.restore()` keeps that true without relying on either.
+    // Best-effort, like everything here — a git/seed failure just means no
+    // detection this boot.
+    await worktreeDetector.start().catch(() => {});
+    if (disposed) return;
+
+    // Re-arm auto-resumes persisted before the last shutdown, so a restart
+    // never strands a chat waiting on a limit that has since lifted.
+    await resume.restore().catch(() => {});
+    if (disposed) return;
+
+    // Adopt the persisted terminal roster (as archived — this process owns no
+    // shells yet) and start the retention sweep. `unref` so a timer can never
+    // be the reason the process won't exit.
+    try {
+      await terminals.reconcile();
+      await terminals.sweep();
+    } catch {
+      /* an unreadable terminals.json must never block boot either */
+    }
+    if (disposed) return;
+    terminalSweep = setInterval(() => {
+      void terminals.sweep().catch(() => {});
+    }, TERMINAL_SWEEP_MS);
+    terminalSweep.unref?.();
+
+    // Seed the PR catalog from every chat's `Chat.prs` BEFORE the sweep runs,
+    // so PRs opened before this catalog existed appear with nobody doing
+    // anything. No GitHub calls — the rows come from the pointers a chat
+    // already holds, and the first sweep fills in live state.
+    await prRegistry.backfill().catch((err: unknown) => {
+      console.error("[Dispatch] PR catalog backfill failed (continuing):", err);
+    });
+    if (disposed) return;
+    // Notices review rounds on PRs chats own — the half of the loop that
+    // doesn't require an agent to keep asking — and keeps the catalog current.
+    safeStart("prReviewWatcher", () => prReviewWatcher.start());
+    safeStart("issueWatcher", () => issueWatcher.start());
+
+    // Last, because it is the slowest and nothing above waits on it.
+    try {
+      await runner.reconcile();
+    } catch {
+      /* a missing runners.json / dead pid probe must never block boot */
+    }
+  };
 
   const services: Services = {
     config,
@@ -1221,17 +1302,6 @@ export function createServices(
       await secrets.start({ watch: true });
       await projectConfig.start().catch(() => {});
 
-      // Best-effort background services. A throw in any ONE of these must not
-      // abort boot and silently skip the wiring BELOW it — that ordering once
-      // risked leaving AI titles + auto-checkpoints un-wired with no error at
-      // all. Isolate + LOG each failure so it's visible, never a silent cascade.
-      const safeStart = (label: string, fn: () => void) => {
-        try {
-          fn();
-        } catch (err) {
-          console.error(`[Dispatch] ${label}.start() failed (continuing):`, err);
-        }
-      };
       // The usage ledger's flush timer. Rows buffer whether or not it is armed,
       // so nothing is lost before this — it only decides how promptly the buffer
       // reaches the disk.
@@ -1273,23 +1343,6 @@ export function createServices(
       // loaded would ask the stable endpoint on behalf of an unstable install.
       await release.hydrate().catch(() => {});
       safeStart("release", () => release.start());
-      // Seed the PR catalog from every chat's `Chat.prs` BEFORE the sweep runs,
-      // so PRs opened before this catalog existed appear with nobody doing
-      // anything. No GitHub calls — the rows come from the pointers a chat
-      // already holds, and the first sweep fills in live state.
-      await prRegistry.backfill().catch((err: unknown) => {
-        console.error("[Dispatch] PR catalog backfill failed (continuing):", err);
-      });
-      // Notices review rounds on PRs chats own — the half of the loop that
-      // doesn't require an agent to keep asking — and keeps the catalog current.
-      safeStart("prReviewWatcher", () => prReviewWatcher.start());
-      safeStart("issueWatcher", () => issueWatcher.start());
-
-      // Agent-created worktree detection: subscribe to turn-complete signals and
-      // seed the per-project baseline. Best-effort — a git/seed failure here must
-      // never block boot.
-      await worktreeDetector.start().catch(() => {});
-
       // AI title: generate one from the first user message IFF the chat is still
       // on its default "New chat" title. We fire as soon as the user's prompt
       // lands (`user` row) so a new chat is named right after the first send
@@ -1329,42 +1382,18 @@ export function createServices(
         })();
       });
 
-      // Re-arm auto-resumes persisted before the last shutdown, so a restart
-      // never strands a chat waiting on a limit that has since lifted.
-      await resume.restore().catch(() => {});
-
-      // NOTE: `restartResume.restore()` is deliberately NOT called here. It
-      // spawns agent process trees, and everything from this point to
-      // `app.listen()` is unbounded — `runner.reconcile()` below awaits a
-      // `docker compose down` per persisted docker runner. `start.ts` arms it
-      // once the port is actually answering. See RESUME_START_DELAY_MS.
-
-      // Boot reconciliation of persisted runners (best-effort).
-      try {
-        await runner.reconcile();
-      } catch {
-        /* a missing runners.json / dead pid probe must never block boot */
-      }
-
-      // Adopt the persisted terminal roster (as archived — this process owns no
-      // shells yet) and start the retention sweep. `unref` so a timer can never
-      // be the reason the process won't exit.
-      try {
-        await terminals.reconcile();
-        await terminals.sweep();
-      } catch {
-        /* an unreadable terminals.json must never block boot either */
-      }
-      terminalSweep = setInterval(() => {
-        void terminals.sweep().catch(() => {});
-      }, TERMINAL_SWEEP_MS);
-      terminalSweep.unref?.();
+      // NOTE: everything whose cost scales with the SIZE of this install —
+      // `resume.restore()`, the PR catalog backfill, worktree detection, the
+      // runner and terminal reconciles — has moved to `warm()`, which runs
+      // after `app.listen()`. See the comment on `warm` for the rollback that
+      // forced the split.
 
       // Data retention: checkpoints on removed worktrees, settled reviewer
       // chats, old tool-output images. Hourly, and NOT at boot like the terminal
-      // sweep above — its first pass on an install with a backlog deletes
+      // sweep in `warm()` — its first pass on an install with a backlog deletes
       // thousands of refs and reads transcripts, which has no business racing
-      // startup. See RETENTION_FIRST_SWEEP_MS.
+      // startup. See RETENTION_FIRST_SWEEP_MS. Only the timer is armed here, so
+      // this stays on the bounded side of the split.
       retention.start();
 
       // Worktree cleanup, on two triggers that share one gate.
@@ -1388,7 +1417,59 @@ export function createServices(
       });
     },
 
+    /**
+     * The half of boot whose cost scales with the install, run AFTER the port
+     * is answering.
+     *
+     * This exists because of a specific failure, five times on one machine:
+     * `tools/app/launch.py` gates a start on a port probe with a 60s clock
+     * (`START_TIMEOUT_S`), and `tools/install.mjs` treats that expiry as a bad
+     * payload and rolls the update back. `buildApp()` awaits `start()` before
+     * `start.ts` calls `app.listen()`, so every await in here used to hold the
+     * port shut — and none of these is bounded by anything but how much the
+     * install contains: the PR backfill walks every chat (1618 of them, 4GB of
+     * transcripts, on the install this was diagnosed on), `worktreeDetector`
+     * spawns git per project, `runner.reconcile()` awaits a
+     * `docker compose down` per persisted docker runner (routinely 5-30s).
+     * A perfectly healthy build therefore answered at >60s, got killed, and was
+     * rolled back — reported as "the server printed nothing", because the first
+     * `console.log` is after `listen` too.
+     *
+     * `restartResume.restore()` was moved out for exactly this reason already
+     * (see RESUME_START_DELAY_MS); this generalises it. The rule for deciding
+     * where something belongs: `start()` is for work that is BOUNDED and that
+     * the very first request would be wrong without — chat status recovery, the
+     * session cap, authored config, bus subscriptions. Everything else warms.
+     *
+     * The cost is a brief window after boot where the terminal roster and the PR
+     * catalog read empty and fill in moments later. That is strictly better than
+     * a closed port, which the updater cannot tell apart from a hung build.
+     */
+    warm(): Promise<void> {
+      // Memoised, so a second caller joins the first pass rather than running a
+      // second one — and so `dispose()` has a handle to wait on no matter who
+      // called it.
+      //
+      // The `catch` is the contract, not politeness: `start.ts` calls this as
+      // `void services.warm()`, and a rejection on a floating promise is an
+      // unhandled rejection — which is fatal to the process, taking every live
+      // session with it (see crash-log.ts). Every step below already handles its
+      // own failure; this covers whatever none of them anticipated.
+      warming ??= warmOnce().catch((err: unknown) => {
+        console.error("[Dispatch] warm boot pass failed (server stays up):", err);
+      });
+      return warming;
+    },
+
     async dispose(): Promise<void> {
+      // Before awaiting anything: every `if (disposed) return` in `warm()` is
+      // reading this, and a warm still in flight would otherwise arm services
+      // (and spawn git) on the far side of the teardown that was meant to stop
+      // them. Then wait for it to actually unwind, so no subprocess outlives
+      // the store it was spawned against — same reasoning as the `drain()`
+      // calls below.
+      disposed = true;
+      await warming?.catch(() => {});
       secrets.stop();
       offCheckpoint?.();
       offCheckpoint = undefined;

@@ -70,11 +70,16 @@ export const RESUME_MAX_AGE_MS = 24 * 60 * 60_000;
  *
  * `restore()` is therefore called from `start.ts` AFTER `app.listen()` resolves,
  * NOT from `services.start()`. Arming it inside `start()` did not hold: what
- * runs after it is unbounded — `runner.reconcile()` awaits a
+ * ran after it was unbounded — `runner.reconcile()` awaits a
  * `docker compose down` per persisted docker runner (routinely 5-30s), then the
  * terminal reconcile/sweep, then `seedDefaultsIfEmpty` and `ensureSetupState` —
  * and the timer fires from the event loop during any of those awaits. This
  * delay is breathing room ON TOP of a guarantee the CALL SITE provides.
+ *
+ * That unbounded work has since moved to `services.warm()`, which also runs
+ * after `listen` — for the same reason, generalised, after it cost a large
+ * install five rolled-back updates. The call site here is unchanged: `warm()`
+ * is not awaited, so it is still `start.ts` that provides the guarantee.
  */
 export const RESUME_START_DELAY_MS = 2_000;
 

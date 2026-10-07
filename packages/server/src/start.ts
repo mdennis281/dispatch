@@ -45,6 +45,15 @@ export async function start({ dev = false }: { dev?: boolean } = {}): Promise<vo
   // See crash-log.ts for the 2026-08-07 double crash this was written for.
   installCrashNet({ dataDir: config.dataDir });
 
+  // Printed BEFORE `buildApp()`, and it is load-bearing rather than chatty.
+  // Everything from here to `listen` is silent, so a boot that was merely slow
+  // reached `launch.py`'s 60s timeout as "the server printed nothing" — a
+  // message that cannot be told apart from node dying before it ran a line of
+  // our code. One line means an empty boot log now genuinely means the latter.
+  const bootStarted = Date.now();
+  // eslint-disable-next-line no-console
+  console.log(`[dispatch] starting (pid ${process.pid}, node ${process.version})`);
+
   const app = await buildApp({ config, dev });
   // The net had to go up before buildApp(), so this is the earliest the bus can
   // exist to bind. Without it the net's publish is a permanent no-op and a
@@ -85,6 +94,13 @@ export async function start({ dev = false }: { dev?: boolean } = {}): Promise<vo
   // closed as an update that hung. `listen` has resolved, so it is answering.
   app.services.restartResume.restore();
 
+  // The rest of boot, now that the port is open: the PR catalog backfill, the
+  // runner and terminal reconciles, worktree detection, auto-resume re-arming.
+  // Deliberately NOT awaited — the whole point is that none of it holds the
+  // port, because `launch.py` gates a start on a 60s port probe and
+  // `install.mjs` rolls an update back when that expires. See `warm()`.
+  void app.services.warm();
+
   const address = app.server.address();
   const listeningPort = typeof address === "object" && address ? address.port : config.port;
   const managerHost = WILDCARD.has(config.host) ? "127.0.0.1" : config.host;
@@ -94,7 +110,8 @@ export async function start({ dev = false }: { dev?: boolean } = {}): Promise<vo
   const url = localUrl();
   // eslint-disable-next-line no-console
   console.log(
-    `[dispatch] listening on ${url}  (data: ${config.dataDir}` +
+    `[dispatch] listening on ${url} after ${Date.now() - bootStarted}ms` +
+      `  (data: ${config.dataDir}` +
       (config.configDir ? `, config: ${config.configDir}` : "") +
       `)` +
       (dev ? "  — SPA + HMR served here" : ""),
