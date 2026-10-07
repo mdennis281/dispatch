@@ -116,6 +116,7 @@ import type {
   GrowthFrame,
   GrowthProgress,
   GrowthReport,
+  RetentionSettings,
 } from "@dispatch/shared";
 import {
   DEFAULT_HARNESS,
@@ -228,6 +229,15 @@ export interface AppSettings {
   };
   /** Issue-triggered chats — the app-wide switch. ON when unset; enrolment is per project. */
   issueWatcher?: { enabled?: boolean };
+  /**
+   * How much history LOADS, and how long it is KEPT — the shared
+   * `RetentionSettings`, reused rather than restated so the pane cannot drift
+   * from the schema that validates its save.
+   *
+   * Every field unset means "the shipped default", and `chatDeleteDays` unset or
+   * `0` means chats are never deleted for being old.
+   */
+  retention?: RetentionSettings;
   /**
    * App-wide defaults for Dispatch's own reviewer: how many rounds a PR gets,
    * and whether that number is fixed or sized to the diff. A project's
@@ -615,8 +625,20 @@ export const api = {
 
   /* chats + transcript */
   chats: {
-    list: (projectId?: string) =>
-      get<Chat[]>(`/api/chats${qs({ projectId })}`),
+    /**
+     * Chats, newest activity first, CAPPED per project (see the server's
+     * `services/chat-load-cap.ts`). `all` fetches past the cap — what the
+     * sidebar's "show older" does — and is the only way to get the whole set.
+     */
+    list: (projectId?: string, opts?: { all?: boolean }) =>
+      get<Chat[]>(`/api/chats${qs({ projectId, all: opts?.all ? 1 : undefined })}`),
+    /**
+     * How many chats each project HAS, against the cap that is loading them.
+     * Both numbers, because a project sitting exactly at its cap is otherwise
+     * indistinguishable from one that has nothing more to show.
+     */
+    totals: () =>
+      get<{ totals: Record<string, number>; limit: number }>("/api/chats/totals"),
     get: (id: string) => get<Chat>(`/api/chats/${id}`),
     create: (body: { projectId: string; title?: string; modeId?: string; agentId?: string }) =>
       post<Chat>("/api/chats", body),

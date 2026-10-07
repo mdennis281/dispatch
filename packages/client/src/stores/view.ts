@@ -45,6 +45,7 @@ export type AppSettingsSection =
   | "accounts"
   | "context"
   | "agent-context"
+  | "retention"
   | "notifications"
   | "auth"
   | "updates"

@@ -13,6 +13,7 @@ import {
   reviewTargetKey,
   spawnParentId,
   statusIsActivity,
+  unloadedChatCount,
 } from "./chats.js";
 
 function chat(id: string, projectId: string, updatedAt = 1): Chat {
@@ -41,6 +42,9 @@ beforeEach(() => {
     activity: {},
     queued: {},
     prSettled: {},
+    chatTotals: {},
+    loadCap: 0,
+    fullyLoaded: {},
   });
 });
 
@@ -686,5 +690,61 @@ describe("statusIsActivity — which status events may move the row's clock", ()
     for (const status of ["queued", "running", "waiting", "awaiting-input", "failed", "error"] as const) {
       expect(statusIsActivity(status)).toBe(true);
     }
+  });
+});
+
+describe("the load cap — mergeChats and unloadedChatCount", () => {
+  it("counts what the server has against what it sent", () => {
+    useChats.getState().hydrate([chat("a1", "p1"), chat("a2", "p1"), chat("b1", "p2")]);
+    useChats.getState().noteTotals({ p1: 10, p2: 1 }, 2);
+
+    expect(unloadedChatCount(useChats.getState(), "p1")).toBe(8);
+    expect(unloadedChatCount(useChats.getState(), "p2")).toBe(0);
+  });
+
+  it("offers nothing before the totals land, or for an unknown project", () => {
+    useChats.getState().hydrate([chat("a1", "p1")]);
+
+    expect(unloadedChatCount(useChats.getState(), "p1")).toBe(0);
+    expect(unloadedChatCount(useChats.getState(), null)).toBe(0);
+    expect(unloadedChatCount(useChats.getState(), "nope")).toBe(0);
+  });
+
+  it("never reports a negative count when a chat is created between the two reads", () => {
+    useChats.getState().hydrate([chat("a1", "p1"), chat("a2", "p1")]);
+    useChats.getState().noteTotals({ p1: 1 }, 200);
+
+    expect(unloadedChatCount(useChats.getState(), "p1")).toBe(0);
+  });
+
+  it("mergeChats adds without dropping what is loaded, and re-sorts by activity", () => {
+    useChats.getState().hydrate([chat("new", "p1", 100)]);
+    useChats.getState().mergeChats([chat("old", "p1", 5), chat("mid", "p1", 50)]);
+
+    expect(ids(chatsForProject(useChats.getState(), "p1"))).toEqual(["new", "mid", "old"]);
+  });
+
+  it("mergeChats leaves an already-loaded chat's live clock alone", () => {
+    useChats.getState().hydrate([chat("a1", "p1", 100)]);
+    useChats.setState({ lastActivity: { a1: 999 } });
+    // The same chat arriving from a REST read is at best as fresh as the events
+    // the store has been following.
+    useChats.getState().mergeChats([chat("a1", "p1", 100)]);
+
+    expect(useChats.getState().lastActivity.a1).toBe(999);
+  });
+
+  it("a loaded project stops offering, until a hydrate re-applies the cap", () => {
+    useChats.getState().hydrate([chat("a1", "p1")]);
+    useChats.getState().noteTotals({ p1: 5 }, 1);
+    expect(unloadedChatCount(useChats.getState(), "p1")).toBe(4);
+
+    useChats.getState().mergeChats([chat("a2", "p1")], { fullyLoadedProject: "p1" });
+    expect(unloadedChatCount(useChats.getState(), "p1")).toBe(0);
+
+    // A reconnect means the server has re-capped: the footer must come back
+    // rather than claiming there is nothing more to show.
+    useChats.getState().hydrate([chat("a1", "p1")]);
+    expect(unloadedChatCount(useChats.getState(), "p1")).toBe(4);
   });
 });

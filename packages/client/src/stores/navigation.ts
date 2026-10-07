@@ -24,6 +24,7 @@ import { useChats, chatsForProject } from "./chats.js";
 import { useProjects } from "./projects.js";
 import { useView } from "./view.js";
 import { useLayout } from "./layout.js";
+import { ensureChatLoaded } from "../lib/actions.js";
 
 /**
  * Focus a project. Switching AWAY closes the open chat: it belongs to the
@@ -47,15 +48,31 @@ export function selectProject(projectId: string): void {
  * Also snaps back to the chat surface: opening a chat while the Memory or
  * Source Control view fills the main area otherwise looks like nothing happened.
  *
- * A chat the store hasn't seen yet is still selected. The `#chat=` deep link
- * fires on a timer that can beat hydrate, and the id becoming real a moment
- * later is the normal case; until then the main area shows the empty state.
+ * A chat the store hasn't seen yet is still selected, and is FETCHED. Two ways
+ * to arrive at an unloaded id, and they used to be the same case: the `#chat=`
+ * deep link can beat hydrate, where the id becomes real a moment later on its
+ * own — and since the load cap, a chat past its project's newest N is never in
+ * the hydrate at all. Without the fetch that second one sits on the empty state
+ * forever, which reads as a broken link rather than a capped list. The fetch
+ * re-aligns the project on arrival, because the record is what names it.
  */
 export function selectChat(chatId: string): void {
   const chat = useChats.getState().byId[chatId];
   if (chat) {
     const projects = useProjects.getState();
     if (chat.projectId !== projects.activeProjectId) projects.setActiveProject(chat.projectId);
+  } else {
+    void ensureChatLoaded(chatId).then((ok) => {
+      // Still the open chat? A fetch is a round trip, and the reader may have
+      // moved on — re-pointing the project at a chat they have left is exactly
+      // the mixed-scope window `visibleChat` exists to prevent.
+      if (!ok || useChats.getState().activeChatId !== chatId) return;
+      const loaded = useChats.getState().byId[chatId];
+      const projects = useProjects.getState();
+      if (loaded && loaded.projectId !== projects.activeProjectId) {
+        projects.setActiveProject(loaded.projectId);
+      }
+    });
   }
   useChats.getState().setActiveChat(chatId);
   useView.getState().setView("chat");

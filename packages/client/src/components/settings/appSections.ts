@@ -18,6 +18,7 @@ import {
   MessageSquare,
   Palette,
   Power,
+  Archive,
   ShieldCheck,
   ArrowUpCircle,
   type LucideIcon,
@@ -75,6 +76,16 @@ export const APP_SECTIONS: AppSectionDef[] = [
       "How many chats Dispatch will run at the same time — the rest wait their turn as " +
       "Queued — and what happens as a session's context window fills. Left alone, a full " +
       "window is an error; with auto-compaction on it's a summary and a continuation.",
+  },
+  {
+    id: "retention",
+    icon: Archive,
+    label: "Retention",
+    blurb: "How much history loads, and how long it is kept",
+    explainer:
+      "Two different questions. How many chats LOAD is a limit on what is on screen — nothing " +
+      "is deleted and everything stays reachable. The windows below are the ones that actually " +
+      "delete, and the last of them deletes conversations.",
   },
   {
     id: "agent-context",

@@ -110,6 +110,7 @@ import {
 import {
   AgentContextSettingsSchema,
   AppReviewAgentDefaultsSchema,
+  RetentionSettingsSchema,
   AttentionFilterSchema,
   HarnessSettingsSchema,
   SubscriptionListSchema,
@@ -315,6 +316,18 @@ export const AppSettingsSchema = z.object({
       autoApprove: z.boolean().default(false),
     })
     .optional(),
+  /**
+   * How much history this install LOADS, and how long it KEEPS — see
+   * `@dispatch/shared/retention.ts`, which owns the chain and spells out why the
+   * load cap and the deletion windows are different fields.
+   *
+   * Optional, and every field inside it optional too, so an untouched install
+   * gets the shipped defaults rather than having whatever they were on the day
+   * the field was introduced frozen into its config.json. In particular
+   * `chatDeleteDays` is OFF unless someone sets it: upgrading into a release is
+   * not consent to start deleting transcripts.
+   */
+  retention: RetentionSettingsSchema.optional(),
   /**
    * Automatic worktree cleanup (see WorktreeReaper).
    *
