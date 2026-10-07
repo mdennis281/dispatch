@@ -459,6 +459,11 @@ export async function hydrateFromServer(): Promise<boolean> {
 
   const prevProject = useProjects.getState().activeProjectId;
   const prevChat = useChats.getState().activeChatId;
+  // Has this tab EVER had the app's data? Read here because `noteHydrated` at
+  // the bottom of this function is what flips it, and it is one-way — never
+  // cleared on a disconnect, which is exactly the distinction the phone's
+  // landing below needs. See the `hydrated` docblock in stores/connection.
+  const firstHydrate = !useConnection.getState().hydrated;
 
   // Every chat has to re-read its transcript from the server, because we stopped
   // receiving its events for however long the socket was down. Mark them all
@@ -549,12 +554,17 @@ export async function hydrateFromServer(): Promise<boolean> {
   // all the world like the app had restored something. `openPicker` is a no-op
   // above `sm`, so the wide layouts are untouched.
   //
-  // Guarded on `prevChat` so this is the FIRST hydrate only. This function also
-  // runs on every WebSocket reconnect, where the two lines above exist
-  // specifically to put the reader back where they were — dropping them onto
-  // the chat list because the socket blipped mid-turn would be far worse than
-  // the landing this fixes.
-  if (!prevChat) openPicker();
+  // Guarded on `firstHydrate` so this is a BOOT only. This function also runs
+  // on every WebSocket reconnect, where the two lines above exist specifically
+  // to put the reader back where they were — dropping them onto the chat list
+  // because the socket blipped mid-turn would be far worse than the landing
+  // this fixes.
+  //
+  // Deliberately not `!prevChat`, which reads as "nothing was open a moment
+  // ago" and is true of more than a boot: delete the last chat in a project and
+  // you are left on the empty state with the drawer shut, and the next
+  // reconnect would have yanked you onto the full-screen picker for it.
+  if (firstHydrate) openPicker();
 
   const activeProject = useProjects.getState().activeProjectId;
   if (activeProject) void loadProjectPanels(activeProject);
