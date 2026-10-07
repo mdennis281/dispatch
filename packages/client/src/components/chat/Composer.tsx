@@ -11,7 +11,6 @@ import {
   useMemo,
   useRef,
   useState,
-  type CSSProperties,
   type ReactNode,
 } from "react";
 import {
@@ -994,14 +993,37 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   // composer nobody asked for.
   const lastStubTapRef = useRef<{ id: string; at: number }>({ id: "", at: 0 });
 
-  // The phone's "Composer options" sheet is a child of the box we hide, and
-  // `Drawer` renders inline rather than through a portal — `display: none` on
-  // an ancestor takes a `position: fixed` descendant with it, with no CSS
-  // escape. An open sheet would therefore vanish with `moreOpen` still true and
-  // pop back the moment the composer returned, so it stands down WITH the
-  // composer rather than behind it.
-  useEffect(() => {
-    if (deferred) setMoreOpen(false);
+  /**
+   * How tall the stood-down composer actually is, measured.
+   *
+   * The stand-down bar stops following the keyboard by giving up exactly
+   * `--cm-kb` of layout height (see the wrapper in the render), and that
+   * subtraction has to start from the box's REAL height or it leaves a dead
+   * band under the bar at rest. It cannot be a constant: the row below the bar
+   * is the live control row, which is a different height with a Stop button in
+   * it, at a different UI scale, or after the fit walk drops a rung. Observed
+   * rather than read once, for the same reason.
+   *
+   * Only while deferred — the composer grows with every line you type, and an
+   * observer that re-rendered on each of those would be a cost paid by everyone
+   * for a number nothing reads.
+   */
+  const deferBoxRef = useRef<HTMLDivElement>(null);
+  const [deferHeight, setDeferHeight] = useState(0);
+  useLayoutEffect(() => {
+    if (!deferred) {
+      setDeferHeight(0);
+      return;
+    }
+    const el = deferBoxRef.current;
+    if (!el) return;
+    const read = () => setDeferHeight(el.offsetHeight);
+    read();
+    // The wrapper constrains its OWN height, never the box's — the box is a
+    // block that simply overflows it — so this cannot feed back on itself.
+    const ro = new ResizeObserver(read);
+    ro.observe(el);
+    return () => ro.disconnect();
   }, [deferred]);
   // Named per device: there is no "tap" on a desktop and no "click" on a phone,
   // and this hint is the ONLY place the way back is written down.
@@ -1013,8 +1035,8 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   /**
    * Hand the real composer back.
    *
-   * `flushSync` so the box is out of `display: none` and focusable BEFORE this
-   * handler returns: iOS only raises the keyboard for a focus that happens
+   * `flushSync` so the editor is out of `display: none` and focusable BEFORE
+   * this handler returns: iOS only raises the keyboard for a focus that happens
    * inside the gesture that asked for it, and a `requestAnimationFrame` here
    * would land outside it — giving back a composer with no keyboard, which on a
    * phone is giving back nothing.
@@ -1126,9 +1148,6 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     multiAccount,
     modeLabel(modes, modeId),
     fitVisible,
-    // Hidden behind the question stub the row measures 0, so the fit has to be
-    // re-derived — synchronously, before paint — the moment it comes back.
-    deferred,
   ]);
 
   /* ------------------------------------------------------- shared menu bodies */
@@ -1547,49 +1566,24 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
 
   return (
     <>
-      {/* The stand-down bar. Rendered BESIDE the real composer rather than
-          instead of it, so the editor keeps its content, its caret and its
-          measured toolbar layout while it waits — the box you get back on a
-          double-tap is the box you had, not a fresh one. */}
-      {deferred && (
-        <div
-          // Why the composer stops following the keyboard here: the shell
-          // shrinks by `--cm-kb` to sit above it (see App.tsx), and a wrapper
-          // that gives up exactly that much height leaves the stub standing
-          // still — it ends up in the band the keyboard now covers, and the
-          // room it vacated goes to the transcript, which is where the question
-          // being answered actually is. The overhang is drawn, not clipped: the
-          // shell's `overflow: hidden` clips at its PADDING box, and the band is
-          // that padding. On desktop `--cm-kb` is always 0, so this is inert.
-          className="shrink-0"
-          style={
-            {
-              "--cm-defer-h": "2.875rem",
-              height: "max(0px, calc(var(--cm-defer-h) - var(--cm-kb, 0px)))",
-            } as CSSProperties
-          }
-        >
-          {/* `RowButton`, not `Button`: a full-width bar whose height is a
-              CSS variable and whose content is an icon, a label that truncates
-              and a hint pinned right is a ROW, and `Button` is `h-6
-              justify-center whitespace-nowrap` with padding of its own. */}
-          <RowButton
-            onClick={onStubTap}
-            aria-label={`Answer the question above, or ${reclaimHint} a message anyway`}
-            // `text-left` and the transition come from `RowButton` itself.
-            className="flex h-[var(--cm-defer-h)] w-full items-center border-t border-line bg-surface/60 px-4 text-xs text-muted hover:text-secondary"
-          >
-            <span className="mx-auto flex w-full max-w-[860px] items-center gap-2 rounded-lg border border-dashed border-line/80 bg-panel-2/40 px-3 py-1.5">
-              <ArrowUp className="size-3.5 shrink-0" />
-              <span className="flex-1 truncate">Answer the question above to continue</span>
-              <span className="shrink-0 text-2xs uppercase tracking-wide text-muted/70">
-                {reclaimHint}
-              </span>
-            </span>
-          </RowButton>
-        </div>
-      )}
-    <div className={cn("border-t border-line bg-surface/80 px-4 py-3", deferred && "hidden")}>
+      {/* The stand-down wrapper. It gives up exactly `--cm-kb` of layout
+          height, which is what stops the composer following the keyboard: the
+          shell shrinks by that much to sit above it (see App.tsx), so a box
+          that shrinks by the same amount stays physically PUT — it ends up in
+          the band the keyboard now covers, and the room it vacated goes to the
+          transcript, which is where the question being answered actually is.
+          The overhang is drawn, not clipped: the shell's `overflow: hidden`
+          clips at its PADDING box, and that band IS the padding. `--cm-kb` is
+          0px whenever no keyboard is up, and on desktop always, so this is a
+          no-op everywhere else. */}
+      <div
+        style={
+          deferred && deferHeight
+            ? { height: `max(0px, calc(${deferHeight}px - var(--cm-kb, 0px)))` }
+            : undefined
+        }
+      >
+    <div ref={deferBoxRef} className="border-t border-line bg-surface/80 px-4 py-3">
       <div className="mx-auto w-full max-w-[860px]">
       {/* Two different states, deliberately worded as such: a steered message is
           already inside the running turn's input and may be read at any moment,
@@ -1750,8 +1744,31 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
           </div>
         )}
 
+        {/* The stand-down row, in place of the text box — the control row
+            below it stays live and visible on purpose: deciding what to do
+            about the question means reading the model, the effort, the context
+            left and whether a turn is still running, and a bar that hid all of
+            that would be pushing you toward an answer with the evidence
+            removed. `RowButton`, not `Button`: this is a whole row that happens
+            to be clickable, and `Button` is `h-6 justify-center
+            whitespace-nowrap` with padding of its own. */}
+        {deferred && (
+          <RowButton
+            onClick={onStubTap}
+            aria-label={`Answer the question above, or ${reclaimHint} a message anyway`}
+            className="flex w-full items-center gap-2 px-3 pb-1 pt-2.5 text-xs text-muted hover:text-secondary"
+          >
+            <span className="flex w-full items-center gap-2 rounded-md border border-dashed border-line bg-inset/60 px-2.5 py-1.5">
+              <ArrowUp className="size-3.5 shrink-0" />
+              <span className="flex-1 truncate">Answer the question above</span>
+              <span className="shrink-0 text-2xs uppercase tracking-wide text-muted/70">
+                {reclaimHint}
+              </span>
+            </span>
+          </RowButton>
+        )}
         {/* editor */}
-        <div className="cm-prose px-3 py-2.5">
+        <div className={cn("cm-prose px-3 py-2.5", deferred && "hidden")}>
           <EditorContent editor={editor} />
           {/* Live transcript. Only the interim guess lives here — finalized
               phrases have already been inserted into the editor above — so this
@@ -2229,6 +2246,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
         </Suspense>
       )}
     </div>
+      </div>
     </>
   );
 }
