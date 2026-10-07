@@ -32,7 +32,7 @@ import { useProjects } from "../../stores/projects.js";
 import { useGitChangeCount } from "../../stores/git.js";
 import { useViewport } from "../../stores/viewport.js";
 import { currentSlot, chatsAction } from "./navState.js";
-import { leaveHome } from "../../stores/navigation.js";
+import { leaveHome, openPicker } from "../../stores/navigation.js";
 import { LAYER } from "../../lib/layers.js";
 import { cn } from "../../lib/cn.js";
 
@@ -240,8 +240,8 @@ export function BottomNav({ chat }: { chat: Chat | null }) {
         .length,
   );
 
-  /** Where the whole shell is, in the four bits the two rules below read. */
-  const place = { mode, view, pane, leftOpen, moreOpen };
+  /** Where the whole shell is, in the bits the two rules below read. */
+  const place = { mode, view, pane, leftOpen, moreOpen, hasChat: !!chat };
   const slot = currentSlot(place);
 
   /**
@@ -286,10 +286,16 @@ export function BottomNav({ chat }: { chat: Chat | null }) {
   const goChats = () => {
     switch (chatsAction(place)) {
       case "open-picker":
-        setLeftOpen(true);
+        // Closes the chat on the way — the list is a place, not a sheet over
+        // the transcript, and the Ship/Run slots beside this one must not stay
+        // live for a chat that is no longer on screen. See `openPicker`.
+        openPicker();
         break;
       case "close-picker":
         setLeftOpen(false);
+        break;
+      case "stay":
+        // Already on the deepest surface there is. See `chatsAction`.
         break;
       case "go-chat":
         // From the homepage this is the SAME return the brand lockup performs —

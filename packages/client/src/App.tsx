@@ -108,7 +108,7 @@ export default function App() {
   useEdgeSwipe(
     swipeEnabled,
     (dir) => {
-      const move = swipeMove({ mode, view, pane, leftOpen, moreOpen }, dir);
+      const move = swipeMove({ mode, view, pane, leftOpen, moreOpen, hasChat: !!chat }, dir);
       if (move) runSwipe(move);
     },
     // Asked once per gesture, at `touchstart`. The same `place` resolves the
@@ -116,7 +116,9 @@ export default function App() {
     // between them, because the only thing that moves meanwhile is the panel
     // this returns a grip on, and that is painted outside React.
     (dir) => {
-      const target = swipeDrag(swipeMove({ mode, view, pane, leftOpen, moreOpen }, dir));
+      const target = swipeDrag(
+        swipeMove({ mode, view, pane, leftOpen, moreOpen, hasChat: !!chat }, dir),
+      );
       return target ? beginPanelDrag(target.panel, target.toOpen) : null;
     },
   );
