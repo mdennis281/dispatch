@@ -220,13 +220,16 @@ export async function buildApp(
   // Carry permission allowlists and metric rows off the retired `manager` MCP
   // server name.
   //
-  // BEFORE `services.start()`, not after, and this ordering is load-bearing:
-  // `start()` calls `resume.restore()`, which re-arms auto-resumes persisted
-  // before the last shutdown — and one that came due while the process was down
-  // arms at a 0 ms timer. Running the migration afterwards means it awaits file
-  // reads, yields the loop, and that session starts against an allowlist that
-  // has not been migrated yet: a permission prompt on a tool approved months
-  // ago, which is the exact failure the migration exists to prevent.
+  // BEFORE the server listens, and this ordering is load-bearing:
+  // `services.warm()` calls `resume.restore()`, which re-arms auto-resumes
+  // persisted before the last shutdown — and one that came due while the
+  // process was down arms at a 0 ms timer. Running the migration afterwards
+  // means it awaits file reads, yields the loop, and that session starts
+  // against an allowlist that has not been migrated yet: a permission prompt on
+  // a tool approved months ago, which is the exact failure the migration exists
+  // to prevent. `warm()` runs from `start.ts` after `listen`, so staying here —
+  // ahead of both — keeps the guarantee without depending on where in boot
+  // `resume.restore()` currently sits.
   //
   // Never fatal — the worst case if it is skipped is that same prompt, which is
   // strictly better than a server that will not boot.
@@ -244,8 +247,14 @@ export async function buildApp(
     /* telemetry cosmetics must never stop a boot */
   }
 
-  // Background wiring (attention aggregation, notifier, runner reconcile,
-  // auto-checkpoint). Best-effort; a failure here must not stop the app booting.
+  // Background wiring (attention aggregation, notifier, auto-checkpoint).
+  // Best-effort; a failure here must not stop the app booting.
+  //
+  // Only the BOUNDED half of boot. The half that scales with the install — the
+  // PR catalog backfill, the runner/terminal reconciles, worktree detection —
+  // is `services.warm()`, which `start.ts` calls after `app.listen()`. Awaiting
+  // it here is what it used to do, and it held the port shut long enough on a
+  // large install for `install.mjs` to roll a healthy update back.
   await services.start().catch(() => {});
 
   // Tear the service container down with the server, then release the state

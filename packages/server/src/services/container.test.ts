@@ -214,6 +214,187 @@ describe("createServices().start() resilience", () => {
 });
 
 /**
+ * `services.start()` is awaited by `buildApp()` BEFORE `app.listen()`, so
+ * anything it awaits holds the port shut. `launch.py` gates a start on a 60s
+ * port probe and `install.mjs` rolls an update back when that expires — which
+ * is exactly what happened, five times, on an install with 1618 chats: a
+ * healthy build got killed mid-boot and reverted. The install-scaling work
+ * therefore lives in `warm()`, which runs after the port answers.
+ *
+ * These tests exist because the regression is invisible: moving an await back
+ * into `start()` breaks nothing a functional test would notice. It just makes
+ * big installs un-updatable.
+ */
+describe("the boot split: start() vs warm()", () => {
+  function overridesRecording(order: string[], extra: ServiceOverrides = {}): ServiceOverrides {
+    return {
+      broker: stub(),
+      memory: stub(),
+      projectConfig: stub(),
+      projectConfigArchive: stub(),
+      title: stub(),
+      checkpoints: stub(),
+      worktrees: stub(),
+      worktreeReaper: stub(),
+      github: stub(),
+      notifier: stub(),
+      push: stub(),
+      secrets: stub(),
+      attention: stub(),
+      usage: stub(),
+      // The five that scale with the size of the install.
+      worktreeDetector: stub({ start: async () => void order.push("worktreeDetector.start") }),
+      resume: stub({ restore: async () => void order.push("resume.restore") }),
+      terminals: stub({
+        reconcile: async () => void order.push("terminals.reconcile"),
+        sweep: async () => {},
+      }),
+      prRegistry: stub({ backfill: async () => void order.push("prRegistry.backfill") }),
+      runner: stub({ reconcile: async () => void order.push("runner.reconcile") }),
+      ...extra,
+    };
+  }
+
+  function build(order: string[], extra: ServiceOverrides = {}) {
+    return createServices(
+      {
+        config: { maxActiveSessions: 4 } as unknown as ServerConfig,
+        store: stub<Store>(),
+        bus: new EventBus(),
+      },
+      overridesRecording(order, extra),
+    );
+  }
+
+  it("does not touch any install-scaling work until warm() runs", async () => {
+    const order: string[] = [];
+    const services = build(order);
+
+    await services.start();
+    // The whole point: boot got to `listen` without awaiting ANY of these.
+    expect(order).toEqual([]);
+
+    await services.warm();
+    expect(order).toEqual([
+      // Detection first — its baseline is what stops pre-existing worktrees
+      // reading as newly created, and a resumed turn is the first thing that
+      // could ask.
+      "worktreeDetector.start",
+      "resume.restore",
+      "terminals.reconcile",
+      "prRegistry.backfill",
+      // Last: the slowest (a `docker compose down` per persisted runner).
+      "runner.reconcile",
+    ]);
+  });
+
+  it("runs the warm pass once however many callers ask for it", async () => {
+    const order: string[] = [];
+    const services = build(order);
+    await services.start();
+
+    await Promise.all([services.warm(), services.warm()]);
+    await services.warm();
+
+    expect(order.filter((step) => step === "runner.reconcile")).toHaveLength(1);
+  });
+
+  it("keeps the server up when a warm step fails in a way nothing anticipated", async () => {
+    // `start.ts` calls this as `void services.warm()`. A rejection on a
+    // floating promise is an unhandled rejection, which is fatal to the whole
+    // process and takes every live session with it (see crash-log.ts) — so the
+    // one thing warm() must never do is reject.
+    //
+    // Every step in the pass guards its OWN failure, so this has to break one
+    // in a way no step anticipates: a `backfill()` that returns a non-promise
+    // makes warm's own `.catch()` the thing that throws, outside every guard.
+    const order: string[] = [];
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const services = build(order, {
+      prRegistry: stub({ backfill: () => undefined }),
+    });
+    await services.start();
+
+    await expect(services.warm()).resolves.toBeUndefined();
+    // Surfaced, not swallowed: a skipped warm pass must be findable in the log.
+    expect(errSpy).toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+
+  it("abandons an in-flight warm when the server shuts down under it", async () => {
+    // A shutdown arriving seconds after boot — an update restart is exactly
+    // this — used to be impossible to race, because warm's work was finished
+    // before the port even opened. Now it can be mid-flight, and arming a
+    // detector or a sweep timer AFTER dispose() has torn them down leaves git
+    // subprocesses and timers outliving the store they were spawned against.
+    const order: string[] = [];
+    let releaseDetector!: () => void;
+    const detectorStarted = new Promise<void>((resolve) => {
+      releaseDetector = resolve;
+    });
+    const services = build(order, {
+      worktreeDetector: stub({
+        start: async () => {
+          order.push("worktreeDetector.start");
+          await detectorStarted;
+        },
+      }),
+    });
+    await services.start();
+
+    const warm = services.warm();
+    // Hand the loop over so warm actually reaches the detector and parks there.
+    await Promise.resolve();
+    expect(order).toEqual(["worktreeDetector.start"]);
+
+    const disposed = services.dispose();
+    releaseDetector();
+    await disposed;
+    await warm;
+
+    // Everything past the first guard was skipped — nothing armed itself on the
+    // far side of the teardown.
+    expect(order).toEqual(["worktreeDetector.start"]);
+  });
+
+  it("waits for the in-flight warm before tearing services down", async () => {
+    // `dispose()` must not close the store while a backfill is still reading it.
+    const order: string[] = [];
+    let releaseBackfill!: () => void;
+    const parked = new Promise<void>((resolve) => {
+      releaseBackfill = resolve;
+    });
+    const services = build(order, {
+      prRegistry: stub({
+        backfill: async () => {
+          order.push("prRegistry.backfill");
+          await parked;
+          order.push("prRegistry.backfill done");
+        },
+      }),
+    });
+    await services.start();
+
+    const warm = services.warm();
+    await vi.waitFor(() => expect(order).toContain("prRegistry.backfill"));
+
+    let settled = false;
+    const disposed = services.dispose().then(() => {
+      settled = true;
+      order.push("dispose");
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    releaseBackfill();
+    await disposed;
+    await warm;
+
+    expect(order.indexOf("prRegistry.backfill done")).toBeLessThan(order.indexOf("dispose"));
+  });
+});
+
+/**
  * A spawned chat's opening prompt is written by an AGENT, not by the human — the
  * human only approved the spawn. Unstamped it landed as the new chat's opening
  * SPEECH BUBBLE, the most prominent row in a transcript that had nothing else in
