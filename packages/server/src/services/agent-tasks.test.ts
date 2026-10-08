@@ -921,6 +921,24 @@ describe("buildTaskParts — issue handling", () => {
       .find((p) => p.kind === "brief")!.text;
     expect(brief).toContain("**Mode: implement.**");
     expect(brief).toContain("Fixes #<n>");
+    // A merge that did not close it is the chat's to close: anoxia's #827 shipped
+    // two `Part of` PRs and nothing ever closed it.
+    expect(brief).toContain("**Close it.**");
+    expect(brief).toContain("`issue_read` it");
+  });
+
+  it("briefs a parked issue to ask the human on a card that does not time out", () => {
+    for (const mode of ["triage", "implement"] as const) {
+      const ctx = { issues: [issue(9, "x") as never], mode, sourceLabel: "s", claimLabel: "l" };
+      const brief = buildTaskParts({ taskId: "issue:handle", instructions: "", params: {}, config: null, status: null, repoPath: "/r", issueBatch: ctx })
+        .find((p) => p.kind === "brief")!.text;
+      expect(brief).toContain("**When it needs a person.**");
+      expect(brief).toContain("mcp__dispatch-confirm__ask_user");
+      expect(brief).toContain("pass NO `timeoutSeconds`");
+      // Every open-ended finish frees the slot, and resuming takes the lock back.
+      expect(brief).toContain("triaged and left open for a human to schedule");
+      expect(brief).toContain("put the claim label back on first");
+    }
   });
 
   it("says so, rather than briefing a hunt, when no issues came with the launch", () => {
