@@ -904,8 +904,9 @@ function issueHandleBriefText(ctx: IssueHandleContext): string {
     "**Tools.** `mcp__dispatch-issues__*` reads and writes the tracker: `issue_read` for the " +
       "full thread, `issue_comment` to reply, `issue_update` for labels, assignees and " +
       `closing. Each issue here already carries the \`${ctx.claimLabel}\` label — that is the ` +
-      "claim that stops a second agent picking it up. Leave it on while you work; remove it " +
-      "when you are done with the issue (comment posted, PR opened, or closed).",
+      "claim that stops a second agent picking it up. Leave it on while you work, and take it " +
+      "off only when this chat is finished with the issue: closed, or parked on a person " +
+      "(below). Taking it off is what frees the watcher's slot for the next issue.",
     "",
   ];
 
@@ -921,8 +922,9 @@ function issueHandleBriefText(ctx: IssueHandleContext): string {
         "cause, and a concrete next step. Short. No restating the issue back at its author.",
       "4. Label it to match (`bug`, `enhancement`, `question`, `duplicate`, `needs-info` — " +
         "reuse labels the repo already has rather than inventing them).",
-      "5. Close it only when it is clearly a duplicate or clearly not an issue (say which, " +
-        "and why). A real bug stays open for a human to schedule.",
+      "5. Close it (`issue_update` with `state: closed`) when it is clearly a duplicate or " +
+        "clearly not an issue — including when you measured it and its premise does not hold. " +
+        "Say which, and why, in the comment. A real bug stays open for a human to schedule.",
       "",
       "Missing information is the normal case: ask for it in the comment and label " +
         "`needs-info`. Do not guess at a repro you could not confirm.",
@@ -935,9 +937,15 @@ function issueHandleBriefText(ctx: IssueHandleContext): string {
         "is NOT clear what to build, do not build: comment asking the question and label " +
         "`needs-info`. A wrong PR costs more than an unanswered issue.",
       "2. Do the work the way this project ships change: its own worktree and branch, tests, " +
-        "then a PR whose description says `Fixes #<n>` so merging closes the issue.",
+        "then a PR. Put `Fixes #<n>` in the PR that completes the issue; a PR that does only " +
+        "part of it says `Part of #<n>` and closes nothing.",
       "3. Comment on the issue with the PR link. Then work the review loop to the end — the " +
         "issue is handled when the PR has landed, not when it has been opened.",
+      "4. **Close it.** Once everything the issue asked for has landed, `issue_read` it. " +
+        "Still open — the work went in over several PRs, the merge did not carry `Fixes`, or " +
+        "the problem turned out not to exist — then close it yourself with a comment linking " +
+        "what landed. An issue whose work is done and which is still open is the failure " +
+        "this step exists for.",
       "",
       "Triage anything that is not a clear change: comment with what you found and the " +
         "question that would unblock it, label it, and move on.",
@@ -945,6 +953,18 @@ function issueHandleBriefText(ctx: IssueHandleContext): string {
   }
 
   lines.push(
+    "",
+    "**When it needs a person.** Some issues stop on a decision that is not yours — a " +
+      "trade-off, a choice between fixes, part of the work done and the rest a judgement " +
+      "call. Do not close it, and do not just leave a comment: nobody reads this chat, and " +
+      "a comment on an issue they filed is easy to miss. Instead:",
+    "",
+    "1. Comment on the issue with what landed, what is left, and the options for the rest " +
+      "with your recommendation. Label it `needs-info` and take the claim label off.",
+    "2. Then ask with `mcp__dispatch-confirm__ask_user` — the same question and options, " +
+      "short — and pass NO `timeoutSeconds`. Without one the card stays up and this chat " +
+      "waits on it until it is answered; a timed-out card is how a question gets missed.",
+    "3. When the answer comes, act on it and finish the issue the way your mode says.",
     "",
     "**Batching.** These issues are in one chat so you can see whether they are related " +
       "before touching any of them. Work them here by default. Start a child chat " +

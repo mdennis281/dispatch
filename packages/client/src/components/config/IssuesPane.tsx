@@ -39,6 +39,7 @@ type ListedIssue = Awaited<ReturnType<typeof api.issues.open>>["issues"][number]
 const CLAIM_TONE: Record<IssueClaim["state"], "info" | "accent" | "success" | "muted" | "danger"> = {
   claimed: "info",
   working: "accent",
+  parked: "info",
   done: "success",
   released: "muted",
   failed: "danger",

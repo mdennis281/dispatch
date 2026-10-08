@@ -66,8 +66,12 @@ function fakeStore(over: { settings?: Partial<AppSettings>; projects?: string[] 
 
 function fakeTracker(open: Issue[]) {
   const labels = new Map<number, Set<string>>();
+  // Reads see the labels `update` wrote, the way GitHub's do: the watcher now
+  // tells a parked issue from a working one by whether the claim label is
+  // still on it, so a fake that forgot its own writes would park every claim.
+  const live = (i: Issue): Issue => (labels.has(i.number) ? { ...i, labels: [...labels.get(i.number)!] } : i);
   const update = vi.fn(async (n: number, patch: { addLabels?: string[]; removeLabels?: string[] }) => {
-    const set = labels.get(n) ?? new Set<string>();
+    const set = labels.get(n) ?? new Set<string>(open.find((i) => i.number === n)?.labels ?? []);
     for (const l of patch.addLabels ?? []) set.add(l);
     for (const l of patch.removeLabels ?? []) set.delete(l);
     labels.set(n, set);
@@ -77,8 +81,11 @@ function fakeTracker(open: Issue[]) {
   const tracker: BoundIssueTracker = {
     source: { provider: "github", repo: "acme/api" },
     from: "origin",
-    list: vi.fn(async () => open.filter((i) => i.state === "open")),
-    get: vi.fn(async (n: number) => open.find((i) => i.number === n) ?? null),
+    list: vi.fn(async () => open.filter((i) => i.state === "open").map(live)),
+    get: vi.fn(async (n: number) => {
+      const found = open.find((i) => i.number === n);
+      return found ? live(found) : null;
+    }),
     comments: async () => [],
     comment: async (_n, body) => ({ id: "1", author: "bot", authorTrust: "owner" as const, body, createdAt: "" }),
     update,
@@ -263,6 +270,47 @@ describe("IssueWatcher", () => {
     const r = await t.w.pollNow("p1");
     expect(t.claims.get("github:acme/api#50")?.state).toBe("done");
     expect(r.taken).toEqual([51]);
+  });
+
+  it("parks a claim whose chat took the label off with the issue open, and frees its slot", async () => {
+    const open: Issue[] = [];
+    const t = watcher({ open, config: { enabled: true, maxConcurrent: 1 } });
+    await t.enrol();
+    open.push(issue(70, { createdAt: new Date(T0 + 1).toISOString() }));
+    t.clock.now = T0 + HOUR;
+    expect((await t.w.pollNow("p1")).taken).toEqual([70]);
+    // The chat stood down on a decision: needs-info on, claim label off, issue open.
+    await t.tracker.update(70, { addLabels: ["needs-info"], removeLabels: ["dispatch:working"] });
+    open.push(issue(71, { createdAt: new Date(T0 + 2).toISOString() }));
+    t.clock.now = T0 + 2 * HOUR;
+    const r = await t.w.pollNow("p1");
+    expect(t.claims.get("github:acme/api#70")?.state).toBe("parked");
+    expect(r.taken).toEqual([71]);
+    // Parked is not a vacancy: the poll never hands the same issue out again.
+    expect(r.seen.find((s) => s.number === 70)).toMatchObject({ taken: false, reason: "parked by this instance" });
+    expect(t.spawns).toHaveLength(2);
+    expect((await t.w.listOpen("p1")).find((row) => row.issue.number === 70)?.reason).toBe(
+      "parked — its chat is waiting on a person",
+    );
+    // And it settles once somebody closes it.
+    open[0] = issue(70, { state: "closed" });
+    t.clock.now = T0 + 3 * HOUR;
+    await t.w.pollNow("p1");
+    expect(t.claims.get("github:acme/api#70")?.state).toBe("done");
+  });
+
+  it("keeps a claim working while its label is still on, however long the chat takes", async () => {
+    const open: Issue[] = [];
+    const t = watcher({ open, config: { enabled: true, maxConcurrent: 1 } });
+    await t.enrol();
+    open.push(issue(80, { createdAt: new Date(T0 + 1).toISOString() }));
+    t.clock.now = T0 + HOUR;
+    await t.w.pollNow("p1");
+    open.push(issue(81, { createdAt: new Date(T0 + 2).toISOString() }));
+    t.clock.now = T0 + 5 * HOUR;
+    const r = await t.w.pollNow("p1");
+    expect(t.claims.get("github:acme/api#80")?.state).toBe("working");
+    expect(r.taken).toEqual([]);
   });
 
   it("drops a claim whose chat vanished without an event, so it stops holding a slot", async () => {

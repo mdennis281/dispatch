@@ -268,6 +268,16 @@ export class IssueWatcher {
     }
     const sourceLabel = issueSourceLabel(tracker.source);
 
+    // Reap BEFORE listing: the reap takes our own label off, and a list read
+    // first still shows it there, so the issue the reap just freed would be
+    // turned away as "being worked elsewhere" by its own stale lock.
+    const claims = await this.reapInterrupted(
+      tracker,
+      policy,
+      await this.store.listIssueClaims(projectId).catch(() => []),
+      now,
+    );
+
     let open: Issue[];
     try {
       open = await tracker.list({ state: "open", limit: POLL_LIMIT });
@@ -277,17 +287,10 @@ export class IssueWatcher {
       this.bus.publish({ type: "notice", level: "warn", text: `Issue poll failed for ${sourceLabel}: ${error}` });
       return { ...result, error };
     }
-
-    const claims = await this.reapInterrupted(
-      tracker,
-      policy,
-      await this.store.listIssueClaims(projectId).catch(() => []),
-      now,
-    );
     const claimed = new Map(claims.map((c) => [c.key, c]));
-    // Settle BEFORE counting: an issue the last chat closed is a slot this poll
-    // can use, not one it should wait a full interval to notice.
-    await this.settleClosed(tracker, claims, open, now);
+    // Settle BEFORE counting: an issue the last chat closed or parked is a slot
+    // this poll can use, not one it should wait a full interval to notice.
+    await this.settle(tracker, policy, claims, open, now);
     // Anything this instance took and is not finished with, whose chat is
     // still around. A chat that vanished without a `chat-deleted` (a crash, a
     // hand-deleted file) drops out of the count here rather than holding a
@@ -451,6 +454,8 @@ export class IssueWatcher {
       if (prior) {
         row.claim = { state: prior.state, chatId: prior.chatId, note: prior.note };
         if (prior.state === "claimed" || prior.state === "working") row.reason = `${prior.state} by this instance`;
+        // The poll never re-takes a parked issue, so the pane must not say it would.
+        else if (prior.state === "parked") row.reason = "parked — its chat is waiting on a person";
       }
       if (row.reason) return row;
       if (!policy.enabled) row.reason = "handling is off";
@@ -577,23 +582,34 @@ export class IssueWatcher {
   }
 
   /**
-   * A working claim whose issue is no longer open is done — the PR merged and
-   * `Fixes #n` closed it, or the chat closed it, or a human did. One `get` per
-   * working claim not in the open list, which is a handful at most.
+   * Move working and parked claims on from what the tracker says now.
+   *
+   * No longer open → done: the PR merged and `Fixes #n` closed it, or the chat
+   * closed it, or a human did. Still open but the claim label is gone → parked:
+   * the brief tells the chat to take the label off when it stands down, and an
+   * issue left open after that is waiting on a person, not on this instance.
+   * Counting it as in flight is what held anoxia's two slots for three days.
+   *
+   * One `get` per claim not in the open list, which is a handful at most.
    */
-  private async settleClosed(
+  private async settle(
     tracker: BoundIssueTracker,
+    policy: ResolvedIssuePolicy,
     claims: IssueClaim[],
     open: Issue[],
     now: number,
   ): Promise<void> {
-    const openNumbers = new Set(open.map((i) => i.number));
+    const openByNumber = new Map(open.map((i) => [i.number, i]));
+    const label = policy.claimLabel.toLowerCase();
     for (const c of claims) {
-      if (c.state !== "working" || openNumbers.has(c.number)) continue;
-      const issue = await tracker.get(c.number).catch(() => null);
-      if (issue && issue.state === "open") continue;
-      c.state = "done";
-      await this.store.updateIssueClaim(c.key, { state: "done", updatedAt: now });
+      if (c.state !== "working" && c.state !== "parked") continue;
+      const issue = openByNumber.get(c.number) ?? (await tracker.get(c.number).catch(() => null));
+      let next: IssueClaim["state"] | null = null;
+      if (!issue || issue.state !== "open") next = "done";
+      else if (c.state === "working" && !issue.labels.some((l) => l.toLowerCase() === label)) next = "parked";
+      if (!next) continue;
+      c.state = next;
+      await this.store.updateIssueClaim(c.key, { state: next, updatedAt: now });
     }
   }
 
@@ -601,7 +617,7 @@ export class IssueWatcher {
   async releaseChat(chatId: string): Promise<void> {
     const now = this.now();
     for (const c of await this.store.listIssueClaims().catch(() => [])) {
-      if (c.chatId !== chatId || (c.state !== "claimed" && c.state !== "working")) continue;
+      if (c.chatId !== chatId || (c.state !== "claimed" && c.state !== "working" && c.state !== "parked")) continue;
       await this.store.updateIssueClaim(c.key, { state: "released", note: "chat deleted", updatedAt: now });
       const tracker = await this.opts.trackerFor(c.projectId).catch(() => null);
       const label = resolveIssuePolicy(this.opts.configFor(c.projectId)).claimLabel;
