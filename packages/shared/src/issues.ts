@@ -361,7 +361,7 @@ export function matchIssue(issue: Issue, policy: Pick<ResolvedIssuePolicy, "filt
 /* ------------------------------------------------------------------ claims */
 
 /**
- * Where a claimed issue is in its life. Rows never go back: a `released` issue
+ * Where a claimed issue is in its life. Rows never go back (but see `parked`): a `released` issue
  * is one a human ended (deleted the chat), and re-claiming it automatically
  * would undo exactly the thing they did — it can only be picked up again by hand.
  *
@@ -370,7 +370,9 @@ export function matchIssue(issue: Issue, policy: Pick<ResolvedIssuePolicy, "filt
  * claim label off to say so. It is not in flight: on anoxia two parked issues
  * sat as `working` for three days and held both slots, so four newer issues
  * were never picked up. It is not settled either; it goes to `done` when the
- * issue closes, and is never re-taken by a poll.
+ * issue closes, and is never re-taken by a poll. It is the one state that may
+ * go back: the chat re-labels when it resumes after an answer, and that returns
+ * it to `working`.
  */
 export const IssueClaimStateSchema = z.enum(["claimed", "working", "parked", "done", "released", "failed"]);
 export type IssueClaimState = z.infer<typeof IssueClaimStateSchema>;

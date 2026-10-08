@@ -292,9 +292,14 @@ describe("IssueWatcher", () => {
     expect((await t.w.listOpen("p1")).find((row) => row.issue.number === 70)?.reason).toBe(
       "parked — its chat is waiting on a person",
     );
+    // The human answered and the chat re-labelled to resume: working again.
+    await t.tracker.update(70, { addLabels: ["dispatch:working"] });
+    t.clock.now = T0 + 3 * HOUR;
+    await t.w.pollNow("p1");
+    expect(t.claims.get("github:acme/api#70")?.state).toBe("working");
     // And it settles once somebody closes it.
     open[0] = issue(70, { state: "closed" });
-    t.clock.now = T0 + 3 * HOUR;
+    t.clock.now = T0 + 4 * HOUR;
     await t.w.pollNow("p1");
     expect(t.claims.get("github:acme/api#70")?.state).toBe("done");
   });

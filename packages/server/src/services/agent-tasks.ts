@@ -905,8 +905,10 @@ function issueHandleBriefText(ctx: IssueHandleContext): string {
       "full thread, `issue_comment` to reply, `issue_update` for labels, assignees and " +
       `closing. Each issue here already carries the \`${ctx.claimLabel}\` label — that is the ` +
       "claim that stops a second agent picking it up. Leave it on while you work, and take it " +
-      "off only when this chat is finished with the issue: closed, or parked on a person " +
-      "(below). Taking it off is what frees the watcher's slot for the next issue.",
+      "off the moment this chat stops working the issue — however it ends: closed, triaged " +
+      "and left open for a human to schedule, labelled `needs-info`, or parked on a person " +
+      "(below). An issue left open with the label still on holds the watcher's slot until " +
+      "somebody closes it. Put the label back before you start working it again.",
     "",
   ];
 
@@ -964,7 +966,9 @@ function issueHandleBriefText(ctx: IssueHandleContext): string {
     "2. Then ask with `mcp__dispatch-confirm__ask_user` — the same question and options, " +
       "short — and pass NO `timeoutSeconds`. Without one the card stays up and this chat " +
       "waits on it until it is answered; a timed-out card is how a question gets missed.",
-    "3. When the answer comes, act on it and finish the issue the way your mode says.",
+    "3. When the answer comes, put the claim label back on first — it is the lock that stops " +
+      "a second instance taking an issue nobody appears to be working — then act on it and " +
+      "finish the issue the way your mode says.",
     "",
     "**Batching.** These issues are in one chat so you can see whether they are related " +
       "before touching any of them. Work them here by default. Start a child chat " +

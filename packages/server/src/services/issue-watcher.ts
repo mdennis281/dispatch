@@ -589,6 +589,9 @@ export class IssueWatcher {
    * the brief tells the chat to take the label off when it stands down, and an
    * issue left open after that is waiting on a person, not on this instance.
    * Counting it as in flight is what held anoxia's two slots for three days.
+   * Parked with the label back on → working again: the human answered and the
+   * chat resumed, and the brief has it re-label first so the work is locked
+   * against a second instance — which makes it in flight again, too.
    *
    * One `get` per claim not in the open list, which is a handful at most.
    */
@@ -605,8 +608,10 @@ export class IssueWatcher {
       if (c.state !== "working" && c.state !== "parked") continue;
       const issue = openByNumber.get(c.number) ?? (await tracker.get(c.number).catch(() => null));
       let next: IssueClaim["state"] | null = null;
+      const labelled = issue?.labels.some((l) => l.toLowerCase() === label) ?? false;
       if (!issue || issue.state !== "open") next = "done";
-      else if (c.state === "working" && !issue.labels.some((l) => l.toLowerCase() === label)) next = "parked";
+      else if (c.state === "working" && !labelled) next = "parked";
+      else if (c.state === "parked" && labelled) next = "working";
       if (!next) continue;
       c.state = next;
       await this.store.updateIssueClaim(c.key, { state: next, updatedAt: now });

@@ -935,6 +935,9 @@ describe("buildTaskParts — issue handling", () => {
       expect(brief).toContain("**When it needs a person.**");
       expect(brief).toContain("mcp__dispatch-confirm__ask_user");
       expect(brief).toContain("pass NO `timeoutSeconds`");
+      // Every open-ended finish frees the slot, and resuming takes the lock back.
+      expect(brief).toContain("triaged and left open for a human to schedule");
+      expect(brief).toContain("put the claim label back on first");
     }
   });
 
