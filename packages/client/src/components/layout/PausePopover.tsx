@@ -1,12 +1,11 @@
 import { useEffect, useState } from "react";
-import { Pause, Play, Skull, ArrowRight } from "lucide-react";
+import { Pause, Play, Skull, ArrowRight, Check, ChevronRight } from "lucide-react";
 import type { SchedulerSnapshot } from "@dispatch/shared";
 import { Popover } from "../ui/Popover.js";
-import { Button } from "../ui/Button.js";
+import { IconButton } from "../ui/IconButton.js";
 import { RowButton } from "../ui/RowButton.js";
 import { Chip } from "../ui/Chip.js";
 import { StatusDot } from "../ui/StatusDot.js";
-import { relTime } from "../../lib/format.js";
 import { cn } from "../../lib/cn.js";
 import { useScheduler } from "../../stores/scheduler.js";
 import { useChats } from "../../stores/chats.js";
@@ -41,7 +40,7 @@ function ChatRow({
   return (
     <RowButton
       onClick={onGo}
-      className="group flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 hover:bg-active"
+      className="group flex w-full items-center gap-2.5 rounded-md px-2 py-1 hover:bg-active"
     >
       <span className="flex w-4 shrink-0 justify-center">{lead}</span>
       <span className="min-w-0 flex-1">
@@ -57,10 +56,45 @@ function ChatRow({
 }
 
 /**
- * The cap as a row of slots: filled for a chat doing work, hollow-outlined for
- * one with a turn open but blocked (it has given its slot back), and the queue
- * trailing behind. The question it answers at a glance is "is the app busy, or
- * just waiting" — which a single running count conflated.
+ * A collapsible list heading. Collapsed by default: the header row and slot
+ * meter already answer "how busy is it", and the lists are for when you want
+ * to know WHICH chats — a question you ask on purpose, not on every open.
+ */
+function Section({
+  label,
+  count,
+  children,
+}: {
+  label: string;
+  count: number;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  const empty = count === 0;
+  return (
+    <div>
+      <RowButton
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        disabled={empty}
+        className="flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-2xs font-semibold uppercase tracking-wide text-faint hover:bg-active hover:text-secondary disabled:pointer-events-none"
+      >
+        <ChevronRight
+          className={cn("size-3 transition-transform", open && "rotate-90", empty && "opacity-0")}
+        />
+        <span className="flex-1">{label}</span>
+        <span className="cm-mono">{count}</span>
+      </RowButton>
+      {open && !empty && <div className="pb-1">{children}</div>}
+    </div>
+  );
+}
+
+/**
+ * The cap as a row of slots, filled for a chat doing work. A chat with a turn
+ * open but blocked (on CI, on a question) has given its slot back, so it is
+ * counted beside the meter rather than in it — the question this answers at a
+ * glance is "is the app busy, or just waiting", which one running count blurred.
  */
 function SlotMeter({ snapshot }: { snapshot: SchedulerSnapshot }) {
   const occupied = snapshot.running.filter((r) => r.occupied).length;
@@ -72,20 +106,12 @@ function SlotMeter({ snapshot }: { snapshot: SchedulerSnapshot }) {
         <span
           key={i}
           className={cn(
-            "h-2 flex-1 rounded-full",
-            snapshot.paused
-              ? i < occupied
-                ? "bg-warn/70"
-                : "bg-line"
-              : i < occupied
-                ? "bg-accent cm-anim-pulse"
-                : "bg-line",
+            "h-1.5 flex-1 rounded-full",
+            i < occupied ? (snapshot.paused ? "bg-warn/70" : "bg-accent cm-anim-pulse") : "bg-line",
           )}
         />
       ))}
-      {blocked > 0 && (
-        <span className="ml-1 cm-mono !text-2xs text-faint">+{blocked} blocked</span>
-      )}
+      {blocked > 0 && <span className="ml-1 cm-mono !text-2xs text-faint">+{blocked} blocked</span>}
     </div>
   );
 }
@@ -96,9 +122,9 @@ function SlotMeter({ snapshot }: { snapshot: SchedulerSnapshot }) {
  * chat's processes.
  *
  * Pause interrupts; it cannot freeze. Neither runtime can suspend a turn, so
- * the copy says "interrupt" plainly rather than promising a resume-in-place it
- * cannot deliver. What resume DOES do is tell each interrupted chat what
- * happened, which is why the panel names how many will be told.
+ * the tooltips say "interrupt" plainly rather than promising a resume-in-place
+ * the runtimes cannot deliver. What resume DOES do is tell each interrupted chat
+ * what happened, which is why its tooltip names how many will be told.
  */
 export function PausePopover({ compact }: { compact?: boolean }) {
   const snapshot = useScheduler((s) => s.snapshot);
@@ -119,6 +145,14 @@ export function PausePopover({ compact }: { compact?: boolean }) {
     return () => clearInterval(t);
   }, [paused, refreshProcesses]);
 
+  // An armed Kill disarms itself. A confirm that stays live indefinitely is a
+  // single click waiting for whoever next touches the panel.
+  useEffect(() => {
+    if (!confirmKill) return;
+    const t = setTimeout(() => setConfirmKill(false), 5_000);
+    return () => clearTimeout(t);
+  }, [confirmKill]);
+
   if (!snapshot) return null;
 
   const working = snapshot.running.filter((r) => r.occupied).length;
@@ -130,11 +164,13 @@ export function PausePopover({ compact }: { compact?: boolean }) {
   const mine = Object.entries(processes).filter(([id]) => id in chatsById);
   const procTotal = mine.reduce((n, [, t]) => n + t.session + t.shells, 0);
   const procChats = mine.length;
+  const killOff = !paused || procTotal === 0 || busy !== null;
+  const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
   return (
     <Popover
       align="end"
-      width={360}
+      width={320}
       className="p-0"
       trigger={({ open, toggle }) => (
         <button
@@ -153,21 +189,16 @@ export function PausePopover({ compact }: { compact?: boolean }) {
             open && !paused && "bg-active text-primary",
           )}
         >
+          <Pause />
           {paused ? (
-            <>
-              <Pause />
-              {!compact && <span>Paused</span>}
-            </>
+            !compact && <span>Paused</span>
           ) : (
-            <>
-              <Pause />
-              {working + snapshot.queued.length > 0 && (
-                <span className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-accent px-1 cm-mono !text-2xs leading-none text-accent-fg">
-                  {working}
-                  {snapshot.queued.length > 0 ? `+${snapshot.queued.length}` : ""}
-                </span>
-              )}
-            </>
+            working + snapshot.queued.length > 0 && (
+              <span className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-accent px-1 cm-mono !text-2xs leading-none text-accent-fg">
+                {working}
+                {snapshot.queued.length > 0 ? `+${snapshot.queued.length}` : ""}
+              </span>
+            )
           )}
         </button>
       )}
@@ -179,46 +210,96 @@ export function PausePopover({ compact }: { compact?: boolean }) {
         };
         return (
           <div className="w-full">
-            <div className="flex items-center justify-between gap-2 px-3 py-2.5 cm-hairline-b">
+            {/* One row: what the scheduler is doing, then every action as an
+                icon. The tooltips carry the explanation, so the body is just
+                the lists. */}
+            <div className="flex items-center gap-1 py-1.5 pl-3 pr-1.5 cm-hairline-b">
               <span className="text-sm font-semibold text-primary">Agents</span>
-              <div className="flex items-center gap-1.5">
-                <Chip tone={paused ? "warn" : working > 0 ? "accent" : "muted"}>
-                  {working}/{snapshot.cap} slots
-                </Chip>
-                <Chip tone={snapshot.queued.length > 0 ? "info" : "muted"}>
-                  {snapshot.queued.length} queued
-                </Chip>
-              </div>
+              <Chip tone={paused ? "warn" : working > 0 ? "accent" : "muted"} className="ml-1">
+                {paused ? "paused" : `${working}/${snapshot.cap}`}
+              </Chip>
+              <span className="flex-1" />
+              {paused ? (
+                <IconButton
+                  size="md"
+                  tip={
+                    busy === "resume"
+                      ? "Resuming…"
+                      : paused.interrupted.length
+                        ? `Resume — tell ${plural(paused.interrupted.length, "interrupted chat")} what happened and to restart their shells, then run the queue`
+                        : "Resume — run the queue"
+                  }
+                  disabled={busy !== null}
+                  onClick={() => {
+                    setConfirmKill(false);
+                    void useScheduler.getState().resume();
+                  }}
+                >
+                  {/* Colour on the glyph, not the button: IconButton's own
+                      `text-secondary` and a className colour would both survive
+                      clsx, and stylesheet order picks the winner. */}
+                  <Play className="text-accent-hi" />
+                </IconButton>
+              ) : (
+                <IconButton
+                  size="md"
+                  tip={
+                    busy === "pause"
+                      ? "Pausing…"
+                      : `Pause all — interrupt ${plural(snapshot.running.length, "turn")} and hold every new one`
+                  }
+                  disabled={busy !== null}
+                  onClick={() => void useScheduler.getState().pause()}
+                >
+                  <Pause className="text-danger" />
+                </IconButton>
+              )}
+              <IconButton
+                size="md"
+                tip={
+                  !paused
+                    ? "Kill chat processes — pause first"
+                    : busy === "kill"
+                      ? "Killing…"
+                      : procTotal === 0
+                        ? "No chat processes left"
+                        : confirmKill
+                          ? `Click again to kill ${plural(procTotal, "process", "processes")} across ${plural(procChats, "chat")} — dev servers and shells too`
+                          : `Kill chat processes (${procTotal})`
+                }
+                // Not `disabled`: a disabled button takes no pointer events, so
+                // its tooltip — the only thing saying WHY it is off — never shows.
+                aria-disabled={killOff}
+                className={cn(
+                  (!paused || procTotal === 0) && "opacity-40",
+                  confirmKill && "bg-danger-ghost",
+                )}
+                onClick={() => {
+                  if (killOff) return;
+                  if (!confirmKill) {
+                    setConfirmKill(true);
+                    return;
+                  }
+                  void useScheduler
+                    .getState()
+                    .kill()
+                    .then(() => {
+                      setConfirmKill(false);
+                      void refreshProcesses();
+                    });
+                }}
+              >
+                {confirmKill ? <Check className="text-danger" /> : <Skull className="text-danger" />}
+              </IconButton>
             </div>
 
-            <div className="px-3 pt-2.5">
+            <div className="px-3 pt-2">
               <SlotMeter snapshot={snapshot} />
             </div>
 
-            {paused && (
-              <div className="mx-3 mt-2.5 rounded-md border border-warn/30 bg-warn-ghost px-2.5 py-2 text-xs text-warn">
-                <div className="font-medium">
-                  Paused {relTime(paused.since)} · {paused.interrupted.length}{" "}
-                  {paused.interrupted.length === 1 ? "turn" : "turns"} interrupted
-                </div>
-                <div className="mt-0.5 text-secondary">
-                  Nothing starts until you resume. On resume, interrupted chats are told what
-                  happened and that their shells need restarting.
-                  {paused.killedAt ? ` Processes killed ${relTime(paused.killedAt)}.` : ""}
-                </div>
-              </div>
-            )}
-
             <div className="max-h-[340px] cm-scroll overflow-y-auto p-1.5">
-              <div className="px-2 pb-1 pt-1.5 text-2xs font-semibold uppercase tracking-wide text-faint">
-                Running · {snapshot.running.length}
-              </div>
-              {snapshot.running.length === 0 ? (
-                <div className="px-2 pb-2 text-xs text-muted">
-                  {paused ? "Nothing running — everything is held." : "Nothing running."}
-                </div>
-              ) : (
-                snapshot.running.map((r) => (
+              <Section label="Running" count={snapshot.running.length}>
+                {snapshot.running.map((r) => (
                   <ChatRow
                     key={r.chatId}
                     chatId={r.chatId}
@@ -232,17 +313,13 @@ export function PausePopover({ compact }: { compact?: boolean }) {
                     }
                     detail={runningLabel(r, activity[r.chatId]?.label)}
                   />
-                ))
-              )}
-
+                ))}
+              </Section>
               {/* The chats the pause cut off. An interrupted turn settles to idle,
                   so without this they would vanish from the panel — and they are
                   exactly the ones resume is going to message. */}
-              {paused && interruptedIdle.length > 0 && (
-                <>
-                  <div className="px-2 pb-1 pt-2.5 text-2xs font-semibold uppercase tracking-wide text-faint">
-                    Interrupted · {interruptedIdle.length}
-                  </div>
+              {paused && (
+                <Section label="Interrupted" count={interruptedIdle.length}>
                   {interruptedIdle.map((id) => (
                     <ChatRow
                       key={id}
@@ -251,21 +328,15 @@ export function PausePopover({ compact }: { compact?: boolean }) {
                       lead={<StatusDot tone="warn" hollow />}
                       detail={
                         paused.killed?.includes(id)
-                          ? "stopped · processes killed · notified on resume"
-                          : "stopped · notified on resume"
+                          ? "processes killed · notified on resume"
+                          : "notified on resume"
                       }
                     />
                   ))}
-                </>
+                </Section>
               )}
-
-              <div className="px-2 pb-1 pt-2.5 text-2xs font-semibold uppercase tracking-wide text-faint">
-                Queued · {snapshot.queued.length}
-              </div>
-              {snapshot.queued.length === 0 ? (
-                <div className="px-2 pb-2 text-xs text-muted">Nothing waiting for a slot.</div>
-              ) : (
-                snapshot.queued.map((q, i) => (
+              <Section label="Queued" count={snapshot.queued.length}>
+                {snapshot.queued.map((q, i) => (
                   <ChatRow
                     key={q.chatId}
                     chatId={q.chatId}
@@ -279,88 +350,8 @@ export function PausePopover({ compact }: { compact?: boolean }) {
                         : "waiting for a slot"
                     }
                   />
-                ))
-              )}
-            </div>
-
-            <div className="flex flex-col gap-2 px-3 py-2.5 cm-hairline-t">
-              {!paused ? (
-                <>
-                  <Button
-                    variant="danger"
-                    size="md"
-                    className="w-full justify-center"
-                    leftIcon={<Pause className="size-3.5" />}
-                    disabled={busy !== null}
-                    onClick={() => void useScheduler.getState().pause()}
-                  >
-                    {busy === "pause" ? "Pausing…" : "Pause all chats"}
-                  </Button>
-                  <p className="text-2xs text-faint">
-                    Interrupts {snapshot.running.length}{" "}
-                    {snapshot.running.length === 1 ? "turn" : "turns"} and holds every new one — human
-                    messages, peers, PR reviews and usage-limit resumes alike.
-                  </p>
-                </>
-              ) : (
-                <>
-                  <Button
-                    variant="primary"
-                    size="md"
-                    className="w-full justify-center"
-                    leftIcon={<Play className="size-3.5" />}
-                    disabled={busy !== null}
-                    onClick={() => {
-                      setConfirmKill(false);
-                      void useScheduler.getState().resume();
-                    }}
-                  >
-                    {busy === "resume"
-                      ? "Resuming…"
-                      : `Resume${paused.interrupted.length ? ` · notify ${paused.interrupted.length}` : ""}`}
-                  </Button>
-                  {confirmKill ? (
-                    <div className="flex items-center gap-1.5">
-                      <span className="flex-1 text-xs text-danger">
-                        Kill {procTotal} {procTotal === 1 ? "process" : "processes"} across {procChats}{" "}
-                        {procChats === 1 ? "chat" : "chats"}? Dev servers and shells die too.
-                      </span>
-                      <Button size="sm" variant="link" onClick={() => setConfirmKill(false)}>
-                        Cancel
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="danger"
-                        disabled={busy !== null}
-                        onClick={() =>
-                          void useScheduler
-                            .getState()
-                            .kill()
-                            .then(() => {
-                              setConfirmKill(false);
-                              void refreshProcesses();
-                            })
-                        }
-                      >
-                        {busy === "kill" ? "Killing…" : "Kill"}
-                      </Button>
-                    </div>
-                  ) : (
-                    <Button
-                      variant="danger"
-                      size="sm"
-                      className="w-full justify-center"
-                      leftIcon={<Skull className="size-3.5" />}
-                      disabled={busy !== null || procTotal === 0}
-                      onClick={() => setConfirmKill(true)}
-                    >
-                      {procTotal === 0
-                        ? "No chat processes left"
-                        : `Kill chat processes · ${procTotal}`}
-                    </Button>
-                  )}
-                </>
-              )}
+                ))}
+              </Section>
             </div>
           </div>
         );
