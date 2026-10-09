@@ -809,6 +809,14 @@ export class AuthService {
     family.currentHash = digest(next);
     family.rotatedAt = now;
     family.lastUsedAt = now;
+    // Where the session is NOW, not where it signed in. The address was only
+    // ever written at login, so a session list is a 90-day-old snapshot: a
+    // laptop that moved networks kept its old address, and turning on
+    // DISPATCH_TRUST_PROXY changed no existing row at all — every one stayed
+    // on the proxy's 10.0.0.1 until its owner happened to sign in again.
+    // Written after the concurrent-refresh check above, which compares
+    // against the address the PREVIOUS rotation came from.
+    if (meta.ip) family.ip = meta.ip;
     family.expiresAt = Math.min(now + REFRESH_SLIDING_MS, family.absoluteExpiresAt);
     await this.persistSessions();
     const nowSec = Math.floor(now / 1000);

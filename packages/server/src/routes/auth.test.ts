@@ -476,3 +476,35 @@ describe("optional authentication", () => {
     await instance.close();
   });
 });
+
+describe("the address a session list reports", () => {
+  /**
+   * The exact report that motivated this: trust the proxy, restart, and every
+   * row STILL said 10.0.0.1 — because the address was written at login and
+   * never again, so only a fresh sign-in could pick up the forwarded one.
+   */
+  it("follows the session on refresh, so trusting a proxy fixes existing rows", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "dispatch-auth-proxy-"));
+    dirs.push(dir);
+    const instance = await buildApp({ store: new Store(dir), bus: new EventBus(), config: {
+      port: 0, host: "127.0.0.1", dataDir: dir, maxActiveSessions: 1, idleSessionMinutes: 30, trustProxy: "10.0.0.1",
+    }});
+    const ua = "Mozilla/5.0 Chrome/126.0 Windows NT 10.0";
+    // Signed in before the proxy forwarded anything: the row holds the proxy.
+    const signedIn = await instance.inject({ method: "POST", url: "/api/auth/bootstrap", remoteAddress: "10.0.0.1",
+      headers: { "user-agent": ua, ...sessionHeaders }, payload: {
+        username: "Owner", password: "correct horse battery staple", canonicalUrl: "http://localhost",
+      }});
+    expect(signedIn.statusCode).toBe(200);
+    const sessionIp = async (accessToken: string) => ((await instance.inject({ url: "/api/auth/security",
+      headers: { authorization: `Bearer ${accessToken}` } })).json() as { sessions: Array<{ ip?: string }> }).sessions[0]!.ip;
+    expect(await sessionIp((signedIn.json() as { accessToken: string }).accessToken)).toBe("10.0.0.1");
+
+    const refreshed = await instance.inject({ method: "POST", url: "/api/auth/refresh", remoteAddress: "10.0.0.1",
+      headers: { cookie: `dispatch_refresh=${encodeURIComponent(rawCookie(signedIn.headers["set-cookie"] as string))}`,
+        "x-forwarded-for": "10.0.0.42", "user-agent": ua, ...sessionHeaders } });
+    expect(refreshed.statusCode).toBe(200);
+    expect(await sessionIp((refreshed.json() as { accessToken: string }).accessToken)).toBe("10.0.0.42");
+    await instance.close();
+  });
+});
