@@ -5,6 +5,7 @@ import { Popover } from "../ui/Popover.js";
 import { IconButton } from "../ui/IconButton.js";
 import { RowButton } from "../ui/RowButton.js";
 import { Chip } from "../ui/Chip.js";
+import { Tooltip } from "../ui/Tooltip.js";
 import { StatusDot } from "../ui/StatusDot.js";
 import { cn } from "../../lib/cn.js";
 import { useScheduler } from "../../stores/scheduler.js";
@@ -91,32 +92,6 @@ function Section({
 }
 
 /**
- * The cap as a row of slots, filled for a chat doing work. A chat with a turn
- * open but blocked (on CI, on a question) has given its slot back, so it is
- * counted beside the meter rather than in it — the question this answers at a
- * glance is "is the app busy, or just waiting", which one running count blurred.
- */
-function SlotMeter({ snapshot }: { snapshot: SchedulerSnapshot }) {
-  const occupied = snapshot.running.filter((r) => r.occupied).length;
-  const blocked = snapshot.running.length - occupied;
-  const slots = Math.max(snapshot.cap, occupied);
-  return (
-    <div className="flex items-center gap-1" aria-hidden>
-      {Array.from({ length: slots }, (_, i) => (
-        <span
-          key={i}
-          className={cn(
-            "h-1.5 flex-1 rounded-full",
-            i < occupied ? (snapshot.paused ? "bg-warn/70" : "bg-accent cm-anim-pulse") : "bg-line",
-          )}
-        />
-      ))}
-      {blocked > 0 && <span className="ml-1 cm-mono !text-2xs text-faint">+{blocked} blocked</span>}
-    </div>
-  );
-}
-
-/**
  * The global pause: a header control with a live panel of what is running and
  * what is queued, Pause / Resume, and — once paused — a way to kill every
  * chat's processes.
@@ -156,6 +131,7 @@ export function PausePopover({ compact }: { compact?: boolean }) {
   if (!snapshot) return null;
 
   const working = snapshot.running.filter((r) => r.occupied).length;
+  const blocked = snapshot.running.length - working;
   const busyIds = new Set([...snapshot.running, ...snapshot.queued].map((c) => c.chatId));
   const interruptedIdle = (paused?.interrupted ?? []).filter((id) => !busyIds.has(id));
   // Only chats this instance knows. The server's process scan is machine-wide,
@@ -215,9 +191,21 @@ export function PausePopover({ compact }: { compact?: boolean }) {
                 the lists. */}
             <div className="flex items-center gap-1 py-1.5 pl-3 pr-1.5 cm-hairline-b">
               <span className="text-sm font-semibold text-primary">Agents</span>
-              <Chip tone={paused ? "warn" : working > 0 ? "accent" : "muted"} className="ml-1">
-                {paused ? "paused" : `${working}/${snapshot.cap}`}
-              </Chip>
+              {/* The chip replaced a bar-per-slot meter that needed explaining:
+                  "what are the two yellow bars?" is a meter failing at its one
+                  job. A number with a tooltip says the same thing outright. */}
+              <Tooltip
+                label={
+                  paused
+                    ? "Paused — nothing starts until you resume"
+                    : `${working} of ${snapshot.cap} active slots in use` +
+                      (blocked > 0 ? ` · ${blocked} more blocked (waiting, not using a slot)` : "")
+                }
+              >
+                <Chip tone={paused ? "warn" : working > 0 ? "accent" : "muted"} className="ml-1">
+                  {paused ? "paused" : `${working}/${snapshot.cap} slots`}
+                </Chip>
+              </Tooltip>
               <span className="flex-1" />
               {paused ? (
                 <IconButton
@@ -293,11 +281,7 @@ export function PausePopover({ compact }: { compact?: boolean }) {
               </IconButton>
             </div>
 
-            <div className="px-3 pt-2">
-              <SlotMeter snapshot={snapshot} />
-            </div>
-
-            <div className="max-h-[340px] cm-scroll overflow-y-auto p-1.5">
+            <div className="max-h-[340px] cm-scroll overflow-y-auto px-1.5 py-1">
               <Section label="Running" count={snapshot.running.length}>
                 {snapshot.running.map((r) => (
                   <ChatRow
