@@ -43,6 +43,7 @@ import { useUsage } from "./usage.js";
 import { useSubscriptions } from "./subscriptions.js";
 import { useUpdate } from "./update.js";
 import { useRestartResume } from "./restartResume.js";
+import { useScheduler } from "./scheduler.js";
 import { useModels } from "./models.js";
 import { useSettings } from "./settings.js";
 import { useHarnesses } from "./harnesses.js";
@@ -370,6 +371,12 @@ export function applyServerEvent(evt: WsServerEvent): void {
       useRestartResume.getState().set(evt.status);
       return;
 
+    case "scheduler":
+      // Running/queued membership or the pause changed. Pushed (coalesced
+      // server-side) so the panel is live without a poll.
+      useScheduler.getState().set(evt.snapshot);
+      return;
+
     case "notice":
       useNotices.getState().push({
         level: evt.level,
@@ -518,6 +525,8 @@ export async function hydrateFromServer(): Promise<boolean> {
   // What the last restart did to chats that were mid-turn. Same best-effort
   // shape: an older server has no route and the card simply never renders.
   void useRestartResume.getState().load();
+  // Whether a pause is holding everything, and what is running vs queued.
+  void useScheduler.getState().load();
   useChats.getState().hydrate(chats);
   useAttention.getState().hydrate(attention);
   // The badge is OS state that outlives the page: a launch that found nothing

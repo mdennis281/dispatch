@@ -140,6 +140,8 @@ function makeBroker(
 /* --------------------------------------------------------- scripted fake SDK */
 
 interface FakeCtl {
+  /** Override what `interrupt()` does — e.g. a provider that never answers. */
+  interruptImpl?: () => Promise<void>;
   canUseTool?: (
     n: string,
     i: Record<string, unknown>,
@@ -342,6 +344,7 @@ function makeFakeQuery(
     const g = gen() as unknown as Record<string, unknown>;
     g.interrupt = async () => {
       ctl.calls.interrupt += 1;
+      await ctl.interruptImpl?.();
     };
     g.setPermissionMode = async (m: string) => {
       ctl.calls.setPermissionMode.push(m);
@@ -1977,6 +1980,96 @@ describe("SessionBroker — steering & concurrency", () => {
 
     await Promise.all(["c1", "c2", "c3"].map((id) => broker.waitFor(id, "idle").catch(() => {})));
     expect(broker.activeCount()).toBe(0);
+  });
+
+  it("a global pause interrupts live turns, holds every new turn, and resume runs the interrupted chat first", async () => {
+    const gate = deferred();
+    const { fn, controllers } = makeFakeQuery(async (text) => {
+      if (text === "go") await gate.promise;
+      return [assistantText(text), resultMsg(text === "go" ? "interrupted" : "success")];
+    });
+    const broker = makeBroker(fn);
+    for (const id of ["c1", "c2"]) {
+      await store.saveChat(chatFor(id));
+      broker.create(chatFor(id));
+    }
+
+    await broker.sendMessage("c1", "go");
+    await until(() => controllers[0]?.pushed.length === 1);
+
+    const state = await broker.pauseAll();
+    expect(state.interrupted).toEqual(["c1"]);
+    expect(controllers[0]!.calls.interrupt).toBe(1);
+
+    // Work arriving while paused parks — the cap is nowhere near full, so this
+    // is the pause and nothing else.
+    await broker.sendMessage("c2", "later");
+    expect(broker.getStatus("c2")).toBe("queued");
+    expect(controllers).toHaveLength(1);
+
+    // The interrupted turn settles; a message to it must not chain a new turn.
+    gate.resolve();
+    await broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "resume note");
+    expect(broker.getStatus("c1")).toBe("queued");
+    expect(controllers[0]!.pushed).toEqual(["go"]);
+    expect(broker.schedulerSnapshot().queued.map((q) => q.chatId)).toEqual(["c2", "c1"]);
+
+    // Resume puts the chat the pause cut off ahead of work that merely arrived.
+    const c1ran = broker.waitFor("c1", "running");
+    broker.resumeAll(["c1"]);
+    await c1ran;
+    expect(broker.pause).toBeUndefined();
+    await until(() => controllers[1]?.pushed.length === 1);
+    expect(controllers[0]!.pushed).toEqual(["go", "resume note"]);
+    expect(controllers[1]!.pushed).toEqual(["later"]);
+  });
+
+  it("hands the pause to onArmed before awaiting an interrupt that never answers", async () => {
+    const { fn, controllers } = makeFakeQuery(async () => {
+      await new Promise(() => {});
+      return [];
+    });
+    const broker = makeBroker(fn, 6, { deps: { query: fn, stopTimeoutMs: 50 } });
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+    await broker.sendMessage("c1", "go");
+    await until(() => controllers[0]?.pushed.length === 1);
+    // An interrupt the provider never acknowledges.
+    controllers[0]!.interruptImpl = () => new Promise(() => {});
+
+    let armed: unknown;
+    const paused = broker.pauseAll(async (s) => {
+      armed = s;
+    });
+    await until(() => armed !== undefined);
+    expect(armed).toMatchObject({ interrupted: ["c1"] });
+    // Bounded: the call still returns once the stop window lapses.
+    await expect(paused).resolves.toMatchObject({ interrupted: ["c1"] });
+  });
+
+  it("killing processes during a pause keeps the work queued behind it", async () => {
+    const { fn, controllers } = makeFakeQuery((text) => [assistantText(text), resultMsg()]);
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+    const firstDone = waitForResults("c1", 1);
+    await broker.sendMessage("c1", "first");
+    await firstDone;
+
+    await broker.pauseAll();
+    await broker.sendMessage("c1", "held");
+    expect(broker.getStatus("c1")).toBe("queued");
+
+    // A plain stop() empties the outbox; this must not.
+    await broker.stopKeepingQueued("c1");
+    expect(broker.getStatus("c1")).toBe("queued");
+    expect(broker.markKilled(["c1"])?.killed).toEqual(["c1"]);
+
+    const heldDone = waitForResults("c1", 1);
+    broker.resumeAll();
+    await heldDone;
+    expect(controllers.at(-1)!.pushed).toContain("held");
   });
 
   it("raising the cap starts the parked chats immediately", async () => {

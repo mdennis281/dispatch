@@ -14,6 +14,7 @@ import {
   PermissionDecisionSchema,
   SendModeSchema,
 } from "./common.js";
+import { SchedulerEventSchema } from "./scheduler.js";
 import {
   ChatSchema,
   ProjectSchema,
@@ -572,6 +573,7 @@ export const WsServerEventSchema = z.discriminatedUnion("type", [
   NoticeEventSchema,
   ErrorEventSchema,
   ServerShutdownEventSchema,
+  SchedulerEventSchema,
 ]);
 export type WsServerEvent = z.infer<typeof WsServerEventSchema>;
 export type WsServerEventType = WsServerEvent["type"];

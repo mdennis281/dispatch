@@ -72,6 +72,8 @@ import type {
 import { nanoid } from "nanoid";
 import type {
   Chat,
+  PauseState,
+  SchedulerSnapshot,
   Project,
   PermissionMode,
   Effort,
@@ -2348,6 +2350,15 @@ export class SessionBroker {
   private readonly sessions = new Map<string, LiveSession>();
   /** FIFO of chatIds parked in `queued` waiting for an active slot. */
   private queueOrder: string[] = [];
+  /**
+   * The global pause, when one is in force. While set, nothing STARTS a turn:
+   * every path that would — a human send, a peer's `chat_send`, a usage-limit
+   * resume, a PR review round — reaches `schedule()` and parks as `queued`
+   * exactly as if the cap were full. See {@link pauseAll}.
+   */
+  private pauseState: PauseState | undefined;
+  /** Debounce for the `scheduler` broadcast — see {@link publishScheduler}. */
+  private schedulerTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(opts: SessionBrokerOptions) {
     this.store = opts.store;
@@ -3625,7 +3636,8 @@ export class SessionBroker {
    * `model_auto_compact_token_limit`; this is the one that reads Settings.
    */
   private async compactIfPastThreshold(session: LiveSession, ok: boolean): Promise<void> {
-    if (!ok) return;
+    // A compaction is a turn like any other; a pause holds it too.
+    if (!ok || this.pauseState) return;
     const settings = await this.store.getSettings().catch(() => undefined);
     const limit = this.compactThreshold(session, settings);
     if (!limit || (session.lastContextTokens ?? 0) < limit) return;
@@ -4087,6 +4099,144 @@ export class SessionBroker {
     return this.cap;
   }
 
+  /* ------------------------------------------------------------ pause */
+
+  /** The global pause in force, if any. */
+  get pause(): PauseState | undefined {
+    return this.pauseState;
+  }
+
+  /**
+   * Re-arm a pause that was in force when the process last stopped, WITHOUT
+   * interrupting anything — at boot there is nothing running to interrupt, and
+   * this must land before `RestartResumeService` sends its continuations or
+   * they would start turns the human deliberately held.
+   */
+  restorePause(state: PauseState): void {
+    this.pauseState = state;
+    this.publishScheduler();
+  }
+
+  /**
+   * Stop every open turn and close the queue.
+   *
+   * WHY INTERRUPT AND NOT FREEZE. Neither runtime can suspend a turn: Claude's
+   * SDK has `interrupt()`, Codex has `turn/interrupt`, and both END the turn.
+   * Suspending the process tree instead would leave a provider stream open
+   * with nobody reading it, which times out into an error on resume — strictly
+   * worse than a clean interrupt the chat can be told about.
+   *
+   * The state is set BEFORE the interrupts are awaited: each one settles
+   * through a turn-end handler, and that handler must already see the pause or
+   * it would chain the next queued message straight into a fresh turn.
+   *
+   * Every turn-live chat is interrupted, including ones blocked on a human or
+   * on `watch_pr` — those wake on their own when CI answers, and a pause that
+   * let them is not a pause.
+   *
+   * `onArmed` runs once the gate is shut and BEFORE any interrupt is awaited,
+   * so the caller can persist the pause first. An interrupt has no deadline of
+   * its own; if persisting waited on them, a provider that never answered
+   * would leave the pause unrecorded, and a restart in that window would come
+   * back unpaused and have `RestartResumeService` restart everything. Each
+   * interrupt is also bounded so the request itself cannot hang.
+   */
+  async pauseAll(onArmed?: (state: PauseState) => Promise<void>): Promise<PauseState> {
+    if (this.pauseState) return this.pauseState;
+    const live = [...this.sessions.values()].filter((s) => this.isTurnLive(s));
+    this.pauseState = { since: this.now(), interrupted: live.map((s) => s.chatId) };
+    this.publishScheduler();
+    await onArmed?.(this.pauseState).catch(() => {});
+    // Settled, not all: one provider refusing must not leave the rest running.
+    await Promise.allSettled(
+      live.map((s) =>
+        Promise.race([
+          this.interrupt(s.chatId),
+          new Promise<void>((resolve) => setTimeout(resolve, this.stopTimeoutMs).unref?.()),
+        ]),
+      ),
+    );
+    return this.pauseState;
+  }
+
+  /** Record that "kill processes" ran during this pause, for the resume note. */
+  markKilled(chatIds: string[]): PauseState | undefined {
+    if (!this.pauseState) return undefined;
+    const killed = new Set([...(this.pauseState.killed ?? []), ...chatIds]);
+    this.pauseState = { ...this.pauseState, killedAt: this.now(), killed: [...killed] };
+    this.publishScheduler();
+    return this.pauseState;
+  }
+
+  /**
+   * Lift the pause. `first` jumps those chats to the head of the queue — the
+   * ones the pause cut off mid-task go before work that merely arrived while
+   * it was in force — and the queue then drains under the ordinary cap.
+   */
+  resumeAll(first: string[] = []): void {
+    if (!this.pauseState) return;
+    this.pauseState = undefined;
+    const head = first.filter((id) => this.queueOrder.includes(id));
+    this.queueOrder = [...head, ...this.queueOrder.filter((id) => !head.includes(id))];
+    this.pump();
+    this.publishScheduler();
+  }
+
+  /**
+   * `stop()` for the pause's "kill processes": the same teardown, but work
+   * parked behind the pause survives it. A plain `stop()` empties the outbox
+   * and drops the chat from the queue, which here would silently discard every
+   * message that arrived while paused — the exact work resume exists to run.
+   */
+  async stopKeepingQueued(chatId: string): Promise<void> {
+    const session = this.sessions.get(chatId);
+    if (!session) return;
+    const held = session.outbox;
+    const wasQueued = session.status === "queued" || this.queueOrder.includes(chatId);
+    await this.stop(chatId);
+    if (held.length === 0 && !wasQueued) return;
+    session.outbox = [...held, ...session.outbox];
+    if (this.pauseState) this.parkForPause(session);
+    else this.schedule(session);
+  }
+
+  /** Park a session as `queued` behind the pause. */
+  private parkForPause(session: LiveSession): void {
+    if (!this.queueOrder.includes(session.chatId)) this.queueOrder.push(session.chatId);
+    session.activity.queued(this.now());
+    this.setStatus(session, "queued");
+  }
+
+  /** What is running and what is waiting, for the scheduler panel. */
+  schedulerSnapshot(): SchedulerSnapshot {
+    const running: SchedulerSnapshot["running"] = [];
+    for (const s of this.sessions.values()) {
+      if (this.isTurnLive(s)) running.push({ chatId: s.chatId, status: s.status, occupied: this.holdsSlot(s) });
+    }
+    return {
+      paused: this.pauseState ?? null,
+      cap: this.cap,
+      running,
+      queued: this.queueOrder
+        .filter((id) => this.sessions.get(id)?.status === "queued")
+        .map((chatId) => ({ chatId })),
+    };
+  }
+
+  /**
+   * Broadcast the snapshot, coalesced. `setStatus` calls this, and it runs on
+   * every tool start in every chat — a burst of those collapses into one frame
+   * rather than one per transition.
+   */
+  private publishScheduler(): void {
+    if (this.schedulerTimer) return;
+    this.schedulerTimer = setTimeout(() => {
+      this.schedulerTimer = undefined;
+      this.bus.publish({ type: "scheduler", snapshot: this.schedulerSnapshot() });
+    }, 150);
+    this.schedulerTimer.unref?.();
+  }
+
   /**
    * Apply the idle-purge window (`AppSettings.idleSessionMinutes`). `undefined`
    * falls back to the boot value, exactly like {@link setCap}.
@@ -4239,6 +4389,10 @@ export class SessionBroker {
       clearInterval(this.idleSweep);
       this.idleSweep = undefined;
     }
+    if (this.schedulerTimer) {
+      clearTimeout(this.schedulerTimer);
+      this.schedulerTimer = undefined;
+    }
     await Promise.all([...this.sessions.keys()].map((id) => this.stop(id)));
     // `setStatus(done)` is deliberately non-blocking during ordinary event
     // handling. Teardown is the one place it must be durable before exit, or a
@@ -4301,6 +4455,14 @@ export class SessionBroker {
     this.refreshCap();
     // A turn is already active → inject the buffered message(s) as steering.
     if (session.started && this.isTurnLive(session)) {
+      // Paused with a turn still open means its interrupt hasn't landed (or the
+      // provider refused it). Steering it would hand the agent new work through
+      // the side door, so the message waits in the outbox; the turn-end handler
+      // parks the chat as `queued` once the turn settles.
+      if (this.pauseState) {
+        this.setStatus(session, session.status);
+        return;
+      }
       this.flushOutbox(session);
       // Re-publish the current status so the client's "N queued" chip reflects the
       // just-injected message immediately (it decrements again as the SDK consumes).
@@ -4308,7 +4470,7 @@ export class SessionBroker {
       return;
     }
     // Otherwise this message must START a turn → needs a free active slot.
-    if (this.activeCount() < this.cap) {
+    if (!this.pauseState && this.activeCount() < this.cap) {
       this.startTurn(session);
     } else {
       if (!this.queueOrder.includes(session.chatId)) this.queueOrder.push(session.chatId);
@@ -4653,6 +4815,8 @@ export class SessionBroker {
   }
 
   private drainQueue(): void {
+    // Paused: the queue is closed, not merely full. `resumeAll` re-pumps.
+    if (this.pauseState) return;
     // The other half of the reconciliation: a slot just freed, so if the cap moved
     // under us this is the moment a parked chat should notice. `setCap` re-enters
     // `pump` on a raise, and a no-change `setCap` returns before it does — so this
@@ -5064,7 +5228,13 @@ export class SessionBroker {
         // `event.ok`, not `ok`: a stopped turn counts as settled for status, but
         // Stop must not be what kicks off an auto-compact turn.
         await this.compactIfPastThreshold(session, event.ok);
-        if ((session.harnessSession?.pending() ?? 0) > 0 || session.outbox.length > 0) {
+        // Paused with only OUR outbox holding work: settle and park rather than
+        // chaining a fresh turn. Input the runtime already holds (`pending()`)
+        // cannot be taken back, so that case still chains — it was handed over
+        // before the pause and the provider will start it regardless.
+        const holdForPause =
+          !!this.pauseState && (session.harnessSession?.pending() ?? 0) === 0 && session.outbox.length > 0;
+        if (!holdForPause && ((session.harnessSession?.pending() ?? 0) > 0 || session.outbox.length > 0)) {
           session.turnOpen = true;
           this.setStatus(session, "running", { state: "thinking" });
           this.flushOutbox(session);
@@ -5073,6 +5243,7 @@ export class SessionBroker {
         } else {
           this.onTurnEnd(session, { stopped });
         }
+        if (holdForPause) this.parkForPause(session);
         return;
     }
   }
@@ -6675,6 +6846,7 @@ export class SessionBroker {
       pending: session.pendingSends.length || undefined,
       prSettled: session.prWatchSettled || undefined,
     });
+    this.publishScheduler();
     // A slot may have just freed WITHOUT a turn ending: the chat blocked on a
     // human, a peer or the network, and {@link holdsSlot} stopped counting it.
     // Every `pump` call elsewhere hangs off turn settlement, so none of them

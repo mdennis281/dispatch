@@ -79,6 +79,8 @@ import type {
   HomeWindow,
   UpdateStatus,
   RestartResumeStatus,
+  SchedulerSnapshot,
+  PauseState,
   UpdateChannel,
   ContextUsage,
   ModelOption,
@@ -1504,6 +1506,14 @@ export const api = {
   },
 
   /* what the last (deliberate) restart did to chats that were mid-turn */
+  /* the global pause — see server/src/services/pause.ts */
+  scheduler: {
+    get: () => get<SchedulerSnapshot>("/api/scheduler"),
+    pause: () => post<{ paused: PauseState }>("/api/pause"),
+    kill: () => post<{ chatIds: string[] }>("/api/pause/kill"),
+    resume: () => post<{ notified: string[] }>("/api/pause/resume"),
+  },
+
   restartResume: {
     get: () => get<RestartResumeStatus | null>("/api/restart-resume"),
     /** The undo: interrupt every turn the server continued on its own. */

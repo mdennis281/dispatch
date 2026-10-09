@@ -40,6 +40,7 @@ export * from "./messages.js";
 export * from "./notify.js";
 export * from "./titles.js";
 export * from "./version.js";
+export * from "./scheduler.js";
 export * from "./wire.js";
 export * from "./metrics.js";
 export * from "./home.js";

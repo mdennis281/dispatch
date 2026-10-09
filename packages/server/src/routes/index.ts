@@ -39,6 +39,7 @@ import { registerFsRoutes } from "./fs.js";
 import { registerShutdownRoutes } from "./shutdown.js";
 import { registerUpdateRoutes } from "./update.js";
 import { registerRestartResumeRoutes } from "./restart-resume.js";
+import { registerPauseRoutes } from "./pause.js";
 import { registerAuthRoutes } from "./auth.js";
 import { registerSetupRoutes } from "./setup.js";
 import { registerDebugTraceRoutes } from "./debug-trace.js";
@@ -81,5 +82,6 @@ export function registerRoutes(app: FastifyInstance): void {
   registerShutdownRoutes(app);
   registerUpdateRoutes(app);
   registerRestartResumeRoutes(app);
+  registerPauseRoutes(app);
   registerDebugTraceRoutes(app);
 }

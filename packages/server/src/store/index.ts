@@ -802,6 +802,10 @@ export class Store {
   authSessionsFile() {
     return join(this.dataDir, "auth-sessions.json");
   }
+  /** The global pause, if one is in force. Per-instance — see services/pause.ts. */
+  pauseFile() {
+    return join(this.dataDir, "pause.json");
+  }
   /** Live-process marker used to make offline owner recovery fail closed. */
   authRecoveryLockFile() {
     return join(this.dataDir, "auth-recovery.lock");
