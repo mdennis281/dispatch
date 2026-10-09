@@ -163,8 +163,16 @@ const ALLOWED_DIR = join(SRC, "components", "ui");
  * kit now, the mission board re-exports it from there, and the homepage's four
  * lists (plus its project row, which was the `ProjectCard` entry above) are built
  * out of it. Thirty-odd rows, one bare element, counted nowhere.
+ *
+ * 88 → 89: the header's `PausePopover` trigger. The same shape as the
+ * `AttentionPopover` trigger beside it, which has always been a bare element and
+ * for the same reason: it morphs between a glyph-only `size-8` box with a count
+ * pinned to its corner and a labelled warn-toned "Paused" pill, and neither
+ * `IconButton` (fixed box, forced `[&_svg]:size-3.5`) nor `Button` (`h-6
+ * justify-center` plus variant padding) can be both without overriding itself
+ * through a clsx that has no tailwind-merge. Its rows use `RowButton`.
  */
-const BASELINE = 88;
+const BASELINE = 89;
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {

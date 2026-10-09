@@ -8,6 +8,7 @@ import {
   FolderGit2,
 } from "lucide-react";
 import { AttentionPopover } from "../attention/AttentionPopover.js";
+import { PausePopover } from "./PausePopover.js";
 import { UsageMeter } from "./UsageMeter.js";
 import { ResourceMeter } from "./ResourceMeter.js";
 import { BrandLockup } from "./BrandLockup.js";
@@ -214,6 +215,10 @@ function Actions({
   return (
     <div className="flex shrink-0 items-center gap-1">
       {attention && <AttentionPopover variant={attention} />}
+      {/* Outside the `!compact` block: stopping everything is not a
+          destination to hide in a sheet — on a phone it is the control you
+          reach for when something is going wrong. */}
+      <PausePopover compact={compact} />
       <IconButton
         tip="Search or run a command (⌘K)"
         onClick={onSearch}

@@ -10,6 +10,10 @@
  * for each user message pushed in, it emits an `assistant` echo + a `result`,
  * emitting the `system/init` handshake once up front. When the channel closes
  * (session stop/dispose) the async iterator ends and the broker settles `done`.
+ *
+ * A message containing `[hold]` keeps its turn OPEN until `interrupt()` — the
+ * one shape the instant echo cannot produce, and the one the global-pause E2E
+ * and screenshots need: a chat that is visibly running when Pause is pressed.
  */
 import type { QueryFn } from "./session-broker.js";
 
@@ -36,6 +40,7 @@ export function makeFakeQuery(): QueryFn {
   return ({ prompt }) => {
     const sessionId = `fake-session-${++sessionSeq}`;
     const input = prompt as AsyncIterable<unknown>;
+    let release: (() => void) | undefined;
 
     async function* stream(): AsyncGenerator<unknown> {
       let first = true;
@@ -53,6 +58,24 @@ export function makeFakeQuery(): QueryFn {
           };
         }
         const text = userText(msg);
+        if (text.includes("[hold]")) {
+          yield {
+            type: "assistant",
+            uuid: `fake-msg-${sessionSeq}-${Math.random().toString(36).slice(2, 8)}`,
+            message: { role: "assistant", content: [{ type: "text", text: "Working on it…" }] },
+          };
+          await new Promise<void>((resolve) => (release = resolve));
+          release = undefined;
+          yield {
+            type: "result",
+            subtype: "error_during_execution",
+            is_error: true,
+            num_turns: 1,
+            duration_ms: 3,
+            total_cost_usd: 0,
+          };
+          continue;
+        }
         yield {
           type: "assistant",
           uuid: `fake-msg-${sessionSeq}-${Math.random().toString(36).slice(2, 8)}`,
@@ -78,7 +101,7 @@ export function makeFakeQuery(): QueryFn {
       [Symbol.asyncIterator]: () => iterator,
       next: () => iterator.next(),
       return: (v?: unknown) => iterator.return(v as never),
-      interrupt: async () => {},
+      interrupt: async () => release?.(),
       setPermissionMode: async () => {},
       setMaxThinkingTokens: async () => {},
       applyFlagSettings: async () => {},

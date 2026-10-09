@@ -59,7 +59,7 @@ import { WorktreeService } from "./worktree.js";
 import { WorktreeDetector } from "./worktree-detector.js";
 import { WorktreeReaper } from "./worktree-reaper.js";
 import { RetentionService } from "./retention.js";
-import { deleteChat } from "./chat-deletion.js";
+import { deleteChat, reapChatResidual } from "./chat-deletion.js";
 import { GitService } from "./git.js";
 import { GrowthService } from "./growth.js";
 import { CommitMessageService } from "./commit-message.js";
@@ -81,6 +81,7 @@ import { ReleaseService } from "./release.js";
 import { ResumeScheduler } from "./resume-scheduler.js";
 import { FailoverService } from "./failover.js";
 import { RestartResumeService } from "./restart-resume.js";
+import { PauseService } from "./pause.js";
 import { TrunkSyncService } from "./trunk-sync.js";
 import { PrReviewWatcher } from "./pr-review-watcher.js";
 import { PrRegistry } from "./pr-registry.js";
@@ -222,6 +223,8 @@ export interface Services extends ServiceBase {
   failover: FailoverService;
   /** Continues chats a deliberate restart (usually an update) cut short. */
   restartResume: RestartResumeService;
+  /** The global pause/resume control. See services/pause.ts. */
+  pause: PauseService;
   /** Chat-to-chat messaging behind `chat_send`/`chat_ask`/`chat_reply`/`chat_state`. */
   chatMessenger: ChatMessenger;
   chatCompletionNotices: ChatCompletionNotices;
@@ -690,6 +693,40 @@ export function createServices(
         await broker.interrupt(chatId);
       },
     });
+  const pause = new PauseService({
+    broker,
+    file: store.pauseFile(),
+    // Intersected with THIS instance's chats. The process scan is machine-wide
+    // and attributes by a per-chat marker, so its tally includes the chats of the
+    // other instance running beside this one — a dev build's Pause must not reach
+    // over and kill stable's shells. Seen on the first live run of this.
+    chatsWithProcesses: async () => {
+      const [counts, chats] = await Promise.all([chatProcesses.counts(), store.listChats()]);
+      const mine = new Set(chats.map((c) => c.id));
+      return Object.keys(counts.byChat).filter((id) => mine.has(id));
+    },
+    // The same three steps as `POST /api/chats/processes/kill`, except that the
+    // session stop keeps what is queued behind the pause — see
+    // `stopKeepingQueued` for why a plain `stop()` would lose it.
+    killChat: async (chatId) => {
+      await broker.stopKeepingQueued(chatId).catch(() => {});
+      terminals.killChat(chatId);
+      await reapChatResidual({ chatProcesses, processes }, chatId).catch(() => {});
+    },
+    afterKill: async (ids) => {
+      for (let i = 0; i < 20; i++) {
+        chatProcesses.invalidate();
+        const { byChat } = await chatProcesses.counts();
+        if (!ids.some((id) => id in byChat)) break;
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      chatProcesses.invalidate();
+    },
+    send: async (chatId, text, opts) => {
+      await ensureSession(services, chatId);
+      await broker.sendMessage(chatId, text, opts);
+    },
+  });
   // A merged PR means the trunk moved. Under the `review` profile the primary
   // checkout is never worked in, so nothing else would ever advance it — and the
   // next worktree cut from a stale base inherits the drift. Fires both for merges
@@ -1259,6 +1296,7 @@ export function createServices(
     issueWatcher,
     prRegistry,
     restartResume,
+    pause,
 
     async start(): Promise<void> {
       // This runs before clients hydrate. Graceful shutdowns have already
@@ -1266,6 +1304,10 @@ export function createServices(
       await recoverInterruptedChatStatuses(store).catch((err) => {
         console.error("[Dispatch] chat status recovery failed (continuing):", err);
       });
+
+      // Before anything can send: `restartResume.restore()` (start.ts) and the
+      // usage-limit resumes would otherwise start turns the pause was holding.
+      await pause.restore();
 
       // The concurrency cap is an app SETTING; `config.maxActiveSessions` (the
       // env var) is only its default. Applied here rather than in the broker's
