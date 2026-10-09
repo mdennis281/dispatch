@@ -18,6 +18,8 @@
 import type { QueryFn } from "./session-broker.js";
 
 let sessionSeq = 0;
+/** Ids for `[hold]` rows. A counter, not `Math.random()` — they only need to be unique. */
+let holdSeq = 0;
 
 /** Pull display text out of a pushed SDKUserMessage (string or text blocks). */
 function userText(msg: unknown): string {
@@ -61,7 +63,7 @@ export function makeFakeQuery(): QueryFn {
         if (text.includes("[hold]")) {
           yield {
             type: "assistant",
-            uuid: `fake-msg-${sessionSeq}-${Math.random().toString(36).slice(2, 8)}`,
+            uuid: `fake-hold-${sessionSeq}-${++holdSeq}`,
             message: { role: "assistant", content: [{ type: "text", text: "Working on it…" }] },
           };
           await new Promise<void>((resolve) => (release = resolve));

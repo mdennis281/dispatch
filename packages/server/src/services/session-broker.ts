@@ -4133,14 +4133,29 @@ export class SessionBroker {
    * Every turn-live chat is interrupted, including ones blocked on a human or
    * on `watch_pr` — those wake on their own when CI answers, and a pause that
    * let them is not a pause.
+   *
+   * `onArmed` runs once the gate is shut and BEFORE any interrupt is awaited,
+   * so the caller can persist the pause first. An interrupt has no deadline of
+   * its own; if persisting waited on them, a provider that never answered
+   * would leave the pause unrecorded, and a restart in that window would come
+   * back unpaused and have `RestartResumeService` restart everything. Each
+   * interrupt is also bounded so the request itself cannot hang.
    */
-  async pauseAll(): Promise<PauseState> {
+  async pauseAll(onArmed?: (state: PauseState) => Promise<void>): Promise<PauseState> {
     if (this.pauseState) return this.pauseState;
     const live = [...this.sessions.values()].filter((s) => this.isTurnLive(s));
     this.pauseState = { since: this.now(), interrupted: live.map((s) => s.chatId) };
     this.publishScheduler();
+    await onArmed?.(this.pauseState).catch(() => {});
     // Settled, not all: one provider refusing must not leave the rest running.
-    await Promise.allSettled(live.map((s) => this.interrupt(s.chatId)));
+    await Promise.allSettled(
+      live.map((s) =>
+        Promise.race([
+          this.interrupt(s.chatId),
+          new Promise<void>((resolve) => setTimeout(resolve, this.stopTimeoutMs).unref?.()),
+        ]),
+      ),
+    );
     return this.pauseState;
   }
 

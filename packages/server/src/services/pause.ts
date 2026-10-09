@@ -36,6 +36,13 @@ export interface PauseServiceDeps {
 
 export class PauseService {
   private readonly now: () => number;
+  /**
+   * The resume in progress. Two clients (a phone and a desktop) can both press
+   * Resume during the seconds the note loop takes, and the broker's pause stays
+   * set until the END of it — so without this both get past the guard and every
+   * interrupted chat receives two briefs and acts on both.
+   */
+  private resuming?: Promise<{ notified: string[] }>;
 
   constructor(private readonly deps: PauseServiceDeps) {
     this.now = deps.now ?? Date.now;
@@ -60,9 +67,9 @@ export class PauseService {
   }
 
   async pause(): Promise<PauseState> {
-    const state = await this.deps.broker.pauseAll();
-    await this.persist(state);
-    return state;
+    // Persisted the moment the gate shuts, not after the interrupts land —
+    // see `pauseAll`'s `onArmed`.
+    return this.deps.broker.pauseAll((state) => this.persist(state));
   }
 
   /**
@@ -90,7 +97,14 @@ export class PauseService {
    * to the head of the queue and opens it — the cap still applies, so twenty
    * interrupted chats do not all restart at once.
    */
-  async resume(): Promise<{ notified: string[] }> {
+  resume(): Promise<{ notified: string[] }> {
+    this.resuming ??= this.resumeOnce().finally(() => {
+      this.resuming = undefined;
+    });
+    return this.resuming;
+  }
+
+  private async resumeOnce(): Promise<{ notified: string[] }> {
     const state = this.deps.broker.pause;
     if (!state) return { notified: [] };
     const now = this.now();

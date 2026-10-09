@@ -140,6 +140,8 @@ function makeBroker(
 /* --------------------------------------------------------- scripted fake SDK */
 
 interface FakeCtl {
+  /** Override what `interrupt()` does — e.g. a provider that never answers. */
+  interruptImpl?: () => Promise<void>;
   canUseTool?: (
     n: string,
     i: Record<string, unknown>,
@@ -342,6 +344,7 @@ function makeFakeQuery(
     const g = gen() as unknown as Record<string, unknown>;
     g.interrupt = async () => {
       ctl.calls.interrupt += 1;
+      await ctl.interruptImpl?.();
     };
     g.setPermissionMode = async (m: string) => {
       ctl.calls.setPermissionMode.push(m);
@@ -2020,6 +2023,29 @@ describe("SessionBroker — steering & concurrency", () => {
     await until(() => controllers[1]?.pushed.length === 1);
     expect(controllers[0]!.pushed).toEqual(["go", "resume note"]);
     expect(controllers[1]!.pushed).toEqual(["later"]);
+  });
+
+  it("hands the pause to onArmed before awaiting an interrupt that never answers", async () => {
+    const { fn, controllers } = makeFakeQuery(async () => {
+      await new Promise(() => {});
+      return [];
+    });
+    const broker = makeBroker(fn, 6, { deps: { query: fn, stopTimeoutMs: 50 } });
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+    await broker.sendMessage("c1", "go");
+    await until(() => controllers[0]?.pushed.length === 1);
+    // An interrupt the provider never acknowledges.
+    controllers[0]!.interruptImpl = () => new Promise(() => {});
+
+    let armed: unknown;
+    const paused = broker.pauseAll(async (s) => {
+      armed = s;
+    });
+    await until(() => armed !== undefined);
+    expect(armed).toMatchObject({ interrupted: ["c1"] });
+    // Bounded: the call still returns once the stop window lapses.
+    await expect(paused).resolves.toMatchObject({ interrupted: ["c1"] });
   });
 
   it("killing processes during a pause keeps the work queued behind it", async () => {

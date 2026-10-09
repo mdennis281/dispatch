@@ -18,9 +18,10 @@ function fakeBroker() {
       state = s;
       calls.push("restore");
     },
-    pauseAll: async () => {
+    pauseAll: async (onArmed?: (s: PauseState) => Promise<void>) => {
       state = { since: 0, interrupted: ["a", "b"] };
       calls.push("pauseAll");
+      await onArmed?.(state);
       return state;
     },
     markKilled: (ids: string[]) => {
@@ -74,6 +75,14 @@ describe("PauseService", () => {
     await next.svc.restore();
     expect(next.calls).toEqual(["restore"]);
     expect(next.broker.pause?.interrupted).toEqual(["a", "b"]);
+  });
+
+  it("a second Resume while the first is still sending joins it instead of re-sending every note", async () => {
+    const { svc, sent } = make();
+    await svc.pause();
+    const [a, b] = await Promise.all([svc.resume(), svc.resume()]);
+    expect(a).toBe(b);
+    expect(sent.map((s) => s.chatId)).toEqual(["a", "b"]);
   });
 
   it("refuses to kill processes unless paused", async () => {

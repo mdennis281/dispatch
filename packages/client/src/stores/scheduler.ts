@@ -10,6 +10,7 @@
 import { create } from "zustand";
 import type { SchedulerSnapshot } from "@dispatch/shared";
 import { api } from "../lib/api.js";
+import { useNotices } from "./notices.js";
 
 type Busy = "pause" | "resume" | "kill" | null;
 
@@ -30,13 +31,22 @@ export const useScheduler = create<SchedulerStore>((set, get) => {
     if (get().busy) return undefined;
     set({ busy: which });
     try {
-      const out = await fn();
+      return await fn();
+    } catch (err) {
+      // Every caller fires and forgets, so this is the only place a failure can
+      // surface — and a silent failure here means someone pressed the
+      // emergency stop and watched the button flip back with nothing stopped.
+      useNotices.getState().push({
+        level: "error",
+        text: `${which === "pause" ? "Pause" : which === "resume" ? "Resume" : "Kill"} failed`,
+        detail: err instanceof Error ? err.message : String(err),
+      });
+      return undefined;
+    } finally {
       // Re-read rather than wait for the push: the push is debounced, and a
       // button that still says "Pause" a beat after you pressed it reads as
-      // not having worked.
+      // not having worked. After a failure it shows what actually happened.
       await get().load();
-      return out;
-    } finally {
       set({ busy: null });
     }
   }
