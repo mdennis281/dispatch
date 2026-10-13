@@ -77,13 +77,22 @@ export const DEFAULT_AUTO_ALLOW_TOOLS: readonly string[] = [
 ];
 
 /**
- * Tools no auto-allow entry may ever answer.
+ * Tools no auto-allow entry may ever answer — not a remembered click, not a
+ * hand-typed entry, not a `*`. Each rides the permission channel but is a
+ * DECISION the card exists to put in front of a human, not a tool call:
  *
- * `AskUserQuestion` rides the permission channel but is a QUESTION: an
- * auto-"allow" would submit it with no answer, and the model would carry on as
- * though the human had replied. A wildcard like `*` must not be able to do that.
+ *   - `AskUserQuestion` is a question: an auto-"allow" submits it with no
+ *     answer, and the model carries on as though the human had replied.
+ *   - `ExitPlanMode` is the plan review. Allowed automatically, the model
+ *     approves its own plan and leaves plan mode unread — the one gate plan
+ *     mode exists for. (Review caught this: the plan card's "Always approve"
+ *     would have saved it app-wide in one click.)
+ *   - `Permissions` is the Codex harness asking to WIDEN its sandbox — extra
+ *     write roots, network. One remembered grant would silently approve every
+ *     future escalation in every chat, the same "one becomes all" a shell is
+ *     kept off this list for.
  */
-export const NEVER_AUTO_ALLOW: readonly string[] = ["AskUserQuestion"];
+export const NEVER_AUTO_ALLOW: readonly string[] = ["AskUserQuestion", "ExitPlanMode", "Permissions"];
 
 /**
  * Tools that are only prompt-free OUTSIDE plan mode.

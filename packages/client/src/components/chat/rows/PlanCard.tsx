@@ -132,11 +132,14 @@ export function PlanCard({ row }: PlanCardProps) {
   const [feedback, setFeedback] = useState("");
   const busy = pending && answered;
 
-  const decide = (decision: "allow" | "deny", remember = false) => {
+  // No "Always approve": it never did anything (the server dropped `remember`),
+  // and once remembering works it would let a chat approve its own plan in
+  // every chat forever. The server refuses to remember ExitPlanMode regardless.
+  const decide = (decision: "allow" | "deny") => {
     if (!pending || answered) return;
     setAnswered(true);
     if (decision === "allow") {
-      actions.answerPermission(row.chatId, row.requestId, "allow", { remember });
+      actions.answerPermission(row.chatId, row.requestId, "allow");
     } else {
       actions.answerPermission(row.chatId, row.requestId, "deny", {
         message: feedback.trim() || undefined,
@@ -209,9 +212,6 @@ export function PlanCard({ row }: PlanCardProps) {
                 onClick={() => decide("allow")}
               >
                 Approve &amp; build
-              </Button>
-              <Button variant="default" size="sm" disabled={busy} onClick={() => decide("allow", true)}>
-                Always approve
               </Button>
               <Button
                 variant="danger"

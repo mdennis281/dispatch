@@ -5521,6 +5521,16 @@ describe("SessionBroker — prompt-free tools", () => {
     expect(again.prompted).toBe(false);
   });
 
+  it("refuses to remember a plan approval even when the wire says remember", async () => {
+    // The client hides the button; this is the check that matters, because
+    // `remember` arrives over the wire from any client.
+    await oneCall("ExitPlanMode", chatFor("c1"), (b, id) =>
+      b.resolvePermission(id, { decision: "allow", remember: true }),
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    expect((await store.getSettings()).autoAllowTools).toBeUndefined();
+  });
+
   it("does not remember a shell from one card", async () => {
     await oneCall("Bash", chatFor("c1"), (b, id) =>
       b.resolvePermission(id, { decision: "allow", remember: true }),

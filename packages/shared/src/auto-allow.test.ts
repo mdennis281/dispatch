@@ -50,8 +50,11 @@ describe("isAutoAllowed", () => {
     expect(isAutoAllowed("mcp__dispatch-chat__chat_find", layers)).toBe(true);
   });
 
-  it("never answers AskUserQuestion, even under a wildcard", () => {
-    expect(isAutoAllowed("AskUserQuestion", { app: ["*"] })).toBe(false);
+  it("never answers a decision card, even under a wildcard or an exact entry", () => {
+    for (const tool of ["AskUserQuestion", "ExitPlanMode", "Permissions"]) {
+      expect(isAutoAllowed(tool, { app: ["*"] })).toBe(false);
+      expect(isAutoAllowed(tool, { app: [tool], mode: [tool] })).toBe(false);
+    }
   });
 
   it("keeps write tools asking in plan mode, and only there", () => {
@@ -84,6 +87,11 @@ describe("withAutoAllowed", () => {
     expect(withAutoAllowed([], "mcp__dispatch-workspace__terminal")).toBeNull();
     expect(withAutoAllowed([], "AskUserQuestion")).toBeNull();
     expect(canRememberAutoAllow("Bash")).toBe(false);
+    // The plan review and Codex's sandbox escalation are decisions, not tools.
+    expect(canRememberAutoAllow("ExitPlanMode")).toBe(false);
+    expect(canRememberAutoAllow("Permissions")).toBe(false);
+    expect(withAutoAllowed(undefined, "ExitPlanMode")).toBeNull();
+    expect(withAutoAllowed(undefined, "Permissions")).toBeNull();
     expect(canRememberAutoAllow("Edit")).toBe(true);
   });
 });
