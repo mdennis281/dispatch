@@ -3,6 +3,7 @@
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { pruneLockfileImporters } from "./lockfile.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const semverTag = /^v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
@@ -81,12 +82,10 @@ for (const relative of files) {
 // so frozen release installs are governed by the same lockfile rules as source.
 // The prebuilt client is static data; excluding its package avoids installing
 // React/Monaco when the browser bundle already contains them.
+const releaseWorkspaces = ["packages/server", "packages/shared", "packages/cli"];
 const sourceWorkspace = readFileSync(join(repoRoot, "pnpm-workspace.yaml"), "utf8");
 const releasePackages =
-  "packages:\n" +
-  "  - 'packages/server'\n" +
-  "  - 'packages/shared'\n" +
-  "  - 'packages/cli'\n";
+  "packages:\n" + releaseWorkspaces.map((workspace) => `  - '${workspace}'\n`).join("");
 const releaseWorkspace = sourceWorkspace.replace(
   /^packages:\s*\r?\n(?:\s+-[^\r\n]*\r?\n)+/,
   releasePackages,
@@ -97,6 +96,13 @@ if (releaseWorkspace === sourceWorkspace) {
 writeFileSync(
   join(output, "pnpm-workspace.yaml"),
   releaseWorkspace,
+);
+// The lockfile has to agree with that trimmed workspace, or a newer pnpm
+// refuses the --frozen-lockfile install outright (see lockfile.mjs).
+const lockfilePath = join(output, "pnpm-lock.yaml");
+writeFileSync(
+  lockfilePath,
+  pruneLockfileImporters(readFileSync(lockfilePath, "utf8"), releaseWorkspaces),
 );
 
 const packageJsonPath = join(output, "package.json");
