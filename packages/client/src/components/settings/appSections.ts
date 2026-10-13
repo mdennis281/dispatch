@@ -20,6 +20,7 @@ import {
   Power,
   Archive,
   ShieldCheck,
+  ShieldOff,
   ArrowUpCircle,
   type LucideIcon,
 } from "lucide-react";
@@ -55,6 +56,15 @@ export const APP_SECTIONS: AppSectionDef[] = [
       "The bottom of every inheritance chain in the app: a project can override these for " +
       "everyone working in its repo, and a single chat can override both. Nothing here changes " +
       "a chat that already exists.",
+  },
+  {
+    id: "permissions",
+    icon: ShieldOff,
+    label: "Permissions",
+    blurb: "Tools that never ask first",
+    explainer:
+      "Every chat, every project, every mode. Saved the moment you change it, because a " +
+      "permission card's \"Always allow\" writes to the same list.",
   },
   {
     id: "accounts",

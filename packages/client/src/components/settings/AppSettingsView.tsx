@@ -47,6 +47,7 @@ import { ChatSection } from "./sections/ChatSection.js";
 import { ContextSection, normalizeContextLimits } from "./sections/ContextSection.js";
 import { AgentContextSection } from "./sections/AgentContextSection.js";
 import { RetentionSection } from "./sections/RetentionSection.js";
+import { PermissionsSection } from "./sections/PermissionsSection.js";
 import { NotificationsSection } from "./sections/NotificationsSection.js";
 import { AuthSettings } from "../auth/AuthSettings.js";
 import { UpdateBanner } from "../update/UpdateBanner.js";
@@ -320,6 +321,8 @@ export function AppSettingsView() {
           <StopDispatch />
         ) : section === "accounts" ? (
           <AccountsSection />
+        ) : section === "permissions" ? (
+          <PermissionsSection />
         ) : !paneProps ? (
           <InlineError message={error ?? "Settings could not be loaded."} />
         ) : section === "appearance" ? (

@@ -5464,3 +5464,100 @@ describe("optional persona instructions", () => {
     expect(JSON.stringify(controllers[0]!.options?.systemPrompt)).toContain("principal-level product owner");
   });
 });
+
+describe("SessionBroker — prompt-free tools", () => {
+  /** Run one turn whose script makes a single canUseTool call; report what happened. */
+  async function oneCall(
+    tool: string,
+    chat: Chat,
+    onPrompt?: (broker: SessionBroker, requestId: string) => void,
+  ): Promise<{ result: unknown; prompted: boolean }> {
+    let result: unknown;
+    let prompted = false;
+    const off = bus.on("permission-request", (e) => {
+      prompted = true;
+      onPrompt?.(broker, e.request.id);
+    });
+    const { fn } = makeFakeQuery(async (_text, ctl) => {
+      result = await ctl.canUseTool!(tool, { x: 1 }, {});
+      return [resultMsg()];
+    });
+    const broker = makeBroker(fn);
+    await store.saveChat(chat);
+    broker.create(chat);
+    const idle = broker.waitFor(chat.id, "idle");
+    await broker.sendMessage(chat.id, "go");
+    await idle;
+    off();
+    return { result, prompted };
+  }
+
+  it("lets a default read-only tool through without a card", async () => {
+    const { result, prompted } = await oneCall("mcp__dispatch-chat__chat_state", chatFor("c1"));
+    expect(prompted).toBe(false);
+    expect(result).toEqual({ behavior: "allow", updatedInput: { x: 1 } });
+  });
+
+  it("still prompts for a tool nobody listed", async () => {
+    const { prompted } = await oneCall("mcp__other__thing", chatFor("c1"), (b, id) =>
+      b.resolvePermission(id, { decision: "allow" }),
+    );
+    expect(prompted).toBe(true);
+  });
+
+  it("'Always allow' persists the tool, seeded from the defaults", async () => {
+    await oneCall("mcp__other__thing", chatFor("c1"), (b, id) =>
+      b.resolvePermission(id, { decision: "allow", remember: true }),
+    );
+    await until(async () =>
+      Boolean((await store.getSettings()).autoAllowTools?.includes("mcp__other__thing")),
+    );
+    const saved = (await store.getSettings()).autoAllowTools ?? [];
+    // The first remembered tool must not have revoked every default.
+    expect(saved).toContain("mcp__dispatch-chat__chat_state");
+
+    // …and the next chat that calls it is not asked.
+    const again = await oneCall("mcp__other__thing", chatFor("c2"));
+    expect(again.prompted).toBe(false);
+  });
+
+  it("refuses to remember a plan approval even when the wire says remember", async () => {
+    // The client hides the button; this is the check that matters, because
+    // `remember` arrives over the wire from any client.
+    await oneCall("ExitPlanMode", chatFor("c1"), (b, id) =>
+      b.resolvePermission(id, { decision: "allow", remember: true }),
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    expect((await store.getSettings()).autoAllowTools).toBeUndefined();
+  });
+
+  it("does not remember a shell from one card", async () => {
+    await oneCall("Bash", chatFor("c1"), (b, id) =>
+      b.resolvePermission(id, { decision: "allow", remember: true }),
+    );
+    // Give the (refused) write a chance to have happened if it were going to.
+    await new Promise((r) => setTimeout(r, 20));
+    expect((await store.getSettings()).autoAllowTools).toBeUndefined();
+  });
+
+  it("adds a mode's list on top of the app's", async () => {
+    await store.saveSettings({ ...(await store.getSettings()), autoAllowTools: [] });
+    await store.saveMode({
+      id: "sweeper",
+      name: "Sweeper",
+      permissionMode: "default",
+      autoAllowTools: ["mcp__other"],
+      scope: "global",
+    });
+    const { prompted } = await oneCall("mcp__other__thing", { ...chatFor("c1"), modeId: "sweeper" });
+    expect(prompted).toBe(false);
+  });
+
+  it("keeps write tools asking in plan mode even when listed", async () => {
+    await store.saveSettings({ ...(await store.getSettings()), autoAllowTools: ["Edit"] });
+    const { prompted } = await oneCall("Edit", { ...chatFor("c1"), modeId: "plan" }, (b, id) =>
+      b.resolvePermission(id, { decision: "deny" }),
+    );
+    expect(prompted).toBe(true);
+  });
+});

@@ -470,6 +470,8 @@ export const ConfigModeSchema = z.object({
   permissionMode: PermissionModeSchema,
   allowedTools: z.array(z.string()).optional(),
   disallowedTools: z.array(z.string()).optional(),
+  /** Tools that skip the prompt in this mode, ON TOP of the app's list. */
+  autoAllowTools: z.array(z.string()).optional(),
   /**
    * Optional system-prompt overlay appended while the mode is selected — the
    * same field a `.data` mode carries. Without it a `.dispatch/modes/` mode

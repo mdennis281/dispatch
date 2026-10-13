@@ -114,6 +114,8 @@ import {
   isToolAllowed,
   enforceGlobalPosture,
   deniedToolRefusal,
+  isAutoAllowed,
+  withAutoAllowed,
   buildGlobalProjectIndex,
   realProjects,
   DEFAULT_HARNESS,
@@ -1372,6 +1374,11 @@ export interface PermissionResolution {
   updatedInput?: Record<string, unknown>;
   /** Deny reason / allow note. */
   message?: string;
+  /**
+   * "Always allow": on an ALLOW, also add the tool to the app's prompt-free
+   * list so no chat asks about it again. Ignored on a deny.
+   */
+  remember?: boolean;
 }
 
 /** Read-only view of a session for callers/tests. */
@@ -2035,6 +2042,13 @@ interface LiveSession {
   modeName?: string;
   allowedTools?: string[];
   deniedTools?: string[];
+  /**
+   * The selected mode's prompt-free additions, and whether it is a planning
+   * posture — the two mode-dependent inputs to `isAutoAllowed`. Stamped with
+   * the gate above so a mode switch moves all of them together.
+   */
+  modeAutoAllow?: string[];
+  planning?: boolean;
   /** The protected trunk for this project (`defaultBranch`, default "main"). */
   trunk?: string;
   /** Branch at the session cwd, or null when detached / unknown. */
@@ -2938,6 +2952,9 @@ export class SessionBroker {
             ? { behavior: "allow", updatedInput: resolution.updatedInput ?? pending.input }
             : { behavior: "deny", message: resolution.message ?? "Denied by user." };
         pending.resolve?.(result);
+      }
+      if (resolution.decision === "allow" && resolution.remember) {
+        void this.rememberAutoAllow(pending.toolName);
       }
 
       this.recordResolvedPermission(
@@ -5079,6 +5096,12 @@ export class SessionBroker {
         return;
       }
       case "permission-request":
+        // The same prompt-free list a Claude chat gets at `canUseTool`, so the
+        // list means one thing whichever provider a chat runs on.
+        if (session.harnessSession && (await this.autoAllows(session, event.toolName))) {
+          session.harnessSession.resolvePermission(event.requestId, { decision: "allow" });
+          return;
+        }
         this.registerHarnessPermission(
           session,
           event.requestId,
@@ -7428,6 +7451,61 @@ export class SessionBroker {
     session.modeName = mode?.name ?? session.modeId;
     session.allowedTools = mode?.allowedTools;
     session.deniedTools = mode?.disallowedTools;
+    session.modeAutoAllow = mode?.autoAllowTools;
+    session.planning =
+      (mode?.permissionMode ?? BUILTIN_MODE_PERMISSION[session.modeId]) === "plan";
+  }
+
+  /**
+   * Would this tool run without a prompt here? Read per call, not per session:
+   * an "Always allow" clicked in one chat has to quiet the NEXT card in every
+   * chat, including the dozen already mid-turn — which is the whole complaint
+   * that motivated it.
+   */
+  private async autoAllows(session: LiveSession, toolName: string): Promise<boolean> {
+    const settings = await this.store.getSettings().catch(() => undefined);
+    return isAutoAllowed(toolName, {
+      app: settings?.autoAllowTools,
+      mode: session.modeAutoAllow,
+      planning: session.planning,
+    });
+  }
+
+  /**
+   * The SDK's `canUseTool`, with the prompt-free list in front of the card.
+   *
+   * Only THIS entry point consults the list, and that is load-bearing:
+   * `handlePermission` is also how `ask_user`, the spawn consent and the review
+   * card put a question in front of the human, and an auto-"allow" on one of
+   * those would answer the human's question for them.
+   */
+  private async canUseTool(
+    session: LiveSession,
+    toolName: string,
+    input: Record<string, unknown>,
+    opts: {
+      title?: string;
+      displayName?: string;
+      description?: string;
+      signal?: AbortSignal;
+    },
+  ): Promise<PermissionResult> {
+    if (await this.autoAllows(session, toolName)) {
+      return { behavior: "allow", updatedInput: input };
+    }
+    return this.handlePermission(session, toolName, input, opts);
+  }
+
+  /** "Always allow" — append to the app list. Best-effort: the call already ran. */
+  private async rememberAutoAllow(toolName: string): Promise<void> {
+    try {
+      await this.store.updateSettings((current) => {
+        const next = withAutoAllowed(current.autoAllowTools, toolName);
+        return next ? { ...current, autoAllowTools: next } : null;
+      });
+    } catch {
+      /* the allow itself stands; only the remembering failed */
+    }
   }
 
   private async buildOptions(session: LiveSession): Promise<Options> {
@@ -7478,7 +7556,7 @@ export class SessionBroker {
       // flag. It only ENABLES bypass to be selected (user-controlled); canUseTool
       // still gates every other mode.
       allowDangerouslySkipPermissions: true,
-      canUseTool: (name, input, o) => this.handlePermission(session, name, input, o),
+      canUseTool: (name, input, o) => this.canUseTool(session, name, input, o),
       // The FIRST-CLASS effort lever: one level the runtime interprets per model
       // (and guides adaptive thinking with), inherited by every subagent this
       // session spawns unless its own definition pins one. Deliberately NOT a

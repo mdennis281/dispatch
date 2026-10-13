@@ -457,6 +457,7 @@ export async function dispatchClientAction(
           decision: action.decision,
           updatedInput: action.updatedInput,
           message: action.message,
+          remember: action.remember,
         });
         if (!ok) {
           emitError(

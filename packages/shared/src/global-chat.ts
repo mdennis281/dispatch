@@ -208,8 +208,14 @@ So when a task needs code changed, do not try to do it. Scope it, then \`spawn_c
  * shape for a chat whose steady state is answering questions, and which would
  * hand it an `ExitPlanMode` escape hatch to rattle. Under `default` every tool
  * that could change anything is already refused by {@link
- * GLOBAL_MODE_DISALLOWED_TOOLS} before a prompt could be raised, so the only
- * calls left are reads — which `default` allows without asking.
+ * GLOBAL_MODE_DISALLOWED_TOOLS} before a prompt could be raised.
+ *
+ * What is left is reads, and this used to claim `default` allows those without
+ * asking. It does not: every MCP tool prompts (the SDK cannot know `chat_state`
+ * is read-only), and so does every `Read` outside the cwd — which, for a chat
+ * whose cwd is an empty directory, is every `Read`. One sweep raised 108 cards.
+ * The reads are made quiet by the app's prompt-free list (shared
+ * `auto-allow.ts`), not by this permission mode.
  *
  * Built-in (scope `global`, no file) rather than seeded into the store: a
  * seeded row can be edited or deleted, and a global chat whose posture someone
