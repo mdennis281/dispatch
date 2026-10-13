@@ -42,6 +42,7 @@ export type AppView =
 export type AppSettingsSection =
   | "appearance"
   | "chat"
+  | "permissions"
   | "accounts"
   | "context"
   | "agent-context"

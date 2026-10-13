@@ -172,6 +172,7 @@ export function configModeToModeConfig(
     permissionMode: mode.permissionMode,
     allowedTools: mode.allowedTools,
     disallowedTools: mode.disallowedTools,
+    autoAllowTools: mode.autoAllowTools,
     instructions: mode.instructions,
     scope: "project",
     projectId,
@@ -1156,6 +1157,7 @@ export class ProjectConfigService {
           permissionMode: permMode.data,
           allowedTools: toToolList(data.allowedTools),
           disallowedTools: toToolList(data.disallowedTools),
+          autoAllowTools: toToolList(data.autoAllowTools),
           instructions:
             typeof data.instructions === "string" && data.instructions.trim()
               ? data.instructions.trim()

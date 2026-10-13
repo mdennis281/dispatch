@@ -71,6 +71,10 @@ export function registerSettingsRoutes(app: FastifyInstance): void {
       // UI — so nothing that PUTs here has ever heard of it, and not preserving it
       // would mean picking a theme silently put your Send key back to steering.
       ...(current.defaultSendMode ? { defaultSendMode: current.defaultSendMode } : {}),
+      // And the auto-allow list, owned by the endpoint below AND written by the
+      // permission card's "Always allow" from any chat at any moment. A draft
+      // loaded before that click would otherwise put the prompt straight back.
+      ...(current.autoAllowTools ? { autoAllowTools: current.autoAllowTools } : {}),
     });
     // The concurrency cap is held by the LIVE broker, not re-read per turn, so a
     // save has to hand it over or the new number means nothing until a restart —
@@ -100,6 +104,27 @@ export function registerSettingsRoutes(app: FastifyInstance): void {
    *
    * `null` clears the pin back to `DEFAULT_SEND_MODE`.
    */
+  /**
+   * The prompt-free tool list. Its own endpoint for the reason above: the
+   * permission card writes it too, so the Settings pane saves just this field
+   * instead of a whole draft that may predate the last "Always allow".
+   *
+   * `null` resets to the shared defaults. Read live by the broker on every
+   * prompt, so nothing needs restarting.
+   */
+  app.put("/api/settings/auto-allow", async (req, reply) => {
+    const parsed = z
+      .object({ tools: z.array(z.string()).nullable() })
+      .safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ error: parsed.error.message });
+    }
+    const tools = parsed.data.tools
+      ? [...new Set(parsed.data.tools.map((t) => t.trim()).filter(Boolean))]
+      : undefined;
+    return store.updateSettings((current) => ({ ...current, autoAllowTools: tools }));
+  });
+
   app.put("/api/settings/send-mode", async (req, reply) => {
     const parsed = z
       .object({ mode: SendModeSchema.nullable() })

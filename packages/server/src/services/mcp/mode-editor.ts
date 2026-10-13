@@ -66,6 +66,8 @@ export interface ModeRecord {
    */
   allowedTools?: string[];
   disallowedTools?: string[];
+  /** Tools that skip the prompt in this mode, on top of the app's list. */
+  autoAllowTools?: string[];
   instructions?: string;
   /** Absolute file for a project mode; absent for the other two scopes. */
   path?: string;
@@ -102,6 +104,7 @@ export interface ManagerMcpModes {
     description?: string;
     allowedTools?: string[];
     disallowedTools?: string[];
+    autoAllowTools?: string[];
     instructions?: string;
   }): Promise<ModeRecord>;
   remove(id: string, scope: WritableModeScope): Promise<boolean>;
@@ -145,6 +148,7 @@ export function createModeEditor(deps: ModeEditorDeps): ManagerMcpModes {
         ...(full?.description ? { description: full.description } : {}),
         ...(full?.allowedTools ? { allowedTools: [...full.allowedTools] } : {}),
         ...(full?.disallowedTools ? { disallowedTools: [...full.disallowedTools] } : {}),
+        ...(full?.autoAllowTools ? { autoAllowTools: [...full.autoAllowTools] } : {}),
         ...(full?.instructions ? { instructions: full.instructions } : {}),
       };
     });
@@ -179,7 +183,16 @@ export function createModeEditor(deps: ModeEditorDeps): ManagerMcpModes {
       return null;
     },
 
-    async write({ scope, name, permissionMode, description, allowedTools, disallowedTools, instructions }) {
+    async write({
+      scope,
+      name,
+      permissionMode,
+      description,
+      allowedTools,
+      disallowedTools,
+      autoAllowTools,
+      instructions,
+    }) {
       const id = modeIdFor(name);
       if (!id) throw new Error(`"${name}" leaves nothing to make a mode id from.`);
       // Writing one would produce a file that is never read — the broker
@@ -211,6 +224,7 @@ export function createModeEditor(deps: ModeEditorDeps): ManagerMcpModes {
         doc.permissionMode = permissionMode;
         if (allowedTools) doc.allowedTools = allowedTools;
         if (disallowedTools) doc.disallowedTools = disallowedTools;
+        if (autoAllowTools) doc.autoAllowTools = autoAllowTools;
         if (instructions) doc.instructions = instructions;
         await writeFile(path, stringifyYaml(doc), "utf8");
         return {
@@ -221,6 +235,7 @@ export function createModeEditor(deps: ModeEditorDeps): ManagerMcpModes {
           description,
           allowedTools,
           disallowedTools,
+          autoAllowTools,
           instructions,
           path,
         };
@@ -232,6 +247,7 @@ export function createModeEditor(deps: ModeEditorDeps): ManagerMcpModes {
         permissionMode,
         allowedTools,
         disallowedTools,
+        autoAllowTools,
         instructions,
         scope: "global",
       });
@@ -272,6 +288,7 @@ function fromStore(m: ModeConfig): ModeRecord {
     description: m.description,
     allowedTools: m.allowedTools,
     disallowedTools: m.disallowedTools,
+    autoAllowTools: m.autoAllowTools,
     instructions: m.instructions,
   };
 }
@@ -322,6 +339,7 @@ export async function readModesDir(dir: string): Promise<ModeRecord[]> {
         description: typeof data.description === "string" ? data.description.trim() || undefined : undefined,
         allowedTools: toolList(data.allowedTools),
         disallowedTools: toolList(data.disallowedTools),
+        autoAllowTools: toolList(data.autoAllowTools),
         instructions:
           typeof data.instructions === "string" ? data.instructions.trim() || undefined : undefined,
         path: join(dir, file),

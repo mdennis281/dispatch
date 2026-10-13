@@ -163,6 +163,13 @@ export const ModeConfigSchema = z.object({
    */
   allowedTools: z.array(z.string()).optional(),
   disallowedTools: z.array(z.string()).optional(),
+  /**
+   * Tools that skip the permission PROMPT while this mode is selected — added
+   * to `AppSettings.autoAllowTools`, never instead of it. Not a restriction:
+   * that is `allowedTools`, which the SDK's own option of the same name does
+   * NOT mean. See shared `auto-allow.ts`.
+   */
+  autoAllowTools: z.array(z.string()).optional(),
   instructions: z.string().optional(),
   scope: ConfigScopeSchema.default("global"),
   projectId: z.string().optional(),

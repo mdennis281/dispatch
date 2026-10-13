@@ -6581,6 +6581,9 @@ ${look}` : "")
           ...(found.disallowedTools?.length
             ? [`disallowedTools: ${found.disallowedTools.join(", ")}`]
             : []),
+          ...(found.autoAllowTools?.length
+            ? [`autoAllowTools: ${found.autoAllowTools.join(", ")}`]
+            : []),
           ...(found.path ? [found.path] : []),
         ];
         return textResult(
@@ -6634,6 +6637,15 @@ ${look}` : "")
             "`mcp__dispatch-workspace__terminal`) can do almost anything the other " +
             "entries deny — denying `Edit` while allowing `Bash` stops nothing.",
         ),
+      autoAllowTools: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Tools that run WITHOUT a permission prompt while this mode is selected, ADDED " +
+            "to the app-wide list in Settings → Permissions (never replacing it). An exact " +
+            "name, a `prefix*`, or a bare MCP server (`mcp__dispatch-chat`) for all its " +
+            "tools. This skips the prompt only — it never overrides `disallowedTools`.",
+        ),
       instructions: z
         .string()
         .optional()
@@ -6664,6 +6676,7 @@ ${look}` : "")
           description: args.description?.trim() || undefined,
           allowedTools: args.allowedTools,
           disallowedTools: args.disallowedTools,
+          autoAllowTools: args.autoAllowTools,
           instructions: args.instructions?.trim() || undefined,
         });
         return textResult(

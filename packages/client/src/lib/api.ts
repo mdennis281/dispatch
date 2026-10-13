@@ -161,6 +161,8 @@ export interface AppSettings {
   /** Kept in the same shape as `ThemePref` in stores/theme.ts. */
   theme: "dark" | "dim" | "light" | "system";
   defaultModeId?: string;
+  /** Prompt-free tools; unset = the shared defaults. Saved by `setAutoAllowTools`. */
+  autoAllowTools?: string[];
   webhook?: {
     kind?: "ntfy" | "pushover";
     url?: string;
@@ -1396,6 +1398,13 @@ export const api = {
      */
     setSendMode: (mode: SendMode | null) =>
       put<AppSettings>("/api/settings/send-mode", { mode }),
+    /**
+     * Replace the prompt-free tool list; `null` resets to the shared defaults.
+     * Its own endpoint because "Always allow" writes the same field from any
+     * chat, so a whole-draft save could erase a click made since it loaded.
+     */
+    setAutoAllowTools: (tools: string[] | null) =>
+      put<AppSettings>("/api/settings/auto-allow", { tools }),
   },
 
   /**

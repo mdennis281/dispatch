@@ -136,6 +136,14 @@ export const AppSettingsSchema = z.object({
    *  an answer before this endpoint can respond (see client stores/theme.ts). */
   theme: z.enum(["dark", "dim", "light", "system"]).default("dark"),
   defaultModeId: z.string().optional(),
+  /**
+   * Tools that run without a permission prompt, in every chat, project and mode
+   * (a mode can add to it, never subtract). Unset means the shared
+   * `DEFAULT_AUTO_ALLOW_TOOLS`; the permission card's "Always allow" appends.
+   * Owned by PUT /api/settings/auto-allow — the settings PUT preserves it, because
+   * an "Always allow" clicked while Settings was open must survive that draft's save.
+   */
+  autoAllowTools: z.array(z.string()).optional(),
   /** App-wide runtime selection, per-runtime defaults, and context budgets. */
   harness: HarnessSettingsSchema.optional(),
   /**
@@ -2264,6 +2272,28 @@ export class Store {
       writeJsonAtomic(this.settingsFile(), validated),
     );
     return validated;
+  }
+
+  /**
+   * Read-modify-write under the settings lock.
+   *
+   * `getSettings` + `saveSettings` holds the lock only for the write, so two
+   * writers that each read first both write what they read plus their own
+   * change — and the second erases the first. Harmless for a human saving a
+   * form; not for "Always allow", where clicking down a column of cards fires
+   * several in the same second and every one but the last was lost.
+   * `fn` returning `null` means "nothing to change" and skips the write.
+   */
+  async updateSettings(fn: (current: AppSettings) => AppSettings | null): Promise<AppSettings> {
+    return this.mutex.run("settings", async () => {
+      const raw = await readJson(this.settingsFile());
+      const current = raw === undefined ? { ...DEFAULT_SETTINGS } : AppSettingsSchema.parse(raw);
+      const next = fn(current);
+      if (!next) return current;
+      const validated = AppSettingsSchema.parse(next);
+      await writeJsonAtomic(this.settingsFile(), validated);
+      return validated;
+    });
   }
 
   /* ---------------------------------------------------------- reviewer */

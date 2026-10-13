@@ -1,6 +1,11 @@
 import { useState } from "react";
 import { ShieldQuestion, Check, X, ShieldCheck, Pencil } from "lucide-react";
-import { readHumanReview, readSecretRequest, type PermissionRow } from "@dispatch/shared";
+import {
+  canRememberAutoAllow,
+  readHumanReview,
+  readSecretRequest,
+  type PermissionRow,
+} from "@dispatch/shared";
 import { RowShell } from "./RowShell.js";
 import { QuestionCard } from "./QuestionCard.js";
 import { ReviewCard } from "./ReviewCard.js";
@@ -181,9 +186,19 @@ export function PermissionCard({ row }: PermissionCardProps) {
             >
               Allow
             </Button>
-            <Button variant="default" size="sm" disabled={invalid || busy} onClick={() => allow(true)}>
-              Always allow
-            </Button>
+            {/* Not for a shell: the card approves ONE command, the list entry would
+                approve every command in every chat. Settings can still list one. */}
+            {canRememberAutoAllow(row.toolName) && (
+              <Button
+                variant="default"
+                size="sm"
+                disabled={invalid || busy}
+                onClick={() => allow(true)}
+                title={`Never ask about ${row.toolName} again, in any chat. Undo in Settings → Permissions.`}
+              >
+                Always allow
+              </Button>
+            )}
             <Button
               variant={refine ? "subtle" : "ghost"}
               size="sm"

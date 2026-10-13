@@ -5057,6 +5057,7 @@ describe("manager-mcp — mode tools and chat posture", () => {
       description: undefined,
       allowedTools: undefined,
       disallowedTools: undefined,
+      autoAllowTools: undefined,
       instructions: undefined,
       scope: undefined,
     };
