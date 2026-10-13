@@ -127,8 +127,12 @@ export function PermissionCard({ row }: PermissionCardProps) {
           )}
         </div>
 
+        {/* `overscroll-y-auto` undoes `.cm-scroll`'s `contain`: on a scroll
+         * container that blocks chaining even when there is nothing to scroll,
+         * so a wheel over a two-line preview froze the transcript. Long input
+         * still scrolls here first, then hands off at its end. */}
         {target && !refine && (
-          <div className="cm-scroll max-h-48 overflow-auto border-t border-line-soft px-3 py-2">
+          <div className="cm-scroll overscroll-y-auto max-h-48 overflow-auto border-t border-line-soft px-3 py-2">
             <pre className="whitespace-pre-wrap break-words cm-mono text-secondary">{target}</pre>
             {typeof row.input.content === "string" && (
               <pre className="mt-1.5 line-clamp-3 whitespace-pre-wrap break-words cm-mono !text-2xs text-faint">
@@ -138,7 +142,7 @@ export function PermissionCard({ row }: PermissionCardProps) {
           </div>
         )}
         {!target && !refine && (
-          <div className="cm-scroll max-h-48 overflow-auto border-t border-line-soft px-3 py-2">
+          <div className="cm-scroll overscroll-y-auto max-h-48 overflow-auto border-t border-line-soft px-3 py-2">
             <pre className="whitespace-pre-wrap break-words cm-mono text-secondary">
               {safeJson(row.input)}
             </pre>
