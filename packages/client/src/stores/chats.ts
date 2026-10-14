@@ -587,16 +587,35 @@ const NEWEST_FIRST: Record<ChatSection, boolean> = {
  * definition of the queue. The transcript's error row carries the button that
  * clears it back to idle (`clear-error`).
  *
- * "new" is read off `sessionId`, which the first turn's init event sets — the
- * record carries no message count. A chat whose very first turn died before
- * the session came up would still count as new; it shows its error either way.
+ * "new" is {@link isUnstartedChat}. A chat whose very first turn died before
+ * the session came up still counts as new; it shows its error either way.
  */
 export function chatSection(chat: Chat): ChatSection {
   const s = chat.status;
   if (s === "awaiting-input" || s === "failed" || s === "error") return "attention";
   if (isChatWorking(s)) return "working";
-  if (!chat.sessionId) return "new";
+  if (isUnstartedChat(chat)) return "new";
   return "idle";
+}
+
+/**
+ * Has this chat never been used? The record carries no message count, so this
+ * is read off what a used chat leaves behind.
+ *
+ * `!sessionId` alone was the old test, and it is wrong in both directions of
+ * time: the server CLEARS `sessionId` on an established chat whenever the
+ * native thread is retired — a harness switch (Codex → Claude), an account
+ * switch the session can't follow, `/clear`, a model change ACP can't apply in
+ * place. Each of those dropped a chat with a full transcript back into "New",
+ * and because a branch files under its most urgent member, one such child
+ * dragged its whole parent branch in with it. `harnessHandoff` marks the
+ * switches until the next init event; `lastUserMessageAt` is the durable "a
+ * human has spoken here" that survives every retirement.
+ */
+export function isUnstartedChat(
+  chat: Pick<Chat, "sessionId" | "harnessHandoff" | "lastUserMessageAt">,
+): boolean {
+  return !chat.sessionId && !chat.harnessHandoff && chat.lastUserMessageAt === undefined;
 }
 
 /** A chat row and the rows drawn beneath it. */
