@@ -282,6 +282,12 @@ describe("PushService", () => {
     expect(sent).toHaveLength(1);
   });
 
+  // The bus handler fires `fanOut` without awaiting it, and a send goes through
+  // a dynamic `import("web-push")` plus a VAPID read from disk. A fixed sleep was
+  // enough on an idle box and NOT on a loaded CI runner (a Promote gate failed
+  // here with 0 of 1 sent), so a send we expect is WAITED for. The sleeps left
+  // below sit only in front of "nothing more was sent" checks, which can't be
+  // polled for.
   it("never pushes a kind the Attention Queue is hiding", async () => {
     // A push you cannot find the row for is the worst of both. The gate is on
     // the BUS path (not `fanOut`), because it also has to keep the muted item
@@ -296,8 +302,7 @@ describe("PushService", () => {
 
     svc.setQueueFilter({ kinds: {}, reviewKinds: {} });
     bus.publish({ type: "attention-add", item: attn("done") });
-    await new Promise((r) => setTimeout(r, 10));
-    expect(sent).toHaveLength(1);
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
     svc.stop();
   });
 
@@ -310,14 +315,13 @@ describe("PushService", () => {
     svc.setQueueFilter({ kinds: { done: false }, reviewKinds: {} });
     bus.publish({ type: "attention-add", item: attn("done", { id: "d1" }) });
     bus.publish({ type: "attention-add", item: attn("permission", { id: "p1" }) });
-    await new Promise((r) => setTimeout(r, 10));
-    expect(sent).toHaveLength(1);
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
     // The muted item is not in the badge the permission push carries.
     expect(JSON.parse(sent[0]!.payload)).toMatchObject({ outstanding: 1, badge: 1 });
 
     svc.setQueueFilter({ kinds: {}, reviewKinds: {} });
     bus.publish({ type: "attention-add", item: attn("question", { id: "q1" }) });
-    await new Promise((r) => setTimeout(r, 10));
+    await vi.waitFor(() => expect(sent).toHaveLength(2));
     // …and after unmuting it counts again, with nothing to reconcile.
     expect(JSON.parse(sent[1]!.payload)).toMatchObject({ outstanding: 3, badge: 3 });
     svc.stop();
@@ -330,15 +334,13 @@ describe("PushService", () => {
     svc.setQueueFilter({ kinds: { done: false }, reviewKinds: {} });
     bus.publish({ type: "attention-add", item: attn("done", { id: "d1" }) });
     bus.publish({ type: "attention-add", item: attn("permission", { id: "p1" }) });
-    await new Promise((r) => setTimeout(r, 10));
-    expect(sent).toHaveLength(1);
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
 
     // The muted `done` is still tracked (it has to be, for unmuting), but the
     // phone is holding a sticky permission toast for a chat with nothing left
     // to show — so the withdrawal must still fire.
     bus.publish({ type: "attention-resolve", id: "p1", chatId: "c1" });
-    await new Promise((r) => setTimeout(r, 10));
-    expect(sent).toHaveLength(2);
+    await vi.waitFor(() => expect(sent).toHaveLength(2));
     expect(JSON.parse(sent[1]!.payload)).toMatchObject({ outstanding: 0 });
 
     // …and resolving the hidden one after that sends nothing more: `withdraw`
@@ -357,13 +359,11 @@ describe("PushService", () => {
     svc.start();
     await svc.subscribe(sub(1));
     bus.publish({ type: "attention-add", item: attn("done", { id: "d1" }) });
-    await new Promise((r) => setTimeout(r, 10));
-    expect(sent).toHaveLength(1);
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
 
     svc.setQueueFilter({ kinds: { done: false }, reviewKinds: {} });
     bus.publish({ type: "attention-resolve", id: "d1", chatId: "c1" });
-    await new Promise((r) => setTimeout(r, 10));
-    expect(sent).toHaveLength(2);
+    await vi.waitFor(() => expect(sent).toHaveLength(2));
     expect(JSON.parse(sent[1]!.payload)).toMatchObject({ id: "withdraw-c1", outstanding: 0 });
     svc.stop();
   });
