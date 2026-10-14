@@ -740,12 +740,15 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     setOver(null);
     const { files, folders } = filesFrom(dt);
     if (files.length || folders) {
+      // addFiles clears the error synchronously, so the folder note has to be
+      // set AFTER it starts or a mixed drop silently loses it. A later upload
+      // failure still replaces it — a file that didn't attach matters more.
+      void addFiles(files);
       if (folders) {
         setError(
           `Folders can't be attached — drop the files inside${folders > 1 ? ` (${folders} folders skipped)` : ""}.`,
         );
       }
-      void addFiles(files);
       return true;
     }
     const paths = pathsFromDrop(dt);
