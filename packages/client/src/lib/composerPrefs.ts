@@ -67,7 +67,7 @@ interface ControlDef {
 
 /** One toggleable control, in toolbar order. */
 export const COMPOSER_CONTROLS = [
-  { id: "attach", label: "Attach", hint: "image upload / file path", sizes: ["sm"], priority: 2 },
+  { id: "attach", label: "Attach", hint: "upload files / insert a path", sizes: ["sm"], priority: 2 },
   // Dictate outranks everything for eviction: press-and-hold is the one gesture
   // that cannot move into a menu (a sheet closes on selection), and a mic is a
   // better control on a phone than it has ever been on a desktop.

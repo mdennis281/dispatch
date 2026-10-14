@@ -1,6 +1,6 @@
 /**
- * REST for chat assets (images the composer pastes/drops, and sprites the agent
- * produces). Uploads are base64 / data-URL JSON (no multipart dependency); the
+ * REST for chat assets (images and files the composer pastes/drops/attaches,
+ * and sprites the agent produces). Uploads are base64 / data-URL JSON (no multipart dependency); the
  * bytes are persisted under the chat's assets/ dir and an `ImageRef` is returned
  * that `send-message` can carry straight to the SDK.
  *   POST /api/chats/:id/assets  { data, mimeType?, alt?, width?, height?, filename? } → ImageRef
@@ -8,7 +8,7 @@
  *                                      410 once retention has expired it
  */
 import type { FastifyInstance } from "fastify";
-import { extname } from "node:path";
+import { basename, extname } from "node:path";
 import { tmpdir } from "node:os";
 import { nanoid } from "nanoid";
 import {
@@ -18,8 +18,13 @@ import {
   collectChatMedia,
   type MediaScanRow,
 } from "@dispatch/shared";
-import { extFromMediaType, mediaTypeFromName } from "../services/media-types.js";
-import { identifyMedia } from "../services/media-sniff.js";
+import {
+  extFromMediaType,
+  mediaKind,
+  mediaTypeFromName,
+  mediaTypeFromPath,
+} from "../services/media-types.js";
+import { identifyMedia, sniffMediaType } from "../services/media-sniff.js";
 import {
   isDenied,
   openFsAsset,
@@ -64,6 +69,52 @@ export function parseByteRange(
   return { start, end };
 }
 
+/**
+ * Is this upload a picture? The bytes decide first; failing that a declared
+ * `image/*` type; failing that the filename. A declared NON-image type is never
+ * trusted on its own: browsers report a TypeScript `.ts` as `video/mp2t`.
+ */
+function isImageUpload(buf: Buffer, declared: string | undefined, filename: string | undefined): boolean {
+  const sniffed = sniffMediaType(buf);
+  if (sniffed) return mediaKind(sniffed) === "image";
+  if (declared?.startsWith("image/")) return true;
+  if (filename) return mediaKind(mediaTypeFromPath(filename)) === "image";
+  // No name, no type, no recognisable bytes: the composer's paste path, where
+  // an image is the overwhelmingly likely truth (and the historic default).
+  return !declared;
+}
+
+/**
+ * The on-disk name for an uploaded file: an id (so two `notes.txt` uploads
+ * never collide) plus the original name made safe, so the path the agent is
+ * handed still says what it is.
+ */
+function storedFileName(
+  filename: string | undefined,
+  declared: string | undefined,
+): { name: string; display: string; mimeType: (buf: Buffer) => string } {
+  const display = basename((filename ?? "").replace(/\\/g, "/")).trim() || "file";
+  let safe = display
+    .replace(/[^A-Za-z0-9._-]+/g, "_")
+    .replace(/^[._]+/, "")
+    .slice(-80);
+  if (!safe) safe = "file";
+  if (!extname(safe)) {
+    const ext = extFromMediaType(declared, "");
+    if (/^\.[a-z0-9]+$/.test(ext)) safe += ext;
+  }
+  return {
+    name: `${nanoid(8)}-${safe}`,
+    display,
+    // Name before declared type, for the same `.ts` → `video/mp2t` reason.
+    mimeType: (buf) =>
+      sniffMediaType(buf) ??
+      mediaTypeFromPath(safe) ??
+      (declared && !declared.startsWith("video/") ? declared : undefined) ??
+      "application/octet-stream",
+  };
+}
+
 /** Only keep a positive integer dimension (ImageRefSchema is strict). */
 function posInt(v: unknown): number | undefined {
   return typeof v === "number" && Number.isInteger(v) && v > 0 ? v : undefined;
@@ -106,9 +157,30 @@ export function registerAssetRoutes(app: FastifyInstance): void {
       } catch {
         return reply.code(400).send({ error: "invalid base64 payload" });
       }
-      if (buf.length === 0) return reply.code(400).send({ error: "empty image" });
+      if (buf.length === 0) return reply.code(400).send({ error: "empty file" });
       if (buf.length > MAX_UPLOAD_BYTES) {
-        return reply.code(413).send({ error: "image too large" });
+        return reply
+          .code(413)
+          .send({ error: `file too large (max ${MAX_UPLOAD_BYTES / (1024 * 1024)} MB)` });
+      }
+
+      // Anything that isn't a picture is a FILE the agent will read by path.
+      // Decided before the image path below, which would otherwise name a
+      // `notes.md` with no declared type `<id>.png`.
+      const filename = typeof body.filename === "string" ? body.filename : undefined;
+      if (!isImageUpload(buf, mime, filename)) {
+        const file = storedFileName(filename, mime);
+        const relPath = await store.writeChatAsset(req.params.id, file.name, buf);
+        const parsed = ImageRefSchema.safeParse({
+          id: nanoid(),
+          path: relPath,
+          mimeType: file.mimeType(buf),
+          // The original name, which is what the chip shows and what the
+          // model is told — the stored name carries an id prefix.
+          alt: typeof body.alt === "string" ? body.alt : file.display,
+        });
+        if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+        return reply.code(201).send(parsed.data);
       }
 
       // Prefer the declared type's canonical extension; fall back to the

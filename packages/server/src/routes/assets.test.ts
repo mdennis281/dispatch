@@ -505,3 +505,59 @@ describe("asset range requests", () => {
     }
   });
 });
+
+describe("chat file attachments", () => {
+  const upload = async (chatId: string, payload: Record<string, unknown>) =>
+    app.inject({ method: "POST", url: `/api/chats/${chatId}/assets`, payload });
+
+  it("stores a non-image under a readable name and keeps the original as alt", async () => {
+    const chatId = await makeChat();
+    const text = Buffer.from("# Notes\nhello\n").toString("base64");
+    const up = await upload(chatId, { data: text, mimeType: "text/markdown", filename: "My Notes.md" });
+    expect(up.statusCode).toBe(201);
+    const ref = up.json() as { path: string; mimeType: string; alt?: string };
+    // The id prefix keeps two `notes.md` apart; the tail is what the agent reads.
+    expect(ref.path).toMatch(/^assets\/[A-Za-z0-9_-]{8}-My_Notes\.md$/);
+    expect(ref.alt).toBe("My Notes.md");
+    expect(ref.mimeType).toBe("text/markdown");
+
+    const got = await app.inject({
+      method: "GET",
+      url: `/api/chats/${chatId}/assets/${ref.path.split("/").pop()}`,
+    });
+    expect(got.statusCode).toBe(200);
+    expect(got.body).toBe("# Notes\nhello\n");
+  });
+
+  it("does not believe a browser that calls a TypeScript file a video", async () => {
+    // Browsers report `.ts` as `video/mp2t`; trusting it would render the
+    // attachment as a broken video player and hide it from the model.
+    const chatId = await makeChat();
+    const up = await upload(chatId, {
+      data: Buffer.from("export const x = 1;\n").toString("base64"),
+      mimeType: "video/mp2t",
+      filename: "x.ts",
+    });
+    const ref = up.json() as { path: string; mimeType: string };
+    expect(ref.path).toMatch(/-x\.ts$/);
+    expect(ref.mimeType).toBe("application/octet-stream");
+  });
+
+  it("keeps a nameless, typeless paste on the image path", async () => {
+    const chatId = await makeChat();
+    const ref = (await upload(chatId, { data: PNG_B64 })).json() as { path: string };
+    expect(ref.path).toMatch(/^assets\/[A-Za-z0-9_-]{21}\.png$/);
+  });
+
+  it("strips path components from the filename", async () => {
+    const chatId = await makeChat();
+    const ref = (
+      await upload(chatId, {
+        data: Buffer.from("x").toString("base64"),
+        filename: "..\\..\\evil/.env",
+      })
+    ).json() as { path: string; alt: string };
+    expect(ref.path).toMatch(/^assets\/[A-Za-z0-9_-]{8}-env$/);
+    expect(ref.alt).toBe(".env");
+  });
+});

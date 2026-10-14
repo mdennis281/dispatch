@@ -756,6 +756,44 @@ describe("SessionBroker neutral harness path", () => {
     ]);
   });
 
+  it("hands uploaded files to the agent by path, and keeps them out of the image list", async () => {
+    const chat = await store.saveChat({
+      id: "chat-file",
+      projectId: "project-1",
+      title: "Codex file",
+      modeId: "plan",
+      effort: "low",
+      harness: "codex",
+      worktrees: [],
+      prs: [],
+      createdAt: 1,
+    });
+    const shot = await store.writeChatAsset(chat.id, "shot.png", Buffer.from("image"));
+    const doc = await store.writeChatAsset(chat.id, "abc12345-report.pdf", Buffer.from("%PDF-1.7"));
+
+    broker.create(chat, null, join(dir, "repo"));
+    await broker.sendMessage(chat.id, "summarise this", {
+      images: [
+        { id: "image-1", path: shot, mimeType: "image/png" },
+        { id: "file-1", path: doc, mimeType: "application/pdf", alt: "report.pdf" },
+      ],
+    });
+    await broker.waitFor(chat.id, "idle");
+
+    // A PDF can't be an image block; the model must be told where it is instead.
+    expect(session.sent[0]?.images?.map((i) => i.id)).toEqual(["image-1"]);
+    const text = session.sent[0]?.text ?? "";
+    expect(text.startsWith("summarise this")).toBe(true);
+    expect(text).toContain(
+      `- report.pdf (8 B, application/pdf): ${join(store.chatAssetsDir(chat.id), "abc12345-report.pdf")}`,
+    );
+
+    // The transcript row still carries BOTH, so the human sees what they sent
+    // and retention treats the file as theirs.
+    const row = (await store.readMessages(chat.id)).find((r) => r.kind === "user");
+    expect(row && "images" in row ? row.images?.map((i) => i.id) : []).toEqual(["image-1", "file-1"]);
+  });
+
   describe("switching login accounts", () => {
     async function withAccounts() {
       await store.saveSettings({

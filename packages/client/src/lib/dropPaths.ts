@@ -4,18 +4,12 @@
  * A browser is never told the path of a file dropped from the OS file manager —
  * `DataTransfer.files` carries the CONTENT and a bare basename, and that's the
  * whole security boundary. But a drag originating from an app that already
- * thinks in paths (VS Code, JetBrains, most terminals, some file managers) also
- * publishes `text/uri-list` / `text/plain` holding the real path, and that we
- * can read.
+ * thinks in paths (VS Code, JetBrains, most terminals) also publishes
+ * `text/uri-list` / `text/plain` holding the real path, and that we can read.
  *
- * Order of preference, then: the text flavors (exact, when the drag source
- * offers them), and failing that the caller resolving a bare basename against
- * the project index (a guess — see Composer.resolveDroppedNames).
- *
- * The Electron build had a third and better source — a preload bridging
- * `webUtils.getPathForFile`, which placed ANY dropped file, Explorer included.
- * That went with the shell when Dispatch became a PWA, so an Explorer drag now
- * takes the basename path like every other browser drop.
+ * A drag that carries file CONTENT is uploaded instead (see dropIntent). This
+ * module only matters for the fileless kind — an editor tab, a terminal
+ * selection — where the path is all there is.
  */
 
 /**
@@ -105,15 +99,10 @@ export function basenameOf(path: string): string {
 }
 
 /**
- * Every real path this drop discloses.
- *
- * Only the text flavors, now that Dispatch runs as a PWA. The Electron build
- * had a preload bridging `webUtils.getPathForFile`, which resolved ANY dropped
- * file — Explorer and Finder included — and took precedence here. Dropping the
- * shell drops that: an Explorer drag no longer carries its path, and falls
- * through to the caller's basename lookup (see `Composer.resolveDroppedNames`).
- * Drags from VS Code, JetBrains and terminals are unaffected — they publish the
- * path as text, which is what this reads.
+ * Every real path this drop discloses — only the text flavors, now that
+ * Dispatch runs as a PWA and the Electron `webUtils.getPathForFile` bridge is
+ * gone. Drags from VS Code, JetBrains and terminals publish the path as text,
+ * which is what this reads.
  */
 export function pathsFromDrop(dt: DataTransfer | null | undefined): string[] {
   return pathsFromDataTransfer(dt);
@@ -125,9 +114,8 @@ export function pathsFromDrop(dt: DataTransfer | null | undefined): string[] {
 
 /**
  * What dropping THIS drag would produce:
- *   "image"  → attached and uploaded
- *   "path"   → the real path, inserted verbatim (certain)
- *   "lookup" → only a basename is on offer, so we'll search the project index
+ *   "upload" → the files' bytes are uploaded and attached (images AND files)
+ *   "path"   → a fileless path drag; the real path is inserted verbatim
  *   null     → not something the composer takes
  *
  * Deliberately computed from what a `dragover` can see. The payload itself is
@@ -136,7 +124,7 @@ export function pathsFromDrop(dt: DataTransfer | null | undefined): string[] {
  * which is exactly enough to promise the right outcome before the user commits
  * to it. Mirrors Composer.handleDrop's precedence; the two must agree.
  */
-export type DropIntent = "image" | "path" | "lookup" | null;
+export type DropIntent = "upload" | "path" | null;
 
 export function dropIntent(dt: DataTransfer | null | undefined): DropIntent {
   if (!dt) return null;
@@ -146,15 +134,10 @@ export function dropIntent(dt: DataTransfer | null | undefined): DropIntent {
     : [];
   const hasFiles = types.includes("Files") || fileItems.length > 0 || !!dt.files?.length;
 
-  if (hasFiles) {
-    // Any image in the set and handleDrop takes the image branch for the whole
-    // drop, so say so — an unannounced "your .ts was ignored" is worse than an
-    // unannounced path.
-    if (fileItems.some((it) => it.type.startsWith("image/"))) return "image";
-    // Whether we get a real path depends entirely on the drag source having
-    // volunteered a URI list; Explorer does not.
-    return types.includes("text/uri-list") ? "path" : "lookup";
-  }
+  // Content wins over a path, even when the source also offered a URI list. The
+  // path is one on the BROWSER's machine, and the agent runs on the server's —
+  // a PWA opened from a phone or a second PC has no such file. The bytes travel.
+  if (hasFiles) return "upload";
 
   // No files, but a path-shaped drag: a VS Code editor tab, a terminal, a
   // JetBrains project-tree node. `text/plain` alone is excluded — a dragged
