@@ -61,8 +61,12 @@ jobs:
           label="ci-failure"
           title="CI failure: $WORKFLOW"
 
+          # Every lookup that only DECORATES the issue is `|| true`: under
+          # `set -e` a transient 5xx here would abort the step before anything
+          # is filed, and the failure this exists to surface goes silent again.
           jobs="$(gh run view "$RUN_ID" --json jobs \
-            --jq '.jobs[] | select(.conclusion == "failure") | "- [\(.name)](\(.url))"')"
+            --jq '.jobs[] | select(.conclusion == "failure") | "- [\(.name)](\(.url))"' \
+            2>/dev/null || true)"
 
           # The lines that actually say what broke, so the issue is readable
           # without opening a 10k-line log: vitest's FAIL headers, assertion
@@ -104,10 +108,12 @@ jobs:
 
           # Match on title as well as label: the label is shared by every
           # workflow, and a Release failure must not be appended to the open
-          # Promote thread.
+          # Promote thread. If the lookup itself fails, a duplicate issue is the
+          # cheaper mistake than no issue, so fall through to `create`.
           existing="$(gh issue list --label "$label" --state open --limit 100 \
             --json number,title \
-            | jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty')"
+            | jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty' \
+            || true)"
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --body "$body"
             echo "updated #$existing" >> "$GITHUB_STEP_SUMMARY"
