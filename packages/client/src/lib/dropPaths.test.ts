@@ -146,11 +146,7 @@ describe("pathsFromDrop", () => {
     expect(pathsFromDrop(d)).toEqual(["C:/repo/a.ts"]);
   });
 
-  /**
-   * The Electron preload used to place these exactly via `webUtils`. Without it
-   * an Explorer drag carries content and a basename and nothing else, so the
-   * caller's project-index lookup is the only remaining route to a path.
-   */
+  /** An Explorer drag carries content and a basename — which is why it uploads. */
   it("discloses nothing for a file drag that publishes no text flavor", () => {
     const files = [{ name: "a.ts" }, { name: "b.ts" }] as unknown as File[];
     expect(pathsFromDrop(drag({ files }))).toEqual([]);
@@ -161,25 +157,20 @@ describe("dropIntent", () => {
   const fileItem = { kind: "file", type: "text/typescript" };
   const imageItem = { kind: "file", type: "image/png" };
 
-  it("promises only a lookup for a plain file drag", () => {
-    // An Explorer drag publishes no text flavor, so this really can't do better
-    // than guess from the basename — and the overlay says so rather than
-    // promising a path it won't deliver.
-    expect(dropIntent(drag({ types: ["Files"], items: [fileItem] }))).toBe("lookup");
+  it("uploads a plain file drag (an Explorer/Finder file)", () => {
+    expect(dropIntent(drag({ types: ["Files"], items: [fileItem] }))).toBe("upload");
   });
 
-  it("promises a path when the source volunteered a URI list", () => {
+  it("uploads even when the source also volunteered a URI list", () => {
+    // That path names a file on the browser's machine, not the agent's.
     expect(dropIntent(drag({ types: ["Files", "text/uri-list"], items: [fileItem] }))).toBe(
-      "path",
+      "upload",
     );
   });
 
-  it("promises an attachment for images", () => {
-    expect(dropIntent(drag({ types: ["Files"], items: [imageItem] }))).toBe("image");
-  });
-
-  it("calls a mixed drop an image drop, matching what handleDrop actually does", () => {
-    expect(dropIntent(drag({ types: ["Files"], items: [imageItem, fileItem] }))).toBe("image");
+  it("uploads images and mixed drops alike", () => {
+    expect(dropIntent(drag({ types: ["Files"], items: [imageItem] }))).toBe("upload");
+    expect(dropIntent(drag({ types: ["Files"], items: [imageItem, fileItem] }))).toBe("upload");
   });
 
   it("promises a path for a fileless URI drag (a VS Code tab, a terminal)", () => {

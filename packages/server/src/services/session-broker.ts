@@ -1842,6 +1842,13 @@ interface OutboxItem {
    */
   peer?: PeerSender;
   /**
+   * Where the human's uploaded NON-image attachments landed on disk, appended
+   * after the text. Images become image blocks; a PDF or a log cannot, and an
+   * attachment the model is never told about is one it silently ignores — so
+   * the agent gets the absolute path and reads the file with its own tools.
+   */
+  fileContext?: string;
+  /**
    * Pushed by the BROKER, not by anybody: `/compact` and `/clear` ride the same
    * outbox as real messages, and sit there for as long as a turn is running.
    *
@@ -1862,6 +1869,31 @@ interface OutboxItem {
  * Peer attribution goes first — it frames who is speaking, which changes how
  * everything after it should be read.
  */
+/** The text a message carries to the model: prefixes, the human's words, then any attached-file note. */
+function outboxText(item: OutboxItem): string {
+  return [...outboxPrefixes(item), item.text, item.fileContext].filter(Boolean).join("\n\n");
+}
+
+/**
+ * Split a message's attachments into what the model can SEE (image blocks) and
+ * what it must READ (everything else, by path).
+ *
+ * A ref with no `mimeType` counts as an image: every attachment written before
+ * files could be uploaded was one, and pasted data-URL refs still omit it.
+ */
+export function splitAttachments(refs: ImageRef[] | undefined): {
+  images: ImageRef[];
+  files: ImageRef[];
+} {
+  const images: ImageRef[] = [];
+  const files: ImageRef[] = [];
+  for (const ref of refs ?? []) {
+    if (ref.mimeType && mediaKind(ref.mimeType) !== "image") files.push(ref);
+    else images.push(ref);
+  }
+  return { images, files };
+}
+
 function outboxPrefixes(item: OutboxItem): string[] {
   const out: string[] = [];
   if (item.peerContext) out.push(item.peerContext);
@@ -2652,8 +2684,12 @@ export class SessionBroker {
     // Resolve any local asset images to inline SDK sources before queueing (the
     // transcript row above keeps the small relative refs; the SDK gets bytes).
     // No images → no extra await, so the text-only fast path is unchanged.
-    const imageSources = o.images?.length
-      ? await this.resolveImageSources(chatId, o.images)
+    const { images: pictures, files } = splitAttachments(o.images);
+    const imageSources = pictures.length
+      ? await this.resolveImageSources(chatId, pictures)
+      : undefined;
+    const fileContext = files.length
+      ? await this.describeAttachedFiles(chatId, files)
       : undefined;
 
     // A persona change can begin during memory, transcript, or image preparation.
@@ -2664,8 +2700,9 @@ export class SessionBroker {
     session.outbox.push({
       id,
       text,
-      images: o.images,
+      images: pictures.length ? pictures : undefined,
       imageSources,
+      fileContext,
       memoryContext: memory?.block,
       peerContext: o.peer ? peerReminder(o.peer) : undefined,
       peer: o.peer,
@@ -2921,6 +2958,27 @@ export class SessionBroker {
       }
     }
     return out;
+  }
+
+  /**
+   * The note that tells the model where each uploaded file is. Absolute paths,
+   * because the agent's cwd is a worktree and the assets dir is not under it.
+   * Size is stat'd rather than trusted from the client, so a file whose upload
+   * never landed says so instead of pointing at nothing.
+   */
+  private async describeAttachedFiles(chatId: string, files: ImageRef[]): Promise<string> {
+    const lines: string[] = [];
+    for (const ref of files) {
+      const abs = this.resolveHarnessImages(chatId, [ref])?.[0]?.path ?? ref.path;
+      const name = ref.alt ?? basename(ref.path);
+      const info = await this.store.statChatAsset(chatId, basename(ref.path)).catch(() => null);
+      const meta = info ? [formatBytes(info.size), ref.mimeType].filter(Boolean).join(", ") : "missing";
+      lines.push(`- ${name} (${meta}): ${abs}`);
+    }
+    return [
+      "The user attached these files to this message. They are saved on disk — read them from these paths:",
+      ...lines,
+    ].join("\n");
   }
 
   /** Resolve only Store's portable `assets/<name>` refs; other relative paths belong to the harness cwd. */
@@ -4547,7 +4605,7 @@ export class SessionBroker {
     if (session.harnessSession) {
       for (const item of session.outbox) {
         session.harnessSession.send({
-          text: [...outboxPrefixes(item), item.text].filter(Boolean).join("\n\n"),
+          text: outboxText(item),
           images: this.resolveHarnessImages(session.chatId, item.images),
           priority: item.priority,
           effort: session.effort,
@@ -8716,7 +8774,7 @@ export class SessionBroker {
     // Auto-surfaced memory rides in front of the user's text (SDK-only; the
     // transcript row keeps just item.text) so the agent sees the fact in context.
     const prefixes = outboxPrefixes(item);
-    let content: unknown = [...prefixes, item.text].filter(Boolean).join("\n\n");
+    let content: unknown = outboxText(item);
     const sources =
       item.imageSources && item.imageSources.length > 0
         ? item.imageSources
@@ -8727,6 +8785,7 @@ export class SessionBroker {
       const blocks: unknown[] = [];
       for (const p of prefixes) blocks.push({ type: "text", text: p });
       if (item.text) blocks.push({ type: "text", text: item.text });
+      if (item.fileContext) blocks.push({ type: "text", text: item.fileContext });
       for (const source of sources) blocks.push({ type: "image", source });
       content = blocks;
     }

@@ -29,9 +29,7 @@ import {
   ChevronsUpDown,
   Gauge,
   Square,
-  Image as ImageIcon,
   File as FileIcon,
-  FileSearch,
   FileCode2,
   Mic,
   Drama,
@@ -49,11 +47,12 @@ import {
   chatRoot,
   PROVIDER_IDS,
   providerFor,
+  mediaKind,
   type SubscriptionStatus,
 } from "@dispatch/shared";
-import { api, type IndexedFile } from "../../lib/api.js";
+import { api } from "../../lib/api.js";
 import { postureSourceShort, useChatPosture } from "../../lib/chatPosture.js";
-import { pathsFromDrop, basenameOf, dropIntent, type DropIntent } from "../../lib/dropPaths.js";
+import { pathsFromDrop, dropIntent, type DropIntent } from "../../lib/dropPaths.js";
 import { useFileDrag } from "../../lib/useFileDrag.js";
 import { useDictation, PTT_LABEL } from "../../lib/useDictation.js";
 import {
@@ -138,22 +137,31 @@ export interface ComposerProps {
   modes: ModeConfig[];
 }
 
-/** Collect image File objects from a paste/drop DataTransfer. */
-function imageFilesFrom(dt: DataTransfer | null | undefined): File[] {
-  if (!dt) return [];
-  const out: File[] = [];
-  if (dt.files?.length) {
-    for (const f of Array.from(dt.files)) if (f.type.startsWith("image/")) out.push(f);
-  }
-  if (!out.length && dt.items?.length) {
-    for (const it of Array.from(dt.items)) {
-      if (it.kind === "file" && it.type.startsWith("image/")) {
-        const f = it.getAsFile();
-        if (f) out.push(f);
+/**
+ * Every uploadable File in a paste/drop, and how many FOLDERS were skipped.
+ *
+ * A dropped folder arrives as a File too — zero bytes, no type — and reading it
+ * fails deep inside the upload with an error that names nothing. Only the entry
+ * API can tell the two apart, and only during the drop event itself.
+ */
+function filesFrom(dt: DataTransfer | null | undefined): { files: File[]; folders: number } {
+  if (!dt) return { files: [], folders: 0 };
+  const files: File[] = [];
+  let folders = 0;
+  const items = dt.items ? Array.from(dt.items).filter((it) => it.kind === "file") : [];
+  if (items.length) {
+    for (const it of items) {
+      if (it.webkitGetAsEntry?.()?.isDirectory) {
+        folders++;
+        continue;
       }
+      const f = it.getAsFile();
+      if (f) files.push(f);
     }
+  } else if (dt.files?.length) {
+    files.push(...Array.from(dt.files));
   }
-  return out;
+  return { files, folders };
 }
 
 /**
@@ -163,20 +171,15 @@ function imageFilesFrom(dt: DataTransfer | null | undefined): File[] {
  */
 const DROP_COPY: Record<Exclude<DropIntent, null>, { icon: ReactNode; title: string; hint: string }> =
   {
-    image: {
-      icon: <ImageIcon />,
+    upload: {
+      icon: <Paperclip />,
       title: "Drop to attach",
-      hint: "the image is uploaded and sent with your message",
+      hint: "the file is uploaded and sent with your message",
     },
     path: {
       icon: <FileCode2 />,
       title: "Drop to insert the file path",
       hint: "The agent reads the file itself — nothing is uploaded",
-    },
-    lookup: {
-      icon: <FileSearch />,
-      title: "Drop to find this file in the project",
-      hint: "the browser hides the real path, so we match on filename",
     },
   };
 
@@ -212,14 +215,6 @@ function DropOverlay({ intent, armed }: { intent: Exclude<DropIntent, null>; arm
   );
 }
 
-/** Non-image files from a drop — these become PATHS, not uploads. */
-function nonImageNamesFrom(dt: DataTransfer | null | undefined): string[] {
-  if (!dt?.files?.length) return [];
-  return Array.from(dt.files)
-    .filter((f) => !f.type.startsWith("image/"))
-    .map((f) => f.name);
-}
-
 /**
  * Turn pasted rich HTML into literal text for this plain-text composer. Hyperlinks
  * become markdown `[label](url)` — but only when the label differs from the bare URL,
@@ -247,6 +242,20 @@ function richPasteToText(html: string): string {
 }
 
 const filenameOf = (img: ImageRef) => img.path.split(/[\\/]/).pop() ?? "image";
+
+/**
+ * An attachment the agent READS rather than sees. Same rule as the server's
+ * `splitAttachments`: a ref with no type is an image, because every one written
+ * before files could be uploaded was.
+ */
+const isFileRef = (ref: ImageRef) => !!ref.mimeType && mediaKind(ref.mimeType) !== "image";
+
+/** "PDF", "MD", … — the extension says more at a glance than `application/octet-stream`. */
+const fileTypeLabel = (ref: ImageRef) => {
+  const name = ref.alt ?? filenameOf(ref);
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(dot + 1).toUpperCase() : "file";
+};
 
 /**
  * True when the caret already sits in some other text field — a rename box, a
@@ -531,7 +540,8 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
       },
       handlePaste: (_view, event) => {
         const clip = (event as ClipboardEvent).clipboardData;
-        const files = imageFilesFrom(clip);
+        // A file copied in Explorer/Finder pastes as a File, same as a screenshot.
+        const { files } = filesFrom(clip);
         if (files.length) {
           addFilesRef.current(files);
           return true;
@@ -615,8 +625,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     });
   };
 
-  const addFiles = async (files: File[]) => {
-    const imgs = files.filter((f) => f.type.startsWith("image/"));
+  const addFiles = async (imgs: File[]) => {
     if (!imgs.length) return;
     // Uploads outlive a chat switch. Bind everything to the chat that owns them
     // so a slow upload can't land its image — or its spinner — in whichever chat
@@ -631,7 +640,10 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
         if (stillHere()) putAttachments([...attachmentsRef.current, ref]);
         else appendDraftImage(forChat, ref); // waiting when they switch back
       } catch (e) {
-        if (stillHere()) setError(e instanceof Error ? e.message : "Image upload failed");
+        if (stillHere()) {
+          const why = e instanceof Error ? e.message : "upload failed";
+          setError(`Couldn't attach ${f.name || "file"}: ${why}`);
+        }
       } finally {
         if (stillHere()) setUploading((n) => n - 1);
       }
@@ -710,66 +722,38 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   };
 
   /**
-   * The drop gave us basenames only (a file-manager drag, which discloses no
-   * path) — ask the server which project files could be meant.
-   */
-  const resolveDroppedNames = async (names: string[]) => {
-    const resolved: string[] = [];
-    for (const name of names) {
-      let matches: IndexedFile[] = [];
-      try {
-        const res = await api.files.search(chat.id, name, 20);
-        matches = res.files.filter(
-          (f) => basenameOf(f.rel).toLowerCase() === name.toLowerCase(),
-        );
-      } catch {
-        /* no index (not a checkout, server down) → fall back to the bare name */
-      }
-      if (matches.length === 1) {
-        resolved.push(matches[0]!.abs);
-        continue;
-      }
-      // Ambiguous, and it's the only thing dropped → let them choose instead of
-      // guessing. With several files in flight, a modal per file would be worse
-      // than the ranked best guess, which is right there in the box to correct.
-      if (matches.length > 1 && names.length === 1) {
-        void pickAndInsertPaths(name);
-        return;
-      }
-      resolved.push(matches[0]?.abs ?? name);
-    }
-    insertPaths(resolved);
-  };
-
-  /**
-   * One drop, three outcomes, in descending order of what we actually know:
-   * images upload as attachments; a drag that discloses real paths inserts them
-   * verbatim; anything else falls back to resolving basenames against the
-   * project index. Returns whether the drop was consumed.
+   * One drop, two outcomes: anything carrying file CONTENT is uploaded and
+   * attached, the same way and with the same retention as a pasted screenshot;
+   * a fileless path drag (an editor tab, a terminal) inserts the path. Returns
+   * whether the drop was consumed.
    *
-   * Which of the last two runs depends entirely on the drag source: only one
-   * that publishes a text flavor discloses a path (see pathsFromDrop), so an
-   * Explorer drag lands on the index fallback. `dropIntent` predicts the branch
-   * so the overlay can say so mid-drag; change one and change the other.
+   * Uploading replaced guessing a path from the basename against the project
+   * index — which only ever worked for files already in the repo, and inserted
+   * a wrong path, silently, for a same-named file anywhere else. `dropIntent`
+   * predicts the branch so the overlay can say so mid-drag; change one and
+   * change the other.
    */
   const handleDrop = (dt: DataTransfer | null): boolean => {
     // Cleared here, not only in the shell's onDrop: a drop landing on the text
     // area is consumed by ProseMirror, which stops propagation before the
     // shell's handler ever runs. Without this the overlay outlives the drop.
     setOver(null);
-    const images = imageFilesFrom(dt);
-    if (images.length) {
-      void addFiles(images);
+    const { files, folders } = filesFrom(dt);
+    if (files.length || folders) {
+      // addFiles clears the error synchronously, so the folder note has to be
+      // set AFTER it starts or a mixed drop silently loses it. A later upload
+      // failure still replaces it — a file that didn't attach matters more.
+      void addFiles(files);
+      if (folders) {
+        setError(
+          `Folders can't be attached — drop the files inside${folders > 1 ? ` (${folders} folders skipped)` : ""}.`,
+        );
+      }
       return true;
     }
     const paths = pathsFromDrop(dt);
     if (paths.length) {
       insertPaths(paths);
-      return true;
-    }
-    const names = nonImageNamesFrom(dt);
-    if (names.length) {
-      void resolveDroppedNames(names);
       return true;
     }
     return false;
@@ -1305,14 +1289,14 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     <div className="flex flex-col">
       <MenuItem
         dense={dense}
-        icon={<ImageIcon />}
+        icon={<Paperclip />}
         hint="upload"
         onClick={() => {
           fileInputRef.current?.click();
           close();
         }}
       >
-        Attach image
+        Attach files…
       </MenuItem>
       <MenuItem
         dense={dense}
@@ -1457,7 +1441,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
         <MenuItem
           dense={dense}
           icon={<Paperclip />}
-          hint="image / path"
+          hint="files / path"
           onClick={() => setMoreView("attach")}
         >
           Attach
@@ -1667,26 +1651,38 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
                 key={img.id}
                 className="group/att relative flex items-center gap-2 rounded-md border border-line bg-inset py-1 pl-1 pr-2"
               >
-                <button
-                  type="button"
-                  onClick={() => setEditing(img)}
-                  title="Click to annotate or crop"
-                  aria-label="Edit image"
-                  className="group/thumb relative size-8 shrink-0 overflow-hidden rounded-[5px] border border-line-soft"
-                >
-                  <AssetImage chatId={chat.id} img={img} className="size-full object-cover" />
-                  <span className="absolute inset-0 flex items-center justify-center bg-scrim text-primary opacity-0 transition-opacity group-hover/thumb:opacity-100 [&_svg]:size-3.5">
-                    <Pencil />
+                {isFileRef(img) ? (
+                  // A file has nothing to annotate — just say what it is.
+                  <span
+                    className="flex size-8 shrink-0 items-center justify-center rounded-[5px] border border-line-soft text-muted [&_svg]:size-4"
+                    aria-hidden
+                  >
+                    <FileIcon />
                   </span>
-                </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setEditing(img)}
+                    title="Click to annotate or crop"
+                    aria-label="Edit image"
+                    className="group/thumb relative size-8 shrink-0 overflow-hidden rounded-[5px] border border-line-soft"
+                  >
+                    <AssetImage chatId={chat.id} img={img} className="size-full object-cover" />
+                    <span className="absolute inset-0 flex items-center justify-center bg-scrim text-primary opacity-0 transition-opacity group-hover/thumb:opacity-100 [&_svg]:size-3.5">
+                      <Pencil />
+                    </span>
+                  </button>
+                )}
                 <div className="leading-tight">
-                  <div className="max-w-[120px] truncate text-xs text-secondary">
+                  <div className="max-w-[160px] truncate text-xs text-secondary" title={img.alt ?? filenameOf(img)}>
                     {img.alt ?? filenameOf(img)}
                   </div>
                   <div className="cm-mono !text-2xs text-faint">
                     {img.width && img.height
                       ? `${img.width}×${img.height}`
-                      : (img.mimeType ?? "image")}
+                      : isFileRef(img)
+                        ? fileTypeLabel(img)
+                        : (img.mimeType ?? "image")}
                   </div>
                 </div>
                 <button
@@ -1804,7 +1800,6 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
           <input
             ref={fileInputRef}
             type="file"
-            accept="image/*"
             multiple
             className="hidden"
             onChange={(e) => {
