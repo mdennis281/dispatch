@@ -91,7 +91,7 @@ export function StatusDot({ tone, pulse, hollow, size = 7, className }: StatusDo
  * from neutral gray to green ("PR done"). It's ignored for any active status
  * (running still pulses purple), so the green only shows once the agent is quiet.
  *
- * `unstarted` = this chat has never run a turn (`!chat.sessionId`, the same test
+ * `unstarted` = this chat has never run a turn (`isUnstartedChat`, the same test
  * {@link chatSection} files a chat under "New" with). It only reaches the dot on
  * an otherwise-quiet chat, because a FIRST turn is unstarted by this test too —
  * the session id does not land until the init event — and a row that reads "New"

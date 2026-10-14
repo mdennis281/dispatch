@@ -10,6 +10,7 @@ import {
   chatsForProject,
   countProjectAgents,
   buildChatTree,
+  isUnstartedChat,
   reviewTargetKey,
   spawnParentId,
   statusIsActivity,
@@ -612,6 +613,47 @@ describe("buildChatTree — rows file into status queues, not one recency list",
     const p2 = withStatus("p2", "running", 20);
 
     expect(order(buildChatTree([p1, c1a, c1b, p2], {}, {}))).toEqual(["working:p1", "working:p2"]);
+  });
+
+  it("keeps a used chat out of New after the server retires its native session", () => {
+    // Observed: a Codex → Claude switch cleared `sessionId` on a chat with a
+    // merged PR behind it, and it sat under New until its next turn.
+    const switched: Chat = {
+      ...chat("switched", "p1", 10),
+      status: "idle",
+      harnessHandoff: { from: "codex", to: "claude", at: 5 },
+    };
+    // `/clear` and an ACP model change retire the thread with no handoff mark.
+    const cleared: Chat = { ...chat("cleared", "p1", 20), status: "idle", lastUserMessageAt: 3 };
+    const fresh: Chat = { ...chat("fresh", "p1", 30), status: "idle" };
+
+    expect(order(buildChatTree([switched, cleared, fresh], {}, {}))).toEqual([
+      "new:fresh",
+      "idle:cleared",
+      "idle:switched",
+    ]);
+  });
+
+  it("doesn't let a switched child drag its idle parent into New", () => {
+    const parent = withStatus("parent", "idle", 10);
+    const child: Chat = {
+      ...chat("child", "p1", 20),
+      parentChatId: "parent",
+      status: "idle",
+      harnessHandoff: { from: "codex", to: "claude", at: 15 },
+      lastUserMessageAt: 12,
+    };
+
+    expect(order(buildChatTree([parent, child], {}, {}))).toEqual(["idle:parent"]);
+  });
+});
+
+describe("isUnstartedChat", () => {
+  it("is true only for a chat nobody has used", () => {
+    expect(isUnstartedChat({})).toBe(true);
+    expect(isUnstartedChat({ sessionId: "s" })).toBe(false);
+    expect(isUnstartedChat({ lastUserMessageAt: 1 })).toBe(false);
+    expect(isUnstartedChat({ harnessHandoff: { from: "codex", to: "claude", at: 1 } })).toBe(false);
   });
 });
 
