@@ -7,6 +7,8 @@ import {
 import { Field, TextArea, TextInput } from "../../sidebar/Modal.js";
 import { Switch } from "../../ui/Switch.js";
 import { positiveTokenLimit } from "../../../lib/harness.js";
+import { modelContextWindow } from "../../../lib/modelWindow.js";
+import { compactTokens } from "../../../lib/format.js";
 import { cn } from "../../../lib/cn.js";
 import type { AppPaneProps } from "./types.js";
 
@@ -15,6 +17,65 @@ import type { AppPaneProps } from "./types.js";
 function numberField(raw: string): number | undefined {
   const n = parseInt(raw.replace(/[^\d]/g, ""), 10);
   return Number.isFinite(n) ? n : undefined;
+}
+
+/**
+ * One model's compact threshold as a slider over its context window. The far
+ * right end IS "max" — it stores nothing, which is what lets the runtime compact
+ * on its own when the window fills — so there's no separate clear control.
+ */
+function ThresholdSlider({
+  id,
+  label,
+  window,
+  value,
+  onChange,
+}: {
+  id: string;
+  label: string;
+  window: number;
+  value: number | undefined;
+  onChange: (tokens: number | undefined) => void;
+}) {
+  // 1k steps on a 200k window, 5k on 1M: fine enough to land on a round number,
+  // coarse enough that a drag doesn't write a save-worthy patch per pixel.
+  const step = window >= 500_000 ? 5_000 : 1_000;
+  // Below a tenth of the window a chat would compact every few turns and spend
+  // more on summaries than on work.
+  const min = Math.round(window / 10 / step) * step;
+  // A stored value past this table's window (typed in the old box, or the model
+  // really is bigger than we think) pins to the right end but reads true.
+  const pos = value == null ? window : Math.min(Math.max(value, min), window);
+  const pct = Math.round((pos / window) * 100);
+  return (
+    <label className="block space-y-1" title={id}>
+      <span className="flex items-baseline justify-between gap-2 text-xs">
+        <span className="min-w-0 truncate text-secondary">{label}</span>
+        <span className="cm-mono shrink-0 text-2xs text-faint">
+          {value == null ? (
+            `max · ${compactTokens(window)}`
+          ) : (
+            <>
+              <span className="text-secondary">{compactTokens(value)}</span> · {pct}%
+            </>
+          )}
+        </span>
+      </span>
+      <input
+        type="range"
+        min={min}
+        max={window}
+        step={step}
+        value={pos}
+        aria-label={`${label} compact threshold`}
+        onChange={(e) => {
+          const n = Number(e.target.value);
+          onChange(n >= window ? undefined : n);
+        }}
+        className="h-1 w-full accent-[var(--p-accent)]"
+      />
+    </label>
+  );
 }
 
 /** How many chats run at once, and what happens as their context windows fill. */
@@ -157,9 +218,9 @@ export function ContextSection({ draft, patch, serverDefaults, catalogs }: AppPa
       >
         <span className="text-xs font-medium text-secondary">Compact threshold by model</span>
         <p className="text-xs leading-snug text-faint">
-          Compact a chat on this model once its context passes this many tokens. Blank
-          means the model's own maximum — the runtime compacts when the window actually
-          fills. A value here beats the per-chat limit above for that model, and applies
+          Compact a chat on this model once its context passes this many tokens. All the
+          way right is the model's own maximum — the runtime compacts when the window
+          actually fills. A value here beats the per-chat limit above for that model, and applies
           to Claude and Codex alike.
         </p>
         <div className="grid gap-2 sm:grid-cols-2">
@@ -167,8 +228,12 @@ export function ContextSection({ draft, patch, serverDefaults, catalogs }: AppPa
             const rows = [
               ...(catalogs[kind] ?? [])
                 .filter((m) => m.value !== "default")
-                .map((m) => ({ id: m.value, label: m.label })),
-              ...(index === 0 ? orphans.map((id) => ({ id, label: id })) : []),
+                .map((m) => ({ id: m.value, label: m.label, window: modelContextWindow(kind, m) })),
+              // An orphan's provider is unknown, so so is its window — it gets
+              // the number box, which is also the only way to clear it.
+              ...(index === 0
+                ? orphans.map((id) => ({ id, label: id, window: undefined }))
+                : []),
             ];
             return (
               <div key={kind} className="rounded-md border border-line bg-inset/40 p-2.5">
@@ -177,27 +242,38 @@ export function ContextSection({ draft, patch, serverDefaults, catalogs }: AppPa
                   <p className="text-xs text-faint">No models listed yet.</p>
                 ) : (
                   <div className="space-y-1.5">
-                    {rows.map((m) => (
-                      <div key={m.id} className="flex items-center gap-2">
-                        <span
-                          className="min-w-0 flex-1 truncate text-xs text-secondary"
-                          title={m.id}
-                        >
-                          {m.label}
-                        </span>
-                        {/* Fixed slot: the shared input is w-full and would
-                            otherwise squeeze the label to nothing. */}
-                        <div className="w-[7.5rem] shrink-0">
-                          <TextInput
-                            mono
-                            inputMode="numeric"
-                            value={perModel[m.id] != null ? String(perModel[m.id]) : ""}
-                            onChange={(e) => patchPerModel(m.id, numberField(e.target.value))}
-                            placeholder="max"
-                          />
+                    {rows.map((m) =>
+                      m.window ? (
+                        <ThresholdSlider
+                          key={m.id}
+                          id={m.id}
+                          label={m.label}
+                          window={m.window}
+                          value={perModel[m.id]}
+                          onChange={(v) => patchPerModel(m.id, v)}
+                        />
+                      ) : (
+                        <div key={m.id} className="flex items-center gap-2">
+                          <span
+                            className="min-w-0 flex-1 truncate text-xs text-secondary"
+                            title={m.id}
+                          >
+                            {m.label}
+                          </span>
+                          {/* Fixed slot: the shared input is w-full and would
+                              otherwise squeeze the label to nothing. */}
+                          <div className="w-[7.5rem] shrink-0">
+                            <TextInput
+                              mono
+                              inputMode="numeric"
+                              value={perModel[m.id] != null ? String(perModel[m.id]) : ""}
+                              onChange={(e) => patchPerModel(m.id, numberField(e.target.value))}
+                              placeholder="max"
+                            />
+                          </div>
                         </div>
-                      </div>
-                    ))}
+                      ),
+                    )}
                   </div>
                 )}
               </div>
