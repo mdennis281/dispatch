@@ -16,10 +16,16 @@ import { selectChat } from "../../stores/navigation.js";
 
 type Running = SchedulerSnapshot["running"][number];
 
-/** What a turn-live chat is doing, in the words the row shows. */
+/**
+ * What a turn-live chat is doing, in the words the row shows.
+ *
+ * `waiting` is NOT singled out: it is the status of every blocked tool — a PR
+ * watch, a sleep, a peer wait, a resume parked for a slot — and the row used to
+ * call all of them "waiting for permission". A permission prompt is
+ * `awaiting-input`; everything else says what the chat is actually blocked on.
+ */
 function runningLabel(r: Running, activityLabel: string | undefined): string {
   if (r.status === "awaiting-input") return "waiting on you";
-  if (r.status === "waiting") return "waiting for permission";
   if (!r.occupied) return activityLabel ? `blocked — ${activityLabel}` : "blocked";
   return activityLabel ?? "working";
 }
