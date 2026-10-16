@@ -4,7 +4,8 @@
 
 An all-in-one agent CLI harness that replaces how you work with your LLMs. I built this to get the most out of my AI subscriptions. Im not saying it's the best agent CLI harness out there, but it's the best for how I build projects.
 
-<img width="953" height="765" alt="image" src="https://github.com/user-attachments/assets/01e324d2-4546-4d65-ba44-199c8402ec1e" />
+<img width="977" height="841" alt="image" src="https://github.com/user-attachments/assets/3d3cefbd-95ae-452e-ba5c-32ca18fb352c" />
+
 <details>
   <summary>More screenshots</summary>
   
