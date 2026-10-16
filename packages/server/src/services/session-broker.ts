@@ -1953,7 +1953,15 @@ interface QueueEntry {
    * them wait again for a slot would be the old deadlock in a new coat.
    */
   human: boolean;
-  /** Resume only: hands the held answer back to the model. */
+  /**
+   * Resume only: hands the held answer(s) back to the model. ONE entry per
+   * chat, however many blocking calls returned while it was parked — a second
+   * `acquireSlot` joins this entry's wait rather than queueing a second one.
+   * Two entries for one chat wedged it: the first grant's reservation filled
+   * the cap, the second entry could never be granted, and the reservation
+   * could never be spent because the second call's span kept the chat
+   * un-occupied.
+   */
   grant?: () => void;
 }
 
@@ -3056,7 +3064,18 @@ export class SessionBroker {
   }
 
   /** Answer a permission request; resolves the blocked `canUseTool` promise. */
-  resolvePermission(requestId: string, resolution: PermissionResolution): boolean {
+  resolvePermission(
+    requestId: string,
+    resolution: PermissionResolution,
+    /**
+     * `human: true` when a PERSON produced this resolution — the permission
+     * card, a question answered or declined in the UI. The other callers of
+     * this resolver (an inactivity timeout, a caller that went away, a new
+     * message retiring stale questions) are not a person, and must not buy the
+     * chat the human tier when it re-acquires its slot.
+     */
+    opts: { human?: boolean } = {},
+  ): boolean {
     for (const session of this.sessions.values()) {
       const pending = session.pendingPermissions.get(requestId);
       if (!pending) continue;
@@ -3068,8 +3087,9 @@ export class SessionBroker {
       // its own up when the card opened. Asked BEFORE the human-wait span is
       // released: with nothing else open on the actor, releasing first would
       // open a `generating` span and read as occupied, and the gate would wave
-      // the chat through. A human answered, so it goes first (tier 0).
-      const admitted = this.acquireSlot(session.chatId, { human: true });
+      // the chat through. A human answer goes first (tier 0); a timeout or a
+      // retired question is an ordinary resume.
+      const admitted = this.acquireSlot(session.chatId, { human: opts.human === true });
       session.activity.unblocked(requestId, this.now());
       const answer = () => {
         if (pending.harnessSession) {
@@ -3216,11 +3236,15 @@ export class SessionBroker {
         return true;
       }
       const { updatedInput, message } = buildQuestionAnswer(pending.input, answer);
-      return this.resolvePermission(requestId, {
-        decision: "allow",
-        updatedInput,
-        message: message ?? answer.answer,
-      });
+      return this.resolvePermission(
+        requestId,
+        {
+          decision: "allow",
+          updatedInput,
+          message: message ?? answer.answer,
+        },
+        { human: true },
+      );
     }
     return false;
   }
@@ -3243,10 +3267,11 @@ export class SessionBroker {
   declineQuestion(requestId: string, message?: string): boolean {
     for (const session of this.sessions.values()) {
       if (!session.pendingPermissions.has(requestId)) continue;
-      return this.resolvePermission(requestId, {
-        decision: "deny",
-        message: message ?? "The user declined to answer this question.",
-      });
+      return this.resolvePermission(
+        requestId,
+        { decision: "deny", message: message ?? "The user declined to answer this question." },
+        { human: true },
+      );
     }
     return false;
   }
@@ -4985,6 +5010,19 @@ export class SessionBroker {
     // `pump` on a raise, and a no-change `setCap` returns before it does — so this
     // cannot recurse.
     this.refreshCap();
+    // A resume whose chat ALREADY holds a slot — a subagent kept it working, or
+    // a reservation from an earlier grant is in place — needs no free slot. It
+    // is not admission, it is a held answer with nothing left to wait for; and
+    // counting it against the cap it is itself filling would never clear.
+    for (const entry of [...this.queue]) {
+      if (entry.kind !== "resume") continue;
+      const session = this.sessions.get(entry.chatId);
+      if (session && this.holdsSlot(session)) {
+        this.queue = this.queue.filter((e) => e !== entry);
+        session.activity.unblocked(RESUME_SLOT_ID, this.now());
+        entry.grant?.();
+      }
+    }
     while (this.activeCount() < this.cap && this.queue.length > 0) {
       const entry = this.orderedQueue()[0]!;
       this.queue = this.queue.filter((e) => e !== entry);
@@ -5106,6 +5144,24 @@ export class SessionBroker {
     const session = this.sessions.get(chatId);
     if (!session || !this.isTurnLive(session) || this.holdsSlot(session)) return Promise.resolve();
     if (opts.signal?.aborted) return Promise.resolve();
+    // Already parked for an earlier call: join that entry's wait. Two parallel
+    // blocking calls (a `watch_pr` and a `wait_for_chat` in one message) must
+    // not become two entries — see {@link QueueEntry.grant}. A human answer
+    // promotes the shared entry; the abort of ONE caller does not end the
+    // other's wait, so only the grant releases joiners.
+    const existing = this.queue.find((e) => e.chatId === chatId && e.kind === "resume");
+    if (existing) {
+      if (opts.human) existing.human = true;
+      return new Promise<void>((resolve) => {
+        const prior = existing.grant;
+        existing.grant = () => {
+          prior?.();
+          resolve();
+        };
+        opts.signal?.addEventListener("abort", () => resolve(), { once: true });
+        this.publishScheduler();
+      });
+    }
     return new Promise<void>((resolve) => {
       const entry: QueueEntry = {
         chatId,
@@ -5119,6 +5175,9 @@ export class SessionBroker {
         resolve();
       };
       const onAbort = () => {
+        // Only the FIRST caller's abort can retire the entry, and only while it
+        // is the sole waiter: a joiner is still owed the grant.
+        if (entry.grant !== finish) return;
         this.queue = this.queue.filter((e) => e !== entry);
         session.activity.unblocked(RESUME_SLOT_ID, this.now());
         finish();

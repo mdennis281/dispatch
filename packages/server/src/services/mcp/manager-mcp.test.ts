@@ -23,6 +23,7 @@ import {
 import {
   createManagerTools,
   createManagerMcpServers,
+  SLOT_REACQUIRE_MIN_MS,
   withSlotReacquire,
   humanReviewQuestion,
   managerToolDescriptors,
@@ -403,11 +404,17 @@ describe("manager-mcp — withSlotReacquire", () => {
     return { calls, broker };
   }
 
+  /** A clock that advances a long way per read, so every call reads as a real wait. */
+  function slowClock() {
+    let t = 0;
+    return () => (t += SLOT_REACQUIRE_MIN_MS * 2);
+  }
+
   it("asks the broker for a slot AFTER a blocking tool's handler returns", async () => {
     // The ratchet this closes: a blocked chat gave its slot up and took none
     // back, so the running set grew past the cap by one per block/unblock.
     const { calls, broker } = recording();
-    const ctx = { chatId: "c1", bus, broker };
+    const ctx = { chatId: "c1", bus, broker, now: slowClock() };
     const { wait } = createManagerTools(ctx);
     const wrapped = withSlotReacquire(ctx, "session", wait);
     const order: string[] = [];
@@ -424,7 +431,7 @@ describe("manager-mcp — withSlotReacquire", () => {
 
   it("marks a human-answered wait so the scheduler admits it first", async () => {
     const { calls, broker } = recording();
-    const ctx = { chatId: "c1", bus, broker };
+    const ctx = { chatId: "c1", bus, broker, now: slowClock() };
     const { askUser } = createManagerTools(ctx);
     await withSlotReacquire(ctx, "confirm", askUser).handler(
       {
@@ -442,6 +449,17 @@ describe("manager-mcp — withSlotReacquire", () => {
     expect(calls).toEqual([{ chatId: "c1", human: true }]);
   });
 
+  it("does not hold the answer of a call that returned quickly", async () => {
+    // Review finding on #358: `resolve_thread` takes 200ms, and holding its
+    // result for a slot would convoy the chat behind whatever cold start was
+    // admitted in that window — at every quick GitHub or spawn call.
+    const { calls, broker } = recording();
+    const ctx = { chatId: "c1", bus, broker };
+    const { wait } = createManagerTools(ctx);
+    await withSlotReacquire(ctx, "session", wait).handler({ seconds: 0.01, reason: undefined }, {});
+    expect(calls).toEqual([]);
+  });
+
   it("leaves a non-blocking tool untouched", () => {
     const { broker } = recording();
     const ctx = { chatId: "c1", bus, broker };
@@ -456,7 +474,7 @@ describe("manager-mcp — withSlotReacquire", () => {
     broker.acquireSlot = async () => {
       throw new Error("gone");
     };
-    const ctx = { chatId: "c1", bus, broker };
+    const ctx = { chatId: "c1", bus, broker, now: slowClock() };
     const { wait } = createManagerTools(ctx);
     const res = await withSlotReacquire(ctx, "session", wait).handler(
       { seconds: 0.01, reason: undefined },
@@ -469,7 +487,7 @@ describe("manager-mcp — withSlotReacquire", () => {
     // Through the real server assembly, not the helper: the wrapper is only a
     // bound if `buildCategoryServer` applies it.
     const { calls, broker } = recording();
-    const servers = createManagerMcpServers({ chatId: "c1", bus, broker });
+    const servers = createManagerMcpServers({ chatId: "c1", bus, broker, now: slowClock() });
     const session = servers["dispatch-session"]!.instance as unknown as {
       _registeredTools: Record<string, { handler: (a: unknown, e: unknown) => Promise<unknown> }>;
     };

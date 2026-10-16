@@ -2482,7 +2482,7 @@ describe("SessionBroker — steering & concurrency", () => {
     const requestId = broker.pendingPermissionSnapshot()[0]!.id;
     let allowed = false;
     void decided!.then(() => (allowed = true));
-    expect(broker.resolvePermission(requestId, { decision: "allow" })).toBe(true);
+    expect(broker.resolvePermission(requestId, { decision: "allow" }, { human: true })).toBe(true);
     await new Promise((r) => setTimeout(r, 20));
     // Answered, but held: c2 has the only slot.
     expect(allowed).toBe(false);
@@ -2491,6 +2491,97 @@ describe("SessionBroker — steering & concurrency", () => {
     gate.resolve();
     await until(() => allowed);
     expect(broker.activeCount()).toBe(1);
+  });
+
+  it("two blocking calls returning together share ONE resume, and both continue", async () => {
+    // Review finding on #358: two entries for one chat wedged it. The first
+    // grant's reservation filled the cap, so the second entry could never be
+    // granted — and the reservation could never be spent, because the second
+    // call's open span kept the chat un-occupied. A second acquire now joins
+    // the first entry's wait.
+    const gate = deferred();
+    let call = 0;
+    const { fn } = makeFakeQuery(async () => {
+      if (++call === 1) return [toolUseMsg("mcp__dispatch-github__watch_pr", { pr: 7 }, "t-watch")];
+      await gate.promise;
+      return [assistantText("done"), resultMsg()];
+    });
+    const broker = makeBroker(fn, 1);
+    for (const id of ["c1", "c2"]) {
+      await store.saveChat(chatFor(id));
+      broker.create(chatFor(id));
+    }
+    await broker.sendMessage("c1", "watch");
+    await broker.waitFor("c1", "waiting");
+    const c2running = broker.waitFor("c2", "running");
+    await broker.sendMessage("c2", "go");
+    await c2running;
+
+    const done: string[] = [];
+    const a = broker.acquireSlot("c1").then(() => done.push("a"));
+    const b = broker.acquireSlot("c1", { human: true }).then(() => done.push("b"));
+    // One entry, promoted by the human-answered joiner.
+    expect(broker.schedulerSnapshot().queued).toEqual([{ chatId: "c1", kind: "resume", tier: 0 }]);
+
+    gate.resolve();
+    await Promise.all([a, b]);
+    expect(done.sort()).toEqual(["a", "b"]);
+    expect(broker.schedulerSnapshot().queued).toEqual([]);
+    expect(broker.activeCount()).toBe(1);
+  });
+
+  it("a resume for a chat that already holds a slot is granted without a free one", async () => {
+    // The other half of the wedge: an acquire that lands AFTER a reservation
+    // (or while a subagent keeps the chat occupied) is a held answer with
+    // nothing to wait for, not an admission.
+    const gate = deferred();
+    let call = 0;
+    const { fn } = makeFakeQuery(async () => {
+      if (++call === 1) return [toolUseMsg("Task", { subagent_type: "Explore", prompt: "look" }, "toolu_sub1")];
+      await gate.promise;
+      return [assistantText("done"), resultMsg()];
+    });
+    const broker = makeBroker(fn, 1);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+    await broker.sendMessage("c1", "go");
+    await broker.waitFor("c1", "waiting");
+    expect(broker.activeCount()).toBe(1);
+    // Holds its slot through the subagent → resolves at once, nothing queued.
+    await broker.acquireSlot("c1");
+    expect(broker.schedulerSnapshot().queued).toEqual([]);
+  });
+
+  it("a timed-out or retired question does not buy the human tier", async () => {
+    const gate = deferred();
+    let call = 0;
+    let decided: Promise<unknown> | undefined;
+    const { fn } = makeFakeQuery(async (_prompt, opts) => {
+      if (++call === 1) {
+        decided = opts?.canUseTool?.("Bash", { command: "ls" }, {} as never);
+        return [];
+      }
+      await gate.promise;
+      return [assistantText("done"), resultMsg()];
+    });
+    const broker = makeBroker(fn, 1);
+    for (const id of ["c1", "c2"]) {
+      await store.saveChat(chatFor(id));
+      broker.create(chatFor(id));
+    }
+    await broker.sendMessage("c1", "go");
+    await broker.waitFor("c1", "awaiting-input");
+    const c2running = broker.waitFor("c2", "running");
+    await broker.sendMessage("c2", "go");
+    await c2running;
+
+    const requestId = broker.pendingPermissionSnapshot()[0]!.id;
+    // No `human` flag: the resolver was reached by a timeout, not a person.
+    expect(broker.resolvePermission(requestId, { decision: "deny", message: "timed out" })).toBe(true);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(broker.schedulerSnapshot().queued).toEqual([{ chatId: "c1", kind: "resume", tier: 2 }]);
+    gate.resolve();
+    await decided;
   });
 
   it("stopping a chat releases a resume it was waiting on", async () => {

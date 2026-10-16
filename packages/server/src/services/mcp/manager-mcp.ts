@@ -8111,8 +8111,17 @@ export function withSlotReacquire<T extends Pick<SdkMcpToolDefinition<never>, "n
   const state = classifyActivity(`mcp__${managerServerName(category)}__${def.name}`);
   if (activityClass(state) !== "blocked") return def;
   const human = state === "waiting_human";
+  const now = ctx.now ?? (() => Date.now());
   const handler = (async (args: never, extra: unknown) => {
+    const started = now();
     const result = await def.handler(args, extra);
+    // A call that returned quickly never really gave anything up — the slot it
+    // released on the way in is at most briefly double-counted on the way out,
+    // which is the pre-#358 burst and is cheap. Holding ITS result for a slot
+    // is not: `resolve_thread` takes 200ms, and a cold start admitted in that
+    // window would have kept the result waiting for its whole turn, at every
+    // quick GitHub or spawn call. Only a call that genuinely waited re-queues.
+    if (now() - started < SLOT_REACQUIRE_MIN_MS) return result;
     await ctx.broker
       .acquireSlot(ctx.chatId, { human, signal: combinedSignal(extraSignal(extra), ctx.signal) })
       .catch(() => {});
@@ -8120,6 +8129,14 @@ export function withSlotReacquire<T extends Pick<SdkMcpToolDefinition<never>, "n
   }) as T["handler"];
   return { ...def, handler };
 }
+
+/**
+ * How long a blocking tool must have blocked before its answer is held for a
+ * slot. Below this the chat resumes at once, as it did before the resume queue;
+ * above it the chat has plausibly lost its slot to admission and must get one
+ * back. Two seconds: longer than any GitHub round trip, shorter than any wait.
+ */
+export const SLOT_REACQUIRE_MIN_MS = 2_000;
 
 const MANAGER_CONTEXT = Symbol("dispatch.managerMcpContext");
 

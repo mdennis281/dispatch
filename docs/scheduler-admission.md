@@ -53,6 +53,20 @@ chat as blocked; without the reservation `drainQueue` would hand the same slot
 to a second chat in that gap, which is precisely the burst this rule exists to
 end.
 
+Two refinements from review:
+
+- **One entry per chat.** Two blocking calls returning together (a `watch_pr`
+  and a `wait_for_chat` in one message) join the same `resume` entry; a second
+  entry wedged the chat, because the first grant's reservation filled the cap
+  and the second could never be granted. A resume whose chat already holds a
+  slot (a subagent kept it, or a reservation is in place) is granted without a
+  free slot — it is a held answer, not an admission.
+- **Only a call that actually waited is gated.** `withSlotReacquire` lets a
+  call that returned in under `SLOT_REACQUIRE_MIN_MS` (2s) through at once.
+  `resolve_thread` takes 200ms; holding its result for a slot would convoy the
+  chat behind whatever cold start was admitted in that window, at every quick
+  GitHub or spawn call. The brief overshoot is the pre-#358 burst, and cheap.
+
 Three things end a resume wait without a slot: the session aborting (stop,
 fork, kill — the turn is being torn down), the global pause being lifted (which
 re-pumps), and nothing else. A steering message does not grant; it promotes the
@@ -70,7 +84,7 @@ with the lowest TIER, oldest first within a tier:
 
 | Tier | Who | Why first |
 | --- | --- | --- |
-| 0 | A resume whose wait a HUMAN answered — a permission, a question, a review card, a steer | The person already waited for the agent once. Making them wait again for a slot would feel like the old deadlock in a new coat. |
+| 0 | A resume whose wait a HUMAN answered — a permission, a question, a review card, a steer (`resolvePermission` is told `human: true` only by the UI routes; a timeout or a retired question is tier 2) | The person already waited for the agent once. Making them wait again for a slot would feel like the old deadlock in a new coat. |
 | 1 | A chat another live, blocked chat is waiting ON — a reviewer whose PR a shipper is watching, a child a parent is in `wait_for_chat`/`chat_ask` on | Admitting it frees two chats, not one. This is priority inheritance, and the direct fix for the deadlock #258 described. |
 | 2 | Any other resume | Its context is loaded and it is closer to finishing. Finishing in-flight work before starting new work is the WIP-limit principle; it is what keeps the queue from growing. |
 | 3 | A cold start | Everything else. |
