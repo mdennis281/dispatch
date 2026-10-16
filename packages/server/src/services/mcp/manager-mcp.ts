@@ -82,10 +82,14 @@
  * per-session factory closed over `{ chatId, bus, broker, signal }`.
  */
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
-import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
+import type {
+  McpSdkServerConfigWithInstance,
+  SdkMcpToolDefinition,
+} from "@anthropic-ai/claude-agent-sdk";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod";
 import {
+  activityClass,
   MemoryTypeSchema,
   ManifestMcpTransportSchema,
   PermissionModeSchema,
@@ -155,6 +159,7 @@ import {
   PROVIDER_IDS,
   COMPACT_FOCUS_MAX,
 } from "@dispatch/shared";
+import { classifyActivity } from "../metrics-activity.js";
 import type { EventBus } from "../../bus.js";
 import type { ManagerMcpModes, ModeScope, WritableModeScope } from "./mode-editor.js";
 import { MODE_SCOPES } from "./mode-editor.js";
@@ -302,6 +307,20 @@ export interface ManagerMcpBroker {
    * survives a restart/reload, not just the life of this session.
    */
   markPrWatched(chatId: string, pr?: { number: number; state: "merged" | "closed" }): void;
+  /**
+   * Re-acquire a concurrency slot before a blocking tool's answer reaches the
+   * model. A chat gives its slot up while blocked; without this it took none
+   * back and the running set grew past the cap by one per block/unblock cycle.
+   * Resolves at once when the chat still holds one. `human` marks a wait a
+   * person ended, which the scheduler admits first.
+   */
+  acquireSlot(chatId: string, opts?: { human?: boolean; signal?: AbortSignal }): Promise<void>;
+  /**
+   * Declare (`on`) or clear what this chat is blocked on, so the scheduler can
+   * admit that target ahead of unrelated work — a reviewer whose PR this chat
+   * is watching, a peer it is waiting on.
+   */
+  noteWaitingOn(chatId: string, target: { chatId?: string; pr?: number }, on: boolean): void;
   /** Ask the human through Dispatch's radio / multi-select question card. */
   askUser(
     chatId: string,
@@ -3220,11 +3239,19 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       });
 
       const steer = steerInterrupt(ctx);
-      const outcome = await waitForChatState(ctx, chatId, timeoutMs, [
-        ctx.signal,
-        extraSignal(extra),
-        steer.signal,
-      ]);
+      // Declared for the scheduler: that chat is what this one is stuck on, so
+      // if it is queued it goes ahead of unrelated work.
+      ctx.broker.noteWaitingOn(ctx.chatId, { chatId }, true);
+      let outcome: Awaited<ReturnType<typeof waitForChatState>>;
+      try {
+        outcome = await waitForChatState(ctx, chatId, timeoutMs, [
+          ctx.signal,
+          extraSignal(extra),
+          steer.signal,
+        ]);
+      } finally {
+        ctx.broker.noteWaitingOn(ctx.chatId, { chatId }, false);
+      }
       steer.dispose();
       if (outcome.aborted) {
         if (steer.steered()) {
@@ -3395,7 +3422,12 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       });
 
       const steer = steerInterrupt(ctx);
-      const outcome = await watchForPrActivity(ctx.github, number, repo, st, {
+      // Declared for the scheduler: a reviewer chat spawned for THIS PR is what
+      // we are stuck on, so if it is queued it goes ahead of unrelated work.
+      ctx.broker.noteWaitingOn(ctx.chatId, { pr: number }, true);
+      let outcome: Awaited<ReturnType<typeof watchForPrActivity>>;
+      try {
+        outcome = await watchForPrActivity(ctx.github, number, repo, st, {
         intervalMs: PR_POLL_INTERVAL_MS,
         timeoutMs: timeoutSeconds * 1000,
         signals: [ctx.signal, extraSignal(extra), steer.signal],
@@ -3410,6 +3442,9 @@ export function createManagerTools(ctx: ManagerMcpContext) {
             },
           ),
       });
+      } finally {
+        ctx.broker.noteWaitingOn(ctx.chatId, { pr: number }, false);
+      }
 
       steer.dispose();
 
@@ -7064,7 +7099,10 @@ ${look}` : "")
       // askId tells the target to `chat_send` it instead, so it still arrives —
       // just not as this call's result.
       const steer = steerInterrupt(ctx);
-      const result = await ctx.messaging.ask({
+      ctx.broker.noteWaitingOn(ctx.chatId, { chatId: to }, true);
+      let result: Awaited<ReturnType<typeof ctx.messaging.ask>>;
+      try {
+        result = await ctx.messaging.ask({
         to,
         question,
         timeoutMs,
@@ -7084,6 +7122,9 @@ ${look}` : "")
             activity: { state: "tool", label: `asking chat ${to}`, toolName: "chat_ask" },
           }),
       });
+      } finally {
+        ctx.broker.noteWaitingOn(ctx.chatId, { chatId: to }, false);
+      }
       steer.dispose();
       if (!result.ok) return peerRefusalResult(result);
       if (result.answered) {
@@ -7920,6 +7961,8 @@ const NOOP_DESCRIPTOR_CTX = {
     getContextUsage: async () => null,
     compact: () => {},
     markPrWatched: () => {},
+    acquireSlot: async () => {},
+    noteWaitingOn: () => {},
     askUser: async () => ({ status: "declined" as const }),
     requestHumanReview: async () => ({ status: "dismissed" as const }),
   } as ManagerMcpBroker,
@@ -8013,7 +8056,7 @@ function buildCategoryServer(
   const server = createSdkMcpServer({
     name: managerServerName(category),
     version: "1.0.0",
-    tools: categoryTools,
+    tools: categoryTools.map((def) => withSlotReacquire(ctx, category, def)),
   });
   // Non-enumerable host metadata, on EVERY category server. The Claude SDK only
   // sees the ordinary MCP config, while the harness broker can recover the SAME
@@ -8044,6 +8087,56 @@ export function createManagerCategoryServer(
   const categoryTools = boundToolsByCategory(ctx).get(category);
   return categoryTools?.length ? buildCategoryServer(ctx, category, categoryTools) : undefined;
 }
+
+/**
+ * Make a BLOCKING tool re-acquire a concurrency slot before its answer returns.
+ *
+ * Applied to every tool whose `classifyActivity` state is blocked-class — the
+ * same classification the slot cap releases on (`holdsSlot` in the broker), so
+ * "this tool frees a slot" and "this tool takes one back" cannot drift apart,
+ * and a newly classified blocking tool gets the gate without being named here.
+ * Non-blocking tools are returned untouched.
+ *
+ * The hold is on the RESULT, after the handler has done its waiting: the chat's
+ * subprocess is already idle, so nothing is paused and nothing is lost. A
+ * `waiting_human` state marks the resume as human-answered, which the scheduler
+ * admits first. The call's own abort and the session's both end the hold —
+ * an answer returning into a torn-down turn needs no slot.
+ */
+export function withSlotReacquire<T extends Pick<SdkMcpToolDefinition<never>, "name" | "handler">>(
+  ctx: ManagerMcpContext,
+  category: ManagerCategory,
+  def: T,
+): T {
+  const state = classifyActivity(`mcp__${managerServerName(category)}__${def.name}`);
+  if (activityClass(state) !== "blocked") return def;
+  const human = state === "waiting_human";
+  const now = ctx.now ?? (() => Date.now());
+  const handler = (async (args: never, extra: unknown) => {
+    const started = now();
+    const result = await def.handler(args, extra);
+    // A call that returned quickly never really gave anything up — the slot it
+    // released on the way in is at most briefly double-counted on the way out,
+    // which is the pre-#358 burst and is cheap. Holding ITS result for a slot
+    // is not: `resolve_thread` takes 200ms, and a cold start admitted in that
+    // window would have kept the result waiting for its whole turn, at every
+    // quick GitHub or spawn call. Only a call that genuinely waited re-queues.
+    if (now() - started < SLOT_REACQUIRE_MIN_MS) return result;
+    await ctx.broker
+      .acquireSlot(ctx.chatId, { human, signal: combinedSignal(extraSignal(extra), ctx.signal) })
+      .catch(() => {});
+    return result;
+  }) as T["handler"];
+  return { ...def, handler };
+}
+
+/**
+ * How long a blocking tool must have blocked before its answer is held for a
+ * slot. Below this the chat resumes at once, as it did before the resume queue;
+ * above it the chat has plausibly lost its slot to admission and must get one
+ * back. Two seconds: longer than any GitHub round trip, shorter than any wait.
+ */
+export const SLOT_REACQUIRE_MIN_MS = 2_000;
 
 const MANAGER_CONTEXT = Symbol("dispatch.managerMcpContext");
 

@@ -458,7 +458,7 @@ export async function dispatchClientAction(
           updatedInput: action.updatedInput,
           message: action.message,
           remember: action.remember,
-        });
+        }, { human: true });
         if (!ok) {
           emitError(
             services,

@@ -26,6 +26,12 @@ export const PauseStateSchema = z.object({
 });
 export type PauseState = z.infer<typeof PauseStateSchema>;
 
+export const QueueEntryKindSchema = z.enum(["start", "resume"]);
+export type QueueEntryKind = z.infer<typeof QueueEntryKindSchema>;
+
+export const QueueTierSchema = z.union([z.literal(0), z.literal(1), z.literal(2), z.literal(3)]);
+export type QueueTier = z.infer<typeof QueueTierSchema>;
+
 export const SchedulerSnapshotSchema = z.object({
   paused: PauseStateSchema.nullable(),
   /** The `maxActiveSessions` cap in force. */
@@ -42,9 +48,38 @@ export const SchedulerSnapshotSchema = z.object({
       occupied: z.boolean(),
     }),
   ),
-  /** Chats waiting for a slot (or for the pause to lift), in admission order. */
-  queued: z.array(z.object({ chatId: z.string() })),
+  /**
+   * Chats waiting for a slot (or for the pause to lift), in the order the
+   * scheduler will admit them.
+   *
+   * `kind` tells a cold START (a message that cannot open its turn yet) from a
+   * RESUME (a turn that is already open, blocked on a tool whose answer has
+   * arrived, and must re-acquire a slot before the answer is handed to the
+   * model). `tier` is the admission class — see `QUEUE_TIER_LABELS` — lowest
+   * first; within a tier, oldest first.
+   */
+  queued: z.array(
+    z.object({
+      chatId: z.string(),
+      kind: QueueEntryKindSchema,
+      tier: QueueTierSchema,
+    }),
+  ),
 });
+
+/**
+ * Why a queued chat sits where it does. Tier 0 is a resume a HUMAN answered —
+ * they already waited for the agent once. Tier 1 is a chat another live, blocked
+ * chat is waiting ON — admitting it frees two chats. Tier 2 is any other
+ * resume — its context is loaded and it is closer to finishing. Tier 3 is a
+ * cold start. The panel shows the label; the server owns the ordering.
+ */
+export const QUEUE_TIER_LABELS: Record<QueueTier, string> = {
+  0: "you answered — resumes first",
+  1: "another chat is waiting on it",
+  2: "mid-turn, waiting for a slot to resume",
+  3: "waiting for a slot",
+};
 export type SchedulerSnapshot = z.infer<typeof SchedulerSnapshotSchema>;
 
 /** Pushed whenever running/queued membership or the pause state changes. */

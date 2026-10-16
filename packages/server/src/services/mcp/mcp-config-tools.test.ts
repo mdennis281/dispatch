@@ -29,6 +29,8 @@ const broker: ManagerMcpBroker = {
   getContextUsage: async () => null,
   compact: () => {},
   markPrWatched: () => {},
+  acquireSlot: async () => {},
+  noteWaitingOn: () => {},
   askUser: async () => ({ status: "declined" }),
   requestHumanReview: async () => ({ status: "dismissed" }),
 };
