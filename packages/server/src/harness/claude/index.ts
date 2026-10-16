@@ -15,7 +15,7 @@
  */
 import { query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
-import { listAvailableModels } from "../../services/models.js";
+import { listAvailableModels, listContextWindows } from "../../services/models.js";
 import { claudeExecutableOption, claudeRuntime } from "../../services/runtime.js";
 import { envWithAccount, transferClaudeSession } from "../../services/subscriptions.js";
 import { parseSessionLimit, type ModelOption } from "@dispatch/shared";
@@ -86,6 +86,10 @@ export class ClaudeHarness implements Harness {
 
   listModels(opts: { refresh?: boolean; account?: HarnessAccount } = {}): Promise<ModelOption[]> {
     return listAvailableModels({ refresh: opts.refresh, account: opts.account });
+  }
+
+  contextWindows(opts: { refresh?: boolean; account?: HarnessAccount } = {}): Promise<Record<string, number>> {
+    return listContextWindows({ refresh: opts.refresh, account: opts.account });
   }
 
   transferSession(sessionId: string, from: HarnessAccount, to: HarnessAccount): Promise<boolean> {

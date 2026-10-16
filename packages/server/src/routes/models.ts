@@ -3,6 +3,7 @@
  *   GET /api/models                          → ModelOption[]  (cached ~5min)
  *   GET /api/models?refresh=1                → ModelOption[]  (re-probe the runtime now)
  *   GET /api/models?subscription=<id>        → that ACCOUNT's list
+ *   GET /api/models/context-windows?harness= → { [modelId]: tokens }, from the runtime
  *   GET /api/harnesses                       → registered providers + capabilities
  *   GET /api/subscriptions                   → every account, with login presence
  *   PUT /api/subscriptions                   → replace the stored account list
@@ -36,6 +37,23 @@ export function registerModelRoutes(app: FastifyInstance): void {
       const sub = named?.provider === kind ? named : subscriptionFor(settings, kind);
       const harness = app.services.harnesses.find(kind)!;
       return harness.listModels({ refresh: req.query.refresh === "1", account: accountOf(sub) });
+    },
+  );
+
+  // Same provider/account resolution as the list above, so a window is read
+  // from the account whose catalogue the row came from.
+  app.get<{ Querystring: { refresh?: string; harness?: string } }>(
+    "/api/models/context-windows",
+    async (req) => {
+      const settings = await store.getSettings().catch(() => null);
+      const parsed = HarnessKindSchema.safeParse(req.query.harness ?? DEFAULT_HARNESS);
+      const kind = parsed.success ? parsed.data : DEFAULT_HARNESS;
+      const harness = app.services.harnesses.find(kind)!;
+      const windows = await harness.contextWindows?.({
+        refresh: req.query.refresh === "1",
+        account: accountOf(subscriptionFor(settings, kind)),
+      });
+      return windows ?? {};
     },
   );
 

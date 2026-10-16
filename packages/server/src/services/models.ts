@@ -161,4 +161,95 @@ export async function listAvailableModels(opts: ListModelsOptions = {}): Promise
 export function resetModelsCache(): void {
   cache.clear();
   inFlight.clear();
+  windowsCache.clear();
+  windowsInFlight.clear();
+}
+
+/* ------------------------------------------------------- context windows */
+
+/**
+ * A model's window is a fact about the model (and the account's plan — 1M
+ * context is plan-gated), not something that moves minute to minute, and the
+ * probe below is slow. A day keeps it cheap; `refresh` re-reads on demand.
+ */
+const WINDOWS_TTL_MS = 24 * 60 * 60 * 1000;
+/** Per model step: `setModel` + `getContextUsage` measured ~3-4s each on 0.3.222. */
+const WINDOW_STEP_TIMEOUT_MS = 15_000;
+
+const windowsCache = new Map<string, { at: number; windows: Record<string, number> }>();
+const windowsInFlight = new Map<string, Promise<Record<string, number> | null>>();
+
+/**
+ * Ask the runtime for each picker model's context window: `supportedModels()`,
+ * then for every row `setModel(value)` and read `getContextUsage().maxTokens`.
+ *
+ * `ModelInfo` carries no window and the Models API isn't reachable on
+ * subscription auth, but the runtime knows exactly what it will serve — Sonnet 5
+ * came back as 967,000, a number no table of ours would have guessed. Same
+ * silent input channel as {@link probe}: control requests only, no turn, no
+ * tokens. A row that fails or times out is simply absent from the map.
+ */
+async function probeWindows(
+  query: ModelsQueryFn,
+  account: HarnessAccount | undefined,
+): Promise<Record<string, number> | null> {
+  const abort = new AbortController();
+  try {
+    const env = envWithAccount(account);
+    const q = query({
+      prompt: SILENT_PROMPT,
+      options: {
+        settingSources: [],
+        abortController: abort,
+        ...claudeExecutableOption(),
+        ...(env ? { env } : {}),
+      },
+    });
+    const models = await withTimeout(q.supportedModels(), PROBE_TIMEOUT_MS);
+    if (!models?.length) return null;
+    const windows: Record<string, number> = {};
+    // Sequential on purpose: `getContextUsage` answers for whatever model the
+    // session is on NOW, so interleaving two `setModel`s would cross the wires.
+    for (const m of models) {
+      try {
+        await withTimeout(q.setModel(m.value), WINDOW_STEP_TIMEOUT_MS);
+        const usage = await withTimeout(q.getContextUsage(), WINDOW_STEP_TIMEOUT_MS);
+        if (usage.maxTokens > 0) windows[m.value] = usage.maxTokens;
+      } catch {
+        /* one model the runtime can't size doesn't sink the rest */
+      }
+    }
+    return Object.keys(windows).length ? windows : null;
+  } catch {
+    return null;
+  } finally {
+    abort.abort();
+  }
+}
+
+/**
+ * Context window per picker model id, from the runtime itself. Never throws:
+ * failure degrades to the last good map, then to `{}` — and the settings pane
+ * treats an absent id as "unknown", not as a guess.
+ */
+export async function listContextWindows(
+  opts: ListModelsOptions = {},
+): Promise<Record<string, number>> {
+  if (process.env.DISPATCH_FAKE_SDK === "1") return {};
+  const key = opts.account && Object.keys(opts.account.env).length ? opts.account.configDir : "";
+  const hit = windowsCache.get(key);
+  if (!opts.refresh && hit && Date.now() - hit.at < WINDOWS_TTL_MS) return hit.windows;
+
+  const query = opts.query ?? (sdkQuery as unknown as ModelsQueryFn);
+  let pending = windowsInFlight.get(key);
+  if (!pending) {
+    pending = probeWindows(query, opts.account).finally(() => {
+      windowsInFlight.delete(key);
+    });
+    windowsInFlight.set(key, pending);
+  }
+  const windows = await pending;
+  if (!windows) return windowsCache.get(key)?.windows ?? {};
+  windowsCache.set(key, { at: Date.now(), windows });
+  return windows;
 }

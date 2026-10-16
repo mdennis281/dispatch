@@ -1,7 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { ModelInfo, Query } from "@anthropic-ai/claude-agent-sdk";
 import { FALLBACK_MODELS } from "@dispatch/shared";
-import { listAvailableModels, resetModelsCache, type ModelsQueryFn } from "./models.js";
+import {
+  listAvailableModels,
+  listContextWindows,
+  resetModelsCache,
+  type ModelsQueryFn,
+} from "./models.js";
 
 /* --------------------------------------------------------------- fixtures */
 
@@ -154,5 +159,69 @@ describe("listAvailableModels", () => {
     const q = ok();
     expect(await listAvailableModels({ query: q })).toEqual(FALLBACK_MODELS);
     expect(q.calls).toBe(0);
+  });
+});
+
+describe("listContextWindows", () => {
+  beforeEach(() => {
+    resetModelsCache();
+    delete process.env.DISPATCH_FAKE_SDK;
+  });
+
+  /**
+   * A control channel whose `getContextUsage` answers for the model last set —
+   * the real runtime's semantics, and the reason the probe must be sequential.
+   * Numbers are what Claude Code 2.1.222 actually reported.
+   */
+  function sizing(windows: Record<string, number | Error>) {
+    let current = "";
+    const fn = ((params) => {
+      fn.calls++;
+      params.options?.abortController?.signal.addEventListener("abort", () => fn.aborts++);
+      return {
+        supportedModels: async () => LIVE,
+        setModel: async (m: string) => {
+          await new Promise((r) => setTimeout(r, 1));
+          current = m;
+        },
+        getContextUsage: async () => {
+          const w = windows[current];
+          if (w instanceof Error) throw w;
+          return { maxTokens: w, model: current };
+        },
+      } as unknown as Query;
+    }) as ModelsQueryFn & { calls: number; aborts: number };
+    fn.calls = 0;
+    fn.aborts = 0;
+    return fn;
+  }
+
+  it("reads each model's window from the runtime, one setModel at a time", async () => {
+    const query = sizing({ default: 1_000_000, sonnet: 967_000, haiku: 200_000 });
+    expect(await listContextWindows({ query })).toEqual({
+      default: 1_000_000,
+      sonnet: 967_000,
+      haiku: 200_000,
+    });
+    expect(query.aborts).toBe(1);
+  });
+
+  it("leaves out a model the runtime couldn't size instead of guessing", async () => {
+    const query = sizing({ default: 1_000_000, sonnet: new Error("nope"), haiku: 200_000 });
+    expect(await listContextWindows({ query })).toEqual({ default: 1_000_000, haiku: 200_000 });
+  });
+
+  it("caches, and shares one probe between concurrent callers", async () => {
+    const query = sizing({ default: 1_000_000, sonnet: 967_000, haiku: 200_000 });
+    await Promise.all([listContextWindows({ query }), listContextWindows({ query })]);
+    await listContextWindows({ query });
+    expect(query.calls).toBe(1);
+  });
+
+  it("answers {} rather than throwing when the runtime is unreachable", async () => {
+    const query = (() => {
+      throw new Error("spawn failed");
+    }) as unknown as ModelsQueryFn;
+    expect(await listContextWindows({ query })).toEqual({});
   });
 });
