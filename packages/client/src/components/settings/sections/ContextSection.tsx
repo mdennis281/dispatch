@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import {
   COMPACT_FOCUS_MAX,
   DEFAULT_MAX_ACTIVE_SESSIONS,
@@ -7,7 +8,7 @@ import {
 import { Field, TextArea, TextInput } from "../../sidebar/Modal.js";
 import { Switch } from "../../ui/Switch.js";
 import { positiveTokenLimit } from "../../../lib/harness.js";
-import { modelContextWindow } from "../../../lib/modelWindow.js";
+import { api } from "../../../lib/api.js";
 import { compactTokens } from "../../../lib/format.js";
 import { cn } from "../../../lib/cn.js";
 import type { AppPaneProps } from "./types.js";
@@ -43,8 +44,8 @@ function ThresholdSlider({
   // Below a tenth of the window a chat would compact every few turns and spend
   // more on summaries than on work.
   const min = Math.round(window / 10 / step) * step;
-  // A stored value past this table's window (typed in the old box, or the model
-  // really is bigger than we think) pins to the right end but reads true.
+  // A stored value past the window (typed in the old box, or set before the
+  // account lost 1M context) pins to the right end but reads true.
   const pos = value == null ? window : Math.min(Math.max(value, min), window);
   const pct = Math.round((pos / window) * 100);
   return (
@@ -78,8 +79,34 @@ function ThresholdSlider({
   );
 }
 
+/**
+ * Each provider's per-model windows, as its runtime reports them. Claude's
+ * answer is a cold probe of tens of seconds (a `setModel` + `getContextUsage`
+ * per model) before the server caches it, so rows render as number boxes until
+ * it lands rather than holding the whole pane on a spinner.
+ */
+function useContextWindows(): Partial<Record<string, Record<string, number>>> {
+  const [windows, setWindows] = useState<Partial<Record<string, Record<string, number>>>>({});
+  useEffect(() => {
+    let live = true;
+    for (const { id } of listProviders()) {
+      api.models
+        .contextWindows(id)
+        .then((w) => live && setWindows((prev) => ({ ...prev, [id]: w })))
+        .catch(() => {
+          /* unknown windows just keep the number box */
+        });
+    }
+    return () => {
+      live = false;
+    };
+  }, []);
+  return windows;
+}
+
 /** How many chats run at once, and what happens as their context windows fill. */
 export function ContextSection({ draft, patch, serverDefaults, catalogs }: AppPaneProps) {
+  const windows = useContextWindows();
   const ac = draft.autoCompact ?? {};
   const perModel = ac.perModel ?? {};
   const patchPerModel = (id: string, tokens: number | undefined) => {
@@ -228,7 +255,7 @@ export function ContextSection({ draft, patch, serverDefaults, catalogs }: AppPa
             const rows = [
               ...(catalogs[kind] ?? [])
                 .filter((m) => m.value !== "default")
-                .map((m) => ({ id: m.value, label: m.label, window: modelContextWindow(kind, m) })),
+                .map((m) => ({ id: m.value, label: m.label, window: windows[kind]?.[m.value] })),
               // An orphan's provider is unknown, so so is its window — it gets
               // the number box, which is also the only way to clear it.
               ...(index === 0

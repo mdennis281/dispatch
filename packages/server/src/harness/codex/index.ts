@@ -11,6 +11,8 @@
  * and rate limits arrive as live percentages with exact reset timestamps rather
  * than an English sentence at the moment of failure.
  */
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import {
   fallbackModels,
   type Effort,
@@ -26,7 +28,7 @@ import type {
   HarnessSessionSpec,
   HarnessTextRequest,
 } from "../types.js";
-import { codexRuntime } from "./runtime.js";
+import { codexHome, codexRuntime } from "./runtime.js";
 import { acquireCodexConnection, type CodexConnection } from "./rpc.js";
 import { CodexSession } from "./session.js";
 
@@ -87,6 +89,8 @@ export class CodexHarness implements Harness {
   /** Keyed by account (see `accountKey`) — a plan decides which models a login gets. */
   private modelCache = new Map<string, { at: number; models: ModelOption[] }>();
   private modelProbe = new Map<string, Promise<ModelOption[] | null>>();
+  /** Per account: every window `models_cache.json` has ever shown us. */
+  private windowCache = new Map<string, Record<string, number>>();
   /** Per-model effort support, learned from the catalogue. */
   private efforts = new Map<string, string[]>();
   /** Keyed by account: limits belong to a login, not to the provider. */
@@ -166,6 +170,42 @@ export class CodexHarness implements Harness {
     } finally {
       held?.release();
     }
+  }
+
+  /**
+   * Codex's `model/list` has no window field (checked against the 0.162
+   * protocol), but the runtime writes the full catalogue it fetched — windows
+   * included — to `$CODEX_HOME/models_cache.json`. That file is the runtime's
+   * own answer, per account, so read it rather than keep a table here.
+   * `context_window` is what a thread is actually given; `max_context_window`
+   * is only the ceiling a `model_context_window` config override may raise it to.
+   */
+  async contextWindows(
+    opts: { account?: HarnessAccount; refresh?: boolean } = {},
+  ): Promise<Record<string, number>> {
+    // `model/list` is what makes the runtime re-fetch and rewrite that file.
+    await this.listModels({ account: opts.account, refresh: true });
+    const key = accountKey(opts.account);
+    const known = this.windowCache.get(key) ?? {};
+    try {
+      const file = join(codexHome({ ...process.env, ...opts.account?.env }), "models_cache.json");
+      const cache = JSON.parse(await readFile(file, "utf8")) as {
+        models?: { slug?: unknown; context_window?: unknown }[];
+      };
+      for (const m of cache.models ?? []) {
+        if (typeof m.slug === "string" && typeof m.context_window === "number" && m.context_window > 0)
+          known[m.slug] = m.context_window;
+      }
+    } catch {
+      // No cache yet (the runtime hasn't fetched one) — unknown, not a guess.
+    }
+    // Merged, never replaced: every Codex on the box (the VS Code extension's,
+    // the stable instance's) shares this one file and rewrites it with the
+    // catalogue ITS version sees. A 0.153 writer dropped GPT-6.1-Sol three
+    // minutes after 0.162 wrote it. A slug's window doesn't depend on which
+    // client asked, so anything any read has seen stays known.
+    this.windowCache.set(key, known);
+    return { ...known };
   }
 
   /** Efforts a model accepts, for clamping at turn start. */

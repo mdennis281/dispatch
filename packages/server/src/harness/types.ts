@@ -680,6 +680,17 @@ export interface Harness {
    * browser servers alone are a third of it.
    */
   contextWindow?(opts?: { model?: string; account?: HarnessAccount }): Promise<number | undefined>;
+  /**
+   * Every picker model's window at once, keyed by `ModelOption.value`, for the
+   * settings pane's per-model compact sliders. Separate from
+   * {@link contextWindow} because the broker awaits that one at session start,
+   * and Claude's answer here costs a probe step per model (tens of seconds
+   * cold). Ids the runtime can't size are absent — never a guess.
+   */
+  contextWindows?(opts?: {
+    account?: HarnessAccount;
+    refresh?: boolean;
+  }): Promise<Record<string, number>>;
   /** Account usage state, or null when this harness can't report it. */
   readLimits(account?: HarnessAccount): Promise<HarnessLimits | null>;
   /**

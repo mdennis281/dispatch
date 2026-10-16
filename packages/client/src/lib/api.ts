@@ -739,6 +739,11 @@ export const api = {
   models: {
     list: (harness: HarnessKind = DEFAULT_HARNESS) =>
       get<ModelOption[]>(`/api/models?harness=${encodeURIComponent(harness)}`),
+    /** Each model's context window as the runtime reports it; absent = unknown. */
+    contextWindows: (harness: HarnessKind) =>
+      get<Record<string, number>>(
+        `/api/models/context-windows?harness=${encodeURIComponent(harness)}`,
+      ),
   },
   harnesses: {
     list: () => get<HarnessInfo[]>("/api/harnesses"),
