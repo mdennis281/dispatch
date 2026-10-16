@@ -205,11 +205,16 @@ export function PausePopover({ compact }: { compact?: boolean }) {
                   paused
                     ? "Paused — nothing starts until you resume"
                     : `${working} of ${snapshot.cap} active slots in use` +
+                      (snapshot.lent > 0
+                        ? ` · ${snapshot.lent} lent by a blocked chat to the chat it waits on`
+                        : "") +
                       (blocked > 0 ? ` · ${blocked} more blocked (waiting, not using a slot)` : "")
                 }
               >
                 <Chip tone={paused ? "warn" : working > 0 ? "accent" : "muted"} className="ml-1">
-                  {paused ? "paused" : `${working}/${snapshot.cap} slots`}
+                  {paused
+                    ? "paused"
+                    : `${working}/${snapshot.cap} slots${snapshot.lent > 0 ? ` · ${snapshot.lent} lent` : ""}`}
                 </Chip>
               </Tooltip>
               <span className="flex-1" />

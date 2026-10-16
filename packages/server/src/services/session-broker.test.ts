@@ -2434,24 +2434,146 @@ describe("SessionBroker — steering & concurrency", () => {
     await broker.sendMessage("busy", "go");
     await busyRunning;
 
-    // An unrelated chat queues FIRST, then the reviewer.
+    // An unrelated chat queues FIRST. The reviewer, arriving second, does not
+    // queue at all: the shipper parked on its PR lends it the slot it is not
+    // using (see the lent-slot test below), and the cold start stays parked.
     await broker.sendMessage("other", "go");
-    await broker.sendMessage("reviewer", "review #7");
-    expect(broker.schedulerSnapshot().queued.map((q) => `${q.chatId}:${q.tier}`)).toEqual([
-      "reviewer:1",
-      "other:3",
-    ]);
-
+    expect(broker.schedulerSnapshot().queued.map((q) => `${q.chatId}:${q.tier}`)).toEqual(["other:3"]);
     const reviewerRunning = broker.waitFor("reviewer", "running");
-    gate.resolve();
+    await broker.sendMessage("reviewer", "review #7");
     await reviewerRunning;
     expect(broker.getStatus("other")).toBe("queued");
+    expect(broker.schedulerSnapshot().lent).toBe(1);
 
-    // Clearing the declaration drops the reviewer back to an ordinary start.
+    // Clearing the declaration does not call the loan in: the stamp lives on
+    // the running chat until it lets its slot go, so the count stays honest
+    // about a chat that IS working past the cap.
     broker.noteWaitingOn("ship", { pr: 7 }, false);
-    expect(broker.schedulerSnapshot().queued.map((q) => `${q.chatId}:${q.tier}`)).toEqual([
-      "other:3",
-    ]);
+    expect(broker.schedulerSnapshot().lent).toBe(1);
+    expect(broker.getStatus("reviewer")).toBe("running");
+    gate.resolve();
+  });
+
+  it("a blocked shipper LENDS its slot to its reviewer, so the reviewer runs at a full cap", async () => {
+    // Seen on the install this was built for: six chats generating under a cap
+    // of six for half an hour, two shippers parked in watch_pr, their reviewers
+    // queued at tier 1 the whole time. Tier 1 only helps when a slot frees, and
+    // the shippers' released slots had already gone to cold starts.
+    const gate = deferred();
+    let call = 0;
+    const { fn } = makeFakeQuery(async () => {
+      if (++call === 1) return [toolUseMsg("mcp__dispatch-github__watch_pr", { pr: 7 }, "t-watch")];
+      await gate.promise;
+      return [assistantText("done"), resultMsg()];
+    });
+    const broker = makeBroker(fn, 1);
+    for (const id of ["ship", "busy", "other"]) {
+      await store.saveChat(chatFor(id));
+      broker.create(chatFor(id));
+    }
+    const reviewer = { ...chatFor("reviewer"), reviewOf: "o/r#7" };
+    await store.saveChat(reviewer);
+    broker.create(reviewer);
+
+    await broker.sendMessage("ship", "watch");
+    await broker.waitFor("ship", "waiting");
+    broker.noteWaitingOn("ship", { pr: 7 }, true);
+    const busyRunning = broker.waitFor("busy", "running");
+    await broker.sendMessage("busy", "go");
+    await busyRunning;
+    expect(broker.activeCount()).toBe(1);
+
+    // The cap is full. A cold start parks…
+    await broker.sendMessage("other", "go");
+    expect(broker.getStatus("other")).toBe("queued");
+    // …but the reviewer runs on the shipper's lent slot.
+    const reviewerRunning = broker.waitFor("reviewer", "running");
+    await broker.sendMessage("reviewer", "review #7");
+    await reviewerRunning;
+    expect(broker.activeCount()).toBe(2);
+    expect(broker.schedulerSnapshot().lent).toBe(1);
+    expect(broker.getStatus("other")).toBe("queued");
+
+    // One slot per waiter: a second dependent of the same shipper does not get in.
+    const second = { ...chatFor("reviewer2"), reviewOf: "o/r#7" };
+    await store.saveChat(second);
+    broker.create(second);
+    await broker.sendMessage("reviewer2", "review #7 again");
+    expect(broker.getStatus("reviewer2")).toBe("queued");
+
+    gate.resolve();
+    await broker.waitFor("reviewer2", "running");
+  });
+
+  it("a dependent that got an ordinary slot is not credited as lent", async () => {
+    // Review finding on #360: the waiter's own slot already left the count
+    // under #258, so crediting a dependent that entered on a free slot counts
+    // the pair twice and admits a cold start on the difference.
+    const gate = deferred();
+    let call = 0;
+    const { fn } = makeFakeQuery(async () => {
+      if (++call === 1) return [toolUseMsg("mcp__dispatch-github__watch_pr", { pr: 7 }, "t-watch")];
+      await gate.promise;
+      return [assistantText("done"), resultMsg()];
+    });
+    const broker = makeBroker(fn, 1);
+    for (const id of ["ship", "other"]) {
+      await store.saveChat(chatFor(id));
+      broker.create(chatFor(id));
+    }
+    const reviewer = { ...chatFor("reviewer"), reviewOf: "o/r#7" };
+    await store.saveChat(reviewer);
+    broker.create(reviewer);
+    await broker.sendMessage("ship", "watch");
+    await broker.waitFor("ship", "waiting");
+    broker.noteWaitingOn("ship", { pr: 7 }, true);
+
+    // The cap is EMPTY, so the reviewer takes the free slot — no loan.
+    const reviewerRunning = broker.waitFor("reviewer", "running");
+    await broker.sendMessage("reviewer", "review #7");
+    await reviewerRunning;
+    expect(broker.schedulerSnapshot().lent).toBe(0);
+    // …and the cap is therefore full for a cold start.
+    await broker.sendMessage("other", "go");
+    expect(broker.getStatus("other")).toBe("queued");
+    gate.resolve();
+  });
+
+  it("two waiters on one chat lend it ONE slot, not two", async () => {
+    const gate = deferred();
+    let call = 0;
+    const { fn } = makeFakeQuery(async () => {
+      // The first two turns park in a PR watch; everything after holds a slot.
+      if (++call <= 2) return [toolUseMsg("mcp__dispatch-github__watch_pr", { pr: 7 }, `t-watch-${call}`)];
+      await gate.promise;
+      return [assistantText("done"), resultMsg()];
+    });
+    const broker = makeBroker(fn, 1);
+    for (const id of ["w1", "w2", "busy", "other"]) {
+      await store.saveChat(chatFor(id));
+      broker.create(chatFor(id));
+    }
+    const dep = { ...chatFor("dep"), reviewOf: "o/r#7" };
+    await store.saveChat(dep);
+    broker.create(dep);
+    for (const w of ["w1", "w2"]) {
+      await broker.sendMessage(w, "watch");
+      await broker.waitFor(w, "waiting");
+      broker.noteWaitingOn(w, { pr: 7 }, true);
+    }
+    const busyRunning = broker.waitFor("busy", "running");
+    await broker.sendMessage("busy", "go");
+    await busyRunning;
+
+    // Admitted on a loan from ONE of the two waiters.
+    const depRunning = broker.waitFor("dep", "running");
+    await broker.sendMessage("dep", "go");
+    await depRunning;
+    expect(broker.schedulerSnapshot().lent).toBe(1);
+    // Net load is 1 of 1 — a cold start does not get in on a phantom second loan.
+    await broker.sendMessage("other", "go");
+    expect(broker.getStatus("other")).toBe("queued");
+    gate.resolve();
   });
 
   it("a permission you answer waits for a slot before the tool runs", async () => {

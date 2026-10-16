@@ -2218,6 +2218,15 @@ interface LiveSession {
    */
   slotReserved?: boolean;
   /**
+   * This chat was admitted PAST the cap on a slot lent by a blocked waiter (see
+   * `admission`). Stamped at admission, not derived: a dependent that happened
+   * to get an ordinary free slot must not be credited as lent, or the pair
+   * would be credited twice — once for the waiter's slot already released
+   * under #258, once here — and a cold start would be admitted on the
+   * difference. Cleared the moment the chat stops holding a slot.
+   */
+  onLentSlot?: boolean;
+  /**
    * What this chat's open blocking calls are parked ON, by count (a subagent
    * can hold a second wait). Declared by `watch_pr`, `wait_for_chat` and
    * `chat_ask`; read by {@link SessionBroker.tierOf} so the chat they wait on
@@ -4397,6 +4406,7 @@ export class SessionBroker {
     return {
       paused: this.pauseState ?? null,
       cap: this.cap,
+      lent: this.lentCount(),
       running,
       queued: this.orderedQueue()
         .filter((e) => e.kind === "resume" || this.sessions.get(e.chatId)?.status === "queued")
@@ -4654,12 +4664,9 @@ export class SessionBroker {
     // A free slot is not enough on its own: something already parked may
     // outrank this start (a resume, a chat somebody is waiting on), and taking
     // the slot past it would be the FIFO the tiers replace.
-    if (
-      !this.pauseState &&
-      this.activeCount() < this.cap &&
-      !this.outranked({ chatId: session.chatId, kind: "start", human: false })
-    ) {
-      this.startTurn(session);
+    const admission = this.pauseState ? undefined : this.admission(session.chatId);
+    if (admission && !this.outranked({ chatId: session.chatId, kind: "start", human: false })) {
+      this.startTurn(session, admission === "lent");
     } else {
       this.enqueueStart(session);
       session.activity.queued(this.now());
@@ -4667,8 +4674,9 @@ export class SessionBroker {
     }
   }
 
-  private startTurn(session: LiveSession): void {
+  private startTurn(session: LiveSession, lent = false): void {
     this.queue = this.queue.filter((e) => !(e.chatId === session.chatId && e.kind === "start"));
+    session.onLentSlot = lent;
     session.turnOpen = true;
     session.explicitInterruptPending = false;
     if (!session.started) {
@@ -5023,13 +5031,18 @@ export class SessionBroker {
         entry.grant?.();
       }
     }
-    while (this.activeCount() < this.cap && this.queue.length > 0) {
-      const entry = this.orderedQueue()[0]!;
+    // The first ADMISSIBLE entry in tier order, not the head: a chat with a
+    // sponsor (below) fits where a cold start does not, and stopping at the
+    // head would leave a sponsored reviewer parked behind an unsponsored start.
+    for (;;) {
+      let admission: "slot" | "lent" | undefined;
+      const entry = this.orderedQueue().find((e) => (admission = this.admission(e.chatId)) !== undefined);
+      if (!entry) break;
       this.queue = this.queue.filter((e) => e !== entry);
       const session = this.sessions.get(entry.chatId);
       if (entry.kind === "start") {
         if (!session || session.status !== "queued") continue;
-        this.startTurn(session);
+        this.startTurn(session, admission === "lent");
         continue;
       }
       // A resume. Reserve BEFORE granting: the grant resolves a promise whose
@@ -5037,6 +5050,7 @@ export class SessionBroker {
       // iteration would count the chat as still blocked and admit over it.
       if (session && this.isTurnLive(session)) {
         session.slotReserved = true;
+        session.onLentSlot = admission === "lent";
         session.activity.unblocked(RESUME_SLOT_ID, this.now());
       }
       entry.grant?.();
@@ -5045,6 +5059,91 @@ export class SessionBroker {
   }
 
   /* ------------------------------------------------------ queue ordering */
+
+  /**
+   * May this chat take a slot now?
+   *
+   * THE SECOND HALF OF PRIORITY INHERITANCE. Tier 1 puts a chat somebody is
+   * waiting on at the head of the queue — but the head of the queue still needs
+   * a free slot, and on a busy install one never comes: six chats were
+   * generating under a cap of six for half an hour while two shippers sat in
+   * `watch_pr` and their reviewers sat queued at tier 1. The shippers had each
+   * released a slot (PR #258), and cold starts had taken both. The pair that
+   * should cost one slot was costing zero, and the reviewer could not run.
+   *
+   * So a blocked waiter LENDS its slot: a chat that some turn-live, unoccupied
+   * chat is waiting on is admitted even at a full cap, as long as that waiter
+   * is not already lending to another running dependent. The waiter cannot use
+   * the slot — it is parked on exactly this chat — so nothing new is spent, and
+   * the overshoot is bounded by the number of chats parked on a dependency.
+   * Lent slots are reported in the snapshot (`lent`) so the panel can say
+   * "7/6 slots · 1 lent" rather than look like a broken cap.
+   *
+   * Load is counted NET of lent slots, and ONLY slots actually lent count:
+   * a chat is credited as lent when it was admitted past the cap on a loan
+   * (`onLentSlot`, stamped at admission), never because it happens to have a
+   * blocked waiter. The waiter's own slot already left the count under #258;
+   * crediting a dependent that got an ordinary slot would count that pair
+   * twice and admit a cold start on the difference. So the effective cap is
+   * `cap + dependents that NEEDED a loan`, not `cap + waiters`.
+   *
+   * Returns how the chat would be admitted — on a free slot, on a loan — or
+   * `undefined` when it cannot be. A free slot is taken before a loan is.
+   */
+  private admission(chatId: string): "slot" | "lent" | undefined {
+    const net = this.activeCount() - this.lentCount();
+    if (net + 1 <= this.cap) return "slot";
+    return this.freeSponsorOf(chatId) ? "lent" : undefined;
+  }
+
+  /**
+   * Chats this blocked waiter is parked on, by id or through the PR a reviewer
+   * was spawned for — the same two edges {@link isWaitedOn} reads, inverted.
+   */
+  private dependentsOf(waiter: LiveSession): LiveSession[] {
+    const out: LiveSession[] = [];
+    for (const d of this.sessions.values()) {
+      if (d === waiter) continue;
+      const reviewed = d.reviewOf ? prNumberOfKey(d.reviewOf) : undefined;
+      if (waiter.waitingOn.chats.has(d.chatId) || (reviewed !== undefined && waiter.waitingOn.prs.has(reviewed))) {
+        out.push(d);
+      }
+    }
+    return out;
+  }
+
+  /** A waiter is lending when a dependent of its is working ON A LOAN. One each. */
+  private isLending(waiter: LiveSession): boolean {
+    return this.dependentsOf(waiter).some((d) => d.onLentSlot === true && this.holdsSlot(d));
+  }
+
+  /** Blocked, turn-live sessions — the only ones with a slot to lend. */
+  private blockedWaiters(): LiveSession[] {
+    return [...this.sessions.values()].filter((s) => this.isTurnLive(s) && !this.holdsSlot(s));
+  }
+
+  /**
+   * How many working chats are running on a lent slot right now. Counts the
+   * CHATS, not their lenders: two chats parked on the same dependent lend it one
+   * slot between them, not two.
+   */
+  private lentCount(): number {
+    let n = 0;
+    for (const s of this.sessions.values()) if (s.onLentSlot && this.holdsSlot(s)) n += 1;
+    return n;
+  }
+
+  /** A blocked waiter of `chatId` that is not lending to anyone yet, if there is one. */
+  private freeSponsorOf(chatId: string): LiveSession | undefined {
+    const target = this.sessions.get(chatId);
+    const reviewed = target?.reviewOf ? prNumberOfKey(target.reviewOf) : undefined;
+    return this.blockedWaiters().find(
+      (w) =>
+        w.chatId !== chatId &&
+        (w.waitingOn.chats.has(chatId) || (reviewed !== undefined && w.waitingOn.prs.has(reviewed))) &&
+        !this.isLending(w),
+    );
+  }
 
   /** The queue as it will be admitted: lowest tier first, oldest first within it. */
   private orderedQueue(): QueueEntry[] {
@@ -5218,6 +5317,9 @@ export class SessionBroker {
     };
     bump(session.waitingOn.chats, target.chatId);
     bump(session.waitingOn.prs, target.pr);
+    // A declaration can make a queued chat admissible on the spot — the waiter
+    // just offered it a slot — and nothing else would pump for that.
+    if (on) this.pump();
     this.publishScheduler();
   }
 
@@ -7268,6 +7370,9 @@ export class SessionBroker {
     if (session.slotReserved && (session.activity.occupied || !this.isTurnLive(session))) {
       session.slotReserved = false;
     }
+    // A loan ends with the slot: a chat that blocks or finishes gives it back,
+    // and if it resumes later it is admitted afresh — on a free slot or a new loan.
+    if (session.onLentSlot && !this.holdsSlot(session)) session.onLentSlot = false;
     if (this.isTurnLive(session) && !session.activity.occupied) this.pump();
   }
 

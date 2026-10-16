@@ -32,7 +32,7 @@ function fakeBroker() {
       state = undefined;
       calls.push(`resumeAll:${first.join(",")}`);
     },
-    schedulerSnapshot: () => ({ paused: state ?? null, cap: 4, running: [], queued: [] }),
+    schedulerSnapshot: () => ({ paused: state ?? null, cap: 4, lent: 0, running: [], queued: [] }),
   };
   return { broker: broker as unknown as SessionBroker, calls };
 }
