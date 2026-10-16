@@ -75,12 +75,20 @@ export function runViewSlide(dir: NavDir, apply: () => void): void {
     return;
   }
 
-  // Read by the `::view-transition-*` rules to pick which way the pair travels.
-  // Cleared on `finished` rather than on a timer so a transition the browser
-  // skipped (a second navigation on top of this one) still tidies up.
+  // Read by the `::view-transition-*` rules to pick which way the pair travels,
+  // and it is also what NAMES the surface at all (see `[data-cm-surface]` in
+  // index.css). Cleared on `finished` rather than on a timer so a transition the
+  // browser skipped (a second navigation on top of this one) still tidies up —
+  // but only by the LATEST call. A skipped transition resolves `finished` in a
+  // microtask, before its successor snapshots the old state, and two same-way
+  // slides can't tell each other apart by direction: clearing on a match left
+  // the second one with no named surface, so it hard-cut instead of sliding.
   doc.documentElement.dataset.cmNav = dir;
+  const token = ++slideToken;
   const transition = doc.startViewTransition(() => flushSync(apply));
   void transition.finished.catch(() => {}).then(() => {
-    if (doc.documentElement.dataset.cmNav === dir) delete doc.documentElement.dataset.cmNav;
+    if (token === slideToken) delete doc.documentElement.dataset.cmNav;
   });
 }
+
+let slideToken = 0;
