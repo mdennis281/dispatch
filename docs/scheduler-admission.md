@@ -101,6 +101,23 @@ through `Chat.parentChatId`. A queued entry is tier 1 when some OTHER session is
 turn-live, not occupied, and either waits on this chat's id, or waits on the PR
 number this chat reviews.
 
+### A blocked waiter lends its slot
+
+Tier 1 alone was not enough. On the install this was built for, six chats
+were generating under a cap of six for half an hour while two shippers sat in
+`watch_pr` and their reviewers sat queued at tier 1. Tier 1 only helps when a
+slot frees, and none did: each shipper had released its slot (rule from #258)
+and cold starts had taken both. A pair that should cost one slot was costing
+zero, and the reviewer could not run.
+
+So a chat that a blocked, turn-live chat is waiting on is admitted even at a
+full cap, as long as that waiter is not already lending to another running
+dependent (`admissible` / `freeSponsorOf` in the broker). The waiter cannot use
+the slot — it is parked on exactly this chat — so nothing new is spent. Load is
+counted net of lent slots for everyone, and the snapshot reports `lent` so the
+panel reads "7/6 slots · 1 lent" instead of looking like a broken cap. The
+overshoot is bounded by the number of chats parked on a dependency.
+
 Starvation: a steady stream of resumes can hold cold starts off indefinitely.
 Resumes are finite — every turn ends — and the panel shows the order, so this
 is accepted rather than aged away.

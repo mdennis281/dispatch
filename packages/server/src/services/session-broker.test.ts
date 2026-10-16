@@ -2434,24 +2434,73 @@ describe("SessionBroker — steering & concurrency", () => {
     await broker.sendMessage("busy", "go");
     await busyRunning;
 
-    // An unrelated chat queues FIRST, then the reviewer.
+    // An unrelated chat queues FIRST. The reviewer, arriving second, does not
+    // queue at all: the shipper parked on its PR lends it the slot it is not
+    // using (see the lent-slot test below), and the cold start stays parked.
     await broker.sendMessage("other", "go");
-    await broker.sendMessage("reviewer", "review #7");
-    expect(broker.schedulerSnapshot().queued.map((q) => `${q.chatId}:${q.tier}`)).toEqual([
-      "reviewer:1",
-      "other:3",
-    ]);
-
+    expect(broker.schedulerSnapshot().queued.map((q) => `${q.chatId}:${q.tier}`)).toEqual(["other:3"]);
     const reviewerRunning = broker.waitFor("reviewer", "running");
-    gate.resolve();
+    await broker.sendMessage("reviewer", "review #7");
     await reviewerRunning;
     expect(broker.getStatus("other")).toBe("queued");
+    expect(broker.schedulerSnapshot().lent).toBe(1);
 
-    // Clearing the declaration drops the reviewer back to an ordinary start.
+    // Clearing the declaration ends the loan; what is running keeps running.
     broker.noteWaitingOn("ship", { pr: 7 }, false);
-    expect(broker.schedulerSnapshot().queued.map((q) => `${q.chatId}:${q.tier}`)).toEqual([
-      "other:3",
-    ]);
+    expect(broker.schedulerSnapshot().lent).toBe(0);
+    expect(broker.getStatus("reviewer")).toBe("running");
+    gate.resolve();
+  });
+
+  it("a blocked shipper LENDS its slot to its reviewer, so the reviewer runs at a full cap", async () => {
+    // Seen on the install this was built for: six chats generating under a cap
+    // of six for half an hour, two shippers parked in watch_pr, their reviewers
+    // queued at tier 1 the whole time. Tier 1 only helps when a slot frees, and
+    // the shippers' released slots had already gone to cold starts.
+    const gate = deferred();
+    let call = 0;
+    const { fn } = makeFakeQuery(async () => {
+      if (++call === 1) return [toolUseMsg("mcp__dispatch-github__watch_pr", { pr: 7 }, "t-watch")];
+      await gate.promise;
+      return [assistantText("done"), resultMsg()];
+    });
+    const broker = makeBroker(fn, 1);
+    for (const id of ["ship", "busy", "other"]) {
+      await store.saveChat(chatFor(id));
+      broker.create(chatFor(id));
+    }
+    const reviewer = { ...chatFor("reviewer"), reviewOf: "o/r#7" };
+    await store.saveChat(reviewer);
+    broker.create(reviewer);
+
+    await broker.sendMessage("ship", "watch");
+    await broker.waitFor("ship", "waiting");
+    broker.noteWaitingOn("ship", { pr: 7 }, true);
+    const busyRunning = broker.waitFor("busy", "running");
+    await broker.sendMessage("busy", "go");
+    await busyRunning;
+    expect(broker.activeCount()).toBe(1);
+
+    // The cap is full. A cold start parks…
+    await broker.sendMessage("other", "go");
+    expect(broker.getStatus("other")).toBe("queued");
+    // …but the reviewer runs on the shipper's lent slot.
+    const reviewerRunning = broker.waitFor("reviewer", "running");
+    await broker.sendMessage("reviewer", "review #7");
+    await reviewerRunning;
+    expect(broker.activeCount()).toBe(2);
+    expect(broker.schedulerSnapshot().lent).toBe(1);
+    expect(broker.getStatus("other")).toBe("queued");
+
+    // One slot per waiter: a second dependent of the same shipper does not get in.
+    const second = { ...chatFor("reviewer2"), reviewOf: "o/r#7" };
+    await store.saveChat(second);
+    broker.create(second);
+    await broker.sendMessage("reviewer2", "review #7 again");
+    expect(broker.getStatus("reviewer2")).toBe("queued");
+
+    gate.resolve();
+    await broker.waitFor("reviewer2", "running");
   });
 
   it("a permission you answer waits for a slot before the tool runs", async () => {

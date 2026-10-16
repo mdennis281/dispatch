@@ -37,6 +37,14 @@ export const SchedulerSnapshotSchema = z.object({
   /** The `maxActiveSessions` cap in force. */
   cap: z.number(),
   /**
+   * Slots LENT: working chats that do not count against the cap because a
+   * blocked chat is waiting on them and has nothing else to spend its own slot
+   * on — a reviewer running on its shipper's slot while the shipper sits in
+   * `watch_pr`. At most one per blocked waiter, so `running` can exceed `cap`
+   * by at most the number of chats parked on a dependency.
+   */
+  lent: z.number(),
+  /**
    * Chats with an open turn. `occupied` is whether it currently holds one of
    * the cap's slots — a chat blocked in `watch_pr` or on a question has a turn
    * open but frees its slot, and the panel shows that difference.
