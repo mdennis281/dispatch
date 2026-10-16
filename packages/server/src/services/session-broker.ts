@@ -104,6 +104,8 @@ import type {
   HarnessKind,
   PrSnapshot,
   PrReviewAgentState,
+  QueueEntryKind,
+  QueueTier,
 } from "@dispatch/shared";
 import {
   BUILTIN_MODE_CONFIGS,
@@ -1927,6 +1929,43 @@ export function peerReminder(peer: PeerSender): string {
   return `<system-reminder>\n${lines.join("\n")}\n</system-reminder>`;
 }
 
+/**
+ * One parked chat. Two kinds, because the cap is crossed at two points:
+ *
+ *  - `start`: a message that cannot OPEN its turn yet — the shape the queue has
+ *    always held.
+ *  - `resume`: a turn that is already open, blocked on a tool whose answer has
+ *    arrived, and must re-acquire a slot before that answer is handed to the
+ *    model. Without this entry a blocked chat released its slot on the way out
+ *    and took none on the way back, and the running set ratcheted past the cap
+ *    by one chat per block/unblock cycle — nine chats working under a cap of
+ *    four, on a project where every chat cycles through `watch_pr` several
+ *    times per PR.
+ */
+interface QueueEntry {
+  chatId: string;
+  kind: QueueEntryKind;
+  /** When it joined. FIFO within a tier. */
+  since: number;
+  /**
+   * A resume whose wait a HUMAN ended — a permission, a question, a review
+   * card, a steer. Tier 0: they already waited for the agent once, and making
+   * them wait again for a slot would be the old deadlock in a new coat.
+   */
+  human: boolean;
+  /** Resume only: hands the held answer back to the model. */
+  grant?: () => void;
+}
+
+/** The tracker id of the span a chat holds while it waits to RESUME. */
+const RESUME_SLOT_ID = "slot:resume";
+
+/** The PR number in a `owner/repo#N` catalog key. */
+function prNumberOfKey(key: string): number | undefined {
+  const m = /#(\d+)$/.exec(key);
+  return m ? Number(m[1]) : undefined;
+}
+
 interface PendingPermission {
   resolve?: (r: PermissionResult) => void;
   /** Neutral adapter that owns this ask (Codex); absent for the Claude SDK. */
@@ -2161,6 +2200,24 @@ interface LiveSession {
    * chat's steer.
    */
   steerListeners: Set<() => void>;
+  /**
+   * A slot granted to a RESUME that the tracker has not yet seen used. The
+   * held tool answer reaches the model asynchronously, and until its next
+   * `generating` span the tracker still reads the chat as blocked — so without
+   * this, `drainQueue` would hand the same slot to a second chat in the gap,
+   * which is exactly the burst the resume queue exists to end. Cleared the
+   * moment the tracker reports the chat occupied, or when the turn ends.
+   */
+  slotReserved?: boolean;
+  /**
+   * What this chat's open blocking calls are parked ON, by count (a subagent
+   * can hold a second wait). Declared by `watch_pr`, `wait_for_chat` and
+   * `chat_ask`; read by {@link SessionBroker.tierOf} so the chat they wait on
+   * is admitted ahead of unrelated work — admitting it frees two chats, not one.
+   */
+  waitingOn: { chats: Map<string, number>; prs: Map<number, number> };
+  /** `Chat.reviewOf`, so a reviewer can be matched to the shipper watching its PR. */
+  reviewOf?: string;
   pendingPermissions: Map<string, PendingPermission>;
   /**
    * Id shared by the in-flight MAIN-LOOP assistant message's token chunks AND
@@ -2394,8 +2451,12 @@ export class SessionBroker {
   private readonly stopTimeoutMs: number;
 
   private readonly sessions = new Map<string, LiveSession>();
-  /** FIFO of chatIds parked in `queued` waiting for an active slot. */
-  private queueOrder: string[] = [];
+  /**
+   * Chats parked for a slot — cold starts AND resumes (see {@link QueueEntry}).
+   * Not a FIFO: {@link drainQueue} picks by {@link tierOf}, oldest first within
+   * a tier. Push order is kept only as the tie-break.
+   */
+  private queue: QueueEntry[] = [];
   /**
    * The global pause, when one is in force. While set, nothing STARTS a turn:
    * every path that would — a human send, a peer's `chat_send`, a usage-limit
@@ -2533,6 +2594,8 @@ export class SessionBroker {
         outbox: [],
         pendingSends: [],
         steerListeners: new Set(),
+        waitingOn: { chats: new Map(), prs: new Map() },
+        reviewOf: chat.reviewOf,
         pendingPermissions: new Map(),
         writeChain: Promise.resolve(),
         turn: 0,
@@ -2998,19 +3061,28 @@ export class SessionBroker {
       const pending = session.pendingPermissions.get(requestId);
       if (!pending) continue;
       session.pendingPermissions.delete(requestId);
-      session.activity.unblocked(requestId, this.now());
       if (pending.timeoutTimer) clearTimeout(pending.timeoutTimer);
       pending.abortListener?.();
 
-      if (pending.harnessSession) {
-        pending.harnessSession.resolvePermission(requestId, resolution);
-      } else {
-        const result: PermissionResult =
-          resolution.decision === "allow"
-            ? { behavior: "allow", updatedInput: resolution.updatedInput ?? pending.input }
-            : { behavior: "deny", message: resolution.message ?? "Denied by user." };
-        pending.resolve?.(result);
-      }
+      // The answer is handed over only once the chat has a slot again — it gave
+      // its own up when the card opened. Asked BEFORE the human-wait span is
+      // released: with nothing else open on the actor, releasing first would
+      // open a `generating` span and read as occupied, and the gate would wave
+      // the chat through. A human answered, so it goes first (tier 0).
+      const admitted = this.acquireSlot(session.chatId, { human: true });
+      session.activity.unblocked(requestId, this.now());
+      const answer = () => {
+        if (pending.harnessSession) {
+          pending.harnessSession.resolvePermission(requestId, resolution);
+        } else {
+          const result: PermissionResult =
+            resolution.decision === "allow"
+              ? { behavior: "allow", updatedInput: resolution.updatedInput ?? pending.input }
+              : { behavior: "deny", message: resolution.message ?? "Denied by user." };
+          pending.resolve?.(result);
+        }
+      };
+      void admitted.then(answer, answer);
       if (resolution.decision === "allow" && resolution.remember) {
         void this.rememberAutoAllow(pending.toolName);
       }
@@ -3120,7 +3192,11 @@ export class SessionBroker {
             : [];
         });
         session.pendingPermissions.delete(requestId);
-        pending.harnessSession.resolveQuestion(requestId, answers);
+        // Same gate as `resolvePermission`: the answer waits for a slot.
+        const admitted = this.acquireSlot(session.chatId, { human: true });
+        const harness = pending.harnessSession;
+        const deliver = () => harness.resolveQuestion(requestId, answers);
+        void admitted.then(deliver, deliver);
         // The harness owns the wire shape, but the transcript row still needs
         // the per-question answers — keyed exactly as the non-harness path keys
         // them, by question text, so the card looks them up the same way.
@@ -3911,7 +3987,7 @@ export class SessionBroker {
     // Already terminal — nothing to tear down. Never re-run onDone (that would
     // emit a duplicate "Session ended" attention item, e.g. from dispose()).
     if ((session.status === "done" || session.status === "error") && !session.started) {
-      this.queueOrder = this.queueOrder.filter((x) => x !== chatId);
+      this.dequeue(chatId);
       return;
     }
     this.drainPendingPermissions(session, "Session stopped.");
@@ -3920,7 +3996,7 @@ export class SessionBroker {
     // be truncated back to the last heartbeat by the next boot.
     session.activity.dispose(this.now());
     session.outbox = [];
-    this.queueOrder = this.queueOrder.filter((x) => x !== chatId);
+    this.dequeue(chatId);
 
     if (session.started && session.harnessSession) {
       const live = session.harnessSession;
@@ -4023,7 +4099,7 @@ export class SessionBroker {
    */
   drop(chatId: string): boolean {
     this.sessions.get(chatId)?.activity.dispose(this.now());
-    this.queueOrder = this.queueOrder.filter((x) => x !== chatId);
+    this.dequeue(chatId);
     // Tear down the chat's persistent shells alongside its session — a deleted
     // chat must not leak live powershell processes.
     this.terminals?.killChat(chatId);
@@ -4251,8 +4327,13 @@ export class SessionBroker {
   resumeAll(first: string[] = []): void {
     if (!this.pauseState) return;
     this.pauseState = undefined;
-    const head = first.filter((id) => this.queueOrder.includes(id));
-    this.queueOrder = [...head, ...this.queueOrder.filter((id) => !head.includes(id))];
+    // Same tier as the rest of the starts, so "first" is done with the
+    // tie-break: date them before everything already parked.
+    const oldest = Math.min(...this.queue.map((e) => e.since), this.now());
+    first.forEach((id, i) => {
+      const entry = this.queue.find((e) => e.chatId === id && e.kind === "start");
+      if (entry) entry.since = oldest - first.length + i;
+    });
     this.pump();
     this.publishScheduler();
   }
@@ -4267,7 +4348,7 @@ export class SessionBroker {
     const session = this.sessions.get(chatId);
     if (!session) return;
     const held = session.outbox;
-    const wasQueued = session.status === "queued" || this.queueOrder.includes(chatId);
+    const wasQueued = session.status === "queued" || this.isQueuedToStart(chatId);
     await this.stop(chatId);
     if (held.length === 0 && !wasQueued) return;
     session.outbox = [...held, ...session.outbox];
@@ -4277,7 +4358,7 @@ export class SessionBroker {
 
   /** Park a session as `queued` behind the pause. */
   private parkForPause(session: LiveSession): void {
-    if (!this.queueOrder.includes(session.chatId)) this.queueOrder.push(session.chatId);
+    this.enqueueStart(session);
     session.activity.queued(this.now());
     this.setStatus(session, "queued");
   }
@@ -4292,9 +4373,9 @@ export class SessionBroker {
       paused: this.pauseState ?? null,
       cap: this.cap,
       running,
-      queued: this.queueOrder
-        .filter((id) => this.sessions.get(id)?.status === "queued")
-        .map((chatId) => ({ chatId })),
+      queued: this.orderedQueue()
+        .filter((e) => e.kind === "resume" || this.sessions.get(e.chatId)?.status === "queued")
+        .map((e) => ({ chatId: e.chatId, kind: e.kind, tier: this.tierOf(e) })),
     };
   }
 
@@ -4476,7 +4557,7 @@ export class SessionBroker {
       [...this.sessions.values()].map((session) => session.writeChain.catch(() => {})),
     );
     this.sessions.clear();
-    this.queueOrder = [];
+    this.queue = [];
   }
 
   /* -------------------------------------------------------- scheduling */
@@ -4521,7 +4602,7 @@ export class SessionBroker {
    * it matches the existing rule that lowering the cap never preempts.
    */
   private holdsSlot(s: LiveSession): boolean {
-    return this.isTurnLive(s) && s.activity.occupied;
+    return this.isTurnLive(s) && (s.activity.occupied || s.slotReserved === true);
   }
 
   private schedule(session: LiveSession): void {
@@ -4545,17 +4626,24 @@ export class SessionBroker {
       return;
     }
     // Otherwise this message must START a turn → needs a free active slot.
-    if (!this.pauseState && this.activeCount() < this.cap) {
+    // A free slot is not enough on its own: something already parked may
+    // outrank this start (a resume, a chat somebody is waiting on), and taking
+    // the slot past it would be the FIFO the tiers replace.
+    if (
+      !this.pauseState &&
+      this.activeCount() < this.cap &&
+      !this.outranked({ chatId: session.chatId, kind: "start", human: false })
+    ) {
       this.startTurn(session);
     } else {
-      if (!this.queueOrder.includes(session.chatId)) this.queueOrder.push(session.chatId);
+      this.enqueueStart(session);
       session.activity.queued(this.now());
       this.setStatus(session, "queued");
     }
   }
 
   private startTurn(session: LiveSession): void {
-    this.queueOrder = this.queueOrder.filter((id) => id !== session.chatId);
+    this.queue = this.queue.filter((e) => !(e.chatId === session.chatId && e.kind === "start"));
     session.turnOpen = true;
     session.explicitInterruptPending = false;
     if (!session.started) {
@@ -4875,7 +4963,7 @@ export class SessionBroker {
     // notice), which makes this the hottest path in the broker; without the
     // early-out every tool call in every chat would cost a settings-file read.
     // With the queue empty there is also nothing a fresh cap could release.
-    if (this.queueOrder.length === 0) return;
+    if (this.queue.length === 0) return;
     // Re-entrancy guard: `startTurn` below calls `setStatus`, which pumps. The
     // recursion terminates — each level shifts the queue — but a nested drain
     // would run the outer loop's `activeCount` against a queue it no longer
@@ -4897,16 +4985,181 @@ export class SessionBroker {
     // `pump` on a raise, and a no-change `setCap` returns before it does — so this
     // cannot recurse.
     this.refreshCap();
-    while (this.activeCount() < this.cap && this.queueOrder.length > 0) {
-      const id = this.queueOrder[0]!;
-      const session = this.sessions.get(id);
-      if (!session || session.status !== "queued") {
-        this.queueOrder.shift();
+    while (this.activeCount() < this.cap && this.queue.length > 0) {
+      const entry = this.orderedQueue()[0]!;
+      this.queue = this.queue.filter((e) => e !== entry);
+      const session = this.sessions.get(entry.chatId);
+      if (entry.kind === "start") {
+        if (!session || session.status !== "queued") continue;
+        this.startTurn(session);
         continue;
       }
-      this.queueOrder.shift();
-      this.startTurn(session);
+      // A resume. Reserve BEFORE granting: the grant resolves a promise whose
+      // continuation runs after this loop, so without the reservation the next
+      // iteration would count the chat as still blocked and admit over it.
+      if (session && this.isTurnLive(session)) {
+        session.slotReserved = true;
+        session.activity.unblocked(RESUME_SLOT_ID, this.now());
+      }
+      entry.grant?.();
     }
+    this.publishScheduler();
+  }
+
+  /* ------------------------------------------------------ queue ordering */
+
+  /** The queue as it will be admitted: lowest tier first, oldest first within it. */
+  private orderedQueue(): QueueEntry[] {
+    return [...this.queue]
+      .map((e) => ({ e, tier: this.tierOf(e) }))
+      .sort((a, b) => a.tier - b.tier || a.e.since - b.e.since)
+      .map((x) => x.e);
+  }
+
+  /**
+   * The admission class of a parked chat. Computed at PICK time, not at
+   * enqueue, because the facts it reads move: the shipper that was watching a
+   * PR may have been steered away, the parent waiting on a child may have ended
+   * its turn.
+   *
+   *   0  a resume a human answered — see {@link QueueEntry.human}
+   *   1  a chat another live, BLOCKED chat is waiting on — admitting it frees
+   *      two chats, not one. This is the deadlock PR #258 was written against:
+   *      ship chats parked on reviewer chats that sat behind unrelated cold
+   *      starts in a FIFO. Releasing blocked chats' slots made room; this is
+   *      the actual fix.
+   *   2  any other resume — its context is loaded and it is closer to
+   *      finishing. Finishing in-flight work before admitting new work is what
+   *      keeps the queue from growing.
+   *   3  a cold start.
+   */
+  private tierOf(e: Pick<QueueEntry, "chatId" | "kind" | "human">): QueueTier {
+    if (e.kind === "resume" && e.human) return 0;
+    if (this.isWaitedOn(e.chatId)) return 1;
+    return e.kind === "resume" ? 2 : 3;
+  }
+
+  /**
+   * Is some OTHER chat — turn-live and blocked, so genuinely stuck — parked on
+   * this one, either by id (`wait_for_chat`, `chat_ask`) or through the PR this
+   * chat was spawned to review (`watch_pr` on the shipper's side, `reviewOf` on
+   * the reviewer's)?
+   */
+  private isWaitedOn(chatId: string): boolean {
+    const target = this.sessions.get(chatId);
+    const reviewed = target?.reviewOf ? prNumberOfKey(target.reviewOf) : undefined;
+    for (const s of this.sessions.values()) {
+      if (s.chatId === chatId || !this.isTurnLive(s) || this.holdsSlot(s)) continue;
+      if (s.waitingOn.chats.has(chatId)) return true;
+      if (reviewed !== undefined && s.waitingOn.prs.has(reviewed)) return true;
+    }
+    return false;
+  }
+
+  /** Would something already parked be admitted before an entry of this shape? */
+  private outranked(shape: Pick<QueueEntry, "chatId" | "kind" | "human">): boolean {
+    const mine = this.tierOf(shape);
+    return this.queue.some((e) => e.chatId !== shape.chatId && this.tierOf(e) <= mine);
+  }
+
+  private isQueuedToStart(chatId: string): boolean {
+    return this.queue.some((e) => e.chatId === chatId && e.kind === "start");
+  }
+
+  private enqueueStart(session: LiveSession): void {
+    if (this.isQueuedToStart(session.chatId)) return;
+    this.queue.push({ chatId: session.chatId, kind: "start", since: this.now(), human: false });
+  }
+
+  /**
+   * Drop every entry for a chat. A resume's grant is CALLED, not dropped: the
+   * tool handler holding the answer must return, and it is returning into a
+   * turn that is being torn down, so the slot it did not get is moot.
+   */
+  private dequeue(chatId: string, kind?: QueueEntryKind): void {
+    const gone = this.queue.filter((e) => e.chatId === chatId && (!kind || e.kind === kind));
+    if (gone.length === 0) return;
+    this.queue = this.queue.filter((e) => !gone.includes(e));
+    for (const e of gone) e.grant?.();
+  }
+
+  /**
+   * Re-acquire a slot before a blocked chat's answer continues its turn.
+   *
+   * THE OTHER HALF OF {@link holdsSlot}. Releasing on block was admission-only
+   * — a tool call cannot be paused, so the chat resumed the instant its call
+   * returned, over the cap if its slot had been taken meanwhile. A tool call
+   * cannot be paused, but its RESULT can be held, and almost every blocking
+   * call is one Dispatch itself answers: the manager tools, permission prompts,
+   * question cards. So they ask here before answering, and the result waits in
+   * the queue as a `resume` entry. The subprocess is already idle; the hold
+   * costs nothing.
+   *
+   * Resolves at once when the chat still holds a slot (a subagent kept it
+   * working, or a reservation is already in place), when its turn is not open
+   * (nothing to re-admit), or when `signal` has fired (the call is being torn
+   * down). A steer while parked promotes the entry to the human tier rather
+   * than granting — the message lands after the result, and the human is
+   * waiting for both.
+   */
+  acquireSlot(chatId: string, opts: { human?: boolean; signal?: AbortSignal } = {}): Promise<void> {
+    const session = this.sessions.get(chatId);
+    if (!session || !this.isTurnLive(session) || this.holdsSlot(session)) return Promise.resolve();
+    if (opts.signal?.aborted) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      const entry: QueueEntry = {
+        chatId,
+        kind: "resume",
+        since: this.now(),
+        human: opts.human === true,
+      };
+      const finish = () => {
+        opts.signal?.removeEventListener("abort", onAbort);
+        session.steerListeners.delete(onSteer);
+        resolve();
+      };
+      const onAbort = () => {
+        this.queue = this.queue.filter((e) => e !== entry);
+        session.activity.unblocked(RESUME_SLOT_ID, this.now());
+        finish();
+        this.publishScheduler();
+      };
+      const onSteer = () => {
+        entry.human = true;
+        this.publishScheduler();
+      };
+      entry.grant = finish;
+      opts.signal?.addEventListener("abort", onAbort, { once: true });
+      session.steerListeners.add(onSteer);
+      this.queue.push(entry);
+      // A span of its own, so the chart says "waited N minutes for a slot"
+      // rather than filing that time under the tool whose answer was ready.
+      session.activity.blocked(MAIN_ACTOR, RESUME_SLOT_ID, "queued", "slot", this.now());
+      this.setStatus(session, session.status, {
+        state: "tool",
+        label: "waiting for a slot to resume",
+      });
+      this.pump();
+    });
+  }
+
+  /**
+   * Declare (`on`) or clear what a chat's blocking call is parked on, so
+   * {@link tierOf} can put that target first. Counted, not flagged: a subagent
+   * can open a second wait while the main loop holds one.
+   */
+  noteWaitingOn(chatId: string, target: { chatId?: string; pr?: number }, on: boolean): void {
+    const session = this.sessions.get(chatId);
+    if (!session) return;
+    const bump = <K,>(map: Map<K, number>, key: K | undefined) => {
+      if (key === undefined) return;
+      const next = (map.get(key) ?? 0) + (on ? 1 : -1);
+      if (next > 0) map.set(key, next);
+      else map.delete(key);
+    };
+    bump(session.waitingOn.chats, target.chatId);
+    bump(session.waitingOn.prs, target.pr);
+    this.publishScheduler();
   }
 
   /**
@@ -4935,7 +5188,7 @@ export class SessionBroker {
       );
     if (active < limit) return true;
     session.started = false;
-    if (!this.queueOrder.includes(session.chatId)) this.queueOrder.push(session.chatId);
+    this.enqueueStart(session);
     // The SECOND way a turn queues, and it arrives after `startTurn` already
     // opened the turn's `generating` span — so this both ends that and starts
     // the wait, rather than leaving the chat looking like it was thinking for
@@ -6944,13 +7197,18 @@ export class SessionBroker {
     //
     // `isTurnLive` is what keeps it from spinning. A chat re-queued by
     // `withinOverallContextBudget` is un-occupied too, but it is also back in
-    // `queueOrder` — pumping on it would hand it straight back to `startTurn`,
+    // the queue — pumping on it would hand it straight back to `startTurn`,
     // which re-checks the same unchanged budget and re-queues it, forever. A
     // queued chat is not turn-live, so it never reaches here; it waits for a
     // settling turn to retry it, exactly as it did before.
     //
     // Cheap by construction: `pump` returns immediately when nothing is queued,
     // which is the overwhelmingly common case.
+    // The reservation a granted resume carried is spent the moment the tracker
+    // sees work again, and void once the turn is over.
+    if (session.slotReserved && (session.activity.occupied || !this.isTurnLive(session))) {
+      session.slotReserved = false;
+    }
     if (this.isTurnLive(session) && !session.activity.occupied) this.pump();
   }
 
@@ -7018,6 +7276,7 @@ export class SessionBroker {
   }
 
   private onTurnEnd(session: LiveSession, opts: { stopped?: boolean } = {}): void {
+    this.dequeue(session.chatId, "resume");
     // Stop can arrive while the terminal row is still being persisted but after
     // turn-end already sampled the marker. Settlement is the final backstop that
     // keeps that late, provider-no-op Stop from leaking into the next turn.
@@ -7051,6 +7310,7 @@ export class SessionBroker {
 
   /** A turn failed but its reusable runtime session is still available. */
   private onTurnFailed(session: LiveSession): void {
+    this.dequeue(session.chatId, "resume");
     session.explicitInterruptPending = false;
     session.turnOpen = false;
     this.setStatus(session, "failed", { state: "idle" });
@@ -7112,7 +7372,7 @@ export class SessionBroker {
     if (session.switching) {
       session.switching = false;
       this.setStatus(session, "idle", { state: "idle" });
-      this.queueOrder = this.queueOrder.filter((x) => x !== session.chatId);
+      this.dequeue(session.chatId);
       this.pump();
       return;
     }
@@ -7128,7 +7388,7 @@ export class SessionBroker {
         createdAt: this.now(),
       },
     });
-    this.queueOrder = this.queueOrder.filter((x) => x !== session.chatId);
+    this.dequeue(session.chatId);
     this.pump();
   }
 
@@ -7173,7 +7433,7 @@ export class SessionBroker {
       level: "error",
       text: `Session error: ${message}`,
     });
-    this.queueOrder = this.queueOrder.filter((x) => x !== session.chatId);
+    this.dequeue(session.chatId);
     this.pump();
   }
 

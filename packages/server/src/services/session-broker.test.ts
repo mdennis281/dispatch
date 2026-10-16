@@ -2314,6 +2314,215 @@ describe("SessionBroker — steering & concurrency", () => {
     expect(broker.getStatus("c2")).toBe("queued");
     expect(controllers).toHaveLength(1);
   });
+
+  it("a chat whose wait ended waits for a slot before its answer continues", async () => {
+    // The ratchet this closes: releasing on block was admission-only, so a chat
+    // resumed the instant its call returned — over the cap if its slot had
+    // been taken meanwhile. Eight chats working under a cap of four.
+    const gate = deferred();
+    let call = 0;
+    const { fn } = makeFakeQuery(async () => {
+      if (++call === 1) return [toolUseMsg("mcp__dispatch-github__watch_pr", { pr: 7 }, "t-watch")];
+      await gate.promise;
+      return [assistantText("done"), resultMsg()];
+    });
+    const broker = makeBroker(fn, 1);
+    for (const id of ["c1", "c2"]) {
+      await store.saveChat(chatFor(id));
+      broker.create(chatFor(id));
+    }
+    await broker.sendMessage("c1", "watch the PR");
+    await broker.waitFor("c1", "waiting");
+    const c2running = broker.waitFor("c2", "running");
+    await broker.sendMessage("c2", "go");
+    await c2running;
+    expect(broker.activeCount()).toBe(1);
+
+    // CI answers: watch_pr wants to return, and asks for its slot back.
+    let resumed = false;
+    const admitted = broker.acquireSlot("c1").then(() => (resumed = true));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(resumed).toBe(false);
+    expect(broker.schedulerSnapshot().queued).toEqual([{ chatId: "c1", kind: "resume", tier: 2 }]);
+    // Still turn-live — a message would steer it — and still not counted.
+    expect(broker.getStatus("c1")).toBe("waiting");
+    expect(broker.activeCount()).toBe(1);
+
+    // c2 finishes → the slot goes to c1's resume, and is RESERVED for it until
+    // the tracker sees it working, so a second chat cannot slip in behind.
+    gate.resolve();
+    await admitted;
+    expect(resumed).toBe(true);
+    expect(broker.activeCount()).toBe(1);
+    expect(broker.schedulerSnapshot().queued).toEqual([]);
+  });
+
+  it("a resume outranks a cold start, and a human-answered resume outranks both", async () => {
+    const gate = deferred();
+    let call = 0;
+    const { fn } = makeFakeQuery(async () => {
+      // c1 and c3 park on a PR watch; c2 then holds the only slot until released.
+      call += 1;
+      if (call <= 2) {
+        return [toolUseMsg("mcp__dispatch-github__watch_pr", { pr: call }, `t-watch-${call}`)];
+      }
+      await gate.promise;
+      return [assistantText("done"), resultMsg()];
+    });
+    const broker = makeBroker(fn, 1);
+    for (const id of ["c1", "c2", "c3", "c4"]) {
+      await store.saveChat(chatFor(id));
+      broker.create(chatFor(id));
+    }
+    await broker.sendMessage("c1", "watch");
+    await broker.waitFor("c1", "waiting");
+    await broker.sendMessage("c3", "watch");
+    await broker.waitFor("c3", "waiting");
+    const c2running = broker.waitFor("c2", "running");
+    await broker.sendMessage("c2", "go");
+    await c2running;
+
+    // Queue, in arrival order: a cold start, then two resumes — the LATER of
+    // which a human answered.
+    await broker.sendMessage("c4", "go");
+    expect(broker.getStatus("c4")).toBe("queued");
+    const order: string[] = [];
+    const r1 = broker.acquireSlot("c1").then(() => order.push("c1"));
+    const r3 = broker.acquireSlot("c3", { human: true }).then(() => order.push("c3"));
+    expect(broker.schedulerSnapshot().queued.map((q) => `${q.chatId}:${q.tier}`)).toEqual([
+      "c3:0",
+      "c1:2",
+      "c4:3",
+    ]);
+
+    gate.resolve();
+    await r3;
+    expect(order).toEqual(["c3"]);
+    // Only ONE slot freed, and it went to the human-answered resume. The other
+    // resume and the cold start are still parked, in that order.
+    expect(broker.schedulerSnapshot().queued.map((q) => q.chatId)).toEqual(["c1", "c4"]);
+    expect(broker.getStatus("c4")).toBe("queued");
+    void r1;
+  });
+
+  it("a chat another blocked chat is waiting on jumps the queue", async () => {
+    // The deadlock PR #258 was written against: a shipper parked in watch_pr on
+    // a reviewer chat that sat behind unrelated cold starts in a FIFO.
+    const gate = deferred();
+    let call = 0;
+    const { fn } = makeFakeQuery(async () => {
+      if (++call === 1) return [toolUseMsg("mcp__dispatch-github__watch_pr", { pr: 7 }, "t-watch")];
+      await gate.promise;
+      return [assistantText("done"), resultMsg()];
+    });
+    const broker = makeBroker(fn, 1);
+    await store.saveChat(chatFor("ship"));
+    broker.create(chatFor("ship"));
+    await store.saveChat(chatFor("busy"));
+    broker.create(chatFor("busy"));
+    await store.saveChat(chatFor("other"));
+    broker.create(chatFor("other"));
+    const reviewer = { ...chatFor("reviewer"), reviewOf: "o/r#7" };
+    await store.saveChat(reviewer);
+    broker.create(reviewer);
+
+    await broker.sendMessage("ship", "watch");
+    await broker.waitFor("ship", "waiting");
+    // What watch_pr declares while it polls.
+    broker.noteWaitingOn("ship", { pr: 7 }, true);
+    const busyRunning = broker.waitFor("busy", "running");
+    await broker.sendMessage("busy", "go");
+    await busyRunning;
+
+    // An unrelated chat queues FIRST, then the reviewer.
+    await broker.sendMessage("other", "go");
+    await broker.sendMessage("reviewer", "review #7");
+    expect(broker.schedulerSnapshot().queued.map((q) => `${q.chatId}:${q.tier}`)).toEqual([
+      "reviewer:1",
+      "other:3",
+    ]);
+
+    const reviewerRunning = broker.waitFor("reviewer", "running");
+    gate.resolve();
+    await reviewerRunning;
+    expect(broker.getStatus("other")).toBe("queued");
+
+    // Clearing the declaration drops the reviewer back to an ordinary start.
+    broker.noteWaitingOn("ship", { pr: 7 }, false);
+    expect(broker.schedulerSnapshot().queued.map((q) => `${q.chatId}:${q.tier}`)).toEqual([
+      "other:3",
+    ]);
+  });
+
+  it("a permission you answer waits for a slot before the tool runs", async () => {
+    // The gate at the other crossing: a chat parked on a permission card gave
+    // its slot up, so the answer is handed over only once it has one again.
+    const gate = deferred();
+    let call = 0;
+    let decided: Promise<unknown> | undefined;
+    const { fn } = makeFakeQuery(async (_prompt, opts) => {
+      if (++call === 1) {
+        decided = opts?.canUseTool?.("Bash", { command: "ls" }, {} as never);
+        return [];
+      }
+      await gate.promise;
+      return [assistantText("done"), resultMsg()];
+    });
+    const broker = makeBroker(fn, 1);
+    for (const id of ["c1", "c2"]) {
+      await store.saveChat(chatFor(id));
+      broker.create(chatFor(id));
+    }
+    await broker.sendMessage("c1", "go");
+    await broker.waitFor("c1", "awaiting-input");
+    const c2running = broker.waitFor("c2", "running");
+    await broker.sendMessage("c2", "go");
+    await c2running;
+
+    const requestId = broker.pendingPermissionSnapshot()[0]!.id;
+    let allowed = false;
+    void decided!.then(() => (allowed = true));
+    expect(broker.resolvePermission(requestId, { decision: "allow" })).toBe(true);
+    await new Promise((r) => setTimeout(r, 20));
+    // Answered, but held: c2 has the only slot.
+    expect(allowed).toBe(false);
+    expect(broker.schedulerSnapshot().queued).toEqual([{ chatId: "c1", kind: "resume", tier: 0 }]);
+
+    gate.resolve();
+    await until(() => allowed);
+    expect(broker.activeCount()).toBe(1);
+  });
+
+  it("stopping a chat releases a resume it was waiting on", async () => {
+    const gate = deferred();
+    let call = 0;
+    const { fn } = makeFakeQuery(async () => {
+      if (++call === 1) return [toolUseMsg("mcp__dispatch-github__watch_pr", { pr: 7 }, "t-watch")];
+      await gate.promise;
+      return [assistantText("done"), resultMsg()];
+    });
+    const broker = makeBroker(fn, 1);
+    for (const id of ["c1", "c2"]) {
+      await store.saveChat(chatFor(id));
+      broker.create(chatFor(id));
+    }
+    await broker.sendMessage("c1", "watch");
+    await broker.waitFor("c1", "waiting");
+    const c2running = broker.waitFor("c2", "running");
+    await broker.sendMessage("c2", "go");
+    await c2running;
+
+    let resumed = false;
+    const admitted = broker.acquireSlot("c1").then(() => (resumed = true));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(resumed).toBe(false);
+    // The answer is returning into a torn-down turn: let the handler go.
+    await broker.stop("c1");
+    await admitted;
+    expect(resumed).toBe(true);
+    expect(broker.schedulerSnapshot().queued).toEqual([]);
+    gate.resolve();
+  });
 });
 
 describe("SessionBroker — live controls", () => {

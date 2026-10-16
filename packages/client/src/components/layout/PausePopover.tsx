@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Pause, Play, Skull, ArrowRight, Check, ChevronRight } from "lucide-react";
-import type { SchedulerSnapshot } from "@dispatch/shared";
+import { QUEUE_TIER_LABELS, type SchedulerSnapshot } from "@dispatch/shared";
 import { Popover } from "../ui/Popover.js";
 import { IconButton } from "../ui/IconButton.js";
 import { RowButton } from "../ui/RowButton.js";
@@ -331,7 +331,7 @@ export function PausePopover({ compact }: { compact?: boolean }) {
                         ? paused.interrupted.includes(q.chatId)
                           ? "interrupted — resumes first"
                           : "held by pause"
-                        : "waiting for a slot"
+                        : QUEUE_TIER_LABELS[q.tier]
                     }
                   />
                 ))}

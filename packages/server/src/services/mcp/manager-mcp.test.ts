@@ -23,6 +23,7 @@ import {
 import {
   createManagerTools,
   createManagerMcpServers,
+  withSlotReacquire,
   humanReviewQuestion,
   managerToolDescriptors,
   prLandingBlockers,
@@ -78,6 +79,8 @@ function fakeBroker(states: Record<string, ChatStatus>): ManagerMcpBroker {
     getContextUsage: async () => null,
     compact: () => {},
     markPrWatched: () => {},
+    acquireSlot: async () => {},
+    noteWaitingOn: () => {},
     askUser: async () => ({ status: "declined" }),
     requestHumanReview: async () => ({ status: "dismissed" }),
   };
@@ -386,9 +389,115 @@ describe("manager-mcp — wait", () => {
   });
 });
 
+/* --------------------------------------------------- slot re-acquisition */
+
+describe("manager-mcp — withSlotReacquire", () => {
+  function recording() {
+    const calls: { chatId: string; human?: boolean }[] = [];
+    const broker: ManagerMcpBroker = {
+      ...fakeBroker({}),
+      acquireSlot: async (chatId, opts) => {
+        calls.push({ chatId, human: opts?.human });
+      },
+    };
+    return { calls, broker };
+  }
+
+  it("asks the broker for a slot AFTER a blocking tool's handler returns", async () => {
+    // The ratchet this closes: a blocked chat gave its slot up and took none
+    // back, so the running set grew past the cap by one per block/unblock.
+    const { calls, broker } = recording();
+    const ctx = { chatId: "c1", bus, broker };
+    const { wait } = createManagerTools(ctx);
+    const wrapped = withSlotReacquire(ctx, "session", wait);
+    const order: string[] = [];
+    broker.acquireSlot = async (chatId, opts) => {
+      order.push("acquire");
+      calls.push({ chatId, human: opts?.human });
+    };
+    const res = await wrapped.handler({ seconds: 0.01, reason: undefined }, {});
+    order.push("returned");
+    expect(resultText(res)).toContain("Waited");
+    expect(calls).toEqual([{ chatId: "c1", human: false }]);
+    expect(order).toEqual(["acquire", "returned"]);
+  });
+
+  it("marks a human-answered wait so the scheduler admits it first", async () => {
+    const { calls, broker } = recording();
+    const ctx = { chatId: "c1", bus, broker };
+    const { askUser } = createManagerTools(ctx);
+    await withSlotReacquire(ctx, "confirm", askUser).handler(
+      {
+        questions: [
+          {
+            header: "Go?",
+            question: "Proceed?",
+            options: [{ label: "Yes" }, { label: "No" }],
+          },
+        ],
+        timeoutSeconds: undefined,
+      },
+      {},
+    );
+    expect(calls).toEqual([{ chatId: "c1", human: true }]);
+  });
+
+  it("leaves a non-blocking tool untouched", () => {
+    const { broker } = recording();
+    const ctx = { chatId: "c1", bus, broker };
+    const { contextUsage } = createManagerTools(ctx);
+    expect(withSlotReacquire(ctx, "session", contextUsage)).toBe(contextUsage);
+  });
+
+  it("still returns the answer when the broker refuses", async () => {
+    // An answer returning into a torn-down turn needs no slot; a broker error
+    // must never swallow a result the handler already produced.
+    const { broker } = recording();
+    broker.acquireSlot = async () => {
+      throw new Error("gone");
+    };
+    const ctx = { chatId: "c1", bus, broker };
+    const { wait } = createManagerTools(ctx);
+    const res = await withSlotReacquire(ctx, "session", wait).handler(
+      { seconds: 0.01, reason: undefined },
+      {},
+    );
+    expect(resultText(res)).toContain("Waited");
+  });
+
+  it("every blocking manager tool on a built server is wrapped", async () => {
+    // Through the real server assembly, not the helper: the wrapper is only a
+    // bound if `buildCategoryServer` applies it.
+    const { calls, broker } = recording();
+    const servers = createManagerMcpServers({ chatId: "c1", bus, broker });
+    const session = servers["dispatch-session"]!.instance as unknown as {
+      _registeredTools: Record<string, { handler: (a: unknown, e: unknown) => Promise<unknown> }>;
+    };
+    await session._registeredTools["wait"]!.handler({ seconds: 0.01 }, {});
+    expect(calls).toEqual([{ chatId: "c1", human: false }]);
+  });
+});
+
 /* ------------------------------------------------------------ wait_for_chat */
 
 describe("manager-mcp — wait_for_chat", () => {
+  it("declares the chat it is parked on while it waits, and clears it after", async () => {
+    const declared: { chatId?: string; on: boolean }[] = [];
+    const broker: ManagerMcpBroker = {
+      ...fakeBroker({ c2: "running" }),
+      noteWaitingOn: (_self, target, on) => declared.push({ chatId: target.chatId, on }),
+    };
+    const { waitForChat } = createManagerTools({ chatId: "c1", bus, broker });
+    const p = waitForChat.handler({ chatId: "c2", timeoutSeconds: undefined }, {});
+    expect(declared).toEqual([{ chatId: "c2", on: true }]);
+    bus.publish({ type: "chat-status", chatId: "c2", status: "done" });
+    await p;
+    expect(declared).toEqual([
+      { chatId: "c2", on: true },
+      { chatId: "c2", on: false },
+    ]);
+  });
+
   it("resolves when the target chat transitions to a terminal state", async () => {
     const { waitForChat } = createManagerTools({
       chatId: "c1",
