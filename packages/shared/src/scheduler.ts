@@ -40,8 +40,9 @@ export const SchedulerSnapshotSchema = z.object({
    * Slots LENT: working chats that do not count against the cap because a
    * blocked chat is waiting on them and has nothing else to spend its own slot
    * on — a reviewer running on its shipper's slot while the shipper sits in
-   * `watch_pr`. At most one per blocked waiter, so `running` can exceed `cap`
-   * by at most the number of chats parked on a dependency.
+   * `watch_pr`. Counted per lent CHAT, stamped at admission: only a chat that
+   * needed the loan to get in is credited, and two waiters on one chat lend it
+   * one slot between them. `running` can exceed `cap` by at most this.
    */
   lent: z.number(),
   /**

@@ -113,10 +113,14 @@ zero, and the reviewer could not run.
 So a chat that a blocked, turn-live chat is waiting on is admitted even at a
 full cap, as long as that waiter is not already lending to another running
 dependent (`admissible` / `freeSponsorOf` in the broker). The waiter cannot use
-the slot — it is parked on exactly this chat — so nothing new is spent. Load is
-counted net of lent slots for everyone, and the snapshot reports `lent` so the
-panel reads "7/6 slots · 1 lent" instead of looking like a broken cap. The
-overshoot is bounded by the number of chats parked on a dependency.
+the slot — it is parked on exactly this chat — so nothing new is spent. A free
+slot is always taken before a loan, and only a chat that NEEDED the loan is
+stamped `onLentSlot` and credited: load is counted net of those, so the
+effective cap is `cap + dependents admitted on a loan`, never `cap + waiters`
+(a dependent that got an ordinary slot would otherwise be credited twice, once
+for the waiter's slot already released under #258). Two waiters on one chat
+lend it one slot between them. The snapshot reports `lent` so the panel reads
+"7/6 slots · 1 lent" instead of looking like a broken cap.
 
 Starvation: a steady stream of resumes can hold cold starts off indefinitely.
 Resumes are finite — every turn ends — and the panel shows the order, so this

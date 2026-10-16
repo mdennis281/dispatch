@@ -2218,6 +2218,15 @@ interface LiveSession {
    */
   slotReserved?: boolean;
   /**
+   * This chat was admitted PAST the cap on a slot lent by a blocked waiter (see
+   * `admission`). Stamped at admission, not derived: a dependent that happened
+   * to get an ordinary free slot must not be credited as lent, or the pair
+   * would be credited twice — once for the waiter's slot already released
+   * under #258, once here — and a cold start would be admitted on the
+   * difference. Cleared the moment the chat stops holding a slot.
+   */
+  onLentSlot?: boolean;
+  /**
    * What this chat's open blocking calls are parked ON, by count (a subagent
    * can hold a second wait). Declared by `watch_pr`, `wait_for_chat` and
    * `chat_ask`; read by {@link SessionBroker.tierOf} so the chat they wait on
@@ -4655,12 +4664,9 @@ export class SessionBroker {
     // A free slot is not enough on its own: something already parked may
     // outrank this start (a resume, a chat somebody is waiting on), and taking
     // the slot past it would be the FIFO the tiers replace.
-    if (
-      !this.pauseState &&
-      this.admissible(session.chatId) &&
-      !this.outranked({ chatId: session.chatId, kind: "start", human: false })
-    ) {
-      this.startTurn(session);
+    const admission = this.pauseState ? undefined : this.admission(session.chatId);
+    if (admission && !this.outranked({ chatId: session.chatId, kind: "start", human: false })) {
+      this.startTurn(session, admission === "lent");
     } else {
       this.enqueueStart(session);
       session.activity.queued(this.now());
@@ -4668,8 +4674,9 @@ export class SessionBroker {
     }
   }
 
-  private startTurn(session: LiveSession): void {
+  private startTurn(session: LiveSession, lent = false): void {
     this.queue = this.queue.filter((e) => !(e.chatId === session.chatId && e.kind === "start"));
+    session.onLentSlot = lent;
     session.turnOpen = true;
     session.explicitInterruptPending = false;
     if (!session.started) {
@@ -5028,13 +5035,14 @@ export class SessionBroker {
     // sponsor (below) fits where a cold start does not, and stopping at the
     // head would leave a sponsored reviewer parked behind an unsponsored start.
     for (;;) {
-      const entry = this.orderedQueue().find((e) => this.admissible(e.chatId));
+      let admission: "slot" | "lent" | undefined;
+      const entry = this.orderedQueue().find((e) => (admission = this.admission(e.chatId)) !== undefined);
       if (!entry) break;
       this.queue = this.queue.filter((e) => e !== entry);
       const session = this.sessions.get(entry.chatId);
       if (entry.kind === "start") {
         if (!session || session.status !== "queued") continue;
-        this.startTurn(session);
+        this.startTurn(session, admission === "lent");
         continue;
       }
       // A resume. Reserve BEFORE granting: the grant resolves a promise whose
@@ -5042,6 +5050,7 @@ export class SessionBroker {
       // iteration would count the chat as still blocked and admit over it.
       if (session && this.isTurnLive(session)) {
         session.slotReserved = true;
+        session.onLentSlot = admission === "lent";
         session.activity.unblocked(RESUME_SLOT_ID, this.now());
       }
       entry.grant?.();
@@ -5070,14 +5079,21 @@ export class SessionBroker {
    * Lent slots are reported in the snapshot (`lent`) so the panel can say
    * "7/6 slots · 1 lent" rather than look like a broken cap.
    *
-   * Load is counted NET of lent slots for everyone, which is what makes the
-   * arithmetic honest: a sponsored reviewer does not consume cap, so when one
-   * of the six finishes an ordinary start may take the freed slot even though
-   * seven chats are working.
+   * Load is counted NET of lent slots, and ONLY slots actually lent count:
+   * a chat is credited as lent when it was admitted past the cap on a loan
+   * (`onLentSlot`, stamped at admission), never because it happens to have a
+   * blocked waiter. The waiter's own slot already left the count under #258;
+   * crediting a dependent that got an ordinary slot would count that pair
+   * twice and admit a cold start on the difference. So the effective cap is
+   * `cap + dependents that NEEDED a loan`, not `cap + waiters`.
+   *
+   * Returns how the chat would be admitted — on a free slot, on a loan — or
+   * `undefined` when it cannot be. A free slot is taken before a loan is.
    */
-  private admissible(chatId: string): boolean {
-    const sponsored = this.freeSponsorOf(chatId) !== undefined;
-    return this.activeCount() - this.lentCount() + (sponsored ? 0 : 1) <= this.cap;
+  private admission(chatId: string): "slot" | "lent" | undefined {
+    const net = this.activeCount() - this.lentCount();
+    if (net + 1 <= this.cap) return "slot";
+    return this.freeSponsorOf(chatId) ? "lent" : undefined;
   }
 
   /**
@@ -5096,9 +5112,9 @@ export class SessionBroker {
     return out;
   }
 
-  /** A waiter is lending when some dependent of its is working. One slot each, however many run. */
+  /** A waiter is lending when a dependent of its is working ON A LOAN. One each. */
   private isLending(waiter: LiveSession): boolean {
-    return this.dependentsOf(waiter).some((d) => this.holdsSlot(d));
+    return this.dependentsOf(waiter).some((d) => d.onLentSlot === true && this.holdsSlot(d));
   }
 
   /** Blocked, turn-live sessions — the only ones with a slot to lend. */
@@ -5106,10 +5122,14 @@ export class SessionBroker {
     return [...this.sessions.values()].filter((s) => this.isTurnLive(s) && !this.holdsSlot(s));
   }
 
-  /** How many working chats are running on a lent slot right now. */
+  /**
+   * How many working chats are running on a lent slot right now. Counts the
+   * CHATS, not their lenders: two chats parked on the same dependent lend it one
+   * slot between them, not two.
+   */
   private lentCount(): number {
     let n = 0;
-    for (const w of this.blockedWaiters()) if (this.isLending(w)) n += 1;
+    for (const s of this.sessions.values()) if (s.onLentSlot && this.holdsSlot(s)) n += 1;
     return n;
   }
 
@@ -7350,6 +7370,9 @@ export class SessionBroker {
     if (session.slotReserved && (session.activity.occupied || !this.isTurnLive(session))) {
       session.slotReserved = false;
     }
+    // A loan ends with the slot: a chat that blocks or finishes gives it back,
+    // and if it resumes later it is admitted afresh — on a free slot or a new loan.
+    if (session.onLentSlot && !this.holdsSlot(session)) session.onLentSlot = false;
     if (this.isTurnLive(session) && !session.activity.occupied) this.pump();
   }
 
