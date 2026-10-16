@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { slideDirection } from "./viewSlide.js";
+import { describe, it, expect, afterEach } from "vitest";
+import { runViewSlide, slideDirection } from "./viewSlide.js";
 
 /**
  * The travel itself needs a DOM (and a browser with View Transitions) and this
@@ -41,5 +41,40 @@ describe("slideDirection", () => {
   it("does not travel when the view did not change", () => {
     expect(slideDirection("home", "home")).toBeNull();
     expect(slideDirection("chat", "chat")).toBeNull();
+  });
+});
+
+describe("runViewSlide", () => {
+  const realDocument = globalThis.document;
+  afterEach(() => {
+    (globalThis as { document?: unknown }).document = realDocument;
+  });
+
+  it("leaves the direction set while a LATER same-way slide is still pending", async () => {
+    // `data-cm-nav` is what names the travelling surface, so clearing it early
+    // turns the next slide into a hard cut. A skipped transition resolves
+    // `finished` before its successor snapshots, and both say "forward" — so
+    // a direction match is not enough to know the attribute is still ours.
+    const finishers: Array<() => void> = [];
+    const dataset: Record<string, string> = {};
+    (globalThis as { document?: unknown }).document = {
+      documentElement: { dataset },
+      startViewTransition: (cb: () => void) => {
+        cb();
+        return { finished: new Promise<void>((r) => finishers.push(r)) };
+      },
+    };
+
+    runViewSlide("forward", () => {});
+    runViewSlide("forward", () => {});
+    finishers[0]!(); // the first one is skipped
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(dataset.cmNav).toBe("forward");
+
+    finishers[1]!();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(dataset.cmNav).toBeUndefined();
   });
 });

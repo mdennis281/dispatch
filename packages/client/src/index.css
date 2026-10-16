@@ -965,8 +965,15 @@
  *
  * ONE box travels (`[data-cm-surface]`), never its rows — home can list
  * hundreds of chats.
+ *
+ * Named ONLY while a slide is running. `view-transition-name` makes its element
+ * a stacking context, and a permanent one trapped the sidebar's `LAYER.drawer`
+ * inside the surface — so the chat menu (`LAYER.sidebarFlyout`, portalled to
+ * the shell above it) painted OVER the sidebar it is meant to slide out from
+ * under. `data-cm-nav` is set before `startViewTransition` snapshots the old
+ * state and cleared on `finished`, so both snapshots still see the name.
  */
-[data-cm-surface] {
+html[data-cm-nav] [data-cm-surface] {
   view-transition-name: cm-surface;
 }
 
