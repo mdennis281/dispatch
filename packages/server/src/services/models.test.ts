@@ -167,6 +167,9 @@ describe("listContextWindows", () => {
     resetModelsCache();
     delete process.env.DISPATCH_FAKE_SDK;
   });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
 
   /**
    * A control channel whose `getContextUsage` answers for the model last set —
@@ -209,6 +212,18 @@ describe("listContextWindows", () => {
   it("leaves out a model the runtime couldn't size instead of guessing", async () => {
     const query = sizing({ default: 1_000_000, sonnet: new Error("nope"), haiku: 200_000 });
     expect(await listContextWindows({ query })).toEqual({ default: 1_000_000, haiku: 200_000 });
+  });
+
+  it("re-probes a partial result after a minute instead of holding it for a day", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const query = sizing({ default: 1_000_000, sonnet: new Error("cold"), haiku: 200_000 });
+    await listContextWindows({ query });
+    vi.setSystemTime(Date.now() + 30_000);
+    await listContextWindows({ query });
+    expect(query.calls).toBe(1);
+    vi.setSystemTime(Date.now() + 61_000);
+    await listContextWindows({ query });
+    expect(query.calls).toBe(2);
   });
 
   it("caches, and shares one probe between concurrent callers", async () => {

@@ -173,11 +173,23 @@ export function resetModelsCache(): void {
  * probe below is slow. A day keeps it cheap; `refresh` re-reads on demand.
  */
 const WINDOWS_TTL_MS = 24 * 60 * 60 * 1000;
+/**
+ * A probe where some row failed to size (a step timing out on a cold spawn) is
+ * still served, but only briefly: cached for a day, the missing row would stay
+ * a number box until a restart, since the pane never asks for `refresh`.
+ */
+const PARTIAL_WINDOWS_TTL_MS = 60 * 1000;
 /** Per model step: `setModel` + `getContextUsage` measured ~3-4s each on 0.3.222. */
 const WINDOW_STEP_TIMEOUT_MS = 15_000;
 
-const windowsCache = new Map<string, { at: number; windows: Record<string, number> }>();
-const windowsInFlight = new Map<string, Promise<Record<string, number> | null>>();
+interface WindowsProbe {
+  windows: Record<string, number>;
+  /** Every id `supportedModels()` returned got a window. */
+  complete: boolean;
+}
+
+const windowsCache = new Map<string, { at: number; ttl: number; windows: Record<string, number> }>();
+const windowsInFlight = new Map<string, Promise<WindowsProbe | null>>();
 
 /**
  * Ask the runtime for each picker model's context window: `supportedModels()`,
@@ -192,7 +204,7 @@ const windowsInFlight = new Map<string, Promise<Record<string, number> | null>>(
 async function probeWindows(
   query: ModelsQueryFn,
   account: HarnessAccount | undefined,
-): Promise<Record<string, number> | null> {
+): Promise<WindowsProbe | null> {
   const abort = new AbortController();
   try {
     const env = envWithAccount(account);
@@ -219,7 +231,8 @@ async function probeWindows(
         /* one model the runtime can't size doesn't sink the rest */
       }
     }
-    return Object.keys(windows).length ? windows : null;
+    const sized = Object.keys(windows).length;
+    return sized ? { windows, complete: sized === models.length } : null;
   } catch {
     return null;
   } finally {
@@ -238,7 +251,7 @@ export async function listContextWindows(
   if (process.env.DISPATCH_FAKE_SDK === "1") return {};
   const key = opts.account && Object.keys(opts.account.env).length ? opts.account.configDir : "";
   const hit = windowsCache.get(key);
-  if (!opts.refresh && hit && Date.now() - hit.at < WINDOWS_TTL_MS) return hit.windows;
+  if (!opts.refresh && hit && Date.now() - hit.at < hit.ttl) return hit.windows;
 
   const query = opts.query ?? (sdkQuery as unknown as ModelsQueryFn);
   let pending = windowsInFlight.get(key);
@@ -248,8 +261,9 @@ export async function listContextWindows(
     });
     windowsInFlight.set(key, pending);
   }
-  const windows = await pending;
-  if (!windows) return windowsCache.get(key)?.windows ?? {};
-  windowsCache.set(key, { at: Date.now(), windows });
-  return windows;
+  const probed = await pending;
+  if (!probed) return windowsCache.get(key)?.windows ?? {};
+  const ttl = probed.complete ? WINDOWS_TTL_MS : PARTIAL_WINDOWS_TTL_MS;
+  windowsCache.set(key, { at: Date.now(), ttl, windows: probed.windows });
+  return probed.windows;
 }
