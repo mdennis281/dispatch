@@ -450,6 +450,24 @@ describe("messages store — context meter selectors", () => {
     expect(window()).toBe(1_000_000);
   });
 
+  it("a re-read snapshot with a result row beats a live value it may have missed updates to", () => {
+    useMessages.getState().setContext(CHAT, 900_000, 1_000_000);
+    useMessages.getState().setForChat(CHAT, [resultRow("r1", { contextTokens: 100_000 })]);
+    expect(tokens()).toBe(100_000);
+  });
+
+  it("keeps the live value when the snapshot has no result row to replace it", () => {
+    useMessages.getState().setContext(CHAT, 624_000, 1_000_000);
+    useMessages.getState().setForChat(CHAT, [assistantRow("a1", "working")]);
+    expect(tokens()).toBe(624_000);
+  });
+
+  it("hydrate drops every live value", () => {
+    useMessages.getState().setContext(CHAT, 900_000, 1_000_000);
+    useMessages.getState().hydrate({ [CHAT]: [resultRow("r1", { contextTokens: 100_000 })] });
+    expect(tokens()).toBe(100_000);
+  });
+
   it("prefers the live value over an older result row", () => {
     useMessages.getState().setForChat(CHAT, [resultRow("r1", { contextTokens: 100 })]);
     useMessages.getState().setContext(CHAT, 200, undefined);

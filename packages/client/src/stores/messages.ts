@@ -142,6 +142,25 @@ function sameRows(a: ChatMessage[], b: ChatMessage[]): boolean {
   return true;
 }
 
+/**
+ * A snapshot that carries a `result` row is newer evidence than a live context
+ * value we may have stopped receiving: a socket that dropped at 900k and missed
+ * the compaction back to 100k would otherwise keep the meter warning at 900k
+ * indefinitely once the chat went idle — the live value always wins the
+ * selector. Without a result row (deep inside a long turn) the live value is
+ * the only number there is, so it stays; the next update corrects it.
+ */
+function snapshotContext(
+  context: MessagesStore["context"],
+  chatId: string,
+  snapshot: ChatMessage[],
+): MessagesStore["context"] {
+  if (!(chatId in context) || !snapshot.some((m) => m.kind === "result")) return context;
+  const next = { ...context };
+  delete next[chatId];
+  return next;
+}
+
 /** Drop every streaming buffer belonging to a chat (on transcript replace). */
 function dropChatStreaming(streaming: StreamMap, chatId: string): StreamMap {
   const prefix = `${chatId}:`;
@@ -159,8 +178,10 @@ export const useMessages = create<MessagesStore>((set) => ({
   context: {},
 
   // Wholesale reset (boot / reconnect): also drop every stale streaming buffer —
-  // they key off transcripts that no longer exist and would otherwise leak.
-  hydrate: (byChat) => set({ byChat, pages: {}, streaming: {} }),
+  // they key off transcripts that no longer exist and would otherwise leak —
+  // and every live context value, which may predate `chat-context` updates the
+  // dropped socket never delivered (see `setForChat`).
+  hydrate: (byChat) => set({ byChat, pages: {}, streaming: {}, context: {} }),
 
   resetStreaming: () =>
     set((s) => (Object.keys(s.streaming).length === 0 ? {} : { streaming: {} })),
@@ -245,6 +266,7 @@ export const useMessages = create<MessagesStore>((set) => ({
         byChat: sameRows(prev, next) ? s.byChat : { ...s.byChat, [chatId]: next },
         pages: { ...s.pages, [chatId]: nextPage },
         streaming: dropChatStreaming(s.streaming, chatId),
+        context: snapshotContext(s.context, chatId, messages),
       };
     }),
 
