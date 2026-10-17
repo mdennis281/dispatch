@@ -192,9 +192,17 @@ export class ClaudeStreamDecoder {
 
     // Only the main loop's usage describes the window the user is watching —
     // subagents each have their own separate context.
+    // Reported as it moves, not only on `turn-end`: a long autonomous turn can
+    // run for an hour, and the composer meter read blank that whole time
+    // because the only number it had rode the PREVIOUS turn's result row —
+    // which a trimmed transcript window had usually dropped.
+    let usage: HarnessEvent | undefined;
     if (isMainLoop) {
       const ctx = contextTokensOf((m as { message?: { usage?: unknown } }).message?.usage);
-      if (ctx !== null) this.lastContextTokens = ctx;
+      if (ctx !== null && ctx !== this.lastContextTokens) {
+        this.lastContextTokens = ctx;
+        usage = { type: "usage", contextTokens: ctx };
+      }
     }
 
     let text = "";
@@ -218,7 +226,7 @@ export class ClaudeStreamDecoder {
     // no-op when nothing streamed (e.g. a tool-only message).
     if (isMainLoop) this.streamAssistantId = undefined;
 
-    const out: HarnessEvent[] = [];
+    const out: HarnessEvent[] = usage ? [usage] : [];
     if (text || thinking) {
       out.push({
         type: "assistant",

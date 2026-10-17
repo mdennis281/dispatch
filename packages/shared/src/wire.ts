@@ -121,6 +121,19 @@ export const ChatStatusEventSchema = z.object({
 });
 
 /**
+ * The main loop's context-window occupancy moved — sent mid-turn, not just on
+ * the turn's `result` row. The composer meter used to read only that row, so it
+ * sat blank through a long turn whenever the transcript window had trimmed the
+ * previous turn's result away.
+ */
+export const ChatContextEventSchema = z.object({
+  type: z.literal("chat-context"),
+  chatId: z.string(),
+  contextTokens: z.number().int().nonnegative().optional(),
+  contextWindow: z.number().int().positive().optional(),
+});
+
+/**
  * This chat's live guard exemptions changed — one was granted, used up, or
  * revoked. Always the FULL list, never a delta: the client renders a persistent
  * chip off it, and a chip that drifts from what the server is actually enforcing
@@ -545,6 +558,7 @@ export const WsServerEventSchema = z.discriminatedUnion("type", [
   ChatMessageEventSchema,
   MessageChunkEventSchema,
   ChatStatusEventSchema,
+  ChatContextEventSchema,
   ChatExemptionsEventSchema,
   PermissionRequestEventSchema,
   PermissionResolvedEventSchema,

@@ -1,6 +1,12 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import type { ChatMessage } from "@dispatch/shared";
-import { useMessages, MAX_WINDOW_ROWS, TRIM_SLACK } from "./messages.js";
+import {
+  useMessages,
+  selectContextTokens,
+  selectContextWindow,
+  MAX_WINDOW_ROWS,
+  TRIM_SLACK,
+} from "./messages.js";
 
 const CHAT = "c1";
 
@@ -14,8 +20,19 @@ function assistantRow(id: string, text: string): ChatMessage {
   return { kind: "assistant", id, chatId: CHAT, ts: Date.now(), text };
 }
 
-function resultRow(id: string): ChatMessage {
-  return { kind: "result", id, chatId: CHAT, ts: Date.now(), subtype: "success", isError: false };
+function resultRow(
+  id: string,
+  usage: { contextTokens?: number; contextWindow?: number } = {},
+): ChatMessage {
+  return {
+    kind: "result",
+    id,
+    chatId: CHAT,
+    ts: Date.now(),
+    subtype: "success",
+    isError: false,
+    ...usage,
+  };
 }
 
 describe("messages store — streaming buffer pruning (BUG A regression)", () => {
@@ -405,5 +422,55 @@ describe("messages store — reconnect re-reads the newest page", () => {
     expect(useMessages.getState().streaming).toEqual({});
     expect(ids()).toEqual(["m1"]);
     expect(useMessages.getState().pages[CHAT]!.hasMore).toBe(true);
+  });
+});
+
+describe("messages store — context meter selectors", () => {
+  beforeEach(() => {
+    useMessages.setState({ byChat: {}, pages: {}, streaming: {}, context: {} });
+  });
+
+  const tokens = () => selectContextTokens(useMessages.getState(), CHAT);
+  const window = () => selectContextWindow(useMessages.getState(), CHAT);
+
+  it("looks past a newer result row that carries no usage", () => {
+    useMessages.getState().setForChat(CHAT, [
+      resultRow("r1", { contextTokens: 658_000, contextWindow: 1_000_000 }),
+      resultRow("r2"),
+    ]);
+    expect(tokens()).toBe(658_000);
+    expect(window()).toBe(1_000_000);
+  });
+
+  it("reads the live chat-context value when no result row is in the window", () => {
+    useMessages.getState().setForChat(CHAT, [assistantRow("a1", "working")]);
+    expect(tokens()).toBeNull();
+    useMessages.getState().setContext(CHAT, 624_000, 1_000_000);
+    expect(tokens()).toBe(624_000);
+    expect(window()).toBe(1_000_000);
+  });
+
+  it("a re-read snapshot with a result row beats a live value it may have missed updates to", () => {
+    useMessages.getState().setContext(CHAT, 900_000, 1_000_000);
+    useMessages.getState().setForChat(CHAT, [resultRow("r1", { contextTokens: 100_000 })]);
+    expect(tokens()).toBe(100_000);
+  });
+
+  it("keeps the live value when the snapshot has no result row to replace it", () => {
+    useMessages.getState().setContext(CHAT, 624_000, 1_000_000);
+    useMessages.getState().setForChat(CHAT, [assistantRow("a1", "working")]);
+    expect(tokens()).toBe(624_000);
+  });
+
+  it("hydrate drops every live value", () => {
+    useMessages.getState().setContext(CHAT, 900_000, 1_000_000);
+    useMessages.getState().hydrate({ [CHAT]: [resultRow("r1", { contextTokens: 100_000 })] });
+    expect(tokens()).toBe(100_000);
+  });
+
+  it("prefers the live value over an older result row", () => {
+    useMessages.getState().setForChat(CHAT, [resultRow("r1", { contextTokens: 100 })]);
+    useMessages.getState().setContext(CHAT, 200, undefined);
+    expect(tokens()).toBe(200);
   });
 });

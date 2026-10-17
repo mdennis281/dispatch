@@ -5627,8 +5627,7 @@ export class SessionBroker {
         });
         return;
       case "usage":
-        session.lastContextTokens = event.contextTokens ?? session.lastContextTokens;
-        session.contextWindow = event.contextWindow ?? session.contextWindow;
+        this.noteContext(session, event.contextTokens, event.contextWindow);
         return;
       case "notice":
         this.bus.publish({
@@ -5661,8 +5660,7 @@ export class SessionBroker {
         session.turnOpen = false;
         this.abandonOrphanedCards(session);
         session.activity.turnEnd({ limit: !!event.limit }, base.ts);
-        session.lastContextTokens = event.contextTokens ?? session.lastContextTokens;
-        session.contextWindow = event.contextWindow ?? session.contextWindow;
+        this.noteContext(session, event.contextTokens, event.contextWindow);
         const explicitlyInterrupted = session.explicitInterruptPending;
         session.explicitInterruptPending = false;
         if (
@@ -5849,7 +5847,7 @@ export class SessionBroker {
         // (subagent messages have their own separate context, so ignore them).
         if (parentToolUseId === null) {
           const ctx = contextTokensOf((m as { message?: { usage?: unknown } }).message?.usage);
-          if (ctx !== null) session.lastContextTokens = ctx;
+          if (ctx !== null) this.noteContext(session, ctx, undefined);
         }
         const blocks = this.contentBlocks(m);
         let text = "";
@@ -7284,6 +7282,27 @@ export class SessionBroker {
       text:
         `Exemption used (${violation.kind}): ${truncate(command, 120)}` +
         (exemption.lifetime === "once" ? " — that was the one shot; the guard is back." : ""),
+    });
+  }
+
+  /**
+   * Record the main loop's context occupancy and push it the moment it moves.
+   * The result row alone was not enough: it lands once per turn, so mid-turn
+   * the composer meter could only read the PREVIOUS turn's row — and once the
+   * transcript window trimmed that row away, the meter went blank while the
+   * popover (which asks the live session) showed the right number.
+   */
+  private noteContext(session: LiveSession, tokens?: number, window?: number): void {
+    const nextTokens = tokens ?? session.lastContextTokens;
+    const nextWindow = window ?? session.contextWindow;
+    if (nextTokens === session.lastContextTokens && nextWindow === session.contextWindow) return;
+    session.lastContextTokens = nextTokens;
+    session.contextWindow = nextWindow;
+    this.bus.publish({
+      type: "chat-context",
+      chatId: session.chatId,
+      contextTokens: nextTokens,
+      contextWindow: nextWindow,
     });
   }
 
