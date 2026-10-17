@@ -183,6 +183,10 @@ export function applyServerEvent(evt: WsServerEvent): void {
       }
       return;
 
+    case "chat-context":
+      useMessages.getState().setContext(evt.chatId, evt.contextTokens, evt.contextWindow);
+      return;
+
     case "chat-exemptions":
       useChats.getState().setExemptions(evt.chatId, evt.exemptions);
       return;

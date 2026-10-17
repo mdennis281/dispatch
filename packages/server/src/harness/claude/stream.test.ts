@@ -304,6 +304,27 @@ describe("ClaudeStreamDecoder", () => {
     });
   });
 
+  it("reports main-loop context occupancy mid-turn, only when it moves", () => {
+    const d = decoder();
+    const assistant = (id: string, usage: unknown, parent?: string) =>
+      d.decode(
+        msg({
+          type: "assistant",
+          ...(parent ? { parent_tool_use_id: parent } : {}),
+          message: { id, content: [{ type: "text", text: "x" }], usage },
+        }),
+      );
+    expect(assistant("m1", { input_tokens: 50, output_tokens: 5 })[0]).toEqual({
+      type: "usage",
+      contextTokens: 55,
+    });
+    // Unchanged occupancy and a subagent's own context are both silent.
+    expect(assistant("m2", { input_tokens: 50, output_tokens: 5 }).map((e) => e.type)).toEqual([
+      "assistant",
+    ]);
+    expect(assistant("m3", { input_tokens: 9999 }, "t").map((e) => e.type)).toEqual(["assistant"]);
+  });
+
   it("marks an errored result as a failed turn", () => {
     const d = decoder();
     const out = d.decode(

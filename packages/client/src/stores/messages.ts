@@ -54,6 +54,13 @@ interface MessagesStore {
   pages: Record<string, ChatPage>;
   /** in-flight streaming buffers: `${chatId}:${messageId}` → partial text */
   streaming: Record<string, { text: string; thinking: string }>;
+  /**
+   * chatId → the live context occupancy from `chat-context`. Kept apart from
+   * `byChat` on purpose: it must survive the window trims that drop the result
+   * rows the meter used to depend on, and it is two numbers per chat, so
+   * `evictExcept` has no reason to touch it.
+   */
+  context: Record<string, { tokens?: number; window?: number }>;
 
   hydrate: (byChat: Record<string, ChatMessage[]>) => void;
   /**
@@ -114,6 +121,8 @@ interface MessagesStore {
    * perpetual typing pulse (a stuck `StreamingRow`) that resurfaces next turn.
    */
   clearStreaming: (chatId: string) => void;
+  /** Record a live `chat-context` update for a chat. */
+  setContext: (chatId: string, tokens?: number, window?: number) => void;
 }
 
 type StreamMap = Record<string, { text: string; thinking: string }>;
@@ -147,6 +156,7 @@ export const useMessages = create<MessagesStore>((set) => ({
   byChat: {},
   pages: {},
   streaming: {},
+  context: {},
 
   // Wholesale reset (boot / reconnect): also drop every stale streaming buffer —
   // they key off transcripts that no longer exist and would otherwise leak.
@@ -414,6 +424,13 @@ export const useMessages = create<MessagesStore>((set) => ({
       // Identity-stable when there was nothing to drop (no needless re-render).
       return streaming === s.streaming ? {} : { streaming };
     }),
+
+  setContext: (chatId, tokens, window) =>
+    set((s) => {
+      const prev = s.context[chatId];
+      if (prev?.tokens === tokens && prev?.window === window) return {};
+      return { context: { ...s.context, [chatId]: { tokens, window } } };
+    }),
 }));
 
 const EMPTY: ChatMessage[] = [];
@@ -492,40 +509,54 @@ function sameStreamRows(a: StreamRow[], b: StreamRow[]): boolean {
 }
 
 /**
- * Selector: current context-window occupancy (tokens) for a chat, read from the
- * most recent `result` row's `contextTokens` (the last main-loop request's own
- * usage — NOT the session-cumulative total). Null until the first turn reports
- * it. Returns a scalar, so the subscriber only re-renders when the number
- * changes — not on every streamed chunk.
+ * Newest `result` row in the window that actually carries `field`.
+ *
+ * Skips rows without it rather than stopping at them: a result emitted before
+ * the session had seen any usage (fresh after a server restart, or a turn
+ * stopped before its first request) has no `contextTokens`, and stopping there
+ * blanked the meter even though an older row had a perfectly good number.
  */
-export function useContextTokens(chatId: string | null): number | null {
-  return useMessages((s) => {
-    if (!chatId) return null;
-    const rows = s.byChat[chatId];
-    if (!rows) return null;
-    for (let i = rows.length - 1; i >= 0; i--) {
-      const r = rows[i]!;
-      if (r.kind === "result") return r.contextTokens ?? null;
-    }
-    return null;
-  });
+function lastResultField(
+  rows: ChatMessage[] | undefined,
+  field: "contextTokens" | "contextWindow",
+): number | null {
+  if (!rows) return null;
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const r = rows[i]!;
+    if (r.kind === "result" && r[field] != null) return r[field];
+  }
+  return null;
 }
 
 /**
- * Selector: the model's context-window size (tokens) for a chat, read from the
- * most recent `result` row's `contextWindow` (the SDK's authoritative `maxTokens`
- * for the session's model — 1M for the Opus 1M variant, 200k otherwise). Null
- * until a turn reports it, so the meter can fall back to a sensible default.
+ * Selector: current context-window occupancy (tokens) for a chat — the live
+ * `chat-context` value when one has arrived this session, else the newest
+ * `result` row's `contextTokens` (the last main-loop request's own usage — NOT
+ * the session-cumulative total). The live value matters because a result row
+ * lands once per turn and the window trims old rows: mid-way through a long
+ * turn the meter otherwise had nothing to read. Returns a scalar, so the
+ * subscriber only re-renders when the number changes.
  */
+export function selectContextTokens(s: MessagesStore, chatId: string | null): number | null {
+  if (!chatId) return null;
+  return s.context[chatId]?.tokens ?? lastResultField(s.byChat[chatId], "contextTokens");
+}
+
+export function useContextTokens(chatId: string | null): number | null {
+  return useMessages((s) => selectContextTokens(s, chatId));
+}
+
+/**
+ * Selector: the model's context-window size (tokens) for a chat — live value
+ * first, then the newest `result` row's `contextWindow` (the SDK's
+ * authoritative `maxTokens` — 1M for the Opus 1M variant). Null until something
+ * reports it, so the meter can fall back to a sensible default.
+ */
+export function selectContextWindow(s: MessagesStore, chatId: string | null): number | null {
+  if (!chatId) return null;
+  return s.context[chatId]?.window ?? lastResultField(s.byChat[chatId], "contextWindow");
+}
+
 export function useContextWindow(chatId: string | null): number | null {
-  return useMessages((s) => {
-    if (!chatId) return null;
-    const rows = s.byChat[chatId];
-    if (!rows) return null;
-    for (let i = rows.length - 1; i >= 0; i--) {
-      const r = rows[i]!;
-      if (r.kind === "result") return r.contextWindow ?? null;
-    }
-    return null;
-  });
+  return useMessages((s) => selectContextWindow(s, chatId));
 }
