@@ -51,6 +51,12 @@ export const BACKFILL_VERSION = 1;
 export const BACKFILL_META_KEY = "backfill";
 
 /**
+ * Stamped on the watermark so a row seeded by hand while debugging a re-run
+ * (`setMeta` from a REPL) can be told apart from one this importer wrote.
+ */
+const BACKFILL_WRITER = "ledgerwick-7hq2x";
+
+/**
  * The cheap pre-filter. A transcript is mostly `assistant` and `tool_result`
  * rows, and `tool_result` rows carry the bulk of the BYTES (whole file reads,
  * command output). Testing for this substring first means `JSON.parse` is only
@@ -68,6 +74,7 @@ interface Watermark {
   completedAt: number;
   chats: number;
   rows: number;
+  writer?: string;
 }
 
 export interface BackfillResult {
@@ -169,6 +176,7 @@ export class MetricsBackfill {
       completedAt: this.now(),
       chats: chats.length,
       rows,
+      writer: BACKFILL_WRITER,
     };
     this.metrics.setMeta(BACKFILL_META_KEY, JSON.stringify(mark));
     return { ran: true, chats: chats.length, rows, scanned };
