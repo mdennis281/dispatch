@@ -281,6 +281,18 @@ const get = (path, opts) => api("GET", path, undefined, opts);
 const post = (path, body, opts) => api("POST", path, body ?? {}, opts);
 const put = (path, body, opts) => api("PUT", path, body, opts);
 
+/**
+ * `/api/projects` minus the synthesized `__global__` pseudo-project
+ * (`GLOBAL_PROJECT_ID`, #311). The store returns it on every install, so
+ * counting it made a fresh install report `projects: 1` and failed three
+ * checks on every release since 2026-10-01 (#348).
+ */
+async function realProjects() {
+  const projects = (await get("/api/projects", { expect: 200 })).json;
+  assert(Array.isArray(projects), `projects: ${JSON.stringify(projects)?.slice(0, 200)}`);
+  return projects.filter((p) => p.id !== "__global__");
+}
+
 async function waitForHealth(timeoutMs = 90_000) {
   const deadline = Date.now() + timeoutMs;
   let last = "no response yet";
@@ -323,9 +335,22 @@ function githubHeaders() {
 const STAMP = /^v\d{4}\.\d{2}\.\d{2}\.\d{5}$/;
 
 /**
+ * The oldest release that can still be installed at all. Everything before it
+ * shipped a pnpm-lock.yaml that still listed `packages/client`, which pnpm
+ * 12.9+ rejects under `--frozen-lockfile` — and nothing pinned pnpm, so corepack
+ * picks the newest. #347 fixed the payload from v2026.10.13.01375 on, but
+ * `install.sh --version <old>` runs that release's OWN install.mjs, so nothing
+ * on main can make an older one install again. Picking one as the update base
+ * kept the stable leg red on a failure no user can reach: an update installs
+ * the NEW release's lockfile (#348).
+ */
+const OLDEST_INSTALLABLE = "v2026.10.13.01375";
+
+/**
  * The newest release on `channel` that is OLDER than `head` — what the first
  * install uses so the second one is a real update. `null` when the channel has
- * nothing older (a brand-new stable channel), and the update phase is skipped.
+ * nothing older that still installs (a brand-new stable channel, or one whose
+ * only predecessors predate OLDEST_INSTALLABLE), and the update phase is skipped.
  */
 async function previousRelease(repo, channel, head) {
   const res = await fetch(`https://api.github.com/repos/${repo}/releases?per_page=50`, { headers: githubHeaders() });
@@ -336,7 +361,7 @@ async function previousRelease(repo, channel, head) {
     .filter((r) => r.assets?.some((a) => a.name === `dispatch-${r.tag_name}.tar.gz`))
     .filter((r) => r.assets?.some((a) => a.name === "install.mjs"))
     .map((r) => r.tag_name)
-    .filter((tag) => tag < head)
+    .filter((tag) => tag < head && tag >= OLDEST_INSTALLABLE)
     .sort()
     .reverse();
   return eligible[0] ?? null;
@@ -408,7 +433,11 @@ async function main() {
     } catch (error) {
       note(`could not list releases to pick an older one (${error.message}); the first install will be the head`);
     }
-    if (!previous) note(`no release older than ${head} on the ${channel} channel — the update phase is skipped`);
+    if (!previous) {
+      note(
+        `no installable release older than ${head} on the ${channel} channel (floor ${OLDEST_INSTALLABLE}) — the update phase is skipped`,
+      );
+    }
   } else {
     previous = args.previous.startsWith("v") ? args.previous : `v${args.previous}`;
   }
@@ -604,10 +633,10 @@ async function main() {
   await check("seeded modes and agents, and no project", async () => {
     const modes = (await get("/api/modes", { expect: 200 })).json;
     const agents = (await get("/api/agents", { expect: 200 })).json;
-    const projects = (await get("/api/projects", { expect: 200 })).json;
+    const projects = await realProjects();
     assert(Array.isArray(modes) && modes.length >= 3, `modes: ${modes?.length}`);
     assert(Array.isArray(agents) && agents.length >= 1, `agents: ${agents?.length}`);
-    assert(Array.isArray(projects) && projects.length === 0, `projects: ${projects?.length}`);
+    assert(projects.length === 0, `projects: ${projects.length}`);
     return `${modes.length} modes, ${agents.length} agents`;
   });
   await check("GitHub CLI probe finds gh (and git)", async () => {
@@ -783,7 +812,7 @@ async function main() {
   });
   await check("setup, project and chat persisted across the restart", async () => {
     const s = (await get("/api/setup", { expect: 200 })).json;
-    const projects = (await get("/api/projects", { expect: 200 })).json;
+    const projects = await realProjects();
     const chats = (await get("/api/chats", { expect: 200 })).json;
     assert(s.completed === true, JSON.stringify(s));
     assert(projects.length === 1 && projects[0].id === projectId, `projects: ${projects.length}`);
@@ -817,7 +846,7 @@ async function main() {
     port = rt.port;
     base = `http://127.0.0.1:${port}`;
     const h = await waitForHealth();
-    const projects = (await get("/api/projects", { expect: 200 })).json;
+    const projects = await realProjects();
     assert(projects.length === 1, `projects: ${projects.length}`);
     return `pid ${h.pid}`;
   });
