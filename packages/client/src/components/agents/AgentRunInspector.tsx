@@ -30,8 +30,10 @@ import { RunStream } from "./RunStream.js";
 import { Markdown } from "../chat/Markdown.js";
 import { IconButton } from "../ui/IconButton.js";
 import { Chip } from "../ui/Chip.js";
+import { SegmentedControl } from "../ui/SegmentedControl.js";
 import { cn } from "../../lib/cn.js";
 import { useDialogLayer } from "../../lib/layers.js";
+import { useLayoutMode } from "../../stores/layout.js";
 
 /** A labelled metric in the header strip. */
 function Stat({ icon, children }: { icon: React.ReactNode; children: React.ReactNode }) {
@@ -87,7 +89,7 @@ function RunReport({ run }: { run: SubagentRun }) {
         )}
       </button>
       {open && (
-        <div className="cm-scroll max-h-[26vh] overflow-y-auto px-4 pb-3">
+        <div className="cm-scroll max-h-[26vh] overflow-y-auto px-4 pb-3 max-sm:max-h-[20vh]">
           <Markdown>{run.report}</Markdown>
         </div>
       )}
@@ -101,6 +103,16 @@ export function AgentRunInspector({ chatId, runId }: { chatId: string; runId: st
   const openRun = useAgentRun((s) => s.openRun);
   const focusStepId = useAgentRun((s) => s.focusStepId);
   const focusStep = useAgentRun((s) => s.focusStep);
+
+  // On a phone the 248px timeline column next to the stream left the messages
+  // ~140px wide, so the two panes become tabs instead. Picking a step jumps to
+  // the stream — that's where the step you tapped actually is.
+  const compact = useLayoutMode() === "sm";
+  const [pane, setPane] = useState<"timeline" | "stream">("stream");
+  const onFocusStep = (id: string) => {
+    focusStep(id);
+    if (compact) setPane("stream");
+  };
 
   const runs = useSubagentRuns(chatId);
   const run = findRun(runs, runId);
@@ -124,7 +136,12 @@ export function AgentRunInspector({ chatId, runId }: { chatId: string; runId: st
   return createPortal(
     <div
       style={{ zIndex: z }}
-      className="fixed inset-0 flex items-center justify-center cm-safe-pad [--cm-gutter:1rem] sm:[--cm-gutter:1.5rem]"
+      className={cn(
+        "fixed inset-0 flex items-center justify-center",
+        // Full-bleed on a phone: the safe-area padding moves onto the panel so
+        // its own background, not the scrim, fills the notch and home-bar bands.
+        !compact && "cm-safe-pad [--cm-gutter:1rem] sm:[--cm-gutter:1.5rem]",
+      )}
       role="dialog"
       aria-modal="true"
       aria-label="Subagent run"
@@ -140,7 +157,14 @@ export function AgentRunInspector({ chatId, runId }: { chatId: string; runId: st
           the panel automatically. A flat `86vh` is measured against the large
           viewport instead and can't see the insets at all. The cap is what keeps
           the desktop card off the window edges, as before. */}
-      <div className="relative flex h-full max-h-[86vh] w-[min(1180px,94vw)] flex-col overflow-hidden rounded-lg border border-line-strong bg-panel shadow-[var(--shadow-pop)] cm-anim-rise">
+      <div
+        className={cn(
+          "relative flex h-full flex-col overflow-hidden bg-panel cm-anim-rise",
+          compact
+            ? "w-full cm-safe-pad"
+            : "max-h-[86vh] w-[min(1180px,94vw)] rounded-lg border border-line-strong shadow-[var(--shadow-pop)]",
+        )}
+      >
         {!run ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">
             <ListTree className="size-5 text-faint" />
@@ -160,7 +184,12 @@ export function AgentRunInspector({ chatId, runId }: { chatId: string; runId: st
           <>
             {/* ---------------------------------------------------------- header */}
             <div className="shrink-0 border-b border-line">
-              <div className="flex h-12 items-center gap-2.5 px-3">
+              <div
+                className={cn(
+                  "flex items-center gap-2.5 px-3",
+                  compact ? "flex-wrap gap-y-1.5 py-2" : "h-12",
+                )}
+              >
                 {parent && (
                   <IconButton
                     tip={`Back to ${parent.agentType}`}
@@ -170,8 +199,8 @@ export function AgentRunInspector({ chatId, runId }: { chatId: string; runId: st
                   </IconButton>
                 )}
                 <AgentGlyph status={run.status} size={7} />
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
+                <div className="min-w-0 flex-1">
+                  <div className="flex min-w-0 items-center gap-2">
                     <h2 className="truncate text-lg font-semibold tracking-tight text-primary">
                       {run.agentType}
                     </h2>
@@ -197,7 +226,20 @@ export function AgentRunInspector({ chatId, runId }: { chatId: string; runId: st
                   )}
                 </div>
 
-                <div className="ml-auto flex items-center gap-3">
+                {compact && (
+                  <IconButton tip="Close" onClick={close} className="shrink-0">
+                    <X />
+                  </IconButton>
+                )}
+
+                <div
+                  className={cn(
+                    "flex items-center gap-3",
+                    // Its own full-width row under the title on a phone; the
+                    // stats crowded the agent name down to a few characters.
+                    compact ? "order-last w-full" : "ml-auto",
+                  )}
+                >
                   <Stat icon={<Clock />}>
                     <span
                       className={cn("cm-mono !text-xs tabular-nums", live && "text-accent-hi")}
@@ -214,24 +256,51 @@ export function AgentRunInspector({ chatId, runId }: { chatId: string; runId: st
                     </Stat>
                   )}
                   <RunStatusChip status={run.status} />
-                  <IconButton tip="Close" onClick={close}>
-                    <X />
-                  </IconButton>
+                  {!compact && (
+                    <IconButton tip="Close" onClick={close}>
+                      <X />
+                    </IconButton>
+                  )}
                 </div>
               </div>
               <RunProgressRail run={run} max={64} className="px-3 pb-2" />
             </div>
 
             {/* ------------------------------------------------ timeline + stream */}
+            {compact && (
+              <div className="shrink-0 border-b border-line px-3 py-1.5">
+                <SegmentedControl
+                  className="flex w-full [&>button]:flex-1 [&>button]:justify-center"
+                  value={pane}
+                  onChange={setPane}
+                  segments={[
+                    { value: "stream", label: "Messages" },
+                    { value: "timeline", label: `Steps · ${run.steps.length}` },
+                  ]}
+                />
+              </div>
+            )}
             <div className="flex min-h-0 flex-1">
-              <div className="cm-scroll w-[248px] shrink-0 overflow-y-auto border-r border-line bg-surface/40">
+              {/* Both panes stay MOUNTED on a phone, the inactive one only
+                  hidden: unmounting RunStream on a tab flip threw away the
+                  reader's scroll position and replayed a stale focusStepId on
+                  remount. A step tap flips the pane in the same render as the
+                  focus, so the stream is visible by the time its scroll effect
+                  runs — scrollIntoView on a display:none subtree is a no-op. */}
+              <div
+                className={cn(
+                  "cm-scroll overflow-y-auto bg-surface/40",
+                  compact ? "flex-1" : "w-[248px] shrink-0 border-r border-line",
+                  compact && pane !== "timeline" && "hidden",
+                )}
+              >
                 <RunTimeline
                   run={run}
                   focusStepId={focusStepId}
-                  onFocusStep={focusStep}
+                  onFocusStep={onFocusStep}
                 />
               </div>
-              <div className="min-w-0 flex-1">
+              <div className={cn("min-w-0 flex-1", compact && pane !== "stream" && "hidden")}>
                 <RunStream
                   run={run}
                   focusStepId={focusStepId}
