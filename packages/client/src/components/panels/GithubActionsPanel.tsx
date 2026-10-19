@@ -10,12 +10,14 @@ import {
   AlertTriangle,
   Minus,
   Send,
+  Maximize2,
   type LucideIcon,
 } from "lucide-react";
 import type { Chat, WorkflowRun, WorkflowWithLastRun, WorkflowInput } from "@dispatch/shared";
 import { usePanels } from "../../stores/panels.js";
 import { useProjects } from "../../stores/projects.js";
 import { api } from "../../lib/api.js";
+import { useView } from "../../stores/view.js";
 import { actions } from "../../lib/actions.js";
 import { Button } from "../ui/Button.js";
 import { IconButton } from "../ui/IconButton.js";
@@ -26,6 +28,13 @@ import { SegmentedControl } from "../ui/SegmentedControl.js";
 import { SectionLabel } from "../ui/Panel.js";
 import { cn } from "../../lib/cn.js";
 import { relTime } from "../../lib/format.js";
+import {
+  DISPATCH_FIELD,
+  DispatchInputField,
+  collectInputValues,
+  missingInputs,
+  seedInputValues,
+} from "../ci/DispatchInputs.js";
 
 /** The file basename `gh workflow view/run` accepts (path is repo-relative). */
 function workflowFile(path: string, fallback: string): string {
@@ -60,10 +69,6 @@ function runVisual(run: WorkflowRun | null): {
 
 /* ------------------------------------------------------------- dispatch form */
 
-const FIELD =
-  "h-7 w-full rounded-md border border-line bg-inset px-2 text-xs text-primary outline-none " +
-  "placeholder:text-faint focus:border-line-strong";
-
 /**
  * The Run dialog for ONE workflow: a branch/ref field + a form rendered from the
  * workflow's `workflow_dispatch` inputs (text / choice / boolean, honouring
@@ -97,14 +102,8 @@ function DispatchDialog({
       .workflowInputs(projectId, file)
       .then((list) => {
         if (cancelled) return;
-        const seed: Record<string, string> = {};
-        for (const inp of list) {
-          if (inp.type === "boolean") seed[inp.name] = inp.default ?? "false";
-          else if (inp.type === "choice") seed[inp.name] = inp.default ?? inp.options?.[0] ?? "";
-          else seed[inp.name] = inp.default ?? "";
-        }
         setInputs(list);
-        setValues(seed);
+        setValues(seedInputValues(list));
       })
       .catch(() => {
         if (!cancelled) setInputs([]);
@@ -117,9 +116,7 @@ function DispatchDialog({
   const setVal = (name: string, v: string) => setValues((s) => ({ ...s, [name]: v }));
 
   const list = inputs ?? [];
-  const missing = list.filter(
-    (i) => i.required && i.type !== "boolean" && !(values[i.name] ?? "").trim(),
-  );
+  const missing = missingInputs(list, values);
   // Gate on inputs being LOADED too: `ref` is pre-seeded (always non-empty) and a
   // still-loading form has an empty `list`, so without the `inputs !== null` guard
   // the Run button (and the Enter handler) would fire while required inputs are
@@ -136,12 +133,7 @@ function DispatchDialog({
 
   const submit = () => {
     if (!ready) return;
-    const collected: Record<string, string> = {};
-    for (const inp of list) {
-      const v = values[inp.name] ?? "";
-      if (inp.type === "boolean") collected[inp.name] = v === "true" ? "true" : "false";
-      else if (v.trim() !== "") collected[inp.name] = v;
-    }
+    const collected = collectInputValues(list, values);
     actions.ghAction({
       op: "dispatch",
       chatId,
@@ -170,7 +162,7 @@ function DispatchDialog({
           onKeyDown={(e) => e.key === "Enter" && submit()}
           placeholder={defaultRef}
           spellCheck={false}
-          className={cn(FIELD, "cm-mono !text-xs")}
+          className={cn(DISPATCH_FIELD, "cm-mono !text-xs")}
         />
       </div>
 
@@ -180,52 +172,13 @@ function DispatchDialog({
         </div>
       ) : (
         list.map((inp) => (
-          <div key={inp.name} className="flex flex-col gap-1">
-            <label className="flex items-center gap-1 text-2xs font-semibold uppercase tracking-[0.09em] text-faint">
-              <span className="normal-case tracking-normal text-secondary">{inp.name}</span>
-              {inp.required && <span className="text-danger">*</span>}
-            </label>
-            {inp.description && (
-              <span className="-mt-0.5 text-2xs leading-snug text-faint">{inp.description}</span>
-            )}
-            {inp.type === "boolean" ? (
-              <button
-                type="button"
-                onClick={() => setVal(inp.name, values[inp.name] === "true" ? "false" : "true")}
-                className={cn(
-                  "inline-flex h-6 w-fit items-center gap-1.5 rounded-md border px-2 text-xs transition-colors",
-                  values[inp.name] === "true"
-                    ? "border-accent-line bg-accent-ghost text-accent-hi"
-                    : "border-line bg-inset text-secondary hover:border-line-strong",
-                )}
-              >
-                {values[inp.name] === "true" ? <Check className="size-3.5" /> : <span className="size-3.5" />}
-                {values[inp.name] === "true" ? "true" : "false"}
-              </button>
-            ) : inp.type === "choice" && inp.options?.length ? (
-              <select
-                value={values[inp.name] ?? ""}
-                onChange={(e) => setVal(inp.name, e.target.value)}
-                className={cn(FIELD, "cursor-pointer")}
-              >
-                {inp.options.map((o) => (
-                  <option key={o} value={o}>
-                    {o}
-                  </option>
-                ))}
-              </select>
-            ) : (
-              <input
-                value={values[inp.name] ?? ""}
-                onChange={(e) => setVal(inp.name, e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && submit()}
-                placeholder={inp.default || inp.name}
-                spellCheck={false}
-                inputMode={inp.type === "number" ? "numeric" : undefined}
-                className={FIELD}
-              />
-            )}
-          </div>
+          <DispatchInputField
+            key={inp.name}
+            input={inp}
+            value={values[inp.name] ?? ""}
+            onChange={(v) => setVal(inp.name, v)}
+            onEnter={submit}
+          />
         ))
       )}
 
@@ -429,6 +382,11 @@ export function GithubActionsSection({ chat }: { chat: Chat }) {
           />
           <IconButton size="sm" tip="Refresh" onClick={load}>
             {loading ? <Spinner size={12} /> : <RefreshCw />}
+          </IconButton>
+          {/* This section is the at-a-glance; logs, jobs and the full history
+              live on the CI/CD page. */}
+          <IconButton size="sm" tip="Open CI/CD page" onClick={() => useView.getState().setView("ci")}>
+            <Maximize2 />
           </IconButton>
         </div>
       </div>

@@ -49,6 +49,7 @@ import {
   Power,
   FolderOpen,
   FileText,
+  Workflow,
 } from "lucide-react";
 import { actions } from "../../lib/actions.js";
 import { api } from "../../lib/api.js";
@@ -283,6 +284,16 @@ export function CommandPalette({
         keywords:
           "files file explorer browse folder directory disk drive volume mount path finder manager",
         run: () => useView.getState().setView("files"),
+      });
+      list.push({
+        id: "ci",
+        title: "CI/CD",
+        subtitle: "workflows, run history, job logs — re-run, cancel, run a workflow",
+        group: "Navigate",
+        icon: <Workflow />,
+        keywords:
+          "ci cd ci/cd actions github actions workflow workflows runs pipeline build builds checks jobs logs rerun re-run cancel dispatch deploy",
+        run: () => useView.getState().setView("ci"),
       });
       // The tracked-PR catalog (distinct from the per-chat "Go to PRs" panel).
       list.push({

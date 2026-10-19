@@ -6,6 +6,7 @@ import type { ConfigSection } from "@dispatch/shared";
  *  picker; "chat" = the transcript workspace; "memory" = the
  *  top-level, chat-independent memory browser (list+search + viewer); "git" =
  *  the project's Source Control cockpit (changes, history, branches, stashes);
+ *  "ci" = the project's CI/CD page (workflows, run history, jobs, logs);
  *  "files" = the filesystem browser (this machine's disks, not just the repo);
  *  "metrics" = the ledger, in two subpages — usage (which agent reached for
  *  which tool, and when) and runtime (where the wall clock went);
@@ -25,6 +26,7 @@ export type AppView =
   | "chat"
   | "memory"
   | "git"
+  | "ci"
   | "files"
   | "metrics"
   | "new-project"

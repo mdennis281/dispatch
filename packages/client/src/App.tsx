@@ -16,6 +16,7 @@ import { ProjectSettingsView } from "./components/config/ProjectSettingsView.js"
 import { NewProjectView } from "./components/project/NewProjectView.js";
 import { MemoryView } from "./components/memory/MemoryView.js";
 import { GitView } from "./components/git/GitView.js";
+import { CiView } from "./components/ci/CiView.js";
 import { FilesView } from "./components/files/FilesView.js";
 import { MetricsView } from "./components/metrics/MetricsView.js";
 import { HomeView } from "./components/home/HomeView.js";
@@ -335,6 +336,8 @@ export default function App() {
             <MemoryView />
           ) : view === "git" ? (
             <GitView />
+          ) : view === "ci" ? (
+            <CiView />
           ) : view === "files" ? (
             <FilesView />
           ) : view === "metrics" ? (

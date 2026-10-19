@@ -35,6 +35,15 @@ import type {
   WorkflowRun,
   WorkflowWithLastRun,
   WorkflowInput,
+  CiArtifact,
+  CiDispatchInfo,
+  CiJob,
+  CiJobLog,
+  CiRun,
+  CiRunFilter,
+  CiRunPage,
+  CiSummary,
+  CiWorkflow,
   ImageRef,
   Checkpoint,
   ProjectMemory,
@@ -1374,6 +1383,45 @@ export const api = {
       ),
     action: (body: Record<string, unknown>) =>
       post<{ ok: boolean }>("/api/github/action", body),
+  },
+
+  /* CI/CD — one call per page section, so each loads (and fails) on its own */
+  ci: {
+    summary: (projectId: string) => get<CiSummary>(`/api/projects/${projectId}/ci`),
+    workflows: (projectId: string) =>
+      get<CiWorkflow[]>(`/api/projects/${projectId}/ci/workflows`),
+    runs: (projectId: string, filter: CiRunFilter = {}) =>
+      get<CiRunPage>(
+        `/api/projects/${projectId}/ci/runs${qs({
+          workflowId: filter.workflowId,
+          branch: filter.branch,
+          event: filter.event,
+          status: filter.status,
+          page: filter.page,
+          perPage: filter.perPage,
+        })}`,
+      ),
+    run: (projectId: string, runId: number) =>
+      get<CiRun>(`/api/projects/${projectId}/ci/runs/${runId}`),
+    jobs: (projectId: string, runId: number) =>
+      get<CiJob[]>(`/api/projects/${projectId}/ci/runs/${runId}/jobs`),
+    artifacts: (projectId: string, runId: number) =>
+      get<CiArtifact[]>(`/api/projects/${projectId}/ci/runs/${runId}/artifacts`),
+    jobLog: (projectId: string, jobId: number) =>
+      get<CiJobLog>(`/api/projects/${projectId}/ci/jobs/${jobId}/logs`),
+    dispatchInfo: (projectId: string, workflowId: number) =>
+      get<CiDispatchInfo>(`/api/projects/${projectId}/ci/workflows/${workflowId}/dispatch`),
+    dispatch: (
+      projectId: string,
+      workflowId: number,
+      body: { ref: string; inputs?: Record<string, string> },
+    ) => post<{ ok: boolean }>(`/api/projects/${projectId}/ci/workflows/${workflowId}/dispatch`, body),
+    rerun: (projectId: string, runId: number, opts: { failedOnly?: boolean } = {}) =>
+      post<{ ok: boolean }>(`/api/projects/${projectId}/ci/runs/${runId}/rerun`, opts),
+    rerunJob: (projectId: string, jobId: number) =>
+      post<{ ok: boolean }>(`/api/projects/${projectId}/ci/jobs/${jobId}/rerun`, {}),
+    cancel: (projectId: string, runId: number) =>
+      post<{ ok: boolean }>(`/api/projects/${projectId}/ci/runs/${runId}/cancel`, {}),
   },
 
   /* settings */
