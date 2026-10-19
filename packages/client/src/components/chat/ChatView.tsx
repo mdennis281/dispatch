@@ -31,6 +31,7 @@ import { StatusDot, statusMeta } from "../ui/StatusDot.js";
 import { TitleText } from "../ui/TitleText.js";
 import { Spinner } from "../ui/Spinner.js";
 import { ChatHeaderBadges } from "./ChatHeaderBadges.js";
+import { QueueOverride } from "./QueueOverride.js";
 import { chatPrRefs, chatWorktreeRefs } from "./chatHeaderRefs.js";
 import { MessageList } from "./MessageList.js";
 import { StreamingTail } from "./StreamingTail.js";
@@ -617,6 +618,7 @@ export function ChatView({ chat }: { chat: Chat }) {
             </div>
             <div className="flex items-center gap-1.5 text-xs text-muted">
               <span className={cn(running && "text-accent-hi")}>{meta.label}</span>
+              <QueueOverride chatId={chat.id} />
               {activity?.label && (
                 <>
                   <span className="text-faint">·</span>

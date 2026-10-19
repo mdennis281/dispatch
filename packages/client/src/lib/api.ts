@@ -1526,6 +1526,7 @@ export const api = {
     pause: () => post<{ paused: PauseState }>("/api/pause"),
     kill: () => post<{ chatIds: string[] }>("/api/pause/kill"),
     resume: () => post<{ notified: string[] }>("/api/pause/resume"),
+    runNow: (chatId: string) => post<{ ok: boolean }>(`/api/scheduler/run/${encodeURIComponent(chatId)}`),
   },
 
   restartResume: {

@@ -4393,6 +4393,46 @@ export class SessionBroker {
   }
 
   /**
+   * The human override: admit one parked chat NOW, past the cap and past every
+   * entry that outranks it. Returns whether anything was admitted.
+   *
+   * Over the cap on purpose. The tiers are a guess at what matters most; the
+   * human pressing this knows better, and a chat they are sitting in front of
+   * waiting behind a dozen cold starts is exactly the case the guess gets
+   * wrong. The overshoot is the same as lowering the cap — nothing is
+   * preempted, and `admission` admits nothing more until load drops back
+   * under it.
+   *
+   * Refused while paused: the pause is a promise that nothing starts, and its
+   * resume note is built from who it interrupted. Resume first.
+   */
+  runNow(chatId: string): boolean {
+    if (this.pauseState) return false;
+    const entry = this.queue.find((e) => e.chatId === chatId);
+    if (!entry) return false;
+    const session = this.sessions.get(chatId);
+    this.queue = this.queue.filter((e) => e !== entry);
+    if (entry.kind === "start") {
+      if (!session || session.status !== "queued") {
+        this.publishScheduler();
+        return false;
+      }
+      this.startTurn(session);
+    } else {
+      // Reserve before granting, exactly as `drainQueue` does — otherwise the
+      // chat counts as still blocked until the grant's continuation runs.
+      if (session && this.isTurnLive(session)) {
+        session.slotReserved = true;
+        session.onLentSlot = false;
+        session.activity.unblocked(RESUME_SLOT_ID, this.now());
+      }
+      entry.grant?.();
+    }
+    this.publishScheduler();
+    return true;
+  }
+
+  /**
    * `stop()` for the pause's "kill processes": the same teardown, but work
    * parked behind the pause survives it. A plain `stop()` empties the outbox
    * and drops the chat from the queue, which here would silently discard every

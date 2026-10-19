@@ -66,6 +66,11 @@ export class PauseService {
     return this.deps.broker.schedulerSnapshot();
   }
 
+  /** Admit one queued chat past the cap — see `SessionBroker.runNow`. */
+  runNow(chatId: string): boolean {
+    return this.deps.broker.runNow(chatId);
+  }
+
   async pause(): Promise<PauseState> {
     // Persisted the moment the gate shuts, not after the interrupts land —
     // see `pauseAll`'s `onArmed`.
