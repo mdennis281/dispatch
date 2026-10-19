@@ -305,6 +305,11 @@ export class ActivityTracker {
     this.occupy(MAIN_ACTOR, QUEUED_ID, "queued", "queued", at);
   }
 
+  /** Taken off the queue WITHOUT a turn starting — the wait ends unanswered. */
+  unqueued(at = this.sink.now()): void {
+    this.release(QUEUED_ID, at);
+  }
+
   /** A turn begins: the queue wait (and any usage-limit pause) ends here. */
   turnStart(at = this.sink.now()): void {
     this.release(QUEUED_ID, at);

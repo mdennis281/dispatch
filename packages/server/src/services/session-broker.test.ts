@@ -2007,9 +2007,14 @@ describe("SessionBroker — steering & concurrency", () => {
     expect(broker.getStatus("c2")).toBe("queued");
     expect(controllers).toHaveLength(1);
 
-    // The interrupted turn settles; a message to it must not chain a new turn.
+    // The interrupted turn settles as `queued`, not `idle` — it runs again on
+    // resume, so reading as finished would be a lie — and a message to it must
+    // not chain a new turn.
     gate.resolve();
-    await broker.waitFor("c1", "idle");
+    await until(() => broker.getStatus("c1") === "queued");
+    expect(broker.schedulerSnapshot().queued.map((q) => q.chatId)).toEqual(["c2", "c1"]);
+    // The pause briefs it on resume; a restart ticket as well would be a second one.
+    expect(broker.interruptionSnapshot().map((s) => s.chatId)).toEqual(["c2"]);
     await broker.sendMessage("c1", "resume note");
     expect(broker.getStatus("c1")).toBe("queued");
     expect(controllers[0]!.pushed).toEqual(["go"]);
@@ -2023,6 +2028,29 @@ describe("SessionBroker — steering & concurrency", () => {
     await until(() => controllers[1]?.pushed.length === 1);
     expect(controllers[0]!.pushed).toEqual(["go", "resume note"]);
     expect(controllers[1]!.pushed).toEqual(["later"]);
+  });
+
+  it("resume unparks an interrupted chat whose note never landed instead of starting an empty turn", async () => {
+    const gate = deferred();
+    const { fn, controllers } = makeFakeQuery(async (text) => {
+      if (text === "go") await gate.promise;
+      return [assistantText(text), resultMsg(text === "go" ? "interrupted" : "success")];
+    });
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+    await broker.sendMessage("c1", "go");
+    await until(() => controllers[0]?.pushed.length === 1);
+
+    await broker.pauseAll();
+    gate.resolve();
+    await until(() => broker.getStatus("c1") === "queued");
+
+    // No note was sent, so c1 is not in `first`.
+    broker.resumeAll([]);
+    expect(broker.getStatus("c1")).toBe("idle");
+    expect(broker.schedulerSnapshot().queued).toEqual([]);
+    expect(controllers[0]!.pushed).toEqual(["go"]);
   });
 
   it("hands the pause to onArmed before awaiting an interrupt that never answers", async () => {

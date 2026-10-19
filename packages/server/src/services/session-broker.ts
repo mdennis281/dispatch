@@ -4223,6 +4223,16 @@ export class SessionBroker {
     const out: InterruptionSnapshot[] = [];
     for (const session of this.sessions.values()) {
       if (!this.isTurnLive(session) && session.status !== "queued") continue;
+      // Parked by the pause with nothing of the human's held. The persisted
+      // pause briefs it on resume; a restart ticket too would hand it a second
+      // "carry on" in the same turn.
+      if (
+        session.status === "queued" &&
+        session.outbox.length === 0 &&
+        this.pauseState?.interrupted.includes(session.chatId)
+      ) {
+        continue;
+      }
       out.push({
         chatId: session.chatId,
         status: session.status,
@@ -4360,7 +4370,17 @@ export class SessionBroker {
    */
   resumeAll(first: string[] = []): void {
     if (!this.pauseState) return;
+    const { interrupted } = this.pauseState;
     this.pauseState = undefined;
+    // An interrupted chat whose resume note never landed is parked with
+    // nothing to say. Admitted, it would open a turn on an empty prompt.
+    for (const id of interrupted) {
+      const session = this.sessions.get(id);
+      if (first.includes(id) || session?.status !== "queued" || session.outbox.length > 0) continue;
+      this.dequeue(id, "start");
+      session.activity.unqueued(this.now());
+      this.setStatus(session, "idle", { state: "idle" });
+    }
     // Same tier as the rest of the starts, so "first" is done with the
     // tie-break: date them before everything already parked.
     const oldest = Math.min(...this.queue.map((e) => e.since), this.now());
@@ -4388,6 +4408,23 @@ export class SessionBroker {
     session.outbox = [...held, ...session.outbox];
     if (this.pauseState) this.parkForPause(session);
     else this.schedule(session);
+  }
+
+  /**
+   * Should a turn that just settled park behind the pause instead of going
+   * idle? Yes when our outbox holds work, and yes for a chat the pause itself
+   * cut off — that one is owed a resume note and runs first on resume, so it
+   * is queued in every sense but having the note yet. Settling it `idle` made
+   * every chat the pause stopped read as finished, indistinguishable from the
+   * ones that really were.
+   *
+   * Input the runtime already holds (`runtimePending`) cannot be taken back,
+   * so that case still chains — it was handed over before the pause and the
+   * provider will start it regardless.
+   */
+  private holdsForPause(session: LiveSession, runtimePending: number): boolean {
+    if (!this.pauseState || runtimePending > 0) return false;
+    return session.outbox.length > 0 || this.pauseState.interrupted.includes(session.chatId);
   }
 
   /** Park a session as `queued` behind the pause. */
@@ -5721,12 +5758,9 @@ export class SessionBroker {
         // `event.ok`, not `ok`: a stopped turn counts as settled for status, but
         // Stop must not be what kicks off an auto-compact turn.
         await this.compactIfPastThreshold(session, event.ok);
-        // Paused with only OUR outbox holding work: settle and park rather than
-        // chaining a fresh turn. Input the runtime already holds (`pending()`)
-        // cannot be taken back, so that case still chains — it was handed over
-        // before the pause and the provider will start it regardless.
-        const holdForPause =
-          !!this.pauseState && (session.harnessSession?.pending() ?? 0) === 0 && session.outbox.length > 0;
+        // Paused: settle and park rather than chaining a fresh turn. See
+        // `holdsForPause`.
+        const holdForPause = this.holdsForPause(session, session.harnessSession?.pending() ?? 0);
         if (!holdForPause && ((session.harnessSession?.pending() ?? 0) > 0 || session.outbox.length > 0)) {
           session.turnOpen = true;
           this.setStatus(session, "running", { state: "thinking" });
@@ -6100,6 +6134,7 @@ export class SessionBroker {
         // `providerErrored`, not `isError`: a stopped turn settles as idle, but
         // Stop must not be what kicks off a compaction turn.
         await this.compactIfPastThreshold(session, !providerErrored);
+        const holdForPause = this.holdsForPause(session, session.input?.pending() ?? 0);
         // Chained turn buffered? Stay running; otherwise the turn is complete.
         if (session.input && session.input.pending() > 0) {
           session.turnOpen = true;
@@ -6109,6 +6144,10 @@ export class SessionBroker {
         } else {
           this.onTurnEnd(session, { stopped });
         }
+        // This loop never parked before, so a message held behind the pause
+        // during an open turn was left in the outbox of a chat reading `idle`
+        // — and the default harness runs HERE, not on the seam above.
+        if (holdForPause) this.parkForPause(session);
         return;
       }
       default:
