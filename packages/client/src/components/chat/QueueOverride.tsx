@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Play } from "lucide-react";
 import { QUEUE_TIER_LABELS } from "@dispatch/shared";
+import { Button } from "../ui/Button.js";
 import { Tooltip } from "../ui/Tooltip.js";
 import { useScheduler } from "../../stores/scheduler.js";
 
@@ -30,18 +31,22 @@ export function QueueOverride({ chatId }: { chatId: string }) {
     <>
       <span className="text-faint">·</span>
       <Tooltip label={tip}>
-        <button
-          type="button"
+        {/* Colour on the children, not the button: `cn` is plain clsx, so a
+            className colour would race `link`'s own `text-muted` on emit order.
+            `-my-1` keeps the 24px button from growing the 48px header. */}
+        <Button
+          variant="link"
+          size="sm"
           disabled={pending}
+          className="-my-1"
+          leftIcon={<Play className="text-accent-hi" />}
           onClick={() => {
             setPending(true);
             void runNow(chatId).finally(() => setPending(false));
           }}
-          className="inline-flex shrink-0 items-center gap-1 rounded-sm px-1 font-medium text-accent-hi hover:bg-accent-ghost disabled:opacity-50 [&_svg]:size-3"
         >
-          <Play />
-          Run now
-        </button>
+          <span className="text-accent-hi">Run now</span>
+        </Button>
       </Tooltip>
     </>
   );
