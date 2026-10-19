@@ -60,11 +60,14 @@ export function CiLogViewer({
   projectId,
   job,
   focusStep,
+  focusSeq = 0,
 }: {
   projectId: string;
   job: CiJob;
   /** Step number to scroll to once the log is in. */
   focusStep: number | null;
+  /** Bumped on every step click, so clicking the same step again re-jumps. */
+  focusSeq?: number;
 }) {
   const log = useResource(`${job.id}:${job.status}`, () => api.ci.jobLog(projectId, job.id));
   const blocks = useMemo(() => (log.data?.available ? parseLog(log.data.text) : []), [log.data]);
@@ -75,6 +78,16 @@ export function CiLogViewer({
   const [query, setQuery] = useState("");
   const [searching, setSearching] = useState(false);
   const [target, setTarget] = useState<number | null>(null);
+  // A line still to be scrolled to. Separate from `target` (which only marks
+  // the line) so the scroll happens ONCE per jump: the effect below also has
+  // to re-run when a group opens or the tail expands — the line may not be in
+  // the DOM until then — and without this it re-scrolled every time the reader
+  // toggled any group afterwards.
+  const pendingScroll = useRef<number | null>(null);
+  const jumpTo = (n: number) => {
+    pendingScroll.current = n;
+    setTarget(n);
+  };
   const scroller = useRef<HTMLDivElement>(null);
 
   // Open every group with an error in it; reset when a new log arrives.
@@ -88,25 +101,35 @@ export function CiLogViewer({
   }, [blocks]);
 
   // Jump to a step: open its group, make sure it's rendered, then scroll.
+  //
+  // Keyed on the step's start STRING, never on `job.steps`: a live run's jobs
+  // are re-fetched every few seconds, each poll is a fresh array, and an effect
+  // on it re-ran the jump on every poll — yanking the scroll back to the step
+  // and reopening a group the reader had just collapsed.
+  const focusStartedAt =
+    focusStep === null ? null : (job.steps.find((s) => s.number === focusStep)?.startedAt ?? null);
   useEffect(() => {
     if (focusStep === null || !lines.length) return;
-    const step = job.steps.find((s) => s.number === focusStep);
-    const n = firstLineAt(lines, step?.startedAt ?? null);
+    const n = firstLineAt(lines, focusStartedAt);
     if (n === null) return;
     const group = blocks.find(
       (b) => b.type === "group" && (b.title.n === n || b.lines.some((l) => l.n === n)),
     );
     if (group?.type === "group") setOpen((s) => new Set(s).add(group.title.n));
     if (lines.length > TAIL_LINES && n < tailStart(lines)) setShowAll(true);
-    setTarget(n);
-  }, [focusStep, lines, blocks, job.steps]);
+    jumpTo(n);
+  }, [focusStep, focusSeq, focusStartedAt, lines, blocks]);
 
   useEffect(() => {
-    if (target === null) return;
-    const el = document.getElementById(`ci-log-${job.id}-L${target}`);
+    const n = pendingScroll.current;
+    if (n === null) return;
+    const el = document.getElementById(`ci-log-${job.id}-L${n}`);
     const box = scroller.current;
     // The scroller is `relative`, so it IS the offsetParent of every line.
-    if (el && box) box.scrollTop = el.offsetTop - 8;
+    if (el && box) {
+      box.scrollTop = el.offsetTop - 8;
+      pendingScroll.current = null;
+    }
   }, [target, open, showAll, job.id]);
 
   // Default view: the tail. Blocks are trimmed whole so a group never loses
@@ -172,7 +195,7 @@ export function CiLogViewer({
             const group = blocks.find((b) => b.type === "group" && b.lines.some((x) => x.n === l.n));
             if (group?.type === "group") setOpen((s) => new Set(s).add(group.title.n));
             if (lines.length > TAIL_LINES && l.n < tailStart(lines)) setShowAll(true);
-            setTarget(l.n);
+            jumpTo(l.n);
           }}
         >
           <Line line={l} jobId={-job.id} />

@@ -364,11 +364,13 @@ function JobList({
   const [expanded, setExpanded] = useState<Set<number>>(
     () => new Set(firstFailed ? [firstFailed.id] : jobs.length === 1 && jobs[0] ? [jobs[0].id] : []),
   );
-  const [logFor, setLogFor] = useState<{ jobId: number; step: number | null } | null>(() => {
-    if (!firstFailed) return null;
-    const step = firstFailed.steps.find((s) => ciIsFailed(s));
-    return { jobId: firstFailed.id, step: step?.number ?? null };
-  });
+  const [logFor, setLogFor] = useState<{ jobId: number; step: number | null; seq: number } | null>(
+    () => {
+      if (!firstFailed) return null;
+      const step = firstFailed.steps.find((s) => ciIsFailed(s));
+      return { jobId: firstFailed.id, step: step?.number ?? null, seq: 0 };
+    },
+  );
 
   const toggle = (id: number) =>
     setExpanded((s) => {
@@ -412,7 +414,7 @@ function JobList({
                 tip={showLog ? "Hide log" : "View log"}
                 active={showLog}
                 onClick={() => {
-                  setLogFor(showLog ? null : { jobId: job.id, step: null });
+                  setLogFor(showLog ? null : { jobId: job.id, step: null, seq: 0 });
                   if (!showLog) setExpanded((s) => new Set(s).add(job.id));
                 }}
               >
@@ -472,7 +474,13 @@ function JobList({
                         <li key={step.number}>
                           <RowButton
                             type="button"
-                            onClick={() => setLogFor({ jobId: job.id, step: step.number })}
+                            onClick={() =>
+                              setLogFor((cur) => ({
+                                jobId: job.id,
+                                step: step.number,
+                                seq: (cur?.seq ?? 0) + 1,
+                              }))
+                            }
                             className={cn(
                               "flex w-full items-center gap-2.5 rounded px-1.5 py-1 text-left text-xs hover:bg-hover",
                               focused && "bg-accent-ghost",
@@ -502,7 +510,12 @@ function JobList({
                 )}
                 {showLog && (
                   <div className="mt-2">
-                    <CiLogViewer projectId={projectId} job={job} focusStep={logFor?.step ?? null} />
+                    <CiLogViewer
+                      projectId={projectId}
+                      job={job}
+                      focusStep={logFor?.step ?? null}
+                      focusSeq={logFor?.seq ?? 0}
+                    />
                   </div>
                 )}
               </div>
