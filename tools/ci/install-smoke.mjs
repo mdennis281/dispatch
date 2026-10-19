@@ -67,6 +67,14 @@ function parseArgs(argv) {
   const out = {
     root: join(tmpdir(), "dispatch-smoke-root"),
     channel: "unstable",
+    /**
+     * Test THIS release as the head instead of whatever the channel resolves
+     * to. promote.yml needs it: it gates a prerelease on its way to stable, and
+     * "the stable head" is by definition the build being REPLACED. `--channel`
+     * still picks the update base, so `--channel stable --tag <t>` is exactly
+     * the path a stable subscriber walks when <t> is promoted.
+     */
+    tag: undefined,
     previous: "auto",
     repo: process.env.DISPATCH_INSTALL_REPO || DEFAULT_REPO,
     report: undefined,
@@ -104,6 +112,7 @@ function parseArgs(argv) {
     };
     if (arg === "--root") out.root = resolve(value());
     else if (arg === "--channel") out.channel = value();
+    else if (arg === "--tag") out.tag = value().replace(/^v?/, "v");
     else if (arg === "--previous") out.previous = value();
     else if (arg === "--repo") out.repo = value();
     else if (arg === "--report") out.report = resolve(value());
@@ -374,6 +383,10 @@ async function main() {
   const { root, channel } = args;
   expectUnreleased = args.expectUnreleased;
   const installer = join(repoRoot, "tools", "install.mjs");
+  // Every install of the head names it explicitly when one was given; the
+  // installer accepts a named prerelease on any channel, the same way the
+  // in-app updater installs one.
+  const headArgs = args.tag ? ["--version", args.tag] : [];
   const python = findPython();
   const launcher = () => join(root, "app", "tools", "app", "launch.py");
   const launch = (extra, opts = {}) =>
@@ -402,7 +415,7 @@ async function main() {
     process.env.PATH = `${system32};${process.env.PATH ?? ""}`;
   }
 
-  console.log(`smoke: ${platform()}/${process.arch} node ${process.version}, channel=${channel}, root=${root}`);
+  console.log(`smoke: ${platform()}/${process.arch} node ${process.version}, channel=${channel}${args.tag ? `, tag=${args.tag}` : ""}, root=${root}`);
   if (existsSync(root)) {
     // A previous run's leftover would turn the "fresh install" phase into an update.
     rmSync(root, { recursive: true, force: true });
@@ -411,10 +424,11 @@ async function main() {
   /* ---- 1. dry run: the channel head, from the checkout's installer ---- */
 
   let head = "";
-  await hard("installer --dry-run resolves the channel head", async () => {
-    const { out } = await run(process.execPath, [installer, "--dry-run", "--channel", channel, "--target", root, "--repo", args.repo], { env });
+  await hard(`installer --dry-run resolves ${args.tag ?? "the channel head"}`, async () => {
+    const { out } = await run(process.execPath, [installer, "--dry-run", "--channel", channel, ...headArgs, "--target", root, "--repo", args.repo], { env });
     head = /^release: (v\S+)/m.exec(out)?.[1] ?? "";
     assert(head, "no `release: v…` line in the dry-run output");
+    assert(!args.tag || head === args.tag, `asked for ${args.tag}, the installer resolved ${head}`);
     assert(/verified: sha256 [0-9a-f]{64}/.test(out), "the dry run did not report a verified checksum");
     assert(/dry run complete/.test(out), "the dry run did not report completion");
     assert(!existsSync(join(root, "app")), "a dry run must not create the install");
@@ -445,7 +459,7 @@ async function main() {
 
   const launcherArgs = args.noLaunchers ? ["--no-shortcut", "--no-autostart"] : [];
   const bootstrapArgs = [
-    ...(previous ? ["--version", previous] : ["--channel", channel]),
+    ...(previous ? ["--version", previous] : headArgs.length ? headArgs : ["--channel", channel]),
     "--target", root,
     "--no-open",
     ...launcherArgs,
@@ -512,7 +526,7 @@ async function main() {
 
   /* ---- 3. update to the head with the checkout's installer ---- */
 
-  const installerArgs = ["--channel", channel, "--target", root, "--no-open", ...launcherArgs, "--repo", args.repo];
+  const installerArgs = ["--channel", channel, ...headArgs, "--target", root, "--no-open", ...launcherArgs, "--repo", args.repo];
   if (previous) {
     let updateOut = "";
     await hard(`tools/install.mjs updates ${previous} → ${head}`, async () => {
@@ -869,7 +883,7 @@ function writeReport(args, fatal) {
   const skipped = results.filter((r) => r.ok === "skip");
   const passed = results.filter((r) => r.ok === true);
   const lines = [
-    `### Install smoke — ${platform()}/${process.arch}, ${args.channel} channel`,
+    `### Install smoke — ${platform()}/${process.arch}, ${args.channel} channel${args.tag ? `, ${args.tag}` : ""}`,
     "",
     `${failed.length === 0 && !fatal ? "✅" : "❌"} ${passed.length} passed, ${failed.length} failed, ${skipped.length} skipped${fatal ? ` — ${fatal}` : ""}`,
     "",
@@ -887,7 +901,7 @@ function writeReport(args, fatal) {
   if (args.report) {
     mkdirSync(dirname(args.report), { recursive: true });
     writeFileSync(args.report, JSON.stringify({
-      platform: platform(), arch: process.arch, node: process.version, channel: args.channel,
+      platform: platform(), arch: process.arch, node: process.version, channel: args.channel, tag: args.tag ?? null,
       ok: failed.length === 0 && !fatal, fatal: fatal ?? null, results, notes,
     }, null, 2));
   }

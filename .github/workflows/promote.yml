@@ -24,6 +24,12 @@
 # duplicate of anything: per-PR CI is Linux-only, so this is the one and only
 # run of the Windows-sensitive suite in the whole pipeline. Unstable ships on
 # merge gated by Linux; stable additionally has to survive Windows.
+#
+# And the `install` job: the install smoke from `install-smoke.yml`, pinned to
+# the tag being promoted. Everything above tests a CHECKOUT; that one installs
+# the published tarball on Linux, macOS and Windows, updates a real stable
+# install onto it, and talks to the result — the path every stable subscriber
+# is about to walk, and one no other job here can see break.
 name: Promote
 
 on:
@@ -241,9 +247,36 @@ jobs:
       - name: Test release installer (Windows)
         run: node --test tools/install.test.mjs
 
+  # ---------------------------------------------------------------------------
+  # THE INSTALL GATE. The weekly smoke, but against THIS tag instead of a
+  # channel head: `channel: stable` makes the update base the current stable
+  # release, so the leg proves "a stable user updates onto <tag>", not "<tag>
+  # installs from nothing". Stable only — the tag is already the unstable head
+  # or behind it, and the weekly run covers that channel.
+  #
+  # The smoke's harness (install-smoke.mjs, install.sh/.ps1, tools/install.mjs)
+  # comes from the revision this workflow was dispatched from, not the tag —
+  # the same split as the Windows file list above, and the same reason: an old
+  # tag may predate `--tag` entirely. The release under test is the tag's
+  # tarball, which is the thing being promoted.
+  # ---------------------------------------------------------------------------
+  install:
+    name: install smoke
+    needs: resolve
+    # A called workflow can never hold more than the caller grants, and its
+    # `report` job asks for issues: write — without it the whole call fails
+    # to start, even though `report` skips itself for a pinned tag.
+    permissions:
+      contents: read
+      issues: write
+    uses: ./.github/workflows/install-smoke.yml
+    with:
+      channel: stable
+      tag: ${{ needs.resolve.outputs.tag }}
+
   promote:
     name: flip to stable
-    needs: [resolve, gate, windows]
+    needs: [resolve, gate, windows, install]
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
