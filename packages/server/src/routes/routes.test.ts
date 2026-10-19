@@ -19,6 +19,7 @@ import { EventBus } from "../bus.js";
 import { Store } from "../store/index.js";
 import { SessionBroker, type QueryFn } from "../services/session-broker.js";
 import { GitHubService, type ExecaLike } from "../services/github.js";
+import { CiService } from "../services/ci.js";
 import { GLOBAL_PROJECT_ID, PROVIDER_IDS, type WsServerEvent } from "@dispatch/shared";
 
 /* --------------------------------------------------------------- scripted SDK */
@@ -134,6 +135,20 @@ const fakeGhExec: ExecaLike = async (_file, args = []) => {
   if (a.includes("repo view")) return { stdout: "acme/widget", exitCode: 0 };
   if (a.startsWith("pr view")) return { stdout: JSON.stringify(PR_JSON), exitCode: 0 };
   if (a.startsWith("pr checks")) return { stdout: "[]", exitCode: 0 };
+  // CI/CD page reads — one run whose jobs load and whose artifacts fail, so a
+  // test can show the two sections answer independently.
+  if (a === "api repos/acme/widget/actions/runs/55/jobs?filter=latest&per_page=100") {
+    return {
+      stdout: JSON.stringify({ jobs: [{ id: 9, name: "build", status: "completed", conclusion: "success" }] }),
+      exitCode: 0,
+    };
+  }
+  if (a.startsWith("api repos/acme/widget/actions/runs/55/artifacts")) {
+    return { stdout: "", stderr: "gh: Server Error (HTTP 500)", exitCode: 1 };
+  }
+  if (a === "api repos/acme/widget/actions/runs/404") {
+    return { stdout: '{"message":"Not Found"}', stderr: "gh: Not Found (HTTP 404)", exitCode: 1 };
+  }
   if (a.startsWith("api graphql")) {
     return {
       stdout: JSON.stringify({
@@ -216,7 +231,9 @@ async function boot(query: QueryFn, overrides: Partial<ServerConfig> = {}): Prom
     deps: { query },
   });
   const github = new GitHubService({ bus, store, exec: fakeGhExec });
-  app = await buildApp({ config, store, bus, serviceOverrides: { broker, github } });
+  // Its own fake exec too: the default would make real `gh api` calls.
+  const ci = new CiService({ resolveRepo: (p) => github.repoForProject(p), exec: fakeGhExec });
+  app = await buildApp({ config, store, bus, serviceOverrides: { broker, github, ci } });
   await app.listen({ port: 0, host: "127.0.0.1" });
   port = (app.server.address() as AddressInfo).port;
 }
@@ -1212,6 +1229,71 @@ describe("routes — gh-action", () => {
     expect(res.statusCode).toBe(502);
     expect(res.json().error).toContain("thread resolved");
     expect(res.json().error).toContain("HTTP 403");
+  });
+});
+
+describe("routes — CI/CD", () => {
+  beforeEach(async () => {
+    await boot(makeFakeQuery(() => [resultMsg()]));
+  });
+
+  it("404s an unknown project before touching the provider", async () => {
+    const res = await app.inject({ url: "/api/projects/nope/ci/workflows" });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("answers each section on its own — jobs load while artifacts fail", async () => {
+    const projectId = await makeProject();
+    const jobs = await app.inject({ url: `/api/projects/${projectId}/ci/runs/55/jobs` });
+    const artifacts = await app.inject({ url: `/api/projects/${projectId}/ci/runs/55/artifacts` });
+    expect(jobs.statusCode).toBe(200);
+    expect(jobs.json()[0]).toMatchObject({ id: 9, name: "build", conclusion: "success" });
+    expect(artifacts.statusCode).toBe(502);
+    expect(artifacts.json().error).toContain("HTTP 500");
+  });
+
+  it("maps the provider's not-found to 404, and a project with no remote to 409", async () => {
+    const projectId = await makeProject();
+    const gone = await app.inject({ url: `/api/projects/${projectId}/ci/runs/404` });
+    expect(gone.statusCode).toBe(404);
+
+    vi.spyOn(app.services.github, "repoForProject").mockRejectedValue(new Error("no git remotes found"));
+    // A second project, so the first one's cached repo isn't what answers.
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/projects",
+      payload: { name: "Local", repoPath: join(dir, "local"), worktreeRoot: "wt" },
+    });
+    const none = await app.inject({ url: `/api/projects/${res.json().id}/ci` });
+    expect(none.statusCode).toBe(409);
+    expect(none.json().error).toContain("No GitHub repository");
+  });
+
+  it("validates query and body before acting", async () => {
+    const projectId = await makeProject();
+    const badPage = await app.inject({ url: `/api/projects/${projectId}/ci/runs?page=abc` });
+    expect(badPage.statusCode).toBe(400);
+    const noRef = await app.inject({
+      method: "POST",
+      url: `/api/projects/${projectId}/ci/workflows/4/dispatch`,
+      payload: { inputs: { a: "b" } },
+    });
+    expect(noRef.statusCode).toBe(400);
+  });
+
+  it("acts through the service and answers 202", async () => {
+    const projectId = await makeProject();
+    const cancel = vi.spyOn(app.services.ci, "cancel").mockResolvedValue();
+    const rerun = vi.spyOn(app.services.ci, "rerun").mockResolvedValue();
+    const c = await app.inject({ method: "POST", url: `/api/projects/${projectId}/ci/runs/55/cancel` });
+    const r = await app.inject({
+      method: "POST",
+      url: `/api/projects/${projectId}/ci/runs/55/rerun`,
+      payload: { failedOnly: true },
+    });
+    expect([c.statusCode, r.statusCode]).toEqual([202, 202]);
+    expect(cancel.mock.calls[0][1]).toBe(55);
+    expect(rerun.mock.calls[0].slice(1)).toEqual([55, { failedOnly: true }]);
   });
 });
 

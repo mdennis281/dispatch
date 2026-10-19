@@ -69,6 +69,7 @@ import { ChatProcessService } from "./chat-processes.js";
 import { ProcTableCache } from "./proc-table-cache.js";
 import { ResourceService } from "./resources.js";
 import { GitHubService } from "./github.js";
+import { CiService } from "./ci.js";
 import { IssueService } from "./issues/service.js";
 import { IssueWatcher } from "./issue-watcher.js";
 import { Notifier } from "./notifier.js";
@@ -133,6 +134,7 @@ export interface ServiceOverrides {
   procTableCache?: ProcTableCache;
   resources?: ResourceService;
   github?: GitHubService;
+  ci?: CiService;
   notifier?: Notifier;
   push?: PushService;
   attention?: AttentionQueue;
@@ -206,6 +208,8 @@ export interface Services extends ServiceBase {
   procTableCache: ProcTableCache;
   resources: ResourceService;
   github: GitHubService;
+  /** The CI/CD page's provider-neutral read/act layer (GitHub Actions today). */
+  ci: CiService;
   notifier: Notifier;
   /** Server-sent Web Push — the only delivery path an iOS home-screen app has. */
   push: PushService;
@@ -422,6 +426,8 @@ export function createServices(
   // GitHub control plane (PRs + Actions). Constructed before the broker so it can
   // back the session MCP's `watch_pr` checks / review-thread / merge-state polls.
   const github = overrides.github ?? new GitHubService({ bus, store });
+  const ci =
+    overrides.ci ?? new CiService({ resolveRepo: (project) => github.repoForProject(project) });
   const issues =
     overrides.issues ??
     new IssueService({
@@ -1276,6 +1282,7 @@ export function createServices(
     procTableCache,
     resources,
     github,
+    ci,
     notifier,
     push,
     attention,

@@ -12,6 +12,7 @@ export * from "./worktree-cleanup.js";
 export * from "./worktree-history.js";
 export * from "./domain.js";
 export * from "./git.js";
+export * from "./ci.js";
 export * from "./project-config.js";
 export * from "./manifest.js";
 export * from "./agent-tasks.js";

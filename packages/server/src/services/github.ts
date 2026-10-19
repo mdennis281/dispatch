@@ -814,17 +814,40 @@ function normalizeInputType(t: unknown): WorkflowInput["type"] | undefined {
  * coercing it to a boolean, so `doc.on.workflow_dispatch` resolves correctly.
  */
 function parseWorkflowInputs(yamlText: string): WorkflowInput[] {
+  return parseWorkflowDispatch(yamlText).inputs;
+}
+
+/**
+ * Whether a workflow can be triggered by hand at all, plus its inputs.
+ *
+ * `dispatchable` exists because "no inputs" and "no `workflow_dispatch`" were
+ * the same `[]` to {@link parseWorkflowInputs}, so a Run form opened on a
+ * push-only workflow looked fine and then 422'd on submit. The trigger can be
+ * spelled three ways — `on: workflow_dispatch`, `on: [push, workflow_dispatch]`,
+ * or a map key whose value is null when it declares no inputs — and all three
+ * must count.
+ */
+export function parseWorkflowDispatch(yamlText: string): {
+  dispatchable: boolean;
+  inputs: WorkflowInput[];
+} {
   let doc: unknown;
   try {
     doc = parseYaml(yamlText);
   } catch {
-    return [];
+    return { dispatchable: false, inputs: [] };
   }
-  if (!doc || typeof doc !== "object") return [];
+  if (!doc || typeof doc !== "object") return { dispatchable: false, inputs: [] };
   const on = (doc as Record<string, unknown>).on;
-  // `on` may be a scalar/array (no dispatch config) or a map holding it.
-  if (!on || typeof on !== "object" || Array.isArray(on)) return [];
-  const wd = (on as Record<string, unknown>).workflow_dispatch;
+  if (on === "workflow_dispatch") return { dispatchable: true, inputs: [] };
+  if (Array.isArray(on)) return { dispatchable: on.includes("workflow_dispatch"), inputs: [] };
+  if (!on || typeof on !== "object") return { dispatchable: false, inputs: [] };
+  if (!("workflow_dispatch" in on)) return { dispatchable: false, inputs: [] };
+  return { dispatchable: true, inputs: parseDispatchInputs(on as Record<string, unknown>) };
+}
+
+function parseDispatchInputs(on: Record<string, unknown>): WorkflowInput[] {
+  const wd = on.workflow_dispatch;
   if (!wd || typeof wd !== "object") return [];
   const inputs = (wd as Record<string, unknown>).inputs;
   if (!inputs || typeof inputs !== "object") return [];
