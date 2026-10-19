@@ -24,6 +24,8 @@ interface SchedulerStore {
   resume: () => Promise<void>;
   /** Kill every chat's processes; resolves to how many chats were reaped. */
   kill: () => Promise<number>;
+  /** Start one queued chat now, past the cap and ahead of the queue. */
+  runNow: (chatId: string) => Promise<void>;
 }
 
 export const useScheduler = create<SchedulerStore>((set, get) => {
@@ -68,5 +70,20 @@ export const useScheduler = create<SchedulerStore>((set, get) => {
       await run("resume", () => api.scheduler.resume());
     },
     kill: async () => (await run("kill", () => api.scheduler.kill()))?.chatIds.length ?? 0,
+    // Not through `run`: that gate is one-at-a-time for the global controls,
+    // and a per-chat override must not be swallowed because a pause is in
+    // flight elsewhere (nor block one).
+    runNow: async (chatId) => {
+      try {
+        await api.scheduler.runNow(chatId);
+      } catch (err) {
+        useNotices.getState().push({
+          level: "error",
+          text: "Couldn't start that chat",
+          detail: err instanceof Error ? err.message : String(err),
+        });
+      }
+      await get().load();
+    },
   };
 });

@@ -1982,6 +1982,38 @@ describe("SessionBroker — steering & concurrency", () => {
     expect(broker.activeCount()).toBe(0);
   });
 
+  it("runNow admits a queued chat past the cap and ahead of the queue, but not while paused", async () => {
+    const gate = deferred();
+    const { fn, controllers } = makeFakeQuery(async () => {
+      await gate.promise;
+      return [assistantText("done"), resultMsg()];
+    });
+    const broker = makeBroker(fn, 1);
+    for (const id of ["c1", "c2", "c3"]) {
+      await store.saveChat(chatFor(id));
+      broker.create(chatFor(id));
+    }
+    await broker.sendMessage("c1", "go");
+    await broker.sendMessage("c2", "go");
+    await broker.sendMessage("c3", "go");
+    await until(() => controllers.length === 1);
+    expect(broker.getStatus("c3")).toBe("queued");
+
+    // c3 jumps c2 and runs at 2/1 slots.
+    expect(broker.runNow("c3")).toBe(true);
+    await until(() => controllers.length === 2);
+    expect(broker.getStatus("c3")).toBe("running");
+    expect(broker.getStatus("c2")).toBe("queued");
+    expect(broker.schedulerSnapshot().queued.map((q) => q.chatId)).toEqual(["c2"]);
+    // Not queued any more → nothing to admit.
+    expect(broker.runNow("c3")).toBe(false);
+
+    await broker.pauseAll();
+    expect(broker.runNow("c2")).toBe(false);
+    expect(broker.getStatus("c2")).toBe("queued");
+    gate.resolve();
+  });
+
   it("a global pause interrupts live turns, holds every new turn, and resume runs the interrupted chat first", async () => {
     const gate = deferred();
     const { fn, controllers } = makeFakeQuery(async (text) => {
