@@ -39,6 +39,25 @@ on:
         description: Release to install FIRST (then update to the head). `auto` = the one before the head; `none` = skip the update phase.
         type: string
         default: auto
+      tag:
+        description: Release to test as the head instead of the channel head (blank = the channel head)
+        type: string
+        default: ""
+  # promote.yml calls this as its install gate, with `channel: stable` and the
+  # tag being promoted — see the `install` job there. The inputs mirror
+  # workflow_dispatch's, and every read below goes through `inputs.*`, which
+  # both triggers populate (`github.event.inputs` is the CALLER's event here).
+  workflow_call:
+    inputs:
+      channel:
+        type: string
+        default: both
+      previous:
+        type: string
+        default: auto
+      tag:
+        type: string
+        default: ""
   # Exactly the files the smoke takes FROM THE CHECKOUT. Everything else it
   # exercises — launch.py, autostart.mjs, create-shortcut.mjs, the server and
   # its routes — comes out of the PUBLISHED release payload it installs, so a
@@ -56,8 +75,10 @@ on:
 permissions:
   contents: read
 
+# `github.workflow` is the CALLER's name under workflow_call, so a promotion's
+# smoke on refs/heads/main never cancels — or is cancelled by — the weekly run.
 concurrency:
-  group: install-smoke-${{ github.ref }}
+  group: install-smoke-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -73,7 +94,7 @@ jobs:
     steps:
       - id: plan
         run: |
-          case "${{ github.event.inputs.channel || 'both' }}" in
+          case "${{ inputs.channel || 'both' }}" in
             stable)   echo 'channels=["stable"]' >> "$GITHUB_OUTPUT" ;;
             unstable) echo 'channels=["unstable"]' >> "$GITHUB_OUTPUT" ;;
             *)        echo 'channels=["stable","unstable"]' >> "$GITHUB_OUTPUT" ;;
@@ -153,11 +174,15 @@ jobs:
         shell: bash
         env:
           SMOKE_EXPECT_INSTALLED_CLIS: ${{ runner.os != 'Windows' && '1' || '0' }}
+          # Through env, not interpolated into the script: it is free text typed
+          # into a dispatch form.
+          SMOKE_TAG: ${{ inputs.tag }}
         run: |
           eval "set -- $SMOKE_EXPECT_UNRELEASED"
           node tools/ci/install-smoke.mjs \
             --channel "${{ matrix.channel }}" \
-            --previous "${{ github.event.inputs.previous || 'auto' }}" \
+            --previous "${{ inputs.previous || 'auto' }}" \
+            ${SMOKE_TAG:+--tag "$SMOKE_TAG"} \
             --root "$RUNNER_TEMP/dispatch-smoke" \
             --report "$RUNNER_TEMP/smoke-report/${{ matrix.os }}-${{ matrix.channel }}.json" \
             "$@"
@@ -193,11 +218,13 @@ jobs:
   # while it stays open, so a bug that persists for four weeks is one thread
   # with four comments and not four issues. Never on pull requests: the PR's
   # own red check is the report there, and a fork's token could not write here
-  # anyway.
+  # anyway. Never for a pinned `tag` either: that is a promotion gate (or a
+  # human testing one build), and the red Promote run in front of whoever
+  # started it is the report — an issue would outlive a build nobody ships.
   report:
     name: file an issue on failure
     needs: smoke
-    if: always() && github.event_name != 'pull_request' && contains(needs.smoke.result, 'failure')
+    if: always() && github.event_name != 'pull_request' && !inputs.tag && contains(needs.smoke.result, 'failure')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

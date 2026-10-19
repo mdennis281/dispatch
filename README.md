@@ -1,6 +1,6 @@
 # Dispatch
 
-[![CI](https://github.com/mdennis281/dispatch/actions/workflows/ci.yml/badge.svg)](https://github.com/mdennis281/dispatch/actions/workflows/ci.yml)
+[![CI](https://github.com/mdennis281/dispatch/actions/workflows/ci.yml/badge.svg)](https://github.com/mdennis281/dispatch/actions/workflows/ci.yml) [![Install smoke](https://github.com/mdennis281/dispatch/actions/workflows/install-smoke.yml/badge.svg)](https://github.com/mdennis281/dispatch/actions/workflows/install-smoke.yml)
 
 An all-in-one agent CLI harness that replaces how you work with your LLMs. I built this to get the most out of my AI subscriptions. Im not saying it's the best agent CLI harness out there, but it's the best for how I build projects.
 
