@@ -30,6 +30,7 @@ import { RunStream } from "./RunStream.js";
 import { Markdown } from "../chat/Markdown.js";
 import { IconButton } from "../ui/IconButton.js";
 import { Chip } from "../ui/Chip.js";
+import { SegmentedControl } from "../ui/SegmentedControl.js";
 import { cn } from "../../lib/cn.js";
 import { useDialogLayer } from "../../lib/layers.js";
 import { useLayoutMode } from "../../stores/layout.js";
@@ -267,52 +268,45 @@ export function AgentRunInspector({ chatId, runId }: { chatId: string; runId: st
 
             {/* ------------------------------------------------ timeline + stream */}
             {compact && (
-              <div className="flex shrink-0 gap-1 border-b border-line px-3 py-1.5" role="tablist">
-                {(["stream", "timeline"] as const).map((p) => (
-                  <button
-                    key={p}
-                    role="tab"
-                    aria-selected={pane === p}
-                    onClick={() => setPane(p)}
-                    className={cn(
-                      "flex-1 rounded-[5px] px-2 py-1 text-xs font-medium transition-colors",
-                      pane === p
-                        ? "bg-hover text-primary"
-                        : "text-muted hover:text-secondary",
-                    )}
-                  >
-                    {p === "stream" ? "Messages" : `Steps · ${run.steps.length}`}
-                  </button>
-                ))}
+              <div className="shrink-0 border-b border-line px-3 py-1.5">
+                <SegmentedControl
+                  className="flex w-full [&>button]:flex-1 [&>button]:justify-center"
+                  value={pane}
+                  onChange={setPane}
+                  segments={[
+                    { value: "stream", label: "Messages" },
+                    { value: "timeline", label: `Steps · ${run.steps.length}` },
+                  ]}
+                />
               </div>
             )}
             <div className="flex min-h-0 flex-1">
-              {/* Unmounted rather than hidden on a phone: RunStream's
-                  scroll-to-focused-step runs on mount, and scrollIntoView on a
-                  display:none subtree is a silent no-op. */}
-              {(!compact || pane === "timeline") && (
-                <div
-                  className={cn(
-                    "cm-scroll overflow-y-auto bg-surface/40",
-                    compact ? "flex-1" : "w-[248px] shrink-0 border-r border-line",
-                  )}
-                >
-                  <RunTimeline
-                    run={run}
-                    focusStepId={focusStepId}
-                    onFocusStep={onFocusStep}
-                  />
-                </div>
-              )}
-              {(!compact || pane === "stream") && (
-                <div className="min-w-0 flex-1">
-                  <RunStream
-                    run={run}
-                    focusStepId={focusStepId}
-                    onOpenNested={openRun}
-                  />
-                </div>
-              )}
+              {/* Both panes stay MOUNTED on a phone, the inactive one only
+                  hidden: unmounting RunStream on a tab flip threw away the
+                  reader's scroll position and replayed a stale focusStepId on
+                  remount. A step tap flips the pane in the same render as the
+                  focus, so the stream is visible by the time its scroll effect
+                  runs — scrollIntoView on a display:none subtree is a no-op. */}
+              <div
+                className={cn(
+                  "cm-scroll overflow-y-auto bg-surface/40",
+                  compact ? "flex-1" : "w-[248px] shrink-0 border-r border-line",
+                  compact && pane !== "timeline" && "hidden",
+                )}
+              >
+                <RunTimeline
+                  run={run}
+                  focusStepId={focusStepId}
+                  onFocusStep={onFocusStep}
+                />
+              </div>
+              <div className={cn("min-w-0 flex-1", compact && pane !== "stream" && "hidden")}>
+                <RunStream
+                  run={run}
+                  focusStepId={focusStepId}
+                  onOpenNested={openRun}
+                />
+              </div>
             </div>
 
             {/* ---------------------------------------------------------- report */}
