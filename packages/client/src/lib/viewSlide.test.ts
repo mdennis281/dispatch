@@ -25,7 +25,7 @@ describe("slideDirection", () => {
   it("leaves home for any shell view the same way it leaves for the chat", () => {
     // The palette can land you on Metrics from the homepage; that is the same
     // journey as landing on the transcript, and must not travel the other way.
-    for (const v of ["memory", "git", "files", "metrics", "app-settings"] as const) {
+    for (const v of ["memory", "git", "ci", "files", "metrics", "app-settings"] as const) {
       expect(slideDirection("home", v)).toBe("forward");
       expect(slideDirection(v, "home")).toBe("back");
     }

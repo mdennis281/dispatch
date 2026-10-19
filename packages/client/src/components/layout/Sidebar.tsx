@@ -22,6 +22,7 @@ import {
   FolderOpen,
   GitBranch,
   GitPullRequestArrow,
+  Workflow,
   Menu,
   RefreshCw,
   Activity,
@@ -1895,6 +1896,19 @@ export function Sidebar() {
             active={view === "git"}
             onClick={() => {
               setView(view === "git" ? "chat" : "git");
+              dismissLeftDrawer();
+            }}
+          />
+          )}
+          {/* Right under Source Control: that is what the checkout holds, this
+              is what happened to it once pushed. */}
+          {!repoless && (
+          <NavButton
+            icon={Workflow}
+            label="CI/CD"
+            active={view === "ci"}
+            onClick={() => {
+              setView(view === "ci" ? "chat" : "ci");
               dismissLeftDrawer();
             }}
           />

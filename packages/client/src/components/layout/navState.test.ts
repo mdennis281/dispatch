@@ -36,7 +36,7 @@ describe("currentSlot", () => {
   });
 
   it("keeps More lit on the destinations that sheet opens", () => {
-    for (const view of ["memory", "git", "files", "metrics", "project-settings", "app-settings"] as const) {
+    for (const view of ["memory", "git", "ci", "files", "metrics", "project-settings", "app-settings"] as const) {
       expect(currentSlot(at({ view }))).toBe("more");
     }
   });

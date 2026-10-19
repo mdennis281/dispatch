@@ -8,6 +8,7 @@ import {
   Brain,
   FolderOpen,
   GitBranch,
+  Workflow,
   Settings,
   Blocks,
   FileCog,
@@ -454,6 +455,11 @@ export function BottomNav({ chat }: { chat: Chat | null }) {
             label="Source Control"
             count={changeCount}
             onClick={() => goView(view === "git" ? "chat" : "git")}
+          />
+          <SheetRow
+            icon={<Workflow />}
+            label="CI/CD"
+            onClick={() => goView(view === "ci" ? "chat" : "ci")}
           />
           <SheetRow
             icon={<FolderOpen />}
