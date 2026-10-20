@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Field, TextInput } from "../../sidebar/Modal.js";
 import { Button } from "../../ui/Button.js";
 import { SegmentedControl } from "../../ui/SegmentedControl.js";
@@ -10,6 +10,7 @@ import {
   pushUnavailableReason,
   deviceTimeZone,
 } from "../../../lib/webPush.js";
+import { api } from "../../../lib/api.js";
 import { DISMISSIBLE_ATTENTION_KINDS } from "@dispatch/shared";
 import type { AttentionFilter, NotificationPrefs } from "@dispatch/shared";
 import { cn } from "../../../lib/cn.js";
@@ -82,6 +83,88 @@ function PushNotifications() {
       {notice && !error ? (
         <p className="mt-1 text-xs leading-snug text-faint">{notice}</p>
       ) : null}
+      {unavailable ? null : <PushDevices />}
+    </div>
+  );
+}
+
+type PushDevice = Awaited<ReturnType<typeof api.push.devices>>[number];
+
+/** The server's fingerprint of an endpoint (routes/push.ts), so this device can find itself. */
+async function fingerprint(endpoint: string): Promise<string | null> {
+  try {
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(endpoint));
+    return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0"))
+      .join("")
+      .slice(0, 12);
+  } catch {
+    return null; // no SubtleCrypto (insecure origin) — every row just gets a Remove
+  }
+}
+
+/**
+ * Every registration the server will push to.
+ *
+ * Exists because a registration can outlive anything that could retune it: a
+ * reinstalled home-screen app gets a new endpoint AND a new device id, so the old
+ * entry keeps receiving pushes under the filters it was registered with — the
+ * "PR review ping with review muted" report — and only a human can say that the
+ * second "iPhone" in this list is the same phone.
+ */
+function PushDevices() {
+  const endpoint = useWebPush((s) => s.endpoint);
+  const [devices, setDevices] = useState<PushDevice[] | null>(null);
+  const [self, setSelf] = useState<string | null>(null);
+  const [removing, setRemoving] = useState<string | null>(null);
+
+  const load = useCallback(() => {
+    api.push.devices().then(setDevices, () => setDevices(null));
+  }, []);
+  useEffect(load, [load, endpoint]);
+  useEffect(() => {
+    if (endpoint) void fingerprint(endpoint).then(setSelf);
+    else setSelf(null);
+  }, [endpoint]);
+
+  if (!devices?.length) return null;
+
+  const remove = async (id: string) => {
+    setRemoving(id);
+    try {
+      await api.push.removeDevice(id);
+    } catch {
+      /* already gone — the reload below shows the truth either way */
+    } finally {
+      setRemoving(null);
+      load();
+    }
+  };
+
+  return (
+    <div className="mt-2 border-t border-line pt-2">
+      <span className="text-xs font-medium text-faint">Registered devices</span>
+      <ul className="mt-1 space-y-1">
+        {devices.map((d) => (
+          <li key={d.id} className="flex items-center justify-between gap-3 text-xs">
+            <span className="min-w-0 truncate text-secondary">
+              {d.label ?? "Device"}
+              <span className="text-faint">
+                {d.id === self ? " · this device" : ` · last seen ${new Date(d.updatedAt).toLocaleDateString()}`}
+              </span>
+            </span>
+            {d.id === self ? null : (
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={removing === d.id}
+                onClick={() => void remove(d.id)}
+              >
+                {removing === d.id ? "Removing…" : "Remove"}
+              </Button>
+            )}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
