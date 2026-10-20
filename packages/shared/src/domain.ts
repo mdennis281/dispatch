@@ -494,8 +494,35 @@ export const PrReviewAgentStateSchema = z.object({
    * at afterwards was indistinguishable from a project with no reviewer at all.
    */
   requestError: z.string().optional(),
+  /**
+   * What each EARLIER round posted, keyed by its reviewer chat — newest last,
+   * capped at {@link PR_REVIEW_PAST_ROUNDS_CAP}.
+   *
+   * {@link postedAt}/{@link findings}/{@link postedEvent} describe the current
+   * round only, and the next claim clears them. Before this, the sidebar row for
+   * every reviewer but the newest fell back to its run status — a PR reviewed
+   * five times showed "1 comment" on one row and "Idle" on four that had each
+   * filed findings. Archived at claim time, so a round that never posted leaves
+   * nothing here rather than a fabricated "no comments".
+   *
+   * Optional: rows written before this field existed parse unchanged, and their
+   * earlier rounds simply keep falling back to status — that history was already
+   * overwritten and cannot be recovered.
+   */
+  pastRounds: z
+    .array(
+      z.object({
+        chatId: z.string(),
+        postedAt: z.number().int(),
+        findings: z.number().int().optional(),
+        postedEvent: z.enum(["COMMENT", "REQUEST_CHANGES", "APPROVE"]).optional(),
+      }),
+    )
+    .optional(),
 });
 export type PrReviewAgentState = z.infer<typeof PrReviewAgentStateSchema>;
+/** How many archived rounds a PR row keeps — well past any sane `maxRounds`. */
+export const PR_REVIEW_PAST_ROUNDS_CAP = 20;
 
 /**
  * A tracked PR's registry row: everything {@link PrSnapshotSchema} shows, plus

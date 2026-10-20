@@ -1377,7 +1377,8 @@ function ReviewRow({
   // can say so — the PR glyph has no dashed twin to swap in.
   const meta = statusMeta(chat.status, false, isUnstartedChat(chat));
   const number = record?.number ?? (key ? parsePrRecordKey(key)?.number : undefined);
-  const posted = reviewSummary(chat, record);
+  const round = reviewRound(chat, record);
+  const posted = reviewSummary(round);
   const folded = foldedChildrenLabel(childChats);
 
   return (
@@ -1437,7 +1438,7 @@ function ReviewRow({
           className={cn(
             "min-w-0 flex-1 truncate text-2xs",
             posted
-              ? record?.reviewAgent?.postedEvent === "REQUEST_CHANGES"
+              ? round?.postedEvent === "REQUEST_CHANGES"
                 ? "text-warn"
                 : "text-info"
               : toneText(meta.tone),
@@ -1466,15 +1467,25 @@ function ReviewRow({
 /**
  * What this reviewer left on the pull request, when the registry still knows.
  *
- * `reviewAgent` remembers ONE round — the last — so only the reviewer whose chat
- * id it names can be credited with its findings. Any earlier round falls back to
- * its own status, because labelling it with the newest round's count would be a
- * confident claim about work it never did.
+ * The current round lives on `reviewAgent` itself; earlier ones in its
+ * `pastRounds` archive, each keyed by the chat that posted it. Matching by chat
+ * id is the point — labelling an old reviewer with the newest round's count
+ * would be a confident claim about work it never did. A round found in neither
+ * (it never posted, or predates the archive) falls back to its own status.
  */
-function reviewSummary(chat: Chat, record: PrRecord | undefined): string | null {
+function reviewRound(
+  chat: Chat,
+  record: PrRecord | undefined,
+): { findings?: number; postedEvent?: "COMMENT" | "REQUEST_CHANGES" | "APPROVE" } | null {
   const agent = record?.reviewAgent;
-  if (!agent || agent.chatId !== chat.id || !agent.postedAt) return null;
-  const n = agent.findings ?? 0;
+  if (!agent) return null;
+  if (agent.chatId === chat.id && agent.postedAt) return agent;
+  return agent.pastRounds?.find((r) => r.chatId === chat.id) ?? null;
+}
+
+function reviewSummary(round: ReturnType<typeof reviewRound>): string | null {
+  if (!round) return null;
+  const n = round.findings ?? 0;
   return n ? `${n} comment${n === 1 ? "" : "s"}` : "no comments";
 }
 

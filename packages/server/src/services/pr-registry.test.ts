@@ -708,6 +708,43 @@ describe("PrRegistry — Dispatch's own reviewer", () => {
     expect(second?.reviewAgent?.findings).toBeUndefined();
     expect(second?.reviewAgent?.postedEvent).toBeUndefined();
   });
+
+  it("archives each posted round under its own chat, so earlier reviewers keep their counts", async () => {
+    // The current-round fields are cleared on every claim; without the archive
+    // every reviewer row but the newest fell back to "Idle" in the sidebar.
+    const reg = makeRegistry();
+    await reg.record(snapshot({ headRefOid: "sha-1" }), { chatId: "c1" });
+    await reg.requestReviewAgent(REPO, 42, "c1");
+    await reg.claimReviewAgent(REPO, 42, { maxRounds: 5 });
+    await reg.noteReviewChat(REPO, 42, "chat-a");
+    const postedA = now;
+    await reg.notePostedReview(REPO, 42, { chatId: "chat-a", findings: 2, event: "REQUEST_CHANGES" });
+
+    // Round two dies without posting — it must leave no archive entry behind.
+    now += 60_000;
+    await reg.record(snapshot({ headRefOid: "sha-2" }), { chatId: "c1" });
+    await reg.requestReviewAgent(REPO, 42, "c1");
+    await reg.claimReviewAgent(REPO, 42, { maxRounds: 5 });
+    await reg.noteReviewChat(REPO, 42, "chat-b");
+
+    now += 60_000;
+    await reg.record(snapshot({ headRefOid: "sha-3" }), { chatId: "c1" });
+    await reg.requestReviewAgent(REPO, 42, "c1");
+    const third = await reg.claimReviewAgent(REPO, 42, { maxRounds: 5 });
+
+    expect(third?.reviewAgent?.pastRounds).toEqual([
+      { chatId: "chat-a", postedAt: postedA, findings: 2, postedEvent: "REQUEST_CHANGES" },
+    ]);
+  });
+
+  it("reads a row written before the archive existed", async () => {
+    // Old rows have no `pastRounds`; claiming over one must not throw or invent history.
+    const reg = makeRegistry();
+    await reg.record(snapshot({ headRefOid: "sha-1" }), { chatId: "c1" });
+    await reg.requestReviewAgent(REPO, 42, "c1");
+    const first = await reg.claimReviewAgent(REPO, 42, { maxRounds: 3 });
+    expect(first?.reviewAgent?.pastRounds).toBeUndefined();
+  });
 });
 
 describe("PrRegistry — a refused review request", () => {

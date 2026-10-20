@@ -30,6 +30,7 @@ import {
   isHeldByLabel,
   PrSnapshotSchema,
   type PrRecord,
+  PR_REVIEW_PAST_ROUNDS_CAP,
   type PrReviewAgentState,
   type PrSnapshot,
   type PRRef,
@@ -506,6 +507,7 @@ export class PrRegistry {
           postedAt: undefined,
           findings: undefined,
           postedEvent: undefined,
+          pastRounds: archiveRound(state),
         },
       }),
     );
@@ -867,4 +869,25 @@ function fingerprint(p: {
  */
 function toSnapshot(row: PrRecord): PrSnapshot {
   return PrSnapshotSchema.parse(row);
+}
+
+/**
+ * The outgoing round's result, appended to the archive the next claim keeps.
+ *
+ * Only a round that POSTED is archived: a reviewer that died mid-run has no
+ * result to remember, and an entry for it would put "no comments" on a row that
+ * never looked. Replaces any earlier entry for the same chat so a re-claim can't
+ * leave one reviewer with two answers.
+ */
+function archiveRound(state: PrReviewAgentState): PrReviewAgentState["pastRounds"] {
+  const past = state.pastRounds;
+  if (!state.chatId || !state.postedAt) return past;
+  const kept = (past ?? []).filter((r) => r.chatId !== state.chatId);
+  kept.push({
+    chatId: state.chatId,
+    postedAt: state.postedAt,
+    findings: state.findings,
+    postedEvent: state.postedEvent,
+  });
+  return kept.slice(-PR_REVIEW_PAST_ROUNDS_CAP);
 }
