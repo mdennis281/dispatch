@@ -994,7 +994,15 @@ export const api = {
       get<Array<{ id: string; label?: string; createdAt: number; updatedAt: number }>>(
         "/api/push/devices",
       ),
-    subscribe: (body: { subscription: unknown; prefs?: NotificationPrefs; label?: string }) =>
+    /** Forget one device by its fingerprint — for a registration no device can name any more. */
+    removeDevice: (id: string) => del<{ removed: boolean }>(`/api/push/devices/${encodeURIComponent(id)}`),
+    subscribe: (body: {
+      subscription: unknown;
+      prefs?: NotificationPrefs;
+      label?: string;
+      deviceId?: string;
+      replaces?: string;
+    }) =>
       post<{ id: string; prefs: NotificationPrefs }>("/api/push/subscribe", body),
     /**
      * Retune one device's filters. Server-side because iOS revokes a

@@ -65,6 +65,16 @@ const StoredSubscriptionSchema = z.object({
   prefs: NotificationPrefsSchema,
   /** Free-text device label so Settings can list "iPhone" rather than a base64 blob. */
   label: z.string().optional(),
+  /**
+   * A random id the DEVICE generated and keeps, so a re-subscription can be
+   * recognised as the same phone. The endpoint can't do that job: the push
+   * service hands out a new one whenever it likes (iOS does so on its own
+   * schedule and after a reinstall), and each new one used to land as a
+   * separate "iPhone" that kept the prefs it was registered with — so a device
+   * with review pings muted still got them through a months-old registration
+   * nobody could see or retune.
+   */
+  deviceId: z.string().optional(),
   createdAt: z.number().int(),
   updatedAt: z.number().int(),
 });
@@ -542,26 +552,59 @@ export class PushService {
     return run;
   }
 
-  /** Register (or re-register) a device. Dedups by endpoint — the browser's own id. */
+  /**
+   * Register (or re-register) a device, leaving exactly one entry for it.
+   *
+   * Dedups by endpoint, and ALSO drops every other entry carrying the same
+   * `deviceId` or the endpoint named by `replaces` — those are this device's
+   * older subscriptions, and leaving them behind means pushes keep arriving
+   * under whatever prefs they were registered with.
+   *
+   * A registration that brings no prefs (the service worker's
+   * `pushsubscriptionchange` path, which can't read the page's localStorage)
+   * inherits the prefs of the entry it replaces rather than falling back to
+   * "everything on" — that fallback is what un-muted a rotated iPhone.
+   */
   async subscribe(
     subscription: PushSubscriptionJson,
     prefs?: NotificationPrefs,
     label?: string,
+    opts: { deviceId?: string; replaces?: string } = {},
   ): Promise<StoredSubscription> {
     return this.mutate(() => {
       const now = this.now();
-      const existing = this.subs.find((s) => s.subscription.endpoint === subscription.endpoint);
+      const { deviceId, replaces } = opts;
+      const endpoint = subscription.endpoint;
+      const predecessors = this.subs
+        .filter(
+          (s) =>
+            s.subscription.endpoint !== endpoint &&
+            ((deviceId !== undefined && s.deviceId === deviceId) || s.subscription.endpoint === replaces),
+        )
+        .sort((a, b) => b.updatedAt - a.updatedAt);
+      if (predecessors.length) {
+        const gone = new Set(predecessors.map((s) => s.subscription.endpoint));
+        this.subs = this.subs.filter((s) => !gone.has(s.subscription.endpoint));
+        for (const ep of gone) {
+          this.inFront.delete(ep);
+          this.shown.delete(ep);
+        }
+      }
+      const inherited = predecessors[0];
+      const existing = this.subs.find((s) => s.subscription.endpoint === endpoint);
       if (existing) {
         existing.subscription = subscription;
         if (prefs) existing.prefs = prefs;
         if (label) existing.label = label;
+        if (deviceId) existing.deviceId = deviceId;
         existing.updatedAt = now;
         return existing;
       }
       const entry: StoredSubscription = {
         subscription,
-        prefs: prefs ?? DEFAULT_NOTIFICATION_PREFS,
-        label,
+        prefs: prefs ?? inherited?.prefs ?? DEFAULT_NOTIFICATION_PREFS,
+        label: label ?? inherited?.label,
+        deviceId: deviceId ?? inherited?.deviceId,
         createdAt: now,
         updatedAt: now,
       };

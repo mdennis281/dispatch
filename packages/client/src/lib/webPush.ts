@@ -67,6 +67,74 @@ function savePrefs(prefs: NotificationPrefs): void {
   }
 }
 
+/* -------------------------------------------------------- device identity */
+
+const DEVICE_ID_KEY = "cm:push-device-id";
+const ENDPOINT_KEY = "cm:push-endpoint";
+/** Shared with public/sw.js, whose `pushsubscriptionchange` has no localStorage. */
+const PUSH_DEVICE_CACHE = "dispatch-push-device";
+const PUSH_DEVICE_KEY = "/__push-device";
+
+/**
+ * This device's permanent push identity, minted on first use.
+ *
+ * The endpoint can't serve: the push service rotates it at will, and every
+ * rotation used to leave the old registration on the server still receiving
+ * pushes under the prefs it was registered with. Sending this lets the server
+ * keep exactly one entry per device. Lost on a reinstall (localStorage goes with
+ * the app), which is why Settings can also remove a device by hand.
+ */
+export function deviceId(): string {
+  const store = backing();
+  try {
+    const known = store?.getItem(DEVICE_ID_KEY);
+    if (known) return known;
+    const fresh = crypto.randomUUID();
+    store?.setItem(DEVICE_ID_KEY, fresh);
+    return fresh;
+  } catch {
+    return crypto.randomUUID(); // private mode — dedup by endpoint alone this time
+  }
+}
+
+/** The endpoint this device last registered, if it is not `current`. */
+function previousEndpoint(current: string): string | undefined {
+  try {
+    const last = backing()?.getItem(ENDPOINT_KEY);
+    return last && last !== current ? last : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Remember what was just registered, here and where the service worker can see it. */
+async function rememberRegistration(endpoint: string, id: string): Promise<void> {
+  try {
+    backing()?.setItem(ENDPOINT_KEY, endpoint);
+  } catch {
+    /* best-effort */
+  }
+  try {
+    const cache = await caches.open(PUSH_DEVICE_CACHE);
+    await cache.put(PUSH_DEVICE_KEY, new Response(JSON.stringify({ deviceId: id, endpoint })));
+  } catch {
+    /* no Cache Storage — the worker falls back to oldSubscription alone */
+  }
+}
+
+/** Register `sub` with the server as THIS device, retiring any older entry for it. */
+async function register(sub: PushSubscription, prefs: NotificationPrefs): Promise<void> {
+  const id = deviceId();
+  await api.push.subscribe({
+    subscription: sub.toJSON(),
+    prefs,
+    label: deviceLabel(),
+    deviceId: id,
+    replaces: previousEndpoint(sub.endpoint),
+  });
+  await rememberRegistration(sub.endpoint, id);
+}
+
 /** The device's IANA zone, so the server can evaluate quiet hours across DST. */
 export function deviceTimeZone(): string {
   try {
@@ -224,9 +292,7 @@ export const useWebPush = create<PushStore>((set, get) => ({
     // what heals the two states that otherwise fail silently: a device the
     // server forgot (registry wiped, or a different instance), and prefs edited
     // while the server was down.
-    await api.push
-      .subscribe({ subscription: sub.toJSON(), prefs: get().prefs, label: deviceLabel() })
-      .catch(() => undefined);
+    await register(sub, get().prefs).catch(() => undefined);
   },
 
   enable: async () => {
@@ -253,11 +319,7 @@ export const useWebPush = create<PushStore>((set, get) => ({
           userVisibleOnly: true,
           applicationServerKey: urlBase64ToUint8Array(publicKey),
         }));
-      await api.push.subscribe({
-        subscription: sub.toJSON(),
-        prefs: get().prefs,
-        label: deviceLabel(),
-      });
+      await register(sub, get().prefs);
       set({ state: "subscribed", endpoint: sub.endpoint });
       return "subscribed";
     } catch (err) {

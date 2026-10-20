@@ -25,6 +25,14 @@
 
 /** Bump to evict every previous shell. Old caches are dropped on activate. */
 const CACHE = "dispatch-shell-v3";
+/**
+ * Not a shell cache: where the page leaves this device's push identity
+ * (`{ deviceId, endpoint }`) for the `pushsubscriptionchange` handler, which has
+ * no localStorage. Kept out of the activate sweep, or every deploy would wipe it.
+ * Must match PUSH_DEVICE_CACHE in src/lib/webPush.ts.
+ */
+const PUSH_DEVICE_CACHE = "dispatch-push-device";
+const PUSH_DEVICE_KEY = "/__push-device";
 let accessToken = null;
 let refreshInFlight = null;
 
@@ -123,7 +131,7 @@ self.addEventListener("activate", (event) => {
   event.waitUntil(
     (async () => {
       const names = await caches.keys();
-      await Promise.all(names.filter((n) => n !== CACHE).map((n) => caches.delete(n)));
+      await Promise.all(names.filter((n) => n !== CACHE && n !== PUSH_DEVICE_CACHE).map((n) => caches.delete(n)));
       await self.clients.claim();
     })(),
   );
@@ -402,10 +410,30 @@ self.addEventListener("pushsubscriptionchange", (event) => {
           userVisibleOnly: true,
           applicationServerKey: key,
         });
+        // iOS usually fires this with no `oldSubscription`, so without the
+        // identity the page left behind the server could neither retire the old
+        // entry nor carry its prefs over — the new one registered with
+        // everything ON while the old one went on pushing under stale filters.
+        const identity = await caches
+          .open(PUSH_DEVICE_CACHE)
+          .then((c) => c.match(PUSH_DEVICE_KEY))
+          .then((r) => (r ? r.json() : {}))
+          .catch(() => ({}));
+        const replaces = event.oldSubscription?.endpoint ?? identity.endpoint;
         await apiFetch("/api/push/subscribe", {
           method: "POST",
-          body: JSON.stringify({ subscription: fresh.toJSON() }),
+          body: JSON.stringify({
+            subscription: fresh.toJSON(),
+            deviceId: identity.deviceId,
+            replaces: replaces && replaces !== fresh.endpoint ? replaces : undefined,
+          }),
         });
+        await caches
+          .open(PUSH_DEVICE_CACHE)
+          .then((c) =>
+            c.put(PUSH_DEVICE_KEY, new Response(JSON.stringify({ ...identity, endpoint: fresh.endpoint }))),
+          )
+          .catch(() => undefined);
         if (event.oldSubscription) {
           await apiFetch("/api/push/unsubscribe", {
             method: "POST",

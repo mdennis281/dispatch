@@ -235,6 +235,61 @@ describe("PushService", () => {
     expect(await svc.list()).toHaveLength(1);
   });
 
+  it("keeps one entry per device when the push service rotates its endpoint", async () => {
+    // The reported bug: an iPhone re-subscribed twice over two months and the
+    // server held three "iPhone"s, the oldest still pushing review pings the
+    // human had since muted.
+    const { svc, sent } = make();
+    const old: NotificationPrefs = { ...DEFAULT_NOTIFICATION_PREFS, kinds: { review: true } };
+    const now: NotificationPrefs = { ...DEFAULT_NOTIFICATION_PREFS, kinds: { review: false } };
+    await svc.subscribe(sub(1), old, "iPhone", { deviceId: "dev-a" });
+    await svc.subscribe(sub(2), now, "iPhone", { deviceId: "dev-a" });
+    expect((await svc.list()).map((s) => s.subscription.endpoint)).toEqual([sub(2).endpoint]);
+    await svc.fanOut(attn("review", { reviewKinds: ["passed"] }));
+    expect(sent).toHaveLength(0);
+  });
+
+  it("never merges two devices that merely share a label", async () => {
+    const { svc } = make();
+    await svc.subscribe(sub(1), undefined, "iPhone", { deviceId: "dev-a" });
+    await svc.subscribe(sub(2), undefined, "iPhone", { deviceId: "dev-b" });
+    await svc.subscribe(sub(3), undefined, "iPhone");
+    expect(await svc.list()).toHaveLength(3);
+  });
+
+  it("retires the endpoint named by `replaces`, even one registered without a device id", async () => {
+    const { svc } = make();
+    await svc.subscribe(sub(1), undefined, "iPhone");
+    await svc.subscribe(sub(2), undefined, "iPhone");
+    await svc.subscribe(sub(3), undefined, "iPhone", { deviceId: "dev-a", replaces: sub(1).endpoint });
+    expect((await svc.list()).map((s) => s.subscription.endpoint).sort()).toEqual([
+      sub(2).endpoint,
+      sub(3).endpoint,
+    ]);
+  });
+
+  it("a prefs-less re-subscription inherits its predecessor's prefs, not 'everything on'", async () => {
+    // The service worker's pushsubscriptionchange path can't read localStorage,
+    // so it registers with no prefs — which used to un-mute the device.
+    const { svc, sent } = make();
+    const muted: NotificationPrefs = { ...DEFAULT_NOTIFICATION_PREFS, kinds: { review: false } };
+    await svc.subscribe(sub(1), muted, "iPhone", { deviceId: "dev-a" });
+    await svc.subscribe(sub(2), undefined, undefined, { deviceId: "dev-a", replaces: sub(1).endpoint });
+    const [only] = await svc.list();
+    expect(only?.prefs).toEqual(muted);
+    expect(only?.label).toBe("iPhone");
+    await svc.fanOut(attn("review"));
+    expect(sent).toHaveLength(0);
+  });
+
+  it("re-registering the same endpoint with a device id adopts it", async () => {
+    const { svc } = make();
+    await svc.subscribe(sub(1), undefined, "iPhone");
+    await svc.subscribe(sub(1), undefined, "iPhone", { deviceId: "dev-a" });
+    await svc.subscribe(sub(2), undefined, "iPhone", { deviceId: "dev-a" });
+    expect((await svc.list()).map((s) => s.subscription.endpoint)).toEqual([sub(2).endpoint]);
+  });
+
   it("survives a restart — the registry is on disk", async () => {
     const { mock } = webPushMock();
     const a = new PushService({ bus, configDir: dir, dataDir: dir, webPush: mock });
