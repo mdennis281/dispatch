@@ -20,7 +20,7 @@ import { cn } from "../../../lib/cn.js";
 import { canCopyImages, copyImageToClipboard, type CopyResult } from "../../../lib/clipboardImage.js";
 import * as vp from "../../../lib/imageViewport.js";
 import { useAssetSrc } from "../../../lib/assetSrc.js";
-import { Spinner } from "../../ui/Spinner.js";
+import { ProgressRing } from "../../ui/Spinner.js";
 
 /** The filename part of an asset path, for the caption and the download name. */
 export function assetName(asset: ImageRef): string {
@@ -77,7 +77,7 @@ export function MediaViewer({
     0,
   );
   const asset = assets[index];
-  const { src, failed: loadFailed, expired } = useAssetSrc(chatId, asset);
+  const { src, failed: loadFailed, expired, progress } = useAssetSrc(chatId, asset);
   const item = asset
     ? {
         src: src ?? "",
@@ -448,7 +448,7 @@ export function MediaViewer({
             </div>
           ) : !src ? (
             <div className="flex h-full items-center justify-center">
-              <Spinner size={18} />
+              <ProgressRing progress={progress} size={40} />
             </div>
           ) : kind === "video" ? (
             <video

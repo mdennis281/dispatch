@@ -3,17 +3,17 @@
  *
  * WHY THIS EXISTS: chat assets are served from `/api/chats/:id/assets/:name`,
  * and the auth gate (server/app.ts) rejects every `/api/` request that arrives
- * without a `Bearer` token. A browser sends NO such header for `<img src=…>`,
+ * without a `Bearer` token. A browser sends NO such header for `<img src=â€¦>`,
  * so once authentication was enabled every stored image in every transcript
  * turned into the broken-thumbnail fallback.
  *
  * The service worker can't rescue it either: a same-origin subresource fetch is
  * `mode: "no-cors"`, and the `Request` constructor silently STRIPS
- * `authorization` from a no-cors request — so the token never reaches the wire
+ * `authorization` from a no-cors request â€” so the token never reaches the wire
  * (and in dev there is no worker at all, it's registered in PROD only).
  *
  * So the bytes are fetched through the one authenticated path the app already
- * has (`sessionFetch`, which also handles a 401 → refresh → retry) and handed
+ * has (`sessionFetch`, which also handles a 401 â†’ refresh â†’ retry) and handed
  * to the DOM as an object URL. Object URLs cost a fetch instead of an HTTP
  * cache hit, so results are memoized per URL for the life of the page; a
  * transcript re-renders its thumbnails constantly and must not re-download on
@@ -24,12 +24,12 @@ import type { ImageRef } from "@dispatch/shared";
 import { assetUrl, fsAssetUrl } from "./api.js";
 import { sessionFetch } from "../stores/auth.js";
 
-/** Already renderable as-is — nothing to fetch, nothing to revoke. */
+/** Already renderable as-is â€” nothing to fetch, nothing to revoke. */
 const DIRECT = /^(https?:|data:|blob:)/i;
 
 /**
  * Marks a path that lives in the PROJECT working tree rather than in the chat's
- * assets dir — an image the agent wrote and then merely mentioned.
+ * assets dir â€” an image the agent wrote and then merely mentioned.
  *
  * An explicit prefix rather than a heuristic on the path shape, because there
  * isn't a reliable one: `assetUrl` reduces a chat asset to its basename, so
@@ -59,18 +59,23 @@ const MAX_ENTRIES = 120;
 
 interface Entry {
   promise: Promise<string>;
-  /** Resolved object URL, once known — needed to revoke on eviction. */
+  /** Resolved object URL, once known â€” needed to revoke on eviction. */
   objectUrl?: string;
   /** Mounted consumers. An entry above zero is exempt from eviction. */
   refs: number;
   usedAt: number;
+  /** Bytes received so far, and the total if the server said (content-length). */
+  loaded: number;
+  total?: number;
+  /** Mounted consumers to tell when `loaded` moves. */
+  listeners: Set<() => void>;
 }
 
 const cache = new Map<string, Entry>();
 let clock = 0;
 
 /**
- * A chat asset the server's retention sweep deleted — answered 410, never 404.
+ * A chat asset the server's retention sweep deleted â€” answered 410, never 404.
  *
  * Its own error type because it is the one failure that is NOT a failure to
  * load: the transcript still names the file and always will, and the honest
@@ -110,7 +115,7 @@ export function directSrc(path: string): string | null {
   return DIRECT.test(path) ? path : null;
 }
 
-/** The endpoint that serves `image` for `chatId` — only for non-direct paths. */
+/** The endpoint that serves `image` for `chatId` â€” only for non-direct paths. */
 export function assetSrcTarget(chatId: string, path: string): string {
   const direct = directSrc(path);
   if (direct) return direct;
@@ -118,17 +123,67 @@ export function assetSrcTarget(chatId: string, path: string): string {
   return fsPath === null ? assetUrl(chatId, { path }) : fsAssetUrl(chatId, fsPath);
 }
 
+/**
+ * The response body as a Blob, publishing progress on `entry` as it arrives.
+ *
+ * WHY NOT `response.blob()`: that is one opaque await, and the whole file has
+ * to land before anything renders (see `AssetMedia`'s KNOWN LIMIT). For a
+ * screenshot that is instant; for a WebM a review card is waiting on, it was a
+ * grey pulsing box for long enough to wonder whether it was ever coming. With
+ * the bytes counted, the placeholder can say how far along it is.
+ *
+ * Listeners hear about whole-percent steps only: a 200MB video arrives in
+ * thousands of chunks, and a re-render per chunk would be pure churn.
+ */
+async function readBody(response: Response, entry: Entry): Promise<Blob> {
+  const total = Number(response.headers?.get("content-length"));
+  // Decide BEFORE taking a reader: `getReader()` locks the body, and a locked
+  // body makes the `blob()` fallback throw â€” which drew every length-less
+  // response as a broken image.
+  if (!response.body || !(total > 0)) return response.blob();
+  const reader = response.body.getReader();
+  entry.total = total;
+  const chunks: Uint8Array[] = [];
+  let step = -1;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    entry.loaded += value.byteLength;
+    const next = Math.floor((entry.loaded / total) * 100);
+    if (next !== step) {
+      step = next;
+      for (const listener of entry.listeners) listener();
+    }
+  }
+  // The type is what lets a <video> play the object URL; `response.blob()`
+  // carried it implicitly, a hand-built Blob has to be told.
+  return new Blob(chunks as BlobPart[], { type: response.headers.get("content-type") ?? "" });
+}
+
 function entryFor(url: string): Entry {
   if (expiredUrls.has(url)) {
     // Not cached: there are no bytes to pin, and nothing to evict.
-    return { refs: 0, usedAt: ++clock, promise: Promise.reject(new AssetExpiredError(url)) };
+    return {
+      refs: 0,
+      usedAt: ++clock,
+      loaded: 0,
+      listeners: new Set(),
+      promise: Promise.reject(new AssetExpiredError(url)),
+    };
   }
   const existing = cache.get(url);
   if (existing) {
     existing.usedAt = ++clock;
     return existing;
   }
-  const entry: Entry = { refs: 0, usedAt: ++clock, promise: undefined as never };
+  const entry: Entry = {
+    refs: 0,
+    usedAt: ++clock,
+    loaded: 0,
+    listeners: new Set(),
+    promise: undefined as never,
+  };
   entry.promise = (async () => {
     const response = await sessionFetch(url);
     if (response.status === 410) {
@@ -140,7 +195,7 @@ function entryFor(url: string): Entry {
       // status says nothing about which one failed.
       throw new Error(`asset ${url} failed: ${response.status} ${response.statusText}`.trimEnd());
     }
-    const objectUrl = URL.createObjectURL(await response.blob());
+    const objectUrl = URL.createObjectURL(await readBody(response, entry));
     entry.objectUrl = objectUrl;
     return objectUrl;
   })().catch((error: unknown) => {
@@ -158,7 +213,7 @@ function entryFor(url: string): Entry {
  * Fetch `url` with the session's bearer token and expose the bytes as an object
  * URL, memoized per URL. Concurrent and repeat callers share one request.
  *
- * INTERNAL — for `useAssetSrc` and its tests, not for feature code. It does not
+ * INTERNAL â€” for `useAssetSrc` and its tests, not for feature code. It does not
  * take a reference on the cache entry, so the object URL it returns may be
  * revoked by a later eviction; anything holding one in the DOM must go through
  * `useAssetSrc` / `AssetImage`, which keep the entry pinned while it is mounted.
@@ -173,6 +228,11 @@ export interface ResolvedAsset {
   failed: boolean;
   /** The failure was an expiry (see {@link AssetExpiredError}). Implies `failed`. */
   expired?: boolean;
+  /**
+   * 0â€“1 while the bytes are in flight, when the server said how many to expect.
+   * Undefined when it didn't (draw an indeterminate spinner) or once loaded.
+   */
+  progress?: number;
 }
 
 /**
@@ -203,6 +263,15 @@ export function useAssetSrc(
     const entry = entryFor(url);
     entry.refs += 1;
     setState((prev) => (prev.src === undefined && !prev.failed ? prev : { failed: false }));
+    const onProgress = () => {
+      if (!live || !entry.total) return;
+      const progress = entry.loaded / entry.total;
+      setState((prev) => (prev.src !== undefined || prev.failed ? prev : { failed: false, progress }));
+    };
+    entry.listeners.add(onProgress);
+    // A remount mid-download (a transcript scrolling) picks up where it is
+    // rather than restarting the ring from zero.
+    onProgress();
     void entry.promise.then(
       (src) => { if (live) setState({ src, failed: false }); },
       (error: unknown) => {
@@ -211,6 +280,7 @@ export function useAssetSrc(
     );
     return () => {
       live = false;
+      entry.listeners.delete(onProgress);
       entry.refs = Math.max(0, entry.refs - 1);
     };
   }, [url]);
