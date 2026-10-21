@@ -3,6 +3,7 @@ import { ImageIcon, ImageOff } from "lucide-react";
 import { TOOL_IMAGE_RETENTION_DAYS, type ImageRef } from "@dispatch/shared";
 import { cn } from "../../../lib/cn.js";
 import { useAssetSrc } from "../../../lib/assetSrc.js";
+import { ProgressRing } from "../../ui/Spinner.js";
 import { MediaViewer, assetName } from "./MediaViewer.js";
 
 /**
@@ -41,7 +42,7 @@ export function ImageThumb({
   const [zoomed, setZoomed] = useState(false);
   const name = assetName(img);
   const dims = img.width && img.height ? `${img.width}×${img.height}` : undefined;
-  const { src, failed, expired } = useAssetSrc(chatId, img);
+  const { src, failed, expired, progress } = useAssetSrc(chatId, img);
   const broken = failed || decodeFailed;
   const tile = variant === "tile";
   const fill = variant === "fill";
@@ -134,14 +135,16 @@ export function ImageThumb({
             />
           ) : (
             // The bytes are still being fetched. Hold the row's height so a
-            // transcript doesn't jump as thumbnails resolve.
+            // transcript doesn't jump as thumbnails resolve, and say how far
+            // along it is — a bare grey box gave no hint it was still coming.
             <span
               className={cn(
-                "block animate-pulse bg-panel-2",
+                "flex items-center justify-center bg-panel-2",
                 tile ? "size-[132px]" : fill ? "h-40 w-full" : "h-40 w-[280px]",
               )}
-              aria-hidden
-            />
+            >
+              <ProgressRing progress={progress} size={tile ? 24 : 32} />
+            </span>
           )}
         </button>
         {!tile && (

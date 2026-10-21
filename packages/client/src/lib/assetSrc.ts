@@ -64,6 +64,11 @@ interface Entry {
   /** Mounted consumers. An entry above zero is exempt from eviction. */
   refs: number;
   usedAt: number;
+  /** Bytes received so far, and the total if the server said (content-length). */
+  loaded: number;
+  total?: number;
+  /** Mounted consumers to tell when `loaded` moves. */
+  listeners: Set<() => void>;
 }
 
 const cache = new Map<string, Entry>();
@@ -118,17 +123,67 @@ export function assetSrcTarget(chatId: string, path: string): string {
   return fsPath === null ? assetUrl(chatId, { path }) : fsAssetUrl(chatId, fsPath);
 }
 
+/**
+ * The response body as a Blob, publishing progress on `entry` as it arrives.
+ *
+ * WHY NOT `response.blob()`: that is one opaque await, and the whole file has
+ * to land before anything renders (see `AssetMedia`'s KNOWN LIMIT). For a
+ * screenshot that is instant; for a WebM a review card is waiting on, it was a
+ * grey pulsing box for long enough to wonder whether it was ever coming. With
+ * the bytes counted, the placeholder can say how far along it is.
+ *
+ * Listeners hear about whole-percent steps only: a 200MB video arrives in
+ * thousands of chunks, and a re-render per chunk would be pure churn.
+ */
+async function readBody(response: Response, entry: Entry): Promise<Blob> {
+  const total = Number(response.headers?.get("content-length"));
+  // Decide BEFORE taking a reader: `getReader()` locks the body, and a locked
+  // body makes the `blob()` fallback throw — which drew every length-less
+  // response as a broken image.
+  if (!response.body || !(total > 0)) return response.blob();
+  const reader = response.body.getReader();
+  entry.total = total;
+  const chunks: Uint8Array[] = [];
+  let step = -1;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    entry.loaded += value.byteLength;
+    const next = Math.floor((entry.loaded / total) * 100);
+    if (next !== step) {
+      step = next;
+      for (const listener of entry.listeners) listener();
+    }
+  }
+  // The type is what lets a <video> play the object URL; `response.blob()`
+  // carried it implicitly, a hand-built Blob has to be told.
+  return new Blob(chunks as BlobPart[], { type: response.headers.get("content-type") ?? "" });
+}
+
 function entryFor(url: string): Entry {
   if (expiredUrls.has(url)) {
     // Not cached: there are no bytes to pin, and nothing to evict.
-    return { refs: 0, usedAt: ++clock, promise: Promise.reject(new AssetExpiredError(url)) };
+    return {
+      refs: 0,
+      usedAt: ++clock,
+      loaded: 0,
+      listeners: new Set(),
+      promise: Promise.reject(new AssetExpiredError(url)),
+    };
   }
   const existing = cache.get(url);
   if (existing) {
     existing.usedAt = ++clock;
     return existing;
   }
-  const entry: Entry = { refs: 0, usedAt: ++clock, promise: undefined as never };
+  const entry: Entry = {
+    refs: 0,
+    usedAt: ++clock,
+    loaded: 0,
+    listeners: new Set(),
+    promise: undefined as never,
+  };
   entry.promise = (async () => {
     const response = await sessionFetch(url);
     if (response.status === 410) {
@@ -140,7 +195,7 @@ function entryFor(url: string): Entry {
       // status says nothing about which one failed.
       throw new Error(`asset ${url} failed: ${response.status} ${response.statusText}`.trimEnd());
     }
-    const objectUrl = URL.createObjectURL(await response.blob());
+    const objectUrl = URL.createObjectURL(await readBody(response, entry));
     entry.objectUrl = objectUrl;
     return objectUrl;
   })().catch((error: unknown) => {
@@ -173,6 +228,11 @@ export interface ResolvedAsset {
   failed: boolean;
   /** The failure was an expiry (see {@link AssetExpiredError}). Implies `failed`. */
   expired?: boolean;
+  /**
+   * 0–1 while the bytes are in flight, when the server said how many to expect.
+   * Undefined when it didn't (draw an indeterminate spinner) or once loaded.
+   */
+  progress?: number;
 }
 
 /**
@@ -202,7 +262,20 @@ export function useAssetSrc(
     let live = true;
     const entry = entryFor(url);
     entry.refs += 1;
-    setState((prev) => (prev.src === undefined && !prev.failed ? prev : { failed: false }));
+    // A carried-over `progress` is the PREVIOUS asset's: paging the viewer from
+    // a clip at 60% to one with no length would otherwise sit on a fake 60%.
+    setState((prev) =>
+      prev.src === undefined && !prev.failed && prev.progress === undefined ? prev : { failed: false },
+    );
+    const onProgress = () => {
+      if (!live || !entry.total) return;
+      const progress = entry.loaded / entry.total;
+      setState((prev) => (prev.src !== undefined || prev.failed ? prev : { failed: false, progress }));
+    };
+    entry.listeners.add(onProgress);
+    // A remount mid-download (a transcript scrolling) picks up where it is
+    // rather than restarting the ring from zero.
+    onProgress();
     void entry.promise.then(
       (src) => { if (live) setState({ src, failed: false }); },
       (error: unknown) => {
@@ -211,6 +284,7 @@ export function useAssetSrc(
     );
     return () => {
       live = false;
+      entry.listeners.delete(onProgress);
       entry.refs = Math.max(0, entry.refs - 1);
     };
   }, [url]);

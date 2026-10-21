@@ -2,6 +2,7 @@ import { Download, FileIcon, Music } from "lucide-react";
 import { type ImageRef, formatBytes, mediaKind } from "@dispatch/shared";
 import { useAssetSrc } from "../../lib/assetSrc.js";
 import { cn } from "../../lib/cn.js";
+import { ProgressRing } from "./Spinner.js";
 
 /**
  * A chat attachment that ISN'T an image — a video an MCP recorded, an audio
@@ -41,7 +42,7 @@ export function AssetMedia({
    */
   preview?: boolean;
 }) {
-  const { src, failed } = useAssetSrc(chatId, asset);
+  const { src, failed, progress } = useAssetSrc(chatId, asset);
   const name = asset.alt ?? asset.path.split(/[\\/]/).pop() ?? asset.path;
   const kind = mediaKind(asset.mimeType);
 
@@ -58,11 +59,17 @@ export function AssetMedia({
 
   if (!src) {
     // Hold a stable height so the transcript doesn't jump as bytes resolve.
+    // The ring matters most here: the whole file lands before playback can
+    // start (KNOWN LIMIT above), and a clip is what you actually sit waiting on.
     return (
       <span
-        className={className ?? "block h-24 w-[240px] animate-pulse rounded-md bg-panel-2"}
-        aria-hidden
-      />
+        className={cn(
+          "flex items-center justify-center rounded-md bg-panel-2",
+          className ?? (preview ? "h-40 w-full" : "h-24 w-[240px]"),
+        )}
+      >
+        <ProgressRing progress={progress} size={32} />
+      </span>
     );
   }
 

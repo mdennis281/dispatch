@@ -104,3 +104,37 @@ describe("loadAsset", () => {
     expect(sessionFetch).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("streamed download", () => {
+  it("reassembles the body into a blob that keeps its content type", async () => {
+    // A <video> can't play an object URL whose Blob lost its type, which is
+    // the thing `response.blob()` used to carry for free.
+    const body = new Response(new Uint8Array([1, 2, 3, 4]), {
+      headers: { "content-type": "video/webm", "content-length": "4" },
+    });
+    let made: Blob | undefined;
+    globalThis.URL.createObjectURL = vi.fn((blob: Blob) => {
+      made = blob;
+      return "blob:stub/streamed";
+    });
+    sessionFetch.mockResolvedValue(body);
+    await expect(loadAsset("/api/chats/c1/assets/clip.webm")).resolves.toBe("blob:stub/streamed");
+    expect(made?.type).toBe("video/webm");
+    expect(made?.size).toBe(4);
+  });
+
+  it("falls back to a plain blob when the server sent no length", async () => {
+    // A real streamed body, not `body: null` — the bug was taking a reader
+    // first, which locked the stream and made the fallback `blob()` throw.
+    const body = new Response(new Uint8Array([1, 2]), { headers: { "content-type": "image/png" } });
+    body.headers.delete("content-length");
+    let made: Blob | undefined;
+    globalThis.URL.createObjectURL = vi.fn((blob: Blob) => {
+      made = blob;
+      return "blob:stub/plain";
+    });
+    sessionFetch.mockResolvedValue(body);
+    await expect(loadAsset("/api/chats/c1/assets/shot.png")).resolves.toBe("blob:stub/plain");
+    expect(made?.size).toBe(2);
+  });
+});
