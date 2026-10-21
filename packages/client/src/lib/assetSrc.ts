@@ -3,17 +3,17 @@
  *
  * WHY THIS EXISTS: chat assets are served from `/api/chats/:id/assets/:name`,
  * and the auth gate (server/app.ts) rejects every `/api/` request that arrives
- * without a `Bearer` token. A browser sends NO such header for `<img src=â€¦>`,
+ * without a `Bearer` token. A browser sends NO such header for `<img src=…>`,
  * so once authentication was enabled every stored image in every transcript
  * turned into the broken-thumbnail fallback.
  *
  * The service worker can't rescue it either: a same-origin subresource fetch is
  * `mode: "no-cors"`, and the `Request` constructor silently STRIPS
- * `authorization` from a no-cors request â€” so the token never reaches the wire
+ * `authorization` from a no-cors request — so the token never reaches the wire
  * (and in dev there is no worker at all, it's registered in PROD only).
  *
  * So the bytes are fetched through the one authenticated path the app already
- * has (`sessionFetch`, which also handles a 401 â†’ refresh â†’ retry) and handed
+ * has (`sessionFetch`, which also handles a 401 → refresh → retry) and handed
  * to the DOM as an object URL. Object URLs cost a fetch instead of an HTTP
  * cache hit, so results are memoized per URL for the life of the page; a
  * transcript re-renders its thumbnails constantly and must not re-download on
@@ -24,12 +24,12 @@ import type { ImageRef } from "@dispatch/shared";
 import { assetUrl, fsAssetUrl } from "./api.js";
 import { sessionFetch } from "../stores/auth.js";
 
-/** Already renderable as-is â€” nothing to fetch, nothing to revoke. */
+/** Already renderable as-is — nothing to fetch, nothing to revoke. */
 const DIRECT = /^(https?:|data:|blob:)/i;
 
 /**
  * Marks a path that lives in the PROJECT working tree rather than in the chat's
- * assets dir â€” an image the agent wrote and then merely mentioned.
+ * assets dir — an image the agent wrote and then merely mentioned.
  *
  * An explicit prefix rather than a heuristic on the path shape, because there
  * isn't a reliable one: `assetUrl` reduces a chat asset to its basename, so
@@ -59,7 +59,7 @@ const MAX_ENTRIES = 120;
 
 interface Entry {
   promise: Promise<string>;
-  /** Resolved object URL, once known â€” needed to revoke on eviction. */
+  /** Resolved object URL, once known — needed to revoke on eviction. */
   objectUrl?: string;
   /** Mounted consumers. An entry above zero is exempt from eviction. */
   refs: number;
@@ -75,7 +75,7 @@ const cache = new Map<string, Entry>();
 let clock = 0;
 
 /**
- * A chat asset the server's retention sweep deleted â€” answered 410, never 404.
+ * A chat asset the server's retention sweep deleted — answered 410, never 404.
  *
  * Its own error type because it is the one failure that is NOT a failure to
  * load: the transcript still names the file and always will, and the honest
@@ -115,7 +115,7 @@ export function directSrc(path: string): string | null {
   return DIRECT.test(path) ? path : null;
 }
 
-/** The endpoint that serves `image` for `chatId` â€” only for non-direct paths. */
+/** The endpoint that serves `image` for `chatId` — only for non-direct paths. */
 export function assetSrcTarget(chatId: string, path: string): string {
   const direct = directSrc(path);
   if (direct) return direct;
@@ -138,7 +138,7 @@ export function assetSrcTarget(chatId: string, path: string): string {
 async function readBody(response: Response, entry: Entry): Promise<Blob> {
   const total = Number(response.headers?.get("content-length"));
   // Decide BEFORE taking a reader: `getReader()` locks the body, and a locked
-  // body makes the `blob()` fallback throw â€” which drew every length-less
+  // body makes the `blob()` fallback throw — which drew every length-less
   // response as a broken image.
   if (!response.body || !(total > 0)) return response.blob();
   const reader = response.body.getReader();
@@ -213,7 +213,7 @@ function entryFor(url: string): Entry {
  * Fetch `url` with the session's bearer token and expose the bytes as an object
  * URL, memoized per URL. Concurrent and repeat callers share one request.
  *
- * INTERNAL â€” for `useAssetSrc` and its tests, not for feature code. It does not
+ * INTERNAL — for `useAssetSrc` and its tests, not for feature code. It does not
  * take a reference on the cache entry, so the object URL it returns may be
  * revoked by a later eviction; anything holding one in the DOM must go through
  * `useAssetSrc` / `AssetImage`, which keep the entry pinned while it is mounted.
@@ -229,7 +229,7 @@ export interface ResolvedAsset {
   /** The failure was an expiry (see {@link AssetExpiredError}). Implies `failed`. */
   expired?: boolean;
   /**
-   * 0â€“1 while the bytes are in flight, when the server said how many to expect.
+   * 0–1 while the bytes are in flight, when the server said how many to expect.
    * Undefined when it didn't (draw an indeterminate spinner) or once loaded.
    */
   progress?: number;
@@ -262,7 +262,11 @@ export function useAssetSrc(
     let live = true;
     const entry = entryFor(url);
     entry.refs += 1;
-    setState((prev) => (prev.src === undefined && !prev.failed ? prev : { failed: false }));
+    // A carried-over `progress` is the PREVIOUS asset's: paging the viewer from
+    // a clip at 60% to one with no length would otherwise sit on a fake 60%.
+    setState((prev) =>
+      prev.src === undefined && !prev.failed && prev.progress === undefined ? prev : { failed: false },
+    );
     const onProgress = () => {
       if (!live || !entry.total) return;
       const progress = entry.loaded / entry.total;
