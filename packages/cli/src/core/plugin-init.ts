@@ -54,7 +54,33 @@ export function defaultSdkPath(): string {
 
 /* ------------------------------------------------------------- templates */
 
-const q = (s: string) => JSON.stringify(s);
+/**
+ * What a display name may contain. The name is spliced into generated YAML,
+ * TSX and Markdown, so rather than escape for three grammars it is kept to
+ * letters, digits, spaces and a few punctuation marks — no quotes, braces,
+ * angle brackets, backslashes, `:`/`#` (YAML structure and comments) or
+ * control characters. `--name "My plugin: v2"` used to write `name: My plugin:
+ * v2`, which the YAML parser rejects, and a `"` in the name produced a TSX
+ * attribute that did not parse.
+ */
+export const PLUGIN_DISPLAY_NAME_PATTERN = /^[\p{L}\p{N}][\p{L}\p{N} ._()+&'!?,-]{0,59}$/u;
+
+/**
+ * A JS string literal for generated code. The pattern above already excludes
+ * every character that could end the literal or open an expression; this
+ * escapes them anyway (plus the line separators JSON.stringify leaves raw),
+ * so the template stays safe if the pattern is ever relaxed.
+ */
+// Built with `new RegExp` from code points: a literal U+2028/U+2029 inside a
+// regex literal is a line terminator to the TypeScript scanner and fails to
+// compile, which is also why `JSON.stringify` alone is not a code sanitizer.
+const LINE_SEPARATORS = String.fromCharCode(0x2028, 0x2029);
+const UNSAFE_IN_CODE = new RegExp("[\\\\\"'`$<>{}" + LINE_SEPARATORS + "\\x00-\\x1f]", "g");
+const js = (s: string): string =>
+  '"' + s.replace(UNSAFE_IN_CODE, (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0")) + '"';
+
+/** A YAML double-quoted scalar — JSON strings are valid YAML. */
+const yamlStr = (s: string): string => JSON.stringify(s);
 
 /** Every file of the scaffold, keyed by relative path. Pure, so the tests can read them without a disk. */
 export function scaffoldFiles(opts: { id: string; name: string; kind: PluginScaffoldKind; sdkLink: string }): Record<string, string> {
@@ -68,10 +94,10 @@ export function scaffoldFiles(opts: { id: string; name: string; kind: PluginScaf
     "# `cm plugin add` and by the host at boot; see docs/plugins.md → \"Anatomy of",
     "# a plugin\" for every field.",
     `id: ${id}`,
-    `name: ${name}`,
+    `name: ${yamlStr(name)}`,
     "version: 0.1.0",
     'dispatch: ">=1"',
-    `description: ${name} — a Dispatch plugin.`,
+    `description: ${yamlStr(`${name} — a Dispatch plugin.`)}`,
     ...(server ? ["server: ./server/index.js", "settings: ./settings.schema.json"] : []),
     ...(client
       ? [
@@ -243,9 +269,9 @@ export function scaffoldFiles(opts: { id: string; name: string; kind: PluginScaf
       'import { createTestContext } from "@dispatch/plugin-sdk/testing";',
       'import plugin from "../src/server.js";',
       "",
-      `describe(${q(id)}, () => {`,
+      `describe(${js(id)}, () => {`,
       '  it("answers /hello and counts status changes into kv", async () => {',
-      `    const t = createTestContext({ id: ${q(id)}, capabilities: ["routes", "events", "kv"], settings: { greeting: "hi" } });`,
+      `    const t = createTestContext({ id: ${js(id)}, capabilities: ["routes", "events", "kv"], settings: { greeting: "hi" } });`,
       "    await plugin.activate(t.ctx);",
       "",
       '    expect((await t.routes.call("GET", "/hello")).body).toMatchObject({ greeting: "hi", seen: 0 });',
@@ -286,7 +312,7 @@ export function scaffoldFiles(opts: { id: string; name: string; kind: PluginScaf
             "function Control({ host }: { host: ClientHost }) {",
             "  const { IconButton } = host.ui;",
             "  return (",
-            `    <IconButton tip=${q(name)} aria-label=${q(name)} onClick={() => void greet(host)}>`,
+            `    <IconButton tip={${js(name)}} aria-label={${js(name)}} onClick={() => void greet(host)}>`,
             "      <Sparkles />",
             "    </IconButton>",
             "  );",
@@ -304,7 +330,7 @@ export function scaffoldFiles(opts: { id: string; name: string; kind: PluginScaf
             "function Control({ host }: { host: ClientHost }) {",
             "  const { IconButton } = host.ui;",
             "  return (",
-            `    <IconButton tip=${q(name)} aria-label=${q(name)} onClick={() => host.toast(${q(`${name} says hello`)})}>`,
+            `    <IconButton tip={${js(name)}} aria-label={${js(name)}} onClick={() => host.toast(${js(`${name} says hello`)})}>`,
             "      <Sparkles />",
             "    </IconButton>",
             "  );",
@@ -315,8 +341,8 @@ export function scaffoldFiles(opts: { id: string; name: string; kind: PluginScaf
       "  const { Button } = host.ui;",
       "  return (",
       '    <div className="space-y-3">',
-      `      <p className="text-xs leading-relaxed text-muted">${name} is installed. This section is yours.</p>`,
-      `      <Button variant="primary" size="sm" onClick={() => host.toast(${q(`${name} says hello`)})}>`,
+      `      <p className="text-xs leading-relaxed text-muted">{${js(`${name} is installed. This section is yours.`)}}</p>`,
+      `      <Button variant="primary" size="sm" onClick={() => host.toast(${js(`${name} says hello`)})}>`,
       "        Say hello",
       "      </Button>",
       "    </div>",
@@ -327,16 +353,16 @@ export function scaffoldFiles(opts: { id: string; name: string; kind: PluginScaf
       "  activate(host) {",
       "    host.slots.composerControl({",
       `      id: "main",`,
-      `      label: ${q(name)},`,
+      `      label: ${js(name)},`,
       `      hint: "scaffolded control",`,
       "      icon: <Sparkles />,",
       "      render: () => <Control host={host} />,",
       "      // No `menu`: the options-menu row runs onSelect instead of drilling in.",
-      ...(server ? ["      onSelect: () => void greet(host),"] : [`      onSelect: () => host.toast(${q(`${name} says hello`)}),`]),
+      ...(server ? ["      onSelect: () => void greet(host),"] : [`      onSelect: () => host.toast(${js(`${name} says hello`)}),`]),
       "    });",
       "    host.slots.settingsSection({",
       `      id: "main",`,
-      `      label: ${q(name)},`,
+      `      label: ${js(name)},`,
       `      blurb: "Scaffolded settings section",`,
       "      icon: Sparkles,",
       "      render: () => <Settings host={host} />,",
@@ -408,6 +434,13 @@ export async function initPlugin(opts: InitPluginOptions): Promise<InitPluginRes
     );
   }
   const id = parsed.data;
+  const name = opts.name?.trim() || id;
+  if (!PLUGIN_DISPLAY_NAME_PATTERN.test(name)) {
+    throw new CmError(
+      `--name "${name}" may only contain letters, digits, spaces and . _ ( ) + & ' ! ? , - (up to 60 characters); ` +
+        "it is written into plugin.yaml and the client source. Edit `name:` in plugin.yaml afterwards for anything else.",
+    );
+  }
   const sdkPath = resolve(opts.sdkPath ?? defaultSdkPath());
   if (!existsSync(join(sdkPath, "package.json"))) {
     throw new CmError(
@@ -425,7 +458,7 @@ export async function initPlugin(opts: InitPluginOptions): Promise<InitPluginRes
   // drives, which pnpm's `link:` also accepts.
   const rel = relative(dir, sdkPath).replace(/\\/g, "/");
   const sdkLink = `link:${rel.startsWith(".") || /^[A-Za-z]:\//.test(rel) || rel.startsWith("/") ? rel : `./${rel}`}`;
-  const files = scaffoldFiles({ id, name: opts.name?.trim() || id, kind: opts.kind, sdkLink });
+  const files = scaffoldFiles({ id, name, kind: opts.kind, sdkLink });
   const written: string[] = [];
   for (const [rel, content] of Object.entries(files)) {
     const target = join(dir, rel);

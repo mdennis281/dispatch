@@ -55,6 +55,21 @@ describe("scaffoldFiles", () => {
     expect(both.devDependencies.react).toBeDefined();
   });
 
+  it("quotes the display name for YAML and emits it as JS string expressions in the TSX", () => {
+    // Every allowed punctuation mark at once: a plain YAML scalar would have
+    // truncated at `#` and a TSX attribute would have broken on the quote.
+    const name = "Michael's plugin (v2), really!? .+&";
+    const files = scaffoldFiles({ id: "p", name, kind: "both", sdkLink: "link:x" });
+    const manifest = PluginManifestSchema.parse(parseYaml(files["plugin.yaml"]!));
+    expect(manifest.name).toBe(name);
+    expect(manifest.description).toBe(`${name} — a Dispatch plugin.`);
+    const tsx = files["src/client.tsx"]!;
+    // Attributes and text are `{"…"}` expressions, never bare attribute strings or JSX text.
+    expect(tsx).toContain(`tip={${JSON.stringify(name).replace("'", "\\u0027")}}`);
+    expect(tsx).not.toMatch(/tip="|aria-label="/);
+    expect(tsx).toMatch(/<p className="[^"]*">\{"/);
+  });
+
   it("uses the SDK helpers, never a raw button, and bundles the server half", () => {
     const files = scaffoldFiles({ id: "b", name: "B", kind: "both", sdkLink: "link:x" });
     expect(files["src/server.ts"]).toContain('from "@dispatch/plugin-sdk"');
@@ -76,13 +91,17 @@ describe("initPlugin", () => {
     expect(existsSync(join(result.dir, "src", "client.tsx"))).toBe(true);
     const pkg = JSON.parse(await readFile(join(result.dir, "package.json"), "utf8")) as { devDependencies: Record<string, string> };
     expect(pkg.devDependencies["@dispatch/plugin-sdk"]).toBe("link:../sdk");
-    expect(await readFile(join(result.dir, "plugin.yaml"), "utf8")).toContain("name: Hello world");
+    expect(await readFile(join(result.dir, "plugin.yaml"), "utf8")).toContain('name: "Hello world"');
   });
 
   it("refuses an invalid or reserved id, a missing SDK, and a non-empty target", async () => {
     await expect(initPlugin({ id: "Bad Id", kind: "server", dir: root, sdkPath: sdk })).rejects.toBeInstanceOf(CmError);
     await expect(initPlugin({ id: "dispatch-x", kind: "server", dir: root, sdkPath: sdk })).rejects.toThrow(/reserved/);
     await expect(initPlugin({ id: "ok", kind: "server", dir: root, sdkPath: join(root, "nope") })).rejects.toThrow(/--sdk/);
+    // `:` and `#` are YAML structure; `"`, `{`, `<` would reach the TSX. Refused up front.
+    for (const name of ["My plugin: v2", "Say #1", 'Say "hi"', "a{b}", "<b>", "x\ny"]) {
+      await expect(initPlugin({ id: "ok", name, kind: "server", dir: root, sdkPath: sdk })).rejects.toThrow(/--name/);
+    }
     await mkdir(join(root, "taken"));
     await writeFile(join(root, "taken", "x"), "x");
     await expect(initPlugin({ id: "taken", kind: "server", dir: root, sdkPath: sdk })).rejects.toThrow(/not empty/);

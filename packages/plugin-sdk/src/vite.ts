@@ -33,7 +33,7 @@
  */
 import { builtinModules } from "node:module";
 import { createRequire } from "node:module";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, resolve } from "node:path";
 import type { Plugin, UserConfig } from "vite";
 
@@ -189,7 +189,13 @@ export function dispatchServerBuild(opts: ServerBuildOptions): UserConfig {
   };
 }
 
-/** The directory of the config file that called us — a convenience for `root`. */
+/**
+ * The directory of the config file that called us — a convenience for `root`.
+ * `fileURLToPath`, not `new URL(...).pathname`: the pathname is still
+ * percent-encoded, so a plugin under `C:\Users\John Smith\` would have resolved
+ * to `John%20Smith`, a directory that does not exist, and every build would
+ * have failed on "entry not found".
+ */
 export function dirOf(importMetaUrl: string): string {
-  return dirname(new URL(importMetaUrl).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
+  return dirname(fileURLToPath(importMetaUrl));
 }
