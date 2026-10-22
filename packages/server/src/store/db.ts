@@ -278,6 +278,25 @@ const MIGRATIONS: ReadonlyArray<string> = [
     body       TEXT NOT NULL
   );
   `,
+
+  // 7 — plugin key/value storage (`ctx.kv`).
+  //
+  // A table and not a JSON file per plugin, for the reason runner state moved
+  // here: a plugin writing a counter on every bus event would be rewriting a
+  // whole file per event, and two instances sharing a plugin would race each
+  // other's writes. Per-instance (it lives in the STATE root, not config/), so
+  // the stable and dev servers each see their own values — the same split as
+  // every other table here. `value` is JSON, validated by nobody: it is the
+  // plugin's own data and the host only moves it.
+  `
+  CREATE TABLE plugin_kv (
+    plugin     TEXT NOT NULL,
+    key        TEXT NOT NULL,
+    value      TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (plugin, key)
+  );
+  `,
 ];
 
 /** Schema version a database must be at for this build to use it. */

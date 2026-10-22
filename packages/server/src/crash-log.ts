@@ -108,6 +108,8 @@ interface LiveNet {
   /** Mutable — see {@link attachCrashBus}. Read at FIRE time, not install time. */
   bus?: EventBus;
   off: () => void;
+  /** The guarded recorder, so a non-fatal fault can be filed by hand — see {@link recordFault}. */
+  record?: (kind: string, err: unknown) => void;
 }
 let live: LiveNet | undefined;
 
@@ -257,6 +259,7 @@ export function installCrashNet(opts: CrashNetOptions): () => void {
     }
   };
 
+  state.record = record;
   const onRejection = (reason: unknown): void => record("unhandledRejection", reason);
   const onException = (err: unknown): void => record("uncaughtException", err);
 
@@ -290,4 +293,23 @@ export function installCrashNet(opts: CrashNetOptions): () => void {
  */
 export function attachCrashBus(bus: EventBus): void {
   if (live) live.bus = bus;
+}
+
+/**
+ * File a fault the process SURVIVED by design — a plugin whose `activate`
+ * threw, say — through the same guarded recorder the handlers above use, so it
+ * lands in `crash.log` with a stack and reaches the UI as an `error` event.
+ *
+ * Exists because "it's in the console" is not a record: under the installed
+ * launcher the console is a pipe nobody reads, and a plugin that fails at boot
+ * would otherwise be diagnosable only from the Settings row's one-line message.
+ * Falls back to stderr when no net is installed (tests, embedded servers).
+ */
+export function recordFault(kind: string, err: unknown): void {
+  if (live?.record) {
+    live.record(kind, err);
+    return;
+  }
+  // eslint-disable-next-line no-console
+  console.error(`[dispatch] ${kind}:`, err);
 }

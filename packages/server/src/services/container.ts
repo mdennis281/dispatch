@@ -94,6 +94,7 @@ import { MetricsBackfill } from "./metrics-backfill.js";
 import { FsExplorerService } from "./fs-explorer.js";
 import { HarnessRegistry } from "../harness/index.js";
 import { ManagerMcpBridge } from "./mcp/manager-http.js";
+import { PluginService } from "../plugins/service.js";
 
 /** The shared base every service hangs off. */
 export interface ServiceBase {
@@ -155,6 +156,7 @@ export interface ServiceOverrides {
   prRegistry?: PrRegistry;
   chatMessenger?: ChatMessenger;
   chatCompletionNotices?: ChatCompletionNotices;
+  plugins?: PluginService;
 }
 
 /** Everything the routes/WS layer needs, wired to one bus + store. */
@@ -233,6 +235,8 @@ export interface Services extends ServiceBase {
   /** Chat-to-chat messaging behind `chat_send`/`chat_ask`/`chat_reply`/`chat_state`. */
   chatMessenger: ChatMessenger;
   chatCompletionNotices: ChatCompletionNotices;
+  /** Installed plugins under `<configDir>/plugins/`: discovery, activation, their route tables. */
+  plugins: PluginService;
   fileIndex: FileIndexService;
   /** The SQLite usage ledger behind the Metrics view. */
   metrics: MetricsService;
@@ -1020,6 +1024,18 @@ export function createServices(
       identity,
     ),
   );
+  // The plugin host. Plugins live in the CONFIG root (shared by both instances,
+  // never replaced by an upgrade); their kv rows live in this instance's state
+  // database. Everything a plugin can reach goes through the services above —
+  // the messenger for sends (never the broker), the queue for attention — so
+  // it is constructed after all of them.
+  const plugins =
+    overrides.plugins ??
+    new PluginService({
+      configDir: config.configDir ?? config.dataDir,
+      store,
+      context: { bus, secrets, inspect, memory, attention, messenger: chatMessenger, broker },
+    });
   // "The chat you spawned is done" — armed by `broker.spawnChat` below, delivered
   // over the messenger above. Constructed here because it needs both, and
   // disposed in `dispose()` so a pending notice is not a reason the process
@@ -1248,6 +1264,16 @@ export function createServices(
     safeStart("prReviewWatcher", () => prReviewWatcher.start());
     safeStart("issueWatcher", () => issueWatcher.start());
 
+    // Plugins activate HERE, after listen, and not in `start()`: each
+    // `activate` is third-party code on a 30 s budget, and awaiting it before
+    // the port opened would hold the health check shut long enough for
+    // `install.mjs` to roll a good update back — the failure that split
+    // `start()` from `warm()`. Their route prefixes answer 503 until then.
+    await plugins.activateAll().catch((err: unknown) => {
+      console.error("[Dispatch] plugin activation failed (continuing):", err);
+    });
+    if (disposed) return;
+
     // Last, because it is the slowest and nothing above waits on it.
     try {
       await runner.reconcile();
@@ -1304,6 +1330,7 @@ export function createServices(
     failover,
     chatMessenger,
     chatCompletionNotices,
+    plugins,
     fileIndex,
     fsExplorer,
     metrics,
@@ -1402,6 +1429,12 @@ export function createServices(
       // loaded would ask the stable endpoint on behalf of an unstable install.
       await release.hydrate().catch(() => {});
       safeStart("release", () => release.start());
+      // Discovery only — a readdir and a YAML parse per plugin, so it is
+      // bounded and `GET /api/plugins` can answer from the first request. No
+      // plugin code runs until `warm()`.
+      await plugins.load().catch((err: unknown) => {
+        console.error("[Dispatch] plugin discovery failed (continuing):", err);
+      });
       // AI title: generate one from the first user message IFF the chat is still
       // on its default "New chat" title. We fire as soon as the user's prompt
       // lands (`user` row) so a new chat is named right after the first send
@@ -1575,6 +1608,10 @@ export function createServices(
       // Releases every chat blocked in `chat_ask`. Before the broker goes away,
       // so a waiting session is told the answer is not coming rather than
       // hanging on a promise nothing is left to resolve.
+      // Plugins go BEFORE the messenger and the broker: a `deactivate` may
+      // still want to send a last message or read a chat, and their bus
+      // listeners should be gone before the broker's teardown floods the bus.
+      await plugins.dispose().catch(() => {});
       chatMessenger.dispose();
       chatCompletionNotices.dispose();
       await runner.stopAll().catch(() => {});
