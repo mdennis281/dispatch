@@ -20,6 +20,10 @@ cm plugin list | enable <id> | disable <id> | remove <id>
       --config-dir <dir>   (or DISPATCH_CONFIG_DIR)    -f, --force   replace an installed plugin    --json
 ```
 
+`init` writes a standalone directory; `--name` is the display name and is kept to
+letters, digits, spaces and `. _ ( ) + & ' ! ? , -` because it is spliced into YAML
+and TSX (edit `name:` in `plugin.yaml` afterwards for anything else).
+
 `add` takes a directory, a git URL (shallow clone) or a tarball, finds `plugin.yaml` at
 the root or one directory down, and refuses an invalid or incompatible manifest BEFORE
 anything lands under the root. It claims the slot by the **manifest's id**, not the
