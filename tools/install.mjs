@@ -187,7 +187,11 @@ async function fetchOk(url, options = {}) {
   const response = await fetch(url, { ...options, headers: { ...githubHeaders(), ...options.headers } });
   if (!response.ok) {
     const body = (await response.text()).slice(0, 500);
-    throw new Error(`GitHub request failed (${response.status}) for ${url}\n${body}`);
+    const err = new Error(`GitHub request failed (${response.status}) for ${url}\n${body}`);
+    // Kept on the error so a caller can tell "ask again" (5xx, 429) from "the
+    // answer is no" (a 404 from `releases/latest` while nothing is stable yet).
+    err.status = response.status;
+    throw err;
   }
   return response;
 }
@@ -221,25 +225,101 @@ export function compareStamps(a, b) {
  * version, not by the list's own order, and skipping anything unorderable rather
  * than guessing. Promoted builds stay in that list, so promoting a release must
  * never look to an unstable install like the channel went backwards.
+ *
+ * Retried with backoff (see CHANNEL_RETRY) on a 5xx/429, a network error, and
+ * an unstable page with nothing installable on it — the last one being the
+ * GitHub glitch behind #404, not a channel that is really empty.
  */
 async function resolveChannelHead(repo, channel) {
-  if (channel !== "unstable") {
-    return (await fetchOk(`https://api.github.com/repos/${repo}/releases/latest`)).json();
+  const unstable = channel === "unstable";
+  const url = unstable
+    ? `https://api.github.com/repos/${repo}/releases?per_page=${UNSTABLE_PAGE_SIZE}`
+    : `https://api.github.com/repos/${repo}/releases/latest`;
+  for (let attempt = 1; ; attempt++) {
+    let failure;
+    try {
+      const response = await fetchOk(url);
+      const body = await response.json();
+      if (!unstable) return body;
+      const best = newestStamped(body);
+      if (best) return best;
+      failure = new Error(
+        `no installable release found on the unstable channel of ${repo} (${describeList(response, body)})`,
+      );
+    } catch (err) {
+      // A 4xx other than 429 is GitHub's real answer. No status at all is a
+      // network error or an unparseable body — transient, so ask again.
+      if (err.status !== undefined && err.status !== 429 && err.status < 500) throw err;
+      failure = err;
+    }
+    if (attempt >= CHANNEL_RETRY.attempts) {
+      failure.message += ` — gave up after ${attempt} attempts`;
+      throw failure;
+    }
+    const wait = CHANNEL_RETRY.baseDelayMs * 2 ** (attempt - 1);
+    console.log(
+      `${failure.message.split("\n")[0]}; retrying in ${wait}ms (attempt ${attempt}/${CHANNEL_RETRY.attempts})`,
+    );
+    await delay(wait);
   }
-  const list = await (
-    await fetchOk(`https://api.github.com/repos/${repo}/releases?per_page=${UNSTABLE_PAGE_SIZE}`)
-  ).json();
+}
+
+/**
+ * How hard `resolveChannelHead` tries before giving up. Exported so the tests
+ * can run the backoff at 0ms instead of sleeping through it.
+ *
+ * FIVE, because the empty page is not rare: GitHub answers an AUTHENTICATED
+ * `GET /repos/:repo/releases` with `200 []` and no Link header — as if the repo
+ * had no releases — on roughly one request in four (measured: 6/30 at
+ * per_page=30, 9/30 at 50; anonymous requests, 0/50). The smoke and any user
+ * with GITHUB_TOKEN set always send a token, so three attempts would still lose
+ * about one resolve in seventy (#404). Worst case waits 1+2+4+8 = 15s.
+ */
+export const CHANNEL_RETRY = { attempts: 5, baseDelayMs: 1000 };
+
+/**
+ * The highest build stamp on a releases page, skipping drafts (their assets may
+ * not exist) and unorderable tags. `null` when nothing qualifies.
+ */
+function newestStamped(list) {
   let best = null;
   for (const release of Array.isArray(list) ? list : []) {
-    if (release.draft || typeof release.tag_name !== "string") continue;
+    if (release?.draft || typeof release?.tag_name !== "string") continue;
     // Unorderable (a semver tag) is skipped, not guessed at — same call the
     // server's comparator documents.
     if (compareStamps(release.tag_name, release.tag_name) === null) continue;
     // `-1` means `best` is OLDER than this one, so this one takes over.
     if (!best || compareStamps(best.tag_name, release.tag_name) === -1) best = release;
   }
-  if (!best) throw new Error(`no installable release found on the unstable channel of ${repo}`);
   return best;
+}
+
+/**
+ * What GitHub actually sent, for the "no installable release" error. The old
+ * message said only "none found", which is how #404 sat as an unexplained macOS
+ * flake across two PRs: an empty page, a non-array body and a page of drafts
+ * all read exactly the same.
+ */
+function describeList(response, body) {
+  const parts = [`HTTP ${response.status}`];
+  if (Array.isArray(body)) {
+    parts.push(`${body.length} release(s)`);
+    if (body.length > 0) {
+      const first = body.slice(0, 5).map((r) => `${r?.tag_name ?? "?"}${r?.draft ? " (draft)" : ""}`);
+      parts.push(`first: ${first.join(", ")}`);
+    }
+  } else {
+    parts.push(`body is not an array: ${String(JSON.stringify(body)).slice(0, 200)}`);
+  }
+  // Empty with no Link header is GitHub's glitch (see CHANNEL_RETRY); the
+  // request id is what GitHub support asks for.
+  if (response.headers?.get) {
+    parts.push(response.headers.get("link") ? "paginated" : "no Link header");
+    const id = response.headers.get("x-github-request-id");
+    if (id) parts.push(`request ${id}`);
+  }
+  parts.push(githubHeaders().Authorization ? "authenticated" : "anonymous");
+  return parts.join(", ");
 }
 
 /**
