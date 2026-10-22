@@ -1,7 +1,7 @@
 /**
  * Settings → Integrations. Blocks for the ways something that is not a browser
- * reaches this instance. Today: TOKENS (this file's `TokensBlock`); outbound
- * webhooks add their block beside it.
+ * reaches this instance: TOKENS (this file's `TokensBlock`) for calls in, and
+ * WEBHOOKS (`WebhooksBlock.tsx`) for signed POSTs out.
  *
  * Nothing here lives in the app-settings draft — a token is minted and revoked
  * the moment you click, like a session — so the section takes no pane props
@@ -34,6 +34,7 @@ import { sessionFetch, useAuth } from "../../../stores/auth.js";
 import { useRealProjects } from "../../../stores/projects.js";
 import { relTime } from "../../../lib/format.js";
 import { cn } from "../../../lib/cn.js";
+import { WebhooksBlock } from "./WebhooksBlock.js";
 
 /* ------------------------------------------------------------------ api */
 
@@ -440,6 +441,7 @@ export function IntegrationsSection() {
         </span>
       </SectionLabel>
       <TokensBlock />
+      <WebhooksBlock />
     </div>
   );
 }

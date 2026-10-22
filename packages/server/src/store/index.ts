@@ -100,6 +100,10 @@ import {
   type IssueWatch,
   McpPortLeaseSchema,
   type McpPortLease,
+  WebhookSubscriptionSchema,
+  type WebhookSubscription,
+  WebhookDeliverySchema,
+  type WebhookDelivery,
   ShellTranscriptFilterSchema,
   McpEnabledMapSchema,
   ProjectConfigLocationSchema,
@@ -636,6 +640,25 @@ function decodeRow<T>(schema: z.ZodType<T>, body: unknown): T | null {
   }
   const parsed = schema.safeParse(raw);
   return parsed.success ? parsed.data : null;
+}
+
+/** Rebuild a WebhookDelivery from its columns; NULLs become absent fields. */
+function toWebhookDelivery(row: Record<string, unknown>): WebhookDelivery {
+  return WebhookDeliverySchema.parse({
+    id: row.id,
+    subscriptionId: row.subscription_id,
+    eventType: row.event_type,
+    chatId: row.chat_id ?? undefined,
+    projectId: row.project_id ?? undefined,
+    status: row.status,
+    attempts: row.attempts,
+    nextAttemptAt: row.next_at ?? undefined,
+    lastStatus: row.last_status ?? undefined,
+    lastError: row.last_error ?? undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    body: row.body,
+  });
 }
 
 /** Rebuild a TerminalLineRecord from its three columns (see the schema). */
@@ -1725,6 +1748,116 @@ export class Store {
       this.db.prepare("DELETE FROM runner_line WHERE runner_id = ?").run(id);
       this.db.prepare("DELETE FROM runner WHERE id = ?").run(id);
     });
+  }
+
+  /* ------------------------------------------------- outbound webhooks */
+
+  async listWebhookSubscriptions(): Promise<WebhookSubscription[]> {
+    // A row that fails to parse costs one subscription, not the whole list —
+    // the Settings pane and the service both read this on every change.
+    return this.rows("SELECT body FROM webhook_subscription ORDER BY seq").flatMap((r) => {
+      const sub = decodeRow(WebhookSubscriptionSchema, r.body);
+      return sub ? [sub] : [];
+    });
+  }
+  async getWebhookSubscription(id: string): Promise<WebhookSubscription | null> {
+    const row = this.db.prepare("SELECT body FROM webhook_subscription WHERE id = ?").get(id);
+    return row ? decodeRow(WebhookSubscriptionSchema, row.body) : null;
+  }
+  async saveWebhookSubscription(sub: WebhookSubscription): Promise<WebhookSubscription> {
+    const validated = WebhookSubscriptionSchema.parse(sub);
+    // ON CONFLICT leaves `seq` alone: a toggle must not move the row to the
+    // bottom of the Settings list.
+    this.db
+      .prepare(
+        "INSERT INTO webhook_subscription (id, body) VALUES (?, ?)" +
+          " ON CONFLICT(id) DO UPDATE SET body = excluded.body",
+      )
+      .run(validated.id, JSON.stringify(validated));
+    return validated;
+  }
+  /** Drops the subscription AND its delivery log in one transaction. */
+  async deleteWebhookSubscription(id: string): Promise<boolean> {
+    return this.db.tx(() => {
+      this.db.prepare("DELETE FROM webhook_delivery WHERE subscription_id = ?").run(id);
+      const res = this.db.prepare("DELETE FROM webhook_subscription WHERE id = ?").run(id);
+      return Number(res.changes) > 0;
+    });
+  }
+
+  /**
+   * Insert or overwrite a delivery row by id.
+   *
+   * Bounded per subscription the way `runner_line` is bounded per runner, but
+   * only over SETTLED rows: a pending delivery past the cap is still owed to the
+   * receiver, and the seven-day sweep is what retires it once it settles.
+   */
+  async saveWebhookDelivery(d: WebhookDelivery, maxSettledRows = 1000): Promise<WebhookDelivery> {
+    const v = WebhookDeliverySchema.parse(d);
+    this.db.tx(() => {
+      this.db
+        .prepare(
+          "INSERT INTO webhook_delivery (id, subscription_id, event_type, chat_id, project_id, status," +
+            " attempts, next_at, last_status, last_error, created_at, updated_at, body)" +
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)" +
+            " ON CONFLICT(id) DO UPDATE SET status = excluded.status, attempts = excluded.attempts," +
+            " next_at = excluded.next_at, last_status = excluded.last_status," +
+            " last_error = excluded.last_error, updated_at = excluded.updated_at",
+        )
+        .run(
+          v.id,
+          v.subscriptionId,
+          v.eventType,
+          v.chatId ?? null,
+          v.projectId ?? null,
+          v.status,
+          v.attempts,
+          v.nextAttemptAt ?? null,
+          v.lastStatus ?? null,
+          v.lastError ?? null,
+          v.createdAt,
+          v.updatedAt,
+          v.body,
+        );
+      this.db
+        .prepare(
+          "DELETE FROM webhook_delivery WHERE subscription_id = ? AND status != 'pending' AND seq <= (" +
+            "SELECT seq FROM webhook_delivery WHERE subscription_id = ? AND status != 'pending'" +
+            " ORDER BY seq DESC LIMIT 1 OFFSET ?)",
+        )
+        .run(v.subscriptionId, v.subscriptionId, maxSettledRows);
+    });
+    return v;
+  }
+  async getWebhookDelivery(id: string): Promise<WebhookDelivery | null> {
+    const row = this.db.prepare("SELECT * FROM webhook_delivery WHERE id = ?").get(id) as
+      | Record<string, unknown>
+      | undefined;
+    return row ? toWebhookDelivery(row) : null;
+  }
+  /** Newest first — the Settings log reads top-down from "what just happened". */
+  async listWebhookDeliveries(subscriptionId: string, limit = 100): Promise<WebhookDelivery[]> {
+    return this.rows(
+      "SELECT * FROM webhook_delivery WHERE subscription_id = ? ORDER BY seq DESC LIMIT ?",
+      subscriptionId,
+      limit,
+    ).map(toWebhookDelivery);
+  }
+  /** Every delivery still owed — what a boot picks back up. */
+  async listPendingWebhookDeliveries(): Promise<WebhookDelivery[]> {
+    return this.rows("SELECT * FROM webhook_delivery WHERE status = 'pending' ORDER BY next_at").map(
+      toWebhookDelivery,
+    );
+  }
+  /**
+   * Retire settled rows created before `cutoff`. Pending rows are never swept:
+   * a delivery nobody has given up on is not a log entry yet.
+   */
+  async sweepWebhookDeliveries(cutoff: number): Promise<number> {
+    const res = this.db
+      .prepare("DELETE FROM webhook_delivery WHERE status != 'pending' AND created_at < ?")
+      .run(cutoff);
+    return Number(res.changes);
   }
 
   /* ---------------------------------------------------- MCP port leases */

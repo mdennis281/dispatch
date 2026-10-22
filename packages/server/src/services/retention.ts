@@ -19,6 +19,10 @@
  *      The only rule here that deletes a CONVERSATION rather than something
  *      derived from one, which is why it defaults to off and why it refuses a
  *      long list of chats that are merely old (see {@link sweepAgedChats}).
+ *   5. Webhook delivery rows older than seven days. A delivery log is evidence
+ *      of what a receiver was sent and when; a week is long enough to debug a
+ *      receiver and short enough that a chatty subscription cannot grow the
+ *      state database without bound. Pending rows are never swept.
  *
  * Deliberately NOT here: metrics pruning (a manual button on purpose, see
  * services/metrics.ts), and `failed/` upgrade payloads, which belong to the
@@ -42,6 +46,7 @@ import { existsSync } from "node:fs";
 import {
   DEFAULT_REVIEWER_CHAT_DAYS,
   DEFAULT_TOOL_IMAGE_DAYS,
+  WEBHOOK_DELIVERY_RETENTION_MS,
   isGlobalProject,
   parseReviewingTarget,
   resolveRetention,
@@ -99,6 +104,8 @@ export interface RetentionReport {
   images: { files: number; bytes: number; chats: number };
   /** Rule 4. Always present; `deleted` is empty when the window is off. */
   agedChats: { deleted: string[]; skipped: number };
+  /** Rule 5: settled webhook delivery rows past their seven days. */
+  webhookDeliveries: { deleted: number };
 }
 
 export class RetentionService {
@@ -230,7 +237,18 @@ export class RetentionService {
       );
     }
 
-    return { checkpoints, reviewerChats: { deleted }, images, agedChats: aged };
+    const webhookDeliveries = await this.store
+      .sweepWebhookDeliveries(this.now() - WEBHOOK_DELIVERY_RETENTION_MS)
+      .then((deleted) => ({ deleted }))
+      .catch((err: unknown) => {
+        this.log(`webhook delivery sweep failed: ${String(err)}`);
+        return { deleted: 0 };
+      });
+    if (webhookDeliveries.deleted) {
+      this.log(`removed ${webhookDeliveries.deleted} webhook deliver${webhookDeliveries.deleted === 1 ? "y" : "ies"} older than 7 days`);
+    }
+
+    return { checkpoints, reviewerChats: { deleted }, images, agedChats: aged, webhookDeliveries };
   }
 
   /* ------------------------------------------------------ reviewer chats */

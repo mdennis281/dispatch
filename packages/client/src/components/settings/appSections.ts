@@ -141,11 +141,12 @@ export const APP_SECTIONS: AppSectionDef[] = [
     id: "integrations",
     icon: Plug,
     label: "Integrations",
-    blurb: "Tokens for bots and scripts",
+    blurb: "Tokens and webhooks for outside tools",
     explainer:
-      "How something that is not a browser reaches this instance: a bot, a script, a remote " +
-      "MCP client. A token is shown once when it is made, carries only the scopes you give " +
-      "it, and dies with authentication — turning login off revokes every token.",
+      "How something that is not a browser talks to this instance. Inbound, a token: shown " +
+      "once when it is made, carrying only the scopes you give it, revoked with authentication. " +
+      "Outbound, a webhook: a signed POST of the events you pick to a URL you own, with a week " +
+      "of delivery history. Both apply the moment you confirm them, not with the bar below.",
   },
   {
     id: "updates",

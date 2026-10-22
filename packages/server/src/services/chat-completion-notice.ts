@@ -42,7 +42,7 @@ import type { EventBus } from "../bus.js";
  * the exact silence this service exists to remove. A turn that died on a usage
  * limit is the notice worth the most, not the one to suppress.
  */
-const AT_REST: ReadonlySet<ChatStatus> = new Set<ChatStatus>([
+export const AT_REST: ReadonlySet<ChatStatus> = new Set<ChatStatus>([
   "idle",
   "done",
   "failed",
