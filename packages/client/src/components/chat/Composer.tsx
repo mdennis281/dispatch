@@ -25,6 +25,7 @@ import {
   Eye,
   Check,
   ChevronLeft,
+  ChevronRight,
   Cpu,
   ChevronsUpDown,
   Gauge,
@@ -45,7 +46,6 @@ import {
   defaultModelFor,
   findModel,
   chatRoot,
-  PROVIDER_IDS,
   providerFor,
   mediaKind,
   type SubscriptionStatus,
@@ -357,16 +357,16 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   const [over, setOver] = useState<DropIntent>(null);
   const [error, setError] = useState<string | null>(null);
   const persona = usePersonaPicker(chat);
-  // The login account this chat runs under. Only a real choice once some
-  // provider has more than one account — counted PER provider, because one
-  // stored account beside the implicit ones for other providers is still one
-  // account each, and switching provider is the model menu's job.
+  // The login account this chat runs under. It is picked inside the model menu,
+  // nested under its provider row: an account belongs to exactly one provider,
+  // and a separate toolbar control for it duplicated the provider switch (an
+  // account on another provider moves the chat there anyway).
   const accounts = useSubscriptions((s) => s.list);
   const account = chatAccountOf(accounts, chat, harness);
-  const multiAccount = PROVIDER_IDS.some(
-    (p) => accounts.filter((a) => a.provider === p).length > 1,
-  );
   const accountName = account ? accountLabel(account) : undefined;
+  // Which provider's accounts the model menu has drilled into, if any. Swapped
+  // IN PLACE for the same reason `moreView` is — never a popover in a popover.
+  const [brainProvider, setBrainProvider] = useState<SubscriptionStatus["provider"] | null>(null);
   // Where the file picker opens: this chat's own working directory, so the
   // paths it inserts are paths the agent for THIS chat can open.
   //
@@ -414,18 +414,10 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   const toggleControl = useComposerPrefs((s) => s.toggle);
   const showAllControls = useComposerPrefs((s) => s.showAll);
   const hidden = hiddenCount(visible);
-  // What the FIT sees: the preference, minus a control with nothing to draw. The
-  // account picker renders nothing on a single-account install, and letting the
-  // fit walk it to `off` anyway counted a control that doesn't exist into the
-  // "N won't fit" tooltip and the menu's eviction line.
-  const fitVisible = useMemo(
-    () => ({ ...visible, account: visible.account && multiAccount }),
-    [visible, multiAccount],
-  );
   // How big each control is currently drawn — derived from measurement, never
   // stored. Starts at everything's widest and gets walked down by `fit` below.
-  const [sizes, setSizes] = useState<ComposerSizes>(() => widestSizes(fitVisible));
-  const evicted = evictedCount(sizes, fitVisible);
+  const [sizes, setSizes] = useState<ComposerSizes>(() => widestSizes(visible));
+  const evicted = evictedCount(sizes, visible);
   // Phone still matters, but only for TOUCH now: taller boxes, roomier menu
   // rows, a circular Send. Which controls the row carries is decided by the
   // same measurement at every width — a phone simply ends up with icons,
@@ -445,8 +437,8 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   const blockedWidthRef = useRef(0);
   // `step` is memoized with no deps (the ResizeObserver must not be torn down and
   // rebuilt on every preference change), so it reads visibility through a ref.
-  const visibleRef = useRef(fitVisible);
-  visibleRef.current = fitVisible;
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   // Latest submit/upload closures, so the (once-configured) TipTap key/paste
@@ -1114,7 +1106,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   // changes the natural width without changing the box.
   useLayoutEffect(() => {
     blockedWidthRef.current = 0;
-    setSizes((cur) => reconcile(cur, fitVisible));
+    setSizes((cur) => reconcile(cur, visible));
     step();
   }, [
     step,
@@ -1128,10 +1120,8 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     effort,
     currentAgent?.name,
     persona.label,
-    accountName,
-    multiAccount,
     modeLabel(modes, modeId),
-    fitVisible,
+    visible,
   ]);
 
   /* ------------------------------------------------------- shared menu bodies */
@@ -1142,19 +1132,63 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
    * `moreView` note above), so it shares these ROWS instead. A forked copy is
    * how two surfaces start disagreeing about which models a harness has.
    */
-  const brainRows = (close: () => void, dense: boolean) => (
+  const brainRows = (close: () => void, dense: boolean) =>
+    brainProvider ? (
+      <>
+        <ConfigBackRow
+          title={`${providerFor(brainProvider).label} account`}
+          dense={dense}
+          onBack={() => setBrainProvider(null)}
+        />
+        {accountRows(
+          brainProvider,
+          () => {
+            setBrainProvider(null);
+            close();
+          },
+          dense,
+        )}
+      </>
+    ) : (
     <>
       <div className="px-2 py-1 text-2xs uppercase tracking-wide text-faint">Provider</div>
-      {harnesses.map((candidate) => (
+      {harnesses.map((candidate) => {
+        // A provider with a choice of accounts drills into them rather than
+        // switching outright — picking the account IS the switch, so a bare
+        // provider click would have to guess which login to run under.
+        const own = accounts.filter((a) => a.provider === candidate.kind);
+        const nested = candidate.runtime.available && own.length > 1;
+        const active = candidate.kind === harness;
+        return (
         <MenuItem
           key={candidate.kind}
           icon={<Cpu />}
           dense={dense}
-          active={candidate.kind === harness}
+          active={active}
           disabled={!candidate.runtime.available}
-          hint={candidate.runtime.available ? candidate.runtime.version : "not installed"}
+          title={candidate.runtime.version}
+          hint={
+            !candidate.runtime.available ? (
+              "not installed"
+            ) : nested ? (
+              <span className="flex items-center gap-1">
+                <span className="max-w-[96px] truncate">
+                  {active && accountName ? accountName : `${own.length} accounts`}
+                </span>
+                <ChevronRight className="size-3" />
+              </span>
+            ) : (
+              candidate.runtime.version
+            )
+          }
           onClick={() => {
-            if (!candidate.runtime.available || candidate.kind === harness) return;
+            if (!candidate.runtime.available) return;
+            if (nested) {
+              void useSubscriptions.getState().load();
+              setBrainProvider(candidate.kind);
+              return;
+            }
+            if (active) return;
             modelByChat.delete(chat.id);
             setModelState("");
             upsertChat({
@@ -1170,10 +1204,11 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
         >
           <span className="flex items-center gap-2 capitalize">
             {candidate.kind}
-            {candidate.kind === harness && <Check className="size-3 text-accent" />}
+            {active && <Check className="size-3 text-accent" />}
           </span>
         </MenuItem>
-      ))}
+        );
+      })}
       <div className="my-1 h-px bg-line" />
       <div className="px-2 py-1 text-2xs uppercase tracking-wide text-faint">
         Model · {harness}
@@ -1212,31 +1247,8 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
           </span>
         </MenuItem>
       ))}
-      {capabilities?.subagents !== false && scopedAgents.length > 0 && (
-        <>
-          <div className="my-1 h-px bg-line" />
-          <div className="px-2 py-1 text-2xs uppercase tracking-wide text-faint">Custom agent</div>
-          {scopedAgents.map((a) => (
-            <MenuItem
-              key={a.id}
-              icon={<Bot />}
-              dense={dense}
-              active={a.id === chat.agentId}
-              onClick={() => {
-                setAgent(a.id);
-                close();
-              }}
-            >
-              <span className="flex items-center gap-2">
-                {a.name}
-                {a.id === chat.agentId && <Check className="size-3 text-accent" />}
-              </span>
-            </MenuItem>
-          ))}
-        </>
-      )}
     </>
-  );
+    );
 
   /** The effort list, shared by the toolbar's own Select and the options menu. */
   const effortRows = (close: () => void, dense: boolean) => (
@@ -1381,44 +1393,37 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     actions.setSubscription(chat.id, target.id);
   };
 
-  const accountRows = (close: () => void, dense: boolean) => (
-    <>
-      {[...new Set(accounts.map((a) => a.provider))].map((provider, i) => (
-        <div key={provider} className="flex flex-col">
-          {i > 0 && <div className="my-1 h-px bg-line" />}
-          <div className="px-2 py-1 text-2xs uppercase tracking-wide text-faint">
-            {providerFor(provider).label}
-          </div>
-          {accounts
-            .filter((a) => a.provider === provider)
-            .map((a) => (
-              <MenuItem
-                key={a.id}
-                icon={<KeyRound />}
-                dense={dense}
-                active={a.id === account?.id}
-                disabled={!a.loggedIn}
-                hint={!a.loggedIn ? "not logged in" : a.isDefault ? "default" : undefined}
-                title={a.resolvedConfigDir}
-                onClick={() => {
-                  chooseAccount(a);
-                  close();
-                }}
-              >
-                <span className="flex items-center gap-2">
-                  {accountLabel(a)}
-                  {a.id === account?.id && <Check className="size-3 text-accent" />}
-                </span>
-              </MenuItem>
-            ))}
-        </div>
-      ))}
-    </>
-  );
+  /** One provider's accounts — the model menu's drilled-in page. */
+  const accountRows = (
+    provider: SubscriptionStatus["provider"],
+    close: () => void,
+    dense: boolean,
+  ) =>
+    accounts
+      .filter((a) => a.provider === provider)
+      .map((a) => (
+        <MenuItem
+          key={a.id}
+          icon={<KeyRound />}
+          dense={dense}
+          active={a.id === account?.id}
+          disabled={!a.loggedIn}
+          hint={!a.loggedIn ? "not logged in" : a.isDefault ? "default" : undefined}
+          title={a.resolvedConfigDir}
+          onClick={() => {
+            chooseAccount(a);
+            close();
+          }}
+        >
+          <span className="flex items-center gap-2">
+            {accountLabel(a)}
+            {a.id === account?.id && <Check className="size-3 text-accent" />}
+          </span>
+        </MenuItem>
+      ));
 
   const configSurface = (close: () => void, dense: boolean) => {
     if (moreView === "attach") return attachRows(close, dense);
-    if (moreView === "account") return <div className="flex flex-col">{accountRows(close, dense)}</div>;
     if (moreView === "mode")
       return (
         <ModeMenu
@@ -1486,9 +1491,13 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
           dense={dense}
           icon={currentAgent ? <Bot /> : <Cpu />}
           hint={currentAgent ? currentAgent.name : modelLabelOf(model)}
-          onClick={() => setMoreView("brain")}
+          onClick={() => {
+            setBrainProvider(null);
+            void useSubscriptions.getState().load();
+            setMoreView("brain");
+          }}
         >
-          Model / agent
+          Model
         </MenuItem>
         <MenuItem
           dense={dense}
@@ -1501,19 +1510,6 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
         >
           Persona
         </MenuItem>
-        {multiAccount && (
-          <MenuItem
-            dense={dense}
-            icon={<KeyRound />}
-            hint={accountName ?? "default"}
-            onClick={() => {
-              void useSubscriptions.getState().load();
-              setMoreView("account");
-            }}
-          >
-            Account
-          </MenuItem>
-        )}
         <MenuItem
           dense={dense}
           icon={<Gauge />}
@@ -1539,9 +1535,8 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     attach: "Attach",
     mode: "Mode & posture",
     effort: "Effort",
-    brain: "Model / agent",
+    brain: "Model",
     persona: "Persona",
-    account: "Account",
     context: "Context",
     customize: "Composer controls",
   };
@@ -1920,9 +1915,18 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
             width={210}
             className="p-1"
             trigger={({ open, toggle }) => {
+              const onClick = () => {
+                if (!open) {
+                  setBrainProvider(null);
+                  // Re-read on open: whether an account is logged in is a fact
+                  // about a directory, and it changes when someone runs a login.
+                  void useSubscriptions.getState().load();
+                }
+                toggle();
+              };
               const btn = (
                 <button
-                  onClick={toggle}
+                  onClick={onClick}
                   aria-expanded={open}
                   aria-label={currentAgent ? "Agent" : "Model"}
                   className={cn(
@@ -2022,51 +2026,6 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
             }}
           >
             {(close) => <PersonaRows picker={persona} close={close} dense={!phone} />}
-          </Popover>
-          )}
-
-          {/* The account sits with the other "who is answering" choices. It draws
-              nothing until some provider has a second account to choose. */}
-          {sizes.account !== "off" && multiAccount && (
-          <Popover
-            align="start"
-            width={240}
-            className="p-1"
-            trigger={({ open, toggle }) => {
-              const onClick = () => {
-                // Re-read on open: whether an account is logged in is a fact
-                // about a directory, and it changes when someone runs a login.
-                if (!open) void useSubscriptions.getState().load();
-                toggle();
-              };
-              const tip = `Account — ${accountName ?? "default"}`;
-              return sizes.account === "md" && accountName ? (
-                <Tooltip label={tip}>
-                  <Button
-                    variant="subtle"
-                    size={phone ? "md" : "sm"}
-                    leftIcon={<KeyRound />}
-                    aria-expanded={open}
-                    aria-label={`Account: ${accountName}`}
-                    onClick={onClick}
-                  >
-                    <span className="max-w-[96px] truncate">{accountName}</span>
-                  </Button>
-                </Tooltip>
-              ) : (
-                <IconButton
-                  size={phone ? "md" : "sm"}
-                  tip={tip}
-                  active={open}
-                  aria-expanded={open}
-                  onClick={onClick}
-                >
-                  <KeyRound />
-                </IconButton>
-              );
-            }}
-          >
-            {(close) => <div className="flex flex-col">{accountRows(close, !phone)}</div>}
           </Popover>
           )}
 
