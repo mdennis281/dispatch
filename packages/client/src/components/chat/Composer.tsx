@@ -995,7 +995,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
    * How tall the stood-down composer actually is, measured.
    *
    * The stand-down bar stops following the keyboard by giving up exactly
-   * `--cm-kb` of layout height (see the wrapper in the render), and that
+   * `--dp-kb` of layout height (see the wrapper in the render), and that
    * subtraction has to start from the box's REAL height or it leaves a dead
    * band under the bar at rest. It cannot be a constant: the row below the bar
    * is the live control row, which is a different height with a Stop button in
@@ -1670,20 +1670,20 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
 
   return (
     <>
-      {/* The stand-down wrapper. It gives up exactly `--cm-kb` of layout
+      {/* The stand-down wrapper. It gives up exactly `--dp-kb` of layout
           height, which is what stops the composer following the keyboard: the
           shell shrinks by that much to sit above it (see App.tsx), so a box
           that shrinks by the same amount stays physically PUT — it ends up in
           the band the keyboard now covers, and the room it vacated goes to the
           transcript, which is where the question being answered actually is.
           The overhang is drawn, not clipped: the shell's `overflow: hidden`
-          clips at its PADDING box, and that band IS the padding. `--cm-kb` is
+          clips at its PADDING box, and that band IS the padding. `--dp-kb` is
           0px whenever no keyboard is up, and on desktop always, so this is a
           no-op everywhere else. */}
       <div
         style={
           deferred && deferHeight
-            ? { height: `max(0px, calc(${deferHeight}px - var(--cm-kb, 0px)))` }
+            ? { height: `max(0px, calc(${deferHeight}px - var(--dp-kb, 0px)))` }
             : undefined
         }
       >
@@ -2314,7 +2314,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
           {/* `min-h-0`: a flex child's default `min-height: auto` is its content,
               so without it the list refuses to shrink under the sheet's `max-h`
               and scrolls the page instead of itself. */}
-          <div className="cm-scroll min-h-0 w-full overflow-y-auto p-1.5 pb-[calc(var(--cm-bottom-nav-space)+0.375rem)]">
+          <div className="cm-scroll min-h-0 w-full overflow-y-auto p-1.5 pb-[calc(var(--dp-bottom-nav-space)+0.375rem)]">
             {moreView !== "root" && (
               <ConfigBackRow
                 title={CONFIG_TITLE[moreView] ?? ""}

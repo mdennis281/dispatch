@@ -148,12 +148,12 @@ function TitleBar({ compact, onSearch }: BarProps) {
  *
  * `h-11` on a desktop, where the browser's own chrome is already above it and
  * every pixel here comes out of the transcript. On a phone the row keeps
- * `min-h-13 pb-2` — a 44px touch row with air under it — and `cm-safe-t` on
+ * `min-h-13 pb-2` — a 44px touch row with air under it — and `dp-safe-t` on
  * the header adds the notch inset ON TOP rather than carving it out of the row.
  */
 function SlimBar({ compact, onSearch }: BarProps) {
   return (
-    <header className="@container/topbar flex shrink-0 flex-col border-b border-line bg-surface cm-safe-t">
+    <header className="@container/topbar flex shrink-0 flex-col border-b border-line bg-surface dp-safe-t">
       <div
         className={
           compact

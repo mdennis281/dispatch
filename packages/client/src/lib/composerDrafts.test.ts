@@ -73,13 +73,13 @@ describe("saveDraft / loadDraft", () => {
     flushDrafts();
     saveDraft("c1", { html: "", images: [] });
     expect(loadDraft("c1")).toEqual({ html: "", images: [] });
-    expect(store().getItem("cm:draft:c1")).toBeNull();
+    expect(store().getItem("dispatch:draft:c1")).toBeNull();
   });
 
   it("treats whitespace-only text with no images as empty", () => {
     saveDraft("c1", { html: "<p></p>", images: [] });
     flushDrafts();
-    expect(store().getItem("cm:draft:c1")).toBeNull();
+    expect(store().getItem("dispatch:draft:c1")).toBeNull();
   });
 });
 
@@ -112,13 +112,13 @@ describe("appendDraftImage", () => {
 
 describe("parsing", () => {
   it("ignores a malformed entry", () => {
-    store().setItem("cm:draft:c1", "{not json");
+    store().setItem("dispatch:draft:c1", "{not json");
     expect(loadDraft("c1")).toEqual({ html: "", images: [] });
   });
 
   it("drops image entries that aren't refs", () => {
     store().setItem(
-      "cm:draft:c1",
+      "dispatch:draft:c1",
       JSON.stringify({ html: "<p>hi</p>", images: [img("a"), null, { id: 1 }], at: Date.now() }),
     );
     expect(loadDraft("c1")).toEqual({ html: "<p>hi</p>", images: [img("a")] });
@@ -126,7 +126,7 @@ describe("parsing", () => {
 
   it("ignores a draft older than the max age", () => {
     const old = Date.now() - 31 * 24 * 60 * 60 * 1000;
-    store().setItem("cm:draft:c1", JSON.stringify({ html: "<p>hi</p>", images: [], at: old }));
+    store().setItem("dispatch:draft:c1", JSON.stringify({ html: "<p>hi</p>", images: [], at: old }));
     expect(loadDraft("c1")).toEqual({ html: "", images: [] });
   });
 });
@@ -134,12 +134,12 @@ describe("parsing", () => {
 describe("pruneDrafts", () => {
   it("sweeps expired keys and leaves fresh ones (and other keys) alone", () => {
     const old = Date.now() - 31 * 24 * 60 * 60 * 1000;
-    store().setItem("cm:draft:stale", JSON.stringify({ html: "<p>x</p>", images: [], at: old }));
-    store().setItem("cm:draft:fresh", JSON.stringify({ html: "<p>y</p>", images: [], at: Date.now() }));
-    store().setItem("cm:theme", "dark");
+    store().setItem("dispatch:draft:stale", JSON.stringify({ html: "<p>x</p>", images: [], at: old }));
+    store().setItem("dispatch:draft:fresh", JSON.stringify({ html: "<p>y</p>", images: [], at: Date.now() }));
+    store().setItem("dispatch:theme", "dark");
     pruneDrafts();
-    expect(store().getItem("cm:draft:stale")).toBeNull();
+    expect(store().getItem("dispatch:draft:stale")).toBeNull();
     expect(loadDraft("fresh").html).toBe("<p>y</p>");
-    expect(store().getItem("cm:theme")).toBe("dark");
+    expect(store().getItem("dispatch:theme")).toBe("dark");
   });
 });

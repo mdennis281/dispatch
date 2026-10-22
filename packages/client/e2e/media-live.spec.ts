@@ -482,7 +482,7 @@ test("arrows walk every image in the chat, and stop at both ends", async ({ page
  * underneath those buttons and could not be clicked at all.
  *
  * SIMULATED, because Playwright launches a browser tab: there is no installed
- * window, so `env(titlebar-area-*)` is absent and every `--cm-titlebar-*`
+ * window, so `env(titlebar-area-*)` is absent and every `--dp-titlebar-*`
  * resolves to its 0px fallback. Overriding the three custom properties gives
  * the same geometry the UA would, and is what the layout actually reads — an
  * unlayered `<style>` outranks the `@layer base` `:root` that declares them.
@@ -497,9 +497,9 @@ test("the viewer's toolbar clears the window controls overlay", async ({ page })
   await openChat(page);
   await page.addStyleTag({
     content: `:root {
-      --cm-titlebar-h: ${WCO_STRIP_H}px;
-      --cm-titlebar-x: 0px;
-      --cm-titlebar-w: calc(100% - ${WCO_BUTTONS_W}px);
+      --dp-titlebar-h: ${WCO_STRIP_H}px;
+      --dp-titlebar-x: 0px;
+      --dp-titlebar-w: calc(100% - ${WCO_BUTTONS_W}px);
     }`,
   });
 
@@ -624,9 +624,9 @@ test("the top bar is a two-line title bar with the overlay, and one short row wi
   await openChat(page);
   await page.addStyleTag({
     content: `:root {
-      --cm-titlebar-h: ${WCO_STRIP_H}px;
-      --cm-titlebar-x: 0px;
-      --cm-titlebar-w: calc(100vw - ${WCO_CHROMIUM_CONTROLS_W}px);
+      --dp-titlebar-h: ${WCO_STRIP_H}px;
+      --dp-titlebar-x: 0px;
+      --dp-titlebar-w: calc(100vw - ${WCO_CHROMIUM_CONTROLS_W}px);
     }`,
   });
 

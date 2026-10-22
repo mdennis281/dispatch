@@ -126,7 +126,7 @@ function InteractionTrace() {
         // the layout viewport like the readout, and the log itself lets touches
         // through so the transcript under it stays scrollable — only the
         // button row takes taps.
-        className="pointer-events-none fixed inset-x-1 bottom-[calc(var(--cm-safe-bottom,0px)+3.5rem+var(--cm-kb,0px))] max-w-[min(100vw-0.5rem,520px)] rounded border border-line-strong bg-black/80 px-1.5 py-1 font-mono text-2xs leading-tight text-white backdrop-blur-sm"
+        className="pointer-events-none fixed inset-x-1 bottom-[calc(var(--dp-safe-bottom,0px)+3.5rem+var(--dp-kb,0px))] max-w-[min(100vw-0.5rem,520px)] rounded border border-line-strong bg-black/80 px-1.5 py-1 font-mono text-2xs leading-tight text-white backdrop-blur-sm"
       >
         <div className="flex items-center gap-1.5">
           <span className="text-white/45">trace</span>
@@ -305,7 +305,7 @@ function ViewportReadout() {
       // Above `shutdown`, the current ceiling: a diagnostic you can't read
       // because the thing you're diagnosing is covering it is no diagnostic.
       style={{ zIndex: LAYER.shutdown + 1 }}
-      className="pointer-events-none fixed left-1 top-[max(var(--cm-safe-top),0.25rem)] rounded border border-line-strong bg-black/80 px-1.5 py-1 font-mono text-2xs leading-tight text-white backdrop-blur-sm"
+      className="pointer-events-none fixed left-1 top-[max(var(--dp-safe-top),0.25rem)] rounded border border-line-strong bg-black/80 px-1.5 py-1 font-mono text-2xs leading-tight text-white backdrop-blur-sm"
     >
       {rows.map(([k, v, warn]) => (
         <div key={k} className="flex gap-1.5">

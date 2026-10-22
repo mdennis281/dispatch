@@ -207,20 +207,20 @@
      * there), so iOS keeps the layout viewport below the status bar itself and
      * there is nothing at the top to pad. The bottom is the exception: the
      * viewport still runs to the bottom of the glass, under the home
-     * indicator, and `env()` no longer says so. `--cm-home-indicator` is
+     * indicator, and `env()` no longer says so. `--dp-home-indicator` is
      * `stores/viewport.ts` working that out from `screen.height - innerHeight`
      * (a Face ID status bar means a home-indicator phone) and it is folded in
-     * here so every consumer of `--cm-safe-bottom` gets it for free.
+     * here so every consumer of `--dp-safe-bottom` gets it for free.
      *
-     * Aliased into `--cm-safe-*` rather than used inline so a call site can
+     * Aliased into `--dp-safe-*` rather than used inline so a call site can
      * `calc()` with them without repeating the fallback: bare `env(x)` with no
      * fallback resolves to nothing (not 0) in a `calc()` on older engines, which
      * silently invalidates the whole declaration.
      */
-    --cm-safe-top: env(safe-area-inset-top, 0px);
-    --cm-safe-right: env(safe-area-inset-right, 0px);
-    --cm-safe-bottom: max(env(safe-area-inset-bottom, 0px), var(--cm-home-indicator, 0px));
-    --cm-safe-left: env(safe-area-inset-left, 0px);
+    --dp-safe-top: env(safe-area-inset-top, 0px);
+    --dp-safe-right: env(safe-area-inset-right, 0px);
+    --dp-safe-bottom: max(env(safe-area-inset-bottom, 0px), var(--dp-home-indicator, 0px));
+    --dp-safe-left: env(safe-area-inset-left, 0px);
 
     /*
      * The title bar we were given instead of a title bar.
@@ -242,9 +242,9 @@
      * nothing gets indented. Note the `0px` rather than
      * `0` — these are `calc()`'d and compared as lengths.
      */
-    --cm-titlebar-h: env(titlebar-area-height, 0px);
-    --cm-titlebar-x: env(titlebar-area-x, 0px);
-    --cm-titlebar-w: env(titlebar-area-width, 100%);
+    --dp-titlebar-h: env(titlebar-area-height, 0px);
+    --dp-titlebar-x: env(titlebar-area-x, 0px);
+    --dp-titlebar-w: env(titlebar-area-width, 100%);
 
     /*
      * The mobile bottom nav, in three parts.
@@ -268,18 +268,18 @@
      * for the overlays that cover it (the two "More" sheets) and want their
      * last row to clear the bar underneath.
      */
-    --cm-bottom-nav-h: 52px;
-    --cm-bottom-nav-clear: calc(var(--cm-safe-bottom) * 0.55);
-    --cm-bottom-nav-strip: calc(
-      var(--cm-bottom-nav-h) + var(--cm-safe-bottom) - var(--cm-bottom-nav-clear)
+    --dp-bottom-nav-h: 52px;
+    --dp-bottom-nav-clear: calc(var(--dp-safe-bottom) * 0.55);
+    --dp-bottom-nav-strip: calc(
+      var(--dp-bottom-nav-h) + var(--dp-safe-bottom) - var(--dp-bottom-nav-clear)
     );
-    --cm-bottom-nav-space: calc(var(--cm-bottom-nav-strip) + var(--cm-bottom-nav-clear));
+    --dp-bottom-nav-space: calc(var(--dp-bottom-nav-strip) + var(--dp-bottom-nav-clear));
 
     /* How much of the window the soft keyboard is covering. Written by
      * lib/useKeyboardInset from `visualViewport`; declared here so the shell's
      * `calc()`s resolve to a real length before the first measurement, and on
      * every platform that never raises one. */
-    --cm-kb: 0px;
+    --dp-kb: 0px;
   }
 
   /*
@@ -504,17 +504,17 @@
   /* Safe-area padding, as classes — Tailwind can't express `env()` without an
    * arbitrary value at every call site, and these are used in a handful of
    * places that all mean the same thing. */
-  .cm-safe-t {
-    padding-top: var(--cm-safe-top);
+  .dp-safe-t {
+    padding-top: var(--dp-safe-top);
   }
-  .cm-safe-b {
-    padding-bottom: var(--cm-safe-bottom);
+  .dp-safe-b {
+    padding-bottom: var(--dp-safe-bottom);
   }
   /* Landscape notch: a full-height drawer flush to the left/right edge would
    * otherwise put its first column of text under the sensor housing. */
-  .cm-safe-x {
-    padding-left: var(--cm-safe-left);
-    padding-right: var(--cm-safe-right);
+  .dp-safe-x {
+    padding-left: var(--dp-safe-left);
+    padding-right: var(--dp-safe-right);
   }
 
   /*
@@ -570,10 +570,10 @@
    * lockup spans both lines, so it has to start there too. 0 on Windows.
    */
   .cm-topbar-tall {
-    --tb-l1: max(var(--cm-titlebar-h), 1.75rem);
+    --tb-l1: max(var(--dp-titlebar-h), 1.75rem);
     --tb-l2: 2.25rem;
     height: calc(var(--tb-l1) + var(--tb-l2));
-    padding-left: var(--cm-titlebar-x);
+    padding-left: var(--dp-titlebar-x);
   }
   /*
    * The column under the window buttons, at least as wide as they are.
@@ -592,7 +592,7 @@
    * buttons. On macOS the slab is on the other side and this reduces to 1rem.
    */
   .cm-topbar-slab {
-    min-width: calc(100vw - var(--cm-titlebar-x) - var(--cm-titlebar-w) + 1rem);
+    min-width: calc(100vw - var(--dp-titlebar-x) - var(--dp-titlebar-w) + 1rem);
   }
 
   .cm-hairline-b {
@@ -665,17 +665,17 @@
  * no way to leave the editor. The centred dialogs were a few pixels from the
  * same fate, since a 24px gutter is less than half a 59px inset.
  *
- * Each side is the LARGER of the design gutter (`--cm-gutter`, set at the call
+ * Each side is the LARGER of the design gutter (`--dp-gutter`, set at the call
  * site) and that side's inset, so nothing moves anywhere the insets are 0 —
  * which is everywhere but a notched display.
  *
  * The TOP has a second claimant on the desktop, for exactly the same reason.
- * With the window controls overlay up (see `--cm-titlebar-*`) the installed
+ * With the window controls overlay up (see `--dp-titlebar-*`) the installed
  * window has no title bar, so `inset: 0` reaches the very top of the window and
  * the minimise/maximise/close buttons are painted over whatever is there. The
  * media viewer put its whole toolbar — zoom, copy, download, CLOSE — in that
  * band, so on Windows the close button sat under the system's close button and
- * could not be pressed at all. `--cm-titlebar-h` is that band's height, 0px
+ * could not be pressed at all. `--dp-titlebar-h` is that band's height, 0px
  * wherever the overlay isn't up, so it joins the same `max()` rather than
  * needing a rule of its own. It is not in the left/right sides because the
  * buttons are always at one END of the strip (right on Windows, left on macOS)
@@ -687,11 +687,11 @@
  * loses to a utility no matter the source order), and only a real utility can
  * take the `sm:` / `max-sm:` variants the full-bleed dialogs need.
  */
-@utility cm-safe-pad {
-  padding-top: max(var(--cm-gutter, 0px), var(--cm-safe-top), var(--cm-titlebar-h));
-  padding-right: max(var(--cm-gutter, 0px), var(--cm-safe-right));
-  padding-bottom: max(var(--cm-gutter, 0px), var(--cm-safe-bottom));
-  padding-left: max(var(--cm-gutter, 0px), var(--cm-safe-left));
+@utility dp-safe-pad {
+  padding-top: max(var(--dp-gutter, 0px), var(--dp-safe-top), var(--dp-titlebar-h));
+  padding-right: max(var(--dp-gutter, 0px), var(--dp-safe-right));
+  padding-bottom: max(var(--dp-gutter, 0px), var(--dp-safe-bottom));
+  padding-left: max(var(--dp-gutter, 0px), var(--dp-safe-left));
 }
 
 /*
@@ -820,8 +820,8 @@
 @keyframes cm-slide-right {
   from {
     transform: var(
-      --cm-popover-animation-from,
-      translateX(calc(-100% - var(--cm-popover-gap, 6px)))
+      --dp-popover-animation-from,
+      translateX(calc(-100% - var(--dp-popover-gap, 6px)))
     );
   }
   to {
@@ -831,10 +831,10 @@
 
 @keyframes cm-slide-left {
   from {
-    transform: var(--cm-popover-animation-from, translateX(0));
+    transform: var(--dp-popover-animation-from, translateX(0));
   }
   to {
-    transform: translateX(calc(-100% - var(--cm-popover-gap, 6px)));
+    transform: translateX(calc(-100% - var(--dp-popover-gap, 6px)));
   }
 }
 

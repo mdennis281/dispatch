@@ -1,14 +1,14 @@
 /**
  * Decoupling seam between the right-panel (this feature area) and the Monaco
  * viewer/diff area — so panels never import the Monaco module. Clicking a changed
- * file fires a typed `cm:open-file` window event; `monaco/CodeViewerHost` listens,
+ * file fires a typed `dispatch:open-file` window event; `monaco/CodeViewerHost` listens,
  * enriches it with the worktree branch, and opens the viewer. Plus a few pure
  * utilities shared across the three panels.
  */
 import type { Chat, WorktreeInfo } from "@dispatch/shared";
 import { focusPanelTab } from "../../stores/layout.js";
 
-/** Detail of the `cm:open-file` event the Monaco area consumes. */
+/** Detail of the `dispatch:open-file` event the Monaco area consumes. */
 export interface OpenFileRequest {
   worktreePath: string;
   relPath: string;
@@ -16,7 +16,7 @@ export interface OpenFileRequest {
   base?: string;
 }
 
-export const OPEN_FILE_EVENT = "cm:open-file";
+export const OPEN_FILE_EVENT = "dispatch:open-file";
 
 /** Ask the Monaco surface to open one worktree file (diff base@`base` vs working). */
 export function requestOpenFile(req: OpenFileRequest): void {
@@ -36,7 +36,7 @@ export type FocusPanelTab = BuiltinPanelTab | (string & {});
 /**
  * Ask the shell to switch to a given right-panel tab (Worktrees / Apps / PRs).
  *
- * This used to be a `cm:focus-panel` window CustomEvent that `RightPanel`
+ * This used to be a `dispatch:focus-panel` window CustomEvent that `RightPanel`
  * listened for, because the selected tab was a `useState` inside that component
  * and nothing outside it could reach one. The tab now lives in `stores/layout`
  * — the mobile bottom nav renders in `App.tsx`, outside the `<aside>`, and had

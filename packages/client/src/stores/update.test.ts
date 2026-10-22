@@ -93,7 +93,7 @@ describe("dismissal", () => {
     useUpdate.getState().set(status());
     useUpdate.getState().dismiss();
     expect(shouldNudge()).toBe(false);
-    expect(localStorage.getItem("cm:update-dismissed")).toBe(LATEST.version);
+    expect(localStorage.getItem("dispatch:update-dismissed")).toBe(LATEST.version);
   });
 
   it("nudges again for the NEXT release", () => {

@@ -22,7 +22,7 @@ globalThis.localStorage = memoryStorage();
 
 const { useProjects } = await import("./projects.js");
 
-const KEY = "cm:last-project";
+const KEY = "dispatch:last-project";
 
 function project(id: string): Project {
   return {

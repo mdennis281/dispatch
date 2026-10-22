@@ -241,7 +241,7 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
   return createPortal(
     <div
       style={{ zIndex: z }}
-      className="fixed inset-0 flex items-center justify-center cm-safe-pad [--cm-gutter:1rem] sm:[--cm-gutter:1.5rem]"
+      className="fixed inset-0 flex items-center justify-center dp-safe-pad [--dp-gutter:1rem] sm:[--dp-gutter:1.5rem]"
       role="dialog"
       aria-modal="true"
     >

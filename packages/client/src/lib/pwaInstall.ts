@@ -34,7 +34,7 @@ interface BeforeInstallPromptEvent extends Event {
   readonly userChoice: Promise<{ outcome: "accepted" | "dismissed" }>;
 }
 
-const KEY = "cm:pwa-install-snoozed";
+const KEY = "dispatch:pwa-install-snoozed";
 /**
  * How long "Not now" holds. Long enough not to nag, short enough that the nudge
  * comes back if you keep working in a tab — the whole point is to get installed.

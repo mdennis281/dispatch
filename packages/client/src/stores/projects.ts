@@ -21,7 +21,7 @@ import type { Project, AgentConfig, ModeConfig } from "@dispatch/shared";
  * localStorage throws under a blocking cookie policy and doesn't exist at all in
  * the node test environment.
  */
-const LAST_PROJECT_KEY = "cm:last-project";
+const LAST_PROJECT_KEY = "dispatch:last-project";
 
 function backing(): Storage | null {
   try {

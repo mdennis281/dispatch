@@ -36,7 +36,7 @@ import {
 } from "@dispatch/shared";
 import { api } from "./api.js";
 
-const PREFS_KEY = "cm:notification-prefs";
+const PREFS_KEY = "dispatch:notification-prefs";
 
 /* --------------------------------------------------------------- storage */
 
@@ -69,8 +69,8 @@ function savePrefs(prefs: NotificationPrefs): void {
 
 /* -------------------------------------------------------- device identity */
 
-const DEVICE_ID_KEY = "cm:push-device-id";
-const ENDPOINT_KEY = "cm:push-endpoint";
+const DEVICE_ID_KEY = "dispatch:push-device-id";
+const ENDPOINT_KEY = "dispatch:push-endpoint";
 /** Shared with public/sw.js, whose `pushsubscriptionchange` has no localStorage. */
 const PUSH_DEVICE_CACHE = "dispatch-push-device";
 const PUSH_DEVICE_KEY = "/__push-device";

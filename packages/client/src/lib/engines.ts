@@ -29,9 +29,9 @@ export const WEB_SPEECH_ENGINE: DictationEngineDef = {
   create: createDictation,
 };
 
-const DICTATION_KEY = "cm:dictation-engine";
-const TTS_KEY = "cm:tts-engine";
-const SPEAK_KEY = "cm:speak-replies";
+const DICTATION_KEY = "dispatch:dictation-engine";
+const TTS_KEY = "dispatch:tts-engine";
+const SPEAK_KEY = "dispatch:speak-replies";
 
 function backing(): Storage | null {
   try {

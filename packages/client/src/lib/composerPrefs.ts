@@ -198,7 +198,7 @@ export const ALL_VISIBLE: ComposerVisibility = Object.fromEntries(
   COMPOSER_CONTROLS.map((c) => [c.id, true]),
 ) as ComposerVisibility;
 
-const KEY = "cm:composer-controls";
+const KEY = "dispatch:composer-controls";
 
 function backing(): Storage | null {
   try {

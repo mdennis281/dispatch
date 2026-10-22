@@ -1,3 +1,5 @@
+// FIRST, before anything that reads storage at import time — see the module.
+import "./lib/storageKeyMigration.js";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App.js";

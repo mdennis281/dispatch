@@ -4,7 +4,7 @@
  * Every number a mobile browser gives you about its own size disagrees with the
  * others while a soft keyboard is up, and on iOS some of them disagree even
  * after it's gone. This store reads all of them, derives the one the shell
- * cares about (`inset` — how much is covered), publishes it as `--cm-kb`, and
+ * cares about (`inset` — how much is covered), publishes it as `--dp-kb`, and
  * keeps the raw readings so `ViewportDebug` can put them on screen. There is no
  * remote Web Inspector for an iPhone from Windows, so an on-screen readout is
  * the only way to see these on the device where they misbehave.
@@ -26,7 +26,7 @@ export interface ViewportMetrics {
   /** What `100dvh` currently evaluates to, measured with a probe element. */
   dvh: number;
   /**
-   * `--cm-safe-bottom` as the engine resolves it — `env(safe-area-inset-bottom)`
+   * `--dp-safe-bottom` as the engine resolves it — `env(safe-area-inset-bottom)`
    * or, in the installed iOS app, the home-indicator band `homeIndicator`
    * below supplies because `env()` has nothing to say there any more (see
    * `index.css`). Measured, not guessed.
@@ -195,9 +195,9 @@ function makeProbe(height: string): HTMLDivElement {
 export function startViewportTracking(): () => void {
   const vv = window.visualViewport;
   const dvhProbe = makeProbe("100dvh");
-  // The RESOLVED bottom inset, fallback included — what `.cm-safe-b` actually
+  // The RESOLVED bottom inset, fallback included — what `.dp-safe-b` actually
   // pads — rather than the raw `env()`, which is 0 in the installed iOS app.
-  const safeProbe = makeProbe("var(--cm-safe-bottom, 0px)");
+  const safeProbe = makeProbe("var(--dp-safe-bottom, 0px)");
   const safeTopProbe = makeProbe("env(safe-area-inset-top, 0px)");
   const standaloneIOS = isStandaloneIOS();
 
@@ -223,7 +223,7 @@ export function startViewportTracking(): () => void {
   const apply = () => {
     // Cancel rather than just forget: the burst loop calls `apply` directly, so
     // clearing the id without cancelling would leave a live rAF nothing is
-    // tracking — one that fires after teardown and re-sets `--cm-kb` on a
+    // tracking — one that fires after teardown and re-sets `--dp-kb` on a
     // document the app has already left.
     if (frame) cancelAnimationFrame(frame);
     frame = 0;
@@ -258,7 +258,7 @@ export function startViewportTracking(): () => void {
       // otherwise leave the shell permanently a pixel short.
       if (inset === 0 || Math.abs(inset - lastInset) >= 2) {
         lastInset = inset;
-        document.documentElement.style.setProperty("--cm-kb", `${inset}px`);
+        document.documentElement.style.setProperty("--dp-kb", `${inset}px`);
       }
     }
 
@@ -267,7 +267,7 @@ export function startViewportTracking(): () => void {
     const home = homeIndicator(standaloneIOS, innerHeight, vvHeight, vvOffsetTop, screenHeight);
     if (home >= 0 && home !== lastHome) {
       lastHome = home;
-      document.documentElement.style.setProperty("--cm-home-indicator", `${home}px`);
+      document.documentElement.style.setProperty("--dp-home-indicator", `${home}px`);
     }
 
     useViewport.getState().set(
@@ -343,7 +343,7 @@ export function startViewportTracking(): () => void {
     dvhProbe.remove();
     safeProbe.remove();
     safeTopProbe.remove();
-    document.documentElement.style.removeProperty("--cm-kb");
-    document.documentElement.style.removeProperty("--cm-home-indicator");
+    document.documentElement.style.removeProperty("--dp-kb");
+    document.documentElement.style.removeProperty("--dp-home-indicator");
   };
 }

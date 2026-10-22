@@ -140,7 +140,7 @@ export function AgentRunInspector({ chatId, runId }: { chatId: string; runId: st
         "fixed inset-0 flex items-center justify-center",
         // Full-bleed on a phone: the safe-area padding moves onto the panel so
         // its own background, not the scrim, fills the notch and home-bar bands.
-        !compact && "cm-safe-pad [--cm-gutter:1rem] sm:[--cm-gutter:1.5rem]",
+        !compact && "dp-safe-pad [--dp-gutter:1rem] sm:[--dp-gutter:1.5rem]",
       )}
       role="dialog"
       aria-modal="true"
@@ -161,7 +161,7 @@ export function AgentRunInspector({ chatId, runId }: { chatId: string; runId: st
         className={cn(
           "relative flex h-full flex-col overflow-hidden bg-panel cm-anim-rise",
           compact
-            ? "w-full cm-safe-pad"
+            ? "w-full dp-safe-pad"
             : "max-h-[86vh] w-[min(1180px,94vw)] rounded-lg border border-line-strong shadow-[var(--shadow-pop)]",
         )}
       >

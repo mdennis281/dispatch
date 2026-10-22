@@ -56,7 +56,7 @@ const DEFAULTS: Record<ShapeKind, ToolStyle> = {
   redact: { color: "#000000", width: 4 },
 };
 
-const KEY = "cm:annotator-style";
+const KEY = "dispatch:annotator-style";
 
 function backing(): Storage | null {
   try {
