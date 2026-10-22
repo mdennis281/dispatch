@@ -65,7 +65,9 @@ describe("scaffoldFiles", () => {
     expect(manifest.description).toBe(`${name} — a Dispatch plugin.`);
     const tsx = files["src/client.tsx"]!;
     // Attributes and text are `{"…"}` expressions, never bare attribute strings or JSX text.
-    expect(tsx).toContain(`tip={${JSON.stringify(name).replace("'", "\\u0027")}}`);
+    // The escaper writes the apostrophe as ' — spelled out here rather
+    // than derived, so the test states the exact bytes the template emits.
+    expect(tsx).toContain('tip={"Michael\\u0027s plugin (v2), really!? .+&"}');
     expect(tsx).not.toMatch(/tip="|aria-label="/);
     expect(tsx).toMatch(/<p className="[^"]*">\{"/);
   });
