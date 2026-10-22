@@ -10,7 +10,8 @@ An all-in-one agent CLI harness that replaces how you work with your LLMs. I bui
   <summary>More screenshots</summary>
   
   <img width="439" height="456" alt="image" src="https://github.com/user-attachments/assets/8af282d9-81ff-425b-9de6-b1381c4fe84a" />
-  <img width="306" height="251" alt="image" src="https://github.com/user-attachments/assets/fa8936fe-cc54-43cb-8dd5-57dc550c1cc7" />
+<img width="326" height="345" alt="image" src="https://github.com/user-attachments/assets/220065fd-c8b2-4f61-a6df-f2ae5443f6db" />
+
   
   <img width="872" height="646" alt="image" src="https://github.com/user-attachments/assets/2e9d3cc4-15b4-4080-9a99-b5ea494e7c21" />
   <img width="889" height="735" alt="image" src="https://github.com/user-attachments/assets/d08c46e3-aa96-40f1-8606-047ba90c6504" />
