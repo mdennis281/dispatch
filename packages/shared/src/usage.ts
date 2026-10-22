@@ -127,5 +127,39 @@ export const ContextUsageSchema = z.object({
   /** Model id the window belongs to. */
   model: z.string().optional(),
   categories: z.array(ContextUsageCategorySchema).default([]),
+  /*
+   * Per-item breakdowns the SDK has always returned and the route has always
+   * passed through untouched — declared now because "show sent context" reads
+   * them: `categories` says MCP tools cost 20k, these say WHICH server. All
+   * optional: a Codex/goose session answers only the two totals.
+   */
+  mcpTools: z
+    .array(
+      z.object({
+        name: z.string(),
+        serverName: z.string(),
+        tokens: z.number(),
+        isLoaded: z.boolean().optional(),
+      }),
+    )
+    .optional(),
+  systemPromptSections: z.array(z.object({ name: z.string(), tokens: z.number() })).optional(),
+  systemTools: z.array(z.object({ name: z.string(), tokens: z.number() })).optional(),
+  memoryFiles: z
+    .array(z.object({ path: z.string(), type: z.string(), tokens: z.number() }))
+    .optional(),
+  skills: z
+    .object({
+      totalSkills: z.number(),
+      includedSkills: z.number(),
+      tokens: z.number(),
+      skillFrontmatter: z
+        .array(z.object({ name: z.string(), source: z.string(), tokens: z.number() }))
+        .optional(),
+    })
+    .optional(),
+  agents: z
+    .array(z.object({ agentType: z.string(), source: z.string(), tokens: z.number() }))
+    .optional(),
 });
 export type ContextUsage = z.infer<typeof ContextUsageSchema>;

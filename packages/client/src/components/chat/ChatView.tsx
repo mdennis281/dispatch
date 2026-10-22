@@ -702,8 +702,10 @@ export function ChatView({ chat }: { chat: Chat }) {
                     Copy chat ID
                   </MenuItem>
                   <div className="my-1 h-px bg-line" />
-                  {/* Show what Dispatch attached to a turn on your behalf —
-                      surfaced memories, repo snapshots. Rendering only: the
+                  {/* Show what Dispatch sent on your behalf — per session the
+                      whole system-prompt append, MCP servers and skills (on the
+                      "Session started" row), per turn surfaced memories,
+                      attachment notes, repo snapshots. Rendering only: the
                       model got the same context either way. Toggling here
                       overrides the project/app default for THIS chat. */}
                   <MenuItem

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { Store } from "../store/index.js";
 import { EventBus } from "../bus.js";
 import type { WsServerEvent, Chat, Project } from "@dispatch/shared";
-import { EMPTY_REFRESH_REPORT, HUMAN_REVIEW_ANSWERS, SECRET_ANSWERS, isPrSettledIdle } from "@dispatch/shared";
+import { EMPTY_REFRESH_REPORT, HUMAN_REVIEW_ANSWERS, SECRET_ANSWERS, isPrSettledIdle, readSentContext } from "@dispatch/shared";
 import { SecretsService, plainKeyProtector } from "./secrets.js";
 import { EXEMPTION_ANSWERS, managerMcpContextOf } from "./mcp/manager-mcp.js";
 import {
@@ -3502,11 +3502,11 @@ describe("SessionBroker — project memory injection", () => {
     expect(append).not.toContain("FEEDBACK BODY must stay out of the prompt");
   });
 
-  it("discloses house rules as a context part on the first turn only", async () => {
-    // They enter through the SYSTEM PROMPT, which is built once per session, so
-    // a per-turn disclosure would misreport what was attached to turn two — and
-    // repeat the whole block down the transcript.
-    const { fn } = makeFakeQuery((t) => [assistantText(t), resultMsg()]);
+  it("discloses the whole system-prompt append on the session's init row, once", async () => {
+    // House rules, instructions, the MCP map… all enter through the SYSTEM
+    // PROMPT, built once per session — so they are disclosed on the init row,
+    // never as a per-turn part that would misreport what turn two carried.
+    const { fn, controllers } = makeFakeQuery((t) => [assistantText(t), resultMsg()]);
     const houseRules = new HouseRulesService({
       globalRoot: join(dir, "global"),
       projectDir: (id) => join(dir, "house", id),
@@ -3523,18 +3523,28 @@ describe("SessionBroker — project memory injection", () => {
     await broker.waitFor("c1", "idle");
 
     const rows = await store.readMessages("c1");
-    const userRows = rows.filter((r) => r.kind === "user");
-    const contextParts = userRows.map(
-      (r) =>
-        (r as { parts?: { kind: string; label?: string; text?: string }[] }).parts?.filter(
-          (p) => p.kind === "context",
-        ) ?? [],
+    // Not on the user rows any more — a plain typed message stays partless.
+    for (const r of rows.filter((r) => r.kind === "user")) {
+      expect((r as { parts?: unknown }).parts).toBeUndefined();
+    }
+    const inits = rows.filter((r) => r.kind === "system" && r.subtype === "init");
+    expect(inits).toHaveLength(1);
+    const sent = readSentContext((inits[0] as { data?: unknown }).data)!;
+    const rules = sent.sections.find((s) => s.id === "house-rules")!;
+    expect(rules.label).toBe("House rules — global + project");
+    expect(rules.text).toContain("PROJECT RULE: ship through a PR.");
+    // Every section is a verbatim slice of what was actually sent, in order —
+    // the disclosure and the prompt are the same text, not two renderings.
+    const append =
+      (controllers[0]!.options as { systemPrompt?: { append?: string } }).systemPrompt?.append ?? "";
+    expect(sent.sections.filter((s) => s.id !== "agent").map((s) => s.text).join("\n\n")).toBe(
+      append,
     );
-    expect(contextParts[0]).toHaveLength(1);
-    expect(contextParts[0]![0]!.label).toBe("House rules — global + project");
-    expect(contextParts[0]![0]!.text).toContain("PROJECT RULE: ship through a PR.");
-    // Second turn: same rules, still in the prompt, but not re-disclosed.
-    expect(contextParts[1] ?? []).toHaveLength(0);
+    expect(sent.sections[0]!.id).toBe("mcp-map");
+    for (const s of sent.sections) expect(s.chars).toBe(s.text.length);
+    // Dispatch's own servers are listed, and none of them carries its config.
+    expect(sent.mcpServers.some((m) => m.origin === "dispatch")).toBe(true);
+    expect(JSON.stringify(sent.mcpServers)).not.toMatch(/command|headers|env/);
   });
 
   it("injects nothing for a project with no memories", async () => {

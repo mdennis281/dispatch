@@ -40,7 +40,7 @@ export function sizeNote(text: string): string {
 }
 
 /** Clipboard copy with a two-second "copied" acknowledgement. */
-function CopyButton({ text, title }: { text: string; title: string }) {
+export function CopyButton({ text, title }: { text: string; title: string }) {
   const [done, setDone] = useState(false);
   return (
     <button

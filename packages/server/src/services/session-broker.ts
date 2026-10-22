@@ -50,7 +50,14 @@ import {
   formatBytes,
 } from "./media-types.js";
 import { identifyMedia } from "./media-sniff.js";
-import type { ChatInterruption } from "@dispatch/shared";
+import type {
+  ChatInterruption,
+  SentContext,
+  SentContextMcpServer,
+  SentContextSection,
+  SentContextSkill,
+} from "@dispatch/shared";
+import { withRuntimeMcpReport } from "@dispatch/shared";
 import {
   compactCommand,
   normalizeCompactFocus,
@@ -1908,6 +1915,18 @@ export function splitAttachments(refs: ImageRef[] | undefined): {
   return { images, files };
 }
 
+/**
+ * How an MCP server config connects, for the sent-context disclosure. An SDK
+ * in-process server carries an `instance` and no `type` the wire would mean
+ * anything by; a config with neither `type` nor `url` is the stdio default.
+ */
+export function mcpTransportOf(cfg: unknown): string {
+  const c = (cfg ?? {}) as { type?: unknown; instance?: unknown; url?: unknown };
+  if (c.type === "sdk" || c.instance) return "in-process";
+  if (typeof c.type === "string") return c.type;
+  return typeof c.url === "string" ? "http" : "stdio";
+}
+
 function outboxPrefixes(item: OutboxItem): string[] {
   const out: string[] = [];
   if (item.peerContext) out.push(item.peerContext);
@@ -2362,15 +2381,13 @@ interface LiveSession {
    */
   surfacedMemories: Set<string>;
   /**
-   * Whether this session has already disclosed its house rules on a transcript
-   * row. They're injected into the SYSTEM PROMPT once per session, so disclosing
-   * them per turn would be a lie about what was attached to that turn — and 1000+
-   * chars of the same text repeated down the transcript.
-   *
-   * Set even when there are no rules to show, so a project without any doesn't
-   * pay two file stats on every message.
+   * What `buildOptions` just handed the runtime — every system-prompt section,
+   * MCP server and skill — waiting to be stamped onto the NEXT init row, then
+   * cleared. One-shot because the Claude runtime can emit `system/init` more
+   * than once per subprocess, and 50KB of prompt repeated on each would bloat
+   * the transcript with copies of something that was only sent once.
    */
-  houseRulesDisclosed?: boolean;
+  pendingSentContext?: SentContext;
   /**
    * This chat's runtime timeline — which actor was in which state, for how long
    * (see metrics-activity.ts). Fed from the same neutral events the transcript
@@ -2777,8 +2794,23 @@ export class SessionBroker {
     // omits context the model was given, which is the exact opacity this whole
     // parts mechanism exists to remove.
     const memory = await this.surfaceMemory(session, text);
-    const houseRules = await this.discloseHouseRules(session);
-    const parts = this.messageParts(text, o.parts, memory, houseRules);
+    // Resolved BEFORE the row too, for the same reason: both ride to the model
+    // invisibly, and the row is the only place the human can ever see them.
+    const { images: pictures, files } = splitAttachments(o.images);
+    const fileContext = files.length
+      ? await this.describeAttachedFiles(chatId, files)
+      : undefined;
+    const peerContext = o.peer
+      ? peerReminder(o.peer)
+      : o.channel
+        ? channelReminder(o.channel)
+        : undefined;
+    const parts = this.messageParts(text, o.parts, memory, [
+      ...(peerContext
+        ? [{ label: o.peer ? "Sender attribution — another chat" : "Sender attribution — integration", text: peerContext }]
+        : []),
+      ...(fileContext ? [{ label: "Attachment paths", text: fileContext }] : []),
+    ]);
 
     await this.emit(session, {
       kind: "user",
@@ -2802,12 +2834,8 @@ export class SessionBroker {
     // Resolve any local asset images to inline SDK sources before queueing (the
     // transcript row above keeps the small relative refs; the SDK gets bytes).
     // No images → no extra await, so the text-only fast path is unchanged.
-    const { images: pictures, files } = splitAttachments(o.images);
     const imageSources = pictures.length
       ? await this.resolveImageSources(chatId, pictures)
-      : undefined;
-    const fileContext = files.length
-      ? await this.describeAttachedFiles(chatId, files)
       : undefined;
 
     // A persona change can begin during memory, transcript, or image preparation.
@@ -2822,11 +2850,7 @@ export class SessionBroker {
       imageSources,
       fileContext,
       memoryContext: memory?.block,
-      peerContext: o.peer
-        ? peerReminder(o.peer)
-        : o.channel
-          ? channelReminder(o.channel)
-          : undefined,
+      peerContext,
       peer: o.peer,
       channel: o.channel,
       priority: o.priority ?? "next",
@@ -3000,17 +3024,15 @@ export class SessionBroker {
     text: string,
     given: MessagePart[] | undefined,
     memory: SurfacedMemory | undefined,
-    houseRules: { block: string; label: string } | undefined,
+    extra: { label: string; text: string }[] = [],
   ): MessagePart[] | undefined {
-    if (!memory && !houseRules) return given;
+    if (!memory && !extra.length) return given;
     const parts: MessagePart[] = [
       ...(given ?? (text ? [{ kind: "text" as const, text }] : [])),
     ];
-    // House rules first of the context parts: they're the frame everything else
-    // was read inside, and they arrived before the turn did.
-    if (houseRules) {
-      parts.push({ kind: "context", label: houseRules.label, text: houseRules.block });
-    }
+    // In the order they reach the model: attribution prefixes the message, the
+    // attachment note trails it, and the memory block rides as its own reminder.
+    for (const e of extra) parts.push({ kind: "context", label: e.label, text: e.text });
     if (memory) {
       const count = memory.names.length + memory.pointed.length;
       const detail = memory.names.length ? `${memory.names.length} in full` : "names only";
@@ -3024,26 +3046,24 @@ export class SessionBroker {
   }
 
   /**
-   * The house-rules block for this session's FIRST turn, so "show sent context"
-   * can display the one injection that never came through a message.
-   *
-   * Once per session, matching where the rules actually enter: the system
-   * prompt, built once per session. A resumed session discloses again because
-   * its prompt is rebuilt — and because the files may have changed since, which
-   * is precisely the case a reader needs told.
+   * Hand the session's sent context to the init row that is about to be
+   * written, at most once per `buildOptions` — see `pendingSentContext`.
+   * The runtime's own init report fills in which tools each server exposed.
    */
-  private async discloseHouseRules(
+  private takeSentContext(
     session: LiveSession,
-  ): Promise<{ block: string; label: string } | undefined> {
-    if (!this.houseRules || session.houseRulesDisclosed) return undefined;
-    // Set before the read, not after: a throwing read must not leave the session
-    // retrying it on every subsequent message.
-    session.houseRulesDisclosed = true;
-    try {
-      return (await this.houseRules.describeInjection(session.projectId ?? undefined)) ?? undefined;
-    } catch {
-      return undefined;
-    }
+    tools: unknown,
+    mcpStatus: unknown,
+  ): { sentContext?: SentContext } {
+    const pending = session.pendingSentContext;
+    if (!pending) return {};
+    session.pendingSentContext = undefined;
+    return {
+      sentContext: {
+        ...pending,
+        mcpServers: withRuntimeMcpReport(pending.mcpServers, tools, mcpStatus),
+      },
+    };
   }
 
   /**
@@ -5585,6 +5605,7 @@ export class SessionBroker {
             permissionMode: event.permissionMode,
             tools: event.tools,
             mcpServers: event.mcpServers,
+            ...this.takeSentContext(session, event.tools, event.mcpServers),
           },
         });
         // Snapshot the runtime's own `/` command list — the only source for the
@@ -5910,6 +5931,11 @@ export class SessionBroker {
               permissionMode: (m as { permissionMode?: unknown }).permissionMode,
               tools: (m as { tools?: unknown }).tools,
               mcpServers: (m as { mcp_servers?: unknown }).mcp_servers,
+              ...this.takeSentContext(
+                session,
+                (m as { tools?: unknown }).tools,
+                (m as { mcp_servers?: unknown }).mcp_servers,
+              ),
             },
           });
           // Learn this model's context window now that the subprocess is live, so
@@ -8271,8 +8297,16 @@ export class SessionBroker {
     const canCreatePr = Boolean(this.github) && workflow.requirePr;
 
     const appends: string[] = [];
+    // Every block appended below is also recorded, labelled, for "show sent
+    // context" — see shared/sent-context.ts. One helper so the prompt and its
+    // disclosure cannot drift: nothing reaches `appends` without a label.
+    const sections: SentContextSection[] = [];
+    const append = (id: string, label: string, text: string) => {
+      appends.push(text);
+      sections.push({ id, label, text, chars: text.length });
+    };
     const handoff = await this.buildHarnessHandoff(session.chatId);
-    if (handoff) appends.push(handoff);
+    if (handoff) append("handoff", "Harness handoff — prior conversation", handoff);
     // The rendered contract itself comes next — before the project's own
     // instructions, so an authored instruction can still refine it.
     const workflowDirective = buildWorkflowDirective(workflow, {
@@ -8283,7 +8317,9 @@ export class SessionBroker {
       prCreate: canCreatePr,
       memory: Boolean(this.memory && session.projectId),
     });
-    if (workflowDirective) appends.push(workflowDirective);
+    if (workflowDirective) {
+      append("workflow", `Workflow profile — ${workflow.profile}`, workflowDirective);
+    }
 
     // The global chat's one standing block: what projects exist, and where.
     //
@@ -8296,7 +8332,9 @@ export class SessionBroker {
     // ever onboarded, and that bill only goes up.
     if (isGlobalProject(session.projectId)) {
       const all = await this.store.listProjects().catch(() => []);
-      appends.push(
+      append(
+        "project-index",
+        "Project index",
         buildGlobalProjectIndex(
           realProjects(all).map((p) => ({ id: p.id, name: p.name, repoPath: p.repoPath })),
         ),
@@ -8501,16 +8539,21 @@ export class SessionBroker {
       };
     }
 
-    if (mode?.instructions) appends.push(mode.instructions);
+    if (mode?.instructions) {
+      append("mode", `Mode — ${mode.name || session.modeId}`, mode.instructions);
+    }
 
     // House rules lead: they're the one human-owned, size-capped block that
     // ALWAYS applies, so they go ahead of every instruction layer. Best-effort
     // like the rest — an unreadable file must never block a turn.
     if (this.houseRules) {
       try {
-        const rules = await this.houseRules.buildInjection(session.projectId ?? undefined);
+        // `describeInjection` rather than `buildInjection`: the same block, plus
+        // the label that says which scopes are in it — rendered together, so the
+        // disclosure can't describe one text while the prompt carries another.
+        const rules = await this.houseRules.describeInjection(session.projectId ?? undefined);
         if (rules) {
-          appends.push(rules);
+          append("house-rules", rules.label, rules.block);
           for (const id of await this.houseRules.listInjected(session.projectId ?? undefined)) {
             this.recordUse(session, { category: "instruction", identifier: id });
           }
@@ -8528,7 +8571,7 @@ export class SessionBroker {
       try {
         const globalInstructions = await this.authored.buildInjection();
         if (globalInstructions) {
-          appends.push(globalInstructions);
+          append("instructions:global", "Global instructions", globalInstructions);
           for (const id of await this.authored.listInjected()) {
             this.recordUse(session, { category: "instruction", identifier: id });
           }
@@ -8545,7 +8588,7 @@ export class SessionBroker {
     if (this.projectConfig && session.projectId) {
       const instructions = this.projectConfig.buildInstructionsInjection(session.projectId);
       if (instructions) {
-        appends.push(instructions);
+        append("instructions:project", "Project instructions", instructions);
         // One row per authored FILE, not one per injection: "the instructions
         // were injected" is true on every turn of every session and says
         // nothing, while "this house-rules file rode along on 400 turns" is the
@@ -8564,7 +8607,7 @@ export class SessionBroker {
     if (this.memory && session.projectId) {
       try {
         const injection = await this.memory.buildInjection(session.projectId);
-        if (injection) appends.push(injection);
+        if (injection) append("memory-index", "Project memory catalogue", injection);
       } catch {
         /* no memory injection this turn */
       }
@@ -8723,7 +8766,11 @@ export class SessionBroker {
     if (session.personaId) {
       if (!this.authored) throw new Error("Persona configuration is unavailable.");
       const persona = await resolvePersona(this.authored, session.personaId, projectConfigPaths?.configDir);
-      appends.push(`## Selected persona: ${persona.name}\n\n${persona.instructions}`);
+      append(
+        "persona",
+        `Persona — ${persona.name}`,
+        `## Selected persona: ${persona.name}\n\n${persona.instructions}`,
+      );
     }
     options.mcpServers = {
       ...(externalMcp as unknown as Record<string, SdkMcpServerConfig>),
@@ -9184,8 +9231,7 @@ export class SessionBroker {
       ...Object.keys(configMcp),
     ]);
     const activeExternalNames = Object.keys(externalMcp);
-    appends.unshift(
-      buildManagerToolsDirective({
+    const toolsDirective = buildManagerToolsDirective({
         github: Boolean(this.github),
         terminals: Boolean(this.terminals),
         worktrees: Boolean(this.worktrees && session.projectId),
@@ -9198,14 +9244,22 @@ export class SessionBroker {
         inspect: Boolean(this.inspect),
         bundledServers: activeExternalNames.filter((name) => !configuredNames.has(name)),
         projectServers: activeExternalNames.filter((name) => configuredNames.has(name)),
-      }),
-    );
+    });
+    appends.unshift(toolsDirective);
+    sections.unshift({
+      id: "mcp-map",
+      label: "Injected MCPs — capability map",
+      text: toolsDirective,
+      chars: toolsDirective.length,
+    });
     // Claude Code's native auto-compaction honours a "Compact Instructions"
     // section wherever it finds one in its instructions — the only way to
     // steer a compaction the SDK starts on its own, since `/compact <focus>`
     // only covers the ones WE start.
     const standingFocus = normalizeCompactFocus(ac?.instructions);
-    if (standingFocus) appends.push(`# Compact Instructions\n\n${standingFocus}`);
+    if (standingFocus) {
+      append("compact", "Compact instructions", `# Compact Instructions\n\n${standingFocus}`);
+    }
     options.systemPrompt = {
       type: "preset",
       preset: "claude_code",
@@ -9224,6 +9278,7 @@ export class SessionBroker {
     // etc. — see `bundled-skills.ts`). Because materialization skips any target
     // dir that already exists, a project or repo skill of the same name silently
     // overrides the bundled one rather than fighting it.
+    const sentSkills: SentContextSkill[] = [];
     if (cwd) {
       const projectSkills =
         this.projectConfig && projectId ? this.projectConfig.getSkills(projectId) : [];
@@ -9245,8 +9300,42 @@ export class SessionBroker {
           /* best-effort: a copy failure must never block a turn from starting */
         }
         options.skills = "all";
+        // First of a name wins, exactly as materialization decides it above.
+        const seen = new Set<string>();
+        for (const s of skills) {
+          if (seen.has(s.name)) continue;
+          seen.add(s.name);
+          sentSkills.push({ name: s.name, description: s.description });
+        }
       }
     }
+    // The agent's prompt is sent as the main thread's definition rather than in
+    // the append, but it is just as much Dispatch-authored context.
+    if (agent?.instructions) {
+      sections.push({
+        id: "agent",
+        label: `Agent — ${agent.name || agent.id}`,
+        text: agent.instructions,
+        chars: agent.instructions.length,
+      });
+    }
+    session.pendingSentContext = {
+      sections,
+      mcpServers: Object.entries(options.mcpServers ?? {}).map(
+        ([name, cfg]): SentContextMcpServer => ({
+          name,
+          origin: isManagerServer(name)
+            ? "dispatch"
+            : name in browserMcp && !configuredNames.has(name)
+              ? "bundled"
+              : "project",
+          // The transport only. Command lines, URLs and headers carry expanded
+          // secrets by this point, and the row is persisted and broadcast.
+          transport: mcpTransportOf(cfg),
+        }),
+      ),
+      skills: sentSkills,
+    };
     if (session.fork) {
       if (session.resumeSessionId) options.resume = session.resumeSessionId;
       if (session.forkAtUuid) options.resumeSessionAt = session.forkAtUuid;

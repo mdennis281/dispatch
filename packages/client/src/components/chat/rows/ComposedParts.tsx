@@ -20,61 +20,21 @@
  *     CARD with its own header ("Dispatch → Claude"), markdown-rendered, open by
  *     default — see AuthoredCard, which owns that chrome and the reasoning for
  *     it.
- *   - `context` — words nobody chose to send, attached automatically. A single
- *     collapsed line, the faintest thing on the row. It's a disclosure, not a
+ *   - `context` — words nobody chose to send, attached automatically. One
+ *     ellipsised line per part, the faintest thing on the row; the text itself
+ *     is a modal away (see SentContext.tsx). It's a disclosure, not a
  *     message, and it's the one part that's hidden by default (see
  *     `useInjectedContext`): present when you go looking, invisible when you're
  *     not.
  */
-import { useState } from "react";
-import { ChevronDown, ChevronRight, FileText, Sparkles } from "lucide-react";
+import { FileText } from "lucide-react";
 import type { ChannelSender, HarnessKind, MessagePart, PeerSender } from "@dispatch/shared";
 import { cn } from "../../../lib/cn.js";
 import { useInjectedContext } from "../../../lib/injectedContext.js";
 import { useChats } from "../../../stores/chats.js";
 import { rowHarnessLabel } from "../../../lib/harness.js";
-import { BriefCard, ChannelCard, PeerCard, sizeNote } from "./AuthoredCard.js";
-
-/* ----------------------------------------------------------------- context */
-
-/**
- * Injected context: one collapsed line, honest about its size.
- *
- * Styled unlike a tool call on purpose. A tool call is the MODEL reaching out;
- * this is the app quietly adding to what the model was given, and the two must
- * not be confusable — hence a dashed rule, no tool-call chevron/icon pairing,
- * and an explicit "attached by Dispatch" tag rather than a tool name.
- */
-function InjectedRow({ part }: { part: MessagePart }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <div className="mt-1.5 w-full text-left first:mt-0">
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        aria-expanded={open}
-        className={cn(
-          "flex w-full items-center gap-1.5 rounded-[5px] border border-dashed border-line-soft",
-          "px-2 py-1 text-left text-2xs text-faint transition-colors",
-          "hover:border-line hover:bg-hover hover:text-muted [&_svg]:size-3",
-        )}
-      >
-        {open ? <ChevronDown /> : <ChevronRight />}
-        <Sparkles className="shrink-0 opacity-70" />
-        <span className="shrink-0 uppercase tracking-[0.06em]">attached by Dispatch</span>
-        <span className="min-w-0 truncate">{part.label ?? "context"}</span>
-        <span className="ml-auto shrink-0 cm-mono !text-2xs opacity-70">
-          {sizeNote(part.text)}
-        </span>
-      </button>
-      {open && (
-        <pre className="cm-scroll cm-mono mt-1 max-h-72 overflow-auto whitespace-pre-wrap rounded-md border border-dashed border-line-soft bg-inset px-2.5 py-2 !text-2xs leading-[1.5] text-muted">
-          {part.text}
-        </pre>
-      )}
-    </div>
-  );
-}
+import { BriefCard, ChannelCard, PeerCard } from "./AuthoredCard.js";
+import { TurnContextLines } from "./SentContext.js";
 
 /* -------------------------------------------------------------------- host */
 
@@ -143,13 +103,22 @@ export function ComposedParts({
 }) {
   const injected = useInjectedContext(chatId);
   const provider = rowHarnessLabel(harness, useChats((s) => s.byId[chatId]?.harness));
-  const visible = parts.filter((p) => p.kind !== "context" || injected.show);
+  // Consecutive `context` parts render as ONE block of one-line entries, so a
+  // turn carrying memories and an attachment note reads as a single
+  // disclosure — and opens as one modal you can page through.
+  const runs: (MessagePart | MessagePart[])[] = [];
+  for (const p of parts) {
+    if (p.kind !== "context") runs.push(p);
+    else if (!injected.show) continue;
+    else if (Array.isArray(runs[runs.length - 1])) (runs[runs.length - 1] as MessagePart[]).push(p);
+    else runs.push([p]);
+  }
   return (
     <div className="flex flex-col items-end">
-      {visible.map((part, i) => {
+      {runs.map((part, i) => {
+        if (Array.isArray(part)) return <TurnContextLines key={`context:${i}`} parts={part} />;
         const key = `${part.kind}:${i}`;
         if (part.kind === "brief") return <BriefCard key={key} part={part} provider={provider} />;
-        if (part.kind === "context") return <InjectedRow key={key} part={part} />;
         if (fromPeer)
           return (
             <PeerCard key={key} chatId={chatId} text={part.text} peer={peer} harness={harness} />

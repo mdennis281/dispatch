@@ -11,7 +11,7 @@ import {
   XCircle,
   Cpu,
 } from "lucide-react";
-import type { NoticeRow, ResultRow, SystemMessageRow } from "@dispatch/shared";
+import { readSentContext, type NoticeRow, type ResultRow, type SystemMessageRow } from "@dispatch/shared";
 import { RowShell } from "./RowShell.js";
 import { TypingPulse } from "../../ui/Spinner.js";
 import { Button } from "../../ui/Button.js";
@@ -23,6 +23,8 @@ import { turnFooter } from "../../../lib/turnFooter.js";
 import { useTypewriter } from "../../../lib/useTypewriter.js";
 import { useChats } from "../../../stores/chats.js";
 import { harnessLabel } from "../../../lib/harness.js";
+import { useInjectedContext } from "../../../lib/injectedContext.js";
+import { SentContextCard } from "./SentContext.js";
 
 /** The live "agent is working" row shown while a turn streams (no text yet). */
 export function WorkingRow({ label }: { label?: string }) {
@@ -191,17 +193,23 @@ export const ResultRowView = memo(function ResultRowView({
 
 /** A system/init message — a quiet "session started" marker with a model chip. */
 export const SystemRowView = memo(function SystemRowView({ row }: { row: SystemMessageRow }) {
+  // Called unconditionally (hooks), consulted only for init rows.
+  const injected = useInjectedContext(row.chatId);
   if (row.subtype === "init") {
     const data = row.data as { model?: string } | undefined;
+    const sent = injected.show ? readSentContext(row.data) : undefined;
     return (
-      <CenterNote icon={<Cpu />}>
-        Session started
-        {data?.model && (
-          <Chip tone="muted" mono className="ml-1">
-            {data.model}
-          </Chip>
-        )}
-      </CenterNote>
+      <>
+        <CenterNote icon={<Cpu />}>
+          Session started
+          {data?.model && (
+            <Chip tone="muted" mono className="ml-1">
+              {data.model}
+            </Chip>
+          )}
+        </CenterNote>
+        {sent && <SentContextCard row={row} sent={sent} />}
+      </>
     );
   }
   return (
