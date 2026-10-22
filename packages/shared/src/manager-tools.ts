@@ -303,6 +303,7 @@ export const MANAGER_TOOL_EXTERNAL: Record<ManagerToolName, boolean> = {
   /* issues — the tracker is per project, not per chat. */
   issue_list: true,
   issue_read: true,
+  issue_create: true,
   issue_comment: true,
   issue_update: true,
 };
