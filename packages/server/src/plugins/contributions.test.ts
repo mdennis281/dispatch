@@ -157,7 +157,8 @@ describe("readPluginContributions — rules", () => {
     const root = await scratch();
     const manifest = { capabilities: ["mcp", "process"], contributes: { mcpServers: "./mcp.yaml", processes: "./processes.yaml", skills: "./skills" } };
     const dir = await writePlugin(root, "warn", manifest, {
-      "mcp.yaml": "- name: a\n  transport: { type: http, url: 'https://x', headers: { Authorization: '${secret:NOT_LISTED}' } }\n",
+      // The undeclared name hides in `prewarm`, which the load-time scan must cover as well as env/headers.
+      "mcp.yaml": "- name: a\n  transport: { type: http, url: 'https://x' }\n  prewarm: 'curl ${secret:NOT_LISTED}'\n",
       "processes.yaml": "processes: [ { id: 'Bad Id', command: node } ]\n",
       "skills/s/SKILL.md": "---\nname: s\ndescription: d\n---\nbody\n",
     });
@@ -202,6 +203,24 @@ describe("selectPluginMcpServers", () => {
     );
     expect(out.a!.env).toEqual({ T: "tok", U: "" });
     expect(refused).toEqual(["UNLISTED"]);
+  });
+
+  it("covers cwd and prewarm too — the fields the project resolver would otherwise fill from undeclared secrets", () => {
+    const refused: string[] = [];
+    const out = selectPluginMcpServers(
+      [
+        decl({
+          name: "a",
+          config: { type: "stdio", command: "node", cwd: "C:/p/${secret:UNLISTED}", prewarm: "curl ${secret:LISTED} ${secret:UNLISTED}" },
+        }),
+      ],
+      undefined,
+      (n) => (n === "LISTED" ? "tok" : "LEAK"),
+      (_p, _s, n) => refused.push(n),
+    );
+    expect(out.a!.cwd).toBe("C:/p/");
+    expect(out.a!.prewarm).toBe("curl tok ");
+    expect(refused).toEqual(["UNLISTED", "UNLISTED"]);
   });
 
   it("uses the plugin's toggle as the default layer and lets an mcpEnabled pin override it either way", () => {
@@ -400,6 +419,53 @@ describe("PluginService — processes", () => {
     bare.store.close();
   });
 
+  it("a stale `running` row from a previous server process does not count: autostart still spawns", async () => {
+    // What an unclean exit leaves behind: the row says running, nothing holds the child.
+    const { svc, store, runner, spawns } = await harness();
+    await store.saveRunner({
+      id: "stale-row",
+      worktreePath: "C:/anywhere",
+      subAppId: "hello-http",
+      owner: "plugin:contributions",
+      kind: "process",
+      pid: 999_999,
+      port: 47311,
+      status: "running",
+      startedAt: 1,
+    });
+    await svc.activateAll();
+    expect(spawns).toHaveLength(1);
+    const rows = await runner.list();
+    expect(rows.filter((r) => r.status === "running" && r.id !== "stale-row")).toHaveLength(1);
+    await svc.dispose();
+    store.close();
+  });
+
+  it("a stale ADOPTED row whose port is free again is marked stopped and the process started", async () => {
+    const { svc, store, runner, spawns } = await harness({ portFree: async () => true });
+    await store.saveRunner({
+      id: "stale-adopted",
+      worktreePath: "C:/anywhere",
+      subAppId: "hello-http",
+      owner: "plugin:contributions",
+      kind: "process",
+      port: 47311,
+      ports: [47311],
+      status: "running",
+      adopted: true,
+      startedAt: 1,
+    });
+    await svc.activateAll();
+    expect(spawns).toHaveLength(1);
+    expect((await runner.list()).find((r) => r.id === "stale-adopted")!.status).toBe("stopped");
+    const host = (svc as unknown as { processHost: PluginProcessHost }).processHost;
+    expect(await host.list("contributions")).toEqual([
+      { id: "hello-http", status: "running", ports: [47311], url: "http://localhost:47311" },
+    ]);
+    await svc.dispose();
+    store.close();
+  });
+
   it("a singleton whose port is already taken is ADOPTED, not spawned, and stop() kills nothing", async () => {
     const { svc, store, runner, spawns, killed } = await harness({ portFree: async () => false });
     await svc.activateAll();
@@ -474,6 +540,7 @@ describe("PluginProcessHost", () => {
         rows.find((r) => r.id === id)!.status = "stopped";
       },
       list: async () => rows as never,
+      isLive: (id) => rows.some((r) => r.id === id && r.status === "running"),
     };
     const host = new PluginProcessHost({ runner });
     host.register("p", "C:/p", [{ id: "a", command: "node", args: ["x.js"] }]);

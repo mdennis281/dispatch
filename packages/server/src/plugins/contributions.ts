@@ -215,10 +215,13 @@ function readMcpServersFile(
     }
     // Checked up front so the owner learns about an undeclared secret from the
     // plugin row, not from a server that starts with an empty token.
+    // EVERY string the runtime config carries — `cwd` and `prewarm` included.
+    // `expandSecretsInMcpServers` (the project resolver, applied to the merged
+    // record a moment later) expands both, so a field left out of this scan
+    // and out of `expandDeclaration` below is a field through which a plugin
+    // reads a project secret it never declared.
     const refs = new Set<string>();
-    for (const v of [config.command, config.url, ...(config.args ?? []), ...Object.values(config.env ?? {}), ...Object.values(config.headers ?? {})]) {
-      if (typeof v === "string") for (const n of referencedSecrets(v)) refs.add(n);
-    }
+    for (const v of secretBearingStrings(config)) for (const n of referencedSecrets(v)) refs.add(n);
     const undeclared = [...refs].filter((n) => !secrets.includes(n));
     if (undeclared.length) {
       warnings.push(
@@ -323,23 +326,39 @@ export function expandPluginSecrets(
   });
 }
 
+/** The string fields of a server config a `${secret:…}` can hide in — the same set `expandSecretsInMcpServers` expands. */
+const SECRET_STRING_KEYS = ["command", "url", "cwd", "prewarm"] as const;
+const SECRET_RECORD_KEYS = ["env", "headers"] as const;
+
+function secretBearingStrings(config: McpServerConfig): string[] {
+  const c = config as McpServerConfig & Record<string, unknown>;
+  const out: string[] = [];
+  for (const k of SECRET_STRING_KEYS) if (typeof c[k] === "string") out.push(c[k] as string);
+  if (Array.isArray(c.args)) out.push(...(c.args as string[]));
+  for (const k of SECRET_RECORD_KEYS) if (c[k]) out.push(...Object.values(c[k] as Record<string, string>));
+  return out;
+}
+
+/**
+ * Fill a declaration's secrets. Mirrors `expandSecretsInMcpServers` FIELD FOR
+ * FIELD (command, args, env, headers, url, cwd, prewarm): that function runs
+ * on the merged record right after this one with the PROJECT resolver, so any
+ * field this skips is one it would fill from secrets the plugin never listed.
+ */
 function expandDeclaration(
   decl: PluginMcpDeclaration,
   lookup: (name: string) => string | undefined,
   onRefused?: (plugin: string, server: string, name: string) => void,
 ): McpServerConfig {
   const refused = (n: string) => onRefused?.(decl.pluginId, decl.name, n);
-  const str = (v: string | undefined) =>
-    v === undefined ? undefined : expandPluginSecrets(v, decl.secrets, lookup, refused);
-  const rec = (r: Record<string, string> | undefined) =>
-    r ? Object.fromEntries(Object.entries(r).map(([k, v]) => [k, expandPluginSecrets(v, decl.secrets, lookup, refused)])) : r;
+  const one = (v: string) => expandPluginSecrets(v, decl.secrets, lookup, refused);
   const c = decl.config as McpServerConfig & Record<string, unknown>;
   const out: Record<string, unknown> = { ...c };
-  if (typeof c.command === "string") out.command = str(c.command);
-  if (Array.isArray(c.args)) out.args = (c.args as string[]).map((a) => expandPluginSecrets(a, decl.secrets, lookup, refused));
-  if (c.env) out.env = rec(c.env as Record<string, string>);
-  if (c.headers) out.headers = rec(c.headers as Record<string, string>);
-  if (typeof c.url === "string") out.url = str(c.url);
+  for (const k of SECRET_STRING_KEYS) if (typeof c[k] === "string") out[k] = one(c[k] as string);
+  if (Array.isArray(c.args)) out.args = (c.args as string[]).map(one);
+  for (const k of SECRET_RECORD_KEYS) {
+    if (c[k]) out[k] = Object.fromEntries(Object.entries(c[k] as Record<string, string>).map(([key, v]) => [key, one(v)]));
+  }
   return out as McpServerConfig;
 }
 

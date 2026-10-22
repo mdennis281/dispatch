@@ -696,6 +696,17 @@ export class RunnerService {
     return this.start(launch.worktreePath, subApp ?? launch.subApp, launch.ctx);
   }
 
+  /**
+   * Does THIS process hold the child for an instance? A persisted `running`
+   * row whose server died uncleanly says `running` until `reconcile()` gets to
+   * it; a caller deciding whether to start another copy must ask this, not
+   * the row's status.
+   */
+  isLive(instanceId: string): boolean {
+    const live = this.live.get(instanceId);
+    return !!live && !live.stopping;
+  }
+
   /** Instances this process is running that were launched from a given subApp. */
   runningFor(projectId: string, subAppId: string): string[] {
     return [...this.live]

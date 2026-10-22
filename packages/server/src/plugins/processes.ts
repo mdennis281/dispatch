@@ -33,6 +33,8 @@ export interface PluginProcessRunner {
   adopt(worktreePath: string, subApp: SubApp, ctx: RunnerLaunchContext, port: number): Promise<RunnerInstance>;
   stop(instanceId: string): Promise<void>;
   list(): Promise<RunnerInstance[]>;
+  /** Whether THIS process holds the child — a persisted `running` row alone does not mean it. */
+  isLive(instanceId: string): boolean;
 }
 
 export interface PluginProcessHostDeps {
@@ -80,12 +82,33 @@ export class PluginProcessHost {
     return { dir: entry.dir, spec };
   }
 
-  /** The live instance for one declared process, if this host has one. */
+  /**
+   * The live instance for one declared process, if there is one.
+   *
+   * A persisted `running` row is NOT proof of a process. After an unclean exit
+   * (a hard kill — Windows delivers no SIGTERM) the row says `running` with a
+   * dead pid until the runner's boot reconcile rewrites it, and plugin
+   * activation is not sequenced behind that reconcile by contract. So a row
+   * counts only when this process holds its child (`isLive`), or — for an
+   * adopted singleton, which never has a child — when its port is still busy.
+   * A stale adopted row is marked stopped here so the roster stops showing a
+   * process nobody is running; a stale spawned row is left for `reconcile()`,
+   * which also deals with a pid that may still be alive.
+   */
   private async running(pluginId: string, id: string): Promise<RunnerInstance | undefined> {
     const owner = pluginProcessOwner(pluginId);
-    return (await this.runner.list()).find(
+    const rows = (await this.runner.list()).filter(
       (r) => r.owner === owner && r.subAppId === id && ACTIVE.has(r.status),
     );
+    for (const row of rows) {
+      if (row.adopted) {
+        if (row.port !== undefined && !(await this.portFree(row.port))) return row;
+        await this.runner.stop(row.id).catch(() => {});
+        continue;
+      }
+      if (this.runner.isLive(row.id)) return row;
+    }
+    return undefined;
   }
 
   /**
@@ -119,17 +142,17 @@ export class PluginProcessHost {
 
   /** Every declared process with its current state — what `ctx.processes.list()` returns. */
   async list(pluginId: string): Promise<Array<{ id: string; status: string; ports?: number[]; url?: string }>> {
-    const owner = pluginProcessOwner(pluginId);
-    const rows = await this.runner.list();
-    return this.declared(pluginId).map((spec) => {
-      const live = rows.find((r) => r.owner === owner && r.subAppId === spec.id && ACTIVE.has(r.status));
-      return {
+    const out: Array<{ id: string; status: string; ports?: number[]; url?: string }> = [];
+    for (const spec of this.declared(pluginId)) {
+      const live = await this.running(pluginId, spec.id);
+      out.push({
         id: spec.id,
         status: live?.status ?? "stopped",
         ...(live?.ports ? { ports: live.ports } : {}),
         ...(live?.url ? { url: live.url } : {}),
-      };
-    });
+      });
+    }
+    return out;
   }
 
   /** Start every `autostart: true` process. One failure never blocks the next. */
@@ -144,7 +167,12 @@ export class PluginProcessHost {
     }
   }
 
-  /** Stop everything this plugin has running — deactivate and dispose. */
+  /**
+   * Stop everything this plugin has running — deactivate and dispose. Every
+   * active row, live or not: an adopted row is marked stopped (nothing to
+   * kill), and a stale one from a previous process is finalised rather than
+   * left `running` for the roster to keep showing.
+   */
   async stopAll(pluginId: string): Promise<void> {
     const owner = pluginProcessOwner(pluginId);
     const rows = (await this.runner.list()).filter((r) => r.owner === owner && ACTIVE.has(r.status));

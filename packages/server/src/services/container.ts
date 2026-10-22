@@ -1307,26 +1307,34 @@ export function createServices(
     safeStart("prReviewWatcher", () => prReviewWatcher.start());
     safeStart("issueWatcher", () => issueWatcher.start());
 
+    // The runner reconcile BEFORE plugin activation. A plugin's `autostart`
+    // asks the runner whether its process is already running, and after an
+    // unclean exit (a hard kill — Windows delivers no SIGTERM) the persisted
+    // row still says `running` with a dead pid until this pass rewrites it.
+    // Activation racing ahead of it would find that row, start nothing, and
+    // the reconcile would then mark the row stopped — a plugin process that
+    // never comes back after a crash. The host also checks liveness itself
+    // (`PluginProcessHost.running`), so this ordering is belt and braces for
+    // the case that matters most, not the only guard.
+    try {
+      await runner.reconcile();
+    } catch {
+      /* a missing runners.json / dead pid probe must never block boot */
+    }
+    if (disposed) return;
+
     // Plugins activate HERE, after listen, and not in `start()`: each
     // `activate` is third-party code on a 30 s budget, and awaiting it before
     // the port opened would hold the health check shut long enough for
     // `install.mjs` to roll a good update back — the failure that split
     // `start()` from `warm()`. Their route prefixes answer 503 until then.
     //
-    // NOT awaited, for the same reason one step further in: the plugins run
-    // serially, so one hung `activate` is a minute, and the runner reconcile
-    // below must not start a minute late because of it. `plugins.dispose()`
-    // joins whatever is still in flight.
+    // NOT awaited: the plugins run serially, so one hung `activate` is a
+    // minute, and nothing in boot should wait a minute for it.
+    // `plugins.dispose()` joins whatever is still in flight.
     void plugins.activateAll().catch((err: unknown) => {
       console.error("[Dispatch] plugin activation failed (continuing):", err);
     });
-
-    // Last, because it is the slowest and nothing above waits on it.
-    try {
-      await runner.reconcile();
-    } catch {
-      /* a missing runners.json / dead pid probe must never block boot */
-    }
   };
 
   const services: Services = {

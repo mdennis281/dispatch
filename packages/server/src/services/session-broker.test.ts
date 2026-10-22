@@ -1515,6 +1515,9 @@ describe("SessionBroker — permissions", () => {
         mcpServers: () => [
           decl("shared", {}),
           decl("plug-only", { A: "${secret:PLUG}", B: "${secret:PROJ}" }),
+          // The undeclared project secret hiding in `cwd` — a field the project
+          // resolver fills on the merged record if the plugin selector skips it.
+          { ...decl("plug-cwd", {}), config: { type: "stdio" as const, command: "x", cwd: "C:/plugins/${secret:PROJ}" } },
         ],
       };
       const session = (broker as unknown as { sessions: Map<string, Record<string, unknown>> }).sessions.get("c1")!;
@@ -1529,6 +1532,7 @@ describe("SessionBroker — permissions", () => {
       expect(options.mcpServers.shared?.command).toBe("project-copy");
       expect(options.mcpServers["plug-only"]?.command).toBe("plugin-copy");
       expect(options.mcpServers["plug-only"]?.env).toEqual({ A: "plug-value", B: "" });
+      expect(JSON.stringify(options.mcpServers["plug-cwd"])).not.toContain("proj-value");
       // A project pin switches the plugin server off like any other.
       projectPins = { "plug-only": false };
       options = await build();
