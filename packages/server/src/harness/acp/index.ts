@@ -11,7 +11,7 @@
  * configuration of the agent rather than as a second implementation.
  *
  * That is why the runtime-specific facts live in {@link AcpAgentSpec} rather
- * than being hard-coded: adding OpenCode later should be a second `PROVIDERS`
+ * than being hard-coded: adding OpenCode later should be a second `BUILTIN_PROVIDERS`
  * row and a second spec, not a second adapter.
  *
  * MODELS COME FROM OLLAMA, NOT FROM ACP. The protocol has no model-listing

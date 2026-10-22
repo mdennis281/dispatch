@@ -11,7 +11,14 @@
  * still open, because the alternative is a project the user cannot get into to
  * change the setting.
  */
-import { DEFAULT_HARNESS, PROVIDER_IDS, type HarnessKind } from "@dispatch/shared";
+import {
+  BUILTIN_HARNESS_KINDS,
+  DEFAULT_HARNESS,
+  registerProvider,
+  type BuiltinHarnessKind,
+  type HarnessKind,
+  type ProviderDescriptor,
+} from "@dispatch/shared";
 import type { Harness, HarnessRuntimeInfo } from "./types.js";
 import { ClaudeHarness } from "./claude/index.js";
 import { CodexHarness } from "./codex/index.js";
@@ -26,15 +33,16 @@ export { AcpHarness, ACP_CAPABILITIES } from "./acp/index.js";
 
 export interface HarnessRegistryOpts {
   /** Injectable harnesses (tests, and the E2E fake SDK). */
-  harnesses?: Partial<Record<HarnessKind, Harness>>;
+  harnesses?: Partial<Record<BuiltinHarnessKind, Harness>>;
 }
 
 /**
- * How to build each provider's runtime adapter — the server half of registering
- * a provider (the shared half is `PROVIDERS`). Typed as a full record so a new
- * `HarnessKind` fails to compile until it has an adapter here.
+ * How to build each BUILT-IN provider's runtime adapter — the server half of
+ * registering one (the shared half is `BUILTIN_PROVIDERS`). Typed as a full
+ * record so a new built-in fails to compile until it has an adapter here. Any
+ * other provider goes through {@link HarnessRegistry.register}.
  */
-const HARNESS_FACTORIES: Record<HarnessKind, () => Harness> = {
+const HARNESS_FACTORIES: Record<BuiltinHarnessKind, () => Harness> = {
   claude: () => new ClaudeHarness(),
   codex: () => new CodexHarness(),
   goose: () => new AcpHarness(),
@@ -44,9 +52,27 @@ export class HarnessRegistry {
   private readonly map = new Map<HarnessKind, Harness>();
 
   constructor(opts: HarnessRegistryOpts = {}) {
-    for (const kind of PROVIDER_IDS) {
+    for (const kind of BUILTIN_HARNESS_KINDS) {
       this.map.set(kind, opts.harnesses?.[kind] ?? HARNESS_FACTORIES[kind]());
     }
+  }
+
+  /**
+   * Add a provider that does not ship in this repo, with the descriptor the
+   * rest of the app labels it by.
+   *
+   * Refuses an id that is already taken. Replacing a live harness would leave
+   * every running session on the old adapter while new ones start on the new
+   * one, and a plugin that shadowed `claude` would silently take over the
+   * fallback every unavailable provider resolves to.
+   */
+  register(harness: Harness, descriptor: ProviderDescriptor): void {
+    if (harness.kind !== descriptor.id) {
+      throw new Error(`harness kind "${harness.kind}" does not match descriptor id "${descriptor.id}"`);
+    }
+    if (this.map.has(harness.kind)) throw new Error(`provider "${harness.kind}" is already registered`);
+    registerProvider(descriptor);
+    this.map.set(harness.kind, harness);
   }
 
   /** Every registered harness, for the settings pane and the boot log. */

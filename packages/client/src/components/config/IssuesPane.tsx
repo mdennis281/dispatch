@@ -6,7 +6,7 @@ import {
   ISSUE_AUTHOR_TRUST,
   ISSUE_INTERVAL_MAX_MINUTES,
   ISSUE_INTERVAL_MIN_MINUTES,
-  PROVIDER_IDS,
+  providerIds,
   issueSourceLabel,
   providerFor,
   resolveIssuePolicy,
@@ -196,7 +196,7 @@ export function IssuesPane({ projectId, hasConfigDir }: { projectId: string; has
   const { harnesses, catalogs } = useProviderCatalogs();
   const providerOptions = [
     { value: "", label: "Same as the project", hint: "follows it" },
-    ...PROVIDER_IDS.map((kind) => {
+    ...providerIds().map((kind) => {
       const runtime = harnesses.find((h) => h.kind === kind)?.runtime;
       return {
         value: kind,

@@ -139,7 +139,9 @@ import type {
 } from "@dispatch/shared";
 import {
   DEFAULT_HARNESS,
+  registerProvider,
   type HarnessDefaults,
+  type ProviderDescriptor,
   type Subscription,
   type SubscriptionStatus,
 } from "@dispatch/shared";
@@ -354,6 +356,7 @@ function usageQuery(target: UsageTarget): string {
 
 export interface HarnessInfo {
   kind: HarnessKind;
+  descriptor: ProviderDescriptor;
   runtime: { path?: string; version?: string; source: string; available: boolean };
   capabilities: {
     efforts: Effort[];
@@ -781,7 +784,16 @@ export const api = {
       ),
   },
   harnesses: {
-    list: () => get<HarnessInfo[]>("/api/harnesses"),
+    /**
+     * Every runtime the server drives. Registers each descriptor as it lands,
+     * so `providerFor` can name a provider this bundle was not compiled with —
+     * every caller of this route refreshes the catalogue, none has to remember.
+     */
+    list: async () => {
+      const list = await get<HarnessInfo[]>("/api/harnesses");
+      for (const h of list) registerProvider(h.descriptor);
+      return list;
+    },
   },
 
   /* login accounts, several per provider — see shared subscriptions.ts */

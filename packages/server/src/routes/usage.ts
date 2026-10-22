@@ -11,7 +11,7 @@
 import type { FastifyInstance } from "fastify";
 import {
   DEFAULT_HARNESS,
-  HarnessKindSchema,
+  isKnownProvider,
   findSubscription,
   accountLabel,
   subscriptionFor,
@@ -37,8 +37,8 @@ interface UsageQuery {
 async function accountFor(app: FastifyInstance, query: UsageQuery) {
   const settings = await app.cm.store.getSettings().catch(() => null);
   const named = findSubscription(settings, query.subscription);
-  const parsed = HarnessKindSchema.safeParse(query.harness ?? DEFAULT_HARNESS);
-  return named ?? subscriptionFor(settings, parsed.success ? parsed.data : DEFAULT_HARNESS);
+  const kind = isKnownProvider(query.harness) ? query.harness : DEFAULT_HARNESS;
+  return named ?? subscriptionFor(settings, kind);
 }
 
 async function snapshotFor(

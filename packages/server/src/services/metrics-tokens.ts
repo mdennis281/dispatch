@@ -16,7 +16,7 @@
  */
 import {
   METRIC_OTHER_KEY,
-  PROVIDER_IDS,
+  isKnownProvider,
   accountLabel,
   findSubscription,
   providerFor,
@@ -92,8 +92,9 @@ export function usageKey(line: Pick<TokenLine, "chatId" | "resultId" | "model">)
 /** Turns a group key into a display name. Supplied per request (settings move). */
 export type TokenLabeller = (dim: TokenDimension, key: string) => string;
 
-const isProvider = (key: string): key is HarnessKind =>
-  (PROVIDER_IDS as readonly string[]).includes(key);
+// Known providers only: an uninstalled provider's history must not render as
+// a live account, and `providerFor` would label it by its bare id anyway.
+const isProvider = (key: string): key is HarnessKind => isKnownProvider(key);
 
 /**
  * Names for the ledger's keys, resolved against the settings AS THEY ARE NOW —

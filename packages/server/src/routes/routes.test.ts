@@ -20,7 +20,7 @@ import { Store } from "../store/index.js";
 import { SessionBroker, type QueryFn } from "../services/session-broker.js";
 import { GitHubService, type ExecaLike } from "../services/github.js";
 import { CiService } from "../services/ci.js";
-import { GLOBAL_PROJECT_ID, PROVIDER_IDS, type WsServerEvent } from "@dispatch/shared";
+import { GLOBAL_PROJECT_ID, providerIds, type WsServerEvent } from "@dispatch/shared";
 
 /* --------------------------------------------------------------- scripted SDK */
 
@@ -397,6 +397,19 @@ describe("routes — REST CRUD", () => {
     off();
   });
 
+  it("serves each provider's descriptor and answers an unregistered one with nothing", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/harnesses" });
+    for (const h of res.json() as Array<{ kind: string; descriptor: { id: string } }>) {
+      expect(h.descriptor.id).toBe(h.kind);
+    }
+    // Not the default's catalogue: a chat left on an uninstalled provider must
+    // not be offered Claude model ids.
+    const models = await app.inject({ method: "GET", url: "/api/models?harness=gemini" });
+    expect(models.json()).toEqual([]);
+    const windows = await app.inject({ method: "GET", url: "/api/models/context-windows?harness=gemini" });
+    expect(windows.json()).toEqual({});
+  });
+
   it("owns the account list at /api/subscriptions and keeps it through a settings PUT", async () => {
     const put = await app.inject({
       method: "PUT",
@@ -413,7 +426,7 @@ describe("routes — REST CRUD", () => {
     // about subscription plumbing.
     expect(put.json().map((s: { id: string }) => s.id)).toEqual([
       "claude2",
-      ...PROVIDER_IDS.filter((id) => id !== "claude"),
+      ...providerIds().filter((id) => id !== "claude"),
     ]);
     expect(put.json()[0]).toMatchObject({ loggedIn: false, dirExists: false, isDefault: true });
 

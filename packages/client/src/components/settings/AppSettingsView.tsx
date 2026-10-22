@@ -19,7 +19,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { SlidersHorizontal, Save, Undo2 } from "lucide-react";
-import { DEFAULT_HARNESS, PROVIDER_IDS, SHELL_TRANSCRIPT_CATEGORIES } from "@dispatch/shared";
+import { DEFAULT_HARNESS, SHELL_TRANSCRIPT_CATEGORIES } from "@dispatch/shared";
 import type { HarnessKind, ModelOption } from "@dispatch/shared";
 import { InlineError } from "../sidebar/Modal.js";
 import { Button } from "../ui/Button.js";
@@ -193,13 +193,18 @@ export function AppSettingsView() {
   // already exists: unsaved edits must not cost the fields their placeholders.
   useEffect(() => {
     void api.settings.defaults().then(setServerDefaults).catch(() => setServerDefaults(null));
-    void api.harnesses.list().then(setHarnesses).catch(() => setHarnesses([]));
-    for (const kind of PROVIDER_IDS) {
-      void api.models
-        .list(kind)
-        .then((models) => setCatalogs((current) => ({ ...current, [kind]: models })))
-        .catch(() => {});
-    }
+    void api.harnesses
+      .list()
+      .then((h) => {
+        setHarnesses(h);
+        for (const { kind } of h) {
+          void api.models
+            .list(kind)
+            .then((models) => setCatalogs((current) => ({ ...current, [kind]: models })))
+            .catch(() => {});
+        }
+      })
+      .catch(() => setHarnesses([]));
   }, []);
 
   const discard = useCallback(() => {

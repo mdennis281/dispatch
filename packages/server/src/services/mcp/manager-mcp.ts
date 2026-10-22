@@ -158,7 +158,8 @@ import {
   type WorkflowMergeMethod,
   type WorktreeInfo,
   HarnessKindSchema,
-  PROVIDER_IDS,
+  isKnownProvider,
+  providerIds,
   COMPACT_FOCUS_MAX,
   MANAGER_TOOL_EXTERNAL,
 } from "@dispatch/shared";
@@ -5766,8 +5767,11 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         .optional()
         .describe("Project to spawn in. Defaults to this chat's own project."),
       modeId: z.string().optional().describe("Mode id for the new chat (default: your project's)."),
-      provider: HarnessKindSchema.optional().describe(
-        `Provider/runtime for the new chat. Choose ${PROVIDER_IDS.join(" or ")}; omit to ` +
+      // Strict here although the schema is open: stored rows must tolerate an
+      // id nobody registers any more, but an agent asking for one is a typo,
+      // and accepting it would spawn a chat that silently runs on Claude.
+      provider: HarnessKindSchema.refine(isKnownProvider, "not an installed provider").optional().describe(
+        `Provider/runtime for the new chat. Choose ${providerIds().join(" or ")}; omit to ` +
           "inherit this chat's current provider. Model does not select the provider.",
       ),
       agentId: z

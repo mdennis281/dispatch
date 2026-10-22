@@ -9,7 +9,7 @@
  * is where one of them stops refreshing.
  */
 import { useEffect, useState } from "react";
-import { PROVIDER_IDS, type HarnessKind, type ModelOption } from "@dispatch/shared";
+import type { HarnessKind, ModelOption } from "@dispatch/shared";
 import { api, type HarnessInfo } from "./api.js";
 
 export function useProviderCatalogs() {
@@ -17,16 +17,21 @@ export function useProviderCatalogs() {
   const [catalogs, setCatalogs] = useState<Partial<Record<HarnessKind, ModelOption[]>>>({});
   useEffect(() => {
     let live = true;
+    // Catalogues only for providers the server actually has — a static id
+    // list would miss every provider registered at runtime.
     void api.harnesses
       .list()
-      .then((h) => live && setHarnesses(h))
+      .then((h) => {
+        if (!live) return;
+        setHarnesses(h);
+        for (const { kind } of h) {
+          void api.models
+            .list(kind)
+            .then((models) => live && setCatalogs((current) => ({ ...current, [kind]: models })))
+            .catch(() => {});
+        }
+      })
       .catch(() => {});
-    for (const kind of PROVIDER_IDS) {
-      void api.models
-        .list(kind)
-        .then((models) => live && setCatalogs((current) => ({ ...current, [kind]: models })))
-        .catch(() => {});
-    }
     return () => {
       live = false;
     };

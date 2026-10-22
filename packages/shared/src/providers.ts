@@ -9,9 +9,12 @@
  * for two providers and silently wrong for a third — a new runtime would have
  * rendered as "Claude" in every label that tested `=== "codex"`.
  *
- * The `satisfies Record<HarnessKind, …>` below is what makes adding a provider
- * one registration: put its id in `HarnessKindSchema`, and the compiler refuses
- * to build until it has a row here (and a `Harness` in the server registry).
+ * The `satisfies Record<BuiltinHarnessKind, …>` below is what makes adding a
+ * BUILT-IN provider one registration: put its id in `BUILTIN_HARNESS_KINDS`,
+ * and the compiler refuses to build until it has a row here (and a `Harness` in
+ * the server registry). Any other provider arrives at runtime through
+ * {@link registerProvider} — the server registers it beside its `Harness`, and
+ * the client learns it from `/api/harnesses`.
  *
  * Only facts that are true of the runtime WITHOUT asking it belong here. What a
  * live runtime reports (installed version, the live model catalogue, the
@@ -19,8 +22,10 @@
  * remains the authority the UI reads once `/api/harnesses` has answered.
  */
 import {
+  BUILTIN_HARNESS_KINDS,
   DEFAULT_HARNESS,
   HarnessKindSchema,
+  type BuiltinHarnessKind,
   type Effort,
   type HarnessKind,
   type ModelOption,
@@ -34,6 +39,13 @@ export interface ProviderDescriptor {
   shortLabel: string;
   /** One line for the setup wizard. */
   blurb: string;
+  /**
+   * Set only on the placeholder {@link providerFor} synthesizes for an id
+   * nothing has registered — a row written by a provider that has since been
+   * uninstalled. Callers that would otherwise act on the account fields (spawn
+   * env, "is there a login") check this instead of trusting empty strings.
+   */
+  unregistered?: true;
   /**
    * The model id an unpinned chat sends. Undefined means send none and let the
    * runtime pick — Codex has no "default" alias, it flags a catalogue row.
@@ -70,6 +82,11 @@ export interface ProviderDescriptor {
      * checked for EXISTENCE by the settings pane — never read for display.
      */
     loginFile: string;
+    /**
+     * The command a human runs to log in, for the setup card. Absent when there
+     * is nothing to log into (a local model).
+     */
+    loginCommand?: string;
     /**
      * Set when an account for this provider selects an ENDPOINT rather than a
      * login directory — and the env var that carries it.
@@ -172,7 +189,7 @@ export const FALLBACK_MODELS_GOOSE: ModelOption[] = [
   { value: "qwen2.5:14b", label: "qwen2.5:14b", hint: "fast", description: "Smaller, quicker, weaker at long tool chains." },
 ];
 
-export const PROVIDERS = {
+export const BUILTIN_PROVIDERS = {
   claude: {
     id: "claude",
     label: "Claude Code",
@@ -187,6 +204,7 @@ export const PROVIDERS = {
       configDirEnv: "CLAUDE_CONFIG_DIR",
       defaultConfigDir: ".claude",
       loginFile: ".credentials.json",
+      loginCommand: "claude auth login",
     },
   },
   codex: {
@@ -204,6 +222,7 @@ export const PROVIDERS = {
       configDirEnv: "CODEX_HOME",
       defaultConfigDir: ".codex",
       loginFile: "auth.json",
+      loginCommand: "codex login",
     },
   },
   goose: {
@@ -249,24 +268,78 @@ export const PROVIDERS = {
       endpointLabel: "Ollama host",
     },
   },
-} as const satisfies Record<HarnessKind, ProviderDescriptor>;
+} as const satisfies Record<BuiltinHarnessKind, ProviderDescriptor>;
 
-/** Every provider id, in the order pickers list them. */
-export const PROVIDER_IDS: readonly HarnessKind[] = HarnessKindSchema.options;
+/**
+ * Every provider this process knows about, in picker order: the built-ins,
+ * then whatever was registered at runtime. Module state on purpose — the server
+ * and the client each hold exactly one catalogue, and threading a registry
+ * object through every label call would touch a hundred call sites to buy
+ * nothing.
+ */
+const registry = new Map<HarnessKind, ProviderDescriptor>(
+  BUILTIN_HARNESS_KINDS.map((id) => [id, BUILTIN_PROVIDERS[id]]),
+);
+
+/**
+ * Add (or refresh) a provider's descriptor.
+ *
+ * Idempotent on purpose: the client re-registers everything every time
+ * `/api/harnesses` answers, and the server's copy of a descriptor is the
+ * authority over the static one compiled into the bundle.
+ */
+export function registerProvider(descriptor: ProviderDescriptor): void {
+  const parsed = HarnessKindSchema.safeParse(descriptor.id);
+  if (!parsed.success) throw new Error(`invalid provider id "${descriptor.id}"`);
+  if (descriptor.unregistered) throw new Error(`cannot register a placeholder for "${descriptor.id}"`);
+  registry.set(descriptor.id, descriptor);
+}
+
+/** True when something has registered this id (built-ins always have). */
+export function isKnownProvider(id: string | undefined | null): id is HarnessKind {
+  return Boolean(id) && registry.has(id!);
+}
+
+/** Every known provider id, in the order pickers list them. */
+export function providerIds(): HarnessKind[] {
+  return [...registry.keys()];
+}
+
+/**
+ * The stand-in for an id nothing registered. It names the provider by its id
+ * rather than borrowing Claude's descriptor, which is what this used to do —
+ * so a chat from an uninstalled provider rendered as "Claude" everywhere, and
+ * its account resolved to Claude's login directory.
+ */
+function unregisteredProvider(id: HarnessKind): ProviderDescriptor {
+  return {
+    id,
+    label: id,
+    shortLabel: id,
+    blurb: "This provider is not installed.",
+    fallbackModels: [],
+    efforts: [],
+    subagents: false,
+    skillsDir: ".agents",
+    account: { configDirEnv: "", defaultConfigDir: "", loginFile: "" },
+    unregistered: true,
+  };
+}
 
 /**
  * The descriptor for a provider id. An absent id is a legacy row written when
- * Claude was the only provider, so it resolves to the default; an unknown
- * string (a provider removed since the row was written) does too, because a
- * label that says the wrong name beats a surface that throws.
+ * Claude was the only provider, so it resolves to the default. An id nothing
+ * has registered gets a placeholder named after itself — see
+ * {@link unregisteredProvider} for why that is no longer Claude.
  */
-export function providerFor(id: HarnessKind | string | undefined | null): ProviderDescriptor {
-  return (PROVIDERS as Record<string, ProviderDescriptor>)[id ?? ""] ?? PROVIDERS[DEFAULT_HARNESS];
+export function providerFor(id: HarnessKind | undefined | null): ProviderDescriptor {
+  if (!id) return registry.get(DEFAULT_HARNESS)!;
+  return registry.get(id) ?? unregisteredProvider(id);
 }
 
 /** Every provider descriptor, in picker order. */
 export function listProviders(): ProviderDescriptor[] {
-  return PROVIDER_IDS.map((id) => PROVIDERS[id]);
+  return [...registry.values()];
 }
 
 /** The seed model list for a provider, used before/instead of a live probe. */
