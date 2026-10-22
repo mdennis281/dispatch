@@ -362,9 +362,19 @@ const OLDEST_INSTALLABLE = "v2026.10.13.01375";
  * only predecessors predate OLDEST_INSTALLABLE), and the update phase is skipped.
  */
 async function previousRelease(repo, channel, head) {
-  const res = await fetch(`https://api.github.com/repos/${repo}/releases?per_page=50`, { headers: githubHeaders() });
-  if (!res.ok) throw new Error(`GitHub releases list failed: ${res.status}`);
-  const list = await res.json();
+  // GitHub intermittently answers an authenticated list with `200 []` (#404 —
+  // see CHANNEL_RETRY in tools/install.mjs). Taken at face value that silently
+  // skipped the update phase on a green run, so an empty page is asked again.
+  let list = [];
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    const res = await fetch(`https://api.github.com/repos/${repo}/releases?per_page=50`, { headers: githubHeaders() });
+    if (!res.ok) throw new Error(`GitHub releases list failed: ${res.status}`);
+    list = await res.json();
+    if (Array.isArray(list) && list.length > 0) break;
+    note(`releases list came back ${Array.isArray(list) ? "empty" : "not an array"} (attempt ${attempt}/5); asking again`);
+    if (attempt < 5) await delay(1000 * attempt);
+  }
+  if (!Array.isArray(list)) throw new Error(`GitHub releases list was not an array: ${JSON.stringify(list).slice(0, 200)}`);
   const eligible = list
     .filter((r) => !r.draft && STAMP.test(r.tag_name) && (channel === "unstable" || !r.prerelease))
     .filter((r) => r.assets?.some((a) => a.name === `dispatch-${r.tag_name}.tar.gz`))
