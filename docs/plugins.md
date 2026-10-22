@@ -203,6 +203,58 @@ neither, and a scaffold's `node_modules` holds a link to the SDK that
 `packages/cli/src/core/plugins.ts`; the server imports them, so the loader and
 the CLI cannot disagree about what a plugin directory is.
 
+### Inspecting a plugin before installing it
+
+Settings → Plugins opens with **Inspect from URL**. The owner pastes a GitHub URL
+(`github.com/<o>/<r>`, `…/tree/<ref>/<dir>`, `…/blob/<ref>/…/plugin.yaml`, a `.git`
+or `git@github.com:` URL) or any https git clone URL (`#<ref>` optional), and
+`POST /api/plugins/inspect` returns a `PluginInspection`
+(`packages/shared/src/plugin-inspection.ts`). Nothing the plugin ships is imported,
+required, built or run; the report is deterministic — manifest, README, static
+scan, no model.
+
+- **Ref → sha** is one `git ls-remote --symref` (any host, no API rate limit), and
+  the ref/subdir split of `/tree/feat/x/plugins/a` takes the LONGEST branch or tag
+  that prefixes the path, as GitHub's router does. A full sha is taken as-is; an
+  abbreviated one is refused (resolving it needs the host's API). Git runs with
+  prompts and credential helpers off, so a private repo fails fast instead of
+  opening a credential window on the host.
+- **Fetch** is GitHub's codeload tarball of that exact sha (other hosts: `git fetch
+  --depth 1 <url> <sha>` + `git archive`), streamed through an in-process tar reader
+  that writes only regular files and directories, refuses links, `..`, absolute
+  and Windows-reserved names, skips `.git`/`node_modules`, keeps only the requested
+  subdirectory, and caps files (2000), bytes (25 MB), per-file bytes (8 MB), the
+  download (100 MB), the unpacked stream (400 MB) and time (60 s). GitHub's pax
+  header carries the commit sha; a mismatch is refused. Every later read is
+  lexically and `realpath`-confined to the scratch directory.
+- **Report**: identity and README excerpt; the verdict of the host's own
+  `PluginManifestSchema` / `pluginRangeAccepts`; declared capabilities with one
+  plain-language line each (`PLUGIN_CAPABILITY_LINES`); contributions, read with
+  the host's own readers but with `${…}` left unexpanded; secrets, OAuth providers
+  and scopes, the settings schema; whether each entry file is actually in the
+  tree (built output is usually gitignored — the report says the plugin will not
+  load until it is built); and what is already installed under that id.
+- **Hooks used** is a token scan of the entries' directories, `src/`, `dist/`,
+  `lib/`, `build/` and any code file a contributed MCP server or process runs
+  (tests and configs excluded): `ctx.*` / `host.*` and whatever `activate`'s first
+  parameter is called, destructuring of those, routes, slots and their ids, events
+  by name when literal, and `fetch`, `node:http(s)`/`net`/`child_process`/`fs`,
+  `eval`, computed `import()`, `process.env`. It cannot see an alias it does not
+  follow or a name built at runtime, and the card says so.
+- **Mismatches**: a capability the scan (or a contribution) needs that the manifest
+  does not declare — absent from `ctx` at runtime, or the contribution ignored —
+  and a declared capability nothing uses. A literal `ctx.secrets.get("X")` for an
+  unlisted `X`, and a bare npm import in a built entry, are warnings.
+
+`POST /api/plugins/install { url, sha, replace? }` re-fetches **that sha** (never the
+ref's current tip), re-runs the same report, refuses unless it is installable, and
+hands the extracted directory to the CLI's `addPlugin` — the same validate / claim /
+copy-without-`.git`-and-`node_modules` / rename path `cm plugin add` takes. Replacing
+an installed copy needs `replace: true` (the card's "Update to x.y.z"). The plugin is
+not loaded: `PluginService.noteInstalled` lists a new id as inert, or flags an
+existing one, with `needsRestart`. Both routes are owner-only (403 for a non-owner
+session or an integration token; auth off means the single local user).
+
 Settings → Plugins is the same list with the enable toggle, status, error text,
 capability and secret chips, warnings, a generic settings form rendered from the
 JSON schema (string / number / integer / boolean / enum), Connect / Disconnect

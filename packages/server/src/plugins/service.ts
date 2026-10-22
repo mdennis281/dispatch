@@ -500,6 +500,9 @@ export class PluginService implements PluginContributionSource {
     const rec = this.records.get(id);
     const client = rec?.manifest?.client;
     if (!rec || !client || !rec.enabled || rec.incompatible) return undefined;
+    // Installed (or toggled on) since boot and never activated: its server
+    // half is not running, so its client half has nothing to talk to.
+    if (rec.needsRestart && rec.phase !== "active") return undefined;
     const base = resolve(rec.dir);
     const dir = resolve(base, manifestPathDir(client));
     if (dir === base || !dir.startsWith(base + sep)) return undefined;
@@ -548,6 +551,39 @@ export class PluginService implements PluginContributionSource {
         this.fault(`plugin "${id}" settings listener threw`, err);
       }
     }
+    return this.info(rec);
+  }
+
+  /**
+   * A plugin directory was written under the root while this process runs
+   * (the Install button). Nothing is loaded — hot reload is out of scope, and
+   * a plugin already imported once cannot be re-imported fresh — so the row
+   * only learns `needsRestart`, the same flag a toggle-on sets:
+   *
+   *   - a NEW id gets a record that is listed but inert (phase `inactive`, no
+   *     contributions, no processes) until the next boot discovers it for real;
+   *   - an EXISTING id keeps running the code it already loaded; its row is
+   *     flagged so the pane says the new files take effect on restart.
+   */
+  async noteInstalled(id: string): Promise<PluginInfo | undefined> {
+    const existing = this.records.get(id);
+    if (existing) {
+      existing.needsRestart = true;
+      return this.info(existing);
+    }
+    const found = (await discoverPlugins(this.configDir)).find((p) => p.id === id);
+    if (!found) return undefined;
+    const settings = await this.store.getSettings().catch(() => ({}) as { plugins?: undefined });
+    const entry = settings.plugins?.[id];
+    const rec: PluginRecord = {
+      ...found,
+      enabled: entry?.enabled ?? true,
+      phase: "inactive",
+      needsRestart: true,
+      settings: entry?.settings ?? {},
+      contributions: EMPTY_CONTRIBUTIONS,
+    };
+    this.records.set(id, rec);
     return this.info(rec);
   }
 

@@ -7,6 +7,8 @@
 import type {
   Persona,
   PluginInfo,
+  PluginInspection,
+  PluginInstallResult,
   PluginOAuthConnectResult,
   ReviewRoundsPolicy,
   GhCliStatus,
@@ -1500,6 +1502,11 @@ export const api = {
     /** Forget the stored tokens for one client. Returns the refreshed row. */
     oauthDisconnect: (id: string, name: string) =>
       del<PluginInfo>(`/api/plugins/${encodeURIComponent(id)}/oauth/${encodeURIComponent(name)}`),
+    /** Read a plugin at a git URL — manifest, README, static scan — without running any of it. Owner only. */
+    inspect: (url: string) => post<PluginInspection>("/api/plugins/inspect", { url }),
+    /** Install exactly the inspected `sha`. `replace` confirms overwriting an installed copy. Owner only. */
+    install: (url: string, sha: string, replace = false) =>
+      post<PluginInstallResult & { plugin?: PluginInfo }>("/api/plugins/install", { url, sha, replace }),
   },
 
   settings: {

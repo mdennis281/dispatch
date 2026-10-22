@@ -4,6 +4,8 @@
  *   PUT  /api/plugins/:id/enabled      → { enabled }  — targeted patch, not a settings-draft write
  *   PUT  /api/plugins/:id/settings     → { settings } — same
  *   POST /api/plugins/:id/reveal       → open the plugin directory on the HOST machine
+ *   POST /api/plugins/inspect          → { url } → PluginInspection, read without running anything (owner only)
+ *   POST /api/plugins/install          → { url, sha, replace? } → install exactly that sha (owner only)
  *   *    /api/plugins/:id/*            → the plugin's own route table
  *
  * The wildcard is registered HERE, at build time, because Fastify cannot add a
@@ -17,12 +19,39 @@
  * names are the host's, and a plugin that wants them has worse problems.
  */
 import { spawn } from "node:child_process";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import * as z from "zod";
+import { PluginInspectRequestSchema, PluginInstallRequestSchema } from "@dispatch/shared";
 import { PluginNotFound } from "../plugins/service.js";
+import { PluginInspectError } from "../plugins/inspect/index.js";
 
 const EnabledBody = z.object({ enabled: z.boolean() });
 const SettingsBody = z.object({ settings: z.record(z.string(), z.unknown()) });
+const InstallBody = PluginInstallRequestSchema.extend({
+  /** The owner confirmed replacing the installed copy ("Update to x.y.z"). */
+  replace: z.boolean().optional(),
+});
+
+/**
+ * Inspect and install are OWNER-only. Installing a plugin is installing code
+ * that runs in-process with the server's privileges, and inspecting one makes
+ * this server fetch from an arbitrary URL — neither belongs to an integration
+ * token or a non-owner account. With auth off there is no identity and the
+ * single local user is the owner, the same reading the plugin OAuth connect
+ * route makes.
+ */
+function refuseNonOwner(req: FastifyRequest, reply: FastifyReply): FastifyReply | null {
+  const who = req.authIdentity;
+  if (!who) return null;
+  if (who.kind !== "user") return reply.code(403).send({ error: "Integration tokens cannot install plugins." });
+  if (!who.user.owner) return reply.code(403).send({ error: "Only the owner can inspect or install plugins." });
+  return null;
+}
+
+function inspectFailure(reply: FastifyReply, err: unknown): FastifyReply {
+  if (err instanceof PluginInspectError) return reply.code(err.status).send({ error: err.message });
+  throw err;
+}
 
 /**
  * Open a directory in the host OS's file manager. Fire-and-forget: the
@@ -74,6 +103,33 @@ export function registerPluginRoutes(app: FastifyInstance): void {
     if (!info) return reply.code(404).send({ error: `no plugin "${req.params.id}"` });
     revealDirectory(info.dir);
     return { ok: true, dir: info.dir };
+  });
+
+  app.post("/api/plugins/inspect", async (req, reply) => {
+    const refused = refuseNonOwner(req, reply);
+    if (refused) return refused;
+    const parsed = PluginInspectRequestSchema.safeParse(req.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: "url is required" });
+    try {
+      return await app.services.pluginInspector.inspect(parsed.data.url);
+    } catch (err) {
+      return inspectFailure(reply, err);
+    }
+  });
+
+  app.post("/api/plugins/install", async (req, reply) => {
+    const refused = refuseNonOwner(req, reply);
+    if (refused) return refused;
+    const parsed = InstallBody.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
+    }
+    try {
+      const { url, sha, replace } = parsed.data;
+      return await app.services.pluginInspector.install(url, sha, !!replace);
+    } catch (err) {
+      return inspectFailure(reply, err);
+    }
   });
 
   app.all<{ Params: { id: string; "*": string } }>("/api/plugins/:id/*", async (req, reply) =>
