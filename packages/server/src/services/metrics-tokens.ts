@@ -119,6 +119,13 @@ export function tokenLabeller(settings: SubscriptionSettings | null | undefined)
 }
 
 export class TokenLedger {
+  /**
+   * Told about every write, after it lands. The limit sampler hangs off this:
+   * a turn that just spent from an account is the best reason to read that
+   * account's windows again.
+   */
+  onRecord?: (lines: readonly TokenLine[]) => void;
+
   constructor(
     private readonly db: StateDb,
     private readonly now: () => number = Date.now,
@@ -128,7 +135,7 @@ export class TokenLedger {
   record(lines: readonly TokenLine[]): number {
     if (lines.length === 0) return 0;
     try {
-      return this.db.tx(() => {
+      const written = this.db.tx(() => {
         const insert = this.db.prepare(INSERT_SQL);
         let written = 0;
         for (const raw of lines) {
@@ -153,6 +160,12 @@ export class TokenLedger {
         }
         return written;
       });
+      try {
+        this.onRecord?.(lines);
+      } catch {
+        // A listener's failure is its own; the rows are already written.
+      }
+      return written;
     } catch (err) {
       console.error("[Dispatch] metrics: token write failed:", err);
       return 0;

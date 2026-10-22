@@ -7,6 +7,7 @@
  */
 import * as z from "zod";
 import { HarnessKindSchema } from "./common.js";
+import { LimitReadingSchema } from "./limit-history.js";
 
 /** One rate-limit window: how much of the quota is used + when it resets. */
 export const UsageWindowSchema = z.object({
@@ -54,6 +55,13 @@ export const UsageSnapshotSchema = z.object({
    * see {@link usageWindowsOf}, the one place that decides.
    */
   windows: z.array(TitledUsageWindowSchema).optional(),
+  /**
+   * EVERY window the provider reported, with stable ids — what the limit
+   * history records. Separate from `windows` because that list drives the card
+   * and the exhaustion check, and a per-model weekly window at 100% must not
+   * mark a whole account exhausted just because it is now being tracked.
+   */
+  limits: z.array(LimitReadingSchema).optional(),
 });
 export type UsageSnapshot = z.infer<typeof UsageSnapshotSchema>;
 

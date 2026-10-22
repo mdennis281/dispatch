@@ -27,6 +27,11 @@
  *
  *   POST /api/metrics/tokens → TokenReport
  *
+ * And the limit history — every account's windows over time, the resets and
+ * anomalies between readings, and what the sampler is doing right now:
+ *
+ *   POST /api/metrics/limits → LimitReport
+ *
  * That one STREAMS. It walks the project's git history on every call — no
  * cache, by design (see `shared/growth.ts`) — and a long history takes long
  * enough that a bare pending request reads as a hung page. So the response is
@@ -60,7 +65,9 @@ import {
   MetricSpanDimensionSchema,
   MetricSpanFilterSchema,
   MetricSpanQuerySchema,
+  LimitQuerySchema,
   TokenQuerySchema,
+  type LimitReport,
 } from "@dispatch/shared";
 import { tokenLabeller } from "../services/metrics-tokens.js";
 
@@ -98,7 +105,23 @@ const SpanRecentSchema = SpanScopeSchema.extend({
 });
 
 export function registerMetricsRoutes(app: FastifyInstance): void {
-  const { metrics, growth, tokens } = app.services;
+  const { metrics, growth, tokens, limits, limitSampler } = app.services;
+
+  app.post<{ Body: unknown }>("/api/metrics/limits", async (req, reply) => {
+    const parsed = LimitQuerySchema.safeParse(req.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+    const settings = await store.getSettings().catch(() => null);
+    const label = tokenLabeller(settings);
+    const stats = limits.stats();
+    const report: LimitReport = {
+      windows: limits.windows(parsed.data, (id) => label("subscription", id)),
+      events: limits.events(parsed.data),
+      accounts: limitSampler.status(),
+      sampleRows: stats.rows,
+      oldest: stats.oldest,
+    };
+    return report;
+  });
   const { store } = app.cm;
 
   app.post<{ Body: unknown }>("/api/metrics/tokens", async (req, reply) => {

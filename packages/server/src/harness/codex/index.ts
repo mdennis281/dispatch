@@ -15,6 +15,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   fallbackModels,
+  limitWindowTitle,
   type Effort,
   type ModelOption,
 } from "@dispatch/shared";
@@ -23,6 +24,7 @@ import type {
   HarnessAccount,
   HarnessCapabilities,
   HarnessLimits,
+  HarnessLimitReadOpts,
   HarnessRuntimeInfo,
   HarnessSession,
   HarnessSessionSpec,
@@ -95,6 +97,10 @@ export class CodexHarness implements Harness {
   private efforts = new Map<string, string[]>();
   /** Keyed by account: limits belong to a login, not to the provider. */
   private limitsCache = new Map<string, HarnessLimits | null>();
+  /** Who wants pushed limit snapshots (the limit history's sampler). */
+  private limitListeners = new Set<
+    (subscriptionId: string | undefined, limits: HarnessLimits) => void
+  >();
 
   constructor(opts: CodexHarnessOpts = {}) {
     this.opts = opts;
@@ -214,18 +220,19 @@ export class CodexHarness implements Harness {
     return this.efforts.get(model) ?? [];
   }
 
-  async readLimits(account?: HarnessAccount): Promise<HarnessLimits | null> {
+  async readLimits(account?: HarnessAccount, opts?: HarnessLimitReadOpts): Promise<HarnessLimits | null> {
     const key = accountKey(account);
     let held: { conn: CodexConnection; release: () => void } | undefined;
     try {
       held = this.connect(account);
       const res = await this.withTimeout(
-        held.conn.call<{ rateLimits?: CodexRateLimitSnapshot }>("account/rateLimits/read", undefined),
+        held.conn.call<CodexRateLimitsResponse>("account/rateLimits/read", undefined),
       );
-      const limits = res.rateLimits ? toHarnessLimits(res.rateLimits) : null;
+      const limits = res.rateLimits ? toHarnessLimits(res.rateLimits, res) : null;
       this.limitsCache.set(key, limits);
       return limits;
-    } catch {
+    } catch (err) {
+      if (opts?.fresh) throw err;
       return this.limitsCache.get(key) ?? null;
     } finally {
       held?.release();
@@ -303,6 +310,13 @@ export class CodexHarness implements Harness {
     }
   }
 
+  onLimits(
+    listener: (subscriptionId: string | undefined, limits: HarnessLimits) => void,
+  ): () => void {
+    this.limitListeners.add(listener);
+    return () => this.limitListeners.delete(listener);
+  }
+
   createSession(spec: HarnessSessionSpec): HarnessSession {
     const key = accountKey(spec.account);
     const held = this.connect(spec.account);
@@ -311,7 +325,10 @@ export class CodexHarness implements Harness {
     held.conn.onGlobal((frame) => {
       if (frame.method !== "account/rateLimits/updated") return;
       const snap = (frame.params as { rateLimits?: CodexRateLimitSnapshot } | undefined)?.rateLimits;
-      if (snap) this.limitsCache.set(key, toHarnessLimits(snap));
+      if (!snap) return;
+      const limits = toHarnessLimits(snap);
+      this.limitsCache.set(key, limits);
+      for (const fn of this.limitListeners) fn(spec.account?.subscriptionId, limits);
     });
     return new CodexSession({
       spec,
@@ -349,11 +366,22 @@ interface CodexRateLimitWindow {
 }
 
 interface CodexRateLimitSnapshot {
+  limitId?: string | null;
+  limitName?: string | null;
   primary?: CodexRateLimitWindow | null;
   secondary?: CodexRateLimitWindow | null;
   planType?: string | null;
   rateLimitReachedType?: string | null;
   spendControlReached?: boolean | null;
+}
+
+/** `account/rateLimits/read`, as far as Dispatch reads it. */
+interface CodexRateLimitsResponse {
+  /** The legacy single-bucket view. */
+  rateLimits?: CodexRateLimitSnapshot;
+  /** Every metered bucket by limit id (`codex`, `premium`, …). */
+  rateLimitsByLimitId?: Record<string, CodexRateLimitSnapshot> | null;
+  rateLimitResetCredits?: { availableCount?: number | null } | null;
 }
 
 /**
@@ -373,8 +401,57 @@ export function toModelOption(m: CodexModel): ModelOption {
   };
 }
 
+/**
+ * Every window across every bucket, ids stable for the account.
+ *
+ * Keyed by bucket and LENGTH (`codex:10080m`), not by slot: a `prolite` plan
+ * reports its weekly window as `primary`, and a plan change that put a 5-hour
+ * window in that slot would otherwise splice two different windows into one
+ * history line.
+ */
+export function trackedWindows(
+  buckets: CodexRateLimitSnapshot[],
+): NonNullable<HarnessLimits["tracked"]> {
+  const out: NonNullable<HarnessLimits["tracked"]> = [];
+  const seen = new Set<string>();
+  for (const b of buckets) {
+    const limitId = b.limitId || "codex";
+    for (const [slot, w] of [
+      ["primary", b.primary],
+      ["secondary", b.secondary],
+    ] as const) {
+      if (!w || typeof w.usedPercent !== "number") continue;
+      const minutes = typeof w.windowDurationMins === "number" ? w.windowDurationMins : undefined;
+      const id = `${limitId}:${minutes ? `${minutes}m` : slot}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const base = limitWindowTitle(minutes, slot === "primary" ? "Primary window" : "Secondary window");
+      // The main bucket goes unqualified; a side bucket is named by the
+      // backend's label, or its id when it gave none.
+      const qualifier = limitId === "codex" ? undefined : b.limitName || limitId;
+      out.push({
+        id,
+        title: qualifier ? `${base} · ${qualifier}` : base,
+        usedPercent: w.usedPercent,
+        windowMinutes: minutes,
+        resetsAt: typeof w.resetsAt === "number" ? w.resetsAt * 1000 : undefined,
+      });
+    }
+  }
+  return out;
+}
+
 /** Codex `RateLimitSnapshot` → the neutral shape. */
-export function toHarnessLimits(s: CodexRateLimitSnapshot): HarnessLimits {
+export function toHarnessLimits(
+  s: CodexRateLimitSnapshot,
+  extra?: Omit<CodexRateLimitsResponse, "rateLimits">,
+): HarnessLimits {
+  // The multi-bucket map when the runtime sends one; the legacy snapshot is a
+  // copy of one of its entries, so it is only a bucket of its own without it.
+  const buckets = extra?.rateLimitsByLimitId
+    ? Object.entries(extra.rateLimitsByLimitId).map(([id, b]) => ({ ...b, limitId: b.limitId ?? id }))
+    : [s];
+  const credits = extra?.rateLimitResetCredits?.availableCount;
   const win = (w: CodexRateLimitWindow | null | undefined) =>
     w
       ? {
@@ -390,6 +467,8 @@ export function toHarnessLimits(s: CodexRateLimitSnapshot): HarnessLimits {
     planType: s.planType ?? undefined,
     reached: Boolean(s.rateLimitReachedType) || Boolean(s.spendControlReached),
     reachedType: s.rateLimitReachedType ?? undefined,
+    tracked: trackedWindows(buckets),
+    ...(typeof credits === "number" ? { resetCredits: credits } : {}),
   };
 }
 

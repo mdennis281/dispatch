@@ -80,6 +80,8 @@ import type {
   MetricQueryInput,
   TokenQueryInput,
   TokenReport,
+  LimitQueryInput,
+  LimitReport,
   MetricSeriesResponse,
   MetricSpan,
   MetricSpanDimension,
@@ -1708,6 +1710,8 @@ export const api = {
     prune: (before: number) => post<{ deleted: number }>("/api/metrics/prune", { before }),
     /** Tokens and cost by account × model — the Tokens tab, in one read. */
     tokens: (query: TokenQueryInput) => post<TokenReport>("/api/metrics/tokens", query),
+    /** Every account's limit windows over time, plus resets and anomalies. */
+    limits: (query: LimitQueryInput) => post<LimitReport>("/api/metrics/limits", query),
 
     /* The RUNTIME half — the same window, answered in milliseconds.
      *
