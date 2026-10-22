@@ -102,7 +102,7 @@ export function registerChatRoutes(app: FastifyInstance): void {
   app.put<{ Params: { id: string } }>(
     "/api/chats/:id",
     async (req, reply) => {
-      const existing = await store.getChat(req.params.id);
+      let existing = await store.getChat(req.params.id);
       if (!existing) return reply.code(404).send({ error: "not found" });
       const body = (req.body ?? {}) as Record<string, unknown>;
       if ("personaId" in body) return reply.code(400).send({ error: "Use the chat persona endpoint to change persona." });
@@ -130,16 +130,24 @@ export function registerChatRoutes(app: FastifyInstance): void {
       // plugin keeps under its own id, and the spread below would. `null`
       // under a key clears that key, the same wire convention as the pins. A
       // top-level `ext: null` falls through to the pin loop and clears the lot.
+      //
+      // The merge runs INSIDE the store's chat lock (`patchChatExt`), not
+      // here: two plugins answering the same `chat-update` both read the same
+      // cached row, and a merge against that row lets the second write erase
+      // the first with a 200. The rest of the body still takes the old path
+      // over the row the patch returned.
       if (body.ext !== undefined && body.ext !== null) {
         if (typeof body.ext !== "object" || Array.isArray(body.ext)) {
           return reply.code(400).send({ error: "ext must be an object keyed by plugin id" });
         }
-        const ext: Record<string, unknown> = { ...(existing.ext ?? {}) };
-        for (const [key, value] of Object.entries(body.ext as Record<string, unknown>)) {
-          if (value === null) delete ext[key];
-          else ext[key] = value;
+        const patched = await store.patchChatExt(req.params.id, body.ext as Record<string, unknown>);
+        if (!patched) return reply.code(404).send({ error: "not found" });
+        delete body.ext;
+        if (Object.keys(body).length === 0) {
+          bus.publish({ type: "chat-update", chat: patched });
+          return patched;
         }
-        body.ext = ext;
+        existing = patched;
       }
       const merged = { ...existing, ...body } as Record<string, unknown>;
       // JSON cannot carry `undefined`, so `null` is the wire form of "clear this

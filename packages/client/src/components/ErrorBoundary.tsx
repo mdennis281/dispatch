@@ -279,3 +279,50 @@ export function RowErrorBoundary({
     </Boundary>
   );
 }
+
+/**
+ * Around one plugin slot — a composer control, a badge, a panel tab, a
+ * settings section. The fallback is INLINE and small, because the slot is:
+ * a badge that fails must not become a banner across the header. Scoped to
+ * the plugin so the console tag and the copied report name the culprit, and
+ * `resetKey` defaults to the scope so a retry is the only way back (a plugin
+ * that throws on every render would otherwise re-throw on every chat).
+ *
+ * Rendered by `plugins/PluginSlot`, which is the only place that should
+ * mount it — see the reasoning there.
+ */
+export function SlotErrorBoundary({
+  children,
+  pluginId,
+  slot,
+  resetKey,
+}: {
+  children: ReactNode;
+  pluginId: string;
+  slot: string;
+  resetKey?: string;
+}) {
+  const scope = `plugin ${pluginId} · ${slot}`;
+  return (
+    <Boundary
+      scope={scope}
+      resetKey={resetKey ?? scope}
+      render={(caught, retry) => (
+        <span
+          className="inline-flex items-center gap-1.5 text-2xs text-muted"
+          title={`${caught.error.name}: ${caught.error.message}`}
+        >
+          <span className="cm-mono text-danger">{pluginId} failed</span>
+          <Button size="sm" variant="link" onClick={retry}>
+            Retry
+          </Button>
+          <Button size="sm" variant="link" onClick={() => copyReport(scope, caught)}>
+            Copy details
+          </Button>
+        </span>
+      )}
+    >
+      {children}
+    </Boundary>
+  );
+}

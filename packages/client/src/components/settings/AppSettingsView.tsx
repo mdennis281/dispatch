@@ -41,6 +41,7 @@ import {
 import { SettingsShell } from "./SettingsShell.js";
 import { APP_SECTIONS, APP_SECTION_BY_ID, pluginSectionDef, useAppSections } from "./appSections.js";
 import { useSlots } from "../../plugins/slots.js";
+import { PluginSlot } from "../../plugins/PluginSlot.js";
 import { AppearanceSection } from "./sections/AppearanceSection.js";
 import { AccountsSection } from "./sections/AccountsSection.js";
 import { ChatSection } from "./sections/ChatSection.js";
@@ -322,7 +323,12 @@ export function AppSettingsView() {
             <Spinner size={14} /> Loading settings…
           </div>
         ) : pluginSection ? (
-          <>{pluginSection.def.render()}</>
+          <PluginSlot
+            pluginId={pluginSection.pluginId}
+            slot={`settingsSection ${pluginSection.def.id}`}
+            render={pluginSection.def.render}
+            args={[]}
+          />
         ) : section === "auth" ? (
           <AuthSettings />
         ) : section === "integrations" ? (

@@ -89,6 +89,16 @@ export interface TtsEngineDef {
 
 /* ------------------------------------------------------------------ slots */
 
+/*
+ * Every `render` below runs AS ITS OWN COMPONENT, inside an error boundary
+ * scoped to the plugin (the host's `PluginSlot`). So a `render` may call
+ * hooks directly — `host.React.useState` in the function body is fine — and
+ * one that throws shows "<plugin> failed · Retry" in the slot's place rather
+ * than taking the host's region down. A `menu` is a ReactNode, not a render:
+ * it is created once at registration, so state belongs in a component of
+ * your own rendered inside it.
+ */
+
 /**
  * A composer-toolbar control. It enters the size ladder (`COMPOSER_CONTROLS`)
  * with a single `sm` rung at `priority` — the row evicts it like any other

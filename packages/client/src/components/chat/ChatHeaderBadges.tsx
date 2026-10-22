@@ -12,6 +12,7 @@ import { openWorkspace } from "../../stores/workspace.js";
 import { rosterRows } from "./chatHeaderRefs.js";
 import { useSlots } from "../../plugins/slots.js";
 import { chatRefOf } from "../../plugins/host.js";
+import { PluginSlot } from "../../plugins/PluginSlot.js";
 import { useChats } from "../../stores/chats.js";
 
 /**
@@ -31,9 +32,14 @@ export function PluginChatBadges({ chatId }: { chatId: string }) {
   return (
     <>
       {badges.map((b) => (
-        <span key={b.key} className="contents">
-          {b.def.render(ref)}
-        </span>
+        <PluginSlot
+          key={b.key}
+          pluginId={b.pluginId}
+          slot="chatBadge"
+          resetKey={`${b.key}:${chatId}`}
+          render={b.def.render}
+          args={[ref]}
+        />
       ))}
     </>
   );

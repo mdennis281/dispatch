@@ -136,6 +136,8 @@ export type ComposerVisibility = Record<BuiltinComposerControl, boolean> & Recor
  */
 export interface RuntimeControlDef extends ControlDef {
   sizes: readonly ["sm"];
+  /** The plugin that registered it — what the slot's error boundary names. */
+  owner?: string;
   icon: ReactNode;
   render(size: "sm"): ReactNode;
   menu?: ReactNode;

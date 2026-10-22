@@ -3,7 +3,6 @@ import { flushSync } from "react-dom";
 import StarterKit from "@tiptap/starter-kit";
 import Placeholder from "@tiptap/extension-placeholder";
 import {
-  Fragment,
   Suspense,
   lazy,
   useCallback,
@@ -112,6 +111,8 @@ import {
   type ComposerControl,
 } from "../../lib/composerPrefs.js";
 import { useEngines, activeTtsEngine } from "../../lib/engines.js";
+import { PluginSlot } from "../../plugins/PluginSlot.js";
+import { SlotErrorBoundary } from "../ErrorBoundary.js";
 import {
   demote,
   promote,
@@ -1466,7 +1467,14 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     if (moreView === "customize") return customizeRows(dense);
     if (moreView === "voice") return voiceRows(dense);
     const runtime = runtimeControls.find((c) => c.id === moreView);
-    if (runtime) return <div className="flex flex-col">{runtime.menu}</div>;
+    if (runtime)
+      return (
+        <div className="flex flex-col">
+          <SlotErrorBoundary pluginId={runtime.owner ?? runtime.id} slot={`${runtime.label} menu`} resetKey={chat.id}>
+            {runtime.menu}
+          </SlotErrorBoundary>
+        </div>
+      );
     return (
       <div className="flex flex-col">
         <MenuItem
@@ -2151,7 +2159,16 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
               what the icon IS is the plugin's `render`. */}
           {runtimeControls.map(
             (c) =>
-              sizes[c.id] !== "off" && <Fragment key={c.id}>{c.render("sm")}</Fragment>,
+              sizes[c.id] !== "off" && (
+                <PluginSlot
+                  key={c.id}
+                  pluginId={c.owner ?? c.id}
+                  slot={`${c.label} control`}
+                  resetKey={chat.id}
+                  render={c.render}
+                  args={["sm"]}
+                />
+              ),
           )}
 
           <div className="ml-auto flex items-center gap-2">

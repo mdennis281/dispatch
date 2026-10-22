@@ -87,6 +87,7 @@ export function createClientHost(pluginId: string): ClientHost {
           // Namespaced, so two plugins' "voice" controls (or a plugin's and a
           // built-in's) cannot share a sizes key.
           id: `${pluginId}:${def.id}`,
+          owner: pluginId,
           label: def.label,
           hint: def.hint,
           icon: def.icon,

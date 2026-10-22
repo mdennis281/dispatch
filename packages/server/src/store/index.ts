@@ -1403,6 +1403,35 @@ export class Store {
       return validated;
     });
   }
+  /**
+   * Merge keys into `chat.ext` while holding the chat file's lock: `null`
+   * deletes a key, anything else replaces it. The merge has to happen HERE
+   * and not in the route, for the reason `patchChat` gives: two plugins
+   * reacting to the same `chat-update` (or two tabs) both read the same
+   * cached row, and the second get-then-save erased the first with a 200.
+   */
+  async patchChatExt(id: string, patch: Record<string, unknown>): Promise<Chat | null> {
+    assertEntityId("chat", id); // before the lock — see deleteProject
+    return this.mutex.run(`chat:${id}`, async () => {
+      const current = await this.readChatRecord(id);
+      if (!current) return null;
+      const ext: Record<string, unknown> = { ...(current.ext ?? {}) };
+      for (const [key, value] of Object.entries(patch)) {
+        if (value === null) delete ext[key];
+        else ext[key] = value;
+      }
+      const validated = ChatSchema.parse({
+        ...current,
+        ext: Object.keys(ext).length ? ext : undefined,
+        id,
+        updatedAt: Date.now(),
+      });
+      await writeJsonAtomic(this.chatFile(id), validated);
+      this.cacheChat(validated);
+      return validated;
+    });
+  }
+
   async deleteChat(id: string): Promise<void> {
     const dir = this.chatDir(id); // validates before the lock — see deleteProject
     await this.mutex.run(`chat:${id}`, () =>

@@ -23,6 +23,7 @@ import {
 import { type FocusPanelTab } from "../panels/panelBus.js";
 import { useSlots } from "../../plugins/slots.js";
 import { chatRefOf } from "../../plugins/host.js";
+import { PluginSlot } from "../../plugins/PluginSlot.js";
 
 type PanelTab = FocusPanelTab;
 
@@ -178,7 +179,17 @@ export function RightPanel({ chat }: { chat: Chat }) {
         {tab === "apps" && <RunnerPanel chat={chat} />}
         {tab === "terminals" && <TerminalsPanel chat={chat} />}
         {tab === "prs" && <PRsPanel chat={chat} />}
-        {pluginTab && <div className="p-3">{pluginTab.def.render(chatRefOf(chat.id) ?? { id: chat.id, projectId: chat.projectId })}</div>}
+        {pluginTab && (
+          <div className="p-3">
+            <PluginSlot
+              pluginId={pluginTab.pluginId}
+              slot={`panelTab ${pluginTab.def.id}`}
+              resetKey={`${pluginTab.key}:${chat.id}`}
+              render={pluginTab.def.render}
+              args={[chatRefOf(chat.id) ?? { id: chat.id, projectId: chat.projectId }]}
+            />
+          </div>
+        )}
       </ScrollArea>
     </aside>
   );

@@ -180,4 +180,15 @@ describe("PUT /api/chats/:id — ext", () => {
     const last = updates.filter((u) => u.type === "chat-update").at(-2);
     expect(last && last.type === "chat-update" ? last.chat.ext : null).toEqual({ hello: { count: 2 } });
   });
+
+  it("keeps every key when writes race — the merge runs under the chat lock, not in the route", async () => {
+    const r = await root();
+    const { instance } = await app(r);
+    const id = await chat(instance, r.dataDir);
+    const put = (ext: unknown) => instance.inject({ method: "PUT", url: `/api/chats/${id}`, payload: { ext } });
+    const results = await Promise.all([put({ a: 1 }), put({ b: 2 }), put({ c: 3 }), put({ d: 4 })]);
+    expect(results.map((x) => x.statusCode)).toEqual([200, 200, 200, 200]);
+    const row = (await instance.inject({ url: `/api/chats/${id}` })).json();
+    expect(row.ext).toEqual({ a: 1, b: 2, c: 3, d: 4 });
+  });
 });
