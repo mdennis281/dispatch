@@ -62,5 +62,6 @@ export * from "./global-chat.js";
 export * from "./auto-allow.js";
 export * from "./plugin-manifest.js";
 export * from "./plugin-api.js";
+export * from "./plugin-inspection.js";
 export * from "./webhooks.js";
 export * from "./plugin-client-api.js";

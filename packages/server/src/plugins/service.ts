@@ -80,6 +80,13 @@ interface PluginRecord extends DiscoveredPlugin {
   activationError?: string;
   /** Toggled on in this process: the pane says "restart to apply". */
   needsRestart: boolean;
+  /**
+   * Its directory was replaced under it by an install while its old code is
+   * still loaded. The client bundle is NOT served from then on: the files on
+   * disk are the new version, and a new client talking to the old in-memory
+   * server half (old routes, old `ctx` behaviour) is a skew nobody tested.
+   */
+  filesReplaced?: boolean;
   settings: Record<string, unknown>;
   module?: PluginModule;
   owned?: OwnedResources;
@@ -393,7 +400,9 @@ export class PluginService implements PluginContributionSource {
       // The ENTRY MODULE's URL, not the directory's: the SPA `import()`s this
       // string as-is, and the file's name is the manifest's to choose
       // (`client/main.js` is as valid as `client/index.js`).
-      ...(m?.client ? { clientUrl: `/plugins/${rec.id}/${basename(m.client)}` } : {}),
+      // Not advertised while the files on disk are newer than the loaded code
+      // (see `filesReplaced`): the loader would import a bundle that 404s.
+      ...(m?.client && !rec.filesReplaced ? { clientUrl: `/plugins/${rec.id}/${basename(m.client)}` } : {}),
       ...(rec.settingsSchema !== undefined ? { settingsSchema: rec.settingsSchema } : {}),
       settings: rec.settings,
       ...(m?.secrets ? { secrets: m.secrets } : {}),
@@ -500,6 +509,10 @@ export class PluginService implements PluginContributionSource {
     const rec = this.records.get(id);
     const client = rec?.manifest?.client;
     if (!rec || !client || !rec.enabled || rec.incompatible) return undefined;
+    // Installed (or toggled on) since boot and never activated: its server
+    // half is not running, so its client half has nothing to talk to.
+    if (rec.needsRestart && rec.phase !== "active") return undefined;
+    if (rec.filesReplaced) return undefined;
     const base = resolve(rec.dir);
     const dir = resolve(base, manifestPathDir(client));
     if (dir === base || !dir.startsWith(base + sep)) return undefined;
@@ -548,6 +561,42 @@ export class PluginService implements PluginContributionSource {
         this.fault(`plugin "${id}" settings listener threw`, err);
       }
     }
+    return this.info(rec);
+  }
+
+  /**
+   * A plugin directory was written under the root while this process runs
+   * (the Install button). Nothing is loaded — hot reload is out of scope, and
+   * a plugin already imported once cannot be re-imported fresh — so the row
+   * only learns `needsRestart`, the same flag a toggle-on sets:
+   *
+   *   - a NEW id gets a record that is listed but inert (phase `inactive`, no
+   *     contributions, no processes) until the next boot discovers it for real;
+   *   - an EXISTING id keeps running the code it already loaded; its row is
+   *     flagged so the pane says the new files take effect on restart.
+   */
+  async noteInstalled(id: string): Promise<PluginInfo | undefined> {
+    const existing = this.records.get(id);
+    if (existing) {
+      existing.filesReplaced = true;
+      // A switched-off plugin will not load on restart either; `setEnabled`
+      // keeps `needsRestart` false for it, and so does this.
+      if (existing.enabled) existing.needsRestart = true;
+      return this.info(existing);
+    }
+    const found = (await discoverPlugins(this.configDir)).find((p) => p.id === id);
+    if (!found) return undefined;
+    const settings = await this.store.getSettings().catch(() => ({}) as { plugins?: undefined });
+    const entry = settings.plugins?.[id];
+    const rec: PluginRecord = {
+      ...found,
+      enabled: entry?.enabled ?? true,
+      phase: "inactive",
+      needsRestart: true,
+      settings: entry?.settings ?? {},
+      contributions: EMPTY_CONTRIBUTIONS,
+    };
+    this.records.set(id, rec);
     return this.info(rec);
   }
 

@@ -13,6 +13,7 @@ import { api } from "../../../lib/api.js";
 import { useCopyId } from "../../../lib/useCopyId.js";
 import { useNotices } from "../../../stores/notices.js";
 import { coerceNumber, displayValue, fieldsFromSchema, type SettingsField } from "./pluginSettingsForm.js";
+import { PluginInspectPanel } from "./PluginInspectPanel.js";
 
 /**
  * Settings → Plugins: every directory under `<configDir>/plugins/`, with the
@@ -50,13 +51,15 @@ export function PluginsSection() {
 
   return (
     <div className="space-y-3">
+      <PluginInspectPanel onInstalled={load} />
       <InlineError message={error} />
       {plugins && plugins.length === 0 ? (
         <div className="rounded-md border border-line-soft px-3 py-4 text-xs leading-relaxed text-muted">
           <p className="font-medium text-secondary">No plugins installed.</p>
           <p className="mt-1">
             Drop one into <code className="text-fg">plugins/&lt;id&gt;/</code> under Dispatch&apos;s config
-            directory, or run <code className="text-fg">cm plugin add &lt;path&gt;</code>, then restart.
+            directory, run <code className="text-fg">cm plugin add &lt;path&gt;</code>, or inspect one from a URL
+            above, then restart.
           </p>
         </div>
       ) : (
@@ -86,7 +89,13 @@ function PluginCard({ plugin, onChange }: { plugin: PluginInfo; onChange: (next:
   const copy = useCopyId();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const status = STATUS[plugin.status];
+  // An enabled plugin the host has not loaded yet (installed or switched on
+  // since boot) reports `disabled`; "Off" beside a switch that is ON read as a
+  // contradiction, so the row names what is actually pending.
+  const status: { tone: DotTone; label: string } =
+    plugin.needsRestart && plugin.enabled && plugin.status === "disabled"
+      ? { tone: "warn", label: "Restart to load" }
+      : STATUS[plugin.status];
   // Invalid and incompatible plugins cannot be turned on; the toggle would
   // promise an activation that can never happen.
   const toggleable = plugin.status !== "invalid" && plugin.status !== "incompatible";
@@ -140,7 +149,8 @@ function PluginCard({ plugin, onChange }: { plugin: PluginInfo; onChange: (next:
       {plugin.error && <InlineError message={plugin.error} />}
       {plugin.needsRestart && (
         <p className="text-xs text-warn">
-          Enabled — restart Dispatch to load it. Plugins are not hot-reloaded.
+          {plugin.status === "active" ? "Updated" : "Not loaded yet"} — restart Dispatch to load it. Plugins are not
+          hot-reloaded.
         </p>
       )}
       <InlineError message={error} />

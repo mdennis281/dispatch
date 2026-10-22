@@ -98,6 +98,7 @@ import { FsExplorerService } from "./fs-explorer.js";
 import { HarnessRegistry } from "../harness/index.js";
 import { ManagerMcpBridge } from "./mcp/manager-http.js";
 import { PluginService } from "../plugins/service.js";
+import { PluginInspector } from "../plugins/inspect/index.js";
 import { PluginOAuthService } from "../plugins/oauth.js";
 
 /** The shared base every service hangs off. */
@@ -163,6 +164,7 @@ export interface ServiceOverrides {
   chatMessenger?: ChatMessenger;
   chatCompletionNotices?: ChatCompletionNotices;
   plugins?: PluginService;
+  pluginInspector?: PluginInspector;
   pluginOAuth?: PluginOAuthService;
 }
 
@@ -246,6 +248,8 @@ export interface Services extends ServiceBase {
   chatCompletionNotices: ChatCompletionNotices;
   /** Installed plugins under `<configDir>/plugins/`: discovery, activation, their route tables. */
   plugins: PluginService;
+  /** Settings → Plugins → Inspect from URL: read a plugin at a git URL without running it, and install that exact sha. */
+  pluginInspector: PluginInspector;
   /** The host-run OAuth client flow behind `ctx.oauth` and the plugin pane's Connect button. */
   pluginOAuth: PluginOAuthService;
   fileIndex: FileIndexService;
@@ -1087,6 +1091,13 @@ export function createServices(
   // next session without a restart.
   authored.setPluginSource(plugins);
   broker.plugins = plugins;
+  const pluginInspector: PluginInspector =
+    overrides.pluginInspector ??
+    new PluginInspector({
+      configDir: config.configDir ?? config.dataDir,
+      hostInfo: (id) => plugins.get(id),
+      noteInstalled: (id) => plugins.noteInstalled(id),
+    });
   // "The chat you spawned is done" — armed by `broker.spawnChat` below, delivered
   // over the messenger above. Constructed here because it needs both, and
   // disposed in `dispose()` so a pending notice is not a reason the process
@@ -1395,6 +1406,7 @@ export function createServices(
     chatMessenger,
     chatCompletionNotices,
     plugins,
+    pluginInspector,
     pluginOAuth,
     fileIndex,
     fsExplorer,

@@ -34,6 +34,22 @@ deletes a copy and unlinks a link (the working directory is untouched).
 `enable`/`disable` flip `AppSettings.plugins[id].enabled` in `config.json`; Settings →
 Plugins does the same live.
 
+## Installing from a URL (Settings → Plugins → Inspect from URL)
+
+The owner can paste your repository's URL and get a report before installing: what
+the manifest declares, what the code was statically seen using, and any mismatch
+between the two. Install then copies **exactly the inspected commit** — the
+repository tree as it is at that sha, never built. So, if you want people to
+install from a URL:
+
+- **Commit the built entries** (`server/index.js`, `client/index.js`) or the report
+  warns that they are missing and the plugin will not load. The scaffold's
+  `.gitignore` excludes them; drop those lines for a published plugin.
+- **Declare every capability you use.** The report lists `ctx.chats.send` without
+  `chats:write`, and a declared capability with no use, as mismatches.
+- Keep `ctx` / `host` (or `activate`'s parameter) as the name you call through; an
+  alias the scan does not follow shows as "nothing uses it".
+
 ## The restart rule
 
 Plugins are discovered and read at boot; **nothing hot-reloads**. After `add`, `link`,
