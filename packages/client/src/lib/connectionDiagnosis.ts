@@ -57,6 +57,13 @@ export interface DiagnosisInput {
   serverVersion?: string;
   badFrames: number;
   badFrameTypes: string[];
+  /**
+   * Did `hello` land on the current socket? Only that clears the store's
+   * `downSince`, so it is the one signal that separates "open and talking" from
+   * "open and silent". Without it a stale bundle — which HAS handshaken, that's
+   * how it learned the server's version — was reported as "awaiting handshake".
+   */
+  handshaken?: boolean;
 }
 
 /**
@@ -170,6 +177,9 @@ function socketCheck(input: DiagnosisInput, serverOk: boolean): Check {
   // Nothing downstream of a dead server is diagnostic — the socket would fail
   // whatever its own state, so reporting it as a second failure is noise.
   if (!serverOk) return { id: "socket", label, state: "skip", value: "—" };
+  if (input.state === "open" && input.handshaken) {
+    return { id: "socket", label, state: "ok", value: "connected" };
+  }
   if (input.state === "open") {
     // Open, yet this screen is up — which means `hello` never landed. See the
     // store's `downSince`, which only a handshake clears.
@@ -224,7 +234,7 @@ export function diagnose(input: DiagnosisInput): Diagnosis {
     return withChecks({
       headline: "This tab is running an old build",
       detail: `The page was built as ${input.clientVersion} and the server is ${input.serverVersion}. They no longer agree on the protocol, so updates are being dropped.`,
-      hint: "Reload to pick up the current build. If it comes straight back, the service worker is holding a cached copy — a hard reload clears it.",
+      hint: "The tab reloads itself when this happens, so seeing it means that reload came back on the old build. A hard reload (Ctrl+Shift+R) clears the browser's copy; if it still comes back, something in front of Dispatch is caching the page.",
       action: "reload",
       retry: false,
     });
