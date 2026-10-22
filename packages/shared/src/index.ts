@@ -44,6 +44,7 @@ export * from "./version.js";
 export * from "./scheduler.js";
 export * from "./wire.js";
 export * from "./metrics.js";
+export * from "./metrics-tokens.js";
 export * from "./home.js";
 export * from "./growth.js";
 export * from "./pr-tools.js";

@@ -401,6 +401,47 @@ const MIGRATIONS: ReadonlyArray<string> = [
     PRIMARY KEY (plugin, name)
   );
   `,
+
+  // 10 — token accounting: one row per (turn × model), stamped with the account
+  // that paid for it.
+  //
+  // Its own table, not numeric columns on `metric`: an event row is one COUNT
+  // and every existing query is `COUNT(*)`, while a token row is four SUMs and a
+  // price. Bolting those onto the event table would leave every row that isn't
+  // a turn carrying four NULLs, and every existing chart one forgotten
+  // `WHERE category = ...` away from summing tool calls as if they were turns.
+  //
+  // `subscription_id` is the column the whole view exists for. The chat record
+  // only knows its CURRENT account, which a fallback or a manual switch changes
+  // mid-chat, so a turn's account can only be known at the moment it ran.
+  `
+  CREATE TABLE metric_tokens (
+    seq             INTEGER PRIMARY KEY,
+    ts              INTEGER NOT NULL,
+    project_id      TEXT,
+    chat_id         TEXT,
+    harness         TEXT,
+    subscription_id TEXT,
+    model           TEXT,
+    turn            INTEGER,
+    input           INTEGER NOT NULL DEFAULT 0,
+    output          INTEGER NOT NULL DEFAULT 0,
+    cache_read      INTEGER NOT NULL DEFAULT 0,
+    cache_write     INTEGER NOT NULL DEFAULT 0,
+    -- NULL, not 0, when the runtime reports no price: a Codex turn is not free,
+    -- it is unpriced, and a SUM over a column of zeros would say otherwise.
+    cost_usd        REAL,
+    source          TEXT    NOT NULL DEFAULT 'live',
+    -- (chat, result row, model). The live recorder and the transcript import
+    -- derive the same key from the same result row, so the import can re-run —
+    -- or race a live turn — without doubling anything.
+    usage_key       TEXT    NOT NULL UNIQUE
+  );
+  CREATE INDEX metric_tokens_ts           ON metric_tokens(ts);
+  CREATE INDEX metric_tokens_subscription ON metric_tokens(subscription_id, ts);
+  CREATE INDEX metric_tokens_model        ON metric_tokens(model, ts);
+  CREATE INDEX metric_tokens_chat         ON metric_tokens(chat_id, ts);
+  `,
 ];
 
 /** Schema version a database must be at for this build to use it. */

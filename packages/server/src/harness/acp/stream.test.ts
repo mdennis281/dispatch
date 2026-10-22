@@ -216,6 +216,8 @@ describe("turnEndOf", () => {
       ok: true,
       subtype: "success",
       usage: { totalTokens: 7768, inputTokens: 7722, outputTokens: 46 },
+      // Normalised for the token ledger; `usage` stays raw for the transcript.
+      turnTokens: { input: 7722, output: 46, cacheRead: 0, cacheWrite: 0 },
       contextTokens: 7768,
       contextWindow: 128000,
     });

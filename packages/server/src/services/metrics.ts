@@ -1534,7 +1534,7 @@ export class MetricsService {
  * client's rendering of the result — a bucket boundary that moved with the
  * viewer's timezone would make the same query disagree with itself.
  */
-function bucketSql(bucket: "hour" | "day" | "week" | "month", expr = "ts"): string {
+export function bucketSql(bucket: "hour" | "day" | "week" | "month", expr = "ts"): string {
   const t = `${expr} / 1000, 'unixepoch'`;
   switch (bucket) {
     case "hour":
@@ -1560,7 +1560,7 @@ function bucketSql(bucket: "hour" | "day" | "week" | "month", expr = "ts"): stri
  * to trim, because a row whose bucket got trimmed away is a row silently
  * dropped from both its series and the response total.
  */
-function fillBuckets(
+export function fillBuckets(
   first: number,
   last: number,
   bucket: "hour" | "day" | "week" | "month",

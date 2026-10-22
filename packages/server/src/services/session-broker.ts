@@ -52,6 +52,12 @@ import {
 import { identifyMedia } from "./media-sniff.js";
 import type { ChatInterruption } from "@dispatch/shared";
 import {
+  figuresOfModelUsage,
+  figuresOfUsage,
+  tokenTotal,
+  type TokenFigures,
+} from "@dispatch/shared";
+import {
   compactCommand,
   normalizeCompactFocus,
   oneLineFocus,
@@ -157,6 +163,7 @@ import type { ChatMessenger } from "./chat-messenger.js";
 import type { TerminalService } from "./terminal.js";
 import type { MemoryService } from "./memory.js";
 import type { MetricsService } from "./metrics.js";
+import type { TokenLedger, TokenLine } from "./metrics-tokens.js";
 import { classifyTool } from "./metrics-classify.js";
 import {
   ActivityTracker,
@@ -1313,6 +1320,8 @@ export interface SessionBrokerOptions {
    * be able to fail a turn.
    */
   metrics?: MetricsService;
+  /** The token ledger (Metrics → Tokens). Optional and fire-and-forget, like `metrics`. */
+  tokens?: TokenLedger;
   /**
    * Called when a turn ends in ERROR, with the SDK's message. The broker doesn't
    * interpret it — the ResumeScheduler decides whether it was a usage limit and
@@ -2315,6 +2324,13 @@ interface LiveSession {
    * first result here has nothing to subtract from and no way to guess.
    */
   costBaselineUnknown?: boolean;
+  /**
+   * {@link lastCostUsd}'s twin for Claude's per-model `modelUsage`, which is
+   * session-cumulative in exactly the same way. See {@link SessionBroker.bookTokens}.
+   */
+  lastModelUsage?: Record<string, TokenFigures>;
+  /** {@link costBaselineUnknown}'s twin: no baseline to diff the first result against. */
+  tokenBaselineUnknown?: boolean;
   /** Per-session serialized transcript write chain. */
   writeChain: Promise<void>;
   turn: number;
@@ -2428,6 +2444,7 @@ export class SessionBroker {
   private readonly managerMcp?: ManagerMcpBridge;
   private readonly inspect?: BrokerInspect;
   private readonly metrics?: MetricsService;
+  private readonly tokens?: TokenLedger;
   /** Settable after construction — the scheduler is built after the broker. */
   onTurnError?: (chatId: string, reason: string | undefined, hit?: HarnessLimitHit) => void;
   /**
@@ -2567,6 +2584,7 @@ export class SessionBroker {
     this.managerMcp = opts.managerMcp;
     this.inspect = opts.inspect;
     this.metrics = opts.metrics;
+    this.tokens = opts.tokens;
     this.onTurnError = opts.onTurnError;
     this.query = opts.deps?.query ?? (sdkQuery as unknown as QueryFn);
     this.genId = opts.deps?.genId ?? (() => nanoid());
@@ -2628,6 +2646,8 @@ export class SessionBroker {
         // A chat that already had a session before the baseline was recorded has
         // nothing to subtract from. See {@link SessionBroker.turnCost}.
         costBaselineUnknown: Boolean(chat.sessionId) && chat.costBaselineUsd === undefined,
+        lastModelUsage: chat.sessionId ? chat.tokenBaseline : undefined,
+        tokenBaselineUnknown: Boolean(chat.sessionId) && chat.tokenBaseline === undefined,
         model: chat.model,
         modelOverride: chat.model,
         status:
@@ -4003,10 +4023,16 @@ export class SessionBroker {
     session.sessionId = undefined;
     session.lastCostUsd = undefined;
     session.costBaselineUnknown = false;
+    session.lastModelUsage = undefined;
+    session.tokenBaselineUnknown = false;
     session.managerGrant?.revoke();
     session.managerGrant = undefined;
     void live.dispose();
-    void this.patchChat(session.chatId, { sessionId: undefined, costBaselineUsd: undefined });
+    void this.patchChat(session.chatId, {
+      sessionId: undefined,
+      costBaselineUsd: undefined,
+      tokenBaseline: undefined,
+    });
     // Said out loud, because a silently restarted session looks like a chat
     // that forgot what it was doing. `clearContext` emits its own notice before
     // calling here, so it passes no reason and gets no second one.
@@ -5521,6 +5547,71 @@ export class SessionBroker {
     return total;
   }
 
+  /**
+   * Book one finished turn's tokens to the token ledger: split by model, and
+   * stamped with the account the turn ACTUALLY ran on — which only this moment
+   * knows, since a fallback or a manual switch moves the chat's account later.
+   *
+   * The per-model split comes from Claude's `modelUsage`, which is cumulative
+   * over the session exactly like `total_cost_usd` and so needs the same
+   * treatment as {@link turnCost}: diff against the last result, persist the
+   * baseline on the chat, and treat a FALL (a restarted provider counter) as a
+   * fresh start rather than a negative turn. Without the split, a turn whose
+   * Explore subagent ran on Haiku would book Haiku's tokens under Opus.
+   *
+   * Everything else (Codex, goose, and the one unmeasurable first Claude turn
+   * of a chat that predates the baseline) books its per-turn figures to the
+   * session's current model at the turn's own cost.
+   *
+   * Mutates the baseline: call exactly once per emitted result, like `turnCost`.
+   * Never throws — the ledger write swallows its own errors.
+   */
+  private bookTokens(
+    session: LiveSession,
+    row: { id: string; ts: number; turn: number },
+    event: { turnTokens?: TokenFigures; modelUsage?: Record<string, TokenFigures> },
+    turnCostUsd: number | undefined,
+  ): void {
+    let split: Record<string, TokenFigures> | undefined;
+    const now = event.modelUsage;
+    if (now) {
+      const last = session.lastModelUsage;
+      session.lastModelUsage = now;
+      // Straight to the store, like `costBaselineUsd`: bookkeeping no client
+      // renders must not broadcast a chat-update or bump `updatedAt`.
+      void this.store.patchChat(session.chatId, { tokenBaseline: now }).catch(() => {});
+      if (last) {
+        const fell = Object.entries(last).some(([model, was]) => {
+          const is = now[model];
+          return !is || tokenTotal(is) < tokenTotal(was);
+        });
+        split = fell ? now : diffModelUsage(now, last);
+      } else if (session.tokenBaselineUnknown) {
+        session.tokenBaselineUnknown = false;
+      } else {
+        split = now;
+      }
+    }
+    if (!this.tokens) return;
+    const stamp = {
+      ts: row.ts,
+      resultId: row.id,
+      projectId: session.projectId,
+      chatId: session.chatId,
+      harness: session.harnessKind,
+      subscriptionId: session.account?.subscriptionId ?? session.subscriptionId,
+      turn: row.turn,
+    };
+    const lines: TokenLine[] = split
+      ? Object.entries(split)
+          .filter(([, f]) => tokenTotal(f) > 0 || (f.costUsd ?? 0) > 0)
+          .map(([model, f]) => ({ ...stamp, ...f, model }))
+      : event.turnTokens
+        ? [{ ...stamp, ...event.turnTokens, model: session.model, costUsd: turnCostUsd }]
+        : [];
+    this.tokens.record(lines);
+  }
+
   /* ---------------------------------------------------------- consume */
 
   private async consumeHarness(session: LiveSession): Promise<void> {
@@ -5563,13 +5654,15 @@ export class SessionBroker {
         if (retired) {
           session.lastCostUsd = undefined;
           session.costBaselineUnknown = false;
+          session.lastModelUsage = undefined;
+          session.tokenBaselineUnknown = false;
         }
         session.sessionId = event.sessionId;
         session.model = event.model ?? session.model;
         session.contextWindow = event.contextWindow ?? session.contextWindow;
         await this.patchChat(session.chatId, {
           sessionId: event.sessionId,
-          ...(retired ? { costBaselineUsd: undefined } : {}),
+          ...(retired ? { costBaselineUsd: undefined, tokenBaseline: undefined } : {}),
           model: session.model,
           harness: session.harnessKind,
           harnessHandoff: undefined,
@@ -5808,6 +5901,7 @@ export class SessionBroker {
             costUsd: event.costUsd,
             turnCostUsd: guardTurnCost,
           });
+          this.bookTokens(session, base, event, guardTurnCost);
           session.turn += 1;
           session.turnOpen = true;
           session.activity.turnStart(base.ts);
@@ -5840,6 +5934,7 @@ export class SessionBroker {
           costUsd: event.costUsd,
           turnCostUsd: endTurnCost,
         });
+        this.bookTokens(session, base, event, endTurnCost);
         session.turn += 1;
         if (!ok) this.onTurnError?.(session.chatId, event.result ?? event.limit?.reason, event.limit);
         // `event.ok`, not `ok`: a stopped turn counts as settled for status, but
@@ -5891,9 +5986,12 @@ export class SessionBroker {
             // this is the one place worth checking.
             session.lastCostUsd = undefined;
             session.costBaselineUnknown = false;
+            session.lastModelUsage = undefined;
+            session.tokenBaselineUnknown = false;
             void this.patchChat(session.chatId, {
               sessionId: sid,
               costBaselineUsd: undefined,
+              tokenBaseline: undefined,
               harnessHandoff: undefined,
             });
           }
@@ -6193,12 +6291,13 @@ export class SessionBroker {
           session,
           (m as { total_cost_usd?: number }).total_cost_usd,
         );
+        const legacyRow = { id: this.genId(), ts: this.now(), turn: session.turn };
         await this.emit(session, {
           kind: "result",
-          id: this.genId(),
+          id: legacyRow.id,
           chatId: session.chatId,
-          ts: this.now(),
-          turn: session.turn,
+          ts: legacyRow.ts,
+          turn: legacyRow.turn,
           sessionId: session.sessionId,
           subtype: stopped ? "interrupted" : String((m as { subtype?: unknown }).subtype ?? "success"),
           isError,
@@ -6211,6 +6310,15 @@ export class SessionBroker {
           costUsd: (m as { total_cost_usd?: number }).total_cost_usd,
           turnCostUsd: legacyTurnCost,
         });
+        this.bookTokens(
+          session,
+          legacyRow,
+          {
+            turnTokens: figuresOfUsage((m as { usage?: unknown }).usage),
+            modelUsage: figuresOfModelUsage((m as { modelUsage?: unknown }).modelUsage),
+          },
+          legacyTurnCost,
+        );
         session.turn += 1;
         // A turn that ended in error may have hit a usage limit — hand the
         // message off so the chat can schedule itself to continue.
@@ -9452,4 +9560,32 @@ export class SessionBroker {
       pendingPermissionIds: [...s.pendingPermissions.keys()],
     };
   }
+}
+
+/**
+ * `now − last`, per model: one turn's share of Claude's session-cumulative
+ * `modelUsage`. A model new this turn counts in full; one that spent nothing
+ * this turn drops out rather than booking a row of zeros.
+ */
+function diffModelUsage(
+  now: Record<string, TokenFigures>,
+  last: Record<string, TokenFigures>,
+): Record<string, TokenFigures> {
+  const out: Record<string, TokenFigures> = {};
+  for (const [model, is] of Object.entries(now)) {
+    const was = last[model];
+    const d: TokenFigures = was
+      ? {
+          input: Math.max(0, is.input - was.input),
+          output: Math.max(0, is.output - was.output),
+          cacheRead: Math.max(0, is.cacheRead - was.cacheRead),
+          cacheWrite: Math.max(0, is.cacheWrite - was.cacheWrite),
+          ...(is.costUsd !== undefined
+            ? { costUsd: Math.max(0, is.costUsd - (was.costUsd ?? 0)) }
+            : {}),
+        }
+      : is;
+    if (tokenTotal(d) > 0 || (d.costUsd ?? 0) > 0) out[model] = d;
+  }
+  return out;
 }

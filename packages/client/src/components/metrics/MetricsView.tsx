@@ -28,17 +28,19 @@
  * which is a second filter row on a page that already has one, and the thing
  * this layout avoids.
  */
-import { Activity, BarChart3, Gauge, RefreshCw, TrendingUp } from "lucide-react";
+import { Activity, BarChart3, Coins, Gauge, RefreshCw, TrendingUp } from "lucide-react";
 import { ScrollArea } from "../ui/ScrollArea.js";
 import { IconButton } from "../ui/IconButton.js";
 import { Tabs } from "../ui/Tabs.js";
 import { useMetrics } from "../../stores/metrics.js";
 import { useSpanMetrics } from "../../stores/metrics-spans.js";
+import { useTokenMetrics } from "../../stores/metrics-tokens.js";
 import { useResources } from "../../stores/resources.js";
 import { useGrowth } from "../../stores/growth.js";
 import { useView, type MetricsSection } from "../../stores/view.js";
 import { RuntimeMetrics } from "./RuntimeMetrics.js";
 import { UsageMetrics } from "./UsageMetrics.js";
+import { TokenMetrics } from "./TokenMetrics.js";
 import { ResourceMetrics } from "./ResourceMetrics.js";
 import { GrowthMetrics } from "./GrowthMetrics.js";
 import { count } from "./chrome.js";
@@ -57,6 +59,9 @@ export function MetricsView() {
   const spanRows = useSpanMetrics((s) => s.ledgerRows);
   const spanBusy = useSpanMetrics((s) => s.refetching);
   const reloadSpans = useSpanMetrics((s) => s.load);
+  const tokenRows = useTokenMetrics((s) => s.report?.ledgerRows ?? 0);
+  const tokenBusy = useTokenMetrics((s) => s.refetching);
+  const reloadTokens = useTokenMetrics((s) => s.load);
 
   // Resources is a LIVE READING rather than a ledger, so its "rows" is the
   // number of chats currently holding something and its reload is a re-scan,
@@ -73,10 +78,27 @@ export function MetricsView() {
   const rewalk = useGrowth((s) => s.load);
 
   const runtime = section === "runtime";
+  const tokens = section === "tokens";
   const resources = section === "resources";
   const growth = section === "growth";
-  const rows = growth ? growthCommits : resources ? resourceChats : runtime ? spanRows : usageRows;
-  const busy = growth ? growthBusy : resources ? resourceBusy : runtime ? spanBusy : usageBusy;
+  const rows = growth
+    ? growthCommits
+    : resources
+      ? resourceChats
+      : runtime
+        ? spanRows
+        : tokens
+          ? tokenRows
+          : usageRows;
+  const busy = growth
+    ? growthBusy
+    : resources
+      ? resourceBusy
+      : runtime
+        ? spanBusy
+        : tokens
+          ? tokenBusy
+          : usageBusy;
   // FORCED for the resource tab. Its snapshot is served off a 10 s table
   // cache, so a plain refetch inside that window returns a byte-identical
   // answer and the button reads as broken.
@@ -86,7 +108,9 @@ export function MetricsView() {
       ? () => rescan(true)
       : runtime
         ? reloadSpans
-        : reloadUsage;
+        : tokens
+          ? reloadTokens
+          : reloadUsage;
   const unit = growth ? "commits" : resources ? "chats" : runtime ? "spans" : "rows";
 
   return (
@@ -99,6 +123,7 @@ export function MetricsView() {
           onChange={(id) => setSection(id as MetricsSection)}
           tabs={[
             { id: "usage", label: "Usage", icon: <BarChart3 size={13} /> },
+            { id: "tokens", label: "Tokens", icon: <Coins size={13} /> },
             { id: "runtime", label: "Runtime", icon: <Activity size={13} /> },
             { id: "resources", label: "Resources", icon: <Gauge size={13} /> },
             { id: "growth", label: "Growth", icon: <TrendingUp size={13} /> },
@@ -124,6 +149,8 @@ export function MetricsView() {
           <ResourceMetrics />
         ) : runtime ? (
           <RuntimeMetrics />
+        ) : tokens ? (
+          <TokenMetrics />
         ) : (
           <UsageMetrics />
         )}

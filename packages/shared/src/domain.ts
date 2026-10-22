@@ -16,6 +16,7 @@ import {
 import { HouseRulesModeSchema } from "./agent-context.js";
 import { ResumePlanSchema } from "./limits.js";
 import { PeerSenderSchema, ChannelSenderSchema } from "./messages.js";
+import { TokenFiguresSchema } from "./metrics-tokens.js";
 import { WorkflowConfigSchema } from "./workflow.js";
 import { ChatWorktreeRecordSchema } from "./worktree-history.js";
 
@@ -862,6 +863,13 @@ export const ChatSchema = z.object({
    * turn back is booked the whole chat's spend. Bookkeeping — never rendered.
    */
   costBaselineUsd: z.number().optional(),
+  /**
+   * The same baseline for Claude's per-model `modelUsage`, which is cumulative
+   * across the session exactly like its cost — and restored across a resume,
+   * so a broker restart without this would book the whole chat's tokens to the
+   * first turn back. Same lifetime as {@link costBaselineUsd}; never rendered.
+   */
+  tokenBaseline: z.record(z.string(), TokenFiguresSchema).optional(),
   agentId: z.string().optional(),
   /** Unset means off; independent of the provider and custom agent. */
   personaId: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/).optional(),
