@@ -205,11 +205,12 @@ const DAY_MS = 24 * 60 * 60_000;
  * human chose and a KDF exists for, goes through argon2id in auth.ts. And a
  * salted KDF could not serve here anyway: the token endpoint has to find the
  * row BY the presented value, which needs a deterministic fingerprint, not a
- * per-row salt. (The CodeQL rule keys on the identifier name containing
- * "TOKEN" and cannot see the entropy; hence the suppression below.)
+ * per-row salt. (CodeQL's password-hash rule keys on the identifier name
+ * containing "TOKEN" and cannot see the entropy; it is excluded project-wide
+ * in .github/codeql/codeql-config.yml with this same reasoning.)
  */
 function sha256(value: string): string {
-  return createHash("sha256").update(value).digest("base64url"); // codeql[js/insufficient-password-hash]
+  return createHash("sha256").update(value).digest("base64url");
 }
 
 function safeEqual(a: string, b: string): boolean {
