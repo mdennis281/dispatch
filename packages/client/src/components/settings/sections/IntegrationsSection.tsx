@@ -35,6 +35,8 @@ import { useRealProjects } from "../../../stores/projects.js";
 import { relTime } from "../../../lib/format.js";
 import { cn } from "../../../lib/cn.js";
 import { WebhooksBlock } from "./WebhooksBlock.js";
+import { OAuthGrantsBlock } from "./OAuthGrantsBlock.js";
+import { SCOPE_HINT } from "../../../lib/scopeHints.js";
 
 /* ------------------------------------------------------------------ api */
 
@@ -55,18 +57,6 @@ const createToken = (body: { name: string; scopes: string[]; projectIds?: string
   });
 
 /* ---------------------------------------------------------------- scopes */
-
-/** What each fixed scope means, in the words the checkbox shows. */
-const SCOPE_HINT: Record<(typeof INTEGRATION_FIXED_SCOPES)[number], string> = {
-  "chats:read": "List chats and read transcripts",
-  "chats:write": "Send messages into chats",
-  "attention:read": "See what is waiting on a human",
-  "attention:answer": "Answer question cards",
-  "memory:read": "Read project memory",
-  "memory:write": "Write project memory",
-  "projects:read": "List projects",
-  "webhooks:manage": "Manage its own webhook subscriptions",
-};
 
 type Expiry = "never" | "7d" | "30d" | "90d" | "365d";
 const EXPIRY_OPTIONS: { value: Expiry; label: string }[] = [
@@ -441,6 +431,7 @@ export function IntegrationsSection() {
         </span>
       </SectionLabel>
       <TokensBlock />
+      <OAuthGrantsBlock />
       <WebhooksBlock />
     </div>
   );

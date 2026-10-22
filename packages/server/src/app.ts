@@ -6,7 +6,7 @@
  * The config, Store, and EventBus are decorated onto the instance as `app.cm`
  * so downstream route/service registrars share one wired context.
  */
-import Fastify, { type FastifyInstance, type FastifyServerOptions } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyServerOptions } from "fastify";
 import fastifyWebsocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import { fileURLToPath } from "node:url";
@@ -28,6 +28,7 @@ import { startPerfMonitor } from "./perf.js";
 import { registerRequestLog } from "./request-log.js";
 import { describeTrustProxy, parseTrustProxy, trustProxyError } from "./trust-proxy.js";
 import { AuthService, type AnyRequestIdentity } from "./services/auth.js";
+import { OAuthServer } from "./services/oauth-server.js";
 import { INTEGRATION_TOKEN_PREFIX } from "@dispatch/shared";
 import { realProjects } from "@dispatch/shared";
 
@@ -43,6 +44,8 @@ declare module "fastify" {
     cm: CmContext;
     services: Services;
     auth: AuthService;
+    /** Dispatch as an OAuth 2.1 authorization server for remote-MCP connectors; see services/oauth-server.ts. */
+    oauthServer: OAuthServer;
     /**
      * Begin a graceful shutdown. Decorated by `installShutdown`, which the
      * ENTRYPOINT wires — never `buildApp` — so it is genuinely absent in tests
@@ -79,6 +82,20 @@ export function isIntegrationApiPath(path: string): boolean {
     path.startsWith("/api/integration/") ||
     isIntegrationBridgePath(path)
   );
+}
+
+/**
+ * The three `/api/oauth/` endpoints exempt from the JWT gate. EXACT paths, and
+ * only these: they ARE the credential exchange and carry their own proof (a
+ * PKCE verifier bound to the consent, a client secret, a refresh token), and a
+ * connector calling them holds no Dispatch session by definition. The consent
+ * endpoints under `/api/oauth/requests/` are deliberately NOT here — the
+ * decision is the one step that must come from the owner's logged-in session.
+ * Registration is rate-limited per address inside the handler because, exempt,
+ * it is otherwise a free write into the state database.
+ */
+export function isOAuthExchangePath(path: string): boolean {
+  return path === "/api/oauth/register" || path === "/api/oauth/token" || path === "/api/oauth/revoke";
 }
 
 /** Build (but do not listen on) the Fastify app. */
@@ -147,6 +164,14 @@ export async function buildApp(
     try { done(null, JSON.parse(body) as unknown); }
     catch { done(Object.assign(new Error("Invalid JSON body."), { statusCode: 400 })); }
   });
+  // RFC 6749 mandates form encoding at the token and revocation endpoints, and
+  // every OAuth client library sends it. Fastify has no parser for it out of
+  // the box — without this, `POST /api/oauth/token` answers 415 to every
+  // connector before the handler runs. Parsed to a flat object; a repeated key
+  // keeps its last value, which is all the grant parameters ever need.
+  app.addContentTypeParser<string>("application/x-www-form-urlencoded", { parseAs: "string" }, (_req, body, done) => {
+    done(null, Object.fromEntries(new URLSearchParams(body)));
+  });
 
   // Before the routes, so the hooks see every one of them. The companion to
   // `perf.log`: that one says the loop stalled, this one says which request it
@@ -156,6 +181,24 @@ export async function buildApp(
   app.decorate("cm", { config, store, bus } satisfies CmContext);
   app.decorate("services", services);
   app.decorate("auth", auth);
+  // Built here rather than in the container because it mints THROUGH the auth
+  // service, which only exists at this level.
+  const oauthServer = new OAuthServer({ store, auth });
+  app.decorate("oauthServer", oauthServer);
+
+  /**
+   * RFC 9728 §5.1: a 401 on the integration MCP mount names the protected-
+   * resource metadata so an MCP client can discover the authorization server
+   * from the refusal alone — that header is the whole of what "connect Dispatch
+   * to Claude.ai by URL" relies on. Absent when OAuth is not offered.
+   */
+  const unauthorized = async (reply: FastifyReply, path: string, message: string) => {
+    if (isIntegrationBridgePath(path)) {
+      const challenge = await oauthServer.challenge(path);
+      if (challenge) reply.header("www-authenticate", challenge);
+    }
+    return reply.code(401).send({ error: message });
+  };
 
   // A single gate covers every current and future API route. Missing auth
   // settings resolve to disabled, preserving pre-auth installs byte-for-byte.
@@ -180,7 +223,10 @@ export async function buildApp(
         // `/api/mcp/manager/session` with a grant token, `verifyJwt` returned
         // null for it, and every Dispatch tool 401'd for the whole session.
         // Auth-disabled installs never saw it.
-        isManagerBridgePath(path)) return;
+        isManagerBridgePath(path) ||
+        // The OAuth credential exchange — see `isOAuthExchangePath` for why
+        // exactly these three and nothing else under `/api/oauth/`.
+        isOAuthExchangePath(path)) return;
     if (path === "/ws") {
       const ticket = new URL(req.url, "http://dispatch.local").searchParams.get("ticket") ?? undefined;
       const found = await auth.authenticateWs(ticket);
@@ -196,7 +242,7 @@ export async function buildApp(
     // for a credential that was never one. The prefix is the discriminant.
     if (token?.startsWith(INTEGRATION_TOKEN_PREFIX)) {
       const integration = await auth.authenticateIntegration(token);
-      if (!integration) return reply.code(401).send({ error: "Invalid or revoked integration token." });
+      if (!integration) return unauthorized(reply, path, "Invalid or revoked integration token.");
       // A token reaches ONLY the curated surface and the integration MCP
       // mount. Every other `/api/` route is the SPA's, reads no identity
       // beyond "the gate let it through", and would answer a `projects:read`
@@ -220,7 +266,7 @@ export async function buildApp(
       return;
     }
     const found = await auth.authenticateAccess(token);
-    if (!found) return reply.code(401).send({ error: "Authentication required." });
+    if (!found) return unauthorized(reply, path, "Authentication required.");
     req.authIdentity = found;
   });
 

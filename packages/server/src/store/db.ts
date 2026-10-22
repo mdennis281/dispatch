@@ -342,6 +342,65 @@ const MIGRATIONS: ReadonlyArray<string> = [
   -- Partial: the boot resume asks only for the handful a shutdown left pending.
   CREATE INDEX webhook_delivery_pending ON webhook_delivery(next_at) WHERE status = 'pending';
   `,
+
+  // 9 — OAuth, both roles (docs/plugins.md → "OAuth").
+  //
+  // PER INSTANCE, like the integration tokens the grants mint: a refresh token
+  // ROTATES, so two instances sharing one row would each invalidate the other's
+  // rotation and a connector would be logged out by whichever instance it did
+  // not talk to last. The same argument keeps `plugin_oauth_token` here rather
+  // than in the (shared) secret store, and a flattened secret name built from
+  // two hyphenated identifiers would be ambiguous anyway.
+  //
+  // `oauth_client` is one JSON body per registered connector (RFC 7591's
+  // response is open-ended; zod on read keeps new fields a schema edit).
+  // Refresh tokens are COLUMNS because every read is a lookup by hash, and
+  // the grant is what revocation acts on: one row per approval, holding the
+  // id of the access token it currently backs so revoking the grant can
+  // revoke that token through the token service.
+  //
+  // Tokens the plugin flow stores are plaintext by necessity — the host has to
+  // send them to the provider — in a database that is already the instance's
+  // private state. Authorization codes and the consent nonce are in memory
+  // only: they live a minute and ten minutes respectively, and a restart that
+  // loses them costs one more click, not a credential.
+  `
+  CREATE TABLE oauth_client (
+    id         TEXT PRIMARY KEY,
+    created_at INTEGER NOT NULL,
+    body       TEXT NOT NULL
+  );
+  CREATE TABLE oauth_grant (
+    id                TEXT PRIMARY KEY,
+    client_id         TEXT NOT NULL,
+    scopes            TEXT NOT NULL,
+    auth_epoch        INTEGER NOT NULL,
+    created_at        INTEGER NOT NULL,
+    last_refreshed_at INTEGER,
+    revoked_at        INTEGER,
+    access_token_id   TEXT
+  );
+  CREATE INDEX oauth_grant_client ON oauth_grant(client_id);
+  CREATE TABLE oauth_refresh_token (
+    hash       TEXT PRIMARY KEY,
+    grant_id   TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    used_at    INTEGER
+  );
+  CREATE INDEX oauth_refresh_grant ON oauth_refresh_token(grant_id);
+  CREATE TABLE plugin_oauth_token (
+    plugin        TEXT NOT NULL,
+    name          TEXT NOT NULL,
+    access_token  TEXT NOT NULL,
+    refresh_token TEXT,
+    token_type    TEXT,
+    expires_at    INTEGER,
+    scopes        TEXT NOT NULL,
+    updated_at    INTEGER NOT NULL,
+    PRIMARY KEY (plugin, name)
+  );
+  `,
 ];
 
 /** Schema version a database must be at for this build to use it. */

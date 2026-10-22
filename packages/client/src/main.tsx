@@ -22,6 +22,10 @@ import { AppErrorBoundary } from "./components/ErrorBoundary.js";
 import { applyScrollAnchoring } from "./lib/scrollAnchoring.js";
 import { lockPageZoom } from "./lib/pageZoom.js";
 import { dismissBootSplashNow, startBootSplash } from "./lib/bootSplash.js";
+import { parseOAuthHash, useOAuthConsent } from "./stores/oauthConsent.js";
+import { openAppSettings } from "./stores/view.js";
+import { APP_SECTIONS } from "./components/settings/appSections.js";
+import { useNotices } from "./stores/notices.js";
 
 // The palette itself was applied by the inline script in index.html (before the
 // first paint); this only subscribes to later OS changes, which matters solely
@@ -177,6 +181,25 @@ if (isShell) {
     history.replaceState(null, "", location.pathname + location.search);
     // After hydrate, or setActiveChat targets a chat the store hasn't seen.
     window.setTimeout(() => focusAttentionTarget(chatId, hash.get("attn") ?? undefined), 400);
+  }
+  // The two OAuth landings (see stores/oauthConsent.ts). `#oauth=<nonce>` is a
+  // connector's authorization request parked server-side — the consent page
+  // renders inside AuthGate while the store holds it. `#settings=<section>`
+  // is where the plugin callback drops the browser after a provider round
+  // trip, with the provider's refusal (if any) riding along for a toast.
+  // Both are cleared from the URL first, for the same reason `chat` is.
+  const oauth = parseOAuthHash(location.hash);
+  if (oauth.nonce || oauth.settings) {
+    history.replaceState(null, "", location.pathname + location.search);
+    if (oauth.nonce) useOAuthConsent.getState().begin(oauth.nonce);
+    if (oauth.settings) {
+      const section = APP_SECTIONS.find((s) => s.id === oauth.settings)?.id;
+      if (section) window.setTimeout(() => openAppSettings(section), 400);
+    }
+    if (oauth.oauthError) {
+      const text = oauth.oauthError;
+      window.setTimeout(() => useNotices.getState().push({ level: "error", text }), 600);
+    }
   }
 }
 

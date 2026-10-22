@@ -51,6 +51,7 @@ export * from "./issue-tools.js";
 export * from "./tail-payload.js";
 export * from "./manager-tools.js";
 export * from "./integration.js";
+export * from "./oauth.js";
 export * from "./human-review.js";
 export * from "./secrets.js";
 export * from "./issues.js";

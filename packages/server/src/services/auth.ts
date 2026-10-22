@@ -655,6 +655,16 @@ export class AuthService {
     return this.tokens.authenticate(token, authEpoch(data));
   }
 
+  /**
+   * The epoch a credential minted now would carry. The OAuth server stamps it
+   * on every grant so a refresh token outlives "turn authentication off" no
+   * better than the access tokens it mints: `disable()` bumps the epoch and
+   * a grant from before it refuses to refresh.
+   */
+  async currentAuthEpoch(): Promise<number> {
+    return authEpoch(await this.load());
+  }
+
   /* ----------------------------------------------------- integration tokens */
 
   async listIntegrationTokens(identity: RequestIdentity): Promise<IntegrationTokenSummary[]> {

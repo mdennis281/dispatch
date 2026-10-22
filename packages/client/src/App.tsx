@@ -36,6 +36,8 @@ import { useEdgeSwipe } from "./lib/useEdgeSwipe.js";
 import { beginPanelDrag } from "./lib/swipeDrag.js";
 import { swipeMove, runSwipe, swipeDrag } from "./components/layout/swipeNav.js";
 import { AuthGate } from "./components/auth/AuthGate.js";
+import { OAuthConsent } from "./components/auth/OAuthConsent.js";
+import { useOAuthConsent } from "./stores/oauthConsent.js";
 import { useAuth } from "./stores/auth.js";
 import { SetupWizard } from "./components/setup/SetupWizard.js";
 import { useSetup, shouldProbeSetup } from "./stores/setup.js";
@@ -183,6 +185,12 @@ export default function App() {
     if (canPoll) return startSystemPolling();
   }, [canPoll]);
 
+  // A connector's authorization request (`#oauth=<nonce>`, stores/oauthConsent).
+  // Rendered inside AuthGate — so a signed-out owner logs in first — and
+  // INSTEAD of the shell: the person came from another application and the
+  // only thing to decide is whether it may act as them.
+  const consentNonce = useOAuthConsent((s) => s.nonce);
+
   return (
     <>
       {/* OUTSIDE the auth gate, deliberately. An update restarts the server, so
@@ -227,7 +235,9 @@ export default function App() {
           frame and then replacing it with a setup wizard is a worse first
           impression than a beat of "Starting Dispatch…", and the store races the
           probe against a deadline so this can't become a hang. */}
-      {setupPending === null ? (
+      {consentNonce ? (
+        <OAuthConsent nonce={consentNonce} />
+      ) : setupPending === null ? (
         <div className="grid h-screen place-items-center bg-app text-sm text-muted">Starting Dispatch…</div>
       ) : setupPending ? (
         <SetupWizard />

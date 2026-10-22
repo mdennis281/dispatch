@@ -41,6 +41,7 @@ import type { MemoryService } from "../services/memory.js";
 import type { AttentionQueue } from "../services/attention.js";
 import type { ChatMessenger } from "../services/chat-messenger.js";
 import { PluginKv } from "./kv.js";
+import type { PluginOAuthService } from "./oauth.js";
 
 /** The server's narrowing of the shared context: route handlers see Fastify's request and reply. */
 export type ServerPluginContext = PluginContext<FastifyRequest, FastifyReply>;
@@ -93,6 +94,8 @@ export interface PluginContextDeps {
   log: PluginLog;
   /** The plugin's cached settings — read live so `onChange` and `get` agree. */
   settings: () => Record<string, unknown>;
+  /** The host-run OAuth client flow (`ctx.oauth`). Optional so a unit test can build a context without it. */
+  pluginOAuth?: PluginOAuthService;
 }
 
 /** What the host must tear down when the plugin goes away. */
@@ -288,6 +291,17 @@ export function buildPluginContext(
         return ok ? { ok: true } : { ok: false, message: "the question is no longer pending" };
       };
     }
+  }
+
+  if (has("oauth") && deps.pluginOAuth) {
+    // Bound to this plugin's id: a plugin names its own clients and cannot
+    // reach another plugin's tokens by naming that plugin.
+    const oauth = deps.pluginOAuth;
+    ctx.oauth = {
+      connectUrl: (name) => oauth.connectUrl(id, name),
+      token: (name) => oauth.token(id, name),
+      disconnect: (name) => oauth.disconnect(id, name),
+    };
   }
 
   if (has("memory")) {
