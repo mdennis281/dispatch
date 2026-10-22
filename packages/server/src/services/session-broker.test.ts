@@ -1536,11 +1536,12 @@ describe("SessionBroker — permissions", () => {
       projectPins = {};
 
       // SITE 2 — live reload. The same layering, restricted to the named servers.
-      const updateMcpServers = vi.fn(async () => {});
+      type Swapped = Record<string, { command?: string; env?: Record<string, string> }>;
+      const updateMcpServers = vi.fn(async (_servers: Swapped) => {});
       session.harnessSession = { updateMcpServers };
       const outcome = await broker.refreshMcpServers(projectId, ["shared", "plug-only"]);
       expect(outcome.refreshed).toEqual(["c1"]);
-      const swapped = updateMcpServers.mock.calls[0]![0] as Record<string, { command?: string; env?: Record<string, string> }>;
+      const swapped = updateMcpServers.mock.calls[0]![0];
       expect(swapped.shared?.command).toBe("project-copy");
       expect(swapped["plug-only"]?.env).toEqual({ A: "plug-value", B: "" });
       projectPins = { "plug-only": false };

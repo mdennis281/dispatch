@@ -90,9 +90,10 @@ describe("groupProcesses", () => {
       [],
       title,
     );
-    expect(groups.map((g) => g.id)).toEqual(["plugin:contributions", "runners", "orphans"]);
-    expect(groups[0]?.title).toBe("Plugin · contributions");
-    expect(groups[0]?.pids).toEqual([700]);
+    // Same bucket as the app runners (sorted by title within it), ahead of orphans.
+    expect(groups.map((g) => g.id)).toEqual(["runners", "plugin:contributions", "orphans"]);
+    expect(groups[1]?.title).toBe("Plugin · contributions");
+    expect(groups[1]?.pids).toEqual([700]);
   });
 
   it("orders chats by how much they are running, then by title", () => {
