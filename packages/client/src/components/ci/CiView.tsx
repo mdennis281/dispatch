@@ -1,5 +1,6 @@
 /**
- * CiView — the project's CI/CD page: every workflow, its run history, and any
+ * CiView — the project's CI/CD page: every workflow with its recent runs
+ * grouped under it, one workflow's full history, and any
  * run drilled into down to the step and its log, with re-run / cancel / run
  * workflow on hand.
  *
@@ -203,6 +204,9 @@ function CiPage({ project }: { project: Project }) {
           <CiRunList
             projectId={projectId}
             workflowId={workflowId}
+            workflows={workflows}
+            onShowAll={setWorkflowId}
+            onRun={(id) => setDispatchFor({ workflowId: id })}
             selectedRunId={selected?.id ?? null}
             onSelect={setSelected}
             refreshTick={tick}
