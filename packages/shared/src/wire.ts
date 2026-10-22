@@ -528,6 +528,23 @@ export const NoticeEventSchema = z.object({
   text: z.string(),
 });
 
+/**
+ * A plugin's own event, published by `ctx.emit` on the server and consumed by
+ * that plugin's client half (`host.events.onPlugin`, workstream E).
+ *
+ * ONE generic member instead of a schema per plugin keeps the wire closed and
+ * typed — every frame still parses against `WsServerEventSchema` — while
+ * leaving `payload` as the plugin's own contract with itself. `plugin` is the
+ * discriminator a client host routes on; `chatId` lets the usual per-chat
+ * tagging apply when the event is about one chat.
+ */
+export const PluginEventSchema = z.object({
+  type: z.literal("plugin-event"),
+  plugin: z.string(),
+  chatId: z.string().optional(),
+  payload: z.unknown(),
+});
+
 /** An error surfaced to the client. */
 export const ErrorEventSchema = z.object({
   type: z.literal("error"),
@@ -588,6 +605,7 @@ export const WsServerEventSchema = z.discriminatedUnion("type", [
   ErrorEventSchema,
   ServerShutdownEventSchema,
   SchedulerEventSchema,
+  PluginEventSchema,
 ]);
 export type WsServerEvent = z.infer<typeof WsServerEventSchema>;
 export type WsServerEventType = WsServerEvent["type"];

@@ -45,6 +45,7 @@ import { registerAuthRoutes } from "./auth.js";
 import { registerSetupRoutes } from "./setup.js";
 import { registerDebugTraceRoutes } from "./debug-trace.js";
 import { registerIntegrationRoutes } from "./integration.js";
+import { registerPluginRoutes } from "./plugins.js";
 
 export function registerRoutes(app: FastifyInstance): void {
   registerAuthRoutes(app);
@@ -88,4 +89,5 @@ export function registerRoutes(app: FastifyInstance): void {
   registerPauseRoutes(app);
   registerDebugTraceRoutes(app);
   registerIntegrationRoutes(app);
+  registerPluginRoutes(app);
 }

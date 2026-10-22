@@ -75,6 +75,11 @@ export function registerSettingsRoutes(app: FastifyInstance): void {
       // permission card's "Always allow" from any chat at any moment. A draft
       // loaded before that click would otherwise put the prompt straight back.
       ...(current.autoAllowTools ? { autoAllowTools: current.autoAllowTools } : {}),
+      // And the plugin map, owned by the targeted PUT /api/plugins/:id/* routes.
+      // Settings → Plugins never writes through the draft, so a draft that
+      // predates a toggle or a plugin's own settings save would otherwise undo
+      // it the next time anyone picked a theme.
+      ...(current.plugins ? { plugins: current.plugins } : {}),
     });
     // The concurrency cap is held by the LIVE broker, not re-read per turn, so a
     // save has to hand it over or the new number means nothing until a restart —

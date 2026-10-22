@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Hello settings",
+  "type": "object",
+  "properties": {
+    "greeting": {
+      "type": "string",
+      "title": "Greeting",
+      "description": "What /hello answers with.",
+      "default": "hello"
+    },
+    "shout": {
+      "type": "boolean",
+      "title": "Shout",
+      "description": "Upper-case the greeting.",
+      "default": false
+    },
+    "repeat": {
+      "type": "integer",
+      "title": "Repeat",
+      "description": "How many times to say it.",
+      "default": 1,
+      "minimum": 1,
+      "maximum": 5
+    },
+    "tone": {
+      "type": "string",
+      "title": "Tone",
+      "enum": ["friendly", "formal", "terse"],
+      "default": "friendly"
+    }
+  }
+}
