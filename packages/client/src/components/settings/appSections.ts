@@ -13,6 +13,7 @@
 import {
   Bell,
   BookMarked,
+  Webhook,
   KeyRound,
   Layers,
   MessageSquare,
@@ -116,6 +117,16 @@ export const APP_SECTIONS: AppSectionDef[] = [
     explainer:
       "How Dispatch reaches you when an agent needs a decision or finishes one. Desktop " +
       "notifications are per browser; the webhook is per install and reaches your phone.",
+  },
+  {
+    id: "integrations",
+    icon: Webhook,
+    label: "Integrations",
+    blurb: "Webhooks for outside tools",
+    explainer:
+      "How code that is not Dispatch hears from it. A webhook is a signed POST of the events you " +
+      "pick to a URL you own; each one keeps a week of delivery history so a receiver can be " +
+      "debugged from here. These save the moment you confirm them, not with the bar below.",
   },
   {
     id: "auth",

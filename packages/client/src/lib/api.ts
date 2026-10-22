@@ -136,6 +136,12 @@ import {
   type SubscriptionStatus,
 } from "@dispatch/shared";
 import { sessionFetch } from "../stores/auth.js";
+import type {
+  WebhookDelivery,
+  WebhookSubscription,
+  WebhookSubscriptionInput,
+  WebhookSubscriptionPublic,
+} from "@dispatch/shared";
 
 /** The pins on a chat that `null` un-sets — see `api.chats.update`. */
 export type ChatTriState = "shellFilter" | "showInjectedContext" | "effort" | "model" | "modeId";
@@ -987,6 +993,24 @@ export const api = {
   },
 
   /* web push — server-sent notifications (the only path an iOS app has) */
+  /** Outbound webhook subscriptions — Settings → Integrations. See routes/webhooks.ts. */
+  webhooks: {
+    list: () => get<WebhookSubscriptionPublic[]>("/api/webhooks"),
+    /** The one response that carries the secret: show it, then forget it. */
+    create: (body: WebhookSubscriptionInput) => post<WebhookSubscription>("/api/webhooks", body),
+    /** Partial. A `secret` in the body rotates it and comes back in the response. */
+    update: (id: string, body: Partial<WebhookSubscriptionInput>) =>
+      put<WebhookSubscriptionPublic & { secret?: string }>(`/api/webhooks/${encodeURIComponent(id)}`, body),
+    remove: (id: string) => del<void>(`/api/webhooks/${encodeURIComponent(id)}`),
+    /** Fires a synthetic delivery and returns it after the first attempt. */
+    test: (id: string) => post<WebhookDelivery>(`/api/webhooks/${encodeURIComponent(id)}/test`),
+    deliveries: (id: string, limit = 50) =>
+      get<WebhookDelivery[]>(`/api/webhooks/${encodeURIComponent(id)}/deliveries?limit=${limit}`),
+    redeliver: (id: string, deliveryId: string) =>
+      post<WebhookDelivery>(
+        `/api/webhooks/${encodeURIComponent(id)}/deliveries/${encodeURIComponent(deliveryId)}/redeliver`,
+      ),
+  },
   push: {
     /** The VAPID public key `pushManager.subscribe` needs. */
     key: () => get<{ publicKey: string }>("/api/push/key"),

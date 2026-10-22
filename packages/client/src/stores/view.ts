@@ -50,6 +50,7 @@ export type AppSettingsSection =
   | "agent-context"
   | "retention"
   | "notifications"
+  | "integrations"
   | "auth"
   | "updates"
   | "system";
