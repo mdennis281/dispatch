@@ -215,19 +215,23 @@ function CreateTokenForm({ onCreated, onCancel }: { onCreated: (t: IntegrationTo
           {MANAGER_CATEGORIES.map((category) => {
             const scope = toolScope(category);
             const on = scopes.has(scope);
+            // The kit's toggle: the pressed look reads off `aria-pressed`, so
+            // the accessible state and the visible one cannot drift.
+            // `type="button"` is load-bearing: inside a <form> a button defaults
+            // to submit, and the first pill clicked minted the token with
+            // whatever scopes happened to be ticked.
             return (
-              <button
+              <Button
                 key={scope}
                 type="button"
+                variant="toggle"
+                size="sm"
                 aria-pressed={on}
                 onClick={() => toggle(scope, !on)}
-                className={cn(
-                  "rounded-full border px-2 py-0.5 text-2xs transition-colors",
-                  on ? "border-accent-2-line bg-accent-2-ghost text-accent-2-hi" : "border-line text-muted hover:bg-hover",
-                )}
+                className="cm-mono !text-2xs"
               >
                 {scope}
-              </button>
+              </Button>
             );
           })}
         </div>
