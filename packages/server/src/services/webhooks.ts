@@ -43,6 +43,7 @@ import {
   WebhookSubscriptionInputSchema,
   isChatWorking,
   webhookFilterMatches,
+  withSentContextSummary,
   type ChatSettledPayload,
   type ChatStatus,
   type WebhookDelivery,
@@ -157,6 +158,20 @@ interface SettleWatch {
 
 function newId(): string {
   return randomBytes(12).toString("base64url");
+}
+
+/**
+ * The event as a receiver gets it. A session's init row carries the whole
+ * system prompt it was built with (see shared/sent-context.ts): the memory
+ * catalogue, machine-wide instructions, every repo path. A `chat-message`
+ * subscription needs only `chats:read`, which never granted any of that, and
+ * the body is stored once per subscription in the delivery log. So it goes
+ * out as labels and sizes only.
+ */
+function forWebhook(evt: WsServerEvent): WsServerEvent {
+  if (evt.type !== "chat-message" || evt.message.kind !== "system") return evt;
+  const data = withSentContextSummary(evt.message.data, 0);
+  return data === evt.message.data ? evt : { ...evt, message: { ...evt.message, data } };
 }
 
 function stripSecret(sub: WebhookSubscription): WebhookSubscriptionPublic {
@@ -276,7 +291,7 @@ export class WebhookService {
 
   private async ingest(evt: WsServerEvent, at: number): Promise<void> {
     const scope = await this.scopeOf(evt);
-    await this.fanOut(scope, at, evt);
+    await this.fanOut(scope, at, forWebhook(evt));
   }
 
   /**

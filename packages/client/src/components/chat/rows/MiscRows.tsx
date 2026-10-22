@@ -11,7 +11,13 @@ import {
   XCircle,
   Cpu,
 } from "lucide-react";
-import { readSentContext, type NoticeRow, type ResultRow, type SystemMessageRow } from "@dispatch/shared";
+import {
+  DISPATCH_INPUT_SUBTYPE,
+  readSentContext,
+  type NoticeRow,
+  type ResultRow,
+  type SystemMessageRow,
+} from "@dispatch/shared";
 import { RowShell } from "./RowShell.js";
 import { TypingPulse } from "../../ui/Spinner.js";
 import { Button } from "../../ui/Button.js";
@@ -24,7 +30,7 @@ import { useTypewriter } from "../../../lib/useTypewriter.js";
 import { useChats } from "../../../stores/chats.js";
 import { harnessLabel } from "../../../lib/harness.js";
 import { useInjectedContext } from "../../../lib/injectedContext.js";
-import { SentContextCard } from "./SentContext.js";
+import { SentContextCard, TurnContextLines } from "./SentContext.js";
 
 /** The live "agent is working" row shown while a turn streams (no text yet). */
 export function WorkingRow({ label }: { label?: string }) {
@@ -193,8 +199,27 @@ export const ResultRowView = memo(function ResultRowView({
 
 /** A system/init message — a quiet "session started" marker with a model chip. */
 export const SystemRowView = memo(function SystemRowView({ row }: { row: SystemMessageRow }) {
-  // Called unconditionally (hooks), consulted only for init rows.
+  // Called unconditionally (hooks), consulted only for the disclosure rows.
   const injected = useInjectedContext(row.chatId);
+  if (row.subtype === DISPATCH_INPUT_SUBTYPE) {
+    // A turn Dispatch sent on its own (a guard recovery). A disclosure like any
+    // other, so it exists only under "show sent context".
+    const d = row.data as { label?: unknown; text?: unknown } | undefined;
+    if (!injected.show || typeof d?.text !== "string") return null;
+    return (
+      <div className="px-4 py-1">
+        <div className="ml-7">
+          <TurnContextLines
+            parts={[
+              { kind: "context", label: typeof d.label === "string" ? d.label : "Sent by Dispatch", text: d.text },
+            ]}
+            group="Sent by Dispatch as a turn"
+            description="Dispatch sent this to the agent on its own — nobody typed it"
+          />
+        </div>
+      </div>
+    );
+  }
   if (row.subtype === "init") {
     const data = row.data as { model?: string } | undefined;
     const sent = injected.show ? readSentContext(row.data) : undefined;

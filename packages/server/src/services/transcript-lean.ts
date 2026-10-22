@@ -26,6 +26,7 @@ import {
   fileResultStat,
   findTailPayloadLine,
   readSentContext,
+  summarizeSentContext,
   type ChatMessage,
 } from "@dispatch/shared";
 
@@ -201,19 +202,7 @@ export function leanRow(row: ChatMessage, toolName?: string): ChatMessage {
       const sent = readSentContext(row.data);
       const kept = {
         ...(typeof model === "string" ? { model } : {}),
-        ...(sent
-          ? {
-              sentContext: {
-                ...sent,
-                sections: sent.sections.map((s) => ({
-                  ...s,
-                  text: clip(s.text, SECTION_PREVIEW_CHARS),
-                  chars: s.chars ?? s.text.length,
-                })),
-                clipped: true,
-              },
-            }
-          : {}),
+        ...(sent ? { sentContext: summarizeSentContext(sent, SECTION_PREVIEW_CHARS) } : {}),
       };
       return {
         ...row,

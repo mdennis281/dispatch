@@ -127,13 +127,19 @@ describe("lean transcript projection — large payloads are clipped + flagged", 
       },
     };
     const lean = leanRow(row) as SystemMessageRow;
-    const data = lean.data as { model: string; tools?: unknown; sentContext: { clipped: boolean; sections: { text: string; chars: number }[]; mcpServers: unknown[] } };
+    const data = lean.data as {
+      model: string;
+      tools?: unknown;
+      sentContext: { clipped: boolean; sections: { text: string; chars: number }[]; mcpServers: { tools?: unknown; toolCount?: number }[] };
+    };
     expect(lean.dataOmitted).toBe(true);
     expect(data.tools).toBeUndefined();
     expect(data.sentContext.clipped).toBe(true);
     expect(data.sentContext.sections[0]!.chars).toBe(BIG.length);
     expect(data.sentContext.sections[0]!.text.length).toBeLessThan(300);
-    expect(data.sentContext.mcpServers).toHaveLength(1);
+    // A count, not the names: the name list is what `data.tools` was dropped for.
+    expect(data.sentContext.mcpServers[0]).toMatchObject({ toolCount: 1 });
+    expect(data.sentContext.mcpServers[0]!.tools).toBeUndefined();
   });
 });
 

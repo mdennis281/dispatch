@@ -165,6 +165,38 @@ describe("signature", () => {
 });
 
 describe("WebhookService", () => {
+  it("sends a session start's sent context as labels and sizes, never its text", async () => {
+    // The text is the memory catalogue, machine-wide instructions, every repo
+    // path; `chat-message` needs only chats:read, which granted none of it.
+    const h = harness(store);
+    await h.svc.start();
+    await chat("c1");
+    await h.svc.create(USER, { name: "all", url: "https://hooks.example/x", filters: { events: ["chat-message"] } });
+    await h.publish({
+      type: "chat-message",
+      chatId: "c1",
+      message: {
+        id: "i1",
+        chatId: "c1",
+        kind: "system",
+        subtype: "init",
+        ts: T0,
+        data: {
+          model: "m",
+          sentContext: {
+            sections: [{ id: "instructions:global", label: "Global instructions", text: "PRIVATE RULE", chars: 12 }],
+            mcpServers: [],
+            skills: [],
+          },
+        },
+      },
+    } as WsServerEvent);
+
+    expect(h.received).toHaveLength(1);
+    expect(h.received[0]!.body).not.toContain("PRIVATE RULE");
+    expect(h.received[0]!.body).toContain("Global instructions");
+  });
+
   it("delivers a matching event, signed, with the delivery id in header and body", async () => {
     const h = harness(store);
     await h.svc.start();

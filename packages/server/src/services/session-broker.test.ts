@@ -3542,9 +3542,60 @@ describe("SessionBroker — project memory injection", () => {
     );
     expect(sent.sections[0]!.id).toBe("mcp-map");
     for (const s of sent.sections) expect(s.chars).toBe(s.text.length);
-    // Dispatch's own servers are listed, and none of them carries its config.
     expect(sent.mcpServers.some((m) => m.origin === "dispatch")).toBe(true);
-    expect(JSON.stringify(sent.mcpServers)).not.toMatch(/command|headers|env/);
+  });
+
+  it("points a restarted session at the earlier init row when its prompt is unchanged", async () => {
+    // The idle sweep stops and resumes sessions all day; each resume rebuilds an
+    // identical prompt, and the transcript is append-only.
+    const { fn } = makeFakeQuery((t) => [assistantText(t), resultMsg()]);
+    const houseRules = new HouseRulesService({
+      globalRoot: join(dir, "global"),
+      projectDir: (id) => join(dir, "house", id),
+    });
+    await houseRules.write("global", "GLOBAL RULE: ask before upgrading stable.");
+    const broker = makeBroker(fn, 6, { houseRules });
+    await store.saveChat(chatFor("c1", "p1"));
+    broker.create(chatFor("c1", "p1"));
+
+    await broker.sendMessage("c1", "hi");
+    await broker.waitFor("c1", "idle");
+    await broker.stop("c1");
+    await broker.sendMessage("c1", "again");
+    await broker.waitFor("c1", "idle");
+
+    const inits = (await store.readMessages("c1")).filter(
+      (r) => r.kind === "system" && r.subtype === "init",
+    );
+    expect(inits).toHaveLength(2);
+    const first = readSentContext((inits[0] as { data?: unknown }).data)!;
+    const second = readSentContext((inits[1] as { data?: unknown }).data)!;
+    expect(first.sameAs).toBeUndefined();
+    expect(first.sections.some((s) => s.text.includes("GLOBAL RULE"))).toBe(true);
+    expect(second.sameAs).toBe(inits[0]!.id);
+    // Labels and sizes still there for the card; no second copy of the text.
+    expect(second.sections.map((s) => s.label)).toEqual(first.sections.map((s) => s.label));
+    expect(second.sections.every((s) => s.text === "" && s.chars > 0)).toBe(true);
+  });
+
+  it("discloses a peer message's attribution reminder as a context part", async () => {
+    const { fn } = makeFakeQuery((t) => [assistantText(t), resultMsg()]);
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+
+    // Image-only (empty text): the text part must survive, or the row loses the
+    // sender card it is drawn from.
+    await broker.sendMessage("c1", "", { peer: { chatId: "c9", title: "Other chat" } });
+    await broker.waitFor("c1", "idle");
+
+    const user = (await store.readMessages("c1")).find((r) => r.kind === "user") as {
+      parts?: { kind: string; label?: string; text: string }[];
+    };
+    expect(user.parts?.[0]).toMatchObject({ kind: "text", text: "" });
+    const ctx = user.parts?.find((p) => p.kind === "context");
+    expect(ctx?.label).toBe("Sender attribution — another chat");
+    expect(ctx?.text).toContain("ANOTHER CHAT");
   });
 
   it("injects nothing for a project with no memories", async () => {
@@ -3916,6 +3967,18 @@ describe("SessionBroker — config-sourced instructions / agents / modes", () =>
     expect(opts.systemPrompt?.append).toContain(
       "Project: `claude-in-chrome` — project-specific integrations.",
     );
+    // The disclosure names the server and how it connects — and nothing of its
+    // config: by the time options are built, URLs, headers and env carry
+    // expanded secrets, and the init row is persisted and broadcast.
+    const init = (await store.readMessages("c1")).find(
+      (r) => r.kind === "system" && r.subtype === "init",
+    ) as { data?: unknown };
+    const sent = readSentContext(init.data)!;
+    expect(sent.mcpServers.find((s) => s.name === "claude-in-chrome")).toMatchObject({
+      origin: "project",
+      transport: "sse",
+    });
+    expect(JSON.stringify(sent)).not.toContain("127.0.0.1:9999");
   });
 
   it("materializes a `.dispatch/skills/` skill into the session cwd + enables skills:'all'", async () => {

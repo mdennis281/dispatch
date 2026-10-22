@@ -251,6 +251,33 @@ describe("readChat", () => {
     expect(result.rows.map((r) => r.id)).toEqual(["a", "e"]);
   });
 
+  it("neither matches nor serves a session start's prompt text in the clipped view", async () => {
+    // The sent context IS the system prompt: in grep every instruction word made
+    // the init row a hit, and the clipped view is what the integration API serves.
+    await seedChat("c2", { title: "with init", updatedAt: T0 + DAY }, [
+      {
+        id: "s",
+        ts: T0,
+        kind: "system",
+        subtype: "init",
+        data: {
+          model: "m",
+          sentContext: {
+            sections: [{ id: "workflow", label: "Workflow profile", text: "zebracorn rule", chars: 14 }],
+            mcpServers: [],
+            skills: [],
+          },
+        },
+      },
+      { id: "u", ts: T0 + 1, kind: "user", text: "hello" },
+    ]);
+    const grep = await service().readChat({ chatId: "c2", view: "grep", query: "zebracorn" });
+    expect(grep.rows).toHaveLength(0);
+    const rows = await service().readChat({ chatId: "c2", view: "messages" });
+    expect(JSON.stringify(rows.rows)).not.toContain("zebracorn");
+    expect(JSON.stringify(rows.rows)).toContain("Workflow profile");
+  });
+
   it("filters by row kind", async () => {
     const result = await service().readChat({
       chatId: "c1",

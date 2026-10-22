@@ -29,6 +29,8 @@ import {
   Sparkles,
 } from "lucide-react";
 import {
+  mcpToolCount,
+  mcpToolPrefix,
   readSentContext,
   type ContextUsage,
   type MessagePart,
@@ -132,9 +134,12 @@ export interface ContextItem {
  * right. One modal for the whole session's context rather than one per line,
  * because the question is usually "where did the window go" — and that is a
  * comparison across sections, not a read of one.
+ *
+ * MOUNT IT ONLY WHILE OPEN. The selection is initialised from `initialKey` at
+ * mount; resetting it in an effect instead painted the previously viewed
+ * section for a frame before the clicked one replaced it.
  */
 export function ContextViewerModal({
-  open,
   onClose,
   title,
   description,
@@ -142,7 +147,6 @@ export function ContextViewerModal({
   initialKey,
   loading,
 }: {
-  open: boolean;
   onClose: () => void;
   title: string;
   description?: ReactNode;
@@ -152,9 +156,6 @@ export function ContextViewerModal({
   loading?: boolean;
 }) {
   const [key, setKey] = useState(initialKey);
-  useEffect(() => {
-    if (open) setKey(initialKey);
-  }, [open, initialKey]);
   const current = items.find((i) => i.key === key) ?? items[0];
   const groups = useMemo(() => {
     const out: { group: string; items: ContextItem[] }[] = [];
@@ -168,7 +169,7 @@ export function ContextViewerModal({
 
   return (
     <Modal
-      open={open}
+      open
       onClose={onClose}
       title={title}
       description={description}
@@ -247,11 +248,19 @@ export function ContextViewerModal({
  * A user row's `context` parts: one line each, all of them in the modal so a
  * turn with memories AND an attachment note can be read side by side.
  */
-export function TurnContextLines({ parts }: { parts: MessagePart[] }) {
+export function TurnContextLines({
+  parts,
+  group = "Attached to this turn",
+  description = "Sent to the agent with this message — not typed by you",
+}: {
+  parts: MessagePart[];
+  group?: string;
+  description?: string;
+}) {
   const [openKey, setOpenKey] = useState<string | null>(null);
   const items: ContextItem[] = parts.map((p, i) => ({
     key: `part:${i}`,
-    group: "Attached to this turn",
+    group,
     label: p.label ?? "context",
     icon: <Sparkles />,
     size: approxTokens(p.text.length),
@@ -269,14 +278,15 @@ export function TurnContextLines({ parts }: { parts: MessagePart[] }) {
           onOpen={() => setOpenKey(item.key)}
         />
       ))}
-      <ContextViewerModal
-        open={openKey !== null}
-        onClose={() => setOpenKey(null)}
-        title="Attached by Dispatch"
-        description="Sent to the agent with this message — not typed by you"
-        items={items}
-        initialKey={openKey ?? undefined}
-      />
+      {openKey !== null && (
+        <ContextViewerModal
+          onClose={() => setOpenKey(null)}
+          title="Attached by Dispatch"
+          description={description}
+          items={items}
+          initialKey={openKey}
+        />
+      )}
     </div>
   );
 }
@@ -287,67 +297,93 @@ const ORIGIN_LABEL: Record<SentContextMcpServer["origin"], string> = {
   dispatch: "Dispatch",
   bundled: "Bundled",
   project: "Project",
+  external: "Runtime",
 };
 
-function McpServersBody({
+/**
+ * Token totals per server and per tool, LOADED tools only. With tool search
+ * on, a deferred tool's schema is not in the window until it is searched for;
+ * counting it would overstate exactly the number this view exists to explain.
+ */
+function mcpTokenTotals(usage: ContextUsage | null | undefined) {
+  const byServer = new Map<string, number>();
+  const byTool = new Map<string, number>();
+  let deferred = 0;
+  for (const t of usage?.mcpTools ?? []) {
+    if (t.isLoaded === false) {
+      deferred += 1;
+      continue;
+    }
+    byServer.set(t.serverName, (byServer.get(t.serverName) ?? 0) + t.tokens);
+    byTool.set(t.name, t.tokens);
+  }
+  return { byServer, byTool, deferred };
+}
+
+export function McpServersBody({
   servers,
   usage,
 }: {
   servers: SentContextMcpServer[];
   usage: ContextUsage | null | undefined;
 }) {
-  const tokensByServer = new Map<string, number>();
-  const tokensByTool = new Map<string, number>();
-  for (const t of usage?.mcpTools ?? []) {
-    tokensByServer.set(t.serverName, (tokensByServer.get(t.serverName) ?? 0) + t.tokens);
-    tokensByTool.set(t.name, t.tokens);
-  }
+  const { byServer, byTool, deferred } = mcpTokenTotals(usage);
   return (
     <div className="flex flex-col gap-2">
-      {!usage?.mcpTools && (
+      {!usage?.mcpTools ? (
         <p className="text-xs text-faint">
-          Per-tool token counts come from the live session — open “Token breakdown” while the chat
-          is running to load them.
+          Per-tool token counts come from the live session — they fill in while the chat is running.
         </p>
+      ) : (
+        deferred > 0 && (
+          <p className="text-xs text-faint">
+            {deferred} deferred tool{deferred === 1 ? "" : "s"} not counted — tool search loads their
+            schemas only when needed.
+          </p>
+        )
       )}
-      {servers.map((s) => (
-        <details key={s.name} className="rounded-md border border-line-soft bg-inset">
-          <summary className="flex cursor-pointer items-center gap-2 px-2.5 py-1.5 text-xs">
-            <Plug className="size-3 shrink-0 text-faint" />
-            <span className="min-w-0 truncate font-medium text-primary">{s.name}</span>
-            <span className="shrink-0 rounded-[4px] bg-hover px-1 text-2xs text-muted">
-              {ORIGIN_LABEL[s.origin] ?? s.origin}
-            </span>
-            <span className="shrink-0 text-2xs text-faint">{s.transport}</span>
-            {s.status && s.status !== "connected" && (
-              <span className="shrink-0 text-2xs text-warn">{s.status}</span>
-            )}
-            <span className="ml-auto shrink-0 cm-mono !text-2xs text-faint">
-              {s.tools ? `${s.tools.length} tools` : "tools not reported"}
-              {tokensByServer.has(s.name) && ` · ${fmtTokens(tokensByServer.get(s.name)!)} tok`}
-            </span>
-          </summary>
-          {s.tools && s.tools.length > 0 && (
-            <ul className="cm-mono grid grid-cols-1 gap-x-4 px-2.5 pb-2 pt-0.5 !text-2xs text-muted sm:grid-cols-2">
-              {s.tools.map((t) => {
-                const full = `mcp__${s.name}__${t}`;
-                return (
-                  <li key={t} className="flex min-w-0 gap-2">
-                    <span className="min-w-0 truncate" title={full}>
-                      {t}
-                    </span>
-                    {tokensByTool.has(full) && (
-                      <span className="ml-auto shrink-0 text-faint">
-                        {fmtTokens(tokensByTool.get(full)!)}
+      {servers.map((s) => {
+        const count = mcpToolCount(s);
+        const prefix = mcpToolPrefix(s.name);
+        return (
+          <details key={s.name} className="rounded-md border border-line-soft bg-inset">
+            <summary className="flex cursor-pointer items-center gap-2 px-2.5 py-1.5 text-xs">
+              <Plug className="size-3 shrink-0 text-faint" />
+              <span className="min-w-0 truncate font-medium text-primary">{s.name}</span>
+              <span className="shrink-0 rounded-[4px] bg-hover px-1 text-2xs text-muted">
+                {ORIGIN_LABEL[s.origin] ?? s.origin}
+              </span>
+              <span className="shrink-0 text-2xs text-faint">{s.transport}</span>
+              {s.status && s.status !== "connected" && (
+                <span className="shrink-0 text-2xs text-warn">{s.status}</span>
+              )}
+              <span className="ml-auto shrink-0 cm-mono !text-2xs text-faint">
+                {count !== undefined ? `${count} tools` : "tools not reported"}
+                {byServer.has(s.name) && ` · ${fmtTokens(byServer.get(s.name)!)} tok`}
+              </span>
+            </summary>
+            {s.tools && s.tools.length > 0 && (
+              <ul className="cm-mono grid grid-cols-1 gap-x-4 px-2.5 pb-2 pt-0.5 !text-2xs text-muted sm:grid-cols-2">
+                {s.tools.map((t) => {
+                  const full = `${prefix}${t}`;
+                  return (
+                    <li key={t} className="flex min-w-0 gap-2">
+                      <span className="min-w-0 truncate" title={full}>
+                        {t}
                       </span>
-                    )}
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </details>
-      ))}
+                      {byTool.has(full) && (
+                        <span className="ml-auto shrink-0 text-faint">
+                          {fmtTokens(byTool.get(full)!)}
+                        </span>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </details>
+        );
+      })}
     </div>
   );
 }
@@ -377,7 +413,7 @@ function BreakdownTable({ rows }: { rows: { name: string; tokens: number; note?:
   );
 }
 
-function UsageBody({ usage }: { usage: ContextUsage | null | undefined }) {
+export function UsageBody({ usage }: { usage: ContextUsage | null | undefined }) {
   if (usage === undefined) {
     return (
       <p className="flex items-center gap-1.5 text-xs text-faint">
@@ -393,10 +429,10 @@ function UsageBody({ usage }: { usage: ContextUsage | null | undefined }) {
       </p>
     );
   }
-  const byServer = new Map<string, number>();
-  for (const t of usage.mcpTools ?? []) {
-    byServer.set(t.serverName, (byServer.get(t.serverName) ?? 0) + t.tokens);
-  }
+  const { byServer, deferred } = mcpTokenTotals(usage);
+  // `?? []`: a Codex / goose / ACP session answers only the two totals, and
+  // nothing on the client applies the schema's default.
+  const categories = (usage.categories ?? []).filter((c) => c.tokens > 0);
   const block = (title: string, body: ReactNode) => (
     <div className="mt-3 first:mt-0">
       <div className="mb-1 text-2xs font-medium uppercase tracking-[0.07em] text-faint">{title}</div>
@@ -408,20 +444,17 @@ function UsageBody({ usage }: { usage: ContextUsage | null | undefined }) {
       <p className="mb-3 text-xs text-muted">
         <span className="cm-mono text-primary">{fmtTokens(usage.totalTokens)}</span> of{" "}
         <span className="cm-mono">{fmtTokens(usage.maxTokens)}</span> tokens in the window right now
-        {usage.model && <> · {usage.model}</>}. Exact counts from the runtime, not estimates.
+        {usage.model && <> · {usage.model}</>}. Exact counts from the runtime for the CURRENT session,
+        not estimates.
       </p>
-      {usage.categories.length > 0 &&
+      {categories.length > 0 &&
         block(
           "By category",
-          <BreakdownTable
-            rows={[...usage.categories]
-              .filter((c) => c.tokens > 0)
-              .sort((a, b) => b.tokens - a.tokens)}
-          />,
+          <BreakdownTable rows={[...categories].sort((a, b) => b.tokens - a.tokens)} />,
         )}
       {byServer.size > 0 &&
         block(
-          "MCP tools by server",
+          deferred > 0 ? `MCP tools by server — ${deferred} deferred not counted` : "MCP tools by server",
           <BreakdownTable
             rows={[...byServer.entries()]
               .map(([name, tokens]) => ({ name, tokens }))
@@ -460,59 +493,85 @@ function UsageBody({ usage }: { usage: ContextUsage | null | undefined }) {
   );
 }
 
-/**
- * The session's sent context, under its "Session started" marker.
- *
- * The row on the wire is LEAN — section texts are 240-char previews (see
- * `transcript-lean.ts`) — so the modal fetches the verbatim row once on open
- * and swaps the full texts in. Fetched into local state rather than through
- * `hydrateFullRows`: nothing else renders these texts, and replacing the row
- * in the store would re-render the transcript around a modal for no reader.
- */
-export function SentContextCard({ row, sent }: { row: SystemMessageRow; sent: SentContext }) {
-  const [openKey, setOpenKey] = useState<string | null>(null);
-  const [full, setFull] = useState<SentContext | null>(sent.clipped ? null : sent);
-  const [loadingFull, setLoadingFull] = useState(false);
-  // undefined = not asked yet / in flight, null = session not live.
-  const [usage, setUsage] = useState<ContextUsage | null | undefined>(undefined);
-  const [askedUsage, setAskedUsage] = useState(false);
+/** Summary counts shared by the card's header and the modal's description. */
+function sentSummary(sent: SentContext) {
+  const chars = sent.sections.reduce((n, s) => n + s.chars, 0);
+  const counts = sent.mcpServers.map(mcpToolCount);
+  const anyTools = counts.some((c) => c !== undefined);
+  const tools = counts.reduce<number>((n, c) => n + (c ?? 0), 0);
+  return { chars, anyTools, tools };
+}
 
-  const open = openKey !== null;
+/**
+ * The drill-down for one session start. Mounted only while open, so every open
+ * fetches afresh: the "live" breakdown is the runtime's answer NOW, and one
+ * kept from an earlier open would quietly go stale.
+ *
+ * The row on the wire is LEAN — section texts are 240-char previews, tool lists
+ * are counts (see `transcript-lean.ts`) — so the verbatim row is fetched and
+ * swapped in. A `sameAs` row has no texts of its own; they live on the row it
+ * names, fetched in the same request. Local state rather than
+ * `hydrateFullRows`: nothing else renders these, and replacing the row in the
+ * store would re-render the transcript around a modal for no reader.
+ */
+export function SentContextModal({
+  row,
+  sent,
+  initialKey,
+  onClose,
+}: {
+  row: SystemMessageRow;
+  sent: SentContext;
+  initialKey?: string;
+  onClose: () => void;
+}) {
+  const [full, setFull] = useState<SentContext | null>(sent.clipped ? null : sent);
+  const [loadingFull, setLoadingFull] = useState(sent.clipped === true);
+  // undefined = in flight, null = session not live.
+  const [usage, setUsage] = useState<ContextUsage | null | undefined>(undefined);
+
   useEffect(() => {
-    if (!open || full) return;
+    if (!sent.clipped) return;
     let cancelled = false;
-    setLoadingFull(true);
+    const ids = sent.sameAs ? [row.id, sent.sameAs] : [row.id];
     api.chats
-      .messagesFull(row.chatId, [row.id])
+      .messagesFull(row.chatId, ids)
       .then((rows) => {
-        const got = readSentContext((rows[0] as SystemMessageRow | undefined)?.data);
-        if (!cancelled && got) setFull(got);
+        if (cancelled) return;
+        const dataOf = (id: string) => {
+          const r = rows.find((x) => x.id === id);
+          return r?.kind === "system" ? r.data : undefined;
+        };
+        const own = readSentContext(dataOf(row.id));
+        const ref = sent.sameAs ? readSentContext(dataOf(sent.sameAs)) : undefined;
+        if (own) setFull({ ...own, sections: ref?.sections ?? own.sections });
       })
       .catch(() => {
         /* the previews stay; reopening retries */
       })
-      .finally(() => !cancelled && setLoadingFull(false));
+      .finally(() => {
+        if (!cancelled) setLoadingFull(false);
+      });
     return () => {
       cancelled = true;
     };
-  }, [open, full, row.chatId, row.id]);
+  }, [row.chatId, row.id, sent.clipped, sent.sameAs]);
 
-  // Asked on first open of ANY item, not only the usage one: the MCP view
-  // shows per-tool tokens from the same answer, and one request is cheap.
+  // Asked for any item, not only the usage one: the MCP view shows per-tool
+  // tokens from the same answer, and one request is cheap.
   useEffect(() => {
-    if (!open || askedUsage) return;
-    setAskedUsage(true);
+    let cancelled = false;
     api.chats
       .contextUsage(row.chatId)
-      .then((r) => setUsage(r.usage))
-      .catch(() => setUsage(null));
-  }, [open, askedUsage, row.chatId]);
+      .then((r) => !cancelled && setUsage(r.usage))
+      .catch(() => !cancelled && setUsage(null));
+    return () => {
+      cancelled = true;
+    };
+  }, [row.chatId]);
 
   const shown = full ?? sent;
-  const totalChars = sent.sections.reduce((n, s) => n + s.chars, 0);
-  const toolCount = sent.mcpServers.reduce((n, s) => n + (s.tools?.length ?? 0), 0);
-  const anyTools = sent.mcpServers.some((s) => s.tools);
-
+  const { anyTools, tools } = sentSummary(sent);
   const items: ContextItem[] = [
     ...shown.sections.map(
       (s, i): ContextItem => ({
@@ -529,7 +588,7 @@ export function SentContextCard({ row, sent }: { row: SystemMessageRow; sent: Se
       group: "Attached to the session",
       label: `MCP servers (${shown.mcpServers.length})`,
       icon: <Plug />,
-      size: anyTools ? `${toolCount} tools` : undefined,
+      size: anyTools ? `${tools} tools` : undefined,
       render: () => <McpServersBody servers={shown.mcpServers} usage={usage} />,
     },
     ...(shown.skills.length
@@ -555,19 +614,41 @@ export function SentContextCard({ row, sent }: { row: SystemMessageRow; sent: Se
   ];
 
   return (
+    <ContextViewerModal
+      onClose={onClose}
+      title="Sent context — session start"
+      description={
+        sent.sameAs
+          ? "Unchanged from an earlier session start in this chat. Claude Code's own base prompt and CLAUDE.md files come on top — see Token breakdown."
+          : "Everything Dispatch handed the agent when this session was built. Claude Code's own base prompt and CLAUDE.md files come on top — see Token breakdown."
+      }
+      items={items}
+      initialKey={initialKey}
+      loading={loadingFull}
+    />
+  );
+}
+
+/** The session's sent context, under its "Session started" marker. */
+export function SentContextCard({ row, sent }: { row: SystemMessageRow; sent: SentContext }) {
+  const [openKey, setOpenKey] = useState<string | null>(null);
+  const { chars, anyTools, tools } = sentSummary(sent);
+
+  return (
     <div className="px-4 pb-1.5">
       <div className="ml-7 rounded-[5px] border border-dashed border-line-soft py-0.5">
         <RowButton
-          onClick={() => setOpenKey(items[0]?.key ?? "usage")}
+          onClick={() => setOpenKey(sent.sections.length ? "section:0" : "mcp")}
           className="flex w-full min-w-0 items-center gap-1.5 px-2 py-1 text-2xs text-faint hover:text-muted [&_svg]:size-3"
         >
           <Sparkles className="shrink-0 opacity-70" />
           <span className="shrink-0 uppercase tracking-[0.06em]">sent by Dispatch at session start</span>
           <span className="min-w-0 truncate">
-            · {sent.sections.length} prompt sections · {approxTokens(totalChars)} ·{" "}
+            · {sent.sections.length} prompt sections · {approxTokens(chars)} ·{" "}
             {sent.mcpServers.length} MCP servers
-            {anyTools && ` / ${toolCount} tools`}
+            {anyTools && ` / ${tools} tools`}
             {sent.skills.length > 0 && ` · ${sent.skills.length} skills`}
+            {sent.sameAs && " · unchanged since an earlier start"}
           </span>
           <span className="ml-auto shrink-0 text-accent-2 opacity-80">Open all</span>
         </RowButton>
@@ -585,7 +666,7 @@ export function SentContextCard({ row, sent }: { row: SystemMessageRow; sent: Se
           icon={<Plug className="opacity-70" />}
           label={`MCP servers (${sent.mcpServers.length})`}
           preview={sent.mcpServers.map((s) => s.name).join(" · ")}
-          size={anyTools ? `${toolCount} tools` : undefined}
+          size={anyTools ? `${tools} tools` : undefined}
           onOpen={() => setOpenKey("mcp")}
         />
         {sent.skills.length > 0 && (
@@ -597,15 +678,59 @@ export function SentContextCard({ row, sent }: { row: SystemMessageRow; sent: Se
           />
         )}
       </div>
-      <ContextViewerModal
-        open={open}
-        onClose={() => setOpenKey(null)}
-        title="Sent context — session start"
-        description="Everything Dispatch handed the agent when this session was built. Claude Code's own base prompt and CLAUDE.md files come on top — see Token breakdown."
-        items={items}
-        initialKey={openKey ?? undefined}
-        loading={loadingFull}
-      />
+      {openKey !== null && (
+        <SentContextModal
+          row={row}
+          sent={sent}
+          initialKey={openKey}
+          onClose={() => setOpenKey(null)}
+        />
+      )}
     </div>
   );
+}
+
+/**
+ * The chat menu's "View sent context": the NEWEST session start, wherever it is.
+ * Claude writes a "Session started" row every turn and only the first after a
+ * rebuild carries the card, so in a long chat it sits far above the loaded
+ * window — the server finds it instead (`GET /api/chats/:id/sent-context`).
+ */
+export function LatestSentContextModal({ chatId, onClose }: { chatId: string; onClose: () => void }) {
+  const [state, setState] = useState<
+    { row: SystemMessageRow; sent: SentContext } | "loading" | "none"
+  >("loading");
+  useEffect(() => {
+    let cancelled = false;
+    api.chats
+      .sentContext(chatId)
+      .then(({ row }) => {
+        if (cancelled) return;
+        const sent = row?.kind === "system" ? readSentContext(row.data) : undefined;
+        setState(row && sent ? { row: row as SystemMessageRow, sent } : "none");
+      })
+      .catch(() => !cancelled && setState("none"));
+    return () => {
+      cancelled = true;
+    };
+  }, [chatId]);
+
+  if (state === "loading" || state === "none") {
+    return (
+      <Modal open onClose={onClose} title="Sent context" icon={<Sparkles />} width={520}>
+        {state === "loading" ? (
+          <p className="flex items-center gap-1.5 text-xs text-faint">
+            <Spinner /> finding the latest session start…
+          </p>
+        ) : (
+          <p className="text-xs text-muted">
+            No session in this chat has recorded its sent context yet — that started with this
+            build. The next time the session starts (send a message after it has gone idle), it
+            will be here.
+          </p>
+        )}
+      </Modal>
+    );
+  }
+  return <SentContextModal row={state.row} sent={state.sent} onClose={onClose} />;
 }

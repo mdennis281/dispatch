@@ -57,7 +57,7 @@ import type {
   SentContextSection,
   SentContextSkill,
 } from "@dispatch/shared";
-import { withRuntimeMcpReport } from "@dispatch/shared";
+import { DISPATCH_INPUT_SUBTYPE, withRuntimeMcpReport } from "@dispatch/shared";
 import {
   compactCommand,
   normalizeCompactFocus,
@@ -2523,6 +2523,12 @@ export class SessionBroker {
 
   private readonly sessions = new Map<string, LiveSession>();
   /**
+   * Per chat, the sent context last written in full and the init row holding
+   * it — outlives the LiveSession on purpose, since a resume is a new one.
+   * See `takeSentContext`.
+   */
+  private readonly lastSentContext = new Map<string, { key: string; rowId: string }>();
+  /**
    * Chats parked for a slot — cold starts AND resumes (see {@link QueueEntry}).
    * Not a FIFO: {@link drainQueue} picks by {@link tierOf}, oldest first within
    * a tier. Push order is kept only as the tie-break.
@@ -2805,7 +2811,11 @@ export class SessionBroker {
       : o.channel
         ? channelReminder(o.channel)
         : undefined;
-    const parts = this.messageParts(text, o.parts, memory, [
+    // A peer/channel turn keeps its text part even when empty (an image-only
+    // send): the sender card is drawn per text part, and with none the row lost
+    // its "from another chat" header the moment it gained a context part.
+    const given = o.parts ?? (peerContext ? [{ kind: "text" as const, text }] : undefined);
+    const parts = this.messageParts(text, given, memory, [
       ...(peerContext
         ? [{ label: o.peer ? "Sender attribution — another chat" : "Sender attribution — integration", text: peerContext }]
         : []),
@@ -3030,8 +3040,9 @@ export class SessionBroker {
     const parts: MessagePart[] = [
       ...(given ?? (text ? [{ kind: "text" as const, text }] : [])),
     ];
-    // In the order they reach the model: attribution prefixes the message, the
-    // attachment note trails it, and the memory block rides as its own reminder.
+    // After the message, whatever order they reach the model in (attribution
+    // and memory prefix it, the attachment note trails it — see `outboxText`):
+    // the human's words lead the row, and the disclosures follow as one block.
     for (const e of extra) parts.push({ kind: "context", label: e.label, text: e.text });
     if (memory) {
       const count = memory.names.length + memory.pointed.length;
@@ -3052,18 +3063,33 @@ export class SessionBroker {
    */
   private takeSentContext(
     session: LiveSession,
+    rowId: string,
     tools: unknown,
     mcpStatus: unknown,
   ): { sentContext?: SentContext } {
     const pending = session.pendingSentContext;
     if (!pending) return {};
     session.pendingSentContext = undefined;
-    return {
-      sentContext: {
-        ...pending,
-        mcpServers: withRuntimeMcpReport(pending.mcpServers, tools, mcpStatus),
-      },
-    };
+    const mcpServers = withRuntimeMcpReport(pending.mcpServers, tools, mcpStatus);
+    // Identical prompt to the last one this process wrote for the chat → point
+    // at that row instead of writing 50KB again. The idle sweep stops and
+    // resumes sessions all day, and every resume rebuilds the same prompt. Per
+    // process, so a server restart writes it once more — the price of not
+    // putting a hash on the chat record.
+    const key = JSON.stringify(pending.sections.map((s) => [s.id, s.label, s.text]));
+    const prior = this.lastSentContext.get(session.chatId);
+    if (prior?.key === key) {
+      return {
+        sentContext: {
+          ...pending,
+          sameAs: prior.rowId,
+          sections: pending.sections.map((s) => ({ ...s, text: "" })),
+          mcpServers,
+        },
+      };
+    }
+    this.lastSentContext.set(session.chatId, { key, rowId });
+    return { sentContext: { ...pending, mcpServers } };
   }
 
   /**
@@ -5002,6 +5028,27 @@ export class SessionBroker {
         }
       }
 
+      // `buildOptions` described Dispatch's servers as the SDK gets them —
+      // in-process. This runtime gets them over HTTP, or (no grant minted) not
+      // at all; the disclosure must say what was actually attached.
+      if (session.pendingSentContext) {
+        const pending = session.pendingSentContext;
+        pending.mcpServers = pending.mcpServers.flatMap((s) =>
+          s.origin !== "dispatch"
+            ? [s]
+            : !managerMcp
+              ? []
+              : managerMcp.transport === "http"
+                ? [{ ...s, transport: "http" }]
+                : [s],
+        );
+        // Only the Claude adapter reads `spec.agent` (harness/claude/session.ts);
+        // Codex and ACP take the append alone, so an agent section would be a
+        // disclosure of something that never reached the model.
+        if (resolved.harness.kind !== "claude") {
+          pending.sections = pending.sections.filter((s) => s.id !== "agent");
+        }
+      }
       const prompt = options.systemPrompt as { append?: string } | undefined;
       const selectedAgent = options.agent ? options.agents?.[options.agent] : undefined;
       const appSettings = await this.store.getSettings().catch(() => undefined);
@@ -5587,6 +5634,9 @@ export class SessionBroker {
         session.sessionId = event.sessionId;
         session.model = event.model ?? session.model;
         session.contextWindow = event.contextWindow ?? session.contextWindow;
+        // Taken BEFORE the await: a retire-and-rebuild landing during the patch
+        // would otherwise let this (old) init carry the NEW session's context.
+        const sent = this.takeSentContext(session, base.id, event.tools, event.mcpServers);
         await this.patchChat(session.chatId, {
           sessionId: event.sessionId,
           ...(retired ? { costBaselineUsd: undefined } : {}),
@@ -5605,7 +5655,7 @@ export class SessionBroker {
             permissionMode: event.permissionMode,
             tools: event.tools,
             mcpServers: event.mcpServers,
-            ...this.takeSentContext(session, event.tools, event.mcpServers),
+            ...sent,
           },
         });
         // Snapshot the runtime's own `/` command list — the only source for the
@@ -5833,7 +5883,18 @@ export class SessionBroker {
           session.turnOpen = true;
           session.activity.turnStart(base.ts);
           this.setStatus(session, "running", { state: "thinking", label: "recovering from guard" });
-          session.harnessSession?.send({ text: guardRecoveryInput(recoveries), priority: "now" });
+          const recoveryText = guardRecoveryInput(recoveries);
+          // A whole turn of input nobody typed. Recorded for "show sent
+          // context" — the result row above says THAT it recovered, this says
+          // what the agent was told.
+          await this.emit(session, {
+            ...base,
+            id: this.genId(),
+            kind: "system",
+            subtype: DISPATCH_INPUT_SUBTYPE,
+            data: { label: "Guard recovery — continue the task", text: recoveryText },
+          });
+          session.harnessSession?.send({ text: recoveryText, priority: "now" });
           return;
         }
         // A different terminal outcome must not let an old guard marker recover
@@ -5919,9 +5980,10 @@ export class SessionBroker {
             });
           }
           session.model = (m as { model?: string }).model;
+          const initId = this.genId();
           await this.emit(session, {
             kind: "system",
-            id: this.genId(),
+            id: initId,
             chatId: session.chatId,
             ts: this.now(),
             sessionId: session.sessionId,
@@ -5933,6 +5995,7 @@ export class SessionBroker {
               mcpServers: (m as { mcp_servers?: unknown }).mcp_servers,
               ...this.takeSentContext(
                 session,
+                initId,
                 (m as { tools?: unknown }).tools,
                 (m as { mcp_servers?: unknown }).mcp_servers,
               ),
