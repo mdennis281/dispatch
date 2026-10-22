@@ -57,3 +57,5 @@ export * from "./issues.js";
 export * from "./authoring.js";
 export * from "./global-chat.js";
 export * from "./auto-allow.js";
+export * from "./plugin-manifest.js";
+export * from "./plugin-api.js";
