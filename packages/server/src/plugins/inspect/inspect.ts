@@ -161,7 +161,15 @@ export function compareVersions(a: string, b: string): number | null {
  * dropped; stops at the first code fence, the second heading, or ~900 chars.
  */
 export function readmeExcerpt(md: string, max = 900): string {
-  const lines = md.replace(/\r\n/g, "\n").replace(/<!--[\s\S]*?-->/g, "").split("\n");
+  // To a fixed point, and an unclosed `<!--` runs to the end: one pass over
+  // `<!<!---->--` leaves a fresh `<!--` behind. The excerpt is rendered as
+  // text, never HTML, but a stray comment opener is still not prose.
+  let src = md.replace(/\r\n/g, "\n");
+  for (let prev = ""; prev !== src; ) {
+    prev = src;
+    src = src.replace(/<!--[\s\S]*?(?:-->|$)/g, "");
+  }
+  const lines = src.split("\n");
   const out: string[] = [];
   let headings = 0;
   let len = 0;

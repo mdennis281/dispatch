@@ -84,7 +84,8 @@ function lineAt(starts: number[], index: number): number {
   return lo + 1;
 }
 
-const esc = (s: string) => s.replace(/[$]/g, "\\$");
+/** Escape every regex metacharacter, backslash included — the names come from the plugin's own source. */
+const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 /**
  * A string literal whose quote is capture group `q` and whose content is group
  * `q + 1` — numbered by the caller, because a backreference is absolute and

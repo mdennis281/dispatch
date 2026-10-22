@@ -417,6 +417,7 @@ describe("scan helpers", () => {
     expect(readmeExcerpt("# Title\n[![badge](x)](y)\n\nFirst **bold**\nwrapped `para`.\n\n## Usage\n\n- a [link](u)\n- b\n\n## Other\n\nNo.")).toBe(
       "First bold wrapped para.\n\nUsage\n\n- a link\n- b",
     );
+    expect(readmeExcerpt("<!<!---->-- hi -->Para.")).toBe("Para.");
     expect(compareVersions("1.2.0", "1.10.0")).toBe(-1);
     expect(compareVersions("1.0.0", "1.0.0-beta")).toBe(1);
   });
