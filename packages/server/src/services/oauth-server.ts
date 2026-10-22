@@ -174,6 +174,24 @@ export interface OAuthServerDeps {
 const REGISTER_PER_HOUR = 20;
 const HOUR_MS = 60 * 60_000;
 
+/** Authorization requests one address may park per minute. Unauthenticated, so bounded. */
+const AUTHORIZE_PER_MINUTE = 30;
+const MINUTE_MS = 60_000;
+
+/**
+ * Most parked authorization requests (and codes) held at once, across every
+ * address. Past this the oldest is evicted: the owner can only be looking at
+ * one consent page, so a backlog that deep is a flood, not a queue.
+ */
+const MAX_PENDING = 500;
+
+/**
+ * How long after a refresh token was rotated a second presentation of it is
+ * read as a lost response rather than a theft. Long enough for a timed-out
+ * retry; far shorter than any window an attacker could plan around.
+ */
+const OAUTH_REFRESH_REUSE_GRACE_MS = 30_000;
+
 const DAY_MS = 24 * 60 * 60_000;
 
 /**
@@ -240,6 +258,7 @@ export class OAuthServer {
   private readonly pending = new Map<string, PendingAuthorization>();
   private readonly codes = new Map<string, IssuedCode>();
   private readonly registerHits = new Map<string, number[]>();
+  private readonly authorizeHits = new Map<string, number[]>();
 
   constructor(deps: OAuthServerDeps) {
     this.store = deps.store;
@@ -401,14 +420,35 @@ export class OAuthServer {
   }
 
   private checkRegisterRate(ip: string): void {
+    this.checkRate(this.registerHits, ip, REGISTER_PER_HOUR, HOUR_MS, "Too many registrations from this address; try again later.");
+  }
+
+  /**
+   * One sliding window per address. Addresses whose hits have all aged out
+   * are dropped on the way through, so a scan that touched ten thousand
+   * addresses once does not keep ten thousand empty arrays forever.
+   */
+  private checkRate(hits: Map<string, number[]>, ip: string, max: number, windowMs: number, message: string): void {
     const now = this.now();
-    const kept = (this.registerHits.get(ip) ?? []).filter((t) => t > now - HOUR_MS);
-    if (kept.length >= REGISTER_PER_HOUR) {
-      this.registerHits.set(ip, kept);
-      throw new OAuthError(429, "too_many_requests", "Too many registrations from this address; try again later.");
+    for (const [addr, times] of hits) {
+      if (addr !== ip && times.every((t) => t <= now - windowMs)) hits.delete(addr);
+    }
+    const kept = (hits.get(ip) ?? []).filter((t) => t > now - windowMs);
+    if (kept.length >= max) {
+      hits.set(ip, kept);
+      throw new OAuthError(429, "too_many_requests", message);
     }
     kept.push(now);
-    this.registerHits.set(ip, kept);
+    hits.set(ip, kept);
+  }
+
+  /** Keep `map` under {@link MAX_PENDING} by evicting its oldest entries (insertion order). */
+  private bound<T>(map: Map<string, T>): void {
+    while (map.size >= MAX_PENDING) {
+      const oldest = map.keys().next().value;
+      if (oldest === undefined) return;
+      map.delete(oldest);
+    }
   }
 
   private client(id: string | undefined): StoredClient | undefined {
@@ -439,9 +479,10 @@ export class OAuthServer {
    * by the auth gate, which is a stronger restriction than any audience the
    * connector could name.
    */
-  async authorize(query: unknown): Promise<{ redirectUrl: string }> {
+  async authorize(query: unknown, ip = "unknown"): Promise<{ redirectUrl: string }> {
     await this.issuer();
     this.sweep();
+    this.checkRate(this.authorizeHits, ip, AUTHORIZE_PER_MINUTE, MINUTE_MS, "Too many authorization requests from this address; try again shortly.");
     const q = AuthorizeQuerySchema.parse(query ?? {});
     const client = this.client(q.client_id);
     if (!client) throw new OAuthError(400, "invalid_client", "Unknown client_id.");
@@ -463,6 +504,7 @@ export class OAuthServer {
     if (!parsedScopes.scopes.length) return back("invalid_scope", "At least one scope is required.");
 
     const nonce = randomBytes(32).toString("base64url");
+    this.bound(this.pending);
     this.pending.set(nonce, {
       nonce,
       client,
@@ -511,6 +553,7 @@ export class OAuthServer {
       return { redirectUrl: withQuery(p.redirectUri, { error: "access_denied", error_description: "The owner declined.", state: p.state }) };
     }
     const code = randomBytes(32).toString("base64url");
+    this.bound(this.codes);
     this.codes.set(code, {
       clientId: p.client.id,
       redirectUri: p.redirectUri,
@@ -584,15 +627,26 @@ export class OAuthServer {
       throw new OAuthError(400, "invalid_grant", "code_verifier does not match the code_challenge.");
     }
 
+    // The epoch is awaited BEFORE the claim so that the claim and the grant
+    // row land in the same synchronous stretch: a replay of this code that
+    // arrives while `mintAccess` is in flight must find a grant to revoke, or
+    // "reuse revokes the grant" would be true only on paper.
+    const epoch = await this.auth.currentAuthEpoch();
     const now = this.now();
     const grantId = randomUUID();
     issued.usedForGrant = grantId;
-    const access = await this.mintAccess(client, issued.scopes);
     this.store.stateDb
-      .prepare(
-        "INSERT INTO oauth_grant (id, client_id, scopes, auth_epoch, created_at, access_token_id) VALUES (?, ?, ?, ?, ?, ?)",
-      )
-      .run(grantId, client.id, JSON.stringify(issued.scopes), await this.auth.currentAuthEpoch(), now, access.id);
+      .prepare("INSERT INTO oauth_grant (id, client_id, scopes, auth_epoch, created_at) VALUES (?, ?, ?, ?, ?)")
+      .run(grantId, client.id, JSON.stringify(issued.scopes), epoch, now);
+    const access = await this.mintAccess(client, issued.scopes);
+    this.store.stateDb.prepare("UPDATE oauth_grant SET access_token_id = ? WHERE id = ?").run(access.id, grantId);
+    const landed = this.grant(grantId);
+    if (!landed || landed.revoked_at !== null) {
+      // Revoked while the mint was in flight (that replay). The token just
+      // minted belongs to nobody now.
+      await this.auth.tokens.remove(access.id).catch(() => false);
+      throw new OAuthError(400, "invalid_grant", "The authorization code was already used; its grant has been revoked.");
+    }
     const refreshToken = this.issueRefresh(grantId);
     return this.tokenResponse(access.token, refreshToken, issued.scopes);
   }
@@ -608,28 +662,9 @@ export class OAuthServer {
     if (!row) throw invalid();
     const grant = this.grant(row.grant_id);
     if (!grant || grant.revoked_at !== null) throw invalid();
-    if (row.used_at !== null) {
-      // Rotation reuse. The token was already exchanged once, so whoever holds
-      // it now is either the client replaying a response it lost, or a thief
-      // replaying one it stole — and there is no way to tell. The family dies.
-      await this.revokeGrant(grant.id);
-      throw new OAuthError(400, "invalid_grant", "This refresh token was already used; the grant has been revoked.");
-    }
-    const now = this.now();
-    if (row.expires_at <= now) throw invalid();
+    if (row.used_at !== null) await this.refuseReuse(grant.id, row.used_at);
+    if (row.expires_at <= this.now()) throw invalid();
     if (grant.client_id !== client.id) throw invalid();
-    if (grant.auth_epoch !== (await this.auth.currentAuthEpoch())) {
-      // Authentication was turned off (and maybe back on) since the consent.
-      // The access tokens already died with the epoch; the grant follows.
-      await this.revokeGrant(grant.id);
-      throw invalid();
-    }
-    if (grant.access_token_id && (await this.accessTokenRevoked(grant.access_token_id))) {
-      // The owner hit Revoke on the `oauth` token in the Tokens list. That is a
-      // decision about the connector, not about one hour of its access.
-      await this.revokeGrant(grant.id);
-      throw invalid();
-    }
     const grantScopes = JSON.parse(grant.scopes) as IntegrationScope[];
     let scopes = grantScopes;
     const narrowed = str("scope");
@@ -640,15 +675,70 @@ export class OAuthServer {
       }
       scopes = parsed.scopes;
     }
+    // EVERY await happens above this line. The two checks below are the only
+    // ones that leave the process, and they must not sit between the read of
+    // `used_at` and the claim: two refreshes carrying the same token would
+    // both pass, both rotate, and the grant would end up with two live
+    // refresh chains and an access token no revocation could reach.
+    const epoch = await this.auth.currentAuthEpoch();
+    const revokedByOwner = !!grant.access_token_id && (await this.accessTokenRevoked(grant.access_token_id));
+    if (grant.auth_epoch !== epoch) {
+      // Authentication was turned off (and maybe back on) since the consent.
+      // The access tokens already died with the epoch; the grant follows.
+      await this.revokeGrant(grant.id);
+      throw invalid();
+    }
+    if (revokedByOwner) {
+      // The owner hit Revoke on the `oauth` token in the Tokens list. That is a
+      // decision about the connector, not about one hour of its access.
+      await this.revokeGrant(grant.id);
+      throw invalid();
+    }
 
-    this.store.stateDb.prepare("UPDATE oauth_refresh_token SET used_at = ? WHERE hash = ?").run(now, row.hash);
-    if (grant.access_token_id) await this.auth.tokens.revoke(grant.access_token_id);
+    // THE CLAIM. Synchronous and conditional: SQLite answers how many rows the
+    // UPDATE touched, and zero means another request claimed this token since
+    // the read above. That request is the one that rotates; this one is the
+    // reuse case, judged by the same grace rule as a stale read.
+    const now = this.now();
+    const claimed = this.store.stateDb
+      .prepare("UPDATE oauth_refresh_token SET used_at = ? WHERE hash = ? AND used_at IS NULL")
+      .run(now, row.hash);
+    if (Number(claimed.changes) !== 1) {
+      const fresh = this.store.stateDb.prepare("SELECT used_at FROM oauth_refresh_token WHERE hash = ?").get(row.hash) as
+        | { used_at: number | null }
+        | undefined;
+      await this.refuseReuse(grant.id, fresh?.used_at ?? now);
+    }
+    const previous = grant.access_token_id;
     const access = await this.mintAccess(client, scopes);
     this.store.stateDb
       .prepare("UPDATE oauth_grant SET access_token_id = ?, last_refreshed_at = ? WHERE id = ?")
       .run(access.id, now, grant.id);
     const refreshToken = this.issueRefresh(grant.id);
+    // REMOVED, not revoked. A revoked row stays in the token file forever by
+    // design (the Settings list says "revoked" instead of a token vanishing
+    // under a bot); here the grant row is the audit record, the superseded
+    // token was never shown to anyone, and one connector rotating hourly
+    // would otherwise add ~24 dead rows a day to a whole-file JSON that is
+    // rewritten under a lock on every mint.
+    if (previous) await this.auth.tokens.remove(previous).catch(() => false);
     return this.tokenResponse(access.token, refreshToken, scopes);
+  }
+
+  /**
+   * A refresh token presented after it was already rotated. Within the grace
+   * window it is almost certainly the same client retrying a request whose
+   * response it lost (or two parallel tool calls that both hit the hour), so
+   * it is refused and nothing else happens — the rotation that won still
+   * stands. Past the window there is no benign reading: whoever holds it
+   * replayed something stolen, and the family dies. Never returns.
+   */
+  private async refuseReuse(grantId: string, usedAt: number): Promise<never> {
+    if (this.now() - usedAt <= OAUTH_REFRESH_REUSE_GRACE_MS) {
+      throw new OAuthError(400, "invalid_grant", "This refresh token was already used.");
+    }
+    await this.revokeGrant(grantId);
+    throw new OAuthError(400, "invalid_grant", "This refresh token was already used; the grant has been revoked.");
   }
 
   private async mintAccess(client: StoredClient, scopes: IntegrationScope[]): Promise<{ token: string; id: string }> {

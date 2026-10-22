@@ -458,7 +458,8 @@ describe("token endpoint", () => {
     expect(late.json()).toMatchObject({ error: "invalid_grant" });
   });
 
-  it("rotates the refresh token, retires the old access token, and reuse revokes the family", async () => {
+  it("rotates the refresh token, removes the old access token, and reuse past the grace window revokes the family", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
     const { instance } = await app();
     const access = await owner(instance);
     const { clientId, tokens } = await fullGrant(instance, access);
@@ -470,6 +471,18 @@ describe("token endpoint", () => {
     expect(t2.access_token).not.toBe(tokens.access_token);
     expect((await instance.inject({ url: "/api/integration/projects", headers: bearer(t2.access_token) })).statusCode).toBe(200);
     expect((await instance.inject({ url: "/api/integration/projects", headers: bearer(tokens.access_token) })).statusCode).toBe(401);
+    // The superseded token is gone from the file, not kept as a "revoked" row:
+    // a connector rotating hourly must not grow the Tokens list by 24 a day.
+    const afterRotate = (await instance.inject({ url: "/api/auth/tokens", headers: bearer(access) })).json() as { tokens: unknown[] };
+    expect(afterRotate.tokens).toHaveLength(1);
+
+    // Within the grace window a replay is refused but nothing is revoked —
+    // that is a client retrying a response it lost, not a thief.
+    const soon = await tokenRequest(instance, { grant_type: "refresh_token", refresh_token: tokens.refresh_token, client_id: clientId });
+    expect(soon.json()).toMatchObject({ error: "invalid_grant" });
+    expect(soon.body).not.toMatch(/has been revoked/);
+    expect((await instance.inject({ url: "/api/integration/projects", headers: bearer(t2.access_token) })).statusCode).toBe(200);
+    vi.setSystemTime(Date.now() + 31_000);
 
     // Narrowing on refresh is allowed; widening is not.
     const narrowed = await tokenRequest(instance, { grant_type: "refresh_token", refresh_token: t2.refresh_token, client_id: clientId, scope: "projects:read" });
@@ -486,6 +499,42 @@ describe("token endpoint", () => {
     const grants = (await instance.inject({ url: "/api/auth/oauth/grants", headers: bearer(access) })).json() as { grants: Array<{ revokedAt?: number }> };
     expect(grants.grants).toHaveLength(1);
     expect(grants.grants[0]!.revokedAt).toBeTypeOf("number");
+  });
+
+  it("two concurrent refreshes of one token: exactly one rotates, the grant survives, and one chain remains", async () => {
+    const { instance } = await app();
+    const access = await owner(instance);
+    const { clientId, tokens } = await fullGrant(instance, access);
+    const form = { grant_type: "refresh_token", refresh_token: tokens.refresh_token, client_id: clientId };
+    const results = await Promise.all([tokenRequest(instance, form), tokenRequest(instance, form), tokenRequest(instance, form)]);
+    const ok = results.filter((r) => r.statusCode === 200);
+    const refused = results.filter((r) => r.statusCode === 400);
+    expect(ok).toHaveLength(1);
+    expect(refused).toHaveLength(2);
+    for (const r of refused) expect(r.json()).toMatchObject({ error: "invalid_grant" });
+    const winner = ok[0]!.json() as TokenResponse;
+    // The one chain that exists keeps working, and the grant is not revoked.
+    expect((await instance.inject({ url: "/api/integration/projects", headers: bearer(winner.access_token) })).statusCode).toBe(200);
+    const next = await tokenRequest(instance, { grant_type: "refresh_token", refresh_token: winner.refresh_token, client_id: clientId });
+    expect(next.statusCode, next.body).toBe(200);
+    const grants = (await instance.inject({ url: "/api/auth/oauth/grants", headers: bearer(access) })).json() as { grants: Array<{ revokedAt?: number }> };
+    expect(grants.grants[0]!.revokedAt).toBeUndefined();
+    // Exactly one live access token in the file: the losers minted nothing.
+    const list = (await instance.inject({ url: "/api/auth/tokens", headers: bearer(access) })).json() as { tokens: Array<{ revokedAt?: number }> };
+    expect(list.tokens.filter((t) => t.revokedAt === undefined)).toHaveLength(1);
+  });
+
+  it("rate-limits authorization requests per address", async () => {
+    const { instance } = await app();
+    await owner(instance);
+    const clientId = ((await register(instance)).json() as { client_id: string }).client_id;
+    const { challenge } = pkce();
+    for (let i = 0; i < 30; i++) {
+      expect((await instance.inject({ url: authorizeUrl(clientId, challenge), remoteAddress: "10.1.1.1" })).statusCode).toBe(302);
+    }
+    const flooded = await instance.inject({ url: authorizeUrl(clientId, challenge), remoteAddress: "10.1.1.1" });
+    expect(flooded.statusCode).toBe(429);
+    expect((await instance.inject({ url: authorizeUrl(clientId, challenge), remoteAddress: "10.1.1.2" })).statusCode).toBe(302);
   });
 
   it("a refresh token belongs to its client", async () => {

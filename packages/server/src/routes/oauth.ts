@@ -148,7 +148,7 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
 
   app.get("/oauth/authorize", async (req, reply) => {
     try {
-      const { redirectUrl } = await server.authorize(req.query);
+      const { redirectUrl } = await server.authorize(req.query, req.ip);
       return reply.header("cache-control", "no-store").redirect(redirectUrl, 302);
     } catch (err) {
       // The unredirectable errors — unknown client, unregistered redirect URI,
