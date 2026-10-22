@@ -53,11 +53,19 @@ re-litigation in the workstreams:
 ```
 <configDir>/plugins/<id>/
   plugin.yaml          the manifest (required)
-  dist/server.js       ESM module exporting activate/deactivate (optional)
-  dist/client.js       ESM module exporting activate(host) (optional)
+  server/index.js      ESM module exporting activate/deactivate (optional)
+  client/index.js      ESM module exporting activate(host) (optional). This
+                       directory, and only this directory, is served publicly
   settings.schema.json JSON Schema for the plugin's settings (optional)
   modes/ skills/ instructions/ personas/   contributions (optional)
 ```
+
+Every path in the manifest resolves inside the plugin directory; one that
+escapes it (`../x`) fails validation. The `client` entry must sit in a
+directory that holds nothing else of the plugin's, because the host serves
+that whole directory without authentication (see "Client host"). A manifest
+whose `client` and `server` entries share a directory, or whose `client` sits
+at the plugin root, fails validation for that reason.
 
 The manifest:
 
@@ -67,8 +75,8 @@ name: Voice
 version: 0.1.0                  # the plugin's own version, semver
 dispatch: ">=1"                 # host plugin-API major it was built against
 description: Talk to a chat; hear replies.
-server: ./dist/server.js        # optional
-client: ./dist/client.js        # optional; served under /plugins/<id>/
+server: ./server/index.js       # optional
+client: ./client/index.js       # optional; its directory is served under /plugins/<id>/
 settings: ./settings.schema.json
 secrets: [WHISPER_URL]          # names the plugin may read; requested through the secret card
 capabilities:                   # declared for the consent card; see "Capabilities"
@@ -85,7 +93,7 @@ contributes:
   processes: ./processes.yaml
 oauth:                          # see "OAuth"
   clients:
-    xai:
+    xai:                        # [a-z0-9][a-z0-9-]{0,31}
       authorizationUrl: https://…
       tokenUrl: https://…
       scopes: [read]
@@ -131,15 +139,22 @@ row, not containment.
    full-replace `PUT /api/settings`, carried raw through `normalize()` in the
    settings view, and have a `SECTION_SLICE` entry — the three edits every
    app-level setting needs, or a theme change deletes it.
-3. **Activate**, after `services.start()`, in id order. The module's
-   `activate(ctx)` is awaited with a 30 s budget. A throw or timeout marks the
-   plugin `error` with the message, logs it to the crash log, and moves on.
-   Boot never waits on a plugin and never fails because of one.
-4. **Run.** Everything the plugin registered (bus listeners, routes, processes)
-   is tracked against the plugin id so deactivate can undo it.
+3. **Activate**, after `app.listen()`, from `services.warm()` — the unbounded
+   half of boot, where the PR catalog backfill and worktree detection already
+   run — in id order, each `activate(ctx)` awaited with a 30 s budget. The port
+   is open before the first plugin runs, so a hung `activate` delays the
+   plugins after it and nothing else; `install.mjs`'s health check never waits
+   on one. A throw or timeout marks the plugin `error` with the message, logs
+   it to the crash log, and moves on. Until a plugin is active, its route
+   prefix answers 503.
+4. **Run.** Everything the plugin registered (bus listeners, route handlers,
+   processes) is tracked against the plugin id so deactivate can undo it.
 5. **Deactivate** on `services.dispose()` or when the enable toggle flips off:
-   `deactivate()` if exported, then the host tears down whatever is still
-   registered. Flipping the toggle on requires a restart; the pane says so.
+   `deactivate()` if exported, then the host drops the plugin's listeners,
+   empties its route table (the prefix answers 404 from then on), and stops
+   its processes. Fastify cannot remove a route from a listening instance,
+   which is why plugin routes are a table and not registrations — see
+   "Server API". Flipping the toggle on requires a restart; the pane says so.
 
 `GET /api/plugins` returns, per plugin: manifest summary, `status`
 (`active | disabled | error | invalid | incompatible`), `error`, the client URL
@@ -181,8 +196,15 @@ export interface PluginContext {
     on<T extends WsServerEventType>(type: T, fn: (evt: Extract<WsServerEvent, { type: T }>) => void): () => void;
     subscribe(fn: (evt: WsServerEvent) => void): () => void;
   };
-  /** Mount routes under /api/plugins/<id>/. Call during activate. Gated by the global auth hook. */
-  routes(register: (app: FastifyInstance) => void): void;
+  /**
+   * Add handlers under /api/plugins/<id>/. The host registered ONE wildcard
+   * route per plugin prefix at build time, before listen; this fills the
+   * table that wildcard consults. Fastify can neither add nor remove routes
+   * on a listening instance, so a table is what makes activate-after-listen
+   * and deactivate possible at all. The global auth hook gates the prefix
+   * because it is under /api/.
+   */
+  routes(define: (r: PluginRouter) => void): void;
   settings: { get<T = unknown>(): T; onChange(fn: (next: unknown) => void): () => void };
   secrets: { get(name: string): Promise<string | undefined>; list(): Promise<string[]> };
   kv: {
@@ -218,9 +240,24 @@ export interface PluginContext {
   /* Workstream F */
   oauth?: { connectUrl(name: string): Promise<string>; token(name: string): Promise<string | undefined>; disconnect(name: string): Promise<void> };
 }
+
+/** Paths are relative to /api/plugins/<id>/ and take `:param` segments. */
+export interface PluginRouter {
+  get(path: string, handler: PluginRouteHandler): void;
+  post(path: string, handler: PluginRouteHandler): void;
+  put(path: string, handler: PluginRouteHandler): void;
+  delete(path: string, handler: PluginRouteHandler): void;
+}
+export type PluginRouteHandler = (req: FastifyRequest, reply: FastifyReply) => unknown;
 ```
 
 Rules the implementation must keep:
+
+- **Routes are a table, not registrations.** `buildApp` registers one
+  wildcard per plugin prefix (`/api/plugins/:id/*`) before listen; the handler
+  looks the plugin up and matches the request against that plugin's table
+  (`find-my-way`, Fastify's own router, is already a dependency). An
+  activating plugin's prefix answers 503, a disabled or unknown one's 404.
 
 - **Sends go through `ChatMessenger`**, never `broker.sendMessage` directly. The
   broker declines every pending question card on send; the messenger holds a
@@ -279,11 +316,15 @@ spawning.
 
 ## Client host (workstream E)
 
-The server serves each enabled plugin's `client` directory at
-`/plugins/<id>/`. That path is **not** auth-gated, deliberately: the SPA bundle
-is public too, a plugin's client code is code and not data, and a bare
-`import()` cannot carry a bearer header any more than an `<img>` can. Nothing
-secret may be placed there.
+The server serves the directory holding each enabled plugin's `client` entry,
+and nothing else of the plugin, at `/plugins/<id>/`, after checking that the
+resolved path stays inside the plugin directory and is not the plugin root.
+That path is **not** auth-gated, deliberately: the SPA bundle is public too, a
+plugin's client code is code and not data, and a bare `import()` cannot carry a
+bearer header any more than an `<img>` can. That is exactly why the manifest
+refuses a layout that puts the server module beside the client entry: a public
+directory must hold only what is meant to be public, and the layout is
+validated rather than left to a warning in the docs.
 
 After boot the SPA fetches `GET /api/plugins`, dynamically imports every active
 plugin with a `client` entry, and calls `activate(host)`. A failing import or
@@ -433,42 +474,102 @@ window, re-read the status, fire only if the chat stayed at rest, cancel on a
 working status. Payload: `{ chatId, projectId, status, lastAssistantText }`.
 
 Delivery: `POST` with body `{ id, type, at, projectId?, chatId?, data }` where
-`data` is the wire event shape, and headers `X-Dispatch-Event`,
-`X-Dispatch-Delivery`, `X-Dispatch-Timestamp`, `X-Dispatch-Signature:
-sha256=<HMAC-SHA256 of the raw body>`. Retries at 5 s, 30 s, 2 m, 10 m, 30 m;
-after five failures the delivery is dead; after twenty consecutive dead
-deliveries the subscription is paused and a `notice` says so. A delivery log
+`data` is the wire event shape, and headers:
+
+- `X-Dispatch-Event`: the event type.
+- `X-Dispatch-Delivery`: the delivery id. It is the **same across every retry
+  of one delivery**, so a receiver can use it as an idempotency key.
+- `X-Dispatch-Signature`: `t=<unix seconds>,v1=<hex HMAC-SHA256 over
+  "<t>.<raw body>">`. The timestamp is inside the signed string, so a captured
+  delivery cannot be replayed later with its original signature; receivers
+  should reject a `t` more than five minutes from their clock. This is the
+  Stripe scheme, chosen because receivers already know how to verify it.
+
+Retries at 5 s, 30 s, 2 m, 10 m, 30 m, each re-signed with a fresh `t`; after
+five failures the delivery is dead; after twenty consecutive dead deliveries
+the subscription is paused and a `notice` says so. A delivery log
 (`webhook_delivery`) keeps seven days and is visible in Settings with status,
 attempts and the last response code; a dead delivery can be redelivered.
 
 Routes: `GET/POST/PUT/DELETE /api/webhooks`, `POST /api/webhooks/:id/test`,
 `GET /api/webhooks/:id/deliveries`, `POST /api/webhooks/:id/deliveries/:d/redeliver`.
-A token with `webhooks:manage` may manage subscriptions it created.
+
+**A token-created subscription is bounded by its token.** A subscription made
+by a browser session may target anything, including the owner's own LAN; that
+is the point of a self-hosted ntfy. A subscription made through
+`webhooks:manage` is not a way around the token's other limits:
+
+- its `projectIds` filter is intersected with the token's `projectIds`, and an
+  unset filter is set to the token's list, never to "all";
+- its event types are limited to those the token's read scopes cover:
+  `chat-message`, `chat-status`, `chat-update`, `chat-deleted` and
+  `chat-settled` need `chats:read`; `attention-add`, `attention-resolve` and
+  `permission-request` need `attention:read`; `pr-update`, `pr-record-update`
+  and `project-update` need `projects:read`; `memory-update` and
+  `memory-deleted` need `memory:read`;
+- its `url` must be `https:` and resolve to a public address — loopback,
+  link-local and RFC 1918 ranges are refused at creation and re-checked at
+  each delivery, so an integration token cannot turn Dispatch into a request
+  proxy to the LAN;
+- it may read, edit, test and delete only subscriptions it created.
 
 The existing `AppSettings.webhook` block (ntfy / pushover on attention-add) is
 left alone in v1.
 
 ### OAuth (workstream F)
 
+The auth gate authenticates `/api/*` from a bearer header and nothing else.
+A browser navigation carries no bearer, so every OAuth step a browser performs
+lives **outside** `/api/`, and the two `/api/oauth/` endpoints that remain are
+exempt from the JWT gate because they *are* the credential exchange and carry
+their own proof (PKCE verifier, client secret, refresh token). This is the one
+called-out exception to the subresource rule at the end of this document.
+
 **Authorization server.** Remote-MCP connectors expect to discover and
-register themselves. Dispatch serves `/.well-known/oauth-authorization-server`
-and `/.well-known/oauth-protected-resource`, dynamic client registration at
-`/api/oauth/register`, `/api/oauth/authorize` (requires a logged-in Dispatch
-session; the SPA shows a consent page naming the client and the scopes; PKCE
-S256 is mandatory), `/api/oauth/token` for the code and refresh grants, and
-`/api/oauth/revoke`. An access token *is* an integration token with `clientId`
-set, one hour long; refresh tokens rotate and last thirty days. The server
-only advertises itself when auth is enabled and the canonical URL is HTTPS.
-Grants appear in Settings → Integrations beside hand-minted tokens, with the
-same revoke.
+register themselves.
+
+- `/.well-known/oauth-authorization-server` and
+  `/.well-known/oauth-protected-resource`: public metadata.
+- `POST /api/oauth/register`: dynamic client registration. Exempt from the
+  gate, rate-limited, and only while the server advertises itself.
+- `GET /oauth/authorize`: validates `client_id`, `redirect_uri`, scopes and
+  the PKCE challenge (S256 is mandatory), parks the request under a
+  single-use nonce, and redirects into the SPA at `#oauth=<nonce>`. The SPA
+  already forces login before rendering anything, so "requires a logged-in
+  Dispatch session" costs nothing extra: a logged-out user sees the login
+  sheet first, then the consent page naming the client and the scopes. The
+  decision goes back with the session's bearer, `POST
+  /api/oauth/requests/:nonce/decision`, which mints the code and returns the
+  client's redirect URL for the SPA to navigate to.
+- `POST /api/oauth/token` (code and refresh grants) and `POST
+  /api/oauth/revoke`: exempt from the gate, authenticated by what they carry.
+
+An access token *is* an integration token with `clientId` set, one hour long;
+refresh tokens rotate and last thirty days. The server only advertises itself
+when auth is enabled and the canonical URL is HTTPS. Grants appear in
+Settings → Integrations beside hand-minted tokens, with the same revoke.
 
 **Client flow for plugins.** A manifest `oauth.clients.<name>` entry gives the
-host everything it needs. The host owns the callback at
-`/api/plugins/<id>/oauth/<name>/callback`, the state check, token storage in
-the secret store under `PLUGIN_<ID>_<NAME>_ACCESS` / `_REFRESH`, and refresh
-before expiry. Server code calls `ctx.oauth.token(name)`; the settings pane
-shows Connect and the connection status. The redirect URI is derived from the
-canonical URL the passkey setup already requires.
+host everything it needs; `name` is `[a-z0-9][a-z0-9-]{0,31}`.
+
+- `ctx.oauth.connectUrl(name)` and the Connect button mint a single-use
+  `state` bound to the browser session that asked, valid ten minutes.
+- The provider redirects to `GET /oauth/callback/<plugin>/<name>`, outside
+  `/api/` because it is a top-level navigation with no bearer. The handler
+  authenticates the request by the `state` alone, exchanges the code, and
+  redirects to `#settings=plugins`.
+- Tokens live in a per-instance table, `plugin_oauth_token`, keyed by
+  `(pluginId, name)` with access token, refresh token, expiry and granted
+  scopes. Not in the secret store: a flattened secret name built from two
+  hyphenated identifiers is ambiguous (`a-b` + `c` reads the same as `a` +
+  `b-c`), and a shared store would let the stable and dev instances race on
+  refresh-token rotation and invalidate each other.
+- `ctx.oauth.token(name)` returns a live access token, refreshing before
+  expiry; `ctx.oauth.disconnect(name)` deletes the row. The settings pane shows
+  Connect and the connection status.
+
+The redirect URIs are derived from the canonical URL the passkey setup already
+requires.
 
 ## Authoring (workstream G)
 
@@ -508,7 +609,10 @@ other adds a block to it.
 - A new app-level setting needs the schema, the preserve line in the
   full-replace route or the `normalize()` carry, and a `SECTION_SLICE` entry.
 - Nothing under `/api/` is reachable as a bare subresource when auth is on; use
-  the authenticated fetch helpers.
+  the authenticated fetch helpers. The OAuth endpoints are the one called-out
+  exception, and they are shaped to need it as little as possible: browser
+  navigations live outside `/api/`, and only the credential exchange itself
+  (`register`, `token`, `revoke`) is exempt from the gate.
 - A per-chat composer control goes into the toolbar ladder, never a new row.
 - Verify UI by looking at it: a screenshot in the PR, both themes for anything
   in the composer or settings.
