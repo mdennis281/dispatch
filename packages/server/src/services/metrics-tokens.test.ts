@@ -6,7 +6,7 @@ import type { Chat } from "@dispatch/shared";
 import { figuresOfUsage } from "@dispatch/shared";
 import { Store } from "../store/index.js";
 import { MetricsService } from "./metrics.js";
-import { TokenLedger, type TokenLine } from "./metrics-tokens.js";
+import { TokenLedger, tokenLabeller, type TokenLine } from "./metrics-tokens.js";
 import { TokenBackfill } from "./metrics-tokens-backfill.js";
 
 let dir: string;
@@ -151,6 +151,20 @@ describe("TokenLedger", () => {
     tokens.record([line({ input: 100, output: 10, costUsd: 2 })]);
     expect(tokens.report({ measure: "output" }, label).series[0]?.total).toBe(10);
     expect(tokens.report({ measure: "cost" }, label).series[0]?.total).toBe(2);
+  });
+});
+
+describe("tokenLabeller", () => {
+  it("names an account by its current settings, and the implicit default by its provider", () => {
+    // History booked under the implicit "claude" id before a named Claude
+    // account was added: that id no longer resolves, but nothing was removed.
+    const label = tokenLabeller({
+      subscriptions: [{ id: "work", name: "Work Max", provider: "claude" }],
+    });
+    expect(label("subscription", "work")).toBe("Work Max");
+    expect(label("subscription", "claude")).toBe("Claude");
+    expect(label("subscription", "old-acct")).toBe("old-acct (removed)");
+    expect(label("subscription", "")).toBe("(unknown account)");
   });
 });
 

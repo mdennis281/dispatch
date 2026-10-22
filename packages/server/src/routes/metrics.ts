@@ -60,14 +60,9 @@ import {
   MetricSpanDimensionSchema,
   MetricSpanFilterSchema,
   MetricSpanQuerySchema,
-  PROVIDER_IDS,
   TokenQuerySchema,
-  accountLabel,
-  findSubscription,
-  providerFor,
-  type HarnessKind,
-  type TokenDimension,
 } from "@dispatch/shared";
+import { tokenLabeller } from "../services/metrics-tokens.js";
 
 /** The window + filter every read shares. */
 const ScopeSchema = z.object({
@@ -112,21 +107,7 @@ export function registerMetricsRoutes(app: FastifyInstance): void {
     // Labels resolve against the settings AS THEY ARE NOW, so renaming an
     // account renames its history — the id is what the ledger stored.
     const settings = await store.getSettings().catch(() => null);
-    const label = (dim: TokenDimension, key: string): string => {
-      if (dim === "subscription") {
-        if (!key) return "(unknown account)";
-        const sub = findSubscription(settings, key);
-        return sub ? accountLabel(sub) : `${key} (removed)`;
-      }
-      if (dim === "harness") {
-        return (PROVIDER_IDS as readonly string[]).includes(key)
-          ? providerFor(key as HarnessKind).shortLabel
-          : key || "(unknown)";
-      }
-      if (dim === "model") return key || "(unknown model)";
-      return key || "(none)";
-    };
-    return tokens.report(parsed.data, label);
+    return tokens.report(parsed.data, tokenLabeller(settings));
   });
 
   app.post<{ Body: unknown }>("/api/metrics/series", async (req, reply) => {

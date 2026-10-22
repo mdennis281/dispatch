@@ -16,6 +16,12 @@
  */
 import {
   METRIC_OTHER_KEY,
+  PROVIDER_IDS,
+  accountLabel,
+  findSubscription,
+  providerFor,
+  type HarnessKind,
+  type SubscriptionSettings,
   TokenQuerySchema,
   resolveBucket,
   type TokenDimension,
@@ -85,6 +91,32 @@ export function usageKey(line: Pick<TokenLine, "chatId" | "resultId" | "model">)
 
 /** Turns a group key into a display name. Supplied per request (settings move). */
 export type TokenLabeller = (dim: TokenDimension, key: string) => string;
+
+const isProvider = (key: string): key is HarnessKind =>
+  (PROVIDER_IDS as readonly string[]).includes(key);
+
+/**
+ * Names for the ledger's keys, resolved against the settings AS THEY ARE NOW —
+ * so renaming an account renames its history; the id is what the ledger stored.
+ */
+export function tokenLabeller(settings: SubscriptionSettings | null | undefined): TokenLabeller {
+  return (dim, key) => {
+    if (dim === "subscription") {
+      if (!key) return "(unknown account)";
+      const sub = findSubscription(settings, key);
+      if (sub) return accountLabel(sub);
+      // An IMPLICIT account's id is its provider id, and it stops resolving the
+      // moment the stored list names any account for that provider (see
+      // `pinnedIdOf`). History booked under it was the provider's default
+      // directory, not a deleted account — so it must not read "(removed)".
+      if (isProvider(key)) return providerFor(key).shortLabel;
+      return `${key} (removed)`;
+    }
+    if (dim === "harness") return isProvider(key) ? providerFor(key).shortLabel : key || "(unknown)";
+    if (dim === "model") return key || "(unknown model)";
+    return key || "(none)";
+  };
+}
 
 export class TokenLedger {
   constructor(
