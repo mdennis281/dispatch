@@ -207,8 +207,12 @@ async function manifestDirIn(root: string): Promise<string | null> {
  */
 async function materialise(source: string): Promise<{ pluginDir: string; scratch?: string }> {
   if (looksLikeGitUrl(source)) {
+    // `--` ends option parsing, so a source shaped like `--upload-pack=…` is a
+    // URL git fails on rather than an option git obeys. The explicit refusal
+    // is belt-and-braces for the same thing — a URL never starts with `-`.
+    if (source.startsWith("-")) throw new CmError(`not a git URL: ${source}`);
     const scratch = await mkdtemp(join(tmpdir(), "cm-plugin-"));
-    await run("git", ["clone", "--depth", "1", "--quiet", source, join(scratch, "src")]);
+    await run("git", ["clone", "--depth", "1", "--quiet", "--", source, join(scratch, "src")]);
     const dir = await manifestDirIn(join(scratch, "src"));
     if (!dir) throw new CmError(`no ${PLUGIN_MANIFEST_FILE} at the root of ${source}`);
     return { pluginDir: dir, scratch };
