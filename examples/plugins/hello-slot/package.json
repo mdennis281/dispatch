@@ -3,12 +3,13 @@
   "private": true,
   "type": "module",
   "version": "0.1.0",
-  "description": "Example Dispatch plugin with a client half — builds client/index.js against the host's globals shim.",
+  "description": "Example Dispatch plugin with a client half \u2014 builds client/index.js with the SDK's Vite preset against the host's globals shim.",
   "scripts": {
     "build": "vite build",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
+    "@dispatch/plugin-sdk": "workspace:*",
     "@dispatch/shared": "workspace:*",
     "@types/react": "^18.3.18",
     "lucide-react": "^0.469.0",

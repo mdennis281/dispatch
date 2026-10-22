@@ -289,14 +289,13 @@ describe("registration", () => {
 describe("authorize", () => {
   it("narrows a request to the scopes that grant something, and refuses one made only of dead ones", async () => {
     const { instance } = await app();
-    await owner(instance);
+    const access = await owner(instance);
     // Registered for a dead scope explicitly — valid, and the point of the test.
     const clientId = ((await register(instance, { scope: "chats:read tools:session" })).json() as { client_id: string }).client_id;
     const { challenge } = pkce();
     const auth = await instance.inject({ url: authorizeUrl(clientId, challenge, { scope: "chats:read tools:session" }) });
     expect(auth.statusCode).toBe(302);
     const nonce = decodeURIComponent(auth.headers.location!.split("#oauth=")[1]!);
-    const access = await ownerAccess(instance);
     const view = await instance.inject({ url: `/api/oauth/requests/${nonce}`, headers: bearer(access) });
     // The consent page lists what will be granted — `tools:session` is gone.
     expect((view.json() as { scopes: string[] }).scopes).toEqual(["chats:read"]);

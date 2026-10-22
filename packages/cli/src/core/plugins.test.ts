@@ -104,6 +104,18 @@ describe("addPlugin", () => {
     expect((await lstat(linked.dir)).isSymbolicLink()).toBe(true);
   });
 
+  it("leaves node_modules and .git behind — a scaffold's SDK link would otherwise be copied through", async () => {
+    const src = await source("built");
+    await mkdir(join(src, "node_modules", "@dispatch", "plugin-sdk"), { recursive: true });
+    await writeFile(join(src, "node_modules", "@dispatch", "plugin-sdk", "package.json"), "{}");
+    await mkdir(join(src, ".git"));
+    await writeFile(join(src, ".git", "HEAD"), "ref: refs/heads/main\n");
+    const result = await addPlugin(configDir, src);
+    expect(existsSync(join(result.dir, "server", "index.js"))).toBe(true);
+    expect(existsSync(join(result.dir, "node_modules"))).toBe(false);
+    expect(existsSync(join(result.dir, ".git"))).toBe(false);
+  });
+
   it("finds the manifest one directory down, the way a tarball or clone wraps it", async () => {
     const wrapped = join(root, "wrapped");
     await mkdir(wrapped, { recursive: true });

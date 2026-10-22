@@ -15,7 +15,7 @@
 /** @type {(() => void) | undefined} */
 let off;
 
-/** @param {import("@dispatch/shared").PluginContext} ctx */
+/** @param {import("@dispatch/plugin-sdk").PluginContext} ctx */
 export async function activate(ctx) {
   // Counted in memory and written through: two bus events in the same tick
   // would otherwise both read the old value and both write old+1.

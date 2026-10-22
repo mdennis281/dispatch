@@ -52,6 +52,15 @@ export {
 } from "./plugins.js";
 
 export {
+  initPlugin,
+  scaffoldFiles,
+  defaultSdkPath,
+  type InitPluginOptions,
+  type InitPluginResult,
+  type PluginScaffoldKind,
+} from "./plugin-init.js";
+
+export {
   parseArgs,
   transportFromArgs,
   parseEnvPairs,

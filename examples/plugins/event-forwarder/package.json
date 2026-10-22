@@ -1,0 +1,19 @@
+{
+  "name": "@dispatch/example-event-forwarder",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "description": "Example Dispatch plugin: bus events → signed webhook POSTs, written in TypeScript against the SDK and unit-tested with createTestContext.",
+  "scripts": {
+    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@dispatch/plugin-sdk": "workspace:*",
+    "@types/node": "^26.1.0",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7",
+    "vitest": "^4.1.11"
+  }
+}

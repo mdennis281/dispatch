@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Event forwarder",
+  "type": "object",
+  "properties": {
+    "url": {
+      "type": "string",
+      "title": "Deliver to",
+      "description": "Where each matching event is POSTed. Empty disables forwarding."
+    },
+    "events": {
+      "type": "string",
+      "title": "Events",
+      "description": "Comma-separated wire event types to forward (any member of WsServerEvent, e.g. chat-status, attention-add, chat-message).",
+      "default": "chat-status,attention-add"
+    }
+  }
+}

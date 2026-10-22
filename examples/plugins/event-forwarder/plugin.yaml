@@ -1,0 +1,24 @@
+# A TypeScript server plugin built with the SDK: forwards chosen bus events to
+# a URL as signed POSTs, in the same envelope and `X-Dispatch-Signature`
+# scheme the host's own outbound webhooks use (docs/plugins.md → "Outbound
+# webhooks"). Build it (`pnpm --filter @dispatch/example-event-forwarder
+# build`), link it in (`cm plugin link examples/plugins/event-forwarder`),
+# restart Dispatch, then set the URL under Settings → Plugins and the secret
+# through the secret card. `test/forwarder.test.ts` drives it with
+# `createTestContext`, no server needed.
+id: event-forwarder
+name: Event forwarder
+version: 0.1.0
+dispatch: ">=1"
+description: POSTs selected bus events to a URL, HMAC-signed, and reports a delivery count.
+server: ./server/index.js
+settings: ./settings.schema.json
+# The one secret it may read — the HMAC key. Unset, deliveries go unsigned
+# and the status route says so.
+secrets:
+  - EVENT_FORWARDER_SECRET
+capabilities:
+  - events
+  - routes
+  - secrets
+  - kv

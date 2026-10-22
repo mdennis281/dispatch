@@ -41,6 +41,8 @@ const VALUE_FLAGS = new Set([
   "expires",
   "config-dir",
   "data-dir",
+  // `cm plugin init` — where the SDK to link lives.
+  "sdk",
 ]);
 
 /** Short aliases, expanded before dispatch. */
