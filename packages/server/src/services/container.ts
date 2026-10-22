@@ -73,6 +73,7 @@ import { CiService } from "./ci.js";
 import { IssueService } from "./issues/service.js";
 import { IssueWatcher } from "./issue-watcher.js";
 import { Notifier } from "./notifier.js";
+import { WebhookService } from "./webhooks.js";
 import { PushService } from "./push.js";
 import { AttentionQueue } from "./attention.js";
 import { HomeService } from "./home.js";
@@ -136,6 +137,7 @@ export interface ServiceOverrides {
   github?: GitHubService;
   ci?: CiService;
   notifier?: Notifier;
+  webhooks?: WebhookService;
   push?: PushService;
   attention?: AttentionQueue;
   home?: HomeService;
@@ -211,6 +213,8 @@ export interface Services extends ServiceBase {
   /** The CI/CD page's provider-neutral read/act layer (GitHub Actions today). */
   ci: CiService;
   notifier: Notifier;
+  /** Signed outbound POSTs of bus events to subscribed URLs; see services/webhooks.ts. */
+  webhooks: WebhookService;
   /** Server-sent Web Push — the only delivery path an iOS home-screen app has. */
   push: PushService;
   attention: AttentionQueue;
@@ -596,6 +600,19 @@ export function createServices(
   // `prewarm_mcp` tool can never disagree about which port a checkout got.
   worktrees.mcpPrewarm = broker.mcpPrewarm;
   const notifier = overrides.notifier ?? new Notifier({ bus, store });
+  // Outbound webhooks. Same seam as the notifier — a bus consumer whose only
+  // side effect is an HTTP POST — plus the completion notice's settle rule for
+  // the derived `chat-settled`, which is why it reads the broker's live status
+  // and pending work rather than trusting the raw `idle` edge.
+  const webhooks =
+    overrides.webhooks ??
+    new WebhookService({
+      bus,
+      store,
+      getStatus: (chatId) => broker.getStatus(chatId),
+      hasPendingWork: (chatId) =>
+        broker.hasPendingWork(chatId) || chatMessenger.hasPending(chatId),
+    });
   // Web Push. The keypair goes in the CONFIG root (shared, and regenerating it
   // would silently invalidate every phone's subscription); the registry goes in
   // the per-instance DATA root, so a dev server never pushes to devices that
@@ -1284,6 +1301,7 @@ export function createServices(
     github,
     ci,
     notifier,
+    webhooks,
     push,
     attention,
     home,
@@ -1382,6 +1400,10 @@ export function createServices(
       safeStart("home", () => home.start());
       safeStart("memoryCommitter", () => memoryCommitter.start());
       safeStart("notifier", () => notifier.start());
+      // Resumes deliveries a shutdown left pending. Async, but awaited inside
+      // safeStart's try so a corrupt row is logged rather than fatal.
+      safeStart("webhooks", () => void webhooks.start().catch((err: unknown) =>
+        console.error("[Dispatch] webhooks failed to start:", err)));
       safeStart("push", () => push.start());
       // Subscription usage polling (a missing token / offline just yields an
       // "unavailable" snapshot the header meter hides on).
@@ -1547,6 +1569,8 @@ export function createServices(
       memoryCommitter.stop();
       await memoryCommitter.drain().catch(() => {});
       notifier.stop();
+      // Clears every retry timer; pending rows are resumed by the next boot.
+      webhooks.dispose();
       push.stop();
       attention.stop();
       // Unsubscribe first, then let an in-flight sweep land rather than yanking
