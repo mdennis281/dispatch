@@ -170,6 +170,26 @@ describe("the gate", () => {
     await instance.close();
   });
 
+  it("403s a token on every route outside the integration surface", async () => {
+    // The gate is the only thing most SPA routes check. Without this fence a
+    // `chats:read` token could open a terminal or rewrite settings.
+    const { instance } = await app();
+    const access = await owner(instance);
+    const { token } = await mint(instance, access, { name: "grok", scopes: ["chats:read", "tools:chat"] });
+    for (const url of ["/api/settings", "/api/projects", "/api/chats", "/api/terminals"]) {
+      const res = await instance.inject({ url, headers: bearer(token) });
+      expect(res.statusCode, url).toBe(403);
+    }
+    // The PER-CHAT bridge is gate-exempt and checks its own ephemeral grants;
+    // a token is not one of those, so it refuses on its own terms (401).
+    expect((await instance.inject({ method: "POST", url: "/api/mcp/manager/chat", headers: bearer(token), payload: {} })).statusCode).toBe(401);
+    expect((await instance.inject({ method: "PUT", url: "/api/settings", headers: bearer(token), payload: {} })).statusCode).toBe(403);
+    // …while the surface itself still answers.
+    expect((await instance.inject({ url: "/api/integration/chats", headers: bearer(token) })).statusCode).toBe(200);
+    expect((await instance.inject({ url: "/api/integration/openapi.json", headers: bearer(token) })).statusCode).toBe(200);
+    await instance.close();
+  });
+
   it("refuses a WS ticket to an integration", async () => {
     const { instance } = await app();
     const access = await owner(instance);
@@ -326,6 +346,46 @@ describe("the external MCP mount", () => {
     }
     expect(isIntegrationBridgePath("/api/mcp/manager/chat")).toBe(false);
     expect(isIntegrationBridgePath("/api/mcp/integrationX")).toBe(false);
+  });
+
+  it("applies the project allowlist on the mount, not just on REST", async () => {
+    const { instance } = await app();
+    const access = await owner(instance);
+    const a = await project(instance, access, "a", join(dirs[0]!, "a"));
+    const b = await project(instance, access, "b", join(dirs[0]!, "b"));
+    const inA = await chat(instance, access, a.id, "in a");
+    const inB = await chat(instance, access, b.id, "in b");
+    const { token } = await mint(instance, access, { name: "grok", scopes: ["tools:chat", "tools:project"], projectIds: [a.id] });
+    await instance.listen({ port: 0, host: "127.0.0.1" });
+    const origin = `http://127.0.0.1:${(instance.server.address() as AddressInfo).port}`;
+    const text = (r: { json: unknown }) =>
+      (r.json as { result: { content: { text: string }[]; isError?: boolean } }).result;
+    try {
+      const projects = text(await rpc(origin, token, "project", "tools/call", { name: "project_list", arguments: {} }));
+      expect(projects.content[0]!.text).toContain(a.id);
+      expect(projects.content[0]!.text).not.toContain(b.id);
+
+      const found = text(await rpc(origin, token, "chat", "tools/call", { name: "chat_find", arguments: {} }));
+      expect(found.content[0]!.text).toContain(inA.id);
+      expect(found.content[0]!.text).not.toContain(inB.id);
+
+      // B's chat is unknown to this token: not readable, not writable, not waitable.
+      const read = text(await rpc(origin, token, "chat", "tools/call", { name: "chat_read", arguments: { chatId: inB.id } }));
+      expect(read.isError).toBe(true);
+      const sent = text(await rpc(origin, token, "chat", "tools/call", { name: "chat_send", arguments: { chatId: inB.id, message: "hi" } }));
+      expect(sent.isError).toBe(true);
+      expect(sent.content[0]!.text).toContain("unknown-chat");
+      const state = text(await rpc(origin, token, "chat", "tools/call", { name: "chat_state", arguments: { chatId: inB.id } }));
+      expect(state.isError).toBe(true);
+      const wait = text(await rpc(origin, token, "chat", "tools/call", { name: "wait_for_chat", arguments: { chatId: inB.id, timeoutSeconds: 5 } }));
+      expect(wait.isError).toBe(true);
+      expect(wait.content[0]!.text).toContain("Unknown chatId");
+      // …and A's chat still answers.
+      const okState = text(await rpc(origin, token, "chat", "tools/call", { name: "chat_state", arguments: { chatId: inA.id } }));
+      expect(okState.isError ?? false).toBe(false);
+    } finally {
+      await instance.close();
+    }
   });
 
   it("lists exactly the external tools of a scoped category, and 403s the rest", async () => {

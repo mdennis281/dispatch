@@ -22,7 +22,7 @@ import {
 } from "./services/container.js";
 import { registerRoutes } from "./routes/index.js";
 import { migrateManagerToolNames } from "./services/manager-tool-migration.js";
-import { isManagerBridgePath } from "./services/mcp/manager-http.js";
+import { isIntegrationBridgePath, isManagerBridgePath } from "./services/mcp/manager-http.js";
 import { healthReport } from "./health.js";
 import { startPerfMonitor } from "./perf.js";
 import { registerRequestLog } from "./request-log.js";
@@ -71,6 +71,15 @@ export interface BuildAppOptions {
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
+
+/** The paths an integration token may reach — the REST surface and its MCP mount. */
+export function isIntegrationApiPath(path: string): boolean {
+  return (
+    path === "/api/integration" ||
+    path.startsWith("/api/integration/") ||
+    isIntegrationBridgePath(path)
+  );
+}
 
 /** Build (but do not listen on) the Fastify app. */
 export async function buildApp(
@@ -188,6 +197,17 @@ export async function buildApp(
     if (token?.startsWith(INTEGRATION_TOKEN_PREFIX)) {
       const integration = await auth.authenticateIntegration(token);
       if (!integration) return reply.code(401).send({ error: "Invalid or revoked integration token." });
+      // A token reaches ONLY the curated surface and the integration MCP
+      // mount. Every other `/api/` route is the SPA's, reads no identity
+      // beyond "the gate let it through", and would answer a `projects:read`
+      // token as if it were the owner — terminals, settings, permission
+      // approvals, the lot. Scopes are meaningless unless the surface they
+      // apply to is the only one a token can see.
+      if (!isIntegrationApiPath(path)) {
+        return reply.code(403).send({
+          error: "Integration tokens may only call /api/integration/* and /api/mcp/integration/*.",
+        });
+      }
       // Counted on the way in, so a flood is refused before it costs a handler.
       const retryAfter = auth.tokens.checkRate(integration.tokenId);
       if (retryAfter !== null) {

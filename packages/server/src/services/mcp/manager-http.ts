@@ -117,14 +117,18 @@ export class ManagerMcpBridge {
   /** Loopback origin of this server, e.g. "http://127.0.0.1:4319". */
   private origin: string;
   /** Builds the chat-less context the integration mount serves from. */
-  private integrationContext: ((identity: IntegrationIdentity) => ManagerMcpContext) | null = null;
+  private integrationContext:
+    | ((identity: IntegrationIdentity) => ManagerMcpContext | Promise<ManagerMcpContext>)
+    | null = null;
 
   constructor(origin = "http://127.0.0.1:4319") {
     this.origin = origin;
   }
 
   /** Wire the external context factory (the container does this once). */
-  setIntegrationContext(factory: (identity: IntegrationIdentity) => ManagerMcpContext): void {
+  setIntegrationContext(
+    factory: (identity: IntegrationIdentity) => ManagerMcpContext | Promise<ManagerMcpContext>,
+  ): void {
     this.integrationContext = factory;
   }
 
@@ -240,7 +244,7 @@ export class ManagerMcpBridge {
       res.end(JSON.stringify({ error: "integration mount not wired" }));
       return;
     }
-    const server = createManagerCategoryServer(this.integrationContext(identity), resolved);
+    const server = createManagerCategoryServer(await this.integrationContext(identity), resolved);
     // Same contract as the per-chat mount: a category with nothing external in
     // it (or nothing bound — memory without a single project) is a 404.
     if (!server) {

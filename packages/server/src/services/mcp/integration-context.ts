@@ -13,6 +13,17 @@
  * missing bindings keep a future tool from being offered merely because its
  * verdict was forgotten.
  *
+ * THE PROJECT ALLOWLIST IS ENFORCED HERE TOO. The REST surface filters by
+ * `identity.projectIds` on every route; a token with "only these projects"
+ * must not be able to reach the others by switching to the MCP mount. So the
+ * `inspect` and `messaging` bindings are wrapped: listings are filtered, and a
+ * chat outside the allowlist is reported as unknown — the same answer REST
+ * gives (404), chosen over "forbidden" so a restricted token cannot enumerate
+ * what it may not see. `wait_for_chat` asks the BROKER whether a chat exists,
+ * synchronously, so a restricted context precomputes the set of chats it may
+ * see once per request; the mount builds a fresh context per call and a chat
+ * created mid-call is not worth an async broker binding.
+ *
  * PROJECT-BOUND TOOLS. Memory and issues need a project, and a token has no
  * chat to inherit one from. They are bound when the token's allowlist names
  * EXACTLY ONE project — that is the only honest reading of "which project" —
@@ -26,7 +37,7 @@
 import type { EventBus } from "../../bus.js";
 import type { Store } from "../../store/index.js";
 import type { IntegrationIdentity } from "../integration-tokens.js";
-import type { ChatMessenger } from "../chat-messenger.js";
+import type { ChatMessenger, PeerSendResult } from "../chat-messenger.js";
 import type { InspectService } from "../inspect.js";
 import type { MemoryService } from "../memory.js";
 import type { MemoryHistoryService } from "../memory-history.js";
@@ -40,7 +51,7 @@ import { externalToolPolicy, type ManagerMcpBroker, type ManagerMcpContext } fro
 
 export interface IntegrationContextDeps {
   bus: EventBus;
-  store: Store;
+  store: Pick<Store, "getChat" | "listChats"> & Parameters<typeof createModeEditor>[0]["store"];
   broker: Pick<SessionBroker, "has" | "getStatus" | "getContextUsage">;
   inspect?: InspectService;
   messenger?: ChatMessenger;
@@ -52,16 +63,30 @@ export interface IntegrationContextDeps {
 }
 
 /**
+ * What a restricted token may see. `null` means unrestricted — every project,
+ * every chat — so the bindings pass straight through and pay nothing.
+ */
+interface Allowlist {
+  projects: ReadonlySet<string>;
+  chats: ReadonlySet<string>;
+}
+
+/**
  * A broker binding with no session behind it. Reads delegate to the real
  * broker — `wait_for_chat` and `chat_state` need live statuses — and every
  * write is a no-op or a refusal: there is no slot to take, no PR dot to light,
  * and no human to put a card in front of.
  */
-function externalBroker(broker: IntegrationContextDeps["broker"]): ManagerMcpBroker {
+function externalBroker(
+  broker: IntegrationContextDeps["broker"],
+  allow: Allowlist | null,
+): ManagerMcpBroker {
+  const visible = (chatId: string): boolean => !allow || allow.chats.has(chatId);
   return {
-    has: (chatId) => broker.has(chatId),
-    getStatus: (chatId) => broker.getStatus(chatId),
-    getContextUsage: (chatId) => broker.getContextUsage(chatId),
+    // A chat outside the allowlist does not exist, as far as this caller knows.
+    has: (chatId) => visible(chatId) && broker.has(chatId),
+    getStatus: (chatId) => (visible(chatId) ? broker.getStatus(chatId) : undefined),
+    getContextUsage: async (chatId) => (visible(chatId) ? broker.getContextUsage(chatId) : null),
     compact: () => {},
     markPrWatched: () => {},
     acquireSlot: async () => {},
@@ -71,40 +96,84 @@ function externalBroker(broker: IntegrationContextDeps["broker"]): ManagerMcpBro
   };
 }
 
-export function createIntegrationContext(
+/** The refusal a send/ask to an invisible chat gets — the messenger's own unknown-chat shape. */
+function unknownChat(to: string): PeerSendResult & { ok: false } {
+  return {
+    ok: false,
+    refusal: "unknown-chat",
+    message: `No chat "${to}" exists. Find the right id with chat_find.`,
+  };
+}
+
+export async function createIntegrationContext(
   deps: IntegrationContextDeps,
   identity: IntegrationIdentity,
-): ManagerMcpContext {
-  const { memory, memoryHistory, issues, inspect, messenger, authored } = deps;
+): Promise<ManagerMcpContext> {
+  const { memory, memoryHistory, issues, inspect, messenger, authored, store } = deps;
   const projectId = identity.projectIds?.length === 1 ? identity.projectIds[0] : undefined;
+  const allow: Allowlist | null = identity.projectIds?.length
+    ? {
+        projects: new Set(identity.projectIds),
+        chats: new Set(
+          (await Promise.all(identity.projectIds.map((p) => store.listChats(p).catch(() => []))))
+            .flat()
+            .map((c) => c.id),
+        ),
+      }
+    : null;
+  const chatVisible = (chatId: string): boolean => !allow || allow.chats.has(chatId);
+  const projectVisible = (id: string | undefined): boolean =>
+    !allow || (id !== undefined && allow.projects.has(id));
   // What the row says and what the reminder names: the token's name, which is
   // what the human chose when they minted it.
   const channel = { name: identity.name };
   return {
     chatId: "",
     bus: deps.bus,
-    broker: externalBroker(deps.broker),
+    broker: externalBroker(deps.broker, allow),
     toolPolicy: externalToolPolicy(),
     now: deps.now,
     inspect: inspect
       ? {
-          findChats: (q) => inspect.findChats(q),
-          readChat: (q) => inspect.readChat(q),
+          findChats: async (q) => {
+            const result = await inspect.findChats(q);
+            if (!allow) return result;
+            // Filtered AFTER the search rather than by narrowing the query: a
+            // token with two projects and no `project` filter needs both.
+            const chats = result.chats.filter((c) => projectVisible(c.projectId));
+            return { ...result, chats };
+          },
+          readChat: async (q) => {
+            if (!chatVisible(q.chatId)) throw new Error(`No chat "${q.chatId}" exists.`);
+            return inspect.readChat(q);
+          },
           // No caller project to fall back to: `project` must be named.
-          projectInfo: (q) => inspect.projectInfo(q, projectId),
-          projectList: (instance) => inspect.projectList(instance),
+          projectInfo: async (q) => {
+            const result = await inspect.projectInfo(q, projectId);
+            if (!projectVisible(result.project.id)) {
+              throw new Error(`No project matching "${q.project ?? ""}".`);
+            }
+            return result;
+          },
+          projectList: async (instance) =>
+            (await inspect.projectList(instance)).filter((p) => projectVisible(p.id)),
         }
       : undefined,
     messaging: messenger
       ? {
-          send: ({ to, message, delivery }) => messenger.send({ channel, to, message, delivery }),
+          send: ({ to, message, delivery }) =>
+            chatVisible(to)
+              ? messenger.send({ channel, to, message, delivery })
+              : Promise.resolve(unknownChat(to)),
           ask: ({ to, question, timeoutMs, signals, onWaiting }) =>
-            messenger.ask({ channel, to, question, timeoutMs, signals, onWaiting }),
+            chatVisible(to)
+              ? messenger.ask({ channel, to, question, timeoutMs, signals, onWaiting })
+              : Promise.resolve({ ...unknownChat(to), answered: false as const }),
           // An integration is never the TARGET of an ask, so this can only ever
           // refuse — but it refuses honestly ("addressed to chat X, not to you")
           // rather than being absent and reading as a missing tool.
           reply: ({ askId, answer }) => messenger.reply({ from: `channel:${identity.name}`, askId, answer }),
-          state: (chatId) => messenger.state(chatId),
+          state: (chatId) => (chatVisible(chatId) ? messenger.state(chatId) : Promise.resolve(null)),
           // Denied by the policy; present so the binding is whole.
           setMode: async () => {
             throw new Error("chat_set_mode is not available to integrations.");
@@ -134,7 +203,7 @@ export function createIntegrationContext(
       ? createAuthoringEditor({ authored, configPaths: null, getConfig: () => null })
       : undefined,
     modes: authored
-      ? createModeEditor({ store: deps.store, configPaths: null, builtin: BUILTIN_MODE_PERMISSION })
+      ? createModeEditor({ store, configPaths: null, builtin: BUILTIN_MODE_PERMISSION })
       : undefined,
   };
 }
