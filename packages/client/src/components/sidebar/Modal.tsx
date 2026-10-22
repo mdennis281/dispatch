@@ -58,11 +58,11 @@ export function Modal({
       style={{ zIndex: z }}
       className={
         // Top-anchored, so the 24px gutter is all that stands between the title
-        // row and the status bar on a phone — `cm-safe-pad` makes each side the
+        // row and the status bar on a phone — `dp-safe-pad` makes each side the
         // larger of the two. The `sm` offset gets the same treatment for the
         // short viewport where 9vh is the smaller number.
         "fixed inset-0 flex items-start justify-center overflow-y-auto " +
-        "cm-safe-pad [--cm-gutter:1.5rem] sm:pt-[max(9vh,var(--cm-safe-top),var(--cm-titlebar-h))]"
+        "dp-safe-pad [--dp-gutter:1.5rem] sm:pt-[max(9vh,var(--dp-safe-top),var(--dp-titlebar-h))]"
       }
     >
       <div

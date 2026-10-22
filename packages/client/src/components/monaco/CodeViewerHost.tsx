@@ -5,7 +5,7 @@
  *
  * Two open paths converge here:
  *  - direct: `openCodeViewer(...)` (chat tool cards, via ./index helpers).
- *  - decoupled: the right-panel fires a `cm:open-file` window event
+ *  - decoupled: the right-panel fires a `dispatch:open-file` window event
  *    (panelBus `OPEN_FILE_EVENT`) so panels never import this area; we listen
  *    for it here and enrich it with the worktree's branch.
  */

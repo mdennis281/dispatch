@@ -1,5 +1,5 @@
 /**
- * `cm token …` — mint, list and revoke integration tokens from a terminal.
+ * `dispatch token …` — mint, list and revoke integration tokens from a terminal.
  *
  * OFFLINE, against the instance's data directory, like `auth reset-owner`:
  * there is no credential a shell could present to the HTTP surface that is not
@@ -27,12 +27,12 @@ import {
   summarizeIntegrationToken,
 } from "../core/integration-tokens.js";
 
-const HELP = `cm token — integration tokens for bots and scripts
+const HELP = `dispatch token — integration tokens for bots and scripts
 
 Usage:
-  cm token create --name <name> --scopes <a,b,…> [--projects <id,…>] [--expires <30d|12h|ISO>]
-  cm token list [--all]
-  cm token revoke <id>
+  dispatch token create --name <name> --scopes <a,b,…> [--projects <id,…>] [--expires <30d|12h|ISO>]
+  dispatch token list [--all]
+  dispatch token revoke <id>
 
 Every command needs the instance's roots:
   --config-dir <dir>   or DISPATCH_CONFIG_DIR   (where config.json says whether auth is on)
@@ -169,7 +169,7 @@ async function list(args: ParsedArgs): Promise<void> {
 async function revoke(args: ParsedArgs): Promise<void> {
   const { dataDir } = roots(args);
   const id = args.positionals[0];
-  if (!id) throw new CmError("usage: cm token revoke <id>");
+  if (!id) throw new CmError("usage: dispatch token revoke <id>");
   const found = await revokeIntegrationToken(integrationTokensPath(dataDir), id);
   if (!found) throw new CmError(`no token with id "${id}"`);
   if (emitJson(args, { id, revoked: true })) return;

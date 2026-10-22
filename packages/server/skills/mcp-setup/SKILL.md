@@ -1,6 +1,6 @@
 ---
 name: mcp-setup
-description: Add, configure, debug, or build an MCP server for this project. Use whenever the conversation turns to installing/adding/connecting an MCP server, wiring up a tool integration (Linear, Sentry, Postgres, Figma, Playwright, a company API…), editing mcpServers config, troubleshooting a server that won't connect or whose tools aren't showing up, giving each git worktree its own MCP instance or fixing MCP port conflicts between parallel chats, returning a screenshot/video/file from a tool, or writing a new MCP server from scratch. Covers Dispatch's `.dispatch/project.yaml` config, the `cm mcp` CLI, the `mcp__dispatch-mcp__*` tools, and secret handling.
+description: Add, configure, debug, or build an MCP server for this project. Use whenever the conversation turns to installing/adding/connecting an MCP server, wiring up a tool integration (Linear, Sentry, Postgres, Figma, Playwright, a company API…), editing mcpServers config, troubleshooting a server that won't connect or whose tools aren't showing up, giving each git worktree its own MCP instance or fixing MCP port conflicts between parallel chats, returning a screenshot/video/file from a tool, or writing a new MCP server from scratch. Covers Dispatch's `.dispatch/project.yaml` config, the `dispatch mcp` CLI, the `mcp__dispatch-mcp__*` tools, and secret handling.
 ---
 
 # MCP setup in Dispatch
@@ -43,15 +43,15 @@ mcp__dispatch-mcp__mcp_remove  → remove one
 **From a terminal** (identical validation, identical output — same core):
 
 ```bash
-cm mcp add <name> -- <command> [args...]          # stdio (local subprocess)
-cm mcp add <name> --transport http --url <url>    # remote HTTP
-cm mcp add <name> --transport sse  --url <url>    # remote SSE
-cm mcp add-json <name> '<json>'                   # paste a README's JSON snippet
-cm mcp import [file]                              # bulk import .mcp.json / Claude Desktop
-cm mcp list | get <name> | remove <name>
+dispatch mcp add <name> -- <command> [args...]          # stdio (local subprocess)
+dispatch mcp add <name> --transport http --url <url>    # remote HTTP
+dispatch mcp add <name> --transport sse  --url <url>    # remote SSE
+dispatch mcp add-json <name> '<json>'                   # paste a README's JSON snippet
+dispatch mcp import [file]                              # bulk import .mcp.json / Claude Desktop
+dispatch mcp list | get <name> | remove <name>
 ```
 
-`cm` walks up from the cwd to the repo root, so it works from any subdirectory.
+`dispatch` walks up from the cwd to the repo root, so it works from any subdirectory.
 Add `--json` to any command for machine-readable output.
 
 ### Translating a README
@@ -61,10 +61,10 @@ Both map over directly:
 
 | Their docs | Here |
 |---|---|
-| `claude mcp add foo -- npx -y foo-mcp` | `cm mcp add foo -- npx -y foo-mcp` |
-| `{"foo":{"command":"npx","args":["-y","foo-mcp"]}}` | `cm mcp add-json foo '{"command":"npx","args":["-y","foo-mcp"]}'` |
-| a whole `.mcp.json` file | `cm mcp import ./.mcp.json` |
-| `"url": "https://x/mcp"` | `cm mcp add x --transport http --url https://x/mcp` |
+| `claude mcp add foo -- npx -y foo-mcp` | `dispatch mcp add foo -- npx -y foo-mcp` |
+| `{"foo":{"command":"npx","args":["-y","foo-mcp"]}}` | `dispatch mcp add-json foo '{"command":"npx","args":["-y","foo-mcp"]}'` |
+| a whole `.mcp.json` file | `dispatch mcp import ./.mcp.json` |
+| `"url": "https://x/mcp"` | `dispatch mcp add x --transport http --url https://x/mcp` |
 
 Flag-shaped arguments (`-y`, `--port`) must come after `--`, not after
 `--command` — the parser stays strict so a typo'd flag is an error, not a
@@ -76,10 +76,10 @@ silently-swallowed argument.
 own environment when a session starts, so the real value never touches the repo.
 
 ```bash
-cm mcp add linear --transport http --url https://mcp.linear.app/mcp \
+dispatch mcp add linear --transport http --url https://mcp.linear.app/mcp \
   -H "Authorization: Bearer ${LINEAR_API_KEY}"
 
-cm mcp add postgres -e DATABASE_URL='${DATABASE_URL}' -- npx -y @modelcontextprotocol/server-postgres
+dispatch mcp add postgres -e DATABASE_URL='${DATABASE_URL}' -- npx -y @modelcontextprotocol/server-postgres
 ```
 
 Supported syntax is `${VAR}` and `${VAR:-default}`. Bare `$VAR` is **not**
@@ -95,7 +95,7 @@ instead, works in MCP `env`/`headers` and a sub-app's `env`, and is set without
 the value ever touching the conversation:
 
 ```bash
-cm mcp add linear --transport http --url https://mcp.linear.app/mcp \
+dispatch mcp add linear --transport http --url https://mcp.linear.app/mcp \
   -H 'Authorization: Bearer ${secret:LINEAR_API_KEY}'
 ```
 
@@ -115,7 +115,7 @@ placeholder in the config and ask for it again with `secret_request`.
 
 ## Verifying it worked
 
-1. `mcp__dispatch-mcp__mcp_list` (or `cm mcp list`) — confirms it's in the config.
+1. `mcp__dispatch-mcp__mcp_list` (or `dispatch mcp list`) — confirms it's in the config.
 2. **The manager UI's MCP catalog** (top bar, or the command palette) — this is
    the real check. It probes each configured server live and shows connection
    status plus every tool it exposes, with parameters. A server that's configured
@@ -134,7 +134,7 @@ placeholder in the config and ask for it again with `secret_request`.
 
 ## Scope note
 
-`cm mcp` edits **project** config — everyone who clones the repo gets it. That's
+`dispatch mcp` edits **project** config — everyone who clones the repo gets it. That's
 the right default for a server the team needs, and the wrong one for a personal
 experiment. If the user wants a server only for themselves, say so and let them
 decide before you write it.

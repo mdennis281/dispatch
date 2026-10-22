@@ -58,7 +58,7 @@ export function PluginsSection() {
           <p className="font-medium text-secondary">No plugins installed.</p>
           <p className="mt-1">
             Drop one into <code className="text-fg">plugins/&lt;id&gt;/</code> under Dispatch&apos;s config
-            directory, run <code className="text-fg">cm plugin add &lt;path&gt;</code>, or inspect one from a URL
+            directory, run <code className="text-fg">dispatch plugin add &lt;path&gt;</code>, or inspect one from a URL
             above, then restart.
           </p>
         </div>

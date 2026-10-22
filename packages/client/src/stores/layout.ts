@@ -72,7 +72,7 @@ export const GROUP_HOME: Record<PanelGroup, FocusPanelTab> = {
   run: "agents",
 };
 
-const KEY = "cm:panel-tab";
+const KEY = "dispatch:panel-tab";
 const DEFAULT_TAB: FocusPanelTab = "worktrees";
 
 function backing(): Storage | null {

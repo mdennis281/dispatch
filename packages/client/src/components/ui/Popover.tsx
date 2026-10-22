@@ -54,8 +54,8 @@ interface Placement {
 }
 
 type PopoverStyle = CSSProperties & {
-  "--cm-popover-gap"?: string;
-  "--cm-popover-animation-from"?: string;
+  "--dp-popover-gap"?: string;
+  "--dp-popover-animation-from"?: string;
 };
 
 /**
@@ -372,8 +372,8 @@ export function Popover({
                     width: placement.width,
                     maxHeight: placement.maxHeight,
                     pointerEvents: closing ? "none" : undefined,
-                    "--cm-popover-gap": `${GAP}px`,
-                    "--cm-popover-animation-from": animationFrom ?? undefined,
+                    "--dp-popover-gap": `${GAP}px`,
+                    "--dp-popover-animation-from": animationFrom ?? undefined,
                   }
                 : {
                     zIndex: LAYER.popover,

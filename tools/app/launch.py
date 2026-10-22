@@ -76,7 +76,7 @@ STOP_TIMEOUT_S = 25
 
 def desktop_root() -> Path:
     """Root of the installed deployment. DISPATCH_HOME overrides, as in paths.mjs."""
-    home = os.environ.get("DISPATCH_HOME") or os.environ.get("CM_HOME")
+    home = os.environ.get("DISPATCH_HOME")
     if home:
         return Path(home).resolve()
     if IS_WINDOWS:
@@ -85,9 +85,15 @@ def desktop_root() -> Path:
         local = str(Path.home() / "Library/Application Support")
     else:
         local = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local/share")
-    # Still literally `claude-manager`: renaming it would strand every existing
-    # chat transcript behind a migration. See the note in paths.mjs.
-    return Path(local) / "claude-manager"
+    root = Path(local) / "dispatch"
+    if root.exists():
+        return root
+    # TODO(remove after install migration): an install that predates the rename
+    # still lives under `claude-manager` until `pnpm app:migrate-home` moves it.
+    legacy = Path(local) / "claude-manager"
+    if legacy.exists():
+        return legacy
+    return root
 
 
 class Paths:

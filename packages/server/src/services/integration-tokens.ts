@@ -6,10 +6,10 @@
  * service because its concerns are its own: a bearer that is not a session,
  * a rate limit the sessions don't have, and a file the CLI edits underneath us.
  *
- * THE FILE IS SHARED WITH `cm token`. So every read goes through a stamp check
+ * THE FILE IS SHARED WITH `dispatch token`. So every read goes through a stamp check
  * (mtime + size + inode, the same trick `auth.json` uses) and reloads when the
  * CLI has written, and every write takes the CLI's lock and re-reads before
- * mutating. Without that a `cm token create` while the server is up either
+ * mutating. Without that a `dispatch token create` while the server is up either
  * never authenticates (server holds a stale list) or is clobbered by the next
  * `lastUsedAt` flush (server writes its stale list back). Both were observed in
  * design and neither errors, which is why the discipline is total.

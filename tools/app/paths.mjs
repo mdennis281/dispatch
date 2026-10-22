@@ -18,25 +18,31 @@
  * Windows would pin the right icon. As an installed PWA the browser provides
  * that identity itself, so the whole directory and the tooling that filled it
  * are gone.
- *
- * NOTE: `<root>` is still literally `claude-manager`. Renaming it would strand
- * every existing chat transcript behind a one-shot migration, which is a poor
- * trade for a directory no user ever looks at. Rename it deliberately later with
- * `pnpm app:migrate`, not as a side effect of the branding change.
  */
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
-/** Root of the installed deployment. `DISPATCH_HOME` overrides for testing. */
-export function desktopRoot(env = process.env) {
-  // `CM_HOME` fallback: a shortcut created before the rename still sets it.
-  const home = env.DISPATCH_HOME ?? env.CM_HOME;
-  if (home) return resolve(home);
-  const local =
+/** The per-user directory the install root lives in. */
+export function localDataDir(env = process.env) {
+  return (
     env.LOCALAPPDATA ??
     env.XDG_DATA_HOME ??
-    join(homedir(), process.platform === "darwin" ? "Library/Application Support" : ".local/share");
-  return join(local, "claude-manager");
+    join(homedir(), process.platform === "darwin" ? "Library/Application Support" : ".local/share")
+  );
+}
+
+/** Root of the installed deployment. `DISPATCH_HOME` overrides for testing. */
+export function desktopRoot(env = process.env) {
+  if (env.DISPATCH_HOME) return resolve(env.DISPATCH_HOME);
+  const local = localDataDir(env);
+  const root = join(local, "dispatch");
+  if (existsSync(root)) return root;
+  // TODO(remove after install migration): an install that predates the rename
+  // still lives under `claude-manager` until `pnpm app:migrate-home` moves it.
+  const legacy = join(local, "claude-manager");
+  if (existsSync(legacy)) return legacy;
+  return root;
 }
 
 /** Every path the desktop deployment cares about, derived from one root. */

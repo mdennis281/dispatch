@@ -2,7 +2,7 @@
  * The plugin manifest — `plugin.yaml` at the root of `<configDir>/plugins/<id>/`.
  *
  * One schema, three consumers: the server's loader decides what to activate
- * from it, `cm plugin add` validates a candidate BEFORE copying it into place,
+ * from it, `dispatch plugin add` validates a candidate BEFORE copying it into place,
  * and the Settings pane renders the row from the server's parse of it. Keeping
  * the shape here (and not in the server) is what stops the CLI accepting a
  * manifest the loader would then list as `invalid` — the failure that
@@ -161,7 +161,7 @@ const PluginManifestObjectSchema = z.object({
  * (see docs/plugins.md → "Client host"), as a whole directory. So it must hold
  * nothing else of the plugin's: not the server module, which may embed a
  * token, and not the plugin root, which would publish the manifest, the
- * settings schema and every contribution. Enforced here so `cm plugin add`
+ * settings schema and every contribution. Enforced here so `dispatch plugin add`
  * refuses the layout before it is ever on disk.
  */
 export const PluginManifestSchema = PluginManifestObjectSchema.superRefine((m, ctx) => {

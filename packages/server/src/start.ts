@@ -150,11 +150,5 @@ export async function start({ dev = false }: { dev?: boolean } = {}): Promise<vo
   if (envVar(process.env, "IPC") === "1") {
     // eslint-disable-next-line no-console
     console.log(`[dispatch] ready ${url}`);
-    // A shell installed BEFORE the rename matches only the old prefix, and
-    // `desktop:publish` swaps the payload without touching the shell. Emit the
-    // legacy line too so that pairing still boots. Safe to delete once the shell
-    // has been reinstalled (`pnpm desktop:install-shell`).
-    // eslint-disable-next-line no-console
-    console.log(`[claude-manager] ready ${url}`);
   }
 }

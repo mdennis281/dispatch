@@ -1,6 +1,6 @@
 ---
 name: plugin-authoring
-description: Build, change or debug a Dispatch plugin, or connect an outside program to Dispatch. Use whenever the task is a plugin (a server module under <configDir>/plugins/<id>/, a client bundle in the SPA), adding a composer control, a settings section, a right-panel tab, a chat badge, a dictation or TTS engine, contributing a mode / skill / instruction / persona / MCP server / managed process from outside the repo, wiring an external bot or connector (integration tokens, scopes, the external MCP mount, the REST surface, outbound webhooks, OAuth as server or client), running `cm plugin init|add|link`, or a plugin that is listed as invalid / incompatible / error in Settings → Plugins. Covers `@dispatch/plugin-sdk`, `plugin.yaml`, `PluginContext`, `ClientHost`, `createTestContext`, and verifying on a throwaway instance.
+description: Build, change or debug a Dispatch plugin, or connect an outside program to Dispatch. Use whenever the task is a plugin (a server module under <configDir>/plugins/<id>/, a client bundle in the SPA), adding a composer control, a settings section, a right-panel tab, a chat badge, a dictation or TTS engine, contributing a mode / skill / instruction / persona / MCP server / managed process from outside the repo, wiring an external bot or connector (integration tokens, scopes, the external MCP mount, the REST surface, outbound webhooks, OAuth as server or client), running `dispatch plugin init|add|link`, or a plugin that is listed as invalid / incompatible / error in Settings → Plugins. Covers `@dispatch/plugin-sdk`, `plugin.yaml`, `PluginContext`, `ClientHost`, `createTestContext`, and verifying on a throwaway instance.
 ---
 
 # Writing a Dispatch plugin
@@ -26,24 +26,25 @@ plugin means restarting Dispatch.**
 Everything else: [manifest.md](references/manifest.md) (every `plugin.yaml` field and
 why the validator refuses what it refuses), [testing.md](references/testing.md) (unit
 test with a fake context, then a throwaway instance), [publishing.md](references/publishing.md)
-(`cm plugin add|link`, versioning, the restart rule).
+(`dispatch plugin add|link`, versioning, the restart rule).
 
 ## The fast path
 
 ```bash
-cm plugin init my-plugin --both        # or --server / --client; from the Dispatch checkout
+dispatch plugin init my-plugin --both        # or --server / --client; from the Dispatch checkout
 cd my-plugin
-pnpm install                           # the SDK is link:ed from the checkout that ran cm
+pnpm install                           # the SDK is link:ed from the checkout that ran dispatch
 pnpm build                             # src/server.ts → server/index.js, src/client.tsx → client/index.js
 pnpm test                              # activate() under @dispatch/plugin-sdk/testing, no server
-cm plugin add . --config-dir <dir>     # validates, copies in; or `cm plugin link .` while developing
+dispatch plugin add . --config-dir <dir>     # validates, copies in; or `dispatch plugin link .` while developing
 # restart Dispatch → Settings → Plugins
 ```
 
-`cm` is `node packages/cli/dist/index.js` in a checkout (`pnpm cm …`), or on PATH in an
-installed app. `--config-dir` is where the running server keeps `config.json`
+`dispatch` is `node packages/cli/dist/index.js` in a checkout (`pnpm dispatch …`). In an installed
+app it is `node <install root>/app/packages/cli/dist/index.js`; on macOS/Linux the `dispatch`
+launcher in `~/.local/bin` forwards `mcp|auth|token|plugin` to it, so plain `dispatch …` works there. `--config-dir` is where the running server keeps `config.json`
 (`DISPATCH_CONFIG_DIR`; a source checkout's default is `<repo>/.data`). The scaffold
-links `@dispatch/plugin-sdk` from the checkout that ran `cm`, so its types match the host
+links `@dispatch/plugin-sdk` from the checkout that ran `dispatch`, so its types match the host
 you are installing into.
 
 Start from the scaffold even for a tiny plugin: it has the manifest rules already
@@ -85,7 +86,7 @@ satisfied, the two Vite presets wired, and a passing test.
 | `packages/plugin-sdk/` | `@dispatch/plugin-sdk`: types, `definePlugin`, `./vite` presets, `./testing` |
 | `packages/server/src/plugins/` | the host: `service.ts` (lifecycle), `context.ts` (what `ctx` adapts) |
 | `packages/client/src/plugins/` | the client host: loader, `host.ts`, slots, `deps.ts` (the shim) |
-| `packages/cli/src/core/plugins.ts`, `plugin-init.ts` | `cm plugin` |
+| `packages/cli/src/core/plugins.ts`, `plugin-init.ts` | `dispatch plugin` |
 | `examples/plugins/{hello-server,hello-slot,event-forwarder,contributions}` | the references — copy from these |
 | `docs/plugins.md` | the full contract |
 

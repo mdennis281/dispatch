@@ -133,7 +133,7 @@ function useFullBleed(): boolean {
  *
  *  - `pad-t`  what the panel's padding-top COMPUTED to. 0 means the inset never
  *             reached the box, whatever the stylesheet says.
- *  - `var-t`  what `--cm-safe-top` resolves to on that same box — the CSS path
+ *  - `var-t`  what `--dp-safe-top` resolves to on that same box — the CSS path
  *             the shipped fix used.
  *  - `js-t`   the same inset as measured by the probe, which is what the inline
  *             style now pays. `var-t` ≠ `js-t` indicts `env()` in a variable.
@@ -163,7 +163,7 @@ function AnnotatorGeometryDebug({ panelRef }: { panelRef: React.RefObject<HTMLDi
       const header = el.querySelector("header");
       setRead({
         pad: cs.paddingTop,
-        varTop: cs.getPropertyValue("--cm-safe-top").trim() || "(unset)",
+        varTop: cs.getPropertyValue("--dp-safe-top").trim() || "(unset)",
         hdr: Math.round(header?.getBoundingClientRect().top ?? -1),
         panel: Math.round(el.getBoundingClientRect().top),
       });
@@ -251,7 +251,7 @@ export default function ImageAnnotator(props: ImageAnnotatorProps) {
   return createPortal(
     <div
       style={{ zIndex: z }}
-      className="fixed inset-0 flex items-center justify-center sm:cm-safe-pad sm:[--cm-gutter:1.5rem]"
+      className="fixed inset-0 flex items-center justify-center sm:dp-safe-pad sm:[--dp-gutter:1.5rem]"
     >
       <div className="fixed inset-0 bg-scrim backdrop-blur-[2px]" aria-hidden />
       <div
@@ -259,9 +259,9 @@ export default function ImageAnnotator(props: ImageAnnotatorProps) {
         role="dialog"
         aria-modal="true"
         aria-label="Edit image"
-        // MEASURED insets, applied inline, rather than the `cm-safe-pad` class
+        // MEASURED insets, applied inline, rather than the `dp-safe-pad` class
         // this used to carry. The class demonstrably reaches the stylesheet and
-        // `--cm-safe-top` demonstrably resolves (the debug readout is positioned
+        // `--dp-safe-top` demonstrably resolves (the debug readout is positioned
         // by it), yet the header stayed under the clock on a real installed PWA
         // — so the CSS path has one unknown too many to keep betting on. These
         // are the same numbers the probe in `stores/viewport` reads out of the

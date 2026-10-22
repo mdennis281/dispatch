@@ -192,7 +192,7 @@ export function reconcileActiveChat(): void {
  * grid has already moved the selection by the time the toggle is pressed. The
  * place is therefore snapshotted at the moment of leaving.
  *
- * Persisted in localStorage, on the same reasoning as `cm:last-project`
+ * Persisted in localStorage, on the same reasoning as `dispatch:last-project`
  * (stores/projects): where you are is a fact about this browser, not the
  * account. It also means arriving at a fresh tab ON the homepage — which is
  * what a reload mid-visit gives you — still has a way back rather than only the
@@ -201,7 +201,7 @@ export function reconcileActiveChat(): void {
  * `chatId` can be null: you can be looking at the empty state, or at Memory, or
  * at Source Control, and all of those return to the project without a chat.
  */
-const LAST_PLACE_KEY = "cm:home-return";
+const LAST_PLACE_KEY = "dispatch:home-return";
 
 interface LastPlace {
   projectId: string | null;

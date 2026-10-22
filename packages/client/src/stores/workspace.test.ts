@@ -159,14 +159,14 @@ describe("workspace store — persistence", () => {
     useWorkspace.getState().setSort("created");
     useWorkspace.getState().toggleFilter("active");
 
-    const saved = JSON.parse(localStorage.getItem("cm.workspace.view")!);
+    const saved = JSON.parse(localStorage.getItem("dispatch:workspace.view")!);
     expect(saved).toMatchObject({ kind: "terminals", scope: "all", sort: "created" });
     expect(saved.filters.active).toBe(true);
 
     // A filter name this build has never heard of must not ride along into the
     // query string, where the server would 400 on it.
     localStorage.setItem(
-      "cm.workspace.view",
+      "dispatch:workspace.view",
       JSON.stringify({ kind: "terminals", scope: "all", sort: "nonsense", filters: { bogus: true } }),
     );
     vi.resetModules();

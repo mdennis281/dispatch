@@ -1,5 +1,5 @@
 /**
- * Plugin install core — what `cm plugin …` does, as functions the server can
+ * Plugin install core — what `dispatch plugin …` does, as functions the server can
  * reuse (it imports discovery from here so the loader and the CLI cannot
  * disagree about what a plugin directory is).
  *
@@ -43,7 +43,7 @@ export interface DiscoveredPlugin {
   incompatible?: boolean;
   /** The parsed `settings` JSON Schema, when the manifest names one and it reads. */
   settingsSchema?: unknown;
-  /** The directory is a junction/symlink (`cm plugin link`). */
+  /** The directory is a junction/symlink (`dispatch plugin link`). */
   linked?: boolean;
 }
 
@@ -283,7 +283,7 @@ async function removeEntry(target: string): Promise<void> {
 }
 
 /**
- * `cm plugin add`: copy a validated plugin into `<configDir>/plugins/<id>`.
+ * `dispatch plugin add`: copy a validated plugin into `<configDir>/plugins/<id>`.
  * Validated in the SOURCE first, so nothing invalid is ever on disk under the
  * root — a half-installed plugin would otherwise show as `invalid` in Settings
  * with no clue that the install itself was the problem.
@@ -331,7 +331,7 @@ export async function addPlugin(
 }
 
 /**
- * `cm plugin link`: point `<configDir>/plugins/<id>` at a working directory.
+ * `dispatch plugin link`: point `<configDir>/plugins/<id>` at a working directory.
  * A junction on Windows (no privilege needed, unlike a symlink) and a symlink
  * elsewhere. Edits in the working dir are live on the next restart.
  */
@@ -354,7 +354,7 @@ export async function linkPlugin(
   return { plugin, outcome: replaced ? "replaced" : "linked", dir: target };
 }
 
-/** `cm plugin remove`: delete the directory, or unlink it if it was linked. */
+/** `dispatch plugin remove`: delete the directory, or unlink it if it was linked. */
 export async function removePlugin(configDir: string, id: string): Promise<{ removed: boolean; dir: string }> {
   const target = join(pluginsRoot(configDir), id);
   try {

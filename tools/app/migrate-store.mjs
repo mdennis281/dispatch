@@ -42,7 +42,7 @@
  *                                    [--dry-run] [--force] [--prune] [--quiet]
  *
  *   --source  state root holding the legacy JSON. Default: this checkout's `.data`.
- *             The installed instance's is `%LOCALAPPDATA%\claude-manager\data`.
+ *             The installed instance's is `%LOCALAPPDATA%\dispatch\data`.
  *   --target  state root to write `state.db` into. Default: the same as --source
  *             (migrating in place). Point it elsewhere to rehearse against a copy.
  */

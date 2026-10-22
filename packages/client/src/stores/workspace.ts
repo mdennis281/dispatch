@@ -55,7 +55,7 @@ const NO_FILTERS: WorkspaceFilters = {
   unattributed: false,
 };
 
-const STORAGE_KEY = "cm.workspace.view";
+const STORAGE_KEY = "dispatch:workspace.view";
 
 interface Persisted {
   kind: WorkspaceKind;

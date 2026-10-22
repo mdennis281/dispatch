@@ -741,7 +741,7 @@ export function McpCatalogView() {
                   Add one from a terminal at the repo root:
                 </p>
                 <code className="block break-all rounded-md border border-line-soft bg-inset px-1.5 py-1 cm-mono !text-2xs leading-snug text-secondary">
-                  cm mcp add &lt;name&gt; -- &lt;command&gt;
+                  dispatch mcp add &lt;name&gt; -- &lt;command&gt;
                 </code>
                 <p className="text-2xs leading-snug text-faint">
                   …or just ask an agent in this project to add it.

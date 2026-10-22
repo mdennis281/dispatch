@@ -4,7 +4,7 @@
  *
  * Lives in the CLI core rather than the server for the same reason the MCP
  * config core does: two processes write this file. The server mints from
- * Settings → Integrations, and `cm token create` mints OFFLINE — there is no
+ * Settings → Integrations, and `dispatch token create` mints OFFLINE — there is no
  * credential a terminal could present to the server's HTTP surface that is not
  * itself one of these tokens, so the first token on an install has to be made
  * without one. Both go through these functions, so the format, the hash and the

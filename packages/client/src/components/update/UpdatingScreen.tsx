@@ -19,7 +19,7 @@
  *
  *   1. **Never reload until a DIFFERENT process answers.** `/api/health` reports
  *      `pid` and `startedAt`; the identity of the server that accepted the
- *      install is recorded in `cm:update-inflight` before it starts going down.
+ *      install is recorded in `dispatch:update-inflight` before it starts going down.
  *      This is the same gate `tools/app/upgrade.mjs` applies to its own swaps.
  *   2. **Survive a reload.** The marker is in localStorage, and the store adopts
  *      it on the first frame, so a refresh (or a crash, or session restore) lands

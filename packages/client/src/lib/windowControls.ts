@@ -18,7 +18,7 @@
  * scroll frequency during a window resize — a debounce and a re-render per frame
  * to learn something a media query already tracks for free. The GEOMETRY, which
  * is the part that genuinely changes on resize, is consumed as `env()` in CSS
- * (see `--cm-titlebar-*` in index.css), where the UA updates it without telling
+ * (see `--dp-titlebar-*` in index.css), where the UA updates it without telling
  * us anything at all.
  */
 import { useEffect, useState } from "react";

@@ -53,9 +53,9 @@ const read = () => readUpdateProgress({ root, includeLog: true });
 const TRANSCRIPT = [
   "Resolving v2026.08.16.00001 from mdennis281/dispatch...",
   "release: v2026.08.16.00001",
-  "target : C:\\Users\\x\\AppData\\Local\\claude-manager",
+  "target : C:\\Users\\x\\AppData\\Local\\dispatch",
   "verified: sha256 9f2c1b0e5d4a3f6c8b7e2d1a0c9f8e7d6b5a4c3f2e1d0b9a8c7f6e5d4b3a2c1d",
-  "  $ tar -xzf C:\\Temp\\payload.tgz -C C:\\Users\\x\\AppData\\Local\\claude-manager\\.install-1",
+  "  $ tar -xzf C:\\Temp\\payload.tgz -C C:\\Users\\x\\AppData\\Local\\dispatch\\.install-1",
   "installing runtime dependencies...",
   "  $ pnpm install --prod --frozen-lockfile --config.confirmModulesPurge=false",
   "Packages: +527",

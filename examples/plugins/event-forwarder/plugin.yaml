@@ -2,7 +2,7 @@
 # a URL as signed POSTs, in the same envelope and `X-Dispatch-Signature`
 # scheme the host's own outbound webhooks use (docs/plugins.md → "Outbound
 # webhooks"). Build it (`pnpm --filter @dispatch/example-event-forwarder
-# build`), link it in (`cm plugin link examples/plugins/event-forwarder`),
+# build`), link it in (`dispatch plugin link examples/plugins/event-forwarder`),
 # restart Dispatch, then set the URL under Settings → Plugins and the secret
 # through the secret card. `test/forwarder.test.ts` drives it with
 # `createTestContext`, no server needed.

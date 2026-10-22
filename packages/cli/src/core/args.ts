@@ -34,14 +34,14 @@ const VALUE_FLAGS = new Set([
   "header",
   "dir",
   "scope",
-  // `cm token` — the roots and the mint fields.
+  // `dispatch token` — the roots and the mint fields.
   "name",
   "scopes",
   "projects",
   "expires",
   "config-dir",
   "data-dir",
-  // `cm plugin init` — where the SDK to link lives.
+  // `dispatch plugin init` — where the SDK to link lives.
   "sdk",
 ]);
 

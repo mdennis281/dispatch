@@ -6,7 +6,7 @@
  * row in one transcript replaced the entire window with a black rectangle, and
  * the only trace was a "Minified React error #xxx" in a console nobody has open
  * on a phone. The reported symptom — "chats populate, then the screen goes
- * black, and clearing `cm:last-project` fixes it" — is that failure mode
+ * black, and clearing `dispatch:last-project` fixes it" — is that failure mode
  * exactly: the remembered project decides which chat auto-opens, hydrate fetches
  * that chat's transcript a beat after the sidebar fills, and whatever is in it
  * takes the app down with it. Forgetting the project just lands you elsewhere.
@@ -22,7 +22,7 @@
  *     without a reload.
  *   - {@link AppErrorBoundary} — last resort. A full screen showing the real
  *     error, stack and component stack, with Copy and a one-click "clear this
- *     browser's saved view state" — the manual `cm:last-project` fix, as a
+ *     browser's saved view state" — the manual `dispatch:last-project` fix, as a
  *     button, since that is what actually gets someone unstuck today.
  *
  * Nothing is hidden behind a friendly message. This is an open-source app whose
@@ -33,6 +33,7 @@ import { Component, type ErrorInfo, type ReactNode } from "react";
 import { AlertTriangle, Copy, RotateCw, Trash2 } from "lucide-react";
 import { Button } from "./ui/Button.js";
 import { LAYER } from "../lib/layers.js";
+import { THEME_STORAGE_KEY } from "../stores/theme.js";
 
 const BUILD_VERSION = typeof __BUILD_VERSION__ === "string" ? __BUILD_VERSION__ : "dev";
 
@@ -102,7 +103,7 @@ function copyReport(scope: string, caught: CaughtError): void {
 }
 
 /**
- * Forget every `cm:`-prefixed localStorage key — the remembered project, the
+ * Forget every `dispatch:`-prefixed localStorage key — the remembered project, the
  * layout, the per-task prefs — and reload.
  *
  * Deliberately scoped to this app's own prefix and deliberately NOT touching
@@ -114,7 +115,11 @@ function clearViewState(): void {
   try {
     const store = globalThis.localStorage;
     if (store) {
-      for (const key of Object.keys(store)) if (key.startsWith("cm:")) store.removeItem(key);
+      // The theme shares the prefix but is a preference, not view state — and it
+      // was never cleared here while the view keys were still spelled `cm:`.
+      for (const key of Object.keys(store)) {
+        if (key.startsWith("dispatch:") && key !== THEME_STORAGE_KEY) store.removeItem(key);
+      }
     }
   } catch {
     /* blocked storage — the reload below is still worth doing */
@@ -129,7 +134,7 @@ function clearViewState(): void {
  * window, and the detached runner-log popup (`/?logs=…`) is the same origin
  * wrapped in this same boundary — so that button, offered there, would silently
  * reset the MAIN window's remembered project and layout to unstick a popup that
- * has no `cm:` state of its own. `main.tsx` passes its `isShell`.
+ * has no `dispatch:` state of its own. `main.tsx` passes its `isShell`.
  */
 export function AppErrorBoundary({
   children,

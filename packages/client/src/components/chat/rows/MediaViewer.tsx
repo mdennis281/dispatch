@@ -312,7 +312,7 @@ export function MediaViewer({
         : undefined;
   const zoomPct = view && natural ? Math.round(view.scale * 100) : null;
 
-  // `cm-safe-pad`: the scrim is this element, so the insets go on as padding —
+  // `dp-safe-pad`: the scrim is this element, so the insets go on as padding —
   // the dim still covers the whole screen and only the chrome moves clear of
   // the status bar, the home indicator, and (on the installed desktop window)
   // the system's own minimise/maximise/close buttons. This header is the reason
@@ -326,7 +326,7 @@ export function MediaViewer({
       aria-modal="true"
       aria-label="Media viewer"
       style={{ zIndex: z }}
-      className="fixed inset-0 flex flex-col bg-scrim-strong backdrop-blur-[2px] cm-safe-pad"
+      className="fixed inset-0 flex flex-col bg-scrim-strong backdrop-blur-[2px] dp-safe-pad"
       onClick={onClose}
     >
       <header

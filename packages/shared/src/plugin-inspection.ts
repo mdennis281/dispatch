@@ -200,7 +200,7 @@ export const PluginInspectionSchema = z.object({
       needsRestart: z.boolean().optional(),
       /** The inspected version against the installed one. */
       comparison: z.enum(["same", "newer", "older", "unknown"]),
-      /** It is a `cm plugin link` junction — Install would replace the link with a copy. */
+      /** It is a `dispatch plugin link` junction — Install would replace the link with a copy. */
       linked: z.boolean().optional(),
     })
     .optional(),

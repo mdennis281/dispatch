@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import {
+  CLI_COMMANDS,
   compareStamps,
   desktopRoot,
   parseArgs,
@@ -22,6 +23,14 @@ import {
   resolveAutostart,
   resolveRelease,
 } from "./install.mjs";
+
+test("the POSIX `dispatch` shim forwards every CLI subcommand the CLI dispatches", async () => {
+  // A subcommand missing here falls through to launch.py and dies on argparse.
+  const source = await readFile(new URL("../packages/cli/src/index.ts", import.meta.url), "utf8");
+  const cases = [...source.matchAll(/^\s*case "([a-z-]+)":/gm)].map((m) => m[1]);
+  assert.ok(cases.length > 0, "found the CLI's command switch");
+  assert.deepEqual([...CLI_COMMANDS].sort(), [...new Set(cases)].sort());
+});
 
 /** A release as the GitHub API returns it, with the two assets the installer requires. */
 function release(tag, extra = {}) {

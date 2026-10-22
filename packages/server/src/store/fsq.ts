@@ -119,7 +119,7 @@ export async function retryOnContention<T>(op: () => Promise<T>): Promise<T> {
  * reproducible on demand by opening the destination from another process with
  * share mode Read/ReadWrite/None — all three fail, only share mode Delete
  * succeeds. It is NOT a test artifact: tests and production run this same
- * function, and production's `.data` / `%LOCALAPPDATA%\claude-manager` are if
+ * function, and production's `.data` / `%LOCALAPPDATA%\dispatch` are if
  * anything scanned harder than TEMP.
  *
  * Nor is it cosmetic. The write sits UPSTREAM of the broadcast — see

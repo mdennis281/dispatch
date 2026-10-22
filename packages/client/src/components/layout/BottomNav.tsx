@@ -165,7 +165,7 @@ function SheetRow({
 /**
  * True while the caret is in a text field.
  *
- * The shell shrinks to sit above the keyboard (`--cm-kb`, see stores/viewport),
+ * The shell shrinks to sit above the keyboard (`--dp-kb`, see stores/viewport),
  * so the bar would still be on screen while you type — eating 52px of an
  * already-short window to offer four destinations you aren't going to. It
  * stands down instead: the composer is the whole task at that moment, and the
@@ -341,7 +341,7 @@ export function BottomNav({ chat }: { chat: Chat | null }) {
         aria-hidden={typing || undefined}
         style={{ zIndex: LAYER.bottomNav }}
         className={cn(
-          "relative flex shrink-0 cm-safe-x bg-surface",
+          "relative flex shrink-0 dp-safe-x bg-surface",
           // The home indicator's inset only means anything when the home
           // indicator is what's down there. With the keyboard up it's the
           // keyboard, and iOS does not reliably zero the inset for you — so
@@ -360,24 +360,24 @@ export function BottomNav({ chat }: { chat: Chat | null }) {
           kb > 0
             ? "pb-0"
             : typing
-              ? "cm-safe-b"
-              : "pb-[var(--cm-bottom-nav-clear)]",
+              ? "dp-safe-b"
+              : "pb-[var(--dp-bottom-nav-clear)]",
           !typing && "border-t border-line",
         )}
       >
-        {/* The slots' band is `--cm-bottom-nav-strip`: the 52px they need PLUS
+        {/* The slots' band is `--dp-bottom-nav-strip`: the 52px they need PLUS
             the part of the home indicator's inset they're allowed to grow into.
             The bar's total height is unchanged (`strip + clear` is still
             `52px + inset`), so nothing above it moves — the icons just stop
             floating in the top half of it. Overlays that cover the bar reserve
-            `--cm-bottom-nav-space`, which is derived from both. */}
+            `--dp-bottom-nav-space`, which is derived from both. */}
         {/* `hidden`, not a zero height or a transform: a strip you can't see but
             can still tab into and hear announced is worse than one that's gone.
             Blur brings it straight back. */}
         <div
           className={cn(
             "w-full items-stretch",
-            typing ? "hidden" : "flex h-[var(--cm-bottom-nav-strip)]",
+            typing ? "hidden" : "flex h-[var(--dp-bottom-nav-strip)]",
           )}
         >
           {/* The transcript AND the list of transcripts, in that order. Always
@@ -443,7 +443,7 @@ export function BottomNav({ chat }: { chat: Chat | null }) {
         {/* `min-h-0`: a flex child's default `min-height: auto` is its content,
             so without this the list refuses to shrink under the sheet's
             `max-h` and scrolls the page instead of itself. */}
-        <div className="cm-scroll min-h-0 overflow-y-auto p-1.5 pb-[calc(var(--cm-bottom-nav-space)+0.375rem)]">
+        <div className="cm-scroll min-h-0 overflow-y-auto p-1.5 pb-[calc(var(--dp-bottom-nav-space)+0.375rem)]">
           <SheetRow
             icon={<Brain />}
             label="Memory"

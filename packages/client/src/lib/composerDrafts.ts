@@ -21,7 +21,7 @@ export interface ComposerDraft {
   images: ImageRef[];
 }
 
-const PREFIX = "cm:draft:";
+const PREFIX = "dispatch:draft:";
 /** Drafts untouched for this long are swept — a deleted chat leaves its key behind. */
 const MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 /** Coalesce a burst of keystrokes into a single write. */

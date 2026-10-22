@@ -13,7 +13,7 @@
  * either nag about a release you rejected or hide one you never saw.
  */
 
-const KEY = "cm:update-dismissed";
+const KEY = "dispatch:update-dismissed";
 
 function backing(): Storage | null {
   try {
@@ -42,7 +42,7 @@ export function dismissVersion(version: string): void {
 
 /* ------------------------------------------------------------------------- */
 
-const FLIGHT_KEY = "cm:update-inflight";
+const FLIGHT_KEY = "dispatch:update-inflight";
 
 /**
  * A marker stops the update screen from being lost to a reload.

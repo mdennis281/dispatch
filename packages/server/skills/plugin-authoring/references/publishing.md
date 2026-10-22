@@ -9,14 +9,14 @@
 once is seen by both and survives every publish. There is no project-scoped plugin; a
 project opts out of a plugin's MCP server through its ordinary `mcpEnabled` map.
 
-## `cm plugin`
+## `dispatch plugin`
 
 ```
-cm plugin init <id> [--server|--client|--both] [--name <n>] [--dir <parent>] [--sdk <path>]
-cm plugin add <path | git-url | .tgz>   validate in the SOURCE, then copy to plugins/<id> (tmp dir + rename, so an
+dispatch plugin init <id> [--server|--client|--both] [--name <n>] [--dir <parent>] [--sdk <path>]
+dispatch plugin add <path | git-url | .tgz>   validate in the SOURCE, then copy to plugins/<id> (tmp dir + rename, so an
                                         interrupted copy never leaves a half-plugin); prints the consent summary
-cm plugin link <path>                   junction (Windows) / symlink a working directory — edits are live on the next restart
-cm plugin list | enable <id> | disable <id> | remove <id>
+dispatch plugin link <path>                   junction (Windows) / symlink a working directory — edits are live on the next restart
+dispatch plugin list | enable <id> | disable <id> | remove <id>
       --config-dir <dir>   (or DISPATCH_CONFIG_DIR)    -f, --force   replace an installed plugin    --json
 ```
 
@@ -76,7 +76,7 @@ Two numbers, two jobs:
   rather than crashing at activate.
 
 `@dispatch/plugin-sdk` is versioned with the host and is not on npm. A scaffold links
-it from the checkout that ran `cm plugin init`, so the types you compile against are the
+it from the checkout that ran `dispatch plugin init`, so the types you compile against are the
 host you install into. Building against a newer checkout than the running host is fine
 as long as nothing you use is newer than the host's API major.
 
@@ -84,7 +84,7 @@ as long as nothing you use is newer than the host's API major.
 
 A plugin is a directory. Tar it (`tar -czf my-plugin.tgz -C .. my-plugin`, after
 `pnpm build`, without `node_modules`) or push it to a git repository with `plugin.yaml`
-at the root; `cm plugin add <url|tgz>` on the other side. Include `server/` and
+at the root; `dispatch plugin add <url|tgz>` on the other side. Include `server/` and
 `client/` build output in what you ship — the receiver should not need your toolchain.
 
 ## If you change THIS skill (or any bundled skill)

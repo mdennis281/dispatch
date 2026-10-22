@@ -6,7 +6,7 @@ per-chat count in `chat.ext`, and round-trips a ping through its server half.
 
 ```
 pnpm --filter @dispatch/example-hello-slot build   # src/index.tsx → client/index.js
-cm plugin link examples/plugins/hello-slot         # or: cm plugin add …
+dispatch plugin link examples/plugins/hello-slot         # or: dispatch plugin add …
 # restart Dispatch
 ```
 

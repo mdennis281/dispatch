@@ -26,7 +26,7 @@
  *
  * WHY THE SERVER PRESET EXISTS. The host imports `server/index.js` straight
  * from `<configDir>/plugins/<id>/` — there is no `node_modules` beside it after
- * `cm plugin add` (which deliberately does not copy one), so a runtime import
+ * `dispatch plugin add` (which deliberately does not copy one), so a runtime import
  * of any npm package, this SDK included, fails at activate. Bundling makes the
  * module self-contained; `definePlugin` is a two-line identity and costs
  * nothing inlined.

@@ -61,7 +61,7 @@ export function contentTypeFor(file: string): string {
  * Two checks, because they catch different things. The LEXICAL one
  * (`resolve` + prefix) refuses `..` and absolute segments before anything
  * touches the disk. The REAL one (`realpath` on both sides) refuses a symlink
- * inside the client directory that points outside it — `cm plugin link`
+ * inside the client directory that points outside it — `dispatch plugin link`
  * junctions a whole working tree in, and a stray link in a build output is not
  * a reason to serve the owner's home directory. The root is realpath'd too,
  * because the plugin dir itself may be the junction.

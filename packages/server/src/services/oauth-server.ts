@@ -323,7 +323,7 @@ export class OAuthServer {
       code_challenge_methods_supported: ["S256"],
       token_endpoint_auth_methods_supported: [...AUTH_METHODS],
       revocation_endpoint_auth_methods_supported: [...AUTH_METHODS],
-      service_documentation: "https://github.com/mdennis281/claude-manager/blob/main/docs/plugins.md",
+      service_documentation: "https://github.com/mdennis281/dispatch/blob/main/docs/plugins.md",
     };
   }
 

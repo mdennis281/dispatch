@@ -8,8 +8,8 @@
 > home indicator, and #238's display-toggle heal missed 3/3. With `auto`:
 > `inner 873` from cold, `safe-t 0`, `safe-b 0`, `fixed-top` just under the
 > clock, nav at the glass. So `screen − inner = 59` is *the status bar*, not a
-> bug, and every `env()` inset is 0 — which is why `--cm-safe-bottom` now
-> folds in `--cm-home-indicator` (34px when the status bar is ≥40px, i.e. a
+> bug, and every `env()` inset is 0 — which is why `--dp-safe-bottom` now
+> folds in `--dp-home-indicator` (34px when the status bar is ≥40px, i.e. a
 > Face ID phone; `stores/viewport.ts`) and `html` takes the top bar's
 > background so the status-bar band matches the header. The comparison that
 > found it was weatherlite.app, which never set `cover`. The heal from #238 is
@@ -114,7 +114,7 @@ is the wrong reading of `safe-t 59` beside a short `inner`.
 
 **And the "correct on load, wrong after interaction" signature.** On a cold load
 `innerHeight === maxInnerHeight === 932`, so `standaloneShellHeight` returns 0,
-`--cm-vh` is never set, and the shell falls back to `100dvh` = 932 = the
+`--dp-vh` is never set, and the shell falls back to `100dvh` = 932 = the
 then-correct layout viewport. Everything fits. The first keyboard raise does two
 things at once: it shrinks the viewport to 873, **and** it arms the high-water
 correction, which pins the shell back at the old 932. Nothing else in the app
@@ -122,7 +122,7 @@ changes on interaction. That is the whole of symptom B.
 
 ### 1.4 Bottom-nav arithmetic, for completeness
 
-`--cm-bottom-nav-strip` + `--cm-bottom-nav-clear` = `52 + safe-b` = **86px**.
+`--dp-bottom-nav-strip` + `--dp-bottom-nav-clear` = `52 + safe-b` = **86px**.
 The bar is the shell's last in-flow row, so with the shell at 932 it occupies
 `[846, 932)`. Paint stops at 873. **27 of 86px are visible**; the labels sit low
 in the 52px slot band and land past the paint edge. Exactly as reported.
@@ -160,7 +160,7 @@ return      base                        = 932
 ```
 
 So the `932 (fixed)` on the readout comes **entirely from the high-water mark**;
-the add-back is not even firing in this state. `--cm-vh: 932px` is written onto a
+the add-back is not even firing in this state. `--dp-vh: 932px` is written onto a
 shell whose layout viewport is 873, and the difference is `over 59` — the band
 the device never paints. Convicted by `over 59` and by the bottom ruler.
 
@@ -217,18 +217,18 @@ shell is pinned. `over` is the number that carries information. Keep `over`,
 demote or relabel `dead`, and make sure nobody ships against `dead 0` a fifth
 time.
 
-### 2.5 `--cm-safe-bottom` / `--cm-bottom-nav-clear` — correct code, stale input
+### 2.5 `--dp-safe-bottom` / `--dp-bottom-nav-clear` — correct code, stale input
 
 Not cargo cult: on a cold 932 viewport the home indicator *is* inside the box and
 34px of clearance is right. After the shrink it is not (§1.2), and every consumer
-of `--cm-safe-bottom` reserves 34px for nothing. Fix the shell first, then gate
+of `--dp-safe-bottom` reserves 34px for nothing. Fix the shell first, then gate
 the bottom inset on the viewport actually reaching the screen. Low priority — it
 is a 34px waste, not a clip.
 
 ### 2.6 Keep
 
 `html, body { overflow: hidden }`, the `fixed` shell (#60), `window.scrollTo(0, 0)`
-in `apply()`, `--cm-kb`, `cm-safe-pad` / `cm-safe-t` / `cm-safe-x`, `PaintRuler`,
+in `apply()`, `--dp-kb`, `dp-safe-pad` / `dp-safe-t` / `dp-safe-x`, `PaintRuler`,
 `AnnotatorGeometryDebug`. None of these are implicated, and the first two stop
 rubber-band panning that is real.
 
@@ -242,7 +242,7 @@ The contradiction is genuine and worth stating sharply: a `fixed` element at
 everything I could rule out, and what is left.
 
 **Ruled out — the build is not stale.**
-`%LOCALAPPDATA%\claude-manager\app\release-manifest.json` is sha
+`%LOCALAPPDATA%\dispatch\app\release-manifest.json` is sha
 `b895a314a042d6305418df39f8ad2ad9057a3db9` — that is `b895a31`, PR #87, current
 `main` — built `2026-08-17T13:02:18Z`. The shipped chunk
 `packages/client/dist/assets/ImageAnnotator-3trKfWOG.js` contains `hdr-t`,
@@ -270,7 +270,7 @@ border-box`, so its content box starts at y = 59, and `<header>` is the first
 in-flow child of the fragment `Editor` returns.
 
 **The control that should have caught this.** `TopBar` does the identical thing —
-`cm-safe-t` → `padding-top: 59px`, inside a box anchored at y = 0 — and renders
+`dp-safe-t` → `padding-top: 59px`, inside a box anchored at y = 0 — and renders
 correctly. It has never been reported under the clock. Whatever kills the
 annotator's 59px does not kill the top bar's.
 
@@ -341,7 +341,7 @@ sampler in `startViewportTracking`. *Predicts:* `inner`/`dvh`/`client` return to
 932 a beat after blur and `max − inner` returns to 0, so no correction is needed
 at all. *Note:* it flickers; that article masks it with a blur veil.
 
-**Step 3 — make `--cm-safe-bottom` honest.** Gate it on
+**Step 3 — make `--dp-safe-bottom` honest.** Gate it on
 `screenHeight - clientHeight <= 2`; otherwise treat the bottom inset as 0.
 *Predicts:* the nav stops being an 86px band in an 873 viewport, and `safe-b`
 stops reserving space for a home indicator that is outside the viewport.
@@ -363,7 +363,7 @@ still overlap, port `AnnotatorGeometryDebug` to `Modal` and `CommandPalette`.
 | the status-bar add-back (`statusBar` branch) | `stores/viewport.ts:170-172` | §2.2 — refuted by the PaintRuler |
 | its three tests | `stores/viewport.test.ts:38-56` | pin the refuted behaviour |
 | the high-water mark (`shrunk`, `base`, `maxInnerHeight` and its plumbing in the store + tracker) | `stores/viewport.ts`, `ViewportDebug.tsx` | §2.1 — the direct cause of `over 59` |
-| `standaloneShellHeight` itself, and `--cm-vh` | ditto | with both branches gone it returns 0 always; the shell is just `100dvh` |
+| `standaloneShellHeight` itself, and `--dp-vh` | ditto | with both branches gone it returns 0 always; the shell is just `100dvh` |
 | the recovered-band term `+ Math.max(0, shellHeight - windowHeight)` | `stores/viewport.ts:82` | §2.3 — dead once the shell equals the window |
 | its test | `stores/viewport.test.ts:95-102` | ditto |
 | the `dead` row, or its prominence | `ViewportDebug.tsx:142,152` | §2.4 — cannot go non-zero in the broken state |

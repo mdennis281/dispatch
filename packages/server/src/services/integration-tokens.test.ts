@@ -79,7 +79,7 @@ describe("IntegrationTokenService", () => {
 
   it("sees a token the CLI minted underneath it", async () => {
     // The failure this guards: the server holding a stale in-memory list, so a
-    // `cm token create` never authenticates until a restart.
+    // `dispatch token create` never authenticates until a restart.
     const { svc, path } = await service();
     await svc.mint({ name: "first", scopes: ["chats:read"] }, { authEpoch: 0 });
     expect((await svc.list()).map((r) => r.name)).toEqual(["first"]);

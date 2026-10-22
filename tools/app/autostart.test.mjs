@@ -17,13 +17,13 @@ import {
  */
 const WINDOWS = {
   platform: "win32",
-  root: "C:\\Users\\ada\\AppData\\Local\\claude-manager",
+  root: "C:\\Users\\ada\\AppData\\Local\\dispatch",
   interpreter: "C:\\Python312\\pythonw.exe",
   home: "C:\\Users\\ada",
   env: { APPDATA: "C:\\Users\\ada\\AppData\\Roaming" },
 };
 const POSIX = {
-  root: "/home/ada/.local/share/claude-manager",
+  root: "/home/ada/.local/share/dispatch",
   interpreter: "/home/ada/.pyenv/versions/3.12.4/bin/python3",
   home: "/home/ada",
 };

@@ -36,7 +36,7 @@
     },
     {
       "label": "Ship: publish HEAD to the installed app",
-      "detail": "Build this repo's COMMITTED HEAD into %LOCALAPPDATA%\\claude-manager\\app. Refuses to run while the app is up; rolls back if the build fails.",
+      "detail": "Build this repo's COMMITTED HEAD into %LOCALAPPDATA%\\dispatch\\app. Refuses to run while the app is up; rolls back if the build fails.",
       "type": "shell",
       "command": "pnpm app:publish",
       "problemMatcher": [],

@@ -324,7 +324,7 @@ export function CommandPalette({
         subtitle: `.dispatch/ for ${project.name}`,
         group: "Navigate",
         icon: <FileCog />,
-        keywords: "config Dispatch manifest instructions subapps mcp agents modes memory export import cm scaffold reload",
+        keywords: "config Dispatch manifest instructions subapps mcp agents modes memory export import scaffold reload",
         run: () => openProjectSettings(),
       });
       // One entry per subpage. This is what the modal couldn't do: its section
@@ -559,9 +559,9 @@ export function CommandPalette({
       style={{ zIndex: LAYER.palette }}
       className={
         // Top-anchored: on a phone the 24px gutter alone would put the search
-        // field under the status bar. See `cm-safe-pad` in index.css.
+        // field under the status bar. See `dp-safe-pad` in index.css.
         "fixed inset-0 flex items-start justify-center " +
-        "cm-safe-pad [--cm-gutter:1.5rem] sm:pt-[max(12vh,var(--cm-safe-top),var(--cm-titlebar-h))]"
+        "dp-safe-pad [--dp-gutter:1.5rem] sm:pt-[max(12vh,var(--dp-safe-top),var(--dp-titlebar-h))]"
       }
     >
       <div className="fixed inset-0 bg-scrim backdrop-blur-[2px]" onClick={close} aria-hidden />

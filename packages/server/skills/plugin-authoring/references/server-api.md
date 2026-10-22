@@ -22,7 +22,7 @@ for you — a plain `export async function activate(ctx)` works just as well
 (`examples/plugins/hello-server` is dependency-free JavaScript for exactly that reason).
 
 **Runtime imports.** `server/index.js` is imported with `import(file://…)` from
-`<configDir>/plugins/<id>/`. There is no `node_modules` there (`cm plugin add` does not
+`<configDir>/plugins/<id>/`. There is no `node_modules` there (`dispatch plugin add` does not
 copy one), so the module may import Node builtins and nothing else. Write TypeScript
 and build it with `dispatchServerBuild` from `@dispatch/plugin-sdk/vite`
 (`examples/plugins/event-forwarder`), which inlines everything but `node:*`.
@@ -147,7 +147,7 @@ contract with yourself; keep it small (it crosses the WebSocket for every tab).
 ## Patterns
 
 - **State that must survive a restart** goes in `ctx.kv`, not a file in `ctx.dir`
-  (the directory may be a junction into a checkout, and `cm plugin add --force`
+  (the directory may be a junction into a checkout, and `dispatch plugin add --force`
   replaces it wholesale).
 - **Counters touched from bus events**: keep them in memory and write through; two
   events in one tick would otherwise both read the old value (see hello-server).

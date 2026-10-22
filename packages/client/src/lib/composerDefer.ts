@@ -4,7 +4,7 @@
  * An AskUserQuestion card is the one surface in a transcript where the thing to
  * do is NOT "type into the box at the bottom" — the answer lives in the card.
  * On a phone that distinction is expensive: tapping the card's notes field
- * raises the keyboard, the shell shrinks to fit above it (`--cm-kb`), and the
+ * raises the keyboard, the shell shrinks to fit above it (`--dp-kb`), and the
  * full composer then rides up and parks between what you are reading and the
  * keyboard, eating ~120px of a window that has maybe 300 left.
  *

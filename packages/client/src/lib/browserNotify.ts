@@ -73,8 +73,8 @@ const KIND_META: Record<
 };
 
 const ICON = "/icons/icon-192.png";
-const KEY = "cm:desktop-notifications";
-const ASK_KEY = "cm:desktop-notifications-asked";
+const KEY = "dispatch:desktop-notifications";
+const ASK_KEY = "dispatch:desktop-notifications-asked";
 
 /* ------------------------------------------------------------ availability */
 

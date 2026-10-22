@@ -126,7 +126,7 @@ export default function App() {
     },
   );
 
-  // Publishes `--cm-kb` (see below) and the raw readings behind `ViewportDebug`.
+  // Publishes `--dp-kb` (see below) and the raw readings behind `ViewportDebug`.
   useEffect(startViewportTracking, []);
 
   // Has this INSTALL ever been set up?
@@ -252,14 +252,14 @@ export default function App() {
 
           …but only the URL bar. A soft keyboard shrinks the VISUAL viewport
           and leaves the layout viewport (and therefore `dvh`) alone, so the
-          bottom of this column would sit behind the keyboard. `--cm-kb` is how
+          bottom of this column would sit behind the keyboard. `--dp-kb` is how
           much the keyboard is covering; padding it off the column shrinks the
           whole shell to what you can actually see, which puts the composer
           directly on top of the keyboard instead of stranding it mid-screen.
           It is 0px whenever no keyboard is up, so desktop is untouched.
 
-          …and it is JUST `100dvh`. This used to be `var(--cm-vh, 100dvh)`,
-          where `--cm-vh` was the tallest the window had ever been — an attempt
+          …and it is JUST `100dvh`. This used to be `var(--dp-vh, 100dvh)`,
+          where `--dp-vh` was the tallest the window had ever been — an attempt
           to out-guess the iOS standalone bug that shrinks the window by ~59px
           on first keyboard open and never restores it. It cannot work, in
           either direction. On iOS, paint is clipped to the layout viewport, so
@@ -285,7 +285,7 @@ export default function App() {
         data-cm-shell=""
         data-popover-layer-root
         className="fixed inset-x-0 top-0 flex flex-col overflow-hidden bg-app text-primary antialiased"
-        style={{ height: "100dvh", paddingBottom: "var(--cm-kb, 0px)" }}
+        style={{ height: "100dvh", paddingBottom: "var(--dp-kb, 0px)" }}
       >
       <TopBar />
       {/* `relative` so the two side drawers can be `absolute` to THIS box rather
@@ -321,7 +321,7 @@ export default function App() {
             // the top bar is above and the bottom nav below, so the Chats slot
             // (now "close-picker") stays on screen as the way out, which matters
             // more now that the scrim behind it is unreachable.
-            className="w-full cm-safe-x"
+            className="w-full dp-safe-x"
           >
             {/* Region-scoped so a sidebar that throws costs you the sidebar,
                 not the window. Keyed on the project: switching project is the
@@ -377,7 +377,7 @@ export default function App() {
                 // furniture.
                 modal={mode === "md"}
                 label="Ship and run"
-                className={cn("cm-safe-x", mode === "sm" ? "w-full" : "w-[360px] max-w-full")}
+                className={cn("dp-safe-x", mode === "sm" ? "w-full" : "w-[360px] max-w-full")}
               >
                 {/* Its own boundary: the worktree/PR panel reads `git` and `gh`
                     output, so it has the widest shape surface in the app, and

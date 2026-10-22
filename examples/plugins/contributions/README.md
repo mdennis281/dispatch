@@ -4,7 +4,7 @@ A plugin with no server module that still changes what every session gets —
 one of each contribution kind. Install it to see the `plugin` scope working:
 
 ```
-cm plugin link examples/plugins/contributions     # or: cm plugin add …
+dispatch plugin link examples/plugins/contributions     # or: dispatch plugin add …
 # restart Dispatch
 ```
 

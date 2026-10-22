@@ -26,7 +26,7 @@ export interface TaskRunPrefs {
   model?: string;
 }
 
-const KEY = "cm:task-run-prefs";
+const KEY = "dispatch:task-run-prefs";
 
 function backing(): Storage | null {
   try {
