@@ -133,7 +133,7 @@ export const TOKEN_MEASURE_LABELS: Record<TokenMeasure, string> = {
   output: "Output",
   cacheRead: "Cache read",
   cacheWrite: "Cache write",
-  cost: "Cost (USD)",
+  cost: "API equivalent value",
 };
 
 export const TokenFilterSchema = z.partialRecord(TokenDimensionSchema, z.array(z.string()));
