@@ -18,7 +18,7 @@
  * broker stop caring which runtime it is talking to.
  */
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
-import type { Effort } from "@dispatch/shared";
+import { figuresOfModelUsage, figuresOfUsage, type Effort } from "@dispatch/shared";
 import type { HarnessEvent } from "../types.js";
 
 /** Tool whose call is rendered as a question card, not a generic tool row. */
@@ -342,6 +342,9 @@ export class ClaudeStreamDecoder {
         durationMs: (m as { duration_ms?: number }).duration_ms,
         costUsd: (m as { total_cost_usd?: number }).total_cost_usd,
         usage: (m as { usage?: unknown }).usage,
+        // `usage` is per turn; `modelUsage` is per session. See the event type.
+        turnTokens: figuresOfUsage((m as { usage?: unknown }).usage),
+        modelUsage: figuresOfModelUsage((m as { modelUsage?: unknown }).modelUsage),
         contextTokens: this.lastContextTokens,
         contextWindow: this.contextWindow,
       },

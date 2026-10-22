@@ -23,6 +23,7 @@
  *   - `usageLimitExceeded` becomes a {@link HarnessLimitHit} carrying an exact
  *     reset timestamp, where the Claude path has to parse English prose.
  */
+import { figuresOfUsage, type TokenFigures } from "@dispatch/shared";
 import type { HarnessEvent, HarnessLimitHit, HarnessQuestion } from "../types.js";
 import type { RpcFrame } from "./rpc.js";
 
@@ -178,6 +179,8 @@ export class CodexStreamDecoder {
   contextWindow?: number;
   /** Most recent total-token occupancy for this thread. */
   private lastContextTokens?: number;
+  /** Tokens spent by this turn's requests so far; reset at turn end. */
+  private turnTokens?: TokenFigures;
   /** Reasoning text accumulated per item id, flushed onto the next message. */
   private readonly reasoning = new Map<string, string>();
   /** Item ids we have already emitted a tool-use for. */
@@ -495,6 +498,17 @@ export class CodexStreamDecoder {
     // millions; only `last` describes the request currently occupying context.
     const tokens = last?.totalTokens;
     if (typeof tokens === "number") this.lastContextTokens = tokens;
+    // Summed per request rather than diffed off `total`: `total` belongs to the
+    // THREAD, which a resumed adapter rejoins mid-count, so the first turn after
+    // a restart would be booked the whole thread's history.
+    const request = figuresOfUsage(last);
+    if (request) {
+      const t = (this.turnTokens ??= { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+      t.input += request.input;
+      t.output += request.output;
+      t.cacheRead += request.cacheRead;
+      t.cacheWrite += request.cacheWrite;
+    }
     return [
       {
         type: "usage",
@@ -511,6 +525,8 @@ export class CodexStreamDecoder {
     const status = String(turn?.status ?? "completed");
     const err = turn?.error as Record<string, unknown> | null | undefined;
     const ok = status === "completed";
+    const turnTokens = this.turnTokens;
+    this.turnTokens = undefined;
     return [
       {
         type: "turn-end",
@@ -520,6 +536,7 @@ export class CodexStreamDecoder {
         subtype: status === "completed" ? "success" : status,
         result: typeof err?.message === "string" ? err.message : this.finalTextOf(turn),
         durationMs: typeof turn?.durationMs === "number" ? turn.durationMs : undefined,
+        ...(turnTokens ? { turnTokens } : {}),
         contextTokens: this.lastContextTokens,
         contextWindow: this.contextWindow,
         limit: err ? limitHitOf(err) : undefined,

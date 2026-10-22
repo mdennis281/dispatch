@@ -92,6 +92,8 @@ import { chatNestingDepth } from "./chat-nesting.js";
 import { FileIndexService } from "./file-index.js";
 import { MetricsService } from "./metrics.js";
 import { MetricsBackfill } from "./metrics-backfill.js";
+import { TokenLedger } from "./metrics-tokens.js";
+import { TokenBackfill } from "./metrics-tokens-backfill.js";
 import { FsExplorerService } from "./fs-explorer.js";
 import { HarnessRegistry } from "../harness/index.js";
 import { ManagerMcpBridge } from "./mcp/manager-http.js";
@@ -152,6 +154,7 @@ export interface ServiceOverrides {
   fileIndex?: FileIndexService;
   metrics?: MetricsService;
   metricsBackfill?: MetricsBackfill;
+  tokens?: TokenLedger;
   fsExplorer?: FsExplorerService;
   trunkSync?: TrunkSyncService;
   prReviewWatcher?: PrReviewWatcher;
@@ -250,6 +253,8 @@ export interface Services extends ServiceBase {
   metrics: MetricsService;
   /** The one-time transcript import that gives that view history on day one. */
   metricsBackfill: MetricsBackfill;
+  /** Tokens and cost per turn × model × account — Metrics → Tokens. */
+  tokens: TokenLedger;
   /** Directory listings, stats, drives/mounts and writes for the file explorer. */
   fsExplorer: FsExplorerService;
   /** Fast-forwards a project's primary checkout after its PRs land. */
@@ -336,6 +341,8 @@ export function createServices(
   const metrics = overrides.metrics ?? new MetricsService({ db: store.stateDb });
   const metricsBackfill =
     overrides.metricsBackfill ?? new MetricsBackfill({ store, metrics });
+  const tokens = overrides.tokens ?? new TokenLedger(store.stateDb);
+  const tokenBackfill = new TokenBackfill({ store, metrics, tokens });
   // Secrets live in the CONFIG root beside reviewer.json, so both instances
   // resolve the same `${secret:NAME}`. Constructed before project config, which
   // expands them into MCP server definitions at load.
@@ -499,6 +506,7 @@ export function createServices(
       managerMcp,
       inspect,
       metrics,
+      tokens,
       deps: brokerDeps,
     });
   // ONE process-table read, shared by everything below that needs one. The
@@ -1374,6 +1382,7 @@ export function createServices(
     fsExplorer,
     metrics,
     metricsBackfill,
+    tokens,
     trunkSync,
     prReviewWatcher,
     issueWatcher,
@@ -1450,6 +1459,17 @@ export function createServices(
           }
         },
         (err: unknown) => console.error("[Dispatch] metrics backfill failed:", err),
+      );
+      // Same deal for token history, under its own watermark. Not awaited.
+      void tokenBackfill.run().then(
+        (r) => {
+          if (r.ran) {
+            console.log(
+              `[Dispatch] metrics: imported ${r.rows} token row(s) from ${r.chats} chat(s).`,
+            );
+          }
+        },
+        (err: unknown) => console.error("[Dispatch] token backfill failed:", err),
       );
 
       safeStart("attention", () => attention.start());

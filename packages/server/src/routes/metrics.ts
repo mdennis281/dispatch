@@ -21,6 +21,12 @@
  *
  *   GET  /api/metrics/growth?projectId= → NDJSON of GrowthFrame  (the Growth tab)
  *
+ * And the token ledger, in ONE read, since the Tokens tab's chart, table and
+ * pick-lists all come from one small table and four round trips would make the
+ * page settle four times:
+ *
+ *   POST /api/metrics/tokens → TokenReport
+ *
  * That one STREAMS. It walks the project's git history on every call — no
  * cache, by design (see `shared/growth.ts`) — and a long history takes long
  * enough that a bare pending request reads as a hung page. So the response is
@@ -54,7 +60,9 @@ import {
   MetricSpanDimensionSchema,
   MetricSpanFilterSchema,
   MetricSpanQuerySchema,
+  TokenQuerySchema,
 } from "@dispatch/shared";
+import { tokenLabeller } from "../services/metrics-tokens.js";
 
 /** The window + filter every read shares. */
 const ScopeSchema = z.object({
@@ -90,8 +98,17 @@ const SpanRecentSchema = SpanScopeSchema.extend({
 });
 
 export function registerMetricsRoutes(app: FastifyInstance): void {
-  const { metrics, growth } = app.services;
+  const { metrics, growth, tokens } = app.services;
   const { store } = app.cm;
+
+  app.post<{ Body: unknown }>("/api/metrics/tokens", async (req, reply) => {
+    const parsed = TokenQuerySchema.safeParse(req.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+    // Labels resolve against the settings AS THEY ARE NOW, so renaming an
+    // account renames its history — the id is what the ledger stored.
+    const settings = await store.getSettings().catch(() => null);
+    return tokens.report(parsed.data, tokenLabeller(settings));
+  });
 
   app.post<{ Body: unknown }>("/api/metrics/series", async (req, reply) => {
     const parsed = MetricQuerySchema.safeParse(req.body ?? {});

@@ -11,11 +11,14 @@ import type { ReactNode } from "react";
 
 const num = new Intl.NumberFormat();
 
-/** Compact big numbers (1,284 / 12.9K / 1.4M) — a hero figure isn't a receipt. */
+/** Compact big numbers (1,284 / 12.9K / 1.4M / 2.5B) — a hero figure isn't a receipt. */
 export function compact(n: number): string {
   if (n < 10_000) return num.format(n);
   if (n < 1_000_000) return `${(n / 1000).toFixed(1).replace(/\.0$/, "")}K`;
-  return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+  // The B tier arrived with the Tokens tab: a month of cache reads is billions,
+  // and "2468.3M" makes the reader do the division the formatter should have.
+  if (n < 1_000_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+  return `${(n / 1_000_000_000).toFixed(1).replace(/\.0$/, "")}B`;
 }
 
 /** Thousands-separated, for table cells and counts that aren't the hero. */

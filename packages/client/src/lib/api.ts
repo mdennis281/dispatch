@@ -76,6 +76,8 @@ import type {
   MetricFacetsResponse,
   MetricFilter,
   MetricQueryInput,
+  TokenQueryInput,
+  TokenReport,
   MetricSeriesResponse,
   MetricSpan,
   MetricSpanDimension,
@@ -1692,6 +1694,8 @@ export const api = {
     /** Total runtime per chat, all time — one small object for every chat. */
     chatRuntime: () => get<ChatRuntimeResponse>("/api/metrics/chat-runtime"),
     prune: (before: number) => post<{ deleted: number }>("/api/metrics/prune", { before }),
+    /** Tokens and cost by account × model — the Tokens tab, in one read. */
+    tokens: (query: TokenQueryInput) => post<TokenReport>("/api/metrics/tokens", query),
 
     /* The RUNTIME half — the same window, answered in milliseconds.
      *

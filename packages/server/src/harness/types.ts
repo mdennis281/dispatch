@@ -46,6 +46,7 @@ import type {
   ImageRef,
   HarnessKind,
   SlashCommandInfo,
+  TokenFigures,
 } from "@dispatch/shared";
 
 export type { HarnessKind };
@@ -524,6 +525,17 @@ export interface HarnessTurnEndEvent {
   costUsd?: number;
   /** Raw usage payload, persisted for the usage view. */
   usage?: unknown;
+  /**
+   * THIS TURN's tokens, normalised. The broker books them to the session's
+   * current model unless {@link modelUsage} gives it a per-model split.
+   */
+  turnTokens?: TokenFigures;
+  /**
+   * Per-model counters, CUMULATIVE across the session (Claude's `modelUsage`,
+   * which counts subagents on other models too). The broker diffs them against
+   * the chat's stored baseline, like `costUsd`.
+   */
+  modelUsage?: Record<string, TokenFigures>;
   contextTokens?: number;
   contextWindow?: number;
   /** Set when this turn ended because the account ran out of budget. */

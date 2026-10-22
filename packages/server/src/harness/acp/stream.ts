@@ -22,6 +22,7 @@
  * accumulated: buffering output nothing can render would grow unboundedly on a
  * long-running command for no user-visible gain.
  */
+import { figuresOfUsage } from "@dispatch/shared";
 import type { HarnessEvent } from "../types.js";
 import type { RpcFrame } from "./rpc.js";
 
@@ -309,7 +310,7 @@ export function turnEndOf(
     type: "turn-end",
     ok: !FAILED_STOPS.has(stopReason),
     subtype: stopReason === "end_turn" ? "success" : stopReason,
-    ...(usage ? { usage } : {}),
+    ...(usage ? { usage, turnTokens: figuresOfUsage(usage) } : {}),
     ...(context.contextTokens !== undefined ? { contextTokens: context.contextTokens } : {}),
     ...(context.contextWindow !== undefined ? { contextWindow: context.contextWindow } : {}),
   };

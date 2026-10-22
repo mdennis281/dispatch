@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../store/index.js";
+import { TokenLedger } from "./metrics-tokens.js";
 import { EventBus } from "../bus.js";
 import type { WsServerEvent, Chat, Project } from "@dispatch/shared";
 import { EMPTY_REFRESH_REPORT, HUMAN_REVIEW_ANSWERS, SECRET_ANSWERS, isPrSettledIdle } from "@dispatch/shared";
@@ -710,6 +711,75 @@ describe("chat status persistence", () => {
     // And the new baseline is written back for the turn after this one.
     await vi.waitFor(async () =>
       expect((await store.getChat("c1"))?.costBaselineUsd).toBe(42.5),
+    );
+  });
+
+  it("books each turn's tokens per MODEL, diffing Claude's session-cumulative modelUsage", async () => {
+    // `modelUsage` accumulates across the session like `total_cost_usd`, and it
+    // is the only place a subagent's spend on ANOTHER model shows up. Turn two
+    // adds Haiku (an Explore subagent) beside Opus; turn three's Opus total is
+    // LOWER — a restarted provider counter, which is a fresh start, not a refund.
+    const mu = (opus: number, haiku?: number) => ({
+      "claude-opus-5-5": {
+        inputTokens: opus,
+        outputTokens: opus * 2,
+        cacheReadInputTokens: 0,
+        cacheCreationInputTokens: 0,
+        costUSD: opus / 100,
+      },
+      ...(haiku !== undefined
+        ? {
+            "claude-haiku-5-5": {
+              inputTokens: haiku,
+              outputTokens: 0,
+              cacheReadInputTokens: 0,
+              cacheCreationInputTokens: 0,
+              costUSD: haiku / 1000,
+            },
+          }
+        : {}),
+    });
+    const usage = [mu(100), mu(150, 40), mu(10)];
+    let turn = 0;
+    const { fn } = makeFakeQuery(() => [
+      assistantText("ok"),
+      { ...resultMsg(), modelUsage: usage[turn++] },
+    ]);
+    const tokens = new TokenLedger(store.stateDb);
+    const broker = makeBroker(fn, 6, { tokens });
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+
+    for (const text of ["one", "two", "three"]) {
+      const idle = broker.waitFor("c1", "idle");
+      await broker.sendMessage("c1", text);
+      await idle;
+    }
+
+    const rows = store.stateDb
+      .prepare(
+        "SELECT turn, model, input, output, cost_usd, subscription_id FROM metric_tokens ORDER BY seq",
+      )
+      .all() as {
+      turn: number;
+      model: string;
+      input: number;
+      output: number;
+      cost_usd: number;
+      subscription_id: string;
+    }[];
+    expect(rows.map((r) => [r.turn, r.model, r.input, r.output])).toEqual([
+      [0, "claude-opus-5-5", 100, 200],
+      [1, "claude-opus-5-5", 50, 100],
+      [1, "claude-haiku-5-5", 40, 0],
+      [2, "claude-opus-5-5", 10, 20],
+    ]);
+    expect(rows[1]!.cost_usd).toBeCloseTo(0.5);
+    // The account the turn RESOLVED to — the implicit default here — not the
+    // chat's (absent) pin, which is what the record alone would have said.
+    expect(rows.every((r) => r.subscription_id === "claude")).toBe(true);
+    await vi.waitFor(async () =>
+      expect((await store.getChat("c1"))?.tokenBaseline?.["claude-opus-5-5"]?.input).toBe(10),
     );
   });
 
