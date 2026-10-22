@@ -5095,6 +5095,42 @@ describe("issue tools", () => {
     expect(closed.payload?.outcome).toEqual({ summary: "Closed #5 as not planned", ok: true, details: ["labelled wontfix"] });
     expect(closed.payload?.issue?.state).toBe("closed");
   });
+
+  it("issue_create labels the issue dispatch:manual AT creation, so no poll lands in between", async () => {
+    const create = vi.fn(async (d: { title: string; labels?: string[] }) => ({ ...issue, title: d.title, labels: d.labels ?? [] }));
+    const update = vi.fn();
+    const { issueCreate } = tools({ create, update });
+    const res = await issueCreate.handler(
+      { title: "plugins: host core", body: "b", labels: ["plugin-layer"], assignees: undefined, autoHandle: undefined },
+      {},
+    );
+    expect(res.isError).toBeFalsy();
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ labels: ["plugin-layer", "dispatch:manual"] }));
+    expect(update).not.toHaveBeenCalled();
+    expect(decodeIssueToolPayload(textOf(res)).payload).toMatchObject({ tool: "issue_create", issue: { number: 5 } });
+  });
+
+  it("issue_create with autoHandle leaves the label off — and strips one passed by hand", async () => {
+    const create = vi.fn(async (d: { labels?: string[] }) => ({ ...issue, labels: d.labels ?? [] }));
+    const { issueCreate } = tools({ create });
+    await issueCreate.handler(
+      { title: "t", body: undefined, labels: ["dispatch:manual"], assignees: undefined, autoHandle: true },
+      {},
+    );
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ labels: [] }));
+  });
+
+  it("issue_create re-labels when GitHub silently dropped the label, and warns if that fails too", async () => {
+    const create = vi.fn(async () => ({ ...issue, labels: [] }));
+    const update = vi.fn(async () => ({ ...issue, labels: [] }));
+    const { issueCreate } = tools({ create, update });
+    const res = await issueCreate.handler(
+      { title: "t", body: undefined, labels: undefined, assignees: undefined, autoHandle: undefined },
+      {},
+    );
+    expect(update).toHaveBeenCalledWith(5, { addLabels: ["dispatch:manual"] });
+    expect(textOf(res)).toContain("WARNING");
+  });
 });
 
 /* ------------------------------------------------------- modes + postures */

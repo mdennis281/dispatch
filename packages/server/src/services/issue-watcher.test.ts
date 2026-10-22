@@ -88,6 +88,9 @@ function fakeTracker(open: Issue[]) {
     }),
     comments: async () => [],
     comment: async (_n, body) => ({ id: "1", author: "bot", authorTrust: "owner" as const, body, createdAt: "" }),
+    create: async () => {
+      throw new Error("the watcher never opens issues");
+    },
     update,
   };
   return { tracker, labels, update };

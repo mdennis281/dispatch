@@ -19,6 +19,7 @@ import {
   type Issue,
   type IssueAuthorTrust,
   type IssueComment,
+  type IssueDraft,
   type IssuePatch,
   type IssueSource,
 } from "@dispatch/shared";
@@ -181,6 +182,24 @@ export class GitHubIssueProvider implements IssueProvider {
       // GitHub echoes the created comment back, author included — that is how
       // the transcript card knows which account it was posted as.
       return mapComment({ ...(raw ?? { id: "" }), body: raw?.body ?? body });
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
+  async create(source: IssueSource, draft: IssueDraft): Promise<Issue> {
+    // Through a file for the same ENAMETOOLONG reason as `comment`, and as JSON
+    // so `labels` is a real array — `-f labels[]=` would be one more argv per label.
+    const dir = await mkdtemp(join(tmpdir(), "dispatch-issue-"));
+    try {
+      const file = join(dir, "issue.json");
+      const payload: Record<string, unknown> = { title: draft.title, body: draft.body ?? "" };
+      if (draft.labels?.length) payload.labels = draft.labels;
+      if (draft.assignees?.length) payload.assignees = draft.assignees;
+      await writeFile(file, JSON.stringify(payload), "utf8");
+      const raw = await this.json<RawIssue>(source, ["--method", "POST", this.path(source, "issues"), "--input", file]);
+      if (!raw) throw new Error(`GitHub returned nothing creating an issue in ${source.repo}`);
+      return toIssue(raw);
     } finally {
       await rm(dir, { recursive: true, force: true }).catch(() => {});
     }

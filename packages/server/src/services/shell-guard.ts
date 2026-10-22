@@ -166,6 +166,61 @@ export function createWorktreeGuardHook(deps: WorktreeGuardDeps): HookCallback {
   };
 }
 
+/* ---------------------------------------------------------------- issues */
+
+/**
+ * The issue-filing guard.
+ *
+ * On a project whose issue watcher is on, a new issue is not inert: the next
+ * poll admits it and starts a chat for it. A chat filing issues for work it (or
+ * its own children) is about to do does not know that, and `gh issue create`
+ * gives it no way to find out — the plugin-layer PO chat filed #373–#379 and
+ * two of them were claimed into an unmanaged third chat. `issue_create` labels
+ * the issue `dispatch:manual` at creation, so the raw command is refused there
+ * and only there; on a project with no watcher it changes nothing and is let be.
+ */
+export function issueCreateRefusal(): string {
+  return (
+    "This project's issue watcher is on: every new issue it admits gets its own " +
+    "auto-started chat, so an issue filed with `gh issue create` will be picked up " +
+    "by a chat you do not control. Use `mcp__dispatch-issues__issue_create` — it " +
+    "labels the issue `dispatch:manual` as it is created, which the watcher never " +
+    "takes. Pass `autoHandle: true` if you DO want the watcher to work it."
+  );
+}
+
+/** `gh issue create` / `gh issue new`, global flags (`-R owner/repo`) and `.exe` allowed. */
+export function looksLikeGhIssueCreate(command: string): boolean {
+  return /(?:^|[\s;&|(`'"])gh(?:\.exe)?\s+(?:-{1,2}[\w-]+(?:[=\s]+[^\s-][^\s]*)?\s+)*issue\s+(?:create|new)\b/i.test(
+    command,
+  );
+}
+
+export interface IssueCreateGuardDeps {
+  /** Read per call — the watcher can be switched on mid-chat. */
+  enabled: () => boolean;
+  onBlocked?: (command: string) => void;
+}
+
+export function createIssueCreateGuardHook(deps: IssueCreateGuardDeps): HookCallback {
+  return async (input): Promise<HookJSONOutput> => {
+    if (input.hook_event_name !== "PreToolUse") return ALLOW;
+    if (!COMMAND_TOOLS.has(input.tool_name)) return ALLOW;
+    const command = (input.tool_input as { command?: unknown } | null)?.command;
+    if (typeof command !== "string" || !looksLikeGhIssueCreate(command)) return ALLOW;
+    if (!deps.enabled()) return ALLOW;
+
+    deps.onBlocked?.(command);
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: issueCreateRefusal(),
+      },
+    };
+  };
+}
+
 /* ------------------------------------------------------- the mode tool policy */
 
 /**

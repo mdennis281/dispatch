@@ -7,6 +7,8 @@ import {
   createBackgroundShellGuardHook,
   createWorktreeGuardHook,
   createModePolicyHook,
+  createIssueCreateGuardHook,
+  looksLikeGhIssueCreate,
 } from "./shell-guard.js";
 
 /** A PreToolUse hook's real return shape (`HookJSONOutput` unions them all). */
@@ -185,6 +187,34 @@ describe("worktree guard", () => {
  * unconditional veto a stock Claude chat has. It must enforce exactly what
  * the neutral harness path's guard does.
  */
+describe("issue create guard", () => {
+  const issueGuard = (enabled = true) => {
+    const hook = createIssueCreateGuardHook({ enabled: () => enabled });
+    return async (tool: string, input: Record<string, unknown>): Promise<PreOut> =>
+      (await hook(pre(tool, input), "t1", { signal: new AbortController().signal })) as PreOut;
+  };
+
+  it("recognises gh issue create in the shapes agents actually write", () => {
+    expect(looksLikeGhIssueCreate('gh issue create --title "x" --body-file b.md')).toBe(true);
+    expect(looksLikeGhIssueCreate("cd /repo && gh -R acme/api issue create -t x -b y")).toBe(true);
+    expect(looksLikeGhIssueCreate("for n in 1 2; do gh.exe issue new --title $n; done")).toBe(true);
+    expect(looksLikeGhIssueCreate("gh issue list --label bug")).toBe(false);
+    expect(looksLikeGhIssueCreate("gh issue edit 5 --add-label dispatch:manual")).toBe(false);
+    expect(looksLikeGhIssueCreate("pnpm test -- gh-issue-create.test.ts")).toBe(false);
+  });
+
+  it("denies it on a watched project and names issue_create", async () => {
+    const out = await issueGuard()("Bash", { command: 'gh issue create --title "x"' });
+    expect(out.hookSpecificOutput?.permissionDecision).toBe("deny");
+    expect(out.hookSpecificOutput?.permissionDecisionReason).toContain("issue_create");
+  });
+
+  it("lets it through where no watcher would take the issue", async () => {
+    const out = await issueGuard(false)("PowerShell", { command: 'gh issue create --title "x"' });
+    expect(out.hookSpecificOutput).toBeUndefined();
+  });
+});
+
 describe("mode tool policy guard", () => {
   const policyGuard = (
     policy: { allowedTools?: string[]; disallowedTools?: string[] },

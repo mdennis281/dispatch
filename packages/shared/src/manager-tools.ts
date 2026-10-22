@@ -196,6 +196,7 @@ export const MANAGER_TOOL_CATEGORY = {
      meant to outlive GitHub being the only tracker. */
   issue_list: "issues",
   issue_read: "issues",
+  issue_create: "issues",
   issue_comment: "issues",
   issue_update: "issues",
 } as const satisfies Record<string, ManagerCategory>;
