@@ -290,13 +290,9 @@ function FieldControl({
     case "number":
     case "integer":
       return (
-        <Field
-          label={field.label}
-          hint={[hint, field.default !== undefined ? `blank = ${String(field.default)}` : undefined]
-            .filter(Boolean)
-            .join(" — ")}
-          className="max-w-[12rem]"
-        >
+        // The default rides in the placeholder rather than the hint: a 12rem
+        // field cannot afford "description — blank = N" on one line.
+        <Field label={field.label} hint={hint} className="max-w-[16rem]">
           <TextInput
             inputMode={field.kind === "integer" ? "numeric" : "decimal"}
             value={value === undefined || value === null ? "" : String(value)}
