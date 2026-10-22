@@ -106,6 +106,55 @@ describe("lean transcript projection — large payloads are clipped + flagged", 
     expect(lean.dataOmitted).toBe(true);
     expect(lean.data).toEqual({ model: "claude-opus-5" });
   });
+
+  it("ships a big dispatch-input row verbatim — the row IS the turn Dispatch sent", () => {
+    // A guard recovery quotes the blocked command; a heredoc commit takes it
+    // past the inline limit, and projecting it left nothing to render.
+    const row: SystemMessageRow = {
+      kind: "system",
+      id: "g1",
+      chatId: "c1",
+      ts: 1,
+      subtype: "dispatch-input",
+      data: { label: "Guard recovery — continue the task", text: BIG },
+    };
+    expect(leanRow(row)).toBe(row);
+  });
+
+  it("keeps the sent-context summary on an init row, with section bodies clipped", () => {
+    // The card under "Session started" draws one line per section with its
+    // size — so the size must survive the clip, and the bodies must not ship.
+    const row: SystemMessageRow = {
+      kind: "system",
+      id: "s1",
+      chatId: "c1",
+      ts: 1,
+      subtype: "init",
+      data: {
+        model: "claude-opus-5",
+        tools: Array.from({ length: 400 }, (_, i) => `tool${i}`),
+        sentContext: {
+          sections: [{ id: "instructions:project", label: "Project instructions", text: BIG, chars: BIG.length }],
+          mcpServers: [{ name: "dispatch-chat", origin: "dispatch", transport: "in-process", tools: ["chat_send"] }],
+          skills: [{ name: "mcp-setup" }],
+        },
+      },
+    };
+    const lean = leanRow(row) as SystemMessageRow;
+    const data = lean.data as {
+      model: string;
+      tools?: unknown;
+      sentContext: { clipped: boolean; sections: { text: string; chars: number }[]; mcpServers: { tools?: unknown; toolCount?: number }[] };
+    };
+    expect(lean.dataOmitted).toBe(true);
+    expect(data.tools).toBeUndefined();
+    expect(data.sentContext.clipped).toBe(true);
+    expect(data.sentContext.sections[0]!.chars).toBe(BIG.length);
+    expect(data.sentContext.sections[0]!.text.length).toBeLessThan(300);
+    // A count, not the names: the name list is what `data.tools` was dropped for.
+    expect(data.sentContext.mcpServers[0]).toMatchObject({ toolCount: 1 });
+    expect(data.sentContext.mcpServers[0]!.tools).toBeUndefined();
+  });
 });
 
 describe("lean transcript projection — file stats survive the clip", () => {

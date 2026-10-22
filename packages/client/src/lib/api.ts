@@ -739,6 +739,9 @@ export const api = {
       del<void>(`/api/chats/${id}/exemptions/${exemptionId}`),
     /** Cancel the auto-resume scheduled after a usage limit (409 if none). */
     cancelResume: (id: string) => post<Chat>(`/api/chats/${id}/resume/cancel`),
+    /** Newest session start that recorded its sent context (lean), or null. */
+    sentContext: (id: string) =>
+      get<{ row: ChatMessage | null }>(`/api/chats/${id}/sent-context`),
     /** Live context-window breakdown (null when the subprocess isn't live). */
     contextUsage: (id: string) =>
       get<{ usage: ContextUsage | null }>(`/api/chats/${id}/context-usage`),

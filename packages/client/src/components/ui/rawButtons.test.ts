@@ -171,8 +171,12 @@ const ALLOWED_DIR = join(SRC, "components", "ui");
  * `IconButton` (fixed box, forced `[&_svg]:size-3.5`) nor `Button` (`h-6
  * justify-center` plus variant padding) can be both without overriding itself
  * through a clsx that has no tailwind-merge. Its rows use `RowButton`.
+ *
+ * 89 → 88: a turn's injected-context line (`ComposedParts`' old `InjectedRow`)
+ * stopped expanding inline and became `SentContext.tsx`'s `ContextLine`, a
+ * `RowButton` that opens the context modal.
  */
-const BASELINE = 89;
+const BASELINE = 88;
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {

@@ -11,6 +11,7 @@
  *   GET    /api/chats/:id/messages?limit=&afterId=&beforeId=&full=
  *                                   → ChatMessage[] (a window; lean unless full=1)
  *   GET    /api/chats/:id/messages/full?ids=a,b → ChatMessage[] (verbatim rows)
+ *   GET    /api/chats/:id/sent-context → { row } newest init row with a sent context (lean)
  *   GET    /api/chats/:id/checkpoints → Checkpoint[] (rollback anchors)
  *   GET    /api/chats/:id/exemptions → WorkflowExemption[] (live guard lifts)
  *   DELETE /api/chats/:id/exemptions/:exemptionId → revoke one
@@ -18,7 +19,7 @@
  *   POST   /api/chats/processes/kill → reap a branch's processes
  */
 import type { FastifyInstance } from "fastify";
-import { ChatSchema } from "@dispatch/shared";
+import { ChatSchema, type ChatMessage } from "@dispatch/shared";
 import { createChat } from "./dispatch.js";
 import { leanRows } from "../services/transcript-lean.js";
 import { chatTotalsByProject, listCappedChats } from "../services/chat-load-cap.js";
@@ -224,6 +225,28 @@ export function registerChatRoutes(app: FastifyInstance): void {
       return reply.code(400).send({ error: `at most ${MAX_HYDRATE_IDS} ids` });
     }
     return store.readMessagesByIds(req.params.id, ids);
+  });
+
+  // The newest session start that carried a sent context, lean-projected like
+  // any page row. The chat menu's "View sent context" opens it: Claude writes a
+  // "Session started" row EVERY turn, so in a long chat the one with the card is
+  // hundreds of rows above the loaded window, and scrolling there is not a way
+  // to answer "what is this chat carrying right now".
+  app.get<{ Params: { id: string } }>("/api/chats/:id/sent-context", async (req) => {
+    const lines = await store.readMessageLines(req.params.id).catch(() => [] as string[]);
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i]!;
+      // Substring gate first — parsing every row of a long transcript to find
+      // one is the cost readMessageLines exists to avoid.
+      if (!line.includes('"sentContext"') || !line.includes('"init"')) continue;
+      try {
+        const row = JSON.parse(line) as ChatMessage;
+        if (row.kind === "system" && row.subtype === "init") return { row: leanRows([row])[0] };
+      } catch {
+        /* a torn line; keep looking */
+      }
+    }
+    return { row: null };
   });
 
   app.get<{ Params: { id: string } }>(

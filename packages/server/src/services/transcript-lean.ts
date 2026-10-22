@@ -21,7 +21,15 @@
  *   - Everything the client reads off a collapsed row is whitelisted below. Adding
  *     a new field to a collapsed card means adding its key here.
  */
-import { fileEditStat, fileResultStat, findTailPayloadLine, type ChatMessage } from "@dispatch/shared";
+import {
+  DISPATCH_INPUT_SUBTYPE,
+  fileEditStat,
+  fileResultStat,
+  findTailPayloadLine,
+  readSentContext,
+  summarizeSentContext,
+  type ChatMessage,
+} from "@dispatch/shared";
 
 /** Inputs at or under this serialized size ship verbatim (no hydrate needed). */
 const INPUT_INLINE_LIMIT = 4_096;
@@ -29,6 +37,11 @@ const INPUT_INLINE_LIMIT = 4_096;
 const RESULT_INLINE_LIMIT = 2_048;
 /** How much of a clipped tool result to keep as a readable head preview. */
 const RESULT_PREVIEW_CHARS = 1_500;
+/**
+ * How much of each sent-context section the collapsed card gets — enough to
+ * fill one ellipsised line at any width. The modal fetches the rest.
+ */
+const SECTION_PREVIEW_CHARS = 240;
 /** How much of a clipped string input value to keep. */
 const INPUT_STRING_PREVIEW_CHARS = 512;
 /**
@@ -180,13 +193,26 @@ export function leanRow(row: ChatMessage, toolName?: string): ChatMessage {
     }
 
     case "system": {
-      // Only `data.model` is ever rendered (the "Session started" chip); an init
-      // payload carries the whole tool/MCP inventory besides.
+      // The collapsed row renders `data.model` (the "Session started" chip) and,
+      // under "show sent context", the sent-context summary: one line per
+      // section with its size, and the MCP server/skill names. The section
+      // BODIES — the whole system-prompt append, tens of KB — wait for the
+      // drill-down to fetch the full row.
+      // A `dispatch-input` row IS its content — the turn Dispatch sent on its
+      // own — like a user row. A guard recovery quotes the blocked command, so a
+      // long heredoc commit pushes it past the limit, and projecting it to
+      // `{ model }` left the client nothing to render: the disclosure vanished.
+      if (row.subtype === DISPATCH_INPUT_SUBTYPE) return row;
       if (jsonBytes(row.data) <= RESULT_INLINE_LIMIT) return row;
       const model = (row.data as { model?: unknown } | undefined)?.model;
+      const sent = readSentContext(row.data);
+      const kept = {
+        ...(typeof model === "string" ? { model } : {}),
+        ...(sent ? { sentContext: summarizeSentContext(sent, SECTION_PREVIEW_CHARS) } : {}),
+      };
       return {
         ...row,
-        data: typeof model === "string" ? { model } : undefined,
+        data: Object.keys(kept).length ? kept : undefined,
         dataOmitted: true,
       };
     }

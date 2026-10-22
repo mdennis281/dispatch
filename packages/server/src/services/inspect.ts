@@ -33,7 +33,7 @@ import { createInterface } from "node:readline";
 import { basename, isAbsolute, join, resolve } from "node:path";
 
 import type { Chat, ImageRef, Project } from "@dispatch/shared";
-import { realProjects, resolveWorkflow } from "@dispatch/shared";
+import { realProjects, resolveWorkflow, withSentContextSummary } from "@dispatch/shared";
 
 import type { Store } from "../store/index.js";
 
@@ -303,6 +303,13 @@ function clip(text: string, max: number): string {
 }
 
 /** Flatten any row payload to searchable/renderable text. */
+/** A row's `data` minus its sent context (search text only — see `rowText`). */
+function withoutSentContext(data: unknown): unknown {
+  if (!data || typeof data !== "object" || !("sentContext" in data)) return data;
+  const { sentContext: _sent, ...rest } = data as Record<string, unknown>;
+  return rest;
+}
+
 function stringify(value: unknown): string {
   if (value === undefined || value === null) return "";
   if (typeof value === "string") return value;
@@ -331,7 +338,11 @@ export function rowText(row: RawRow): string {
     case "result":
       return row.result ?? "";
     case "system":
-      return [row.subtype, row.text, stringify(row.data)].filter(Boolean).join(" ");
+      // Without the sent context: it is the system prompt, so every word of the
+      // instructions would make every session-start row a search hit.
+      return [row.subtype, row.text, stringify(withoutSentContext(row.data))]
+        .filter(Boolean)
+        .join(" ");
     case "permission":
       return [row.toolName, row.text, stringify(row.input)].filter(Boolean).join(" ");
     case "task_status":
@@ -930,5 +941,10 @@ function clipRow(row: RawRow): RawRow {
   if (typeof out.result === "string") out.result = clip(out.result, FIELD_CLIP);
   if (out.input !== undefined) out.input = clip(stringify(out.input), FIELD_CLIP);
   if (out.content !== undefined) out.content = clip(stringify(out.content), FIELD_CLIP);
+  // An init row's sent context is the whole system prompt — the memory
+  // catalogue, machine-wide instructions, every repo path. This clipped view is
+  // what the integration API serves on `chats:read` alone, so it gets labels and
+  // sizes; `full` (a local agent's own `chat_read`) still sees everything.
+  if (out.kind === "system" && out.data !== undefined) out.data = withSentContextSummary(out.data, 0);
   return out;
 }

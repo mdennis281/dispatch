@@ -17,6 +17,7 @@ import {
   Search,
   RotateCcw,
   SlidersHorizontal,
+  ScrollText,
 } from "lucide-react";
 import type {
   AgentActivity,
@@ -67,6 +68,7 @@ import {
   useInjectedContext,
   injectedContextSourceLabel,
 } from "../../lib/injectedContext.js";
+import { LatestSentContextModal } from "./rows/SentContext.js";
 
 /** A human "what is the agent doing" label from the live activity state. */
 function workingLabelFor(a: AgentActivity | undefined): string {
@@ -309,6 +311,7 @@ export function ChatView({ chat }: { chat: Chat }) {
   // transcript, so it survives whatever the filter is set to.
   const shellFilter = useShellFilter(chat.id);
   const [filterOpen, setFilterOpen] = useState(false);
+  const [sentContextOpen, setSentContextOpen] = useState(false);
   // What this chat still has running — its live shells plus every listener that
   // descends from them. Read here so the menu can put the COUNT on the item:
   // "kill the processes" with no number is a click nobody can calibrate.
@@ -703,8 +706,10 @@ export function ChatView({ chat }: { chat: Chat }) {
                     Copy chat ID
                   </MenuItem>
                   <div className="my-1 h-px bg-line" />
-                  {/* Show what Dispatch attached to a turn on your behalf —
-                      surfaced memories, repo snapshots. Rendering only: the
+                  {/* Show what Dispatch sent on your behalf — per session the
+                      whole system-prompt append, MCP servers and skills (on the
+                      "Session started" row), per turn surfaced memories,
+                      attachment notes, repo snapshots. Rendering only: the
                       model got the same context either way. Toggling here
                       overrides the project/app default for THIS chat. */}
                   <MenuItem
@@ -720,6 +725,19 @@ export function ChatView({ chat }: { chat: Chat }) {
                     }}
                   >
                     {injected.show ? "Hide sent context" : "Show sent context"}
+                  </MenuItem>
+                  {/* Straight to the CURRENT session's context. The card hangs
+                      off the session-start row, and in a long chat that row
+                      is hundreds of rows up — out of the loaded window. Not
+                      gated on the toggle: asking to see it is the opt-in. */}
+                  <MenuItem
+                    icon={<ScrollText />}
+                    onClick={() => {
+                      setSentContextOpen(true);
+                      close();
+                    }}
+                  >
+                    View sent context…
                   </MenuItem>
                   {injected.source === "chat" && (
                     <MenuItem
@@ -892,6 +910,10 @@ export function ChatView({ chat }: { chat: Chat }) {
         open={confirmDelete}
         onClose={() => setConfirmDelete(false)}
       />
+
+      {sentContextOpen && (
+        <LatestSentContextModal chatId={chat.id} onClose={() => setSentContextOpen(false)} />
+      )}
 
       <ShellFilterModal
         open={filterOpen}

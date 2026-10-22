@@ -631,6 +631,42 @@ export const MOCK_MESSAGES: Record<string, ChatMessage[]> = {
       text: "Wire up Steam Cloud auto-save for the run stash. Follow the SDK docs.",
       origin: "human",
     },
+    // A session start carrying its sent context — the card "show sent context"
+    // hangs off the "Session started" marker. Lean-shaped (previews, `clipped`)
+    // as the wire delivers it, so the shell renders exactly what a real chat does.
+    {
+      kind: "system",
+      id: "st1-init",
+      chatId: CHAT_STEAM,
+      ts: ago(20),
+      subtype: "init",
+      dataOmitted: true,
+      data: {
+        model: "claude-opus-5-5[1m]",
+        sentContext: {
+          clipped: true,
+          sections: [
+            { id: "mcp-map", label: "Injected MCPs — capability map", chars: 2140, text: "# Injected MCPs\n\nThis is a capability map, not a tool reference. Prefer these MCPs over improvised shell/API equivalents…" },
+            { id: "workflow", label: "Workflow profile — review", chars: 3920, text: "# How change ships here\n\nThis project is on the **`review`** workflow profile — a multi-agent repo where several agents work in parallel…" },
+            { id: "house-rules", label: "House rules — global + project", chars: 1310, text: "## House rules\n_Set by the human. These ALWAYS apply, in every chat._\n\n### Everywhere\n\nAsk before upgrading stable…" },
+            { id: "instructions:global", label: "Global instructions", chars: 2480, text: "## Global instructions\n_Apply to every project on this machine (Dispatch-shipped + operator-authored)._\n\n# Recording what you learn…" },
+            { id: "instructions:project", label: "Project instructions", chars: 5811, text: "## Project instructions\n_Authored in `.dispatch/` — project-specific house rules for this repo._\n\n# Working on Hivebreak…" },
+            { id: "memory-index", label: "Project memory catalogue", chars: 3150, text: "## Project memory\n\nDurable facts, preferences and corrections your team recorded for THIS project — a lookup catalogue…" },
+          ],
+          mcpServers: [
+            { name: "dispatch-chat", origin: "dispatch", transport: "in-process", status: "connected", tools: ["spawn_chat", "chat_find", "chat_read", "chat_send", "chat_ask", "chat_reply", "wait_for_chat"] },
+            { name: "dispatch-github", origin: "dispatch", transport: "in-process", status: "connected", tools: ["create_pr", "watch_pr", "approve_pr", "resolve_thread", "request_review"] },
+            { name: "dispatch-memory", origin: "dispatch", transport: "in-process", status: "connected", tools: ["remember", "recall", "forget", "memory_search"] },
+            { name: "playwright", origin: "bundled", transport: "stdio", status: "connected", tools: ["browser_navigate", "browser_snapshot", "browser_click", "browser_take_screenshot"] },
+            { name: "steamworks-docs", origin: "project", transport: "http", status: "failed", tools: [] },
+          ],
+          skills: [
+            { name: "mcp-setup", description: "Add, configure, debug, or build an MCP server for this project." },
+            { name: "cut-a-release", description: "Tag, build and upload a Steam depot." },
+          ],
+        },
+      },
+    },
     {
       kind: "assistant",
       id: "st2",
