@@ -33,6 +33,7 @@ import { fileURLToPath } from "node:url";
 import {
   SkillConfigSchema,
   AUTHORED_NAME_RE,
+  isWritableScope,
   type AuthoredItem,
   type AuthoredKind,
   type AuthoredScope,
@@ -199,6 +200,20 @@ export interface AuthoredConfigOptions {
    * exactly the lifetime "my own house style" wants.
    */
   globalRoot: string;
+  /** The `plugin` scope's source, when known at construction (tests). */
+  plugins?: PluginContributionSource;
+}
+
+/**
+ * What the plugin host supplies for the `plugin` scope — the enabled plugins'
+ * contribution files, each tagged with the plugin it came from. Declared here
+ * (and implemented by `PluginService`) so this module depends on nothing in
+ * `plugins/`, which depends on it.
+ */
+export interface PluginContributionSource {
+  skills(): Array<{ pluginId: string; skill: SkillConfig }>;
+  instructions(): Array<{ pluginId: string; file: InstructionFile }>;
+  personas(): Array<{ pluginId: string; file: InstructionFile }>;
 }
 
 /**
@@ -211,9 +226,22 @@ export class AuthoredConfigService {
   private readonly globalRoot: string;
   /** Memoized shipped instructions — a published payload can't change under us. */
   private shippedInstructions: InstructionFile[] | null = null;
+  /**
+   * The `plugin` scope's source. Set AFTER construction (`setPluginSource`)
+   * because the plugin host is built last in the container — it adapts over
+   * the services this one is among. Absent means no plugins contribute, which
+   * is exactly what every install did before the scope existed.
+   */
+  private plugins: PluginContributionSource | undefined;
 
   constructor(opts: AuthoredConfigOptions) {
     this.globalRoot = opts.globalRoot;
+    this.plugins = opts.plugins;
+  }
+
+  /** Wire the plugin host in. See {@link AuthoredConfigService.plugins}. */
+  setPluginSource(source: PluginContributionSource | undefined): void {
+    this.plugins = source;
   }
 
   globalSkillsDir(): string {
@@ -223,14 +251,20 @@ export class AuthoredConfigService {
     return join(this.globalRoot, GLOBAL_INSTRUCTIONS_DIR);
   }
 
+  /** Skills every enabled plugin contributes, in plugin-id order. */
+  pluginSkills(): SkillConfig[] {
+    return (this.plugins?.skills() ?? []).map((s) => s.skill);
+  }
+
   /**
-   * App-level skills in MATERIALIZATION ORDER — global before shipped, so an
-   * operator's own `code-review` skill quietly wins over a shipped one of the
-   * same name (materialization skips a target that already exists). The caller
-   * puts project skills ahead of both.
+   * App-level skills in MATERIALIZATION ORDER — global, then plugin, then
+   * shipped, so an operator's own `code-review` skill quietly wins over a
+   * plugin's, which wins over a shipped one of the same name (materialization
+   * skips a target that already exists). The caller puts project skills ahead
+   * of all three.
    */
   appSkills(): SkillConfig[] {
-    return [...readSkillsDir(this.globalSkillsDir()), ...bundledSkills()];
+    return [...readSkillsDir(this.globalSkillsDir()), ...this.pluginSkills(), ...bundledSkills()];
   }
 
   /** Shipped instructions — `packages/server/instructions/*.md`, memoized. */
@@ -247,8 +281,9 @@ export class AuthoredConfigService {
   }
 
   /**
-   * The app-level system-prompt append: shipped instructions first, then global.
-   * Null when there are none, so an untouched install injects nothing.
+   * The app-level system-prompt append: shipped instructions first, then every
+   * enabled plugin's, then global. Null when there are none, so an untouched
+   * install injects nothing.
    *
    * Broadest-first is the whole point — the project's own instructions are
    * appended AFTER this block by the broker, so the most specific guidance is
@@ -257,6 +292,7 @@ export class AuthoredConfigService {
   async buildInjection(): Promise<string | null> {
     const sections = [
       ...(await this.shipped()),
+      ...(this.plugins?.instructions() ?? []).map((p) => p.file),
       ...(await readInstructionsDir(this.globalInstructionsDir())),
     ];
     const text = sections
@@ -266,7 +302,7 @@ export class AuthoredConfigService {
     if (!text.trim()) return null;
     return [
       "## Global instructions",
-      "_Apply to every project on this machine (Dispatch-shipped + operator-authored)._",
+      "_Apply to every project on this machine (Dispatch-shipped + plugin-contributed + operator-authored)._",
       "",
       text.length > MAX_GLOBAL_INJECTION_CHARS
         ? `${text.slice(0, MAX_GLOBAL_INJECTION_CHARS)}\n\n… (global instructions truncated)`
@@ -277,21 +313,30 @@ export class AuthoredConfigService {
   /** Ids of the app-level instruction files riding along, for the usage ledger. */
   async listInjected(): Promise<string[]> {
     const shipped = (await this.shipped()).map((i) => `shipped:${i.name}`);
+    const plugin = (this.plugins?.instructions() ?? []).map((p) => `plugin:${p.pluginId}:${p.file.name}`);
     const global = (await readInstructionsDir(this.globalInstructionsDir())).map(
       (i) => `global:${i.name}`,
     );
-    return [...shipped, ...global];
+    return [...shipped, ...plugin, ...global];
   }
 
   /* ------------------------------------------------------------- listing */
 
-  /** Every app-level item of a kind (both `shipped` and `global`). */
+  /**
+   * Every app-level item of a kind, broadest scope first: `shipped`, then
+   * `plugin`, then `global`. That order is load-bearing for `listPersonas`,
+   * which replaces by id as it walks the list so the most specific definition
+   * is the one left standing.
+   */
   async list(kind: AuthoredKind): Promise<AuthoredItem[]> {
     if (kind === "persona") {
       const shipped = findPackageDir("personas");
       return [
         ...(shipped ? await readInstructionsDir(shipped) : []).map((f) => ({
           ...toInstructionItem(f, "shipped"), kind: "persona" as const,
+        })),
+        ...(this.plugins?.personas() ?? []).map((p) => ({
+          ...toInstructionItem(p.file, "plugin"), kind: "persona" as const, plugin: p.pluginId,
         })),
         ...(await readInstructionsDir(join(this.globalRoot, "personas"))).map((f) => ({
           ...toInstructionItem(f, "global"), kind: "persona" as const,
@@ -301,11 +346,15 @@ export class AuthoredConfigService {
     if (kind === "skill") {
       return [
         ...bundledSkills().map((s) => toSkillItem(s, "shipped")),
+        ...(this.plugins?.skills() ?? []).map((p) => ({ ...toSkillItem(p.skill, "plugin"), plugin: p.pluginId })),
         ...readSkillsDir(this.globalSkillsDir()).map((s) => toSkillItem(s, "global")),
       ];
     }
     return [
       ...(await this.shipped()).map((i) => toInstructionItem(i, "shipped")),
+      ...(this.plugins?.instructions() ?? []).map((p) => ({
+        ...toInstructionItem(p.file, "plugin"), plugin: p.pluginId,
+      })),
       ...(await readInstructionsDir(this.globalInstructionsDir())).map((i) =>
         toInstructionItem(i, "global"),
       ),
@@ -371,7 +420,7 @@ function toSkillItem(skill: SkillConfig, scope: AuthoredScope): AuthoredItem {
     name: skill.dir,
     description: skill.description,
     path: skill.path,
-    writable: scope !== "shipped",
+    writable: isWritableScope(scope),
     active: true,
   };
 }
@@ -387,7 +436,7 @@ function toInstructionItem(
     name: file.name,
     description: file.description,
     path: file.path,
-    writable: scope !== "shipped",
+    writable: isWritableScope(scope),
     active,
   };
 }

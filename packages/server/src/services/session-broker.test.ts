@@ -1551,6 +1551,79 @@ describe("SessionBroker — permissions", () => {
       expect(options.mcpServers.remote).toMatchObject({ headers: { Authorization: "Bearer live-value" } });
     });
 
+    it("merges plugin MCP servers under the project's at BOTH sites — session build and live reload", async () => {
+      const { broker, secrets } = await withSecrets();
+      const repo = await mkdtemp(join(tmpdir(), "cm-plugin-mcp-repo-"));
+      tempDirs.push(repo);
+      const projectId = chatFor("c1").projectId;
+      await store.saveProject({
+        id: projectId, name: "P", repoPath: repo, worktreeRoot: join(repo, "..", "wt"),
+        defaultBranch: "main", subApps: [], createdAt: 1,
+      });
+      // A GLOBAL secret the plugin lists, and a PROJECT one it does not.
+      await secrets.set({ name: "PLUG", scope: "global" }, "plug-value");
+      await secrets.set({ name: "PROJ", scope: "project", projectId }, "proj-value");
+      let projectPins: Record<string, boolean> = {};
+      (broker as unknown as { projectConfig?: unknown }).projectConfig = {
+        getAgent: () => null,
+        getMode: () => null,
+        buildInstructionsInjection: () => null,
+        getMcpServers: () => ({ shared: { type: "stdio", command: "project-copy" } }),
+        getMcpEnabled: () => projectPins,
+        getSkills: () => [],
+      };
+      const decl = (name: string, env: Record<string, string>) => ({
+        name,
+        pluginId: "px",
+        config: { type: "stdio" as const, command: "plugin-copy", cwd: "C:/plugins/px", env },
+        byDefault: true,
+        defaultReason: "declared",
+        secrets: ["PLUG"],
+      });
+      broker.plugins = {
+        modes: () => [],
+        mcpServers: () => [
+          decl("shared", {}),
+          decl("plug-only", { A: "${secret:PLUG}", B: "${secret:PROJ}" }),
+          // The undeclared project secret hiding in `cwd` — a field the project
+          // resolver fills on the merged record if the plugin selector skips it.
+          { ...decl("plug-cwd", {}), config: { type: "stdio" as const, command: "x", cwd: "C:/plugins/${secret:PROJ}" } },
+        ],
+      };
+      const session = (broker as unknown as { sessions: Map<string, Record<string, unknown>> }).sessions.get("c1")!;
+      const build = () =>
+        (broker as unknown as { buildOptions(s: unknown): Promise<{ mcpServers: Record<string, { command?: string; env?: Record<string, string> }> }> })
+          .buildOptions(session);
+
+      // SITE 1 — session build. The project's `shared` shadows the plugin's; the
+      // plugin-only server arrives with its listed secret filled and the
+      // unlisted project secret blanked, never leaked.
+      let options = await build();
+      expect(options.mcpServers.shared?.command).toBe("project-copy");
+      expect(options.mcpServers["plug-only"]?.command).toBe("plugin-copy");
+      expect(options.mcpServers["plug-only"]?.env).toEqual({ A: "plug-value", B: "" });
+      expect(JSON.stringify(options.mcpServers["plug-cwd"])).not.toContain("proj-value");
+      // A project pin switches the plugin server off like any other.
+      projectPins = { "plug-only": false };
+      options = await build();
+      expect(options.mcpServers["plug-only"]).toBeUndefined();
+      projectPins = {};
+
+      // SITE 2 — live reload. The same layering, restricted to the named servers.
+      type Swapped = Record<string, { command?: string; env?: Record<string, string> }>;
+      const updateMcpServers = vi.fn(async (_servers: Swapped) => {});
+      session.harnessSession = { updateMcpServers };
+      const outcome = await broker.refreshMcpServers(projectId, ["shared", "plug-only"]);
+      expect(outcome.refreshed).toEqual(["c1"]);
+      const swapped = updateMcpServers.mock.calls[0]![0];
+      expect(swapped.shared?.command).toBe("project-copy");
+      expect(swapped["plug-only"]?.env).toEqual({ A: "plug-value", B: "" });
+      projectPins = { "plug-only": false };
+      await broker.refreshMcpServers(projectId, ["plug-only"]);
+      // Nothing enabled → nothing swapped: the call count did not move.
+      expect(updateMcpServers).toHaveBeenCalledTimes(1);
+    });
+
     it("reads a bare 'Saved' with no stored value as skipped — an old card can't fake a save", async () => {
       const { broker } = await withSecrets();
       const reqP = nextPermissionId();

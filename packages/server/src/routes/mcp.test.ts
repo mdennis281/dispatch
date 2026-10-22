@@ -408,6 +408,54 @@ describe("mcp-catalog — builder", () => {
     }
   });
 
+  it("lists a plugin server under kind `plugin`, probed in the plugin dir, with the plugin's toggle as its default", async () => {
+    const cwds: Array<string | undefined> = [];
+    const probe: McpProbe = async (_n, config, _t, cwd) => {
+      cwds.push(config.cwd ?? cwd);
+      return { status: "ok", tools: [{ name: "echo", description: "e", inputSchema: {} }] };
+    };
+    const catalog = await buildProjectMcpCatalog(makeProject(), {
+      probe,
+      plugins: [
+        { name: "contrib-echo", pluginId: "contributions", config: { type: "stdio", command: "node", cwd: "/plugins/contributions" }, byDefault: true, defaultReason: 'declared by plugin "contributions"' },
+        { name: "sleepy", pluginId: "off-plugin", config: { type: "stdio", command: "node", cwd: "/plugins/off" }, byDefault: false, defaultReason: "off — plugin is switched off" },
+      ],
+    });
+    const echo = catalog.servers.find((s) => s.name === "contrib-echo")!;
+    expect(echo.kind).toBe("plugin");
+    expect(echo.status).toBe("ok");
+    expect(echo.tools[0]!.qualifiedName).toBe("mcp__contrib-echo__echo");
+    expect(echo.enablement).toMatchObject({ effective: true, source: "default", byDefault: true });
+    expect(cwds).toEqual(["/plugins/contributions"]);
+    // The disabled plugin's server is LISTED, off, unprobed — and a project pin can bring it back.
+    const sleepy = catalog.servers.find((s) => s.name === "sleepy")!;
+    expect(sleepy).toMatchObject({ kind: "plugin", status: "disabled", defaultReason: expect.stringMatching(/switched off/) });
+    const pinned = await buildProjectMcpCatalog(makeProject(), {
+      probe,
+      plugins: [{ name: "sleepy", pluginId: "off-plugin", config: { type: "stdio", command: "node" }, byDefault: false }],
+      enablement: { project: { sleepy: true } },
+    });
+    expect(pinned.servers.find((s) => s.name === "sleepy")!.enablement).toMatchObject({ effective: true, source: "project" });
+  });
+
+  it("a plugin server is shadowed by a project server of the same name, and shadows a bundled one", async () => {
+    const probe: McpProbe = async () => ({ status: "ok", tools: [] });
+    const catalog = await buildProjectMcpCatalog(makeProject({ mine: { command: "node" } }), {
+      probe,
+      bundled: [{ name: "playwright", config: { type: "stdio", command: "node" }, byDefault: true }],
+      plugins: [
+        { name: "mine", pluginId: "p", config: { type: "stdio", command: "node" }, byDefault: true },
+        { name: "playwright", pluginId: "p", config: { type: "stdio", command: "node" }, byDefault: true },
+        { name: "dispatch-chat", pluginId: "p", config: { type: "stdio", command: "node" }, byDefault: true },
+      ],
+    });
+    const kinds = Object.fromEntries(catalog.servers.map((s) => [s.name, s.kind]));
+    expect(kinds.mine).toBe("external");
+    expect(kinds.playwright).toBe("plugin");
+    expect(catalog.servers.filter((s) => s.name === "playwright")).toHaveLength(1);
+    expect(kinds["dispatch-chat"]).toBe("custom");
+  });
+
   it("drops a bundled server the project declares itself, so only one row wins", async () => {
     // The broker's merge lets a project's own `mcpServers` entry override the
     // bundled one outright; listing both would show a row no session gets.

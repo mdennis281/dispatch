@@ -13,7 +13,7 @@ import { mergeById } from "../services/project-config.js";
 
 export function registerModeRoutes(app: FastifyInstance): void {
   const { store } = app.cm;
-  const { projectConfig } = app.services;
+  const { projectConfig, plugins } = app.services;
 
   // Merge config-sourced modes (from any project's `.dispatch/modes/`)
   // OVER the `.data` store — the repo config wins on id collision — so the
@@ -34,7 +34,16 @@ export function registerModeRoutes(app: FastifyInstance): void {
    * layer, so returning one here would advertise a policy nothing enforces.
    */
   app.get("/api/modes", async () => {
-    const merged = mergeById(projectConfig.configModes(), await store.listModes());
+    // Plugin modes go UNDER both authored layers: a project or store mode of
+    // the same id shadows them, the same precedence the broker's `resolveMode`
+    // applies. They ride in this list (rather than a separate one) because the
+    // composer's picker is built from it — a plugin mode that is not here is a
+    // mode nobody can pick. `ManageConfigDialog` filters `scope: "plugin"` out
+    // of its editable roster itself, since these have no row to Save.
+    const merged = mergeById(
+      mergeById(projectConfig.configModes(), await store.listModes()),
+      plugins?.modes() ?? [],
+    );
     return merged.filter((m) => !isProtectedMode(m.id));
   });
 

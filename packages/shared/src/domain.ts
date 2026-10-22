@@ -100,8 +100,14 @@ export type Project = z.infer<typeof ProjectSchema>;
 
 /* ------------------------------------------------------------ agents & modes */
 
-/** Config scope: global (all projects) or a single project. */
-export const ConfigScopeSchema = z.enum(["global", "project"]);
+/**
+ * Config scope: global (all projects), a single project, or — for modes only —
+ * an installed plugin's `contributes.modes`. A `plugin` mode is listed and
+ * resolvable but never written: `POST/PUT /api/modes` and `mode_write` only
+ * ever produce `global`/`project` rows, so the Settings dialog's scope picker
+ * keeps offering just those two.
+ */
+export const ConfigScopeSchema = z.enum(["global", "project", "plugin"]);
 export type ConfigScope = z.infer<typeof ConfigScopeSchema>;
 
 /** A custom agent: instructions + permission profile + tool gating. */
@@ -174,6 +180,8 @@ export const ModeConfigSchema = z.object({
   instructions: z.string().optional(),
   scope: ConfigScopeSchema.default("global"),
   projectId: z.string().optional(),
+  /** Set when scope === "plugin": the contributing plugin's id. */
+  pluginId: z.string().optional(),
 });
 export type ModeConfig = z.infer<typeof ModeConfigSchema>;
 
@@ -1147,6 +1155,20 @@ export const RunnerInstanceSchema = z.object({
   exitCode: z.number().int().nullable().optional(),
   /** OS signal when the process ended without an exit code. */
   exitSignal: z.string().nullable().optional(),
+  /**
+   * Who this runner belongs to when it is NOT a project's sub-app: a plugin's
+   * managed process is `plugin:<id>`. Absent for every sub-app runner, so the
+   * project/chat panels keep filtering on `projectId`/`chatId` unchanged while
+   * the process roster can group these under their plugin.
+   */
+  owner: z.string().optional(),
+  /**
+   * The record describes a process ANOTHER instance spawned and this one only
+   * found listening on its declared port (a `singleton: true` plugin process —
+   * stable and dev load the same plugin). There is no pid and no child handle,
+   * so `stop()` marks it stopped without killing anything.
+   */
+  adopted: z.boolean().optional(),
 });
 export type RunnerInstance = z.infer<typeof RunnerInstanceSchema>;
 

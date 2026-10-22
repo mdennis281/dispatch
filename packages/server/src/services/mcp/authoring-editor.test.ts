@@ -129,6 +129,37 @@ describe("createAuthoringEditor", () => {
 });
 
 
+describe("the plugin scope", () => {
+  it("reads project → global → plugin → shipped, and lists the plugin item read-only", async () => {
+    const pluginDir = join(globalRoot, "fake-plugin");
+    await mkdir(join(pluginDir, "skills", "mcp-setup"), { recursive: true });
+    await writeFile(join(pluginDir, "skills", "mcp-setup", "SKILL.md"), "---\nname: mcp-setup\ndescription: p\n---\nPLUGIN BODY", "utf8");
+    authored.setPluginSource({
+      skills: () => [
+        {
+          pluginId: "fake",
+          skill: { id: "mcp-setup", name: "mcp-setup", description: "p", dir: "mcp-setup", path: join(pluginDir, "skills", "mcp-setup", "SKILL.md"), layout: "dir" },
+        },
+      ],
+      instructions: () => [],
+      personas: () => [],
+    });
+    const ed = editor();
+    // Nothing above it: the plugin copy shadows the shipped one.
+    expect((await ed.read("skill", "mcp-setup"))?.scope).toBe("plugin");
+    expect((await ed.read("skill", "mcp-setup"))?.text).toContain("PLUGIN BODY");
+    expect((await ed.read("skill", "mcp-setup", "shipped"))?.scope).toBe("shipped");
+    // A global copy outranks it; a project copy outranks that.
+    await authored.write("skill", "mcp-setup", "GLOBAL BODY", "g");
+    expect((await ed.read("skill", "mcp-setup"))?.scope).toBe("global");
+    await ed.write({ kind: "skill", scope: "project", name: "mcp-setup", body: "PROJECT BODY", description: "p" });
+    expect((await ed.read("skill", "mcp-setup"))?.scope).toBe("project");
+    const listed = (await ed.list("skill")).filter((i) => i.name === "mcp-setup");
+    expect(listed.map((i) => i.scope)).toEqual(["project", "shipped", "plugin", "global"]);
+    expect(listed.find((i) => i.scope === "plugin")).toMatchObject({ writable: false, plugin: "fake" });
+  });
+});
+
 describe("persona authoring", () => {
   it("overrides shipped at global then project scope and restores fallback after deletion", async () => {
     const ed = editor();

@@ -1,0 +1,9 @@
+# A plugin mode: listed by GET /api/modes and mode_list with scope `plugin`,
+# resolvable by the broker, never written. A project `.dispatch/modes/careful.yaml`
+# or a store mode of the same id shadows it.
+name: Careful
+description: Plan-only posture from the contributions example plugin.
+permissionMode: plan
+instructions: |
+  You are in the example plugin's "Careful" mode. Describe what you would
+  change and why before touching anything; prefer a plan over an edit.

@@ -37,7 +37,9 @@ import {
 import {
   buildProjectMcpCatalog,
   type BundledCatalogServer,
+  type PluginCatalogServer,
 } from "../services/mcp/mcp-catalog.js";
+import { selectPluginMcpServers } from "../plugins/contributions.js";
 import type { ManagerToolBinding } from "../services/mcp/manager-mcp.js";
 import {
   buildBrowserMcpServers,
@@ -239,10 +241,26 @@ export function registerMcpRoutes(app: FastifyInstance): void {
       // nothing is blocked, so there is nothing to ask to have lifted.
       exemptions: resolveWorkflow(project).guard === "deny",
     };
+    // Plugin servers, secrets filled in for the PROBE only (as above) and only
+    // for the names each plugin's manifest lists — the same selector the
+    // broker hands a session through, minus the enablement filter: the catalog
+    // lists a switched-off server, so every declaration is passed and
+    // `buildSpawnableEntry` resolves its toggle like any other row.
+    const pluginLookup = services.secrets?.resolverFor(undefined);
+    const plugins = (services.plugins?.mcpServers() ?? []).map(
+      (decl): PluginCatalogServer => ({
+        name: decl.name,
+        pluginId: decl.pluginId,
+        config: selectPluginMcpServers([{ ...decl, byDefault: true }], undefined, pluginLookup)[decl.name]!,
+        byDefault: decl.byDefault,
+        defaultReason: decl.defaultReason,
+      }),
+    );
     return buildProjectMcpCatalog(project, {
       bindings,
       mcpServers,
       bundled: bundledServers(project.id, subApps),
+      plugins,
       enablement: await enablementLayers(project.id, runtime),
     });
   }

@@ -11,6 +11,7 @@
  * See docs/plugins.md → "Anatomy of a plugin".
  */
 import * as z from "zod";
+import { ManifestMcpServerSchema } from "./project-config.js";
 
 /**
  * The host's plugin-API MAJOR. A manifest's `dispatch` range is matched against
@@ -237,6 +238,75 @@ export function pluginRangeAccepts(range: string, major: number): boolean {
   return true;
 }
 
+/* ------------------------------------------------------- contribution files */
+
+/**
+ * `contributes.mcpServers` — the file it points at (`mcp.yaml` by convention).
+ *
+ * The SAME per-server shape a project's `mcpServers:` list uses, so a server
+ * definition can be moved between a project manifest and a plugin without
+ * rewriting it. Two rules differ and are applied by the loader, not here:
+ * the default `cwd` is the PLUGIN directory (a project server's default is
+ * the chat's tree, which is wrong for code that ships with the plugin), and
+ * `${secret:NAME}` expands only for names the manifest lists under `secrets:`.
+ * Accepts either a bare list or `{ mcpServers: [...] }`, the latter so a file
+ * copied from a project manifest works unchanged.
+ */
+export const PluginMcpServersFileSchema = z.union([
+  z.array(ManifestMcpServerSchema),
+  z.object({ mcpServers: z.array(ManifestMcpServerSchema).default([]) }).transform((o) => o.mcpServers),
+]);
+
+/** `[a-z0-9][a-z0-9-]*` — a process id is a runner `subAppId` and a port-lease key. */
+export const PLUGIN_PROCESS_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,39}$/;
+
+/**
+ * One entry of `contributes.processes` — a long-running process the host runs
+ * through `RunnerService` on the plugin's behalf, with owner `plugin:<id>`.
+ *
+ * Modelled on a sub-app's `dev` rather than on a raw spawn: `command` + `args`
+ * are joined VERBATIM into ONE shell line (the runner spawns through a shell,
+ * which is what makes `pnpm`/`npx` shims work on Windows) — write an argument
+ * with spaces quoted, as you would at the prompt. `{port}`/`{portN}` in any of
+ * them are substituted from the leased ports, and `env` is overlaid on the
+ * manager-quarantined environment exactly as for a sub-app.
+ */
+export const PluginProcessSchema = z
+  .object({
+    id: z.string().regex(PLUGIN_PROCESS_ID_PATTERN, "process id must be 1–40 chars of [a-z0-9-]"),
+    /** Display name; defaults to the id. */
+    name: z.string().min(1).optional(),
+    command: z.string().min(1),
+    args: z.array(z.string()).optional(),
+    env: z.record(z.string(), z.string()).optional(),
+    /** Working directory, relative to the plugin dir. Defaults to the plugin dir. */
+    cwd: z.string().optional(),
+    /** Base ports to lease; the first is injected as `PORT` and fills `{port}`. */
+    ports: z.array(z.number().int().min(1).max(65535)).max(8).optional(),
+    /** One-click URL template, e.g. `http://localhost:{port}`. */
+    url: z.string().optional(),
+    /** Start on plugin activation (default false — `ctx.processes.start` otherwise). */
+    autostart: z.boolean().optional(),
+    /**
+     * Only one may run per machine. Both Dispatch instances load the same
+     * plugin, so the second to activate ADOPTS a process already listening on
+     * the first declared port instead of spawning another. Requires `ports`,
+     * because the port is the only identity two processes can see of each other.
+     */
+    singleton: z.boolean().optional(),
+  })
+  .refine((p) => !p.singleton || (p.ports?.length ?? 0) > 0, {
+    message: "a singleton process must declare at least one port — that is how the second instance finds it",
+    path: ["singleton"],
+  });
+export type PluginProcess = z.infer<typeof PluginProcessSchema>;
+
+/** `contributes.processes` — the file (`processes.yaml`): a bare list or `{ processes: [...] }`. */
+export const PluginProcessesFileSchema = z.union([
+  z.array(PluginProcessSchema),
+  z.object({ processes: z.array(PluginProcessSchema).default([]) }).transform((o) => o.processes),
+]);
+
 /* ------------------------------------------------------------ API rows */
 
 /**
@@ -299,6 +369,14 @@ export const PluginInfoSchema = z.object({
       }),
     )
     .optional(),
+  /**
+   * Non-fatal problems with the plugin's CONTRIBUTIONS — an `mcp.yaml` that
+   * failed to parse, a server named `dispatch-*`, a process declared without
+   * the `process` capability. The plugin still activates (its code is fine);
+   * the offending contribution is dropped and named here, because the only
+   * other place it shows is a server log nobody reads.
+   */
+  warnings: z.array(z.string()).optional(),
 });
 export type PluginInfo = z.infer<typeof PluginInfoSchema>;
 

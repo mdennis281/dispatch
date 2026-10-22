@@ -25,6 +25,7 @@ import {
   Activity,
   AlertTriangle,
   MessagesSquare,
+  Puzzle,
   RefreshCw,
   Server,
   Skull,
@@ -59,7 +60,7 @@ export interface PortRow {
 export type ProcessRow = ShellRow | PortRow;
 
 export interface ProcessGroup {
-  /** `chat:<id>`, `runners`, or `orphans` — stable react key + sort bucket. */
+  /** `chat:<id>`, `plugin:<id>`, `runners`, or `orphans` — stable react key + sort bucket. */
   id: string;
   title: string;
   /** Set for a chat group, so the group can offer "open this chat". */
@@ -69,9 +70,9 @@ export interface ProcessGroup {
   pids: number[];
 }
 
-/** Sort: chats first (most rows first), then runners, then orphans last. */
+/** Sort: chats first (most rows first), then app runners and plugins, then orphans last. */
 const BUCKET_ORDER = (id: string): number =>
-  id === "orphans" ? 2 : id === "runners" ? 1 : 0;
+  id === "orphans" ? 2 : id === "runners" || id.startsWith("plugin:") ? 1 : 0;
 
 /**
  * Fold listeners + live shells into per-chat groups.
@@ -105,12 +106,17 @@ export function groupProcesses(
   }
 
   for (const p of processes) {
+    // A plugin-managed process is a runner with an `owner` and no project; it
+    // gets a group of its own so "what did that plugin start" has an answer
+    // that isn't "look through App runners for one with no branch".
     const g =
       p.source === "terminal" && p.chatId
         ? ensure(`chat:${p.chatId}`, p.chatTitle ?? chatTitle(p.chatId) ?? "Untitled chat", p.chatId)
-        : p.source === "runner"
-          ? ensure("runners", "App runners")
-          : ensure("orphans", "Unaccounted for");
+        : p.source === "runner" && p.owner?.startsWith("plugin:")
+          ? ensure(p.owner, `Plugin · ${p.owner.slice("plugin:".length)}`)
+          : p.source === "runner"
+            ? ensure("runners", "App runners")
+            : ensure("orphans", "Unaccounted for");
     g.rows.push({ kind: "port", process: p });
     g.pids.push(p.pid);
   }
@@ -233,6 +239,8 @@ export function ProcessesOverlay() {
                   <MessagesSquare className="size-3.5 text-muted" />
                 ) : g.id === "runners" ? (
                   <Server className="size-3.5 text-muted" />
+                ) : g.id.startsWith("plugin:") ? (
+                  <Puzzle className="size-3.5 text-muted" />
                 ) : (
                   <AlertTriangle className="size-3.5 text-warn" />
                 )}

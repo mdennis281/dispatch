@@ -6290,8 +6290,21 @@ ${look}` : "")
   const scopeArg = AuthoredScopeSchema.optional().describe(
     "project = committed in this repo's .dispatch/ (the default, and the only one " +
       "teammates get). global = this machine only, applies to every project here. " +
+      "plugin = contributed by an installed plugin; readable, never writable. " +
       "shipped = built into Dispatch; readable, never writable.",
   );
+
+  /** Why a read-only scope refuses a write — one sentence per scope, reused by write and delete. */
+  const readOnlyScopeReason = (scope: string, verb: "write" | "delete"): string =>
+    scope === "plugin"
+      ? `The \`plugin\` scope belongs to an installed plugin — its files live under the plugin's ` +
+        `own directory and would be lost when it is reinstalled, so they cannot be ${verb === "write" ? "written" : "deleted"} ` +
+        `here. Write to \`project\` (committed in this repo) or \`global\` (this machine) instead.`
+      : verb === "write"
+        ? "The `shipped` scope is built into Dispatch and delivered by an app upgrade — " +
+          "a write here would be overwritten by the next publish. Write to `project` " +
+          "(committed in this repo) or `global` (this machine) instead."
+        : "The `shipped` scope is built into Dispatch and cannot be deleted at runtime.";
 
   const configList = tool(
     "config_list",
@@ -6427,12 +6440,7 @@ ${look}` : "")
       if (!body.trim()) return textResult("config_write requires a non-empty body.", true);
       const scope = args.scope ?? (ctx.authoring.hasProject ? "project" : "global");
       if (!isWritableScope(scope)) {
-        return textResult(
-          "The `shipped` scope is built into Dispatch and delivered by an app upgrade — " +
-            "a write here would be overwritten by the next publish. Write to `project` " +
-            "(committed in this repo) or `global` (this machine) instead.",
-          true,
-        );
+        return textResult(readOnlyScopeReason(scope, "write"), true);
       }
       if (scope === "project" && !ctx.authoring.hasProject) {
         return textResult(
@@ -6496,10 +6504,7 @@ ${look}` : "")
       if (!name) return textResult("config_delete requires a name.", true);
       const scope = args.scope ?? (ctx.authoring.hasProject ? "project" : "global");
       if (!isWritableScope(scope)) {
-        return textResult(
-          "The `shipped` scope is built into Dispatch and cannot be deleted at runtime.",
-          true,
-        );
+        return textResult(readOnlyScopeReason(scope, "delete"), true);
       }
       try {
         const removed = await ctx.authoring.remove(args.kind, name, scope);
@@ -6527,7 +6532,8 @@ ${look}` : "")
     .describe(
       "project = committed in this repo's .dispatch/modes/ (the default, and the only " +
         "one teammates get; wins on an id collision). global = this machine's Dispatch " +
-        "store, every project here. builtin = the fixed ids Dispatch ships (plan, auto, " +
+        "store, every project here. plugin = contributed by an installed plugin; readable, " +
+        "never writable. builtin = the fixed ids Dispatch ships (plan, auto, " +
         "yolo, …); readable, never writable.",
     );
 

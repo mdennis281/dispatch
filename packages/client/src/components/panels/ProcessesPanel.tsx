@@ -150,6 +150,11 @@ export function ProcessesPanel({ projectId }: { projectId: string }) {
                       {p.subAppId && (
                         <span className="text-faint"> · {p.subAppId}</span>
                       )}
+                      {/* Owned by a plugin, not by this project: say which, or
+                          the row looks like a sub-app the project never declared. */}
+                      {p.owner?.startsWith("plugin:") && (
+                        <span className="text-faint"> · {p.owner}</span>
+                      )}
                       {/* A chat's shell started this one: say WHOSE, because that
                           is the actionable half — you stop it by stopping the
                           chat's terminal, not by hunting the pid. */}

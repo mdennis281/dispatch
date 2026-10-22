@@ -96,6 +96,12 @@ export interface PluginContextDeps {
   settings: () => Record<string, unknown>;
   /** The host-run OAuth client flow (`ctx.oauth`). Optional so a unit test can build a context without it. */
   pluginOAuth?: PluginOAuthService;
+  /**
+   * The plugin's `ctx.processes`, already bound to its id. Supplied by the
+   * service (it owns the process host); absent when the host has no runner,
+   * in which case the member is absent too, capability or not.
+   */
+  processes?: PluginContext["processes"];
 }
 
 /** What the host must tear down when the plugin goes away. */
@@ -302,6 +308,10 @@ export function buildPluginContext(
       token: (name) => oauth.token(id, name),
       disconnect: (name) => oauth.disconnect(id, name),
     };
+  }
+
+  if (has("process") && deps.processes) {
+    ctx.processes = deps.processes;
   }
 
   if (has("memory")) {

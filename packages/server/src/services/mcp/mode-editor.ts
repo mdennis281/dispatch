@@ -44,11 +44,15 @@ import {
 } from "@dispatch/shared";
 import { slugifyConfigName } from "../project-config.js";
 
-/** Where a mode is defined. Ordered most-specific-first, which is lookup order. */
-export const MODE_SCOPES = ["project", "global", "builtin"] as const;
+/**
+ * Where a mode is defined. Ordered most-specific-first, which is lookup order.
+ * `plugin` — an installed plugin's `contributes.modes` — sits above `builtin`
+ * and below the two authored homes, mirroring the authored-guidance scopes.
+ */
+export const MODE_SCOPES = ["project", "global", "plugin", "builtin"] as const;
 export type ModeScope = (typeof MODE_SCOPES)[number];
 
-/** Scopes a write/delete may target — `builtin` has no file behind it. */
+/** Scopes a write/delete may target — `builtin` has no file behind it; `plugin` files belong to the plugin. */
 export type WritableModeScope = "project" | "global";
 
 /** One mode, as the tools list and read it. */
@@ -69,8 +73,10 @@ export interface ModeRecord {
   /** Tools that skip the prompt in this mode, on top of the app's list. */
   autoAllowTools?: string[];
   instructions?: string;
-  /** Absolute file for a project mode; absent for the other two scopes. */
+  /** Absolute file for a project mode; absent for the other scopes. */
   path?: string;
+  /** The contributing plugin's id, for `scope: "plugin"`. */
+  plugin?: string;
 }
 
 /** The subset of the store the editor needs — `.data` modes are `global`. */
@@ -87,6 +93,8 @@ export interface ModeEditorDeps {
   configPaths: ProjectPaths | null;
   /** The broker's built-in id → posture table (`BUILTIN_MODE_PERMISSION`). */
   builtin: Record<string, PermissionMode>;
+  /** Enabled plugins' contributed modes (scope `plugin`). Absent → none. */
+  pluginModes?: () => ModeConfig[];
 }
 
 /** The per-session mode binding the `mode_*` tools consume. */
@@ -118,6 +126,9 @@ export function modeIdFor(name: string): string {
 /** Build the per-session mode binding. */
 export function createModeEditor(deps: ModeEditorDeps): ManagerMcpModes {
   const { store, configPaths, builtin } = deps;
+
+  const pluginModes = (): ModeRecord[] =>
+    (deps.pluginModes?.() ?? []).map((m) => ({ ...fromStore(m), scope: "plugin" as const, plugin: m.pluginId }));
 
   const projectModes = async (): Promise<ModeRecord[]> => {
     if (!configPaths) return [];
@@ -163,7 +174,7 @@ export function createModeEditor(deps: ModeEditorDeps): ManagerMcpModes {
       // as "the project mode in effect" would be the catalogue stating a
       // policy that is not the one being enforced — and for a mode that is a
       // security boundary, a catalogue nobody can trust is worse than none.
-      const authored = [...(await projectModes()), ...(await globalModes())].filter(
+      const authored = [...(await projectModes()), ...(await globalModes()), ...pluginModes()].filter(
         (m) => !isProtectedMode(m.id),
       );
       return [...authored, ...builtinModes()];
@@ -176,7 +187,13 @@ export function createModeEditor(deps: ModeEditorDeps): ManagerMcpModes {
       const order: ModeScope[] = scope ? [scope] : [...MODE_SCOPES];
       for (const s of order) {
         const pool =
-          s === "project" ? await projectModes() : s === "global" ? await globalModes() : builtinModes();
+          s === "project"
+            ? await projectModes()
+            : s === "global"
+              ? await globalModes()
+              : s === "plugin"
+                ? pluginModes()
+                : builtinModes();
         const found = pool.find((m) => m.id === id);
         if (found) return found;
       }

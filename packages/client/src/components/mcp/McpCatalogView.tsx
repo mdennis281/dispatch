@@ -32,6 +32,7 @@ import {
   Boxes,
   Cpu,
   Globe,
+  Puzzle,
   Wrench,
   Copy,
   Check,
@@ -564,6 +565,7 @@ export function McpCatalogView() {
   const servers = catalog?.servers ?? [];
   const custom = useMemo(() => servers.filter((s) => s.kind === "custom"), [servers]);
   const bundled = useMemo(() => servers.filter((s) => s.kind === "bundled"), [servers]);
+  const plugin = useMemo(() => servers.filter((s) => s.kind === "plugin"), [servers]);
   const external = useMemo(() => servers.filter((s) => s.kind === "external"), [servers]);
 
   // Keep a valid selection: default to the first server; clear if it vanished.
@@ -703,6 +705,20 @@ export function McpCatalogView() {
               runtime={runtime}
               onSelect={setSelected}
             />
+            {/* Only when a plugin contributes one: most installs have none, and
+                an empty "Plugins" heading would read as something missing. */}
+            {plugin.length > 0 && (
+              <ServerGroup
+                projectId={projectId}
+                label="Plugins"
+                icon={<Puzzle />}
+                servers={plugin}
+                selected={selected}
+                scope={scope}
+                runtime={runtime}
+                onSelect={setSelected}
+              />
+            )}
             <ServerGroup
               projectId={projectId}
               label="External"

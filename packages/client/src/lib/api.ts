@@ -375,6 +375,8 @@ export interface ProjectProcess {
   worktreePath?: string;
   /** How Dispatch knows about it: an app runner, a chat's shell, or not at all. */
   source: "runner" | "terminal" | "orphan";
+  /** A runner's non-project owner — `plugin:<id>` for a plugin-managed process. */
+  owner?: string;
   /** Chat whose shell started it (`source: "terminal"`). */
   chatId?: string;
   chatTitle?: string;

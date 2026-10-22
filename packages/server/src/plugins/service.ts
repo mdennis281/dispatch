@@ -30,13 +30,16 @@ import { resolve } from "node:path";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import {
   PLUGIN_API_VERSION,
+  type ModeConfig,
   type PluginInfo,
   type PluginLog,
   type PluginModule,
   type PluginStatus,
+  type SkillConfig,
 } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import { recordFault } from "../crash-log.js";
+import type { InstructionFile, PluginContributionSource } from "../services/authored-config.js";
 import {
   buildPluginContext,
   newOwnedResources,
@@ -46,6 +49,13 @@ import {
 } from "./context.js";
 import { discoverPlugins, pluginsRoot, type DiscoveredPlugin } from "./manifest.js";
 import { pluginOAuthManifestView, type PluginOAuthManifestView } from "./oauth.js";
+import {
+  EMPTY_CONTRIBUTIONS,
+  readPluginContributions,
+  type PluginContributions,
+  type PluginMcpDeclaration,
+} from "./contributions.js";
+import { PluginProcessHost, type PluginProcessRunner } from "./processes.js";
 
 /** Spec budget for one `activate` (docs/plugins.md → "Lifecycle"). */
 export const ACTIVATE_BUDGET_MS = 30_000;
@@ -72,6 +82,8 @@ interface PluginRecord extends DiscoveredPlugin {
   settings: Record<string, unknown>;
   module?: PluginModule;
   owned?: OwnedResources;
+  /** Snapshot of the plugin's static contributions, read once at `load()`. */
+  contributions: PluginContributions;
 }
 
 export interface PluginServiceOptions {
@@ -79,7 +91,16 @@ export interface PluginServiceOptions {
   configDir: string;
   store: Store;
   /** Everything the context adapts over, minus what the service supplies itself. */
-  context: Omit<PluginContextDeps, "log" | "settings" | "store">;
+  context: Omit<PluginContextDeps, "log" | "settings" | "store" | "processes">;
+  /**
+   * The sub-app runner, which plugin processes run through. Optional so the
+   * host still comes up without one (tests, a stripped container); then
+   * `contributes.processes` is declared but nothing starts, and `ctx.processes`
+   * is absent.
+   */
+  runner?: PluginProcessRunner;
+  /** Port probe for singleton adoption — injected by tests. */
+  portFree?: (port: number) => Promise<boolean>;
   activateBudgetMs?: number;
   deactivateBudgetMs?: number;
   /** Injected for tests so a module can be faked without a file on disk. */
@@ -113,11 +134,13 @@ function moduleOf(ns: unknown): PluginModule | undefined {
   return undefined;
 }
 
-export class PluginService {
+export class PluginService implements PluginContributionSource {
   private readonly records = new Map<string, PluginRecord>();
   private readonly configDir: string;
   private readonly store: Store;
   private readonly ctxDeps: PluginServiceOptions["context"];
+  /** Present when the container handed over a runner; see {@link PluginServiceOptions.runner}. */
+  private readonly processHost: PluginProcessHost | undefined;
   private readonly activateBudgetMs: number;
   private readonly deactivateBudgetMs: number;
   private readonly importModule: (url: string) => Promise<unknown>;
@@ -138,6 +161,9 @@ export class PluginService {
     this.fault = opts.fault ?? recordFault;
     // eslint-disable-next-line no-console
     this.log = opts.log ?? ((line) => console.log(line));
+    this.processHost = opts.runner
+      ? new PluginProcessHost({ runner: opts.runner, portFree: opts.portFree, log: this.log })
+      : undefined;
   }
 
   /** `<configDir>/plugins` — what "open folder" and the CLI both point at. */
@@ -157,13 +183,26 @@ export class PluginService {
       const entry = map[found.id];
       const enabled = entry?.enabled ?? true;
       const eligible = !!found.manifest && !found.incompatible && enabled;
+      // Contributions are read for every VALID plugin, enabled or not: a
+      // disabled plugin's MCP servers still appear in the catalog (switched
+      // off, with the reason) so the layered toggles have something to point
+      // at. Everything else a disabled plugin contributes is filtered out at
+      // the query methods below.
+      const contributions =
+        found.manifest && !found.incompatible
+          ? await readPluginContributions(found.id, found.dir, found.manifest).catch(() => EMPTY_CONTRIBUTIONS)
+          : EMPTY_CONTRIBUTIONS;
       this.records.set(found.id, {
         ...found,
         enabled,
         phase: eligible ? "pending" : "inactive",
         needsRestart: false,
         settings: entry?.settings ?? {},
+        contributions,
       });
+      if (contributions.processes.length) {
+        this.processHost?.register(found.id, found.dir, contributions.processes);
+      }
     }
     this.loaded = true;
   }
@@ -188,14 +227,17 @@ export class PluginService {
     const manifest = rec.manifest!;
     rec.phase = "activating";
     rec.activationError = undefined;
+    const log = this.loggerFor(rec.id);
     if (!manifest.server) {
-      // Contributions-only or client-only: nothing to run on this side.
+      // Contributions-only or client-only: nothing to run on this side —
+      // except the processes it declared, which start on activation whether
+      // or not there is a module to call.
       rec.phase = "active";
+      await this.autostartProcesses(rec, log);
       return;
     }
     const owned = newOwnedResources();
     rec.owned = owned;
-    const log = this.loggerFor(rec.id);
     try {
       const url = pathToFileURL(resolve(rec.dir, manifest.server)).href;
       const ns = await withBudget(this.importModule(url), this.activateBudgetMs, "import");
@@ -205,15 +247,26 @@ export class PluginService {
       const ctx = buildPluginContext(
         manifest,
         rec.dir,
-        { ...this.ctxDeps, store: this.store, log, settings: () => rec.settings },
+        {
+          ...this.ctxDeps,
+          store: this.store,
+          log,
+          settings: () => rec.settings,
+          processes: this.processHost?.for(rec.id),
+        },
         owned,
       );
+      // Autostart BEFORE `activate` runs, so a module that talks to its own
+      // process from `activate` (health-check it, read its port from
+      // `ctx.processes.list()`) finds it already up.
+      await this.autostartProcesses(rec, log);
       await withBudget(Promise.resolve(mod.activate(ctx)), this.activateBudgetMs, "activate()");
       if (this.disposed) {
         // The host went away while this one was coming up. `dispose()` does not
         // wait for an activate in flight (a hung one would hold the shutdown
         // for its whole budget), so the late arrival tears itself down here.
         this.teardown(rec);
+        await this.stopProcesses(rec);
         rec.phase = "inactive";
         return;
       }
@@ -223,8 +276,10 @@ export class PluginService {
       rec.phase = "error";
       rec.activationError = describe(err);
       this.fault(`plugin "${rec.id}" failed to activate`, err);
-      // Whatever it registered before throwing is as dead as the plugin.
+      // Whatever it registered before throwing is as dead as the plugin —
+      // its processes included.
       this.teardown(rec);
+      await this.stopProcesses(rec);
     }
   }
 
@@ -239,7 +294,24 @@ export class PluginService {
       }
     }
     this.teardown(rec);
+    await this.stopProcesses(rec);
     rec.phase = "inactive";
+  }
+
+  /** Start the plugin's `autostart` processes; a failure is a row warning, never an activation failure. */
+  private async autostartProcesses(rec: PluginRecord, log: PluginLog): Promise<void> {
+    if (!this.processHost || !rec.contributions.processes.length) return;
+    await this.processHost.autostart(rec.id, (id, err) => {
+      log.error(`process "${id}" failed to start: ${describe(err)}`, err);
+    });
+  }
+
+  /** Stop every process the plugin has running. Best-effort, like the rest of teardown. */
+  private async stopProcesses(rec: PluginRecord): Promise<void> {
+    if (!this.processHost || !rec.contributions.processes.length) return;
+    await this.processHost.stopAll(rec.id).catch((err: unknown) => {
+      this.fault(`plugin "${rec.id}" processes failed to stop`, err);
+    });
   }
 
   /** Drop everything the plugin registered. Idempotent. */
@@ -322,6 +394,7 @@ export class PluginService {
       settings: rec.settings,
       ...(m?.secrets ? { secrets: m.secrets } : {}),
       ...(oauth?.length ? { oauth } : {}),
+      ...(rec.contributions.warnings.length ? { warnings: rec.contributions.warnings } : {}),
     };
   }
 
@@ -332,6 +405,72 @@ export class PluginService {
   get(id: string): PluginInfo | undefined {
     const rec = this.records.get(id);
     return rec && this.info(rec);
+  }
+
+  /* -------------------------------------------------------- contributions */
+
+  /**
+   * Plugins whose contributions are IN EFFECT: valid, compatible and enabled.
+   * Activation phase is deliberately not consulted — a plugin whose server
+   * module threw still has valid skills, and a contributions-only plugin has
+   * no module to activate. Id order, which is also activation order, so a
+   * name two plugins both claim is resolved the same way everywhere.
+   */
+  private contributing(): PluginRecord[] {
+    return [...this.records.values()]
+      .filter((r) => r.manifest && !r.incompatible && r.enabled)
+      .sort((a, b) => a.id.localeCompare(b.id));
+  }
+
+  /** Contributed skills, each with the plugin it came from. */
+  skills(): Array<{ pluginId: string; skill: SkillConfig }> {
+    return this.contributing().flatMap((r) => r.contributions.skills.map((skill) => ({ pluginId: r.id, skill })));
+  }
+
+  /** Contributed instructions — injected between shipped and global. */
+  instructions(): Array<{ pluginId: string; file: InstructionFile }> {
+    return this.contributing().flatMap((r) => r.contributions.instructions.map((file) => ({ pluginId: r.id, file })));
+  }
+
+  /** Contributed personas. */
+  personas(): Array<{ pluginId: string; file: InstructionFile }> {
+    return this.contributing().flatMap((r) => r.contributions.personas.map((file) => ({ pluginId: r.id, file })));
+  }
+
+  /** Contributed modes, scope `plugin`, each stamped with its `pluginId`. */
+  modes(): ModeConfig[] {
+    const seen = new Set<string>();
+    const out: ModeConfig[] = [];
+    for (const r of this.contributing()) {
+      for (const m of r.contributions.modes) {
+        if (seen.has(m.id)) continue;
+        seen.add(m.id);
+        out.push(m);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Every declared MCP server from every VALID plugin — disabled ones too,
+   * with `byDefault: false` — so the catalog can list what a toggle could turn
+   * on. Selection for a session happens in `selectPluginMcpServers`.
+   */
+  mcpServers(): PluginMcpDeclaration[] {
+    const out: PluginMcpDeclaration[] = [];
+    for (const r of [...this.records.values()].sort((a, b) => a.id.localeCompare(b.id))) {
+      if (!r.manifest || r.incompatible) continue;
+      for (const decl of r.contributions.mcpServers) {
+        out.push({
+          ...decl,
+          byDefault: r.enabled,
+          defaultReason: r.enabled
+            ? `declared by plugin "${r.id}"`
+            : `off — plugin "${r.id}" is switched off in Settings → Plugins`,
+        });
+      }
+    }
+    return out;
   }
 
   /** The host API major, for the pane's "built for" text. */

@@ -3,7 +3,12 @@
   "compilerOptions": {
     "outDir": "./dist",
     "rootDir": "./src",
-    "noUncheckedIndexedAccess": true
+    "noUncheckedIndexedAccess": true,
+    // Explicit, like the server's: the only ambient library this package wants
+    // is Node's. Left implicit, tsc also sweeps in every `node_modules/@types`
+    // it can reach walking UP from here, and on 2026-10-22 that included a
+    // half-installed `@types/three` behind a symlinked `C:\node_modules`.
+    "types": ["node"]
   },
   "include": ["src/**/*.ts"],
   "exclude": ["src/**/*.test.ts"]

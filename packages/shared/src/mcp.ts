@@ -42,8 +42,13 @@ export interface McpToolInfo {
  *              made "why can the agent call playwright?" unanswerable from the
  *              one screen that exists to answer it.
  *   external — declared by the project under `mcpServers`.
+ *   plugin   — contributed by an installed plugin's `contributes.mcpServers`.
+ *              Its own kind rather than `external` because the thing to fix
+ *              when it misbehaves is in `<configDir>/plugins/<id>/`, not in
+ *              this project's manifest, and the toggle beside it defaults to
+ *              the PLUGIN's enabled state rather than to "declared, so on".
  */
-export type McpServerKind = "custom" | "bundled" | "external";
+export type McpServerKind = "custom" | "bundled" | "external" | "plugin";
 
 /**
  * Probe outcome for one server. `unconfigured` = no transport to connect on;

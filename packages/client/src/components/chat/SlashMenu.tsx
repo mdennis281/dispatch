@@ -21,6 +21,7 @@ import { cn } from "../../lib/cn.js";
 const SOURCE_LABEL: Record<SlashCommandSource, string> = {
   project: "project",
   global: "global",
+  plugin: "plugin",
   shipped: "dispatch",
   repo: "repo",
   builtin: "built-in",

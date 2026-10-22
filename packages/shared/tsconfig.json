@@ -3,7 +3,15 @@
   "compilerOptions": {
     "outDir": "./dist",
     "rootDir": "./src",
-    "noUncheckedIndexedAccess": true
+    "noUncheckedIndexedAccess": true,
+    // No ambient type libraries. This package is bundled into the BROWSER as
+    // well as the server (see `ambientEnv()` in env-expand.ts for the same
+    // rule applied to runtime code), so nothing here may lean on `@types/node`
+    // or anything else tsc would pull in implicitly. Pinning the list also
+    // stops a stray `node_modules/@types` higher up the directory tree — a
+    // half-installed `@types/three` reachable through a symlinked `C:\node_modules`
+    // took the build down on 2026-10-22 — from being swept into the program.
+    "types": []
   },
   "include": ["src/**/*.ts"],
   "exclude": ["src/**/*.test.ts"]

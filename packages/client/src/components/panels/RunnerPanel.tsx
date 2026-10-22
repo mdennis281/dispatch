@@ -258,17 +258,26 @@ export function RunnerPanel({ chat }: { chat: Chat }) {
 
   if (mine.length === 0 && subApps.length === 0) {
     return (
-      <div className="px-4 py-10 text-center">
-        <Gamepad2 className="mx-auto mb-2 size-5 text-faint" />
-        <p className="text-sm text-muted">No subApps configured.</p>
-        <p className="mt-0.5 text-xs text-faint">Add subApps to this project to run them here.</p>
-        {project?.repoPath && (
-          <div className="mt-3 flex justify-center">
-            <Button size="sm" variant="subtle" leftIcon={<SquarePen />} onClick={editDefinitions}>
-              Edit definitions
-            </Button>
-          </div>
-        )}
+      <div className="space-y-3 p-3">
+        <div className="px-1 py-7 text-center">
+          <Gamepad2 className="mx-auto mb-2 size-5 text-faint" />
+          <p className="text-sm text-muted">No subApps configured.</p>
+          <p className="mt-0.5 text-xs text-faint">Add subApps to this project to run them here.</p>
+          {project?.repoPath && (
+            <div className="mt-3 flex justify-center">
+              <Button size="sm" variant="subtle" leftIcon={<SquarePen />} onClick={editDefinitions}>
+                Edit definitions
+              </Button>
+            </div>
+          )}
+        </div>
+        {/* Still offered with nothing to launch: the ports this project's
+            chats took, and any plugin-managed process (which belongs to no
+            project and so appears in every project's view), are only
+            reachable from here and the roster overlay. Hiding the panel with
+            the empty state made a plugin's process invisible in exactly the
+            projects that most need to know what took the port. */}
+        {project && <ProcessesPanel projectId={project.id} />}
       </div>
     );
   }
