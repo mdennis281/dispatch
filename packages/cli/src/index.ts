@@ -14,16 +14,18 @@ import { CmError } from "./core/manifest.js";
 import { runMcpCommand } from "./commands/mcp.js";
 import { runAuthCommand } from "./commands/auth.js";
 import { runTokenCommand } from "./commands/token.js";
+import { runPluginCommand } from "./commands/plugin.js";
 
 const HELP = `cm — Dispatch project CLI
 
 Usage:
   dispatch mcp <command> [options]    Manage this project's MCP servers
+  cm plugin <command> [options]       Install and manage plugins (global, <configDir>/plugins/)
   dispatch auth reset-owner --config-dir <dir> [--data-dir <dir>] --password-stdin --confirm-stopped
   cm token create|list|revoke   Integration tokens for bots and scripts (\`cm token help\`)
   cm help                       Show this help
 
-Run \`dispatch mcp help\` for the MCP command surface.
+Run \`dispatch mcp help\` or \`cm plugin help\` for each command surface.
 
 Config lives in .dispatch/project.yaml at the repo root — committable,
 reviewable, and re-read live by Dispatch whenever it changes.
@@ -50,6 +52,10 @@ async function main(argv: string[]): Promise<number> {
         return 0;
       case "token":
         await runTokenCommand(rest);
+        return 0;
+      case "plugin":
+      case "plugins":
+        await runPluginCommand(rest);
         return 0;
       default:
         process.stderr.write(`cm: unknown command "${command}"\n\n${HELP}`);
