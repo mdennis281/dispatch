@@ -56,3 +56,4 @@ export * from "./issues.js";
 export * from "./authoring.js";
 export * from "./global-chat.js";
 export * from "./auto-allow.js";
+export * from "./webhooks.js";

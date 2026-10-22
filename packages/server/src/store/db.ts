@@ -278,6 +278,51 @@ const MIGRATIONS: ReadonlyArray<string> = [
     body       TEXT NOT NULL
   );
   `,
+
+  // 7 — outbound webhooks.
+  //
+  // `webhook_subscription` is one JSON body per subscription, like `pr` and
+  // `issue`: the filter shape will grow (a new wire event is a new option) and
+  // zod on read is how that stays a schema edit rather than a migration.
+  //
+  // `webhook_delivery` is COLUMNS plus the signed body. Every read is a filter
+  // over them — "pending rows due before now" on boot, "this subscription's
+  // newest 100" in Settings, "older than seven days" in the sweep — and the
+  // body is kept verbatim because a redelivery must re-send the exact bytes the
+  // signature was computed over; re-serialising the event could reorder keys
+  // and invalidate a signature the receiver already logged.
+  //
+  // No foreign key to the subscription table, on purpose: deleting a
+  // subscription drops its deliveries in the same transaction (see
+  // deleteWebhookSubscription), and a constraint here would make the boot
+  // resume refuse a row whose subscription a crash deleted a moment earlier.
+  `
+  CREATE TABLE webhook_subscription (
+    seq  INTEGER PRIMARY KEY,
+    id   TEXT NOT NULL UNIQUE,
+    body TEXT NOT NULL
+  );
+  CREATE TABLE webhook_delivery (
+    seq             INTEGER PRIMARY KEY,
+    id              TEXT NOT NULL UNIQUE,
+    subscription_id TEXT NOT NULL,
+    event_type      TEXT NOT NULL,
+    chat_id         TEXT,
+    project_id      TEXT,
+    status          TEXT NOT NULL,
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    next_at         INTEGER,
+    last_status     INTEGER,
+    last_error      TEXT,
+    created_at      INTEGER NOT NULL,
+    updated_at      INTEGER NOT NULL,
+    body            TEXT NOT NULL
+  );
+  CREATE INDEX webhook_delivery_sub     ON webhook_delivery(subscription_id, seq);
+  CREATE INDEX webhook_delivery_created ON webhook_delivery(created_at);
+  -- Partial: the boot resume asks only for the handful a shutdown left pending.
+  CREATE INDEX webhook_delivery_pending ON webhook_delivery(next_at) WHERE status = 'pending';
+  `,
 ];
 
 /** Schema version a database must be at for this build to use it. */
