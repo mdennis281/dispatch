@@ -156,7 +156,13 @@ export function desktopRoot(override) {
     process.env.LOCALAPPDATA ||
     process.env.XDG_DATA_HOME ||
     join(homedir(), platform() === "darwin" ? "Library/Application Support" : ".local/share");
-  return join(base, "claude-manager");
+  const root = join(base, "dispatch");
+  if (existsSync(root)) return root;
+  // TODO(remove after install migration): an install that predates the rename
+  // still lives under `claude-manager` until `pnpm app:migrate-home` moves it.
+  const legacy = join(base, "claude-manager");
+  if (existsSync(legacy)) return legacy;
+  return root;
 }
 
 function assertSafeRoot(root) {

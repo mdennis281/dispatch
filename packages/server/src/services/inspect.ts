@@ -283,12 +283,16 @@ export function installedRoots(
   env: NodeJS.ProcessEnv = process.env,
   home = homedir(),
 ): { dataDir: string; configDir: string } | null {
-  const explicit = env.DISPATCH_HOME ?? env.CM_HOME;
   const local =
     env.LOCALAPPDATA ??
     env.XDG_DATA_HOME ??
     join(home, process.platform === "darwin" ? "Library/Application Support" : ".local/share");
-  const root = explicit ? resolve(explicit) : join(local, "claude-manager");
+  let root = env.DISPATCH_HOME ? resolve(env.DISPATCH_HOME) : join(local, "dispatch");
+  // TODO(remove after install migration): an install that predates the rename
+  // still lives under `claude-manager` until `pnpm app:migrate-home` moves it.
+  if (!env.DISPATCH_HOME && !existsSync(root) && existsSync(join(local, "claude-manager"))) {
+    root = join(local, "claude-manager");
+  }
   const dataDir = join(root, "data");
   const configDir = join(root, "config");
   // Already pointed at it → `self` is the same store.

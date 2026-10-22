@@ -371,7 +371,7 @@ launch. The **Ports & processes** panel is the escape hatch:
 - **Kill orphans** / **Kill all** tree-kills by pid — use this whenever you hit
   "port already in use" but the UI shows nothing running.
 
-## MCP servers (`cm mcp`)
+## MCP servers (`dispatch mcp`)
 
 A managed repo's MCP servers live in its committable `.dispatch/project.yaml`.
 The manager watches that file, so an edit applies to the next turn — no restart.
@@ -381,18 +381,18 @@ Three ways to add one, all writing the same file:
 - **Ask an agent.** Sessions get `mcp__dispatch-mcp__mcp_add` / `mcp_list` / `mcp_remove`,
   plus a bundled `mcp-setup` skill that fires whenever the conversation turns to
   installing or debugging an MCP server.
-- **The `cm` CLI**, from anywhere inside the repo.
+- **The `dispatch` CLI**, from anywhere inside the repo.
 - **By hand**, if you prefer — the CLI just validates for you.
 
 ```bash
-cm mcp add ripgrep -- npx -y mcp-ripgrep@latest      # stdio (local subprocess)
-cm mcp add linear --transport http --url https://mcp.linear.app/mcp
-cm mcp add-json foo '{"command":"npx","args":["-y","foo-mcp"]}'
-cm mcp import ./.mcp.json                            # bulk import
-cm mcp list | get <name> | remove <name>
+dispatch mcp add ripgrep -- npx -y mcp-ripgrep@latest      # stdio (local subprocess)
+dispatch mcp add linear --transport http --url https://mcp.linear.app/mcp
+dispatch mcp add-json foo '{"command":"npx","args":["-y","foo-mcp"]}'
+dispatch mcp import ./.mcp.json                            # bulk import
+dispatch mcp list | get <name> | remove <name>
 ```
 
-`cm` needs `pnpm build` once, then to reach it from a managed repo put it on your
+`dispatch` needs `pnpm build` once, then to reach it from a managed repo put it on your
 PATH:
 
 ```bash
@@ -403,7 +403,7 @@ Without installing, run it from the Dispatch checkout with an explicit
 target directory:
 
 ```bash
-pnpm cm mcp list -C /path/to/your/repo
+pnpm dispatch mcp list -C /path/to/your/repo
 ```
 
 **Secrets stay out of the committed file.** Values may use `${VAR}` or
@@ -411,7 +411,7 @@ pnpm cm mcp list -C /path/to/your/repo
 starts:
 
 ```bash
-cm mcp add linear --transport http --url https://mcp.linear.app/mcp \
+dispatch mcp add linear --transport http --url https://mcp.linear.app/mcp \
   -H "Authorization: Bearer ${LINEAR_API_KEY}"
 ```
 
@@ -441,15 +441,15 @@ Plugins are global; a project opts out of a plugin's MCP server through its ordi
 **Install.**
 
 ```bash
-pnpm cm plugin add <path | git-url | tarball> --config-dir <dir>   # validate, copy in, print what it declares
-pnpm cm plugin link <path> --config-dir <dir>                      # junction a working directory (development)
-pnpm cm plugin list | enable <id> | disable <id> | remove <id>
-pnpm cm plugin init my-plugin --both                                # scaffold one against @dispatch/plugin-sdk
+pnpm dispatch plugin add <path | git-url | tarball> --config-dir <dir>   # validate, copy in, print what it declares
+pnpm dispatch plugin link <path> --config-dir <dir>                      # junction a working directory (development)
+pnpm dispatch plugin list | enable <id> | disable <id> | remove <id>
+pnpm dispatch plugin init my-plugin --both                                # scaffold one against @dispatch/plugin-sdk
 ```
 
 The four reference plugins are in `examples/plugins/` (`hello-server`, `hello-slot`,
 `event-forwarder`, `contributions`); `pnpm build` at the root builds them, so a built
-checkout can `cm plugin link` any of them straight away.
+checkout can `dispatch plugin link` any of them straight away.
 
 **The restart rule.** Plugins are read at boot and nothing hot-reloads: after `add`,
 `link`, `enable`, or editing a plugin's files, restart the instance that should see it
@@ -461,7 +461,7 @@ immediately (routes 404, listeners dropped, processes stopped); switching it **o
 settings form, OAuth Connect buttons and "open folder" live.
 
 **Integrations without a plugin.** A bot or script talks to the host directly with an
-integration token (Settings → Integrations → Tokens, or `pnpm cm token create`), the
+integration token (Settings → Integrations → Tokens, or `pnpm dispatch token create`), the
 REST surface under `/api/integration/`, the external MCP mount
 `/api/mcp/integration/<category>`, outbound webhooks, and OAuth for connectors that
 expect it. All of it needs authentication enabled. See docs/plugins.md → "Integrations".
@@ -481,7 +481,7 @@ and the **hot-reload dev server** you break things in. They run side by side.
 ### Install
 ```
 pnpm app:migrate -- --dry-run        # preview the data move; then drop --dry-run
-pnpm app:migrate-store -- --source "%LOCALAPPDATA%\claude-manager\data" --dry-run   # then drop it
+pnpm app:migrate-store -- --source "%LOCALAPPDATA%\dispatch\data" --dry-run   # then drop it
 pnpm app:publish                     # build + install the payload
 pnpm app:shortcut                    # Start-menu entry (add -- --desktop for a Desktop one)
 ```
@@ -521,8 +521,8 @@ Two things to know:
   error at all. If you see that message, just re-run the script: it resumes.
 
 ```
-pnpm app:migrate-store -- --source "%LOCALAPPDATA%\claude-manager\data" --dry-run
-pnpm app:migrate-store -- --source "%LOCALAPPDATA%\claude-manager\data"
+pnpm app:migrate-store -- --source "%LOCALAPPDATA%\dispatch\data" --dry-run
+pnpm app:migrate-store -- --source "%LOCALAPPDATA%\dispatch\data"
 ```
 `--source` defaults to this checkout's `.data`, so a dev-only migration needs no flags.
 `--target` writes the database somewhere else, leaving the source untouched — that is how
@@ -571,7 +571,7 @@ browser (Chrome, Edge, Brave, Vivaldi…).
 
 ### Layout
 ```
-%LOCALAPPDATA%\claude-manager\    ← still the pre-rename name; see note below
+%LOCALAPPDATA%\dispatch\
   app\               the payload — a git clone of this repo, built in place
   data\              DISPATCH_DATA_DIR   chats + state.db              (per-instance)
     state.db         checkpoints, PRs, worktrees, runners, terminals, MCP port leases
@@ -587,11 +587,12 @@ browser (Chrome, Edge, Brave, Vivaldi…).
   upgrade.log        the detached swap's narration (rotated past 2 MB)
 ```
 
-The root is still literally `claude-manager`. Renaming it would strand every existing
-chat transcript behind a one-shot migration, which is a poor trade for a directory
-nobody opens — so the rebrand left it alone. Move it deliberately when you want to:
-set `DISPATCH_HOME`, or run `pnpm app:migrate`. `DISPATCH_HOME` is read first but
-`CM_HOME` still works, so a shortcut created before the rename keeps launching.
+<!-- TODO(remove after install migration) -->
+An install from before the rename lives in `%LOCALAPPDATA%\claude-manager`. Move it with
+`pnpm app:migrate-home` (stop the app first; `-- --dry-run` previews every step). It
+renames the root in place — no data is copied — then rebuilds `app\` there, because
+pnpm's junctions hold absolute paths into the old location. Until it has run, every
+launcher still finds the old root when the new one does not exist.
 
 **`config/` is shared, `data/` is not.** Projects, agents and modes are written rarely and
 are miserable to maintain twice, so both instances read one copy.
@@ -718,7 +719,7 @@ and is never deleted — it's the only copy of the thing that broke.
 | `DISPATCH_MAX_ACTIVE_SESSIONS` | `6` | max concurrently-active chats — the DEFAULT only; **Settings → Context → Max active chats** overrides it and applies without a restart |
 | `DISPATCH_TRUST_PROXY` | unset | upstreams allowed to set `X-Forwarded-For` — see [Behind a reverse proxy](#behind-a-reverse-proxy) |
 | `DISPATCH_IPC` | unset | `1` makes the server accept `shutdown` on stdin (the launcher sets it) |
-| `DISPATCH_HOME` | `%LOCALAPPDATA%\claude-manager` | root for the whole installed layout |
+| `DISPATCH_HOME` | `%LOCALAPPDATA%\dispatch` | root for the whole installed layout |
 
 To run the launcher against a checkout instead of the installed payload, pass
 `--app-dir` rather than an env var: `python tools/app/launch.py --app-dir .`

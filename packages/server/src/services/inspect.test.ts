@@ -551,14 +551,14 @@ describe("installedRoots", () => {
 
   it("derives the documented layout from LOCALAPPDATA", () => {
     const roots = installedRoots({ LOCALAPPDATA: LOCAL } as NodeJS.ProcessEnv);
-    expect(slash(roots?.dataDir)).toBe(`${LOCAL}/claude-manager/data`);
-    expect(slash(roots?.configDir)).toBe(`${LOCAL}/claude-manager/config`);
+    expect(slash(roots?.dataDir)).toBe(`${LOCAL}/dispatch/data`);
+    expect(slash(roots?.configDir)).toBe(`${LOCAL}/dispatch/config`);
   });
 
   it("returns null when this process ALREADY is the installed instance", () => {
     const roots = installedRoots({
       LOCALAPPDATA: LOCAL,
-      DISPATCH_DATA_DIR: join(LOCAL, "claude-manager", "data"),
+      DISPATCH_DATA_DIR: join(LOCAL, "dispatch", "data"),
     } as NodeJS.ProcessEnv);
     expect(roots).toBeNull();
   });

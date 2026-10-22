@@ -35,21 +35,15 @@ import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { desktopPaths } from "./paths.mjs";
 import {
+  assertAppStopped,
   assertNodeVersion,
   buildInto,
   capture,
-  portAlive,
   prepareClone,
 } from "./build-payload.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "../..");
-
-/**
- * How long to give a supervisor that is still tearing down. Matches launch.py's
- * STOP_TIMEOUT_S (25s) plus slack — beyond that it is wedged, not slow.
- */
-const SUPERVISOR_EXIT_WAIT_MS = 35_000;
 
 function parseArgs(argv) {
   const args = { ref: "HEAD", dryRun: false };
@@ -64,63 +58,6 @@ function parseArgs(argv) {
     else throw new Error(`unknown argument: ${a}`);
   }
   return args;
-}
-
-/**
- * Refuse to publish under a live app. `runtime.json` can be stale (a hard crash
- * never cleans it up), so confirm with an actual connection before blocking.
- */
-async function assertAppStopped(paths) {
-  if (!existsSync(paths.runtime)) return;
-  let rt;
-  try {
-    rt = JSON.parse(readFileSync(paths.runtime, "utf8"));
-  } catch {
-    return; // unreadable => treat as stale
-  }
-  if (rt.port && (await portAlive(rt.port))) {
-    throw new Error(
-      `Dispatch is running (pid ${rt.pid}, ${rt.url}).\n` +
-        `  Stop it first:  pnpm app:stop\n` +
-        `  That runs the server's own teardown — stopping agents and subApps\n` +
-        `  cleanly. Killing the process does not.`,
-    );
-  }
-  // A dead port is not a stopped app. `app.close()` drops the listener and only
-  // then runs the teardown, so the supervisor — which is still holding a cwd
-  // inside `app/` — can outlive the port by the whole grace window, and this
-  // builds IN PLACE in that directory. Wait it out rather than racing it.
-  if (await supervisorLingering(paths, rt)) {
-    throw new Error(
-      `a previous instance is still shutting down (supervisor pid ${rt.supervisor}).\n` +
-        `  Its teardown may be wedged on a hung subApp — check the Ports & processes\n` +
-        `  panel, then re-run.`,
-    );
-  }
-  console.log("note: stale runtime.json (app not reachable) — continuing.\n");
-}
-
-/** True if the recorded supervisor is STILL alive after a bounded wait. */
-async function supervisorLingering(paths, rt) {
-  const pid = rt?.supervisor;
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  const deadline = Date.now() + SUPERVISOR_EXIT_WAIT_MS;
-  let announced = false;
-  while (Date.now() < deadline) {
-    // EPERM = it exists and belongs to somebody else: alive, not gone.
-    try {
-      process.kill(pid, 0);
-    } catch (err) {
-      if (err?.code !== "EPERM") return false;
-    }
-    if (!existsSync(paths.runtime)) return false; // its own exit removes the file
-    if (!announced) {
-      console.log(`waiting for the previous instance to finish shutting down...`);
-      announced = true;
-    }
-    await new Promise((r) => setTimeout(r, 500));
-  }
-  return true;
 }
 
 async function main() {

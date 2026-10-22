@@ -24,6 +24,7 @@
  */
 import { readdirSync, readFileSync, writeFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { desktopPaths } from "./paths.mjs";
 
 const args = process.argv.slice(2);
 const apply = args.includes("--apply");
@@ -31,7 +32,7 @@ const dataArg = args.indexOf("--data");
 const dataDir =
   dataArg !== -1
     ? args[dataArg + 1]
-    : join(process.env.LOCALAPPDATA ?? "", "claude-manager", "data");
+    : desktopPaths().dataDir;
 const chatsDir = join(dataDir, "chats");
 
 // A minute of slack: a chat written at the tail of its own turn is legitimately
