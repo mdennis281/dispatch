@@ -39,7 +39,8 @@ import {
   dirtyAppSections,
 } from "../../stores/settingsDraft.js";
 import { SettingsShell } from "./SettingsShell.js";
-import { APP_SECTIONS, APP_SECTION_BY_ID } from "./appSections.js";
+import { APP_SECTIONS, APP_SECTION_BY_ID, pluginSectionDef, useAppSections } from "./appSections.js";
+import { useSlots } from "../../plugins/slots.js";
 import { AppearanceSection } from "./sections/AppearanceSection.js";
 import { AccountsSection } from "./sections/AccountsSection.js";
 import { ChatSection } from "./sections/ChatSection.js";
@@ -248,7 +249,12 @@ export function AppSettingsView() {
     }
   }, [busy, draft, pushToast]);
 
-  const def = APP_SECTION_BY_ID.get(section) ?? APP_SECTIONS[0]!;
+  const sections = useAppSections();
+  // A plugin's section (host.slots.settingsSection), when the selected id is
+  // one. Rendered by the plugin; the heading and blurb are the host's.
+  const pluginSection = useSlots((s) => s.settingsSections).find((e) => e.key === section);
+  const def =
+    APP_SECTION_BY_ID.get(section) ?? (pluginSection ? pluginSectionDef(pluginSection) : APP_SECTIONS[0]!);
   const Icon = def.icon;
   const paneProps = draft ? { draft, patch, harnesses, catalogs, serverDefaults } : null;
 
@@ -257,7 +263,7 @@ export function AppSettingsView() {
       icon={<SlidersHorizontal />}
       title="Settings"
       subtitle="App-wide preferences, persisted server-side"
-      sections={APP_SECTIONS.map((s) => ({
+      sections={sections.map((s) => ({
         id: s.id,
         icon: s.icon,
         label: s.label,
@@ -315,6 +321,8 @@ export function AppSettingsView() {
           <div className="flex items-center justify-center gap-2 py-16 text-sm text-muted">
             <Spinner size={14} /> Loading settings…
           </div>
+        ) : pluginSection ? (
+          <>{pluginSection.def.render()}</>
         ) : section === "auth" ? (
           <AuthSettings />
         ) : section === "integrations" ? (

@@ -113,7 +113,7 @@ if (!isMissionPreview) {
   void initializeAuth().then(() => {
     const status = useAuth.getState().status;
     if (!status?.enabled || useAuth.getState().user) {
-      startLiveApp();
+      startLiveApp({ shell: isShell });
     }
   });
 }

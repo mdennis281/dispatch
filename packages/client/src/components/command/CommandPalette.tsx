@@ -64,7 +64,7 @@ import {
   openProjectSettings,
 } from "../../stores/view.js";
 import { openWorkspace } from "../../stores/workspace.js";
-import { APP_SECTIONS } from "../settings/appSections.js";
+import { useAppSections } from "../settings/appSections.js";
 import { SECTIONS } from "../config/sections.js";
 import { requestFocusPanel, type FocusPanelTab } from "../panels/panelBus.js";
 import { Kbd } from "../ui/Kbd.js";
@@ -244,6 +244,7 @@ export function CommandPalette({
     return () => cancelAnimationFrame(id);
   }, [open]);
 
+  const appSections = useAppSections();
   const commands = useMemo<Command[]>(() => {
     const list: Command[] = [];
     const project = projects.find((p) => p.id === activeProjectId) ?? null;
@@ -402,7 +403,7 @@ export function CommandPalette({
       keywords: "preferences theme webhook config gear notifications",
       run: () => openAppSettings(),
     });
-    for (const s of APP_SECTIONS) {
+    for (const s of appSections) {
       list.push({
         id: `settings-${s.id}`,
         title: `Settings › ${s.label}`,
@@ -483,7 +484,7 @@ export function CommandPalette({
     }
 
     return list;
-  }, [projects, activeProjectId, chatsById, chatOrder, activeChatId]);
+  }, [projects, activeProjectId, chatsById, chatOrder, activeChatId, appSections]);
 
   const activeProject = projects.find((p) => p.id === activeProjectId) ?? null;
   const fileCommands = useProjectFileCommands(

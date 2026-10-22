@@ -18,6 +18,7 @@ import type {
 import { DEFAULT_HARNESS } from "@dispatch/shared";
 
 import { api, ApiError } from "../lib/api.js";
+import { publishServerEvent } from "../lib/eventTap.js";
 import {
   notifyAttention,
   syncChatNotification,
@@ -124,10 +125,20 @@ function itemsForChat(chatId: string): AttentionItem[] {
 }
 
 /**
- * The one reducer: apply a server event to the stores. Exhaustive over
- * WsServerEvent so a new event type is a compile error until it's handled.
+ * The one reducer: apply a server event to the stores, then hand the frame to
+ * the event tap (lib/eventTap) for plugin code. The tap runs AFTER the switch
+ * so a listener reads the stores as they are once the event has landed.
  */
 export function applyServerEvent(evt: WsServerEvent): void {
+  reduceServerEvent(evt);
+  publishServerEvent(evt);
+}
+
+/**
+ * Exhaustive over WsServerEvent so a new event type is a compile error until
+ * it's handled.
+ */
+function reduceServerEvent(evt: WsServerEvent): void {
   switch (evt.type) {
     case "hello":
       useConnection.getState().onHello(evt.serverTime, evt.version);
@@ -395,9 +406,9 @@ export function applyServerEvent(evt: WsServerEvent): void {
     case "pong":
       return;
 
-    // A plugin's own event for its client half. No store here reads it: the
-    // client plugin host (workstream E) subscribes to the socket and routes it
-    // by `plugin`. Listed so the exhaustive check still holds.
+    // A plugin's own event for its client half. No store reads it: the client
+    // plugin host receives it through the event tap below and routes it by
+    // `plugin` (plugins/host.ts). Listed so the exhaustive check still holds.
     case "plugin-event":
       return;
 

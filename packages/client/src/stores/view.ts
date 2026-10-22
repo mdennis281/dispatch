@@ -41,7 +41,7 @@ export type AppView =
  * ("Stop Dispatch" lands on `system`), and a store that imported a component
  * file to learn the union would be pointing the wrong way.
  */
-export type AppSettingsSection =
+export type BuiltinAppSettingsSection =
   | "appearance"
   | "chat"
   | "permissions"
@@ -55,6 +55,13 @@ export type AppSettingsSection =
   | "auth"
   | "updates"
   | "system";
+
+/**
+ * A built-in subpage, or a plugin's (`host.slots.settingsSection`), which is
+ * filed under `<pluginId>:<id>` — see plugins/slots. The `string & {}` keeps
+ * the literals in completions while admitting ids the type cannot know.
+ */
+export type AppSettingsSection = BuiltinAppSettingsSection | (string & {});
 
 /**
  * The app's modal surfaces — project-scoped things that sit ON TOP of a view

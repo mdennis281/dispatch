@@ -25,7 +25,13 @@ export function requestOpenFile(req: OpenFileRequest): void {
 
 /** The right-panel tabs the command palette can jump to. (Memory is now a
  *  top-level, chat-independent view — see stores/view.ts — not a panel tab.) */
-export type FocusPanelTab = "worktrees" | "agents" | "apps" | "terminals" | "prs";
+export type BuiltinPanelTab = "worktrees" | "agents" | "apps" | "terminals" | "prs";
+/**
+ * A built-in tab, or a plugin's (`host.slots.panelTab`), filed under
+ * `<pluginId>:<id>` — see plugins/slots. The `string & {}` keeps the literals
+ * in completions while admitting ids the type cannot know.
+ */
+export type FocusPanelTab = BuiltinPanelTab | (string & {});
 
 /**
  * Ask the shell to switch to a given right-panel tab (Worktrees / Apps / PRs).

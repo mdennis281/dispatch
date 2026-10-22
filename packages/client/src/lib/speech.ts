@@ -10,8 +10,9 @@
  * deletes both the failure and the workaround.
  *
  * Everything above this module talks to `DictationEngine`, so a second engine
- * (a local model, a server-side transcriber) is a matter of adding another
- * factory here — no UI changes.
+ * (a local model, a server-side transcriber) is a matter of registering another
+ * factory — `host.engines.dictation.register` from a plugin, or the registry in
+ * lib/engines.ts — with no UI changes.
  */
 
 /** Chrome's SpeechRecognition isn't in TypeScript's DOM lib; only what we use. */
@@ -96,21 +97,11 @@ function describe(code: string): string | null {
   }
 }
 
-export interface DictationHandlers {
-  /** Stable, committed text. Arrives in chunks as you pause. */
-  onFinal(text: string): void;
-  /** Live guess for the phrase in progress; replaced on every event. */
-  onInterim(text: string): void;
-  /** A real problem worth surfacing. Benign codes never reach this. */
-  onError(message: string): void;
-  /** Recognition has genuinely stopped — update the UI to "not listening". */
-  onStopped(): void;
-}
-
-export interface DictationEngine {
-  start(): void;
-  stop(): void;
-}
+// The engine contract lives in @dispatch/shared (plugin-client-api.ts) now,
+// because a plugin's dictation engine implements the same two interfaces this
+// one does. Re-exported so the composer keeps importing them from here.
+import type { DictationEngine, DictationHandlers } from "@dispatch/shared";
+export type { DictationEngine, DictationHandlers };
 
 /**
  * How many consecutive instant restarts we tolerate before concluding the engine

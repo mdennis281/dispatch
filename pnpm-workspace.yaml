@@ -1,5 +1,8 @@
 packages:
   - 'packages/*'
+  # The example plugins build in CI (`pnpm -r build`) so the client-host
+  # contract — a bundle against the globals shim — cannot rot unnoticed.
+  - 'examples/plugins/*'
 allowBuilds:
   esbuild: true
 minimumReleaseAgeExclude:

@@ -21,8 +21,8 @@
  * selected lives in the view store (see stores/view), so the command palette can
  * address a subpage directly and the choice survives a trip to a chat and back.
  */
-import { useEffect, useState, type ReactNode } from "react";
-import { ChevronLeft, type LucideIcon } from "lucide-react";
+import { useEffect, useState, type ComponentType, type ReactNode } from "react";
+import { ChevronLeft } from "lucide-react";
 import { Chip } from "../ui/Chip.js";
 import { IconButton } from "../ui/IconButton.js";
 import { ScrollArea } from "../ui/ScrollArea.js";
@@ -31,7 +31,8 @@ import { cn } from "../../lib/cn.js";
 
 export interface ShellSection<Id extends string> {
   id: Id;
-  icon: LucideIcon;
+  /** A lucide icon, or any component taking `className` — a plugin section's icon is the latter. */
+  icon: ComponentType<{ className?: string }>;
   label: string;
   /** One line, under the label on the index and in the rail tooltip. */
   blurb: string;

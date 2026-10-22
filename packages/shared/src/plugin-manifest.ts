@@ -345,7 +345,7 @@ export const PluginInfoSchema = z.object({
   needsRestart: z.boolean().optional(),
   capabilities: z.array(PluginCapabilitySchema),
   hasServer: z.boolean(),
-  /** Where the client half is served, when the manifest has one (workstream E). */
+  /** The client entry module's URL (`/plugins/<id>/<file>`), when the manifest has one. The SPA imports it as-is. */
   clientUrl: z.string().optional(),
   /** The parsed `settings` JSON Schema, when the manifest names one. */
   settingsSchema: z.unknown().optional(),

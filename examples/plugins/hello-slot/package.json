@@ -1,0 +1,21 @@
+{
+  "name": "@dispatch/example-hello-slot",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "description": "Example Dispatch plugin with a client half — builds client/index.js against the host's globals shim.",
+  "scripts": {
+    "build": "vite build",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@dispatch/shared": "workspace:*",
+    "@types/react": "^18.3.18",
+    "lucide-react": "^0.469.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7",
+    "zustand": "^5.0.2"
+  }
+}

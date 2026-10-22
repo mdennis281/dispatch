@@ -1,0 +1,18 @@
+# The smallest plugin with a CLIENT half: a composer control, a settings
+# section, a chat badge, and a server route that answers the control's ping
+# with a plugin-event. Build it (`pnpm --filter @dispatch/example-hello-slot
+# build`) and link it in (`cm plugin link examples/plugins/hello-slot`), then
+# restart Dispatch. See README.md and docs/plugins.md → "Client host".
+id: hello-slot
+name: Hello (slot)
+version: 0.1.0
+dispatch: ">=1"
+description: A composer control, a settings section and a badge, talking to a tiny server half.
+server: ./server/index.js
+# Its directory — and ONLY its directory — is served publicly at
+# /plugins/hello-slot/. The manifest schema refuses a layout where the server
+# module or anything else of the plugin's sits in here.
+client: ./client/index.js
+capabilities:
+  - routes
+  - ui

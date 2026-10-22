@@ -125,6 +125,22 @@ export function registerChatRoutes(app: FastifyInstance): void {
             "so there is nothing for another posture to be safe in.",
         });
       }
+      // `ext` is the per-plugin bag (see `Chat.ext`) and merges PER KEY: a
+      // plugin writing `{ ext: { voice: {…} } }` must not wipe what another
+      // plugin keeps under its own id, and the spread below would. `null`
+      // under a key clears that key, the same wire convention as the pins. A
+      // top-level `ext: null` falls through to the pin loop and clears the lot.
+      if (body.ext !== undefined && body.ext !== null) {
+        if (typeof body.ext !== "object" || Array.isArray(body.ext)) {
+          return reply.code(400).send({ error: "ext must be an object keyed by plugin id" });
+        }
+        const ext: Record<string, unknown> = { ...(existing.ext ?? {}) };
+        for (const [key, value] of Object.entries(body.ext as Record<string, unknown>)) {
+          if (value === null) delete ext[key];
+          else ext[key] = value;
+        }
+        body.ext = ext;
+      }
       const merged = { ...existing, ...body } as Record<string, unknown>;
       // JSON cannot carry `undefined`, so `null` is the wire form of "clear this
       // pin and inherit" — for EVERY tri-state field, not a per-field special

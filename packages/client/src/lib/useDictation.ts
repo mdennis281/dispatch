@@ -9,13 +9,9 @@
  * (stop now). Starting on press rather than waiting to disambiguate is what keeps
  * push-to-talk from clipping the first word.
  */
-import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  createDictation,
-  pressOutcome,
-  unavailableReason,
-  type DictationEngine,
-} from "./speech.js";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { pressOutcome, type DictationEngine } from "./speech.js";
+import { activeDictationEngine, useEngines } from "./engines.js";
 
 /**
  * Push-to-talk key. A single key you can hold down comfortably, which rules out
@@ -49,8 +45,14 @@ export function useDictation(onText: (text: string) => void): Dictation {
   const [listening, setListening] = useState(false);
   const [interim, setInterim] = useState("");
   const [error, setError] = useState<string | null>(null);
-  // Probed once: it's a capability of the build, and it can't change mid-session.
-  const [unavailable] = useState(unavailableReason);
+  // Which engine is in force — the per-browser pick from lib/engines, falling
+  // back to Web Speech. Subscribed, so choosing another engine in the options
+  // menu re-points the mic without a reload.
+  const def = useEngines(activeDictationEngine);
+  // A capability of the engine, so it is re-asked when the engine changes and
+  // not before: for Web Speech it is "does this browser have the API", which
+  // cannot change mid-session.
+  const unavailable = useMemo(() => def.unavailable?.() ?? null, [def]);
 
   // The insertion callback is rebuilt every render (it closes over the editor and
   // the current draft), but the engine's handlers are wired exactly once.
@@ -64,18 +66,36 @@ export function useDictation(onText: (text: string) => void): Dictation {
 
   const engine = useCallback((): DictationEngine | null => {
     if (!engineRef.current) {
-      engineRef.current = createDictation({
-        onFinal: (text: string) => onTextRef.current(text),
-        onInterim: setInterim,
-        onError: (message: string) => setError(message),
-        onStopped: () => {
-          setListening(false);
-          setInterim("");
-        },
-      });
+      try {
+        engineRef.current = def.create({
+          onFinal: (text: string) => onTextRef.current(text),
+          onInterim: setInterim,
+          onError: (message: string) => setError(message),
+          onStopped: () => {
+            setListening(false);
+            setInterim("");
+          },
+        });
+      } catch (err) {
+        // A plugin engine that throws on create is a broken engine, not a
+        // broken composer: report it where the mic's other errors go.
+        setError(`${def.label}: ${err instanceof Error ? err.message : String(err)}`);
+        return null;
+      }
     }
     return engineRef.current;
-  }, []);
+  }, [def]);
+
+  // Switching engines drops the instance so the next press builds one from
+  // the new factory; a mic that was live under the old engine is closed first,
+  // because nothing else would ever stop it.
+  useEffect(
+    () => () => {
+      engineRef.current?.stop();
+      engineRef.current = null;
+    },
+    [def],
+  );
 
   const start = useCallback(() => {
     const e = engine();

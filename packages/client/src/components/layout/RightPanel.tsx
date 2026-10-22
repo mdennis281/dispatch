@@ -16,11 +16,13 @@ import { cn } from "../../lib/cn.js";
 import { useProcesses } from "../../stores/processes.js";
 import {
   useLayout,
-  PANEL_GROUP,
+  groupOfTab,
   GROUP_HOME,
   type PanelGroup as PanelGroupId,
 } from "../../stores/layout.js";
 import { type FocusPanelTab } from "../panels/panelBus.js";
+import { useSlots } from "../../plugins/slots.js";
+import { chatRefOf } from "../../plugins/host.js";
 
 type PanelTab = FocusPanelTab;
 
@@ -56,10 +58,15 @@ export function RightPanel({ chat }: { chat: Chat }) {
   // inapplicable — and leaving its "+ New" worktree button on screen would be
   // a UI route around the very posture the mode enforces.
   const shipless = isGlobalProject(chat.projectId);
-  const group = shipless ? "run" : PANEL_GROUP[tab];
+  const group = shipless ? "run" : groupOfTab(tab);
   useEffect(() => {
-    if (shipless && PANEL_GROUP[tab] === "ship") setTab(GROUP_HOME.run);
+    if (shipless && groupOfTab(tab) === "ship") setTab(GROUP_HOME.run);
   }, [shipless, tab, setTab]);
+  // Plugin tabs (host.slots.panelTab), each filed in the group it asked for.
+  // A plugin's tab takes the same `TabDef` row as a built-in and renders its
+  // own body below; the chat it gets is the host's projection, not the row.
+  const pluginTabs = useSlots((s) => s.panelTabs);
+  const pluginTab = pluginTabs.find((t) => t.key === tab);
 
   // Shared with the mobile bottom nav, so a nav badge and a tab badge can never
   // disagree. See panels/usePanelCounts.
@@ -83,9 +90,14 @@ export function RightPanel({ chat }: { chat: Chat }) {
     // when a port appears or is released.
   }, [chat.projectId, counts.runners, counts.shells, counts.background]);
 
+  const pluginTabDefs = (g: PanelGroupId): TabDef[] =>
+    pluginTabs
+      .filter((t) => t.def.group === g)
+      .map((t) => ({ id: t.key, label: t.def.label, ...(t.def.icon !== undefined ? { icon: t.def.icon } : {}) }));
   const shipTabs: TabDef[] = [
     { id: "worktrees", label: "Worktrees", icon: <GitBranch />, count: counts.worktrees },
     { id: "prs", label: "PRs", icon: <GitPullRequest />, count: counts.prs },
+    ...pluginTabDefs("ship"),
   ];
   const runTabs: TabDef[] = [
     { id: "agents", label: "Agents", icon: <Bot />, count: counts.agents },
@@ -107,6 +119,7 @@ export function RightPanel({ chat }: { chat: Chat }) {
       tip: appsTip(counts),
     },
         ] as TabDef[]),
+    ...pluginTabDefs("run"),
   ];
 
   const tabs = group === "ship" ? shipTabs : runTabs;
@@ -165,6 +178,7 @@ export function RightPanel({ chat }: { chat: Chat }) {
         {tab === "apps" && <RunnerPanel chat={chat} />}
         {tab === "terminals" && <TerminalsPanel chat={chat} />}
         {tab === "prs" && <PRsPanel chat={chat} />}
+        {pluginTab && <div className="p-3">{pluginTab.def.render(chatRefOf(chat.id) ?? { id: chat.id, projectId: chat.projectId })}</div>}
       </ScrollArea>
     </aside>
   );

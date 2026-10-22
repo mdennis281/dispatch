@@ -21,7 +21,15 @@
  * a 390px phone cannot honour is a preference that lies, and the same profile
  * has to survive a window drag from 1600px to 400px. What you choose is what
  * appears; how big it gets is the layout's problem.
+ *
+ * The list is a REGISTRY, not only the `as const` array below: a plugin's
+ * composer control (`host.slots.composerControl`) is appended at runtime with
+ * a single `sm` rung and the priority it asked for, and from then on it is
+ * one more control the ladder shrinks and evicts like any other. That is the
+ * rule from the persona-row incident — a per-chat control competes for THIS
+ * row, it never gets a row of its own — applied to code the repo cannot see.
  */
+import type { ReactNode } from "react";
 import { create } from "zustand";
 
 /**
@@ -45,7 +53,7 @@ export function rungCost(size: ControlSize): number {
   return SIZE_RUNGS.indexOf(size);
 }
 
-interface ControlDef {
+export interface ControlDef {
   id: string;
   label: string;
   hint: string;
@@ -65,7 +73,7 @@ interface ControlDef {
   priority: number;
 }
 
-/** One toggleable control, in toolbar order. */
+/** One toggleable built-in control, in toolbar order. */
 export const COMPOSER_CONTROLS = [
   { id: "attach", label: "Attach", hint: "upload files / insert a path", sizes: ["sm"], priority: 2 },
   // Dictate outranks everything for eviction: press-and-hold is the one gesture
@@ -103,17 +111,79 @@ export const COMPOSER_CONTROLS = [
   { id: "context", label: "Context meter", hint: "window usage", sizes: ["md", "sm"], priority: 1 },
 ] as const satisfies readonly ControlDef[];
 
-export type ComposerControl = (typeof COMPOSER_CONTROLS)[number]["id"];
+export type BuiltinComposerControl = (typeof COMPOSER_CONTROLS)[number]["id"];
 
-export type ComposerVisibility = Record<ComposerControl, boolean>;
+/**
+ * A control id: one of the built-ins, or whatever a plugin registered. The
+ * `string & {}` keeps the built-in literals in completions while admitting
+ * runtime ids the type cannot know.
+ */
+export type ComposerControl = BuiltinComposerControl | (string & {});
+
+/**
+ * Visibility per control. Built-ins are always present; runtime controls are
+ * keyed by their registered id and added (default visible) the moment they
+ * register, so a read for a registered control never finds a hole.
+ */
+export type ComposerVisibility = Record<BuiltinComposerControl, boolean> & Record<string, boolean>;
+
+/* ------------------------------------------------------- runtime registry */
+
+/**
+ * A control registered at runtime — the host's `ComposerControlDef` with the
+ * ladder entry filled in. `sizes` is always `["sm"]`: a plugin control is an
+ * icon that opens its own menu, the one shape every control already has.
+ */
+export interface RuntimeControlDef extends ControlDef {
+  sizes: readonly ["sm"];
+  icon: ReactNode;
+  render(size: "sm"): ReactNode;
+  menu?: ReactNode;
+  onSelect?(): void;
+}
+
+interface ComposerRegistryStore {
+  runtime: RuntimeControlDef[];
+}
+
+/** Runtime controls, in registration order. Subscribed by the composer so a late registration re-renders it. */
+export const useComposerRegistry = create<ComposerRegistryStore>(() => ({ runtime: [] }));
+
+/**
+ * Append a runtime control to the ladder. Returns the unregister. Refuses an
+ * id that is already taken — a second "attach" would make `sizes.attach`
+ * ambiguous, and two plugins colliding is a bug worth a toast rather than a
+ * silent last-writer-wins.
+ */
+export function registerComposerControl(def: Omit<RuntimeControlDef, "sizes">): () => void {
+  if (allControls().some((c) => c.id === def.id)) {
+    throw new Error(`composer control "${def.id}" is already registered`);
+  }
+  const entry: RuntimeControlDef = { ...def, sizes: ["sm"] };
+  useComposerRegistry.setState((s) => ({ runtime: [...s.runtime, entry] }));
+  useComposerPrefs.getState().ensure(def.id);
+  return () => {
+    useComposerRegistry.setState((s) => ({ runtime: s.runtime.filter((c) => c !== entry) }));
+  };
+}
+
+/** Every control the ladder currently knows: the built-ins, then the runtime ones. */
+export function allControls(): readonly ControlDef[] {
+  const runtime = useComposerRegistry.getState().runtime;
+  return runtime.length ? [...COMPOSER_CONTROLS, ...runtime] : COMPOSER_CONTROLS;
+}
+
+/* ----------------------------------------------------------------- ladder */
 
 /**
  * The rungs this control has, widest first. Widened from the `as const` tuple:
  * the literal type of `sizes` is per-control (`readonly ["sm"]` for attach), and
- * the fitting algorithm walks all of them through one uniform ladder.
+ * the fitting algorithm walks all of them through one uniform ladder. An id the
+ * registry no longer knows (a plugin's control after it unregistered, still in
+ * a stale sizes map) gets the universal floor, `["sm"]`.
  */
 export function ladderOf(id: ComposerControl): readonly ControlSize[] {
-  return COMPOSER_CONTROLS.find((c) => c.id === id)!.sizes;
+  return allControls().find((c) => c.id === id)?.sizes ?? ["sm"];
 }
 
 /** Widest rung this control has — where it starts before any shrinking. */
@@ -137,18 +207,19 @@ function backing(): Storage | null {
 }
 
 /**
- * Tolerant load: an unknown key is ignored and a missing one defaults to
- * visible, so adding a control to the list doesn't hide it for everyone who
- * already saved a preference.
+ * Tolerant load: a missing key defaults to visible, so adding a control to
+ * the list doesn't hide it for everyone who already saved a preference. Keys
+ * the built-in list does not know are KEPT when they are booleans: they are
+ * plugin controls, saved before this load and registered after it.
  */
 function load(): ComposerVisibility {
   try {
     const raw = backing()?.getItem(KEY);
     if (!raw) return ALL_VISIBLE;
     const parsed = JSON.parse(raw) as Record<string, unknown>;
-    const out = { ...ALL_VISIBLE };
-    for (const c of COMPOSER_CONTROLS) {
-      if (typeof parsed[c.id] === "boolean") out[c.id] = parsed[c.id] as boolean;
+    const out: ComposerVisibility = { ...ALL_VISIBLE };
+    for (const [id, value] of Object.entries(parsed)) {
+      if (typeof value === "boolean") out[id] = value;
     }
     return out;
   } catch {
@@ -168,23 +239,33 @@ interface ComposerPrefsStore {
   visible: ComposerVisibility;
   toggle: (id: ComposerControl) => void;
   showAll: () => void;
+  /** Make sure a (runtime) control has an entry — default visible — without touching one that exists. */
+  ensure: (id: ComposerControl) => void;
 }
 
 export const useComposerPrefs = create<ComposerPrefsStore>((set) => ({
   visible: load(),
   toggle: (id) =>
     set((s) => {
-      const visible = { ...s.visible, [id]: !s.visible[id] };
+      const visible = { ...s.visible, [id]: !(s.visible[id] ?? true) };
       persist(visible);
       return { visible };
     }),
-  showAll: () => {
-    persist(ALL_VISIBLE);
-    return set({ visible: { ...ALL_VISIBLE } });
-  },
+  showAll: () =>
+    set((s) => {
+      const visible = { ...s.visible };
+      for (const c of allControls()) visible[c.id] = true;
+      persist(visible);
+      return { visible };
+    }),
+  ensure: (id) =>
+    set((s) => {
+      if (typeof s.visible[id] === "boolean") return {};
+      return { visible: { ...s.visible, [id]: true } };
+    }),
 }));
 
 /** How many controls are currently hidden (drives the toolbar's badge). */
 export function hiddenCount(v: ComposerVisibility): number {
-  return COMPOSER_CONTROLS.filter((c) => !v[c.id]).length;
+  return allControls().filter((c) => !(v[c.id] ?? true)).length;
 }

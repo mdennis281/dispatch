@@ -11,7 +11,8 @@ function enter(session: AuthSessionResponse): void {
   useAuth.getState().applySession(session);
   const status = useAuth.getState().status;
   if (status) useAuth.getState().applyStatus({ ...status, enabled: true, configured: true, firstRunDismissed: true, user: session.user });
-  startLiveApp();
+  // The gate only ever renders inside the full shell, never the log popup.
+  startLiveApp({ shell: true });
 }
 
 function Card({ title, description, children }: { title: string; description: string; children: ReactNode }) {
