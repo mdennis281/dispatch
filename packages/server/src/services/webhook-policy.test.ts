@@ -85,11 +85,15 @@ describe("isPrivateAddress", () => {
     "fd00::1",
     "::ffff:127.0.0.1",
     "::ffff:192.168.0.1",
+    // The hex spelling WHATWG URL normalises mapped literals to.
+    "::ffff:7f00:1",
+    "::ffff:c0a8:101",
+    "0:0:0:0:0:ffff:a00:1",
     "not-an-ip",
   ])("%s is private", (ip) => {
     expect(isPrivateAddress(ip)).toBe(true);
   });
-  it.each(["8.8.8.8", "1.1.1.1", "172.32.0.1", "172.15.0.1", "2606:4700::1111", "::ffff:8.8.8.8"])(
+  it.each(["8.8.8.8", "1.1.1.1", "172.32.0.1", "172.15.0.1", "2606:4700::1111", "::ffff:8.8.8.8", "::ffff:808:808"])(
     "%s is public",
     (ip) => {
       expect(isPrivateAddress(ip)).toBe(false);
@@ -115,6 +119,11 @@ describe("assertPublicUrl", () => {
   it("refuses loopback, LAN and localhost however spelled", async () => {
     await expect(assertPublicUrl("https://127.0.0.1/x", resolve)).rejects.toThrow(/private/);
     await expect(assertPublicUrl("https://[::1]/x", resolve)).rejects.toThrow(/private/);
+    // `new URL()` rewrites the dotted mapped form to hex before the check sees it.
+    expect(new URL("https://[::ffff:127.0.0.1]/x").hostname).toBe("[::ffff:7f00:1]");
+    await expect(assertPublicUrl("https://[::ffff:127.0.0.1]/x", resolve)).rejects.toThrow(/private/);
+    await expect(assertPublicUrl("https://[::ffff:7f00:1]:4318/api/x", resolve)).rejects.toThrow(/private/);
+    await expect(assertPublicUrl("https://[::ffff:192.168.1.1]/x", resolve)).rejects.toThrow(/private/);
     await expect(assertPublicUrl("https://localhost/x", resolve)).rejects.toThrow(/this machine/);
     await expect(assertPublicUrl("https://lan.example/x", resolve)).rejects.toThrow(/private/);
   });

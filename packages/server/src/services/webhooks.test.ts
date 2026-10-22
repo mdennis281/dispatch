@@ -35,8 +35,9 @@ function harness(store: Store, opts: { bus?: EventBus; startAt?: number } = {}) 
   const timers = new Map<number, { fn: () => void; ms: number; at: number }>();
   let nextTimer = 1;
   const received: Received[] = [];
-  /** Per-call response plan; the default answers 200. */
-  let respond: (req: Received) => { ok: boolean; status: number } | Error = () => ({ ok: true, status: 200 });
+  /** Per-call response plan; the default answers 200. May return a promise to hold a request open. */
+  type Plan = { ok: boolean; status: number } | Error;
+  let respond: (req: Received) => Plan | Promise<Plan> = () => ({ ok: true, status: 200 });
   const live = new Map<string, ChatStatus>();
   const pendingWork = new Set<string>();
   const notices: string[] = [];
@@ -53,7 +54,7 @@ function harness(store: Store, opts: { bus?: EventBus; startAt?: number } = {}) 
         body: String(init.body),
       };
       received.push(req);
-      const plan = respond(req);
+      const plan = await respond(req);
       if (plan instanceof Error) throw plan;
       return plan;
     },
@@ -220,6 +221,53 @@ describe("WebhookService", () => {
     expect(h.received).toHaveLength(0);
     await h.publish(userRow("c1"));
     expect(h.received).toHaveLength(1);
+  });
+
+  it("does not let one slow receiver delay another subscription's copy of the event", async () => {
+    const h = harness(store);
+    await h.svc.start();
+    await chat("c1");
+    await h.svc.create(USER, { name: "slow", url: "https://slow.example/x" });
+    await h.svc.create(USER, { name: "fast", url: "https://fast.example/x" });
+    let release!: () => void;
+    const held = new Promise<{ ok: boolean; status: number }>((r) => {
+      release = () => r({ ok: true, status: 200 });
+    });
+    h.setRespond((req) => (req.url.startsWith("https://slow") ? held : { ok: true, status: 200 }));
+    h.bus.publish(userRow("c1"));
+    // Not `publish()`: that awaits idle, and the slow one is held on purpose.
+    for (let i = 0; i < 50 && h.received.length < 2; i++) await new Promise((r) => setImmediate(r));
+    expect(h.received.map((r) => r.url).sort()).toEqual(["https://fast.example/x", "https://slow.example/x"]);
+    release();
+    await h.svc.whenIdle();
+  });
+
+  it("treats a redirect as a failed attempt rather than following it", async () => {
+    const h = harness(store);
+    await h.svc.start();
+    await chat("c1");
+    const sub = await h.svc.create(USER, { name: "moved", url: "https://hooks.example/x" });
+    h.setRespond(() => ({ ok: false, status: 307 }));
+    await h.publish(userRow("c1"));
+    expect(h.received).toHaveLength(1);
+    const [d] = await h.svc.deliveries(USER, sub.id);
+    expect(d).toMatchObject({ status: "pending", attempts: 1, lastStatus: 307 });
+    expect(d!.lastError).toMatch(/redirects are not followed/);
+  });
+
+  it("a failed test fire on a paused subscription settles dead with no retry timer", async () => {
+    const h = harness(store);
+    await h.svc.start();
+    const sub = await h.svc.create(USER, { name: "paused", url: "https://hooks.example/x", active: false });
+    h.setRespond(() => new Error("ECONNREFUSED"));
+    const d = await h.svc.test(USER, sub.id);
+    expect(d).toMatchObject({ status: "dead", attempts: 1, lastError: "ECONNREFUSED" });
+    expect(h.timers.size).toBe(0);
+    // Probing a paused webhook is not a failure of the webhook.
+    expect(h.svc.list(USER)[0]!.consecutiveFailures).toBe(0);
+    // And the dead row is redeliverable once the endpoint is back.
+    h.setRespond(() => ({ ok: true, status: 200 }));
+    expect(await h.svc.redeliver(USER, sub.id, d.id)).toMatchObject({ status: "delivered" });
   });
 
   it("does not deliver to a paused subscription", async () => {
@@ -420,6 +468,16 @@ describe("WebhookService", () => {
     expect(mine.filters.projectIds).toEqual(["p1"]);
     expect(mine.filters.events).toEqual(["chat-message", "chat-status", "chat-update", "chat-deleted", "chat-settled"]);
 
+    // A refused update changes nothing — not even the fields that were valid.
+    await expect(
+      h.svc.update(tok, mine.id, { name: "renamed", secret: "rotated-secret-1", filters: { events: ["attention-add"] } }),
+    ).rejects.toMatchObject({ status: 403 });
+    expect(h.svc.list(tok)[0]).toMatchObject({ name: "mine" });
+    await h.publish(userRow("c1"));
+    const last = h.received.at(-1)!;
+    expect(last.url).toBe("https://203.0.113.9/x");
+    expect(verifyWebhookSignature(mine.secret, last.body, last.headers["x-dispatch-signature"]!, { nowSeconds: Math.floor(h.now() / 1000) })).toBe(true);
+
     // It sees only its own; the owner's is invisible, not forbidden.
     expect(h.svc.list(tok).map((s) => s.id)).toEqual([mine.id]);
     await expect(h.svc.update(tok, owners.id, { name: "x" })).rejects.toMatchObject({ status: 404 });
@@ -428,10 +486,11 @@ describe("WebhookService", () => {
     expect(h.svc.list(USER)).toHaveLength(2);
 
     // The bound holds at delivery time: p2's event never reaches the token's URL.
+    const before = h.received.filter((r) => r.url === "https://203.0.113.9/x").length;
     await h.publish(userRow("c2"));
-    expect(h.received.filter((r) => r.url === "https://203.0.113.9/x")).toHaveLength(0);
+    expect(h.received.filter((r) => r.url === "https://203.0.113.9/x")).toHaveLength(before);
     await h.publish(userRow("c1"));
-    expect(h.received.filter((r) => r.url === "https://203.0.113.9/x")).toHaveLength(1);
+    expect(h.received.filter((r) => r.url === "https://203.0.113.9/x")).toHaveLength(before + 1);
   });
 });
 

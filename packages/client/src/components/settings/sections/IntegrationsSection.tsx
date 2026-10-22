@@ -168,6 +168,12 @@ function SubscriptionCard({
       const d = await api.webhooks.test(sub.id);
       if (d.status === "delivered") {
         pushToast({ level: "info", text: `"${sub.name}" answered HTTP ${d.lastStatus ?? "2xx"}.` });
+      } else if (d.status === "dead") {
+        // A paused webhook gets one try and no retry schedule (see the service).
+        pushToast({
+          level: "warn",
+          text: `"${sub.name}" did not accept the test (${d.lastError ?? "no response"}). It is paused, so there is no retry — fix the endpoint and send another.`,
+        });
       } else {
         pushToast({
           level: "warn",

@@ -186,15 +186,46 @@ function isPrivateV4(ip: string): boolean {
 }
 
 function isPrivateV6(ip: string): boolean {
-  const lower = ip.toLowerCase().split("%")[0]!; // drop a zone id
-  if (lower === "::" || lower === "::1") return true;
-  // IPv4-mapped (::ffff:a.b.c.d) — judge the embedded address.
-  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(lower);
-  if (mapped) return isPrivateV4(mapped[1]!);
-  const first = parseInt(lower.split(":")[0] || "0", 16);
+  const groups = expandV6(ip.toLowerCase().split("%")[0]!); // drop a zone id
+  if (!groups) return true; // unparseable — refuse rather than guess
+  // IPv4-mapped, ::ffff:0:0/96. The dotted spelling (`::ffff:127.0.0.1`) is
+  // what a human types, but WHATWG URL normalises it to hex
+  // (`[::ffff:7f00:1]`) before this module ever sees it, so both spellings
+  // have to land here and be judged as the embedded IPv4 address.
+  if (groups.slice(0, 5).every((g) => g === 0) && groups[5] === 0xffff) {
+    const hi = groups[6]!;
+    const lo = groups[7]!;
+    return isPrivateV4(`${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`);
+  }
+  if (groups.every((g) => g === 0)) return true; // ::
+  if (groups.slice(0, 7).every((g) => g === 0) && groups[7] === 1) return true; // ::1
+  const first = groups[0]!;
   if ((first & 0xffc0) === 0xfe80) return true; // fe80::/10 link-local
   if ((first & 0xfe00) === 0xfc00) return true; // fc00::/7 unique local
   return false;
+}
+
+/**
+ * An IPv6 literal as eight 16-bit groups, or null when it does not parse.
+ * Expands `::` and folds a trailing dotted quad into the last two groups.
+ */
+function expandV6(ip: string): number[] | null {
+  let text = ip;
+  const quad = /^(.*:)(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(text);
+  if (quad) {
+    const [a, b, c, d] = [quad[2], quad[3], quad[4], quad[5]].map(Number) as [number, number, number, number];
+    if ([a, b, c, d].some((n) => n > 255)) return null;
+    text = `${quad[1]}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
+  }
+  const halves = text.split("::");
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const missing = 8 - head.length - tail.length;
+  if (missing < 0 || (halves.length === 1 && missing !== 0)) return null;
+  const parts = [...head, ...(Array(missing).fill("0") as string[]), ...tail];
+  const groups = parts.map((g) => (/^[0-9a-f]{1,4}$/.test(g) ? parseInt(g, 16) : Number.NaN));
+  return groups.some(Number.isNaN) ? null : groups;
 }
 
 /** Resolver seam: the real one is `dns.lookup`; tests hand in a table. */

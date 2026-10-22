@@ -279,12 +279,20 @@ export class WebhookService {
     await this.fanOut(scope, at, evt);
   }
 
-  /** Match a scoped event against every active subscription and enqueue a delivery each. */
+  /**
+   * Match a scoped event against every active subscription, write one delivery
+   * row each, then start every first attempt WITHOUT awaiting it. The rows are
+   * the durable part; the POSTs run concurrently so one blackholed receiver
+   * (up to WEBHOOK_REQUEST_TIMEOUT_MS) cannot delay every other subscription's
+   * copy of the same event by that long.
+   */
   private async fanOut(scope: WebhookEventScope, at: number, data: unknown): Promise<void> {
+    const rows: WebhookDelivery[] = [];
     for (const sub of this.activeSubs()) {
       if (!webhookFilterMatches(sub.filters, scope)) continue;
-      await this.enqueue(sub, { type: scope.type, at, projectId: scope.projectId, chatId: scope.chatId, data });
+      rows.push(await this.enqueue(sub, { type: scope.type, at, projectId: scope.projectId, chatId: scope.chatId, data }));
     }
+    for (const row of rows) void this.track(this.attempt(row));
   }
 
   /**
@@ -433,6 +441,7 @@ export class WebhookService {
 
   /* ------------------------------------------------------------ delivery */
 
+  /** Write the pending row for one subscription. The attempt is the caller's. */
   private async enqueue(
     sub: WebhookSubscription,
     envelope: Omit<WebhookEnvelope, "id">,
@@ -440,7 +449,7 @@ export class WebhookService {
     const id = newId();
     const body = JSON.stringify({ id, ...envelope } satisfies WebhookEnvelope);
     const now = this.now();
-    const row = await this.store.saveWebhookDelivery({
+    return this.store.saveWebhookDelivery({
       id,
       subscriptionId: sub.id,
       eventType: envelope.type,
@@ -453,7 +462,6 @@ export class WebhookService {
       updatedAt: now,
       body,
     });
-    return this.attempt(row);
   }
 
   /** Boot: re-arm a pending row at its due time (immediately when overdue). */
@@ -510,13 +518,22 @@ export class WebhookService {
       } else if (attempts >= WEBHOOK_MAX_ATTEMPTS) {
         next = { ...row, status: "dead", attempts, nextAttemptAt: undefined, lastStatus: outcome.status, lastError: outcome.error, updatedAt: now };
         await this.recordDead(sub);
+      } else if (!sub.active) {
+        // A forced attempt (test, redeliver) on a paused subscription gets
+        // exactly one try. A retry timer would fire into `attemptById`, be
+        // refused for the pause, and leave the row `pending` with no timer:
+        // never redeliverable, never swept, and fired as a stale surprise the
+        // day the subscription is re-enabled. Settled dead instead, and
+        // without touching the failure count — it is already paused and the
+        // human is probing it.
+        next = { ...row, status: "dead", attempts, nextAttemptAt: undefined, lastStatus: outcome.status, lastError: outcome.error, updatedAt: now };
       } else {
         const delay = WEBHOOK_RETRY_DELAYS_MS[attempts - 1]!;
         next = { ...row, status: "pending", attempts, nextAttemptAt: now + delay, lastStatus: outcome.status, lastError: outcome.error, updatedAt: now };
         // Timer first, save second: the save is what a crash loses, and the
         // boot resume re-arms from the row, so a timer without a row is the
         // harmless order and a row without a timer is a delivery nobody retries.
-        if (sub.active || opts.force) this.armTimer(row.id, delay);
+        this.armTimer(row.id, delay);
       }
       await this.store.saveWebhookDelivery(next);
       return next;
@@ -552,9 +569,19 @@ export class WebhookService {
       },
       body,
       signal: AbortSignal.timeout(WEBHOOK_REQUEST_TIMEOUT_MS),
+      // Never follow a redirect. The public-address check above judged the URL
+      // the subscription names; a receiver answering `307 Location:
+      // http://127.0.0.1:4318/...` would have `follow` re-POST the signed body
+      // to exactly the address that check exists to refuse. One rule for every
+      // subscription rather than a token-only one: a webhook that moved should
+      // be edited, not silently chased.
+      redirect: "manual",
     };
     try {
       const res = await this.fetchImpl(sub.url, init);
+      if (res.status >= 300 && res.status < 400) {
+        return { ok: false, status: res.status, error: `HTTP ${res.status} (redirects are not followed)` };
+      }
       if (res.ok) return { ok: true, status: res.status };
       return { ok: false, status: res.status, error: `HTTP ${res.status}` };
     } catch (err) {
@@ -627,19 +654,32 @@ export class WebhookService {
     assertMayManage(caller);
     const sub = this.own(caller, id);
     const input = parsePartialInput(raw);
+    // Validate EVERYTHING before touching the cached row. The cache is
+    // authoritative and the next delivery persists whatever it finds there, so
+    // a request refused half-way (a token's filter failing its scope check
+    // after the secret was already assigned) would have left a rotated secret
+    // live behind a 403.
     if (input.url !== undefined && caller.kind === "integration") {
       await assertPublicUrl(input.url, this.resolveHost);
     }
+    const filters = input.filters !== undefined ? boundFilterFor(caller, input.filters) : undefined;
+
     const wasActive = sub.active;
-    if (input.name !== undefined) sub.name = input.name;
-    if (input.url !== undefined) sub.url = input.url;
-    if (input.secret !== undefined) sub.secret = input.secret;
-    if (input.filters !== undefined) sub.filters = boundFilterFor(caller, input.filters);
-    if (input.active !== undefined) sub.active = input.active;
-    if (sub.active && !wasActive) {
-      sub.pausedReason = undefined;
-      sub.consecutiveFailures = 0;
+    const patch: Partial<WebhookSubscription> = {};
+    if (input.name !== undefined) patch.name = input.name;
+    if (input.url !== undefined) patch.url = input.url;
+    if (input.secret !== undefined) patch.secret = input.secret;
+    if (filters !== undefined) patch.filters = filters;
+    if (input.active !== undefined) patch.active = input.active;
+    if (patch.active && !wasActive) {
+      // Re-enabling is the human saying the endpoint is back.
+      patch.pausedReason = undefined;
+      patch.consecutiveFailures = 0;
     }
+    // Assigned onto the SAME object rather than replaced in the map: an
+    // in-flight attempt holds a reference and will save it when it settles, and
+    // a replacement would let that stale object overwrite this edit.
+    Object.assign(sub, patch);
     await this.store.saveWebhookSubscription(sub);
     if (sub.active && !wasActive) {
       for (const d of await this.store.listPendingWebhookDeliveries()) {

@@ -20,6 +20,7 @@ import { verifyWebhookSignature } from "../services/webhooks.js";
 interface Hit {
   headers: Record<string, string | string[] | undefined>;
   body: string;
+  url: string;
 }
 
 let dataDir: string;
@@ -48,7 +49,16 @@ beforeEach(async () => {
     let body = "";
     req.on("data", (c: Buffer) => (body += c.toString()));
     req.on("end", () => {
-      hits.push({ headers: req.headers, body });
+      if (req.url === "/redirect") {
+        // A receiver trying to bounce the signed POST somewhere else — here
+        // back to this same loopback server, exactly the kind of address the
+        // token guard exists to refuse.
+        res.statusCode = 307;
+        res.setHeader("location", receiverUrl.replace(/\/hook$/, "/landed"));
+        res.end();
+        return;
+      }
+      hits.push({ headers: req.headers, body, url: req.url ?? "" });
       res.statusCode = answer;
       res.end();
     });
@@ -195,6 +205,16 @@ describe("/api/webhooks", () => {
     expect(hits).toHaveLength(2);
     expect(hits[1]!.body).toBe(hits[0]!.body);
     expect(hits[1]!.headers["x-dispatch-delivery"]).toBe(first.id);
+  });
+
+  it("never follows a redirect, so a receiver cannot bounce the POST elsewhere", async () => {
+    const sub = await create({ name: "bouncer", url: receiverUrl.replace(/\/hook$/, "/redirect") });
+    const res = await app.inject({ method: "POST", url: `/api/webhooks/${sub.id}/test` });
+    const d = res.json() as WebhookDelivery;
+    expect(d).toMatchObject({ status: "pending", attempts: 1, lastStatus: 307 });
+    expect(d.lastError).toMatch(/redirects are not followed/);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(hits.filter((h) => h.url === "/landed")).toHaveLength(0);
   });
 
   it("404s an unknown subscription on every subresource", async () => {
