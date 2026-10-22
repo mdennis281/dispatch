@@ -287,12 +287,7 @@ export function installedRoots(
     env.LOCALAPPDATA ??
     env.XDG_DATA_HOME ??
     join(home, process.platform === "darwin" ? "Library/Application Support" : ".local/share");
-  let root = env.DISPATCH_HOME ? resolve(env.DISPATCH_HOME) : join(local, "dispatch");
-  // TODO(remove after install migration): an install that predates the rename
-  // still lives under `claude-manager` until `pnpm app:migrate-home` moves it.
-  if (!env.DISPATCH_HOME && !existsSync(root) && existsSync(join(local, "claude-manager"))) {
-    root = join(local, "claude-manager");
-  }
+  const root = env.DISPATCH_HOME ? resolve(env.DISPATCH_HOME) : join(local, "dispatch");
   const dataDir = join(root, "data");
   const configDir = join(root, "config");
   // Already pointed at it → `self` is the same store.

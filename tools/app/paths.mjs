@@ -19,7 +19,6 @@
  * that identity itself, so the whole directory and the tooling that filled it
  * are gone.
  */
-import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -36,13 +35,7 @@ export function localDataDir(env = process.env) {
 export function desktopRoot(env = process.env) {
   if (env.DISPATCH_HOME) return resolve(env.DISPATCH_HOME);
   const local = localDataDir(env);
-  const root = join(local, "dispatch");
-  if (existsSync(root)) return root;
-  // TODO(remove after install migration): an install that predates the rename
-  // still lives under `claude-manager` until `pnpm app:migrate-home` moves it.
-  const legacy = join(local, "claude-manager");
-  if (existsSync(legacy)) return legacy;
-  return root;
+  return join(local, "dispatch");
 }
 
 /** Every path the desktop deployment cares about, derived from one root. */
