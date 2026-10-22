@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import { Copy, FolderOpen, RefreshCw, Save } from "lucide-react";
-import type { PluginInfo, PluginStatus } from "@dispatch/shared";
+import { Copy, FolderOpen, Link2, RefreshCw, Save, Unlink2 } from "lucide-react";
+import type { PluginInfo, PluginOAuthStatus, PluginStatus } from "@dispatch/shared";
 import { Field, InlineError, TextArea, TextInput } from "../../sidebar/Modal.js";
 import { Button } from "../../ui/Button.js";
 import { IconButton } from "../../ui/IconButton.js";
@@ -168,6 +168,14 @@ function PluginCard({ plugin, onChange }: { plugin: PluginInfo; onChange: (next:
         <PluginSettingsForm plugin={plugin} onChange={onChange} />
       )}
 
+      {plugin.oauth?.length ? (
+        <div className="space-y-1 rounded-md bg-inset/40 px-2.5 py-2">
+          {plugin.oauth.map((client) => (
+            <PluginOAuthRow key={client.name} plugin={plugin} client={client} onChange={onChange} />
+          ))}
+        </div>
+      ) : null}
+
       <div className="flex items-center gap-1.5">
         <code className="min-w-0 flex-1 truncate cm-mono text-2xs text-faint" title={plugin.dir}>
           {plugin.dir}
@@ -179,6 +187,90 @@ function PluginCard({ plugin, onChange }: { plugin: PluginInfo; onChange: (next:
           Open folder
         </Button>
       </div>
+    </div>
+  );
+}
+
+/* ----------------------------------------------------------------- oauth */
+
+/** "Connected until <time>" — or just "Connected" when the provider gave no expiry. */
+function oauthConnectedLabel(client: PluginOAuthStatus, now = Date.now()): string {
+  if (!client.connected) return "Not connected";
+  if (client.expiresAt === undefined) return "Connected";
+  if (client.expiresAt <= now) return "Connected — token expired, renews on next use";
+  return `Connected until ${new Date(client.expiresAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}`;
+}
+
+/**
+ * One declared `oauth.clients.<name>`: Connect sends the browser to the
+ * provider (the server builds the URL and holds the state); the provider
+ * sends it back to `/oauth/callback/<plugin>/<name>`, which lands on this
+ * pane with the row updated. Disconnect forgets the tokens here and now.
+ */
+function PluginOAuthRow({
+  plugin,
+  client,
+  onChange,
+}: {
+  plugin: PluginInfo;
+  client: PluginOAuthStatus;
+  onChange: (next: PluginInfo) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const disabled = busy || plugin.status !== "active" || !!client.configError;
+
+  const connect = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const { url } = await api.plugins.oauthConnect(plugin.id, client.name);
+      location.assign(url);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setBusy(false);
+    }
+  };
+
+  const disconnect = async () => {
+    if (!confirm(`Disconnect "${client.name}"? ${plugin.name} loses its token until you connect again.`)) return;
+    setBusy(true);
+    setError(null);
+    try {
+      onChange(await api.plugins.oauthDisconnect(plugin.id, client.name));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="space-y-1" data-testid={`plugin-oauth-${client.name}`}>
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="cm-mono text-xs font-medium text-secondary">oauth:{client.name}</span>
+            <StatusDot tone={client.connected ? "success" : client.configError ? "warn" : "muted"} />
+            <span className="text-2xs text-muted">{oauthConnectedLabel(client)}</span>
+          </div>
+          {client.configError ? (
+            <p className="mt-0.5 text-2xs text-warn">{client.configError}</p>
+          ) : client.scopes?.length ? (
+            <p className="mt-0.5 cm-mono text-2xs text-faint">{client.scopes.join(" ")}</p>
+          ) : null}
+        </div>
+        {client.connected ? (
+          <Button variant="ghost" size="sm" leftIcon={<Unlink2 />} disabled={busy} onClick={() => void disconnect()}>
+            Disconnect
+          </Button>
+        ) : (
+          <Button variant="primary" size="sm" leftIcon={<Link2 />} disabled={disabled} onClick={() => void connect()}>
+            {busy ? "Opening…" : "Connect"}
+          </Button>
+        )}
+      </div>
+      <InlineError message={error} />
     </div>
   );
 }

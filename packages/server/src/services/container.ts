@@ -96,6 +96,7 @@ import { FsExplorerService } from "./fs-explorer.js";
 import { HarnessRegistry } from "../harness/index.js";
 import { ManagerMcpBridge } from "./mcp/manager-http.js";
 import { PluginService } from "../plugins/service.js";
+import { PluginOAuthService } from "../plugins/oauth.js";
 
 /** The shared base every service hangs off. */
 export interface ServiceBase {
@@ -159,6 +160,7 @@ export interface ServiceOverrides {
   chatMessenger?: ChatMessenger;
   chatCompletionNotices?: ChatCompletionNotices;
   plugins?: PluginService;
+  pluginOAuth?: PluginOAuthService;
 }
 
 /** Everything the routes/WS layer needs, wired to one bus + store. */
@@ -241,6 +243,8 @@ export interface Services extends ServiceBase {
   chatCompletionNotices: ChatCompletionNotices;
   /** Installed plugins under `<configDir>/plugins/`: discovery, activation, their route tables. */
   plugins: PluginService;
+  /** The host-run OAuth client flow behind `ctx.oauth` and the plugin pane's Connect button. */
+  pluginOAuth: PluginOAuthService;
   fileIndex: FileIndexService;
   /** The SQLite usage ledger behind the Metrics view. */
   metrics: MetricsService;
@@ -1046,12 +1050,24 @@ export function createServices(
   // database. Everything a plugin can reach goes through the services above —
   // the messenger for sends (never the broker), the queue for attention — so
   // it is constructed after all of them.
-  const plugins =
+  // The OAuth client flow for plugins. Built before the plugin service because
+  // the context hands it out as `ctx.oauth`; it looks manifests up through the
+  // plugin service lazily (per request), which is why the closure below may
+  // name a `const` that is assigned a few lines further down.
+  const pluginOAuth: PluginOAuthService =
+    overrides.pluginOAuth ??
+    new PluginOAuthService({
+      store,
+      secrets,
+      resolve: (id) => plugins.oauthView(id),
+      canonicalUrl: async () => (await store.getSettings()).auth?.canonicalUrl,
+    });
+  const plugins: PluginService =
     overrides.plugins ??
     new PluginService({
       configDir: config.configDir ?? config.dataDir,
       store,
-      context: { bus, secrets, inspect, memory, attention, messenger: chatMessenger, broker },
+      context: { bus, secrets, inspect, memory, attention, messenger: chatMessenger, broker, pluginOAuth },
     });
   // "The chat you spawned is done" — armed by `broker.spawnChat` below, delivered
   // over the messenger above. Constructed here because it needs both, and
@@ -1353,6 +1369,7 @@ export function createServices(
     chatMessenger,
     chatCompletionNotices,
     plugins,
+    pluginOAuth,
     fileIndex,
     fsExplorer,
     metrics,

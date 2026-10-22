@@ -81,14 +81,31 @@ const RelativePathSchema = z
   .refine((p) => !/^([a-zA-Z]:)?[\\/]/.test(p), { message: "must be relative to the plugin directory" })
   .refine((p) => !p.split(/[\\/]/).includes(".."), { message: "must not leave the plugin directory" });
 
-/** `oauth.clients.<name>` — parsed here so an invalid entry is an invalid manifest. Workstream F consumes it. */
+/** `[a-z0-9][a-z0-9-]{0,31}` — an `oauth.clients` key is a URL path segment of the callback and a column value, so it is kept this strict. */
+export const PLUGIN_OAUTH_CLIENT_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/;
+
+/**
+ * `oauth.clients.<name>` — parsed here so an invalid entry is an invalid
+ * manifest. `clientId` / `clientSecret` may be literals or `${secret:NAME}`
+ * references; a reference resolves ONLY when `NAME` is also listed under
+ * `secrets:`, the same rule `ctx.secrets.get` follows, so a manifest cannot
+ * reach a secret it never declared by routing it through the OAuth block.
+ */
 export const PluginOAuthClientSchema = z.object({
-  authorizationUrl: z.string().min(1),
-  tokenUrl: z.string().min(1),
+  authorizationUrl: z.string().url(),
+  tokenUrl: z.string().url(),
   scopes: z.array(z.string()).optional(),
   clientId: z.string().min(1),
   clientSecret: z.string().optional(),
+  /**
+   * Extra query parameters on the authorization URL — `access_type=offline`,
+   * `prompt=consent`, an `audience`. Values are sent verbatim; the standard
+   * parameters (`client_id`, `redirect_uri`, `state`, PKCE…) are the host's
+   * and cannot be overridden from here.
+   */
+  extraParams: z.record(z.string(), z.string()).optional(),
 });
+export type PluginOAuthClient = z.infer<typeof PluginOAuthClientSchema>;
 
 /** Normalised parent directory of a manifest path: `./client/index.js` → `client`, `index.js` → `` (the root). */
 export function manifestPathDir(p: string): string {
@@ -133,7 +150,7 @@ const PluginManifestObjectSchema = z.object({
     .optional(),
   oauth: z
     .object({
-      clients: z.record(z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/), PluginOAuthClientSchema).optional(),
+      clients: z.record(z.string().regex(PLUGIN_OAUTH_CLIENT_NAME_PATTERN), PluginOAuthClientSchema).optional(),
     })
     .optional(),
 });
@@ -266,6 +283,22 @@ export const PluginInfoSchema = z.object({
   settings: z.record(z.string(), z.unknown()),
   /** Secret names the manifest lists — the pane shows which are set. */
   secrets: z.array(z.string()).optional(),
+  /**
+   * The manifest's `oauth.clients`, each with its connection state — what the
+   * pane's Connect / Disconnect row reads. Present only when the manifest
+   * declares the `oauth` capability AND at least one client.
+   */
+  oauth: z
+    .array(
+      z.object({
+        name: z.string(),
+        connected: z.boolean(),
+        expiresAt: z.number().optional(),
+        scopes: z.array(z.string()).optional(),
+        configError: z.string().optional(),
+      }),
+    )
+    .optional(),
 });
 export type PluginInfo = z.infer<typeof PluginInfoSchema>;
 

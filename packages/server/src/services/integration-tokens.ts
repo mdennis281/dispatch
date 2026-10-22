@@ -248,6 +248,27 @@ export class IntegrationTokenService {
     return found;
   }
 
+  /**
+   * DELETE a row, as opposed to {@link revoke}, which keeps it. For a token
+   * nobody was ever shown — an OAuth access token a rotation has superseded,
+   * whose grant row is the audit record. A hand-minted token is never removed
+   * this way: its "revoked" row is what tells the person who minted it why
+   * their bot stopped working.
+   */
+  async remove(id: string): Promise<boolean> {
+    const found = await withIntegrationTokenLock(this.path, async () => {
+      const fresh = await readIntegrationTokenFile(this.path);
+      const before = fresh.tokens.length;
+      fresh.tokens = fresh.tokens.filter((t) => t.id !== id);
+      if (fresh.tokens.length === before) return false;
+      await writeIntegrationTokenFile(this.path, fresh);
+      return true;
+    });
+    this.data = null;
+    this.dirtyUsed.delete(id);
+    return found;
+  }
+
   /** Revoke every live token — what turning authentication off does. */
   async revokeAll(): Promise<number> {
     const now = this.now();

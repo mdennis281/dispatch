@@ -37,3 +37,15 @@ query-filters:
   # shutdown hook, which is not a route handler at all.
   - exclude:
       id: js/missing-rate-limiting
+  # js/insufficient-password-hash — fires on SHA-256 of anything whose
+  # identifier looks credential-shaped ("token", "secret"), and cannot see
+  # entropy. Every value this project fingerprints that way is 32 bytes from
+  # `randomBytes` — integration tokens (cli/core integration-tokens.ts), OAuth
+  # refresh tokens and client secrets (services/oauth-server.ts) — so a KDF
+  # would have nothing to stretch, and a salted one could not serve as the
+  # lookup key the token endpoint needs. The one human-chosen credential, the
+  # owner's password, goes through argon2id in services/auth.ts, which the
+  # query does not flag. An inline `codeql[…]` suppression was tried first
+  # (PR #392) and the alert re-fired on the commit that carried it.
+  - exclude:
+      id: js/insufficient-password-hash

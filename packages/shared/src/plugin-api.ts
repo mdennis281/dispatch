@@ -282,7 +282,14 @@ export interface PluginContext<Req = unknown, Reply = unknown> {
     stop(id: string): Promise<void>;
     list(): Promise<Array<{ id: string; status: string; ports?: number[]; url?: string }>>;
   };
-  /* Workstream F */
+  /**
+   * `oauth` — the host-run client flow for the manifest's `oauth.clients`.
+   * `connectUrl` mints a single-use state and returns the provider URL to send
+   * the owner to; `token` returns a live access token, refreshing it first
+   * when it is within a minute of expiry, or `undefined` when the owner has
+   * not connected; `disconnect` forgets the stored tokens. The values are
+   * never exposed to the SPA — only the plugin's server half sees them.
+   */
   oauth?: {
     connectUrl(name: string): Promise<string>;
     token(name: string): Promise<string | undefined>;

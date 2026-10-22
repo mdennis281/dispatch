@@ -45,6 +45,7 @@ import {
   type ServerPluginRouteHandler,
 } from "./context.js";
 import { discoverPlugins, pluginsRoot, type DiscoveredPlugin } from "./manifest.js";
+import { pluginOAuthManifestView, type PluginOAuthManifestView } from "./oauth.js";
 
 /** Spec budget for one `activate` (docs/plugins.md → "Lifecycle"). */
 export const ACTIVATE_BUDGET_MS = 30_000;
@@ -287,9 +288,23 @@ export class PluginService {
     return rec.needsRestart ? "disabled" : "active";
   }
 
+  /**
+   * The declared `oauth.clients` of an enabled, valid plugin — what the OAuth
+   * client flow resolves a Connect click or a `ctx.oauth` call against.
+   * Undefined for a plugin that is off, broken, or declares no `oauth`
+   * capability, so a token can be neither minted nor read for one.
+   */
+  oauthView(id: string): PluginOAuthManifestView | undefined {
+    const rec = this.records.get(id);
+    if (!rec?.manifest || !rec.enabled || rec.incompatible) return undefined;
+    return pluginOAuthManifestView(rec.manifest);
+  }
+
   info(rec: PluginRecord): PluginInfo {
     const m = rec.manifest;
     const error = rec.phase === "error" ? rec.activationError : rec.error;
+    const oauthView = m ? pluginOAuthManifestView(m) : undefined;
+    const oauth = oauthView && this.ctxDeps.pluginOAuth ? this.ctxDeps.pluginOAuth.status(rec.id, oauthView) : undefined;
     return {
       id: rec.id,
       name: m?.name ?? rec.id,
@@ -306,6 +321,7 @@ export class PluginService {
       ...(rec.settingsSchema !== undefined ? { settingsSchema: rec.settingsSchema } : {}),
       settings: rec.settings,
       ...(m?.secrets ? { secrets: m.secrets } : {}),
+      ...(oauth?.length ? { oauth } : {}),
     };
   }
 
