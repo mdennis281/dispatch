@@ -8389,7 +8389,14 @@ export class SessionBroker {
           {
             hooks: [
               createIssueCreateGuardHook({
-                enabled: () => resolveIssuePolicy(this.projectConfig?.getConfig?.(projectId)?.issues).enabled,
+                applies: async (repo) => {
+                  if (!resolveIssuePolicy(this.projectConfig?.getConfig?.(projectId)?.issues).enabled) return false;
+                  if (!repo) return true;
+                  const own = await this.issues?.sourceFor(projectId).catch(() => null);
+                  // Unknown source = cannot tell it is elsewhere; let it through
+                  // rather than strand an upstream report with nowhere to go.
+                  return own?.source.repo.toLowerCase() === repo;
+                },
                 onBlocked: () => {
                   this.bus.publish({
                     type: "notice",

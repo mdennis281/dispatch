@@ -5114,10 +5114,10 @@ describe("issue tools", () => {
     const create = vi.fn(async (d: { labels?: string[] }) => ({ ...issue, labels: d.labels ?? [] }));
     const { issueCreate } = tools({ create });
     await issueCreate.handler(
-      { title: "t", body: undefined, labels: ["dispatch:manual"], assignees: undefined, autoHandle: true },
+      { title: "t", body: undefined, labels: ["Dispatch:Manual", "bug"], assignees: undefined, autoHandle: true },
       {},
     );
-    expect(create).toHaveBeenCalledWith(expect.objectContaining({ labels: [] }));
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ labels: ["bug"] }));
   });
 
   it("issue_create re-labels when GitHub silently dropped the label, and warns if that fails too", async () => {

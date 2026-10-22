@@ -7566,9 +7566,10 @@ ${look}` : "")
     },
     async ({ autoHandle, ...draft }): Promise<CallToolResult> =>
       withTracker(async (t) => {
-        const labels = new Set(draft.labels ?? []);
-        if (autoHandle) labels.delete(ISSUE_MANUAL_LABEL);
-        else labels.add(ISSUE_MANUAL_LABEL);
+        // Case-insensitive, like `matchIssue`: a hand-passed "Dispatch:Manual"
+        // would otherwise survive `autoHandle` and still keep the watcher off.
+        const labels = new Set((draft.labels ?? []).filter((l) => l.toLowerCase() !== ISSUE_MANUAL_LABEL));
+        if (!autoHandle) labels.add(ISSUE_MANUAL_LABEL);
         let issue = await t.create({ ...draft, labels: [...labels] });
         const details = [issue.url];
         // GitHub drops labels SILENTLY when the token lacks push access. An
