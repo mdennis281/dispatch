@@ -265,8 +265,9 @@ export const PLUGIN_PROCESS_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,39}$/;
  * through `RunnerService` on the plugin's behalf, with owner `plugin:<id>`.
  *
  * Modelled on a sub-app's `dev` rather than on a raw spawn: `command` + `args`
- * are joined into ONE shell line (the runner spawns through a shell, which is
- * what makes `pnpm`/`npx` shims work on Windows), `{port}`/`{portN}` in any of
+ * are joined VERBATIM into ONE shell line (the runner spawns through a shell,
+ * which is what makes `pnpm`/`npx` shims work on Windows) — write an argument
+ * with spaces quoted, as you would at the prompt. `{port}`/`{portN}` in any of
  * them are substituted from the leased ports, and `env` is overlaid on the
  * manager-quarantined environment exactly as for a sub-app.
  */

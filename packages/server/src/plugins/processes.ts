@@ -167,22 +167,24 @@ export class PluginProcessHost {
  * A declared process as the sub-app shape the runner launches. `command` and
  * `args` become ONE shell line because the runner spawns through a shell (the
  * only way a `.cmd` shim like `pnpm` starts on Windows since the
- * CVE-2024-27980 fix); quoting is minimal and POSIX/cmd-compatible — an
- * argument with whitespace or a quote is double-quoted with inner quotes
- * escaped, anything else passes through so `{port}` placeholders survive.
+ * CVE-2024-27980 fix).
+ *
+ * Joined VERBATIM, with no quoting. The line has to be read by cmd.exe on one
+ * machine and sh on another, and no single escaping rule is right for both:
+ * doubling backslashes satisfies sh and corrupts every Windows path, and
+ * escaping only the quotes is the incomplete form CodeQL (rightly) flags. So
+ * this does what a sub-app's `dev:` already does — the author writes each
+ * argument as they would type it at the prompt, quotes included, and
+ * `{port}` placeholders pass through untouched.
  */
 export function toSubApp(spec: PluginProcess): SubApp {
   return {
     id: spec.id,
     name: spec.name ?? spec.id,
     path: ".",
-    dev: [spec.command, ...(spec.args ?? [])].map(shellWord).join(" "),
+    dev: [spec.command, ...(spec.args ?? [])].join(" "),
     ...(spec.ports ? { ports: spec.ports } : {}),
     ...(spec.env ? { env: spec.env } : {}),
     ...(spec.url ? { url: spec.url } : {}),
   };
-}
-
-function shellWord(w: string): string {
-  return /[\s"']/.test(w) ? `"${w.replace(/"/g, '\\"')}"` : w;
 }

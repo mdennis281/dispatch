@@ -486,9 +486,14 @@ describe("PluginProcessHost", () => {
     await expect(host.start("p", "nope")).rejects.toThrow(/declares no process "nope"/);
   });
 
-  it("toSubApp joins command and args into one shell line, quoting only what needs it", () => {
-    expect(toSubApp({ id: "a", command: "node", args: ["./s.mjs", "--name", "hello world", "{port}"] }).dev).toBe(
+  it("toSubApp joins command and args verbatim — the author quotes, as in a sub-app's dev line", () => {
+    expect(toSubApp({ id: "a", command: "node", args: ["./s.mjs", "--name", '"hello world"', "{port}"] }).dev).toBe(
       'node ./s.mjs --name "hello world" {port}',
+    );
+    // A Windows path is left exactly as written: no escaping pass can be right
+    // for both cmd.exe and sh, so none is attempted.
+    expect(toSubApp({ id: "b", command: "C:\\tools\\run.exe", args: ["--dir", "C:\\data"] }).dev).toBe(
+      "C:\\tools\\run.exe --dir C:\\data",
     );
   });
 });
