@@ -19,6 +19,7 @@ import {
   Palette,
   Plug,
   Power,
+  Puzzle,
   Archive,
   ShieldCheck,
   ShieldOff,
@@ -116,6 +117,17 @@ export const APP_SECTIONS: AppSectionDef[] = [
     explainer:
       "How Dispatch reaches you when an agent needs a decision or finishes one. Desktop " +
       "notifications are per browser; the webhook is per install and reaches your phone.",
+  },
+  {
+    id: "plugins",
+    icon: Puzzle,
+    label: "Plugins",
+    blurb: "Extensions installed on this machine",
+    explainer:
+      "Code from outside Dispatch, loaded from the shared config directory, so both the " +
+      "installed app and a dev server see the same list. Each row says what the plugin " +
+      "declared it will touch. Turning one off takes effect now; turning one on, or " +
+      "changing its files, needs a restart.",
   },
   {
     id: "auth",

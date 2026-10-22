@@ -6,6 +6,7 @@
  */
 import type {
   Persona,
+  PluginInfo,
   ReviewRoundsPolicy,
   GhCliStatus,
   RuntimeSetupStatus,
@@ -295,6 +296,13 @@ export interface AppSettings {
    * Background shells are never swept by this — only the session tree.
    */
   idleSessionMinutes?: number;
+  /**
+   * Per-plugin state keyed by plugin id — the enable toggle and the plugin's
+   * own settings. Written through `api.plugins.*`, NOT through a settings PUT
+   * (same arrangement as `mcpEnabled`); carried raw through `normalize()` so a
+   * full-replace save of anything else does not delete it.
+   */
+  plugins?: Record<string, { enabled?: boolean; settings?: Record<string, unknown> }>;
   harness?: {
     defaultHarness?: HarnessKind;
     defaults?: Partial<Record<HarnessKind, HarnessDefaults>>;
@@ -1443,6 +1451,17 @@ export const api = {
     github: () => get<GhCliStatus>("/api/setup/github"),
     runtimes: () => get<RuntimeSetupStatus[]>("/api/setup/runtimes"),
     complete: () => post<SetupStatus>("/api/setup/complete", {}),
+  },
+
+  /* plugins — Settings → Plugins. Targeted patches; never a settings-draft write. */
+  plugins: {
+    list: () => get<PluginInfo[]>("/api/plugins"),
+    setEnabled: (id: string, enabled: boolean) =>
+      put<PluginInfo>(`/api/plugins/${encodeURIComponent(id)}/enabled`, { enabled }),
+    setSettings: (id: string, settings: Record<string, unknown>) =>
+      put<PluginInfo>(`/api/plugins/${encodeURIComponent(id)}/settings`, { settings }),
+    /** Open the plugin's directory in the file manager of the machine Dispatch runs on. */
+    reveal: (id: string) => post<{ ok: boolean; dir: string }>(`/api/plugins/${encodeURIComponent(id)}/reveal`),
   },
 
   settings: {

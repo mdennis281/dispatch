@@ -49,6 +49,7 @@ import { RetentionSection } from "./sections/RetentionSection.js";
 import { PermissionsSection } from "./sections/PermissionsSection.js";
 import { NotificationsSection } from "./sections/NotificationsSection.js";
 import { IntegrationsSection } from "./sections/IntegrationsSection.js";
+import { PluginsSection } from "./sections/PluginsSection.js";
 import { AuthSettings } from "../auth/AuthSettings.js";
 import { UpdateBanner } from "../update/UpdateBanner.js";
 import { StopDispatch } from "./StopDispatch.js";
@@ -112,6 +113,12 @@ function normalize(s: AppSettings): AppSettings {
     // time anyone saved a theme. Naming it at all is the load-bearing part — a
     // field this function omits is a field the next save DELETES.
     retention: s.retention,
+    // Carried RAW, and this one is not even edited here: Settings → Plugins
+    // writes through its own targeted routes. It is named so that saving a
+    // theme from this draft does not delete every plugin's settings and
+    // toggles — the server preserves it too, but a draft that round-trips the
+    // field is honest about what it holds.
+    plugins: s.plugins,
     // Spelled out for the reason above, and it matters doubly here: a field
     // this function drops is a field the section renders as "nothing muted"
     // whatever is stored, AND one the next save clears.
@@ -256,8 +263,8 @@ export function AppSettingsView() {
         label: s.label,
         blurb: s.blurb,
         // Per section, so the dot points at what you actually edited. Auth,
-        // accounts, updates and system never appear here — they save through
-        // their own endpoints and have nothing in the draft.
+        // accounts, plugins, updates and system never appear here — they save
+        // through their own endpoints and have nothing in the draft.
         dirty: dirtySections.has(s.id),
       }))}
       active={section}
@@ -320,6 +327,8 @@ export function AppSettingsView() {
           <AccountsSection />
         ) : section === "permissions" ? (
           <PermissionsSection />
+        ) : section === "plugins" ? (
+          <PluginsSection />
         ) : !paneProps ? (
           <InlineError message={error ?? "Settings could not be loaded."} />
         ) : section === "appearance" ? (
