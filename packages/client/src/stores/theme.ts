@@ -9,10 +9,12 @@
  * resolution rules. **Change one, change both** — they are duplicated precisely
  * because nothing importable can run early enough.
  *
- * The server also persists a `theme` in app settings, and that stays the
- * cross-device source of truth (`SettingsPanel` pushes it in on load and save).
- * localStorage is a CACHE of it, not a rival: it exists only so the first paint
- * has an answer before `GET /api/settings` can possibly return.
+ * localStorage is the ONLY home of this preference — it is per browser, not per
+ * install. It used to be a cache of a server-side `theme`, reconciled toward the
+ * server whenever Settings loaded; since `config/` is shared by every device (and
+ * by the stable and dev instances), merely opening Settings on one device
+ * repainted it with whatever another device had last saved. A phone in light
+ * mode and a desktop in dark are both right, so there is nothing to reconcile.
  */
 import { create } from "zustand";
 
@@ -27,10 +29,9 @@ export const THEME_STORAGE_KEY = "dispatch:theme";
 
 const DARK_QUERY = "(prefers-color-scheme: dark)";
 
-/** Default is dark: it is the palette the product is designed in, and an
- *  unreadable first paint is worse than ignoring an OS preference we have not
- *  been told to honor. */
-export const DEFAULT_THEME: ThemePref = "dark";
+/** Default follows the OS: with the preference per browser, a device that has
+ *  never been told anything should look like the rest of that device. */
+export const DEFAULT_THEME: ThemePref = "system";
 
 function isPref(v: unknown): v is ThemePref {
   return v === "dark" || v === "dim" || v === "light" || v === "system";
@@ -38,6 +39,9 @@ function isPref(v: unknown): v is ThemePref {
 
 export function resolveTheme(pref: ThemePref): ResolvedTheme {
   if (pref !== "system") return pref;
+  // No window under node-env tests that import a store which imports this one;
+  // with `system` the default, the store's initializer lands here at import time.
+  if (typeof window === "undefined" || !window.matchMedia) return "dark";
   return window.matchMedia(DARK_QUERY).matches ? "dark" : "light";
 }
 

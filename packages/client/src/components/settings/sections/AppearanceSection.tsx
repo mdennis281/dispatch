@@ -7,21 +7,19 @@ import type { AppPaneProps } from "./types.js";
 /**
  * Theme, and only theme.
  *
- * The picker applies LIVE — you cannot judge a palette from the word "dark" —
- * which is why the save bar's Discard puts the saved theme back rather than just
- * dropping the draft field.
+ * Per browser and applied immediately — deliberately NOT part of the settings
+ * draft. Routed through the server-side draft it was shared by every device, so
+ * opening Settings on one repainted it with another's choice (see stores/theme).
  */
-export function AppearanceSection({ draft, patch }: AppPaneProps) {
+export function AppearanceSection(_props: AppPaneProps) {
+  const pref = useTheme((s) => s.pref);
   const setTheme = useTheme((s) => s.setTheme);
   return (
-    <Field label="Theme" hint="previews live, saved for all devices">
+    <Field label="Theme" hint="applies instantly, this browser only">
       <SegmentedControl
         size="md"
-        value={draft.theme}
-        onChange={(v) => {
-          patch({ theme: v });
-          setTheme(v);
-        }}
+        value={pref}
+        onChange={setTheme}
         segments={[
           { value: "dark", label: "Dark", icon: <Moon /> },
           { value: "dim", label: "Dim", icon: <SunMoon /> },

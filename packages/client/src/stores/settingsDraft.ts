@@ -66,10 +66,9 @@ interface AppDraftPair {
  * stores them under one key.
  */
 const SECTION_SLICE: Record<
-  "appearance" | "chat" | "context" | "retention" | "notifications",
+  "chat" | "context" | "retention" | "notifications",
   (s: AppSettings) => unknown
 > = {
-  appearance: (s) => s.theme,
   chat: (s) => [
     s.defaultModeId,
     s.showInjectedContext,
