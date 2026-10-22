@@ -43,7 +43,7 @@ import {
 import {
   DEFAULT_REVIEW_MAX_ROUNDS,
   DEFAULT_REVIEW_ROUNDS,
-  PROVIDER_IDS,
+  providerIds,
   applyReviewAgentDefaults,
   authorReviewerRoster,
   providerFor,
@@ -136,8 +136,6 @@ const PREVIEW_SIZES = [50, 600, 1500, 5000];
 
 const nf = new Intl.NumberFormat();
 
-const HARNESSES = PROVIDER_IDS;
-
 export function ReviewerSection({
   value,
   onChange,
@@ -208,7 +206,7 @@ export function ReviewerSection({
       label: "Same as the project",
       hint: projectHarness ? harnessLabel(projectHarness) : "follows it",
     },
-    ...HARNESSES.map((kind) => {
+    ...providerIds().map((kind) => {
       const runtime = harnesses.find((h) => h.kind === kind)?.runtime;
       return {
         value: kind,

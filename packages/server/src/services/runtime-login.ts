@@ -157,8 +157,12 @@ async function probeLogin(
         method: "local model",
       };
     case "claude":
-    default:
       return probeClaudeLogin(exe, env, run);
+    default:
+      // A provider registered at runtime. Probing it as Claude is the same
+      // fall-through the comment above describes — until a provider can
+      // supply its own probe, say we could not check rather than guess.
+      return { checked: false, loggedIn: false, error: `no login probe for ${kind}` };
   }
 }
 

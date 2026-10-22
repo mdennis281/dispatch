@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -178,6 +178,43 @@ describe("SessionBroker neutral harness path", () => {
     expect(specs[0]!.agent).toBeUndefined();
     await broker.setHarness(chat.id, "claude");
     expect((await store.getChat(chat.id))!.personaId).toBe("product-owner");
+  });
+
+  it("falls back BEFORE building options, so an uninstalled provider's skills land where Claude reads", async () => {
+    // A chat left on a provider nothing registers runs on the default. The
+    // options used to be built first, against the placeholder descriptor, so
+    // the skills went to `.agents/skills` and the Claude session found none.
+    const repo = join(dir, "repo");
+    await mkdir(repo, { recursive: true });
+    await store.saveProject({ id: "p-ghost", name: "Ghost", repoPath: repo, worktreeRoot: join(dir, "trees"), subApps: [], createdAt: 1 });
+    const claudeSpecs: HarnessSessionSpec[] = [];
+    const claude: Harness = {
+      kind: "claude",
+      capabilities: caps as unknown as Harness["capabilities"],
+      runtime: () => ({ kind: "claude", source: "installed", available: true }),
+      listModels: async () => [],
+      readLimits: async () => null,
+      generateText: async () => "title",
+      createSession: (spec: HarnessSessionSpec) => { claudeSpecs.push(spec); return new FakeHarnessSession(); },
+    };
+    const ghostBroker = new SessionBroker({
+      store,
+      bus: new EventBus(),
+      harnesses: new HarnessRegistry({ harnesses: { claude } }),
+      authored: new AuthoredConfigService({ globalRoot: join(dir, "global") }),
+      deps: { stopTimeoutMs: 5 },
+    });
+    try {
+      const chat = await store.saveChat({ id: "ghost", projectId: "p-ghost", title: "Ghost", modeId: "plan", effort: "low", harness: "gemini", worktrees: [], prs: [], createdAt: 1 });
+      ghostBroker.create(chat);
+      await ghostBroker.sendMessage(chat.id, "hello");
+      await ghostBroker.waitFor(chat.id, "idle");
+      expect(claudeSpecs).toHaveLength(1);
+      expect((await readdir(join(repo, ".claude", "skills"))).length).toBeGreaterThan(0);
+      await expect(readdir(join(repo, ".agents"))).rejects.toThrow();
+    } finally {
+      await ghostBroker.dispose();
+    }
   });
 
   it("pays off a mid-turn policy switch once the turn settles, not 'eventually'", async () => {

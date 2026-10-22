@@ -14,8 +14,8 @@
 import type { FastifyInstance } from "fastify";
 import {
   DEFAULT_HARNESS,
-  HarnessKindSchema,
   SubscriptionListSchema,
+  providerFor,
   findSubscription,
   subscriptionFor,
 } from "@dispatch/shared";
@@ -28,14 +28,16 @@ export function registerModelRoutes(app: FastifyInstance): void {
     "/api/models",
     async (req) => {
       const settings = await store.getSettings().catch(() => null);
-      const parsed = HarnessKindSchema.safeParse(req.query.harness ?? DEFAULT_HARNESS);
-      const kind = parsed.success ? parsed.data : DEFAULT_HARNESS;
+      const kind = req.query.harness || DEFAULT_HARNESS;
+      // No runtime, no catalogue. Answering an uninstalled provider with the
+      // default's list would put Claude ids in that chat's picker.
+      const harness = app.services.harnesses.find(kind);
+      if (!harness) return [];
       // A named account wins, but only on ITS provider: `?harness=codex&subscription=claude2`
       // is a stale client, and answering it with Claude's catalogue would put a
       // Claude id in a Codex picker.
       const named = findSubscription(settings, req.query.subscription);
       const sub = named?.provider === kind ? named : subscriptionFor(settings, kind);
-      const harness = app.services.harnesses.find(kind)!;
       return harness.listModels({ refresh: req.query.refresh === "1", account: accountOf(sub) });
     },
   );
@@ -46,9 +48,9 @@ export function registerModelRoutes(app: FastifyInstance): void {
     "/api/models/context-windows",
     async (req) => {
       const settings = await store.getSettings().catch(() => null);
-      const parsed = HarnessKindSchema.safeParse(req.query.harness ?? DEFAULT_HARNESS);
-      const kind = parsed.success ? parsed.data : DEFAULT_HARNESS;
-      const harness = app.services.harnesses.find(kind)!;
+      const kind = req.query.harness || DEFAULT_HARNESS;
+      const harness = app.services.harnesses.find(kind);
+      if (!harness) return {};
       const windows = await harness.contextWindows?.({
         refresh: req.query.refresh === "1",
         account: accountOf(subscriptionFor(settings, kind)),
@@ -62,6 +64,9 @@ export function registerModelRoutes(app: FastifyInstance): void {
       kind: harness.kind,
       runtime: harness.runtime(),
       capabilities: harness.capabilities,
+      // The client's labels, pickers and account pane read the descriptor, and
+      // only the server knows the ones a plugin registered.
+      descriptor: providerFor(harness.kind),
     })),
   );
 

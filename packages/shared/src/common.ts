@@ -69,11 +69,35 @@ export type ShellTranscriptFilter = z.infer<typeof ShellTranscriptFilterSchema>;
  * at creation is what lets the project default change without stranding chats
  * that are already running.
  */
-export const HarnessKindSchema = z.enum(["claude", "codex", "goose"]);
-export type HarnessKind = z.infer<typeof HarnessKindSchema>;
+export const HarnessKindSchema = z
+  .string()
+  .regex(/^[a-z][a-z0-9-]{0,39}$/, "a provider id is lowercase letters, digits and dashes");
 
-/** The harness a project gets when it has never said otherwise. */
-export const DEFAULT_HARNESS: HarnessKind = "claude";
+/**
+ * The providers that ship in this repo. Every other id is registered at
+ * runtime (see `registerProvider`), which is why {@link HarnessKind} is open.
+ *
+ * It was a closed `z.enum` of exactly these three, and that enum was also the
+ * PERSISTENCE schema for chats, projects, subscriptions and settings — so a row
+ * naming any other provider failed to parse and took its whole file down with
+ * it. That made a provider that can be uninstalled impossible by construction:
+ * removing it would brick every chat that ever ran on it.
+ */
+export const BUILTIN_HARNESS_KINDS = ["claude", "codex", "goose"] as const;
+export type BuiltinHarnessKind = (typeof BUILTIN_HARNESS_KINDS)[number];
+
+/**
+ * A provider id. Open — the `(string & {})` arm keeps editor completion for the
+ * built-ins without pretending they are the only values a row can hold.
+ */
+export type HarnessKind = BuiltinHarnessKind | (string & {});
+
+/**
+ * The harness a project gets when it has never said otherwise — and the one an
+ * unavailable provider falls back to, which is why it must be a built-in: a
+ * fallback that can be uninstalled is not one.
+ */
+export const DEFAULT_HARNESS: BuiltinHarnessKind = "claude";
 
 /**
  * WHERE a project's config dir lives — the repo, or the app's own config root.

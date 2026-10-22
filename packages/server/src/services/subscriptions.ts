@@ -63,7 +63,14 @@ export function configDirOf(sub: Subscription, machine: MachineEnv = {}): string
 
 /** Two paths name the same directory (Windows compares case-insensitively). */
 function sameDir(a: string, b: string): boolean {
-  const norm = (p: string) => resolve(p).replace(/[\\/]+$/, "");
+  // A loop, not `/[\\/]+$/`: that pattern backtracks quadratically on a long
+  // run of separators, and CodeQL (js/polynomial-redos) flags it once a path
+  // can come from a stored account row.
+  const norm = (p: string) => {
+    let out = resolve(p);
+    while (out.length > 1 && (out.endsWith("/") || out.endsWith("\\"))) out = out.slice(0, -1);
+    return out;
+  };
   return process.platform === "win32"
     ? norm(a).toLowerCase() === norm(b).toLowerCase()
     : norm(a) === norm(b);
@@ -85,7 +92,9 @@ export function accountOf(sub: ResolvedSubscription, machine: MachineEnv = {}): 
     subscriptionId: sub.id,
     configDir,
     env: {
-      ...(isDefault ? {} : { [configDirEnv]: configDir }),
+      // An unregistered provider's placeholder has no env var to name; an
+      // overlay keyed "" would reach the spawn as a nameless variable.
+      ...(isDefault || !configDirEnv ? {} : { [configDirEnv]: configDir }),
       // An endpoint provider's account IS its host, so unlike the config dir
       // this is overlaid whenever the subscription names one — including when
       // it happens to match the default. The two are not the same case: a dir
@@ -143,7 +152,8 @@ export function subscriptionStatuses(
 ): SubscriptionStatus[] {
   return resolveSubscriptions(settings).map((sub) => {
     const dir = configDirOf(sub, machine);
-    const { loginFile, endpointEnv } = providerFor(sub.provider).account;
+    const provider = providerFor(sub.provider);
+    const { loginFile, endpointEnv } = provider.account;
     return {
       ...sub,
       resolvedConfigDir: dir,
@@ -155,7 +165,10 @@ export function subscriptionStatuses(
       // not exist on Windows (its config lives under AppData), so every goose
       // account rendered greyed out and "not logged in", and a user who had
       // just added one could not select it.
-      loggedIn: endpointEnv ? true : existsSync(join(dir, loginFile)),
+      //
+      // An account of an uninstalled provider is never usable, and its empty
+      // `loginFile` would otherwise probe the directory itself and say yes.
+      loggedIn: provider.unregistered ? false : endpointEnv ? true : existsSync(join(dir, loginFile)),
       isDefault: subscriptionFor(settings, sub.provider).id === sub.id,
       atDefaultDir: sameDir(dir, defaultConfigDir(sub.provider, machine)),
     };

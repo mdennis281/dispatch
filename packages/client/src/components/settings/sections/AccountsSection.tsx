@@ -13,7 +13,7 @@ import {
   X,
 } from "lucide-react";
 import {
-  PROVIDER_IDS,
+  providerIds,
   SubscriptionListSchema,
   accountLabel,
   providerFor,
@@ -165,7 +165,7 @@ export function AccountsSection() {
                       width={140}
                       value={row.provider}
                       onChange={(provider) => patchRow(i, { provider })}
-                      options={PROVIDER_IDS.map((id) => ({ value: id, label: providerFor(id).label }))}
+                      options={providerIds().map((id) => ({ value: id, label: providerFor(id).label }))}
                     />
                     <IconButton
                       tip="Remove — chats on it fall back to the provider's default account"
@@ -229,7 +229,7 @@ export function AccountsSection() {
         )}
 
         <div className="mt-2 flex flex-wrap items-center gap-2">
-          {PROVIDER_IDS.map((provider) => (
+          {providerIds().map((provider) => (
             <Button key={provider} variant="ghost" leftIcon={<Plus />} onClick={() => add(provider)}>
               {providerFor(provider).shortLabel} account
             </Button>

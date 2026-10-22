@@ -17,7 +17,7 @@
  */
 import * as z from "zod";
 import { HarnessKindSchema, type HarnessKind } from "./common.js";
-import { PROVIDER_IDS, providerFor } from "./providers.js";
+import { providerFor, providerIds } from "./providers.js";
 
 /** Lowercase slug: stable in URLs, chat records and MCP arguments. */
 export const SubscriptionIdSchema = z
@@ -121,7 +121,7 @@ export function resolveSubscriptions(
   const stored = settings?.subscriptions ?? [];
   const out: ResolvedSubscription[] = [...stored];
   const taken = new Set(stored.map((s) => s.id));
-  for (const provider of PROVIDER_IDS) {
+  for (const provider of providerIds()) {
     if (stored.some((s) => s.provider === provider)) continue;
     // The provider id is the natural implicit id. Suffixed only when a stored
     // subscription of ANOTHER provider already took it, which is legal and rare.
@@ -152,8 +152,15 @@ export function subscriptionFor(
   const pinned = wanted ? mine.find((s) => s.id === wanted) : undefined;
   if (pinned) return pinned;
   const preferred = settings?.harness?.defaults?.[provider]?.subscriptionId;
-  // `resolveSubscriptions` guarantees at least one per provider.
-  return mine.find((s) => s.id === preferred) ?? mine[0]!;
+  // `resolveSubscriptions` guarantees at least one per KNOWN provider. A chat
+  // left on a provider that has since been uninstalled has none, and every
+  // caller treats the result as present — so it gets the same implicit stand-in
+  // a known provider would, labelled by the placeholder descriptor, rather than
+  // an undefined that throws on the first `.configDir`.
+  return (
+    mine.find((s) => s.id === preferred) ??
+    mine[0] ?? { id: provider, name: providerFor(provider).label, provider, implicit: true }
+  );
 }
 
 /**

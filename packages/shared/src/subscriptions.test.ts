@@ -7,7 +7,7 @@ import {
   subscriptionFor,
   SubscriptionListSchema,
 } from "./subscriptions.js";
-import { PROVIDER_IDS } from "./providers.js";
+import { providerIds } from "./providers.js";
 
 describe("resolveSubscriptions", () => {
   it("gives an install with no list one implicit account per provider", () => {
@@ -15,7 +15,7 @@ describe("resolveSubscriptions", () => {
     // Derived from the registry rather than spelled out, so registering a new
     // provider does not fail a test about the mechanism.
     expect(all.map((s) => [s.id, s.provider, s.implicit])).toEqual(
-      PROVIDER_IDS.map((id) => [id, id, true]),
+      providerIds().map((id) => [id, id, true]),
     );
   });
 
@@ -30,8 +30,15 @@ describe("resolveSubscriptions", () => {
     expect(all.map((s) => s.id)).toEqual([
       "claude1",
       "claude2",
-      ...PROVIDER_IDS.filter((id) => id !== "claude"),
+      ...providerIds().filter((id) => id !== "claude"),
     ]);
+  });
+
+  it("still answers for a provider nothing registers, instead of undefined", () => {
+    // A chat left on an uninstalled provider; every caller reads `.configDir`.
+    expect(subscriptionFor({}, "gemini")).toMatchObject({ id: "gemini", provider: "gemini", implicit: true });
+    // ...and does not invent one in the picker list.
+    expect(resolveSubscriptions({}).some((s) => s.provider === "gemini")).toBe(false);
   });
 
   it("never lets an implicit id collide with a stored one", () => {

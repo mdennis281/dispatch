@@ -474,9 +474,13 @@ function runtimeHint(runtime: RuntimeSetupStatus): string {
   return [runtime.version, runtime.source].filter(Boolean).join(" · ");
 }
 
-/** The login command for a runtime, for the not-logged-in line. */
+/**
+ * The login command for a runtime, for the not-logged-in line. From the
+ * descriptor rather than a `=== "codex"` ternary, which told goose — and
+ * would tell any provider registered at runtime — to run `claude auth login`.
+ */
 function loginCommand(kind: HarnessKind): string {
-  return kind === "codex" ? "codex login" : "claude auth login";
+  return providerFor(kind).account.loginCommand ?? `${kind} login`;
 }
 
 /**

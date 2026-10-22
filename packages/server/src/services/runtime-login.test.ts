@@ -94,7 +94,7 @@ describe("probeCodexLogin", () => {
 
 describe("probeRuntimeLogins", () => {
   const harness = (
-    kind: "claude" | "codex" | "goose",
+    kind: string,
     runtime: Partial<ReturnType<Harness["runtime"]>>,
   ) =>
     ({ kind, runtime: () => ({ kind, source: "installed", available: true, ...runtime }) }) as unknown as Harness;
@@ -117,6 +117,22 @@ describe("probeRuntimeLogins", () => {
     expect(ranAnything).toBe(false);
     expect(status!.login).toMatchObject({ checked: true, notRequired: true });
     expect(status!.login.error).toBeUndefined();
+  });
+
+  it("does not probe a runtime-registered provider as if it were Claude", async () => {
+    // Same fall-through as the goose case, one provider later: the switch's
+    // default used to be the Claude probe.
+    let ranAnything = false;
+    const run: RunProbe = async () => {
+      ranAnything = true;
+      return { code: 0, stdout: "{}", stderr: "" };
+    };
+    const [status] = await probeRuntimeLogins([harness("opencode", { path: "/x/opencode" })], null, {
+      run,
+      env: {},
+    });
+    expect(ranAnything).toBe(false);
+    expect(status!.login).toMatchObject({ checked: false, loggedIn: false });
   });
 
   it("probes the bundled Claude binary when nothing newer is installed", async () => {
