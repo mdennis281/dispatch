@@ -105,7 +105,7 @@ function Breakdown() {
             <th className="px-2 py-1.5 text-right font-medium">Cache read</th>
             <th className="px-2 py-1.5 text-right font-medium">Cache write</th>
             <th className="px-2 py-1.5 text-right font-medium">Total</th>
-            <th className="px-2 py-1.5 text-right font-medium">Cost</th>
+            <th className="px-2 py-1.5 text-right font-medium">API value</th>
             <th className="px-2 py-1.5 text-right font-medium">Turns</th>
             <th className="px-2 py-1.5 text-right font-medium">Last</th>
           </tr>
@@ -233,10 +233,12 @@ export function TokenMetrics() {
               value={compact(t?.total ?? 0)}
               hint="Input + output + cache read + cache write"
             />
+            {/* The runtime's figure is API list price. On a subscription it is
+                not a bill, and "Cost" read as $16k of spend on a flat-rate plan. */}
             <StatTile
-              label="Cost"
+              label="API equivalent value"
               value={usd(t?.costUsd ?? null)}
-              hint="As the runtime priced it"
+              hint="At API list prices — not billed on subscriptions"
             />
             <StatTile label="Input" value={compact(t?.input ?? 0)} />
             <StatTile label="Output" value={compact(t?.output ?? 0)} />
