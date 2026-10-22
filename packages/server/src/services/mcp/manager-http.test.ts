@@ -16,9 +16,12 @@ import { MANAGER_CATEGORIES, managerServerName } from "@dispatch/shared";
 import { EventBus } from "../../bus.js";
 import { createManagerMcpServers, managerMcpContextOf } from "./manager-mcp.js";
 import {
+  INTEGRATION_MCP_PATH,
+  INTEGRATION_MCP_ROUTE,
   MANAGER_MCP_PATH,
   MANAGER_MCP_ROUTE,
   ManagerMcpBridge,
+  isIntegrationBridgePath,
   isManagerBridgePath,
   managerCategoryFromPath,
 } from "./manager-http.js";
@@ -35,6 +38,21 @@ describe("isManagerBridgePath", () => {
 
   it("still matches the parent path", () => {
     expect(isManagerBridgePath(MANAGER_MCP_PATH)).toBe(true);
+  });
+
+  it("does NOT exempt the integration mount", () => {
+    // The integration mount is authenticated by the global gate (a `dsp_`
+    // bearer the gate resolves to an identity), so it must stay INSIDE the
+    // gate. Had it been placed under the per-chat prefix it would have ridden
+    // this exemption and answered tool calls to anybody.
+    for (const category of MANAGER_CATEGORIES) {
+      const path = `${INTEGRATION_MCP_PATH}/${category}`;
+      expect(isManagerBridgePath(path), category).toBe(false);
+      expect(isIntegrationBridgePath(path), category).toBe(true);
+    }
+    expect(INTEGRATION_MCP_ROUTE).toBe(`${INTEGRATION_MCP_PATH}/:category`);
+    expect(isIntegrationBridgePath(`${INTEGRATION_MCP_PATH}X`)).toBe(false);
+    expect(isIntegrationBridgePath(MANAGER_MCP_PATH)).toBe(false);
   });
 
   it("does not exempt a neighbouring route", () => {

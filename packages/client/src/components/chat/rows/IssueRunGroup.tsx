@@ -45,6 +45,7 @@ export interface IssueRunEntry {
 const VERB: Record<string, string> = {
   issue_list: "list",
   issue_read: "read",
+  issue_create: "open",
   issue_comment: "comment",
   issue_update: "update",
 };

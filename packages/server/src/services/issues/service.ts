@@ -11,6 +11,7 @@ import {
   type Issue,
   type IssueComment,
   type IssueConfig,
+  type IssueDraft,
   type IssuePatch,
   type IssueProviderId,
   type IssueSource,
@@ -36,6 +37,7 @@ export interface BoundIssueTracker {
   get(number: number): Promise<Issue | null>;
   comments(number: number, limit?: number, total?: number): Promise<IssueComment[]>;
   comment(number: number, body: string): Promise<IssueComment>;
+  create(draft: IssueDraft): Promise<Issue>;
   update(number: number, patch: IssuePatch): Promise<Issue>;
 }
 
@@ -108,6 +110,7 @@ export class IssueService {
       get: (n) => p.get(source, n),
       comments: (n, limit, total) => p.comments(source, n, limit, total),
       comment: (n, body) => p.comment(source, n, body),
+      create: (draft) => p.create(source, draft),
       update: (n, patch) => p.update(source, n, patch),
     };
   }

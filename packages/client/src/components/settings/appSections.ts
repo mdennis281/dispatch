@@ -13,11 +13,11 @@
 import {
   Bell,
   BookMarked,
-  Webhook,
   KeyRound,
   Layers,
   MessageSquare,
   Palette,
+  Plug,
   Power,
   Archive,
   ShieldCheck,
@@ -44,9 +44,8 @@ export const APP_SECTIONS: AppSectionDef[] = [
     label: "Appearance",
     blurb: "Light, dark, or follow the OS",
     explainer:
-      "Saved server-side, so every browser and device you open Dispatch in agrees. The picker " +
-      "previews live — you can't judge a palette from the word for it — so leaving without " +
-      "saving keeps the preview until you discard it.",
+      "Remembered by this browser only, so a phone and a desktop can each keep their own. " +
+      "Takes effect the moment you pick it — there is nothing to save.",
   },
   {
     id: "chat",
@@ -119,22 +118,23 @@ export const APP_SECTIONS: AppSectionDef[] = [
       "notifications are per browser; the webhook is per install and reaches your phone.",
   },
   {
-    id: "integrations",
-    icon: Webhook,
-    label: "Integrations",
-    blurb: "Webhooks for outside tools",
-    explainer:
-      "How code that is not Dispatch hears from it. A webhook is a signed POST of the events you " +
-      "pick to a URL you own; each one keeps a week of delivery history so a receiver can be " +
-      "debugged from here. These save the moment you confirm them, not with the bar below.",
-  },
-  {
     id: "auth",
     icon: ShieldCheck,
     label: "Authentication",
     blurb: "Who can reach this instance",
     explainer:
       "Dispatch listens on your network, not just localhost. This is the gate in front of it.",
+  },
+  {
+    id: "integrations",
+    icon: Plug,
+    label: "Integrations",
+    blurb: "Tokens and webhooks for outside tools",
+    explainer:
+      "How something that is not a browser talks to this instance. Inbound, a token: shown " +
+      "once when it is made, carrying only the scopes you give it, revoked with authentication. " +
+      "Outbound, a webhook: a signed POST of the events you pick to a URL you own, with a week " +
+      "of delivery history. Both apply the moment you confirm them, not with the bar below.",
   },
   {
     id: "updates",

@@ -214,6 +214,7 @@ const DISPATCH_COPY: Record<string, { title: string; activity: string; category:
   secret_delete: { title: "Delete secret", activity: "Deleting secret", category: "config" },
   issue_list: { title: "List issues", activity: "Listing issues", category: "issue" },
   issue_read: { title: "Read issue", activity: "Reading issue", category: "issue" },
+  issue_create: { title: "Open issue", activity: "Opening issue", category: "issue" },
   issue_comment: { title: "Comment on issue", activity: "Commenting", category: "issue" },
   issue_update: { title: "Update issue", activity: "Updating issue", category: "issue" },
   wait: { title: "Wait", activity: "Waiting", category: "wait" },

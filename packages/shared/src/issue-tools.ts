@@ -17,7 +17,13 @@ import * as z from "zod";
 import { IssueCommentSchema, IssueSchema } from "./issues.js";
 import { decodeTailPayload, encodeTailPayload } from "./tail-payload.js";
 
-export const IssueToolKindSchema = z.enum(["issue_list", "issue_read", "issue_comment", "issue_update"]);
+export const IssueToolKindSchema = z.enum([
+  "issue_list",
+  "issue_read",
+  "issue_create",
+  "issue_comment",
+  "issue_update",
+]);
 export type IssueToolKind = z.infer<typeof IssueToolKindSchema>;
 
 /** What the tool DID — same loose, self-describing shape as a PR outcome. */

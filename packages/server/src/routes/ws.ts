@@ -98,9 +98,12 @@ export function registerWsRoutes(app: FastifyInstance): void {
 
     // Fan every bus event out to this socket (multiplexed, client routes by chatId).
     const unsub = bus.subscribe((evt) => send(evt));
-    const unsubRevocation = req.authIdentity
+    // A socket is only ever a person's: tickets are JWTs the gate resolves to a
+    // session, and an integration token cannot mint one (routes/auth.ts).
+    const sessionIdentity = req.authIdentity?.kind === "user" ? req.authIdentity : undefined;
+    const unsubRevocation = sessionIdentity
       ? app.auth.onSessionRevoked((id) => {
-          if (id === req.authIdentity?.sessionId) socket.close(4401, "session revoked");
+          if (id === sessionIdentity.sessionId) socket.close(4401, "session revoked");
         })
       : () => {};
     // Identity credentials live in shared config while session families are
@@ -108,8 +111,8 @@ export function registerWsRoutes(app: FastifyInstance): void {
     // credential reset in stable closes the same user's dev socket promptly.
     let identityFailures = 0;
     const identityTimer = setInterval(() => {
-      const check = req.authIdentity
-        ? app.auth.identityStillValid(req.authIdentity)
+      const check = sessionIdentity
+        ? app.auth.identityStillValid(sessionIdentity)
         : app.auth.enabled().then((enabled) => !enabled);
       void check.then((valid) => {
         identityFailures = 0;

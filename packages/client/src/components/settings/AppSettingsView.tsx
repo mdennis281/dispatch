@@ -32,7 +32,6 @@ import {
 } from "../../lib/api.js";
 import { useNotices } from "../../stores/notices.js";
 import { useSettings } from "../../stores/settings.js";
-import { useTheme } from "../../stores/theme.js";
 import { useView, type AppSettingsSection } from "../../stores/view.js";
 import {
   useAppSettingsDraft,
@@ -63,6 +62,9 @@ import { StopDispatch } from "./StopDispatch.js";
  */
 function normalize(s: AppSettings): AppSettings {
   return {
+    // Vestigial: the theme is per browser now (stores/theme), but the server
+    // schema still requires the field and PUT is a full replace, so it rides
+    // through untouched. Nothing reads it back into the page.
     theme: s.theme ?? "dark",
     defaultModeId: s.defaultModeId,
     // Deliberately NOT filled in with an effective default like the fields
@@ -129,7 +131,6 @@ export function AppSettingsView() {
   const section = useView((s) => s.appSection);
   const setSection = useView((s) => s.setAppSection);
   const pushToast = useNotices((s) => s.push);
-  const setTheme = useTheme((s) => s.setTheme);
 
   const saved = useAppSettingsDraft((s) => s.saved);
   const draft = useAppSettingsDraft((s) => s.draft);
@@ -163,9 +164,6 @@ export function AppSettingsView() {
         if (cancelled) return;
         const next = normalize(s);
         useAppSettingsDraft.getState().hydrate(next);
-        // The server value is the cross-device truth; localStorage only ever
-        // held a pre-paint cache of it, so reconcile toward the server on load.
-        setTheme(next.theme);
       })
       .catch((e) => {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
@@ -176,7 +174,7 @@ export function AppSettingsView() {
     return () => {
       cancelled = true;
     };
-  }, [hasDraft, setTheme]);
+  }, [hasDraft]);
 
   // Catalogs are cheap and can change under us (a provider installed since the
   // last visit), so unlike the draft they refresh on every mount. The server's
@@ -197,10 +195,7 @@ export function AppSettingsView() {
 
   const discard = useCallback(() => {
     useAppSettingsDraft.getState().discard();
-    // The theme picker previews live, so dropping the draft has to un-paint it.
-    const base = useAppSettingsDraft.getState().saved;
-    if (base) setTheme(base.theme);
-  }, [setTheme]);
+  }, []);
 
   const save = useCallback(async () => {
     if (busy || !draft) return;
@@ -235,7 +230,6 @@ export function AppSettingsView() {
       const result = await api.settings.update(body);
       const next = normalize(result);
       useAppSettingsDraft.getState().commit(next);
-      setTheme(next.theme);
       // Push into the live store too: transcripts read this on every render and
       // would otherwise keep the boot-time value until a reload.
       useSettings.getState().apply(result);
@@ -245,7 +239,7 @@ export function AppSettingsView() {
     } finally {
       setBusy(false);
     }
-  }, [busy, draft, pushToast, setTheme]);
+  }, [busy, draft, pushToast]);
 
   const def = APP_SECTION_BY_ID.get(section) ?? APP_SECTIONS[0]!;
   const Icon = def.icon;
@@ -316,6 +310,8 @@ export function AppSettingsView() {
           </div>
         ) : section === "auth" ? (
           <AuthSettings />
+        ) : section === "integrations" ? (
+          <IntegrationsSection />
         ) : section === "updates" ? (
           <UpdateBanner />
         ) : section === "system" ? (
@@ -324,8 +320,6 @@ export function AppSettingsView() {
           <AccountsSection />
         ) : section === "permissions" ? (
           <PermissionsSection />
-        ) : section === "integrations" ? (
-          <IntegrationsSection />
         ) : !paneProps ? (
           <InlineError message={error ?? "Settings could not be loaded."} />
         ) : section === "appearance" ? (

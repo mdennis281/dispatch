@@ -34,6 +34,13 @@ const VALUE_FLAGS = new Set([
   "header",
   "dir",
   "scope",
+  // `cm token` — the roots and the mint fields.
+  "name",
+  "scopes",
+  "projects",
+  "expires",
+  "config-dir",
+  "data-dir",
 ]);
 
 /** Short aliases, expanded before dispatch. */

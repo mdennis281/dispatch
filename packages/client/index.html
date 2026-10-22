@@ -45,7 +45,7 @@
       (function () {
         try {
           var p = localStorage.getItem("dispatch:theme");
-          if (p !== "dark" && p !== "dim" && p !== "light" && p !== "system") p = "dark";
+          if (p !== "dark" && p !== "dim" && p !== "light" && p !== "system") p = "system";
           var t =
             p === "system"
               ? matchMedia("(prefers-color-scheme: dark)").matches

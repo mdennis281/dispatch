@@ -175,6 +175,15 @@ export const IssuePatchSchema = z.object({
 });
 export type IssuePatch = z.infer<typeof IssuePatchSchema>;
 
+/** A new issue. Labels a repo does not have yet are created on the way in. */
+export const IssueDraftSchema = z.object({
+  title: z.string().min(1).max(256),
+  body: z.string().max(65_000).optional(),
+  labels: z.array(z.string().min(1)).optional(),
+  assignees: z.array(z.string().min(1)).optional(),
+});
+export type IssueDraft = z.infer<typeof IssueDraftSchema>;
+
 /* ------------------------------------------------------------------ config */
 
 /** What a spawned chat is briefed to do with an issue. */
@@ -264,6 +273,19 @@ export const IssueConfigSchema = z.object({
 export type IssueConfig = z.infer<typeof IssueConfigSchema>;
 
 export const DEFAULT_ISSUE_CLAIM_LABEL = "dispatch:working";
+
+/**
+ * The label that says "a chat filed this for its own work — never auto-take it".
+ *
+ * Built in rather than left to `excludeLabels`, because the chat filing the
+ * issue cannot read the project's filters: a PO chat that filed seven tracker
+ * issues for workstreams it was about to hand to its own children watched the
+ * watcher claim two of them into a third, unmanaged chat. A label every project
+ * honours, with no config, is one the filer can rely on. `issue_create` puts it
+ * on at creation, so no poll can land between "opened" and "labelled". A human
+ * handing the issue over by hand still can — this only stops the poll.
+ */
+export const ISSUE_MANUAL_LABEL = "dispatch:manual";
 export const DEFAULT_ISSUE_TRUST: readonly IssueAuthorTrust[] = ["owner", "member", "collaborator"];
 
 /** An issue policy with every default made explicit. */
@@ -338,6 +360,9 @@ export function matchIssue(issue: Issue, policy: Pick<ResolvedIssuePolicy, "filt
   if (issue.state !== "open") return { ok: false, reason: "not open" };
   if (labels.has(policy.claimLabel.toLowerCase())) {
     return { ok: false, reason: `already claimed (${policy.claimLabel})` };
+  }
+  if (labels.has(ISSUE_MANUAL_LABEL)) {
+    return { ok: false, reason: `labelled ${ISSUE_MANUAL_LABEL} — filed for a chat already handling it` };
   }
   if (lower(f.excludeAuthors).has(author)) return { ok: false, reason: `author ${issue.author} is excluded` };
   if (issue.authorIsBot && !f.includeBots) return { ok: false, reason: `author ${issue.author} is a bot` };

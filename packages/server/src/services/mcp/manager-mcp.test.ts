@@ -18,11 +18,14 @@ import {
   HUMAN_REVIEW_ANSWERS,
   HUMAN_REVIEW_SUMMARY_MAX,
   managerToolQualifiedName,
+  MANAGER_TOOL_EXTERNAL,
+  MANAGER_TOOL_NAMES,
   type ManagerToolName,
 } from "@dispatch/shared";
 import {
   createManagerTools,
   createManagerMcpServers,
+  externalToolPolicy,
   SLOT_REACQUIRE_MIN_MS,
   withSlotReacquire,
   humanReviewQuestion,
@@ -5095,6 +5098,42 @@ describe("issue tools", () => {
     expect(closed.payload?.outcome).toEqual({ summary: "Closed #5 as not planned", ok: true, details: ["labelled wontfix"] });
     expect(closed.payload?.issue?.state).toBe("closed");
   });
+
+  it("issue_create labels the issue dispatch:manual AT creation, so no poll lands in between", async () => {
+    const create = vi.fn(async (d: { title: string; labels?: string[] }) => ({ ...issue, title: d.title, labels: d.labels ?? [] }));
+    const update = vi.fn();
+    const { issueCreate } = tools({ create, update });
+    const res = await issueCreate.handler(
+      { title: "plugins: host core", body: "b", labels: ["plugin-layer"], assignees: undefined, autoHandle: undefined },
+      {},
+    );
+    expect(res.isError).toBeFalsy();
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ labels: ["plugin-layer", "dispatch:manual"] }));
+    expect(update).not.toHaveBeenCalled();
+    expect(decodeIssueToolPayload(textOf(res)).payload).toMatchObject({ tool: "issue_create", issue: { number: 5 } });
+  });
+
+  it("issue_create with autoHandle leaves the label off — and strips one passed by hand", async () => {
+    const create = vi.fn(async (d: { labels?: string[] }) => ({ ...issue, labels: d.labels ?? [] }));
+    const { issueCreate } = tools({ create });
+    await issueCreate.handler(
+      { title: "t", body: undefined, labels: ["Dispatch:Manual", "bug"], assignees: undefined, autoHandle: true },
+      {},
+    );
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ labels: ["bug"] }));
+  });
+
+  it("issue_create re-labels when GitHub silently dropped the label, and warns if that fails too", async () => {
+    const create = vi.fn(async () => ({ ...issue, labels: [] }));
+    const update = vi.fn(async () => ({ ...issue, labels: [] }));
+    const { issueCreate } = tools({ create, update });
+    const res = await issueCreate.handler(
+      { title: "t", body: undefined, labels: undefined, assignees: undefined, autoHandle: undefined },
+      {},
+    );
+    expect(update).toHaveBeenCalledWith(5, { addLabels: ["dispatch:manual"] });
+    expect(textOf(res)).toContain("WARNING");
+  });
 });
 
 /* ------------------------------------------------------- modes + postures */
@@ -5437,5 +5476,40 @@ describe("manager-mcp — a steering message interrupts blocking waits", () => {
       expect(vi.getTimerCount()).toBe(0);
       expect(steer.live()).toBe(0);
     });
+  });
+});
+
+describe("the external tool policy", () => {
+  it("denies exactly the tools the registry marks not external, by qualified name", () => {
+    const denied = new Set(externalToolPolicy().disallowedTools);
+    for (const name of MANAGER_TOOL_NAMES) {
+      expect(denied.has(managerToolQualifiedName(name)), name).toBe(!MANAGER_TOOL_EXTERNAL[name]);
+    }
+  });
+
+  it("leaves only external tools on a server built with it", () => {
+    // Every binding present, so what is dropped is dropped by the POLICY alone.
+    const ctx = {
+      chatId: "",
+      bus,
+      broker: fakeBroker({}),
+      toolPolicy: externalToolPolicy(),
+      memory: fakeMemory(),
+      messaging: {} as never,
+      inspect: {} as never,
+      authoring: {} as never,
+      modes: {} as never,
+      issues: {} as never,
+      terminals: {} as never,
+    };
+    const names = registeredNames(ctx);
+    expect(names.length).toBeGreaterThan(0);
+    for (const name of names) expect(MANAGER_TOOL_EXTERNAL[name as ManagerToolName], name).toBe(true);
+    expect(names).not.toContain("terminal");
+    expect(names).toContain("chat_find");
+    const servers = Object.keys(createManagerMcpServers(ctx));
+    expect(servers).not.toContain("dispatch-workspace");
+    expect(servers).not.toContain("dispatch-session");
+    expect(servers).not.toContain("dispatch-confirm");
   });
 });

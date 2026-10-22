@@ -28,12 +28,12 @@
  */
 import { useState } from "react";
 import { ChevronDown, ChevronRight, FileText, Sparkles } from "lucide-react";
-import type { HarnessKind, MessagePart, PeerSender } from "@dispatch/shared";
+import type { ChannelSender, HarnessKind, MessagePart, PeerSender } from "@dispatch/shared";
 import { cn } from "../../../lib/cn.js";
 import { useInjectedContext } from "../../../lib/injectedContext.js";
 import { useChats } from "../../../stores/chats.js";
 import { rowHarnessLabel } from "../../../lib/harness.js";
-import { BriefCard, PeerCard, sizeNote } from "./AuthoredCard.js";
+import { BriefCard, ChannelCard, PeerCard, sizeNote } from "./AuthoredCard.js";
 
 /* ----------------------------------------------------------------- context */
 
@@ -112,6 +112,8 @@ export function ComposedParts({
   harness,
   peer,
   fromPeer,
+  channel,
+  fromChannel,
 }: {
   chatId: string;
   parts: MessagePart[];
@@ -130,6 +132,14 @@ export function ComposedParts({
    * bubble, the exact attribution failure the peer treatment exists to prevent.
    */
   fromPeer?: boolean;
+  /** The sending integration, when this whole turn arrived from one. */
+  channel?: ChannelSender;
+  /**
+   * True when the ROW is `origin: "channel"` — the same trap as `fromPeer`:
+   * memory surfacing hands a channel row `parts` too, and without this the
+   * integration's words would go to `SpokenPart` and wear the human's bubble.
+   */
+  fromChannel?: boolean;
 }) {
   const injected = useInjectedContext(chatId);
   const provider = rowHarnessLabel(harness, useChats((s) => s.byId[chatId]?.harness));
@@ -143,6 +153,10 @@ export function ComposedParts({
         if (fromPeer)
           return (
             <PeerCard key={key} chatId={chatId} text={part.text} peer={peer} harness={harness} />
+          );
+        if (fromChannel)
+          return (
+            <ChannelCard key={key} chatId={chatId} text={part.text} channel={channel} harness={harness} />
           );
         return <SpokenPart key={key} part={part} />;
       })}

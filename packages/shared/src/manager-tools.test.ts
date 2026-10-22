@@ -6,7 +6,9 @@ import {
   MANAGER_CATEGORIES,
   MANAGER_SERVER_NAMES,
   MANAGER_TOOL_CATEGORY,
+  MANAGER_TOOL_EXTERNAL,
   MANAGER_TOOL_NAMES,
+  externalManagerTools,
   findLegacyManagerMentions,
   isManagerServer,
   isManagerServerOrLegacy,
@@ -248,5 +250,40 @@ describe("isManagerToolName", () => {
     expect(isManagerToolName("toString")).toBe(false);
     expect(isManagerToolName("constructor")).toBe(false);
     expect(isManagerToolName("terminal")).toBe(true);
+  });
+});
+
+describe("the external verdicts", () => {
+  it("has a verdict for every tool and nothing else", () => {
+    // The record is typed total, which catches a MISSING verdict at compile
+    // time; this catches a stale one left behind after a tool is removed.
+    expect(Object.keys(MANAGER_TOOL_EXTERNAL).sort()).toEqual([...MANAGER_TOOL_NAMES].sort());
+  });
+
+  it("never exports a tool that acts on the calling chat or puts a card up", () => {
+    // The rule, as the tools it most obviously applies to. A regression here
+    // would let a bearer token open a shell or merge a PR with no chat to answer for it.
+    for (const name of [
+      "wait", "context_usage", "compact_context",
+      "terminal", "terminal_output", "worktree", "run_subapp",
+      "ask_user", "request_exemption", "request_human_review", "secret_request",
+      "create_pr", "approve_pr", "watch_pr", "post_review", "request_review", "resolve_thread",
+      "config_write", "config_delete", "mode_write", "mode_delete", "mcp_add", "mcp_remove",
+    ] as const) {
+      expect(MANAGER_TOOL_EXTERNAL[name], name).toBe(false);
+    }
+  });
+
+  it("exports the cross-chat reads and messaging, projects, memory and issues", () => {
+    expect(externalManagerTools("chat").sort()).toEqual(
+      ["chat_ask", "chat_find", "chat_read", "chat_reply", "chat_send", "chat_state", "spawn_chat", "wait_for_chat"].sort(),
+    );
+    expect(externalManagerTools("project").sort()).toEqual(["project_info", "project_list"]);
+    expect(externalManagerTools("config").sort()).toEqual(["config_list", "config_read", "mode_list"]);
+    expect(externalManagerTools("memory")).toEqual(managerToolsInCategory("memory"));
+    expect(externalManagerTools("issues")).toEqual(managerToolsInCategory("issues"));
+    for (const category of ["github", "confirm", "workspace", "mcp", "session", "secrets"] as const) {
+      expect(externalManagerTools(category), category).toEqual([]);
+    }
   });
 });

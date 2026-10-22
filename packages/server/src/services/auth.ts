@@ -27,6 +27,8 @@ import { IpGeo } from "./ip-geo.js";
 import { describeTrustProxy, trustProxyError } from "../trust-proxy.js";
 import type { Store } from "../store/index.js";
 import { readJson, writeJsonAtomic } from "../store/fsq.js";
+import { IntegrationTokenService, type IntegrationIdentity } from "./integration-tokens.js";
+import type { IntegrationTokenCreateRequest, IntegrationTokenCreated, IntegrationTokenSummary } from "@dispatch/shared";
 
 const ACCESS_SECONDS = 10 * 60;
 const REFRESH_SLIDING_MS = 30 * 24 * 60 * 60 * 1000;
@@ -191,12 +193,22 @@ export class AuthFailure extends Error {
   }
 }
 
+/**
+ * A browser session's identity. `kind` is the discriminant against
+ * {@link IntegrationIdentity}: every route that reaches for `user` or
+ * `sessionId` narrows on it first, and the ones that only a person may call
+ * (the WS ticket, every account mutation) refuse the other kind outright.
+ */
 export interface RequestIdentity {
+  kind: "user";
   user: AuthUserSummary;
   sessionId: string;
   securityVersion: number;
   authEpoch: number;
 }
+
+/** Whatever the gate stamped: a person's session or an integration token. */
+export type AnyRequestIdentity = RequestIdentity | IntegrationIdentity;
 
 function b64url(input: Uint8Array | string): string {
   return Buffer.from(input).toString("base64url");
@@ -357,10 +369,17 @@ export class AuthService {
    */
   private readonly trustProxyBoot: { fromEnv: string; active: string };
   private lastSeenFlush: NodeJS.Timeout | null = null;
+  /**
+   * Integration tokens, owned here so their lifetime is tied to the auth gate's:
+   * minting refuses while auth is off, and turning auth off revokes them with
+   * the sessions. Persisted beside the sessions, per instance.
+   */
+  readonly tokens: IntegrationTokenService;
 
   constructor(private store: Store, geo?: IpGeo, trustProxy?: { fromEnv: string; active: string }) {
     this.geo = geo ?? new IpGeo();
     this.trustProxyBoot = trustProxy ?? { fromEnv: "", active: "" };
+    this.tokens = new IntegrationTokenService(store.integrationTokensFile());
   }
 
   /** Serialize check-then-write credential/session mutations within this process. */
@@ -473,6 +492,7 @@ export class AuthService {
 
   /** Land the pending last-seen stamps. Called on server close. */
   async dispose(): Promise<void> {
+    await this.tokens.dispose();
     if (!this.lastSeenFlush) return;
     clearTimeout(this.lastSeenFlush);
     this.lastSeenFlush = null;
@@ -620,7 +640,60 @@ export class AuthService {
         family.authEpoch !== epoch || payload.aep !== epoch ||
         family.expiresAt <= Date.now() || family.absoluteExpiresAt <= Date.now()) return null;
     this.touch(family);
-    return { user: userSummary(user), sessionId: family.id, securityVersion: version, authEpoch: epoch };
+    return { kind: "user", user: userSummary(user), sessionId: family.id, securityVersion: version, authEpoch: epoch };
+  }
+
+  /**
+   * Resolve a `dsp_` bearer. Only meaningful while auth is enabled — the gate
+   * never runs otherwise — and bound to the current epoch, so a token minted
+   * before authentication was last turned off is dead even if the explicit
+   * revoke never reached its file (a token minted offline while the server was
+   * down, say).
+   */
+  async authenticateIntegration(token: string | undefined): Promise<IntegrationIdentity | null> {
+    const data = await this.load();
+    return this.tokens.authenticate(token, authEpoch(data));
+  }
+
+  /* ----------------------------------------------------- integration tokens */
+
+  async listIntegrationTokens(identity: RequestIdentity): Promise<IntegrationTokenSummary[]> {
+    if (!identity.user.owner) throw new AuthFailure(403, "Owner access required.");
+    return this.tokens.list();
+  }
+
+  /**
+   * Mint a token for a person at the Settings pane. Owner-only: a token is an
+   * instance-wide credential and is not bounded by the minting account's own
+   * reach, so letting a non-owner mint one would be a privilege escalation.
+   *
+   * `clientId` is the seam workstream F mints through: an OAuth grant calls
+   * this with the client set and the human never sees the value.
+   */
+  async mintIntegrationToken(
+    identity: RequestIdentity | { kind: "oauth"; clientId: string },
+    input: IntegrationTokenCreateRequest,
+  ): Promise<IntegrationTokenCreated> {
+    if (identity.kind === "user" && !identity.user.owner) throw new AuthFailure(403, "Owner access required.");
+    // An unauthenticated install has nothing to scope — every caller already
+    // holds everything — and a token would only pretend otherwise.
+    if (!(await this.enabled())) throw new AuthFailure(409, "Enable authentication before minting integration tokens.");
+    const data = await this.load();
+    try {
+      return await this.tokens.mint(input, {
+        authEpoch: authEpoch(data),
+        ...(identity.kind === "oauth" ? { clientId: identity.clientId } : {}),
+      });
+    } catch (error) {
+      // The CLI core reports a bad request as its own error class; here it is a 400.
+      if (error instanceof Error && error.name === "CmError") throw new AuthFailure(400, error.message);
+      throw error;
+    }
+  }
+
+  async revokeIntegrationToken(identity: RequestIdentity, id: string): Promise<void> {
+    if (!identity.user.owner) throw new AuthFailure(403, "Owner access required.");
+    if (!(await this.tokens.revoke(id))) throw new AuthFailure(404, "Token not found.");
   }
 
   async authenticateWs(ticket: string | undefined): Promise<RequestIdentity | null> {
@@ -637,7 +710,7 @@ export class AuthService {
         family.authEpoch === epoch && payload.aep === epoch &&
         family.expiresAt > now && family.absoluteExpiresAt > now)) return null;
     this.touch(family);
-    return { user: userSummary(user), sessionId: family.id, securityVersion: version, authEpoch: epoch };
+    return { kind: "user", user: userSummary(user), sessionId: family.id, securityVersion: version, authEpoch: epoch };
   }
 
   async identityStillValid(identity: RequestIdentity): Promise<boolean> {
@@ -858,6 +931,10 @@ export class AuthService {
     // Revoke first: a crash can leave auth enabled, but can never leave tokens
     // live after Settings says it was disabled and those credentials are re-used.
     await this.persistSessions();
+    // Integration tokens follow the sessions' rule. Explicitly, AND by the
+    // epoch bump below: the explicit stamp is what the Settings list shows,
+    // the epoch is what catches a token this process never loaded.
+    await this.tokens.revokeAll().catch(() => {});
     data.sessionEpoch = authEpoch(data) + 1;
     await this.persistAuth();
     const settings = await this.store.getSettings();

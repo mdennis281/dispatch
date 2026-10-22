@@ -117,7 +117,9 @@ import {
   HUMAN_REVIEW_SUMMARY_MAX,
   HUMAN_REVIEW_TITLE_MAX,
   type HumanReviewPayload,
+  IssueDraftSchema,
   IssuePatchSchema,
+  ISSUE_MANUAL_LABEL,
   issueSourceLabel,
   type Issue,
   type IssueComment,
@@ -158,6 +160,7 @@ import {
   HarnessKindSchema,
   PROVIDER_IDS,
   COMPACT_FOCUS_MAX,
+  MANAGER_TOOL_EXTERNAL,
 } from "@dispatch/shared";
 import { classifyActivity } from "../metrics-activity.js";
 import type { EventBus } from "../../bus.js";
@@ -1936,7 +1939,12 @@ export interface ManagerMcpExemptions {
 
 /** Per-session context the factory closes over. */
 export interface ManagerMcpContext {
-  /** The chat this session drives (for the waiting status label). */
+  /**
+   * The chat this session drives (for the waiting status label). EMPTY for an
+   * external context — the integration mount — which has no self chat; the
+   * tools that would act on it are not offered there (see
+   * {@link externalToolPolicy}), and the two that advertise a wait check for it.
+   */
   chatId: string;
   /**
    * The selected MODE's tool policy. A tool it denies is NOT REGISTERED —
@@ -3227,16 +3235,20 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         1000;
 
       // Advertise the wait in the UI header (reuses the working-status surface).
-      ctx.bus.publish({
-        type: "chat-status",
-        chatId: ctx.chatId,
-        status: "running",
-        activity: {
-          state: "tool",
-          label: `waiting for chat ${chatId}`,
-          toolName: "wait_for_chat",
-        },
-      });
+      // Not from an EXTERNAL context: it has no chat, and a status event for an
+      // empty id would put a phantom "running" row in every client's store.
+      if (ctx.chatId) {
+        ctx.bus.publish({
+          type: "chat-status",
+          chatId: ctx.chatId,
+          status: "running",
+          activity: {
+            state: "tool",
+            label: `waiting for chat ${chatId}`,
+            toolName: "wait_for_chat",
+          },
+        });
+      }
 
       const steer = steerInterrupt(ctx);
       // Declared for the scheduler: that chat is what this one is stuck on, so
@@ -7114,13 +7126,17 @@ ${look}` : "")
         // peer doesn't look like one that has hung — but only once the ask is
         // actually admitted. Published unconditionally up front, a refused call
         // (a self-send, an unknown id) flashed a wait that never happened.
-        onWaiting: () =>
+        onWaiting: () => {
+          // Same guard as `wait_for_chat`: an external context has no row to
+          // advertise on.
+          if (!ctx.chatId) return;
           ctx.bus.publish({
             type: "chat-status",
             chatId: ctx.chatId,
             status: "running",
             activity: { state: "tool", label: `asking chat ${to}`, toolName: "chat_ask" },
-          }),
+          });
+        },
       });
       } finally {
         ctx.broker.noteWaitingOn(ctx.chatId, { chatId: to }, false);
@@ -7545,6 +7561,48 @@ ${look}` : "")
       }),
   );
 
+  const issueCreate = tool(
+    "issue_create",
+    "Open a new issue in this project's tracker. Use this rather than `gh issue create`: when the " +
+      "project's issue watcher is on, it auto-starts a separate chat for every new issue it admits, " +
+      `and this tool labels the issue \`${ISSUE_MANUAL_LABEL}\` AT CREATION so the watcher never takes ` +
+      "it — the right default when you are filing issues to track work you or your own child chats " +
+      "will do. Pass `autoHandle: true` only when you want Dispatch's issue watcher to pick it up.",
+    {
+      title: IssueDraftSchema.shape.title,
+      body: IssueDraftSchema.shape.body.describe("Markdown."),
+      labels: IssueDraftSchema.shape.labels,
+      assignees: IssueDraftSchema.shape.assignees,
+      autoHandle: z
+        .boolean()
+        .optional()
+        .describe(`Default false: the issue gets ${ISSUE_MANUAL_LABEL} and the watcher skips it.`),
+    },
+    async ({ autoHandle, ...draft }): Promise<CallToolResult> =>
+      withTracker(async (t) => {
+        // Case-insensitive, like `matchIssue`: a hand-passed "Dispatch:Manual"
+        // would otherwise survive `autoHandle` and still keep the watcher off.
+        const labels = new Set((draft.labels ?? []).filter((l) => l.toLowerCase() !== ISSUE_MANUAL_LABEL));
+        if (!autoHandle) labels.add(ISSUE_MANUAL_LABEL);
+        let issue = await t.create({ ...draft, labels: [...labels] });
+        const details = [issue.url];
+        // GitHub drops labels SILENTLY when the token lacks push access. An
+        // issue that was meant to be exempt but isn't is the exact failure this
+        // tool exists to prevent, so retry once and say so if it still isn't.
+        const exempt = (i: Issue) => i.labels.some((l) => l.toLowerCase() === ISSUE_MANUAL_LABEL);
+        if (!autoHandle && !exempt(issue)) {
+          issue = await t.update(issue.number, { addLabels: [ISSUE_MANUAL_LABEL] }).catch(() => issue);
+          if (!exempt(issue)) details.push(`WARNING: could not label it ${ISSUE_MANUAL_LABEL} — the issue watcher may take it`);
+        }
+        const summary = `Opened #${issue.number}: ${issue.title}`;
+        return issueToolResult(`${summary}\n${details.join("\n")}\n${issueLine(issue)}`, {
+          tool: "issue_create",
+          outcome: { summary, ok: true, details },
+          issue,
+        });
+      }),
+  );
+
   const issueComment = tool(
     "issue_comment",
     "Post a comment on one of this project's issues, as the account Dispatch's issue tracker is " +
@@ -7610,6 +7668,7 @@ ${look}` : "")
   return {
     issueList,
     issueRead,
+    issueCreate,
     issueComment,
     issueUpdate,
     secretRequest,
@@ -7691,6 +7750,7 @@ type ManagerToolKey = keyof ManagerTools;
 const TOOL_WIRE_NAME: Record<ManagerToolKey, ManagerToolName> = {
   issueList: "issue_list",
   issueRead: "issue_read",
+  issueCreate: "issue_create",
   issueComment: "issue_comment",
   issueUpdate: "issue_update",
   secretRequest: "secret_request",
@@ -7744,6 +7804,36 @@ const TOOL_WIRE_NAME: Record<ManagerToolKey, ManagerToolName> = {
   projectInfo: "project_info",
   projectList: "project_list",
 };
+
+/**
+ * The compile-time half of `MANAGER_TOOL_EXTERNAL`'s guarantee, in the same
+ * shape as {@link TOOL_WIRE_NAME}: every tool the FACTORY builds has a verdict.
+ * The shared record is already total over the registry; this is what ties the
+ * registry to the factory, so a tool that exists only in one of them fails the
+ * build rather than being served to an integration by accident.
+ */
+const TOOL_EXTERNAL: Record<ManagerToolKey, boolean> = Object.fromEntries(
+  (Object.keys(TOOL_WIRE_NAME) as ManagerToolKey[]).map((key) => [
+    key,
+    MANAGER_TOOL_EXTERNAL[TOOL_WIRE_NAME[key]],
+  ]),
+) as Record<ManagerToolKey, boolean>;
+
+/**
+ * The tool policy an EXTERNAL context is built with: a denylist of every tool
+ * that is not external, by the qualified name {@link boundToolsByCategory}
+ * checks. Reusing the mode-policy seam means the rule is enforced at
+ * registration — a tool outside the set is never on the server, rather than
+ * present and refusing — and that it composes with whatever the token's
+ * bindings leave bound.
+ */
+export function externalToolPolicy(): { disallowedTools: string[] } {
+  return {
+    disallowedTools: (Object.keys(TOOL_WIRE_NAME) as ManagerToolKey[])
+      .filter((key) => !TOOL_EXTERNAL[key])
+      .map((key) => managerToolQualifiedName(TOOL_WIRE_NAME[key])),
+  };
+}
 
 /**
  * Which session binding gates a manager tool being OFFERED to the agent (see
@@ -7807,6 +7897,7 @@ const MANAGER_TOOL_GATE: Record<ManagerToolName, ManagerToolBinding | null> = {
   secret_delete: "secrets",
   issue_list: "issues",
   issue_read: "issues",
+  issue_create: "issues",
   issue_comment: "issues",
   issue_update: "issues",
 };
@@ -7918,6 +8009,7 @@ function boundTools(ctx: ManagerMcpContext): Record<ManagerToolName, boolean> {
     // not say anything on it has no way to report back where the reporter looks.
     issue_list: Boolean(ctx.issues),
     issue_read: Boolean(ctx.issues),
+    issue_create: Boolean(ctx.issues),
     issue_comment: Boolean(ctx.issues),
     issue_update: Boolean(ctx.issues),
     // Cross-chat MESSAGING — the write path. All four together: a chat that can
