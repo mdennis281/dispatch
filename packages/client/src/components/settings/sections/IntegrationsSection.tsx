@@ -156,6 +156,7 @@ function SubscriptionCard({
   onChanged: () => void;
 }) {
   const pushToast = useNotices((s) => s.push);
+  const projects = useRealProjects();
   const [showLog, setShowLog] = useState(false);
   const [testing, setTesting] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -226,7 +227,15 @@ function SubscriptionCard({
                 attention: {summary(f.attentionKinds, "kinds")}
               </Chip>
             ) : null}
-            <Chip tone="neutral">{summary(f.projectIds, "projects")}</Chip>
+            <Chip tone="neutral">
+              {summary(
+                // Names, not ids: the id is what the filter stores, but nobody
+                // recognises their project by it. A project since removed keeps
+                // its id so the chip still says something is narrowed.
+                f.projectIds?.map((id) => projects.find((p) => p.id === id)?.name ?? id),
+                "projects",
+              )}
+            </Chip>
             {f.chatIds?.length ? <Chip tone="neutral">{summary(f.chatIds, "chats")}</Chip> : null}
             {sub.createdBy !== "user" ? <Chip tone="agent">token</Chip> : null}
           </div>
