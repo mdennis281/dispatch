@@ -220,6 +220,15 @@ describe("diagnose — protocol", () => {
     expect(check(d.checks, "protocol").state).toBe("fail");
   });
 
+  it("does not call a stale bundle's socket 'awaiting handshake' — it handshook", () => {
+    // The server's version only arrives in `hello`, so a known mismatch proves
+    // the handshake happened. Saying otherwise sent people chasing the socket.
+    const d = diagnose(
+      input({ state: "open", serverVersion: "2026.08.21.00002", handshaken: true }),
+    );
+    expect(check(d.checks, "socket")).toMatchObject({ state: "ok", value: "connected" });
+  });
+
   it("outranks every other verdict, because it is the one that looks healthy", () => {
     // Server unreachable AND stale: the staleness is what a reload fixes, and a
     // "start the server" instruction would send the user somewhere useless.

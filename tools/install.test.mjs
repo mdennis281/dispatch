@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import {
+  CHANNEL_RETRY,
   CLI_COMMANDS,
   compareStamps,
   desktopRoot,
@@ -234,6 +235,82 @@ test("an unstable resolve skips drafts and unorderable tags", async () => {
   await withFetch({ "/releases?per_page=": page }, async () => {
     const { release: picked } = await resolveRelease("o/r", undefined, "unstable");
     assert.equal(picked.tag_name, "v2026.08.15.10000");
+  });
+});
+
+/**
+ * Stub `fetch` with one canned response per call, in order — for the retry
+ * paths, where the SAME url has to answer differently the second time. A
+ * response is a body (served as 200) or `{ status, text }` for an error.
+ */
+async function withFetchSequence(responses, fn) {
+  const original = globalThis.fetch;
+  const retry = { ...CHANNEL_RETRY };
+  // The real backoff is 1+2+4+8s; nothing here is about the waiting.
+  CHANNEL_RETRY.baseDelayMs = 0;
+  const asked = [];
+  globalThis.fetch = async (url) => {
+    asked.push(String(url));
+    const next = responses[Math.min(asked.length, responses.length) - 1];
+    if (next?.status) return { ok: false, status: next.status, text: async () => next.text ?? "" };
+    return { ok: true, status: 200, json: async () => next };
+  };
+  try {
+    return await fn(asked);
+  } finally {
+    globalThis.fetch = original;
+    Object.assign(CHANNEL_RETRY, retry);
+  }
+}
+
+test("an empty unstable page is asked again, not taken as an empty channel (#404)", async () => {
+  // GitHub really does this to authenticated list requests: `200 []`, then the
+  // full page a moment later.
+  await withFetchSequence([[], [release("v2026.08.16.63367", { prerelease: true })]], async (asked) => {
+    const { release: picked } = await resolveRelease("o/r", undefined, "unstable");
+    assert.equal(picked.tag_name, "v2026.08.16.63367");
+    assert.equal(asked.length, 2);
+  });
+});
+
+test("a persistently empty unstable channel fails with what GitHub actually sent", async () => {
+  await withFetchSequence([[]], async (asked) => {
+    await assert.rejects(resolveRelease("o/r", undefined, "unstable"), (err) => {
+      assert.match(err.message, /no installable release found on the unstable channel of o\/r/);
+      assert.match(err.message, /HTTP 200, 0 release\(s\)/);
+      assert.match(err.message, /gave up after 5 attempts/);
+      return true;
+    });
+    assert.equal(asked.length, CHANNEL_RETRY.attempts);
+  });
+});
+
+test("the no-release error names the tags it skipped and why", async () => {
+  const page = [release("v2026.08.17.00001", { draft: true }), release("v9.9.9")];
+  await withFetchSequence([page], async () => {
+    await assert.rejects(
+      resolveRelease("o/r", undefined, "unstable"),
+      /2 release\(s\), first: v2026\.08\.17\.00001 \(draft\), v9\.9\.9/,
+    );
+  });
+  await withFetchSequence([{ message: "Moved Permanently" }], async () => {
+    await assert.rejects(
+      resolveRelease("o/r", undefined, "unstable"),
+      /body is not an array: \{"message":"Moved Permanently"\}/,
+    );
+  });
+});
+
+test("a 5xx or 429 is retried; any other 4xx is GitHub's answer and is not", async () => {
+  const good = [release("v2026.08.16.63367", { prerelease: true })];
+  await withFetchSequence([{ status: 502 }, { status: 429 }, good], async (asked) => {
+    const { release: picked } = await resolveRelease("o/r", undefined, "unstable");
+    assert.equal(picked.tag_name, "v2026.08.16.63367");
+    assert.equal(asked.length, 3);
+  });
+  await withFetchSequence([{ status: 404, text: "Not Found" }, good], async (asked) => {
+    await assert.rejects(resolveRelease("o/r", undefined, "unstable"), /GitHub request failed \(404\)/);
+    assert.equal(asked.length, 1);
   });
 });
 
