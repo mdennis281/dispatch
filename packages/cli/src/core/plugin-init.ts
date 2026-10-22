@@ -144,6 +144,18 @@ export function scaffoldFiles(opts: { id: string; name: string; kind: PluginScaf
     2,
   )}\n`;
 
+  // pnpm 11 refuses to run a dependency's install script unless the project
+  // lists it, and exits 1 (ERR_PNPM_IGNORED_BUILDS) rather than warning.
+  // esbuild — vite's compiler — unpacks its platform binary in a postinstall,
+  // so without this line the scaffold's very first `pnpm install` fails.
+  files["pnpm-workspace.yaml"] = [
+    "# pnpm will not run esbuild's postinstall (which unpacks its binary) unless",
+    "# it is allowed here; without it `pnpm install` exits with ERR_PNPM_IGNORED_BUILDS.",
+    "allowBuilds:",
+    "  esbuild: true",
+    "",
+  ].join("\n");
+
   files[".gitignore"] = [
     "node_modules/",
     "# Build output of the vite configs — plugin.yaml points at these.",

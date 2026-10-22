@@ -62,6 +62,12 @@ const files = [
   "packages/shared/dist",
   "packages/cli/package.json",
   "packages/cli/dist",
+  // `cm plugin init` links this package into every scaffold it writes, so an
+  // install that lacks it can scaffold nothing. Types, two presets and a fake
+  // context — no runtime dependency beyond @dispatch/shared.
+  "packages/plugin-sdk/package.json",
+  "packages/plugin-sdk/README.md",
+  "packages/plugin-sdk/dist",
   "tools/app/autostart.mjs",
   "tools/app/create-shortcut.mjs",
   "tools/app/launch.py",
@@ -82,7 +88,7 @@ for (const relative of files) {
 // so frozen release installs are governed by the same lockfile rules as source.
 // The prebuilt client is static data; excluding its package avoids installing
 // React/Monaco when the browser bundle already contains them.
-const releaseWorkspaces = ["packages/server", "packages/shared", "packages/cli"];
+const releaseWorkspaces = ["packages/server", "packages/shared", "packages/cli", "packages/plugin-sdk"];
 const sourceWorkspace = readFileSync(join(repoRoot, "pnpm-workspace.yaml"), "utf8");
 const releasePackages =
   "packages:\n" + releaseWorkspaces.map((workspace) => `  - '${workspace}'\n`).join("");

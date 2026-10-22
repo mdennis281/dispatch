@@ -16,13 +16,14 @@ plugin fine and then shows a "failed to load" toast for its client half.
 
 ## What to look at
 
-- `src/index.tsx` — `activate(host)`, one use of every slot. The toolbar
+- `src/index.tsx` — `defineClientPlugin({ activate(host) })`, one use of every slot. The toolbar
   control is a bare icon: the host's size ladder decides whether it is in the
   row or only in the composer options menu, exactly as for the built-ins.
-- `vite.config.mjs` — the externals → globals pattern. `react`, `react-dom`,
-  `react/jsx-runtime`, `zustand` and `lucide-react` are not bundled; they
-  resolve to `window.__dispatch.deps`, which the host sets before any plugin
-  loads. React must be the host's — a second copy breaks every hook.
+- `vite.config.mjs` — one call to the SDK's `dispatchClientBuild`. `react`,
+  `react-dom`, `react/jsx-runtime`, `zustand` and `lucide-react` are not
+  bundled; they resolve to `window.__dispatch.deps`, which the host sets before
+  any plugin loads. React must be the host's — a second copy breaks every hook.
+  The mechanism is in `packages/plugin-sdk/src/vite.ts`.
 - `server/index.js` — `GET hello`, `POST ping`, and `ctx.emit`, which the
   client receives through `host.events.onPlugin`.
 - `plugin.yaml` — note `client: ./client/index.js` sits in its own directory.

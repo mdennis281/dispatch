@@ -39,7 +39,7 @@ describe("scaffoldFiles", () => {
   it("writes only the half that was asked for, and links the SDK", () => {
     const server = scaffoldFiles({ id: "s", name: "S", kind: "server", sdkLink: "link:../sdk" });
     expect(Object.keys(server).sort()).toEqual(
-      [".gitignore", "README.md", "package.json", "plugin.yaml", "settings.schema.json", "src/server.ts", "test/server.test.ts", "tsconfig.json", "vite.server.config.mjs"].sort(),
+      [".gitignore", "README.md", "package.json", "plugin.yaml", "pnpm-workspace.yaml", "settings.schema.json", "src/server.ts", "test/server.test.ts", "tsconfig.json", "vite.server.config.mjs"].sort(),
     );
     const client = scaffoldFiles({ id: "c", name: "C", kind: "client", sdkLink: "link:../sdk" });
     expect(Object.keys(client)).not.toContain("src/server.ts");
