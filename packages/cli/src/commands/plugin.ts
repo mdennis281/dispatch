@@ -48,7 +48,7 @@ function emitJson(args: ParsedArgs, payload: unknown): boolean {
   return true;
 }
 
-const RESTART_NOTE = "  Restart Dispatch to load it (hot reload is not supported).\n";
+const RESTART_NOTE = "  Restart Dispatch to apply (plugins are read at boot; nothing is hot-reloaded).\n";
 
 async function cmdAdd(args: ParsedArgs): Promise<void> {
   const [source] = args.positionals;
@@ -99,8 +99,10 @@ async function cmdEnable(args: ParsedArgs, enabled: boolean): Promise<void> {
   await setPluginEnabled(configDir, id, enabled);
   if (emitJson(args, { ok: true, id, enabled })) return;
   process.stdout.write(`${enabled ? "Enabled" : "Disabled"} ${id}\n`);
-  if (enabled) process.stdout.write(RESTART_NOTE);
-  else process.stdout.write("  A running Dispatch deactivates it on its next settings read; restart to be sure.\n");
+  // Both directions need a restart from here: the server reads the toggle map
+  // once at boot and only its own PUT /api/plugins/:id/enabled changes it live.
+  // Settings → Plugins is the way to turn one off without restarting.
+  process.stdout.write(RESTART_NOTE);
 }
 
 async function cmdRemove(args: ParsedArgs): Promise<void> {

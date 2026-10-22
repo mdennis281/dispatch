@@ -294,15 +294,21 @@ export async function addPlugin(
     const found = await validated(pluginDir);
     const root = pluginsRoot(configDir);
     await mkdir(root, { recursive: true });
-    const replaced = await claimSlot(root, found.id, !!opts.force);
-    const target = join(root, found.manifest!.id);
+    // The MANIFEST id, never `found.id`: that is the source directory's name,
+    // which is `src` for a clone, a random temp name for a tarball, and
+    // whatever the author called their checkout. Claiming by that name would
+    // skip the "already installed" check and let `--force` delete the wrong
+    // plugin.
+    const id = found.manifest!.id;
+    const replaced = await claimSlot(root, id, !!opts.force);
+    const target = join(root, id);
     // Copy to a sibling tmp dir and rename, so an interrupted copy never
     // leaves a half-plugin the loader would list as broken.
-    const tmp = join(root, `.${found.manifest!.id}.${process.pid}.tmp`);
+    const tmp = join(root, `.${id}.${process.pid}.tmp`);
     await rm(tmp, { recursive: true, force: true });
     await cp(pluginDir, tmp, { recursive: true, dereference: true, filter: (p) => basename(p) !== ".git" });
     await rename(tmp, target);
-    const plugin = await readPluginDir(target, found.manifest!.id);
+    const plugin = await readPluginDir(target, id);
     return { plugin, outcome: replaced ? "replaced" : "copied", dir: target };
   } finally {
     if (scratch) await rm(scratch, { recursive: true, force: true }).catch(() => {});
@@ -324,10 +330,12 @@ export async function linkPlugin(
   const found = await validated(abs);
   const root = pluginsRoot(configDir);
   await mkdir(root, { recursive: true });
-  const replaced = await claimSlot(root, found.id, !!opts.force);
-  const target = join(root, found.manifest!.id);
+  // Manifest id, not the checkout's directory name — see `addPlugin`.
+  const id = found.manifest!.id;
+  const replaced = await claimSlot(root, id, !!opts.force);
+  const target = join(root, id);
   await symlink(abs, target, process.platform === "win32" ? "junction" : "dir");
-  const plugin = await readPluginDir(target, found.manifest!.id);
+  const plugin = await readPluginDir(target, id);
   return { plugin, outcome: replaced ? "replaced" : "linked", dir: target };
 }
 

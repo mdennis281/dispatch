@@ -76,6 +76,34 @@ describe("addPlugin", () => {
     expect(await readFile(join(again.dir, "server", "index.js"), "utf8")).toContain("return 2");
   });
 
+  it("claims the slot by MANIFEST id when the source directory is named something else", async () => {
+    // A clone lands in `src/`, a checkout is called whatever the author
+    // called it. Claiming by that name skipped the installed check (rename
+    // then failed with ENOTEMPTY) and let --force delete the wrong plugin.
+    const first = await addPlugin(configDir, await source("hello"));
+    expect(first.dir).toBe(join(configDir, "plugins", "hello"));
+    const checkout = join(root, "src", "hello-checkout");
+    await mkdir(join(checkout, "server"), { recursive: true });
+    await writeFile(join(checkout, "plugin.yaml"), MANIFEST("hello"));
+    await writeFile(join(checkout, "server", "index.js"), "export function activate() { return 'checkout'; }\n");
+
+    await expect(addPlugin(configDir, checkout)).rejects.toThrow(/already installed/);
+    expect(await readFile(join(first.dir, "server", "index.js"), "utf8")).not.toContain("checkout");
+
+    const forced = await addPlugin(configDir, checkout, { force: true });
+    expect(forced.outcome).toBe("replaced");
+    expect(forced.dir).toBe(join(configDir, "plugins", "hello"));
+    expect(await readFile(join(forced.dir, "server", "index.js"), "utf8")).toContain("checkout");
+    expect(existsSync(join(configDir, "plugins", "hello-checkout"))).toBe(false);
+
+    // Same for link: the slot is the manifest id, so a second link refuses
+    // and a forced one replaces the copy with the junction.
+    await expect(linkPlugin(configDir, checkout)).rejects.toThrow(/already installed/);
+    const linked = await linkPlugin(configDir, checkout, { force: true });
+    expect(linked.dir).toBe(join(configDir, "plugins", "hello"));
+    expect((await lstat(linked.dir)).isSymbolicLink()).toBe(true);
+  });
+
   it("finds the manifest one directory down, the way a tarball or clone wraps it", async () => {
     const wrapped = join(root, "wrapped");
     await mkdir(wrapped, { recursive: true });

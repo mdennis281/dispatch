@@ -5,12 +5,14 @@
  * Three decisions here are the ones a later change is most likely to undo by
  * accident, so they get their reasons up front:
  *
- *   ACTIVATION RUNS FROM `warm()`, AFTER LISTEN. A plugin's `activate` is
- *   arbitrary code with a 30 s budget. Awaiting it before the port opened would
- *   hold the health check shut long enough for `install.mjs` to roll a healthy
- *   update back — the exact failure that split `start()` from `warm()` in the
- *   first place. So the port is open before the first plugin runs, and a hung
- *   `activate` delays only the plugins queued behind it.
+ *   ACTIVATION RUNS FROM `warm()`, AFTER LISTEN, AND NOTHING AWAITS IT. A
+ *   plugin's `activate` is arbitrary code with a 30 s budget. Awaiting it
+ *   before the port opened would hold the health check shut long enough for
+ *   `install.mjs` to roll a healthy update back — the exact failure that split
+ *   `start()` from `warm()` in the first place. So the port is open before the
+ *   first plugin runs, `warm()` fires `activateAll` and moves on, and a hung
+ *   `activate` delays only the plugins queued behind it — not the runner
+ *   reconcile, and not a shutdown (`dispose` does not join it either).
  *
  *   A THROWING PLUGIN IS A ROW, NOT A CRASH. Every failure path marks the plugin
  *   `error` with its message, files it through the crash log, and moves on.
@@ -121,7 +123,7 @@ export class PluginService {
   private readonly fault: (kind: string, err: unknown) => void;
   private readonly log: (line: string) => void;
   private loaded = false;
-  /** The in-flight `activateAll`, so `dispose` can wait for it to unwind. */
+  /** Memoised `activateAll`, so a second call joins the first instead of re-running it. */
   private activating: Promise<void> | undefined;
   private disposed = false;
 
@@ -206,6 +208,14 @@ export class PluginService {
         owned,
       );
       await withBudget(Promise.resolve(mod.activate(ctx)), this.activateBudgetMs, "activate()");
+      if (this.disposed) {
+        // The host went away while this one was coming up. `dispose()` does not
+        // wait for an activate in flight (a hung one would hold the shutdown
+        // for its whole budget), so the late arrival tears itself down here.
+        this.teardown(rec);
+        rec.phase = "inactive";
+        return;
+      }
       rec.phase = "active";
       log.info(`active (v${manifest.version})`);
     } catch (err) {
@@ -247,10 +257,17 @@ export class PluginService {
     rec.module = undefined;
   }
 
-  /** Deactivate every active plugin, reverse id order. Waits for a boot activation in flight first. */
+  /**
+   * Deactivate every active plugin, reverse id order.
+   *
+   * Does NOT wait for an activation still in flight: that is third-party code
+   * on a 30 s budget, and a shutdown held for it is exactly what the
+   * activate-after-listen design was meant to spare the host. The loop in
+   * `activateAll` stops at the next plugin, and the one in flight sees
+   * `disposed` when it returns and tears itself down (see `activateOne`).
+   */
   async dispose(): Promise<void> {
     this.disposed = true;
-    await this.activating?.catch(() => {});
     const recs = [...this.records.values()].sort((a, b) => b.id.localeCompare(a.id));
     for (const rec of recs) {
       if (rec.phase === "active" || rec.phase === "error") await this.deactivateOne(rec);

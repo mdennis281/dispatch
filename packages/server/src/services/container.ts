@@ -1269,10 +1269,14 @@ export function createServices(
     // the port opened would hold the health check shut long enough for
     // `install.mjs` to roll a good update back — the failure that split
     // `start()` from `warm()`. Their route prefixes answer 503 until then.
-    await plugins.activateAll().catch((err: unknown) => {
+    //
+    // NOT awaited, for the same reason one step further in: the plugins run
+    // serially, so one hung `activate` is a minute, and the runner reconcile
+    // below must not start a minute late because of it. `plugins.dispose()`
+    // joins whatever is still in flight.
+    void plugins.activateAll().catch((err: unknown) => {
       console.error("[Dispatch] plugin activation failed (continuing):", err);
     });
-    if (disposed) return;
 
     // Last, because it is the slowest and nothing above waits on it.
     try {
