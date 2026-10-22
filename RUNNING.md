@@ -422,6 +422,50 @@ Open the **MCP catalog** in the UI (top bar / command palette) to see every
 configured server's live connection status and its tools, command by command,
 grouped by server.
 
+## Plugins
+
+Code from outside the repo that registers into Dispatch's seams: a server module that
+runs in the server process (routes under `/api/plugins/<id>/`, the event bus, chats,
+memory, kv, secrets), a client bundle the SPA loads (composer controls, settings
+sections, panel tabs, chat badges, dictation/TTS engines), and/or contributed modes,
+skills, instructions, personas, MCP servers and managed processes. The full contract is
+[docs/plugins.md](docs/plugins.md); an agent gets the bundled `plugin-authoring` skill.
+
+**Where they live.** `<configDir>/plugins/<id>/` — the directory `config.json` is in
+(`DISPATCH_CONFIG_DIR`; Settings → System shows it; a source checkout uses `.data/`).
+The config root is shared by the installed app and `pnpm dev` and is never replaced by
+an upgrade, so a plugin installed once is seen by both and survives every publish.
+Plugins are global; a project opts out of a plugin's MCP server through its ordinary
+`mcpEnabled` map.
+
+**Install.**
+
+```bash
+pnpm cm plugin add <path | git-url | tarball> --config-dir <dir>   # validate, copy in, print what it declares
+pnpm cm plugin link <path> --config-dir <dir>                      # junction a working directory (development)
+pnpm cm plugin list | enable <id> | disable <id> | remove <id>
+pnpm cm plugin init my-plugin --both                                # scaffold one against @dispatch/plugin-sdk
+```
+
+The four reference plugins are in `examples/plugins/` (`hello-server`, `hello-slot`,
+`event-forwarder`, `contributions`); `pnpm build` at the root builds them, so a built
+checkout can `cm plugin link` any of them straight away.
+
+**The restart rule.** Plugins are read at boot and nothing hot-reloads: after `add`,
+`link`, `enable`, or editing a plugin's files, restart the instance that should see it
+(`pnpm app:stop` / Settings → Stop for the installed app, Ctrl-C for `pnpm dev`). The
+one live edge is **Settings → Plugins**: switching a plugin **off** deactivates it
+immediately (routes 404, listeners dropped, processes stopped); switching it **on** says
+"restart to apply". That pane is also where each plugin's status (`active`, `disabled`,
+`error` with the message, `invalid`, `incompatible`), declared capabilities and secrets,
+settings form, OAuth Connect buttons and "open folder" live.
+
+**Integrations without a plugin.** A bot or script talks to the host directly with an
+integration token (Settings → Integrations → Tokens, or `pnpm cm token create`), the
+REST surface under `/api/integration/`, the external MCP mount
+`/api/mcp/integration/<category>`, outbound webhooks, and OAuth for connectors that
+expect it. All of it needs authentication enabled. See docs/plugins.md → "Integrations".
+
 ## Installed app (stable) vs `pnpm dev` (unstable)
 
 Two instances, on purpose: an **installed PWA** you can trust with long-running agents,
