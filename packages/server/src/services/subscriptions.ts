@@ -63,7 +63,14 @@ export function configDirOf(sub: Subscription, machine: MachineEnv = {}): string
 
 /** Two paths name the same directory (Windows compares case-insensitively). */
 function sameDir(a: string, b: string): boolean {
-  const norm = (p: string) => resolve(p).replace(/[\\/]+$/, "");
+  // A loop, not `/[\\/]+$/`: that pattern backtracks quadratically on a long
+  // run of separators, and CodeQL (js/polynomial-redos) flags it once a path
+  // can come from a stored account row.
+  const norm = (p: string) => {
+    let out = resolve(p);
+    while (out.length > 1 && (out.endsWith("/") || out.endsWith("\\"))) out = out.slice(0, -1);
+    return out;
+  };
   return process.platform === "win32"
     ? norm(a).toLowerCase() === norm(b).toLowerCase()
     : norm(a) === norm(b);
