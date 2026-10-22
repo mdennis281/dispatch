@@ -19,6 +19,7 @@ import { DEFAULT_HARNESS } from "@dispatch/shared";
 
 import { api, ApiError } from "../lib/api.js";
 import { publishServerEvent } from "../lib/eventTap.js";
+import { planStaleReload, runStaleReload } from "../lib/staleReload.js";
 import {
   notifyAttention,
   syncChatNotification,
@@ -142,6 +143,20 @@ function reduceServerEvent(evt: WsServerEvent): void {
   switch (evt.type) {
     case "hello":
       useConnection.getState().onHello(evt.serverTime, evt.version);
+      // A tab that didn't launch the upgrade has nobody to reload it, and a
+      // stale bundle never recovers on its own. An in-flight update is left to
+      // UpdatingScreen, which owns that reload and its loop guard.
+      if (!useUpdate.getState().flight) {
+        const plan = planStaleReload(
+          typeof __BUILD_VERSION__ === "string" ? __BUILD_VERSION__ : "dev",
+          evt.version,
+          typeof sessionStorage === "undefined" ? undefined : sessionStorage,
+        );
+        if (plan !== "none") {
+          void runStaleReload(plan);
+          return;
+        }
+      }
       // (Re)hydrate the authoritative REST snapshot on every connect — the very
       // first one primes the app; a reconnect resyncs after a server restart.
       void hydrateFromServer();

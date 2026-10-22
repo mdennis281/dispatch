@@ -233,6 +233,7 @@ export function ConnectingScreen() {
     serverVersion,
     badFrames,
     badFrameTypes,
+    handshaken: downSince === undefined,
   });
 
   return (
