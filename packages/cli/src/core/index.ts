@@ -46,3 +46,23 @@ export {
   all,
   type ParsedArgs,
 } from "./args.js";
+
+export {
+  INTEGRATION_TOKENS_FILE,
+  integrationTokensPath,
+  generateIntegrationToken,
+  hashIntegrationToken,
+  isIntegrationTokenShape,
+  summarizeIntegrationToken,
+  readIntegrationTokenFile,
+  writeIntegrationTokenFile,
+  withIntegrationTokenLock,
+  validateIntegrationTokenRequest,
+  mintIntegrationToken,
+  listIntegrationTokens,
+  revokeIntegrationToken,
+  parseExpiry,
+  type StoredIntegrationToken,
+  type IntegrationTokenFile,
+  type MintOptions,
+} from "./integration-tokens.js";

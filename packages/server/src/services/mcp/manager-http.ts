@@ -38,9 +38,11 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
 import { createManagerCategoryServer, type ManagerMcpContext } from "./manager-mcp.js";
+import type { IntegrationIdentity } from "../integration-tokens.js";
 import {
   MANAGER_CATEGORIES,
   managerServerName,
+  toolScope,
   type ManagerCategory,
 } from "@dispatch/shared";
 
@@ -81,6 +83,28 @@ export function isManagerBridgePath(path: string): boolean {
   return path === MANAGER_MCP_PATH || path.startsWith(`${MANAGER_MCP_PATH}/`);
 }
 
+/**
+ * The SECOND mount: the same category servers for an INTEGRATION, built from a
+ * context with no self chat (see `integration-context.ts`).
+ *
+ * Deliberately NOT under {@link MANAGER_MCP_PATH} and deliberately NOT exempt
+ * from the auth gate. The per-chat mount carries its own ephemeral grant and
+ * must be exempt — that is what {@link isManagerBridgePath} is for. This one
+ * is authenticated by the `dsp_` bearer the gate already understands, so the
+ * gate stamps the identity and the handler reads it. Putting it under the
+ * exempt prefix would have been one `startsWith` away from an unauthenticated
+ * tool surface.
+ */
+export const INTEGRATION_MCP_PATH = "/api/mcp/integration";
+
+/** The route pattern Fastify registers for the integration mount. */
+export const INTEGRATION_MCP_ROUTE = `${INTEGRATION_MCP_PATH}/:category`;
+
+/** Is this request path the integration mount's? (NOT an auth-gate exemption.) */
+export function isIntegrationBridgePath(path: string): boolean {
+  return path === INTEGRATION_MCP_PATH || path.startsWith(`${INTEGRATION_MCP_PATH}/`);
+}
+
 /** Recognise a category from a URL segment, or undefined when it isn't one. */
 export function managerCategoryFromPath(segment: string | undefined): ManagerCategory | undefined {
   return MANAGER_CATEGORIES.find((c) => c === segment);
@@ -92,9 +116,20 @@ export class ManagerMcpBridge {
   private readonly grants = new Map<string, Grant>();
   /** Loopback origin of this server, e.g. "http://127.0.0.1:4319". */
   private origin: string;
+  /** Builds the chat-less context the integration mount serves from. */
+  private integrationContext:
+    | ((identity: IntegrationIdentity) => ManagerMcpContext | Promise<ManagerMcpContext>)
+    | null = null;
 
   constructor(origin = "http://127.0.0.1:4319") {
     this.origin = origin;
+  }
+
+  /** Wire the external context factory (the container does this once). */
+  setIntegrationContext(
+    factory: (identity: IntegrationIdentity) => ManagerMcpContext | Promise<ManagerMcpContext>,
+  ): void {
+    this.integrationContext = factory;
   }
 
   /** Called once the HTTP server knows its real port. */
@@ -169,6 +204,63 @@ export class ManagerMcpBridge {
       res.end(JSON.stringify({ error: "category-unavailable", category: managerServerName(resolved) }));
       return;
     }
+    await this.serve(req, res, body, server);
+  }
+
+  /**
+   * Serve one request on the INTEGRATION mount. The gate has already resolved
+   * the bearer; what is checked here is the SCOPE — a category is offered only
+   * when the token holds `tools:<category>` — and the identity's existence,
+   * which a request on an auth-disabled install would lack. That last case is
+   * a 401 on purpose: with auth off there are no tokens, and this mount is not
+   * the per-chat one that loopback processes are allowed to reach.
+   */
+  async handleIntegration(
+    req: IncomingMessage,
+    res: ServerResponse,
+    body: unknown,
+    identity: IntegrationIdentity | undefined,
+    category: string | undefined,
+  ): Promise<void> {
+    if (!identity) {
+      res.writeHead(401, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "integration token required" }));
+      return;
+    }
+    const resolved = managerCategoryFromPath(category);
+    if (!resolved) {
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "unknown-category" }));
+      return;
+    }
+    const scope = toolScope(resolved);
+    if (!identity.scopes.includes(scope)) {
+      res.writeHead(403, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: `This token does not have the "${scope}" scope.`, scope }));
+      return;
+    }
+    if (!this.integrationContext) {
+      res.writeHead(503, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "integration mount not wired" }));
+      return;
+    }
+    const server = createManagerCategoryServer(await this.integrationContext(identity), resolved);
+    // Same contract as the per-chat mount: a category with nothing external in
+    // it (or nothing bound — memory without a single project) is a 404.
+    if (!server) {
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "category-unavailable", category: managerServerName(resolved) }));
+      return;
+    }
+    await this.serve(req, res, body, server);
+  }
+
+  private async serve(
+    req: IncomingMessage,
+    res: ServerResponse,
+    body: unknown,
+    server: NonNullable<ReturnType<typeof createManagerCategoryServer>>,
+  ): Promise<void> {
     const { instance } = server as unknown as { instance: McpServer };
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     // Closing the transport must also close the server, or the pair leaks for

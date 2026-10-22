@@ -56,6 +56,7 @@
  * open SQLite handle blocks `rm -r` of the directory containing it.
  */
 import { join, resolve, relative, isAbsolute, basename } from "node:path";
+import { integrationTokensPath } from "@dispatch/cli/core";
 import {
   readdir,
   mkdir,
@@ -809,6 +810,14 @@ export class Store {
   /** Refresh families are high-write and must never be shared by two processes. */
   authSessionsFile() {
     return join(this.dataDir, "auth-sessions.json");
+  }
+  /**
+   * Integration tokens — beside the sessions, per instance, so turning auth off
+   * revokes them under the rule sessions already follow. Written by the server
+   * AND by `cm token`; see `services/integration-tokens.ts` for the lock.
+   */
+  integrationTokensFile() {
+    return integrationTokensPath(this.dataDir);
   }
   /** The global pause, if one is in force. Per-instance — see services/pause.ts. */
   pauseFile() {

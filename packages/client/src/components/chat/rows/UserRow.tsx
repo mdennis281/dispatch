@@ -1,12 +1,12 @@
 import { memo } from "react";
-import { Bot } from "lucide-react";
+import { Bot, Plug } from "lucide-react";
 import type { UserMessageRow } from "@dispatch/shared";
 import { RowShell } from "./RowShell.js";
 import { Chip } from "../../ui/Chip.js";
 import { Button } from "../../ui/Button.js";
 import { MediaGroup } from "./MediaGroup.js";
 import { ComposedParts, SPEECH_BUBBLE } from "./ComposedParts.js";
-import { PeerCard } from "./AuthoredCard.js";
+import { ChannelCard, PeerCard } from "./AuthoredCard.js";
 import { actions } from "../../../lib/actions.js";
 import { useHasCheckpoint } from "../../../stores/checkpoints.js";
 import { selectChat } from "../../../stores/navigation.js";
@@ -29,6 +29,11 @@ import { selectChat } from "../../../stores/navigation.js";
  * prompt. Absent `origin` still means human, which is every row written before
  * peer messaging existed.
  *
+ * A turn an INTEGRATION sent — a bot on the REST surface or the external MCP
+ * mount, a plugin — arrives with `origin: "channel"` and `channel: { name }`.
+ * Same lane, same reason, third author: it gets its own card voice so the
+ * reader is never asked to learn that one colour means two senders.
+ *
  * Which is why a peer turn gets the CARD, not the bubble (see AuthoredCard).
  * Chips and a swapped avatar were the whole treatment once, and they lost: the
  * body still wore the speech bubble, and the bubble is what people actually read
@@ -48,11 +53,19 @@ export const UserRow = memo(function UserRow({
   // up as something the human typed.
   const fromPeer = row.origin === "peer";
   const peer = row.peer;
+  const fromChannel = row.origin === "channel";
+  const channel = row.channel;
   return (
     <RowShell
       tint="user"
       align="right"
-      who={fromPeer ? (peer?.title ?? "Another chat") : "You"}
+      who={
+        fromPeer
+          ? (peer?.title ?? "Another chat")
+          : fromChannel
+            ? (channel?.name ?? "Integration")
+            : "You"
+      }
       ts={row.ts}
       rollback={canRollback}
       onRollback={() => actions.rollback(chatId, row.id)}
@@ -88,6 +101,16 @@ export const UserRow = memo(function UserRow({
               question
             </Chip>
           )}
+          {fromChannel && (
+            <Chip tone="info" icon={<Plug />} title="Sent through an integration, not typed here.">
+              from an integration
+            </Chip>
+          )}
+          {channel?.askId && (
+            <Chip tone="info" title="Sent as a question via chat_ask, not a plain message.">
+              question
+            </Chip>
+          )}
           {row.steering && <Chip tone="accent">steering</Chip>}
           {composed?.some((p) => p.kind === "brief") && <Chip tone="muted">composed</Chip>}
           {row.effort && <Chip tone="muted">{row.effort}</Chip>}
@@ -100,6 +123,11 @@ export const UserRow = memo(function UserRow({
           // message would otherwise tell.
           <span className="flex size-6 items-center justify-center rounded-md bg-accent-2-ghost text-accent-2-hi ring-1 ring-accent-2-line [&_svg]:size-3.5">
             <Bot />
+          </span>
+        ) : fromChannel ? (
+          // Same reasoning as the peer avatar: the initial is the lie.
+          <span className="flex size-6 items-center justify-center rounded-md bg-info-ghost text-info-hi ring-1 ring-info-line [&_svg]:size-3.5">
+            <Plug />
           </span>
         ) : (
           <span className="flex size-6 items-center justify-center rounded-md bg-bubble text-2xs font-semibold text-primary ring-1 ring-bubble-line">
@@ -115,9 +143,13 @@ export const UserRow = memo(function UserRow({
           harness={row.harness}
           peer={peer}
           fromPeer={fromPeer}
+          channel={channel}
+          fromChannel={fromChannel}
         />
       ) : fromPeer ? (
         <PeerCard chatId={chatId} text={row.text ?? ""} peer={peer} harness={row.harness} />
+      ) : fromChannel ? (
+        <ChannelCard chatId={chatId} text={row.text ?? ""} channel={channel} harness={row.harness} />
       ) : (
         row.text && <div className={SPEECH_BUBBLE}>{row.text}</div>
       )}

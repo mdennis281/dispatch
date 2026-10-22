@@ -26,8 +26,8 @@
  *     a peer chat may read as the model talking.
  */
 import { useState, type ReactNode } from "react";
-import { Bot, Check, ChevronDown, ChevronRight, Copy, Send } from "lucide-react";
-import type { HarnessKind, MessagePart, PeerSender } from "@dispatch/shared";
+import { Bot, Check, ChevronDown, ChevronRight, Copy, Plug, Send } from "lucide-react";
+import type { ChannelSender, HarnessKind, MessagePart, PeerSender } from "@dispatch/shared";
 import { Markdown } from "../Markdown.js";
 import { cn } from "../../../lib/cn.js";
 import { useChats } from "../../../stores/chats.js";
@@ -80,6 +80,16 @@ const VOICE = {
     edge: "shadow-[inset_0_1px_0_0_var(--p-accent-2-line)]",
     tag: "text-accent-2-hi",
     rule: "border-accent-2-line/40",
+  },
+  // An INTEGRATION — a bot behind a token, a plugin. Info-blue, the colour of
+  // "true but not urgent": it is a third author and must not borrow the
+  // peer's violet (another agent) or the app's amber (Dispatch itself), or the
+  // reader learns that violet means two different things.
+  channel: {
+    frame: "border-info-line/60 bg-info-ghost/40",
+    edge: "shadow-[inset_0_1px_0_0_var(--p-info-line)]",
+    tag: "text-info-hi",
+    rule: "border-info-line/40",
   },
 } as const;
 
@@ -168,6 +178,41 @@ export function BriefCard({ part, provider }: { part: MessagePart; provider: str
       label={part.label ?? "Instructions sent for you"}
       text={part.text}
       copyTitle="Copy the text Dispatch sent"
+    />
+  );
+}
+
+/**
+ * A message an INTEGRATION sent — through the REST surface, the external MCP
+ * mount, or a plugin's `ctx.chats.send`.
+ *
+ * Unlike {@link PeerCard}, the tag IS the sender's name, uppercased: there is
+ * no fixed category word that tells the reader more than "GROK" does, and the
+ * name is what the human chose when they minted the token. What the tag has
+ * to establish is still the same thing — not the human — and the `→ provider`
+ * half says where it went. The row's `who` repeats the name in prose.
+ */
+export function ChannelCard({
+  text,
+  channel,
+  harness,
+  chatId,
+}: {
+  text: string;
+  channel: ChannelSender | undefined;
+  harness: HarnessKind | undefined;
+  chatId: string;
+}) {
+  const provider = rowHarnessLabel(harness, useChats((s) => s.byId[chatId]?.harness));
+  return (
+    <AuthoredCard
+      voice="channel"
+      icon={<Plug />}
+      from={channel?.name ?? "Integration"}
+      to={provider}
+      label={channel?.askId ? "Asked a question from outside Dispatch" : "Sent from outside Dispatch"}
+      text={text}
+      copyTitle="Copy the message the integration sent"
     />
   );
 }

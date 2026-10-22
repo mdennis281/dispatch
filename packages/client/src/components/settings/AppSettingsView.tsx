@@ -48,6 +48,7 @@ import { AgentContextSection } from "./sections/AgentContextSection.js";
 import { RetentionSection } from "./sections/RetentionSection.js";
 import { PermissionsSection } from "./sections/PermissionsSection.js";
 import { NotificationsSection } from "./sections/NotificationsSection.js";
+import { IntegrationsSection } from "./sections/IntegrationsSection.js";
 import { AuthSettings } from "../auth/AuthSettings.js";
 import { UpdateBanner } from "../update/UpdateBanner.js";
 import { StopDispatch } from "./StopDispatch.js";
@@ -309,6 +310,8 @@ export function AppSettingsView() {
           </div>
         ) : section === "auth" ? (
           <AuthSettings />
+        ) : section === "integrations" ? (
+          <IntegrationsSection />
         ) : section === "updates" ? (
           <UpdateBanner />
         ) : section === "system" ? (
