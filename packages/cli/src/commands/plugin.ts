@@ -22,6 +22,7 @@ import {
   removePlugin,
   setPluginEnabled,
 } from "../core/plugins.js";
+import { initPlugin, type PluginScaffoldKind } from "../core/plugin-init.js";
 import { CmError } from "../core/manifest.js";
 import { flag, has, parseArgs, type ParsedArgs } from "../core/args.js";
 
@@ -114,9 +115,43 @@ async function cmdRemove(args: ParsedArgs): Promise<void> {
   process.stdout.write(`Removed ${id} (${dir})\n${RESTART_NOTE}`);
 }
 
+async function cmdInit(args: ParsedArgs): Promise<void> {
+  const [id] = args.positionals;
+  if (!id) throw new CmError("Usage: cm plugin init <id> [--server | --client | --both] [--name <display name>] [--dir <parent>] [--sdk <path>]");
+  const picked = (["server", "client", "both"] as const).filter((k) => has(args, k));
+  if (picked.length > 1) throw new CmError("Pick one of --server, --client, --both.");
+  const kind: PluginScaffoldKind = picked[0] ?? "both";
+  const result = await initPlugin({
+    id,
+    kind,
+    ...(flag(args, "name") ? { name: flag(args, "name") } : {}),
+    ...(flag(args, "dir") ? { dir: resolve(flag(args, "dir")!) } : {}),
+    ...(flag(args, "sdk") ? { sdkPath: resolve(flag(args, "sdk")!) } : {}),
+  });
+  if (emitJson(args, result)) return;
+  const halves = kind === "both" ? "server + client" : kind;
+  process.stdout.write(`Created ${id} at ${result.dir} (${halves}; SDK ${result.sdkLink})\n`);
+  for (const f of result.files) process.stdout.write(`  ${f}\n`);
+  process.stdout.write(
+    [
+      "",
+      "Next:",
+      `  cd ${result.dir}`,
+      "  pnpm install",
+      "  pnpm build          # src/ → the entries plugin.yaml names",
+      ...(kind !== "client" ? ["  pnpm test           # activate() under @dispatch/plugin-sdk/testing"] : []),
+      "  cm plugin add . --config-dir <dir>   # or: cm plugin link .   (development)",
+      "  then restart Dispatch and look under Settings → Plugins.",
+      "",
+    ].join("\n"),
+  );
+}
+
 export const PLUGIN_HELP = `cm plugin — install and manage Dispatch plugins (<configDir>/plugins/<id>/)
 
 Usage:
+  cm plugin init <id> [--server|--client|--both]   Scaffold a plugin against @dispatch/plugin-sdk (default: both)
+                     [--name <n>] [--dir <parent>] [--sdk <path>]
   cm plugin add <path | git-url | tarball>   Copy a plugin in, validate it, print what it asks for
   cm plugin link <path>                      Junction/symlink a working directory (development)
   cm plugin list                             List installed plugins and their state
@@ -146,6 +181,10 @@ export async function runPluginCommand(argv: readonly string[]): Promise<void> {
     return;
   }
   switch (sub) {
+    case "init":
+    case "new":
+    case "create":
+      return cmdInit(args);
     case "add":
     case "install":
       return cmdAdd(args);

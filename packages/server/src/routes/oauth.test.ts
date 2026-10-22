@@ -196,6 +196,9 @@ describe("discovery", () => {
       grant_types_supported: ["authorization_code", "refresh_token"],
     });
     expect((meta.json() as { scopes_supported: string[] }).scopes_supported).toContain("tools:chat");
+    // Only categories with an external tool are advertised: `tools:session`
+    // parses but the mount answers 404 for it, so offering it is a lie.
+    expect((meta.json() as { scopes_supported: string[] }).scopes_supported).not.toContain("tools:session");
 
     const resource = await instance.inject({ url: "/.well-known/oauth-protected-resource" });
     expect(resource.json()).toMatchObject({
@@ -262,6 +265,16 @@ describe("registration", () => {
     expect((await register(instance, { redirect_uris: ["cursor://anysphere.cursor-mcp/callback"] })).statusCode).toBe(201);
   });
 
+  it("defaults a registration without scope to the OFFERABLE scopes, never a dead tools:* one", async () => {
+    const { instance } = await app();
+    await owner(instance);
+    const scope = ((await register(instance)).json() as { scope: string }).scope.split(" ");
+    expect(scope).toContain("chats:read");
+    expect(scope).toContain("tools:chat");
+    expect(scope).not.toContain("tools:session");
+    expect(scope).not.toContain("tools:workspace");
+  });
+
   it("rate-limits one address", async () => {
     const { instance } = await app();
     await owner(instance);
@@ -274,6 +287,24 @@ describe("registration", () => {
 /* ====================================================== authorize */
 
 describe("authorize", () => {
+  it("narrows a request to the scopes that grant something, and refuses one made only of dead ones", async () => {
+    const { instance } = await app();
+    const access = await owner(instance);
+    // Registered for a dead scope explicitly — valid, and the point of the test.
+    const clientId = ((await register(instance, { scope: "chats:read tools:session" })).json() as { client_id: string }).client_id;
+    const { challenge } = pkce();
+    const auth = await instance.inject({ url: authorizeUrl(clientId, challenge, { scope: "chats:read tools:session" }) });
+    expect(auth.statusCode).toBe(302);
+    const nonce = decodeURIComponent(auth.headers.location!.split("#oauth=")[1]!);
+    const view = await instance.inject({ url: `/api/oauth/requests/${nonce}`, headers: bearer(access) });
+    // The consent page lists what will be granted — `tools:session` is gone.
+    expect((view.json() as { scopes: string[] }).scopes).toEqual(["chats:read"]);
+
+    const dead = await instance.inject({ url: authorizeUrl(clientId, challenge, { scope: "tools:session" }) });
+    expect(dead.statusCode).toBe(302);
+    expect(new URL(dead.headers.location!).searchParams.get("error")).toBe("invalid_scope");
+  });
+
   it("shows (never redirects) an unknown client or an unregistered redirect_uri", async () => {
     const { instance } = await app();
     await owner(instance);

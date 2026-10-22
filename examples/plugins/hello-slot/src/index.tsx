@@ -16,7 +16,7 @@
 // the app around it.
 import { useEffect, useState } from "react";
 import { Hand, Radio, Sparkles } from "lucide-react";
-import type { ClientHost, PluginChatRef } from "@dispatch/shared";
+import { defineClientPlugin, type ClientHost, type PluginChatRef } from "@dispatch/plugin-sdk";
 
 interface HelloExt {
   count?: number;
@@ -147,25 +147,27 @@ function HelloSettings({ host }: { host: ClientHost }) {
   );
 }
 
-export function activate(host: ClientHost): void {
-  host.slots.composerControl({
-    id: "hello",
-    label: "Hello",
-    hint: "the example control",
-    icon: <Sparkles />,
-    priority: 1,
-    render: () => <HelloControl host={host} />,
-    menu: <HelloMenu host={host} />,
-  });
-  host.slots.chatBadge({ render: (chat) => <HelloBadge host={host} chat={chat} /> });
-  host.slots.settingsSection({
-    id: "hello",
-    label: "Hello (slot)",
-    blurb: "The example plugin's page",
-    icon: Sparkles,
-    render: () => <HelloSettings host={host} />,
-  });
-  host.events.onPlugin((payload) => {
-    host.toast(`hello-slot: ${JSON.stringify(payload)}`);
-  });
-}
+export default defineClientPlugin({
+  activate(host) {
+    host.slots.composerControl({
+      id: "hello",
+      label: "Hello",
+      hint: "the example control",
+      icon: <Sparkles />,
+      priority: 1,
+      render: () => <HelloControl host={host} />,
+      menu: <HelloMenu host={host} />,
+    });
+    host.slots.chatBadge({ render: (chat) => <HelloBadge host={host} chat={chat} /> });
+    host.slots.settingsSection({
+      id: "hello",
+      label: "Hello (slot)",
+      blurb: "The example plugin's page",
+      icon: Sparkles,
+      render: () => <HelloSettings host={host} />,
+    });
+    host.events.onPlugin((payload) => {
+      host.toast(`hello-slot: ${JSON.stringify(payload)}`);
+    });
+  },
+});

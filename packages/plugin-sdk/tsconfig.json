@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "noUncheckedIndexedAccess": true,
+    // Node only: the Vite preset enumerates a package's exports with
+    // `import()` and the test context is a node-side fake. The client-facing
+    // types come through @dispatch/shared, which compiles with no ambient
+    // libraries at all — nothing here is ever bundled into a browser.
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["src/**/*.test.ts"]
+}

@@ -18,7 +18,7 @@ import { Check, Copy, KeyRound, Plus, Trash2 } from "lucide-react";
 import {
   INTEGRATION_FIXED_SCOPES,
   INTEGRATION_SCOPES,
-  MANAGER_CATEGORIES,
+  OFFERABLE_TOOL_CATEGORIES,
   toolScope,
   type IntegrationScope,
   type IntegrationTokenCreated,
@@ -26,6 +26,7 @@ import {
 } from "@dispatch/shared";
 import { Button } from "../../ui/Button.js";
 import { Chip } from "../../ui/Chip.js";
+import { ScopeChips } from "../../ui/ScopeChips.js";
 import { Select } from "../../ui/Select.js";
 import { Field, InlineError, TextInput } from "../../sidebar/Modal.js";
 import { SectionLabel } from "../../ui/Panel.js";
@@ -70,19 +71,6 @@ const DAY_MS = 86_400_000;
 function expiresAtOf(e: Expiry): number | undefined {
   if (e === "never") return undefined;
   return Date.now() + Number.parseInt(e, 10) * DAY_MS;
-}
-
-/** Scope chips on a row: short, with `tools:` collapsed to the category. */
-function ScopeChips({ scopes }: { scopes: IntegrationScope[] }) {
-  return (
-    <span className="flex flex-wrap gap-1">
-      {scopes.map((s) => (
-        <Chip key={s} tone={s.startsWith("tools:") ? "agent" : "info"} className="!text-2xs">
-          {s}
-        </Chip>
-      ))}
-    </span>
-  );
 }
 
 /* ------------------------------------------------------------ the reveal */
@@ -203,7 +191,7 @@ function CreateTokenForm({ onCreated, onCancel }: { onCreated: (t: IntegrationTo
           shell or PR tools have nothing to offer.
         </p>
         <div className="flex flex-wrap gap-1">
-          {MANAGER_CATEGORIES.map((category) => {
+          {OFFERABLE_TOOL_CATEGORIES.map((category) => {
             const scope = toolScope(category);
             const on = scopes.has(scope);
             // The kit's toggle: the pressed look reads off `aria-pressed`, so

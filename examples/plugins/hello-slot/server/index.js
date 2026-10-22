@@ -6,7 +6,7 @@
 //   POST /ping    → emits { pong, at }      the composer menu's round trip;
 //                                           the client's onPlugin toasts it
 
-/** @param {import("@dispatch/shared").PluginContext} ctx */
+/** @param {import("@dispatch/plugin-sdk").PluginContext} ctx */
 export async function activate(ctx) {
   ctx.routes((r) => {
     r.get("/hello", async () => ({ greeting: "hello from the server half", at: Date.now() }));

@@ -310,7 +310,18 @@ export async function addPlugin(
     // leaves a half-plugin the loader would list as broken.
     const tmp = join(root, `.${id}.${process.pid}.tmp`);
     await rm(tmp, { recursive: true, force: true });
-    await cp(pluginDir, tmp, { recursive: true, dereference: true, filter: (p) => basename(p) !== ".git" });
+    // `.git` is history, not the plugin. `node_modules` is the author's build
+    // environment: a scaffold links `@dispatch/plugin-sdk` into it, and with
+    // `dereference: true` that symlink would be FOLLOWED — copying the SDK, its
+    // workspace siblings and their dependencies into the config root. The
+    // built `server/index.js` is self-contained by construction (the SDK's
+    // preset inlines everything but Node's builtins), so nothing in
+    // node_modules is needed at runtime.
+    await cp(pluginDir, tmp, {
+      recursive: true,
+      dereference: true,
+      filter: (p) => basename(p) !== ".git" && basename(p) !== "node_modules",
+    });
     await rename(tmp, target);
     const plugin = await readPluginDir(target, id);
     return { plugin, outcome: replaced ? "replaced" : "copied", dir: target };

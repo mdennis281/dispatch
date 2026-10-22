@@ -1,0 +1,2 @@
+# Build output of vite.config.mjs; the root `pnpm build` regenerates it.
+server/
