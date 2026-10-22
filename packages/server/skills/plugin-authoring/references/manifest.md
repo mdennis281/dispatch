@@ -1,6 +1,6 @@
 # plugin.yaml — the manifest
 
-One schema, three consumers: the server's loader, `cm plugin add` (which validates
+One schema, three consumers: the server's loader, `dispatch plugin add` (which validates
 BEFORE copying anything in), and the Settings → Plugins row. It lives in
 `packages/shared/src/plugin-manifest.ts` (`PluginManifestSchema`), and
 `@dispatch/plugin-sdk/manifest` re-exports it for tooling.
@@ -82,7 +82,7 @@ oauth:                          # see external-api.md → "OAuth client flow"
 A capability the manifest does not declare is **absent from the object** `activate`
 receives — the member is `undefined`, not a stub that throws. `settings`, `projects`,
 `log`, `emit`, `id`, `dir`, `version` are always present. This is a declaration for the
-human who installs the plugin (the consent summary `cm plugin add` prints and the
+human who installs the plugin (the consent summary `dispatch plugin add` prints and the
 Settings row), not a sandbox: server plugins run in-process with the server's
 privileges.
 

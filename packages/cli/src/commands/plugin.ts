@@ -1,5 +1,5 @@
 /**
- * `cm plugin …` — install and manage plugins under `<configDir>/plugins/`.
+ * `dispatch plugin …` — install and manage plugins under `<configDir>/plugins/`.
  *
  * Thin shells over `core/plugins.ts`, like `mcp.ts` is over `core/mcp.ts`:
  * parse flags, call one function, print. `--json` for scripts and agents.
@@ -53,7 +53,7 @@ const RESTART_NOTE = "  Restart Dispatch to apply (plugins are read at boot; not
 
 async function cmdAdd(args: ParsedArgs): Promise<void> {
   const [source] = args.positionals;
-  if (!source) throw new CmError("Usage: cm plugin add <path | git-url | tarball> [--force]");
+  if (!source) throw new CmError("Usage: dispatch plugin add <path | git-url | tarball> [--force]");
   const result = await addPlugin(configDirOf(args), source, { force: has(args, "force") });
   if (emitJson(args, result)) return;
   const m = result.plugin.manifest!;
@@ -64,7 +64,7 @@ async function cmdAdd(args: ParsedArgs): Promise<void> {
 
 async function cmdLink(args: ParsedArgs): Promise<void> {
   const [source] = args.positionals;
-  if (!source) throw new CmError("Usage: cm plugin link <path> [--force]");
+  if (!source) throw new CmError("Usage: dispatch plugin link <path> [--force]");
   const result = await linkPlugin(configDirOf(args), source, { force: has(args, "force") });
   if (emitJson(args, result)) return;
   const m = result.plugin.manifest!;
@@ -79,7 +79,7 @@ async function cmdList(args: ParsedArgs): Promise<void> {
   const rows = plugins.map((p) => ({ ...p, enabled: toggles[p.id] ?? true }));
   if (emitJson(args, { root: pluginsRoot(configDir), apiVersion: PLUGIN_API_VERSION, plugins: rows })) return;
   if (!rows.length) {
-    process.stdout.write(`No plugins in ${pluginsRoot(configDir)}\n  Add one:  cm plugin add <path | git-url | tarball>\n`);
+    process.stdout.write(`No plugins in ${pluginsRoot(configDir)}\n  Add one:  dispatch plugin add <path | git-url | tarball>\n`);
     return;
   }
   process.stdout.write(`${rows.length} plugin(s) in ${pluginsRoot(configDir)}:\n`);
@@ -93,7 +93,7 @@ async function cmdList(args: ParsedArgs): Promise<void> {
 
 async function cmdEnable(args: ParsedArgs, enabled: boolean): Promise<void> {
   const [id] = args.positionals;
-  if (!id) throw new CmError(`Usage: cm plugin ${enabled ? "enable" : "disable"} <id>`);
+  if (!id) throw new CmError(`Usage: dispatch plugin ${enabled ? "enable" : "disable"} <id>`);
   const configDir = configDirOf(args);
   const known = (await discoverPlugins(configDir)).some((p) => p.id === id);
   if (!known) throw new CmError(`No plugin "${id}" in ${pluginsRoot(configDir)}.`);
@@ -108,7 +108,7 @@ async function cmdEnable(args: ParsedArgs, enabled: boolean): Promise<void> {
 
 async function cmdRemove(args: ParsedArgs): Promise<void> {
   const [id] = args.positionals;
-  if (!id) throw new CmError("Usage: cm plugin remove <id>");
+  if (!id) throw new CmError("Usage: dispatch plugin remove <id>");
   const { removed, dir } = await removePlugin(configDirOf(args), id);
   if (emitJson(args, { ok: removed, id, dir })) return;
   if (!removed) throw new CmError(`No plugin "${id}" to remove.`);
@@ -117,7 +117,7 @@ async function cmdRemove(args: ParsedArgs): Promise<void> {
 
 async function cmdInit(args: ParsedArgs): Promise<void> {
   const [id] = args.positionals;
-  if (!id) throw new CmError("Usage: cm plugin init <id> [--server | --client | --both] [--name <display name>] [--dir <parent>] [--sdk <path>]");
+  if (!id) throw new CmError("Usage: dispatch plugin init <id> [--server | --client | --both] [--name <display name>] [--dir <parent>] [--sdk <path>]");
   const picked = (["server", "client", "both"] as const).filter((k) => has(args, k));
   if (picked.length > 1) throw new CmError("Pick one of --server, --client, --both.");
   const kind: PluginScaffoldKind = picked[0] ?? "both";
@@ -140,24 +140,24 @@ async function cmdInit(args: ParsedArgs): Promise<void> {
       "  pnpm install",
       "  pnpm build          # src/ → the entries plugin.yaml names",
       ...(kind !== "client" ? ["  pnpm test           # activate() under @dispatch/plugin-sdk/testing"] : []),
-      "  cm plugin add . --config-dir <dir>   # or: cm plugin link .   (development)",
+      "  dispatch plugin add . --config-dir <dir>   # or: dispatch plugin link .   (development)",
       "  then restart Dispatch and look under Settings → Plugins.",
       "",
     ].join("\n"),
   );
 }
 
-export const PLUGIN_HELP = `cm plugin — install and manage Dispatch plugins (<configDir>/plugins/<id>/)
+export const PLUGIN_HELP = `dispatch plugin — install and manage Dispatch plugins (<configDir>/plugins/<id>/)
 
 Usage:
-  cm plugin init <id> [--server|--client|--both]   Scaffold a plugin against @dispatch/plugin-sdk (default: both)
+  dispatch plugin init <id> [--server|--client|--both]   Scaffold a plugin against @dispatch/plugin-sdk (default: both)
                      [--name <n>] [--dir <parent>] [--sdk <path>]
-  cm plugin add <path | git-url | tarball>   Copy a plugin in, validate it, print what it asks for
-  cm plugin link <path>                      Junction/symlink a working directory (development)
-  cm plugin list                             List installed plugins and their state
-  cm plugin enable <id>                      Turn a plugin on (takes effect after a restart)
-  cm plugin disable <id>                     Turn a plugin off
-  cm plugin remove <id>                      Delete (or unlink) a plugin
+  dispatch plugin add <path | git-url | tarball>   Copy a plugin in, validate it, print what it asks for
+  dispatch plugin link <path>                      Junction/symlink a working directory (development)
+  dispatch plugin list                             List installed plugins and their state
+  dispatch plugin enable <id>                      Turn a plugin on (takes effect after a restart)
+  dispatch plugin disable <id>                     Turn a plugin off
+  dispatch plugin remove <id>                      Delete (or unlink) a plugin
 
 Options:
       --config-dir <dir>   Dispatch's config root (default: $DISPATCH_CONFIG_DIR, then $DISPATCH_DATA_DIR)
@@ -168,7 +168,7 @@ Plugins are global: both the stable and the dev instance load the same
 directory, and an upgrade never touches it. Changing a plugin needs a restart.
 `;
 
-/** Route a `cm plugin <sub> …` invocation. */
+/** Route a `dispatch plugin <sub> …` invocation. */
 export async function runPluginCommand(argv: readonly string[]): Promise<void> {
   const [sub, ...rest] = argv;
   if (!sub || sub === "help" || sub === "--help" || sub === "-h") {
@@ -202,6 +202,6 @@ export async function runPluginCommand(argv: readonly string[]): Promise<void> {
     case "uninstall":
       return cmdRemove(args);
     default:
-      throw new CmError(`Unknown command "cm plugin ${sub}". Run \`cm plugin help\` for usage.`);
+      throw new CmError(`Unknown command "dispatch plugin ${sub}". Run \`dispatch plugin help\` for usage.`);
   }
 }

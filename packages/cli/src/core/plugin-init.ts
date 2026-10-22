@@ -1,13 +1,13 @@
 /**
- * `cm plugin init` — scaffold a plugin that builds against `@dispatch/plugin-sdk`.
+ * `dispatch plugin init` — scaffold a plugin that builds against `@dispatch/plugin-sdk`.
  *
  * The templates are STRINGS in this module rather than files beside it: the
  * CLI ships as `tsc` output, and `tsc` copies nothing that is not a module, so
  * a `templates/` directory would exist in a source checkout and be missing
- * from every built install. What is here is what `cm` can always produce.
+ * from every built install. What is here is what `dispatch` can always produce.
  *
  * The scaffold links the SDK from the Dispatch checkout (or installed app)
- * that ran `cm` — `"@dispatch/plugin-sdk": "link:<path>"` — because the SDK is
+ * that ran `dispatch` — `"@dispatch/plugin-sdk": "link:<path>"` — because the SDK is
  * versioned with the host and is not on npm. A `link:` and not a `file:`: pnpm
  * copies a `file:` directory into the store and then cannot resolve the SDK's
  * own `workspace:*` dependency on `@dispatch/shared`; a `link:` is a symlink,
@@ -90,8 +90,8 @@ export function scaffoldFiles(opts: { id: string; name: string; kind: PluginScaf
   const files: Record<string, string> = {};
 
   files["plugin.yaml"] = [
-    `# ${name} — scaffolded by \`cm plugin init\`. The manifest is validated by`,
-    "# `cm plugin add` and by the host at boot; see docs/plugins.md → \"Anatomy of",
+    `# ${name} — scaffolded by \`dispatch plugin init\`. The manifest is validated by`,
+    "# `dispatch plugin add` and by the host at boot; see docs/plugins.md → \"Anatomy of",
     "# a plugin\" for every field.",
     `id: ${id}`,
     `name: ${yamlStr(name)}`,
@@ -379,13 +379,13 @@ export function scaffoldFiles(opts: { id: string; name: string; kind: PluginScaf
   files["README.md"] = [
     `# ${name}`,
     "",
-    `A Dispatch plugin (\`${id}\`), scaffolded by \`cm plugin init --${kind}\`.`,
+    `A Dispatch plugin (\`${id}\`), scaffolded by \`dispatch plugin init --${kind}\`.`,
     "",
     "```",
     "pnpm install",
     `pnpm build          # src/ → ${[server && "server/index.js", client && "client/index.js"].filter(Boolean).join(" and ")}`,
     ...(server ? ["pnpm test           # activate() under a fake context, no server"] : []),
-    "cm plugin add . --config-dir <dispatch config dir>   # or: cm plugin link . (development)",
+    "dispatch plugin add . --config-dir <dispatch config dir>   # or: dispatch plugin link . (development)",
     "# restart Dispatch — plugins are read at boot, nothing hot-reloads",
     "```",
     "",
@@ -402,7 +402,7 @@ export function scaffoldFiles(opts: { id: string; name: string; kind: PluginScaf
     "",
     "| file | what |",
     "|---|---|",
-    "| `plugin.yaml` | the manifest: id, entries, capabilities. Validated by `cm plugin add` and the host |",
+    "| `plugin.yaml` | the manifest: id, entries, capabilities. Validated by `dispatch plugin add` and the host |",
     ...(server
       ? [
           "| `src/server.ts` | `activate(ctx)` — routes, bus, kv. Bundled to `server/index.js` with no runtime imports |",
@@ -414,7 +414,7 @@ export function scaffoldFiles(opts: { id: string; name: string; kind: PluginScaf
       ? ["| `src/client.tsx` | `activate(host)` — slots, kit, toasts. Bundled to `client/index.js` against the host's React |"]
       : []),
     "",
-    "`@dispatch/plugin-sdk` is linked from the Dispatch checkout that ran `cm plugin init`",
+    "`@dispatch/plugin-sdk` is linked from the Dispatch checkout that ran `dispatch plugin init`",
     "(`package.json` → `link:`). The reference plugins are `examples/plugins/` there, and the",
     "contract is `docs/plugins.md`.",
     "",
@@ -445,7 +445,7 @@ export async function initPlugin(opts: InitPluginOptions): Promise<InitPluginRes
   if (!existsSync(join(sdkPath, "package.json"))) {
     throw new CmError(
       `cannot find @dispatch/plugin-sdk at ${sdkPath}.\n` +
-        "  Pass --sdk <path to a Dispatch checkout>/packages/plugin-sdk, or run cm from a checkout that has it.",
+        "  Pass --sdk <path to a Dispatch checkout>/packages/plugin-sdk, or run dispatch from a checkout that has it.",
     );
   }
   const dir = resolve(opts.dir ?? process.cwd(), id);

@@ -850,7 +850,7 @@ export class Store {
   /**
    * Integration tokens — beside the sessions, per instance, so turning auth off
    * revokes them under the rule sessions already follow. Written by the server
-   * AND by `cm token`; see `services/integration-tokens.ts` for the lock.
+   * AND by `dispatch token`; see `services/integration-tokens.ts` for the lock.
    */
   integrationTokensFile() {
     return integrationTokensPath(this.dataDir);

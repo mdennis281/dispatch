@@ -16,7 +16,7 @@ message tells you which rung of this ladder you're on.
   that exists in the primary checkout may simply not be there yet. That is
   usually a missing install/build step, not a config error.
 - **http/sse, 401/403** — the `${VAR}` didn't expand (unset where the manager
-  runs) or the header name is wrong. `cm mcp get <name>` shows exactly what's
+  runs) or the header name is wrong. `dispatch mcp get <name>` shows exactly what's
   stored.
 - **http/sse, connection refused / 404** — wrong transport. Some servers publish
   an `/sse` endpoint and some a streamable `/mcp` one; they are not
@@ -49,8 +49,8 @@ project.
 ## Reading the actual config
 
 ```bash
-cm mcp list          # names + transports
-cm mcp get <name>    # exactly what is stored, post-expansion
+dispatch mcp list          # names + transports
+dispatch mcp get <name>    # exactly what is stored, post-expansion
 ```
 
 `mcp__dispatch-mcp__mcp_list` is the in-session equivalent. Note both show the

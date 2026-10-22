@@ -112,7 +112,7 @@ describe("initPlugin", () => {
 
   it("finds the real SDK beside this CLI in the workspace", () => {
     // The scaffold's link target must be a real package in a source checkout;
-    // this is what `cm plugin init` with no --sdk relies on.
+    // this is what `dispatch plugin init` with no --sdk relies on.
     expect(existsSync(join(defaultSdkPath(), "package.json"))).toBe(true);
   });
 });

@@ -194,7 +194,7 @@ function readMcpServersFile(
   const seen = new Set<string>();
   for (const server of parsed.data) {
     try {
-      // The same chokepoint `mcp_add` and `cm mcp add` go through, so the
+      // The same chokepoint `mcp_add` and `dispatch mcp add` go through, so the
       // reserved `dispatch-` prefix is refused here with the same sentence.
       assertValidServerName(server.name);
     } catch (err) {

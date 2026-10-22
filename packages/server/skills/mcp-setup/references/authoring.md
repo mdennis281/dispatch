@@ -26,7 +26,7 @@ await server.connect(new StdioServerTransport());
 Register it against the local entrypoint while iterating:
 
 ```bash
-cm mcp add my-server -- node ./tools/my-mcp/dist/index.js
+dispatch mcp add my-server -- node ./tools/my-mcp/dist/index.js
 ```
 
 ## What separates a good server from a bad one
@@ -88,6 +88,6 @@ configured but red there is a server that doesn't work yet.
 
 ## Scope
 
-`cm mcp` edits **project** config, so everyone who clones the repo gets it.
+`dispatch mcp` edits **project** config, so everyone who clones the repo gets it.
 That's right for a server the team needs and wrong for a personal experiment —
 if it's the latter, say so before writing it into the committed file.

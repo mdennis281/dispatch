@@ -8,7 +8,7 @@ to what happens in Dispatch and tells something outside".
 
 ```
 pnpm --filter @dispatch/example-event-forwarder build   # src/server.ts → server/index.js
-cm plugin link examples/plugins/event-forwarder         # or: cm plugin add …
+dispatch plugin link examples/plugins/event-forwarder         # or: dispatch plugin add …
 # restart Dispatch
 ```
 

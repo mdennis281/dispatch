@@ -62,7 +62,7 @@ const files = [
   "packages/shared/dist",
   "packages/cli/package.json",
   "packages/cli/dist",
-  // `cm plugin init` links this package into every scaffold it writes, so an
+  // `dispatch plugin init` links this package into every scaffold it writes, so an
   // install that lacks it can scaffold nothing. Types, two presets and a fake
   // context — no runtime dependency beyond @dispatch/shared.
   "packages/plugin-sdk/package.json",
@@ -123,7 +123,6 @@ packageJson.version = buildStampTag.test(args.tag)
 packageJson.scripts = {
   start: "pnpm --filter @dispatch/server start",
   dispatch: "node packages/cli/dist/index.js",
-  cm: "node packages/cli/dist/index.js",
   app: "python tools/app/launch.py",
   "app:stop": "python tools/app/launch.py --stop",
   "app:status": "python tools/app/launch.py --status",

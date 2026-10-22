@@ -42,7 +42,7 @@ Settled with the owner on 2026-10-21; the implementation kept every one:
 - **Server plugins run in-process** with the server's full privileges. This is a
   single-user control plane on the owner's own machine; an out-of-process
   protocol would roughly double the work for a trust boundary nobody here
-  needs yet. `cm plugin add` prints a consent summary of the plugin's declared
+  needs yet. `dispatch plugin add` prints a consent summary of the plugin's declared
   capabilities, which are a declaration for the human, not a sandbox.
 - **OAuth is part of the layer and the host owns it.** Both primitives touch
   the auth gate and the secret store, which plugin code must never reimplement:
@@ -189,10 +189,10 @@ shows and copies the path).
 ### Install and the CLI
 
 ```
-cm plugin init <id> [--server|--client|--both] [--name <n>] [--dir <parent>] [--sdk <path>]
-cm plugin add <path | git-url | tarball>   validate in the source, copy into plugins/<id>, print the consent summary
-cm plugin link <path>                      junction/symlink a working directory (development)
-cm plugin list | enable <id> | disable <id> | remove <id>
+dispatch plugin init <id> [--server|--client|--both] [--name <n>] [--dir <parent>] [--sdk <path>]
+dispatch plugin add <path | git-url | tarball>   validate in the source, copy into plugins/<id>, print the consent summary
+dispatch plugin link <path>                      junction/symlink a working directory (development)
+dispatch plugin list | enable <id> | disable <id> | remove <id>
 ```
 
 `add` claims the slot by the manifest's id (not the source directory's name),
@@ -561,7 +561,7 @@ non-chat caller.
   integrations; they get webhooks instead.
 - Rate limit 60 requests per minute per token, 429 with `Retry-After`.
 - Minted once and shown once, in Settings → Integrations → Tokens
-  (owner-only) or offline with `cm token create --name … --scopes …
+  (owner-only) or offline with `dispatch token create --name … --scopes …
   [--projects …] [--expires …] --config-dir <dir> --data-dir <dir>` — the data
   dir because the file is per instance; the server re-reads it on mtime, so no
   restart.
@@ -803,12 +803,12 @@ listed under `secrets:`.
   on `./manifest`. Built in the workspace, versioned with the host, not on
   npm; route handlers are typed `PluginRequest` / `PluginReply`, the structural
   subset of Fastify's objects a handler reads.
-- `cm plugin init <id> [--server|--client|--both]` scaffolds a standalone
-  directory whose `package.json` links the SDK from the checkout that ran `cm`
+- `dispatch plugin init <id> [--server|--client|--both]` scaffolds a standalone
+  directory whose `package.json` links the SDK from the checkout that ran `dispatch`
   (`link:`, so the SDK's own workspace dependencies resolve from its real path),
   with the manifest, both Vite configs, a settings schema, a vitest test using
   `createTestContext`, and a `pnpm-workspace.yaml` allowing esbuild's build
-  script. `pnpm install && pnpm build && pnpm test`, then `cm plugin add .`.
+  script. `pnpm install && pnpm build && pnpm test`, then `dispatch plugin add .`.
 - `examples/plugins/hello-server` (dependency-free JS, every basic server
   seam; the host's own test fixture), `hello-slot` (a client half built with
   the preset, every slot once), `event-forwarder` (TypeScript server plugin:

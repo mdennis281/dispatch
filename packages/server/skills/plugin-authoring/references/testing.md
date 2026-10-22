@@ -64,7 +64,7 @@ From a Dispatch checkout that has been built (`pnpm install && pnpm -r build`):
 $R = "$env:TEMP\dsp-try"; New-Item -ItemType Directory -Force "$R\config","$R\data" | Out-Null
 
 # install the plugin into the scratch config root
-pnpm cm plugin add C:\path\to\my-plugin --config-dir $R\config      # or: cm plugin link … while iterating
+pnpm dispatch plugin add C:\path\to\my-plugin --config-dir $R\config      # or: dispatch plugin link … while iterating
 
 # pick a port nobody holds (netstat -ano | findstr LISTEN) — 4318 is stable, 4319 is dev, other agents use others
 Set-Location packages\server
@@ -118,4 +118,4 @@ Stop it cleanly with `POST /api/shutdown` (or Ctrl-C in its terminal) — never
 - The composer control survives a narrow window (resize to 360 px): it must move into
   the options menu, not break the row.
 - Light and dark screenshots of anything you added to the UI.
-- The install path: `cm plugin add` (a copy, no `node_modules`), not only `link`.
+- The install path: `dispatch plugin add` (a copy, no `node_modules`), not only `link`.

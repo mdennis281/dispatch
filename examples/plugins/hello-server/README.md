@@ -3,7 +3,7 @@
 The canonical minimal server plugin. Install it to see the host working:
 
 ```
-cm plugin link examples/plugins/hello-server     # or: cm plugin add examples/plugins/hello-server
+dispatch plugin link examples/plugins/hello-server     # or: dispatch plugin add examples/plugins/hello-server
 # restart Dispatch
 curl http://127.0.0.1:4319/api/plugins/hello-server/hello
 ```

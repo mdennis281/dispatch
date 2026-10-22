@@ -138,7 +138,7 @@ export interface IntegrationTokenSummary {
   clientId?: string;
 }
 
-/** What a mint request carries — from the pane or `cm token create`. */
+/** What a mint request carries — from the pane or `dispatch token create`. */
 export interface IntegrationTokenCreateRequest {
   name: string;
   scopes: string[];

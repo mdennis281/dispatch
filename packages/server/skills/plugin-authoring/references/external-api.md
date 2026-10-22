@@ -21,9 +21,9 @@ when a chat finishes — a webhook subscription on `chat-settled` (needs
   Stable and dev do not share tokens. Turning auth off revokes every token.
 - Mint in Settings → Integrations → Tokens (shown once, with Copy), or offline:
   ```
-  cm token create --name grok-bot --scopes chats:read,chats:write,tools:chat [--projects <id,…>] [--expires 30d] \
+  dispatch token create --name grok-bot --scopes chats:read,chats:write,tools:chat [--projects <id,…>] [--expires 30d] \
     --config-dir <dir> --data-dir <dir>      # both roots: config says whether auth is on, data holds the file
-  cm token list [--all] | cm token revoke <id>
+  dispatch token list [--all] | dispatch token revoke <id>
   ```
   The server notices a CLI-minted token by the file's mtime; no restart.
 - **The gate fences a `dsp_` bearer to `/api/integration/*` and `/api/mcp/integration/*`.**

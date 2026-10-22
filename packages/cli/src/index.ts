@@ -16,16 +16,16 @@ import { runAuthCommand } from "./commands/auth.js";
 import { runTokenCommand } from "./commands/token.js";
 import { runPluginCommand } from "./commands/plugin.js";
 
-const HELP = `cm — Dispatch project CLI
+const HELP = `dispatch — Dispatch project CLI
 
 Usage:
-  dispatch mcp <command> [options]    Manage this project's MCP servers
-  cm plugin <command> [options]       Install and manage plugins (global, <configDir>/plugins/)
+  dispatch mcp <command> [options]      Manage this project's MCP servers
+  dispatch plugin <command> [options]   Install and manage plugins (global, <configDir>/plugins/)
   dispatch auth reset-owner --config-dir <dir> [--data-dir <dir>] --password-stdin --confirm-stopped
-  cm token create|list|revoke   Integration tokens for bots and scripts (\`cm token help\`)
-  cm help                       Show this help
+  dispatch token create|list|revoke     Integration tokens for bots and scripts (\`dispatch token help\`)
+  dispatch help                         Show this help
 
-Run \`dispatch mcp help\` or \`cm plugin help\` for each command surface.
+Run \`dispatch mcp help\` or \`dispatch plugin help\` for each command surface.
 
 Config lives in .dispatch/project.yaml at the repo root — committable,
 reviewable, and re-read live by Dispatch whenever it changes.
@@ -38,7 +38,7 @@ async function main(argv: string[]): Promise<number> {
     return 0;
   }
   if (command === "--version" || command === "-v") {
-    process.stdout.write("cm 0.0.0\n");
+    process.stdout.write("dispatch 0.0.0\n");
     return 0;
   }
 
@@ -58,14 +58,14 @@ async function main(argv: string[]): Promise<number> {
         await runPluginCommand(rest);
         return 0;
       default:
-        process.stderr.write(`cm: unknown command "${command}"\n\n${HELP}`);
+        process.stderr.write(`dispatch: unknown command "${command}"\n\n${HELP}`);
         return 1;
     }
   } catch (err) {
     // Expected, user-facing problems get a clean one-liner; anything else is a
     // real bug and keeps its stack so it can be reported.
     if (err instanceof CmError) {
-      process.stderr.write(`cm: ${err.message}\n`);
+      process.stderr.write(`dispatch: ${err.message}\n`);
       return 1;
     }
     throw err;
@@ -77,7 +77,7 @@ main(process.argv.slice(2)).then(
     process.exitCode = code;
   },
   (err: unknown) => {
-    process.stderr.write(`cm: unexpected error\n${err instanceof Error ? err.stack : String(err)}\n`);
+    process.stderr.write(`dispatch: unexpected error\n${err instanceof Error ? err.stack : String(err)}\n`);
     process.exitCode = 1;
   },
 );

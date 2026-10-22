@@ -12,14 +12,14 @@ What a Dispatch plugin author imports. Three entry points:
 Start from a scaffold rather than from here:
 
 ```
-cm plugin init my-plugin --both      # or --server / --client
+dispatch plugin init my-plugin --both      # or --server / --client
 cd my-plugin && pnpm install && pnpm build && pnpm test
-cm plugin add . --config-dir <dispatch config dir>
+dispatch plugin add . --config-dir <dispatch config dir>
 # restart Dispatch
 ```
 
 The scaffold's `package.json` links this package from the Dispatch checkout
-that ran `cm`, so the types and the build presets are the ones that match the
+that ran `dispatch`, so the types and the build presets are the ones that match the
 host you are installing into. The SDK is versioned with the host and is not on
 npm; `PLUGIN_API_VERSION` (and the manifest's `dispatch:` range) is the
 compatibility contract, not a package version.
