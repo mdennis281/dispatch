@@ -94,6 +94,8 @@ import { MetricsService } from "./metrics.js";
 import { MetricsBackfill } from "./metrics-backfill.js";
 import { TokenLedger } from "./metrics-tokens.js";
 import { TokenBackfill } from "./metrics-tokens-backfill.js";
+import { LimitLedger } from "./limit-ledger.js";
+import { LimitSampler } from "./limit-sampler.js";
 import { FsExplorerService } from "./fs-explorer.js";
 import { HarnessRegistry } from "../harness/index.js";
 import { ManagerMcpBridge } from "./mcp/manager-http.js";
@@ -259,6 +261,10 @@ export interface Services extends ServiceBase {
   metricsBackfill: MetricsBackfill;
   /** Tokens and cost per turn × model × account — Metrics → Tokens. */
   tokens: TokenLedger;
+  /** Every account's limit windows over time, and their resets — Metrics → Limits. */
+  limits: LimitLedger;
+  /** The one schedule that reads every account's limits into {@link limits}. */
+  limitSampler: LimitSampler;
   /** Directory listings, stats, drives/mounts and writes for the file explorer. */
   fsExplorer: FsExplorerService;
   /** Fast-forwards a project's primary checkout after its PRs land. */
@@ -662,7 +668,26 @@ export function createServices(
         configDir: account.configDir,
         subscriptionId: account.subscriptionId,
       }),
+    // The limit sampler below is the one schedule for every account; a poller
+    // with its own timer as well would spend the same token's bucket twice.
+    false,
   );
+  // Limit history. Reading every account on one adaptive schedule also keeps
+  // the header meter's snapshots fresh — each Claude read still publishes
+  // `usage-update` — so the base poller no longer runs a timer of its own.
+  const limits = new LimitLedger(store.stateDb);
+  const limitSampler = new LimitSampler({
+    ledger: limits,
+    harnesses,
+    usage: accountUsage,
+    settings: () => store.getSettings(),
+  });
+  // A turn that just spent from an account is the best reason to look at that
+  // account's windows again; the sampler's floor keeps it to one read per
+  // five minutes however many turns run.
+  tokens.onRecord = (lines) => {
+    for (const id of new Set(lines.map((l) => l.subscriptionId))) limitSampler.nudge(id);
+  };
   // "Is there a newer Dispatch than this one." Inert on a payload built from
   // source: with no release-manifest.json there is nothing to compare against.
   // The channel subscription is read/written through the settings store because
@@ -1413,6 +1438,8 @@ export function createServices(
     metrics,
     metricsBackfill,
     tokens,
+    limits,
+    limitSampler,
     trunkSync,
     prReviewWatcher,
     issueWatcher,
@@ -1513,9 +1540,10 @@ export function createServices(
       safeStart("webhooks", () => void webhooks.start().catch((err: unknown) =>
         console.error("[Dispatch] webhooks failed to start:", err)));
       safeStart("push", () => push.start());
-      // Subscription usage polling (a missing token / offline just yields an
-      // "unavailable" snapshot the header meter hides on).
-      safeStart("usage", () => usage.start());
+      // Every account's limit windows, on one schedule — which is also what
+      // keeps the header meter's usage snapshots fresh (a missing token /
+      // offline just yields an "unavailable" snapshot the meter hides on).
+      safeStart("limitSampler", () => limitSampler.start());
       // Release polling. A no-op unless this payload came from a release, and
       // its first check is deferred so an unreachable GitHub delays no boot.
       // Hydrate the channel FIRST — a check that ran before the subscription
@@ -1693,6 +1721,7 @@ export function createServices(
       await prReviewWatcher.drain().catch(() => {});
       issueWatcher.dispose();
       await issueWatcher.drain().catch(() => {});
+      limitSampler.stop();
       usage.stop();
       accountUsage.stop();
       release.stop();

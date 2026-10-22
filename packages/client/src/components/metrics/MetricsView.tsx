@@ -28,19 +28,21 @@
  * which is a second filter row on a page that already has one, and the thing
  * this layout avoids.
  */
-import { Activity, BarChart3, Coins, Gauge, RefreshCw, TrendingUp } from "lucide-react";
+import { Activity, BarChart3, Coins, Gauge, RefreshCw, Timer, TrendingUp } from "lucide-react";
 import { ScrollArea } from "../ui/ScrollArea.js";
 import { IconButton } from "../ui/IconButton.js";
 import { Tabs } from "../ui/Tabs.js";
 import { useMetrics } from "../../stores/metrics.js";
 import { useSpanMetrics } from "../../stores/metrics-spans.js";
 import { useTokenMetrics } from "../../stores/metrics-tokens.js";
+import { useLimitMetrics } from "../../stores/metrics-limits.js";
 import { useResources } from "../../stores/resources.js";
 import { useGrowth } from "../../stores/growth.js";
 import { useView, type MetricsSection } from "../../stores/view.js";
 import { RuntimeMetrics } from "./RuntimeMetrics.js";
 import { UsageMetrics } from "./UsageMetrics.js";
 import { TokenMetrics } from "./TokenMetrics.js";
+import { LimitMetrics } from "./LimitMetrics.js";
 import { ResourceMetrics } from "./ResourceMetrics.js";
 import { GrowthMetrics } from "./GrowthMetrics.js";
 import { count } from "./chrome.js";
@@ -62,6 +64,9 @@ export function MetricsView() {
   const tokenRows = useTokenMetrics((s) => s.report?.ledgerRows ?? 0);
   const tokenBusy = useTokenMetrics((s) => s.refetching);
   const reloadTokens = useTokenMetrics((s) => s.load);
+  const limitRows = useLimitMetrics((s) => s.report?.sampleRows ?? 0);
+  const limitBusy = useLimitMetrics((s) => s.refetching);
+  const reloadLimits = useLimitMetrics((s) => s.load);
 
   // Resources is a LIVE READING rather than a ledger, so its "rows" is the
   // number of chats currently holding something and its reload is a re-scan,
@@ -81,7 +86,10 @@ export function MetricsView() {
   const tokens = section === "tokens";
   const resources = section === "resources";
   const growth = section === "growth";
-  const rows = growth
+  const limits = section === "limits";
+  const rows = limits
+    ? limitRows
+    : growth
     ? growthCommits
     : resources
       ? resourceChats
@@ -90,7 +98,9 @@ export function MetricsView() {
         : tokens
           ? tokenRows
           : usageRows;
-  const busy = growth
+  const busy = limits
+    ? limitBusy
+    : growth
     ? growthBusy
     : resources
       ? resourceBusy
@@ -102,7 +112,9 @@ export function MetricsView() {
   // FORCED for the resource tab. Its snapshot is served off a 10 s table
   // cache, so a plain refetch inside that window returns a byte-identical
   // answer and the button reads as broken.
-  const reload = growth
+  const reload = limits
+    ? reloadLimits
+    : growth
     ? rewalk
     : resources
       ? () => rescan(true)
@@ -111,7 +123,7 @@ export function MetricsView() {
         : tokens
           ? reloadTokens
           : reloadUsage;
-  const unit = growth ? "commits" : resources ? "chats" : runtime ? "spans" : "rows";
+  const unit = limits ? "readings" : growth ? "commits" : resources ? "chats" : runtime ? "spans" : "rows";
 
   return (
     <div className="flex min-w-0 flex-1 flex-col bg-app">
@@ -124,6 +136,7 @@ export function MetricsView() {
           tabs={[
             { id: "usage", label: "Usage", icon: <BarChart3 size={13} /> },
             { id: "tokens", label: "Tokens", icon: <Coins size={13} /> },
+            { id: "limits", label: "Limits", icon: <Timer size={13} /> },
             { id: "runtime", label: "Runtime", icon: <Activity size={13} /> },
             { id: "resources", label: "Resources", icon: <Gauge size={13} /> },
             { id: "growth", label: "Growth", icon: <TrendingUp size={13} /> },
@@ -143,7 +156,9 @@ export function MetricsView() {
           relative to `Date.now()`, so a "last 7 days" render held from an hour
           ago is quietly answering a different question than its own label. */}
       <ScrollArea className="min-h-0 flex-1">
-        {growth ? (
+        {limits ? (
+          <LimitMetrics />
+        ) : growth ? (
           <GrowthMetrics />
         ) : resources ? (
           <ResourceMetrics />

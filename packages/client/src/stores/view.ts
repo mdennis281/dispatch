@@ -103,7 +103,13 @@ export type AppOverlay = "workspace" | "mcp" | "agents" | "processes";
  * growth reads the repo's own history out of git rather than anything
  * Dispatch recorded.
  */
-export type MetricsSection = "usage" | "tokens" | "runtime" | "resources" | "growth";
+export type MetricsSection =
+  | "usage"
+  | "tokens"
+  | "limits"
+  | "runtime"
+  | "resources"
+  | "growth";
 
 interface ViewStore {
   view: AppView;

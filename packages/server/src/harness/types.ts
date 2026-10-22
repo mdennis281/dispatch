@@ -164,6 +164,15 @@ export interface HarnessLimits {
   reached?: boolean;
   /** Machine-readable reason when `reached`, e.g. "usage_limit_reached". */
   reachedType?: string;
+  /**
+   * EVERY window across every metered bucket, with ids stable for the account
+   * — what the limit history records. Kept apart from `windows` because that
+   * list drives the card and the exhaustion check, and a side bucket (Codex's
+   * `premium`) at 100% must not mark the whole account out.
+   */
+  tracked?: Array<HarnessLimitWindow & { id: string; title: string }>;
+  /** Backend-granted reset credits still available (Codex). */
+  resetCredits?: number;
 }
 
 /**
@@ -705,6 +714,12 @@ export interface Harness {
   }): Promise<Record<string, number>>;
   /** Account usage state, or null when this harness can't report it. */
   readLimits(account?: HarnessAccount): Promise<HarnessLimits | null>;
+  /**
+   * Limits the runtime volunteers without being asked (Codex pushes
+   * `account/rateLimits/updated` after every turn). Free, fresher readings for
+   * the limit history. Optional: absent means the runtime only answers polls.
+   */
+  onLimits?(listener: (subscriptionId: string | undefined, limits: HarnessLimits) => void): () => void;
   /**
    * Carry a native session from one account of this provider to another, so a
    * chat switching accounts resumes with its context instead of a transcript

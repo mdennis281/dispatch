@@ -442,6 +442,62 @@ const MIGRATIONS: ReadonlyArray<string> = [
   CREATE INDEX metric_tokens_model        ON metric_tokens(model, ts);
   CREATE INDEX metric_tokens_chat         ON metric_tokens(chat_id, ts);
   `,
+  // 11 — subscription limit history: every window's reading over time, and the
+  // transitions between readings that mean something (a reset, an early reset,
+  // a drop inside a window, a moved reset time).
+  //
+  // Samples and events are separate tables because they are read differently:
+  // samples are a dense series the chart draws, events are the sparse log the
+  // tab exists to surface. Deriving events at query time from samples would mean
+  // re-running the classifier over every read, and keeping the sampler's state
+  // (the previous reading) only in memory would lose it across a restart, which
+  // is exactly when a reset tends to slip past unseen.
+  //
+  // `limit_accounts` carries the account-level facts a window row has no slot
+  // for — the plan and Codex's reset-credit count — so a change in either is
+  // still detectable after a restart.
+  `
+  CREATE TABLE limit_samples (
+    seq             INTEGER PRIMARY KEY,
+    ts              INTEGER NOT NULL,
+    subscription_id TEXT    NOT NULL,
+    provider        TEXT    NOT NULL,
+    window_id       TEXT    NOT NULL,
+    title           TEXT    NOT NULL,
+    window_minutes  INTEGER,
+    percent         REAL    NOT NULL,
+    resets_at       INTEGER,
+    source          TEXT    NOT NULL DEFAULT 'poll'
+  );
+  CREATE INDEX limit_samples_window ON limit_samples(subscription_id, window_id, ts);
+  CREATE INDEX limit_samples_ts     ON limit_samples(ts);
+
+  CREATE TABLE limit_events (
+    seq             INTEGER PRIMARY KEY,
+    ts              INTEGER NOT NULL,
+    prev_ts         INTEGER,
+    subscription_id TEXT    NOT NULL,
+    provider        TEXT    NOT NULL,
+    window_id       TEXT,
+    title           TEXT    NOT NULL,
+    kind            TEXT    NOT NULL,
+    from_percent    REAL,
+    to_percent      REAL,
+    prev_resets_at  INTEGER,
+    resets_at       INTEGER,
+    detail          TEXT
+  );
+  CREATE INDEX limit_events_ts           ON limit_events(ts);
+  CREATE INDEX limit_events_subscription ON limit_events(subscription_id, ts);
+
+  CREATE TABLE limit_accounts (
+    subscription_id TEXT PRIMARY KEY,
+    provider        TEXT NOT NULL,
+    plan_type       TEXT,
+    reset_credits   INTEGER,
+    updated_at      INTEGER NOT NULL
+  );
+  `,
 ];
 
 /** Schema version a database must be at for this build to use it. */

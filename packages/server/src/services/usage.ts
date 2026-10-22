@@ -21,7 +21,12 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { UsageSnapshot, UsageWindow } from "@dispatch/shared";
+import {
+  claudeWindowOf,
+  type LimitReading,
+  type UsageSnapshot,
+  type UsageWindow,
+} from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
 import type { HarnessAccount } from "../harness/types.js";
 
@@ -104,6 +109,23 @@ function toWindow(w: RawWindow | null | undefined): UsageWindow | null {
   return { percent: w.utilization, resetsAt: isoToMs(w.resets_at) };
 }
 
+/**
+ * Every window in the response, not just the two the meter draws. The
+ * endpoint also reports per-model and per-surface weekly windows
+ * (`seven_day_opus`, `seven_day_sonnet`, `seven_day_oauth_apps`…), most of them
+ * null on most plans; any key whose value carries a numeric `utilization` is a
+ * window, so one Anthropic adds later is tracked without a code change.
+ */
+export function limitReadingsOf(data: Record<string, unknown>): LimitReading[] {
+  const out: LimitReading[] = [];
+  for (const [key, value] of Object.entries(data)) {
+    const w = toWindow(value as RawWindow | null);
+    if (!w) continue;
+    out.push({ ...claudeWindowOf(key), percent: w.percent, resetsAt: w.resetsAt });
+  }
+  return out;
+}
+
 export class UsageService {
   private readonly bus: EventBus;
   private readonly fetchImpl: typeof fetch;
@@ -158,6 +180,23 @@ export class UsageService {
     return this.poll();
   }
 
+  /**
+   * A read on the limit sampler's schedule. Unlike {@link refresh} it honours
+   * the 429 cooldown — the sampler is the thing that would otherwise keep a
+   * throttled token throttled — and answers with the last windows marked stale.
+   */
+  async sample(): Promise<UsageSnapshot> {
+    if (this.now() < this.cooldownUntil) {
+      return { ...(this.latest ?? this.errorSnapshot("rate_limited")), stale: true, error: "rate_limited" };
+    }
+    return this.poll();
+  }
+
+  /** Epoch ms until which polls are held off after a 429 (0 = none). */
+  get cooldownEndsAt(): number {
+    return this.cooldownUntil;
+  }
+
   /** Force a fresh fetch now (the manual "refresh" button), floor-spaced. */
   async refresh(): Promise<UsageSnapshot> {
     if (this.inflight) return this.inflight;
@@ -204,7 +243,7 @@ export class UsageService {
       }
       if (!res.ok) return this.commit(this.errorSnapshot("unavailable"));
 
-      const data = (await res.json()) as RawUsage;
+      const data = (await res.json()) as RawUsage & Record<string, unknown>;
       // A successful fetch clears any lingering cooldown.
       this.cooldownUntil = 0;
       return this.commit({
@@ -215,6 +254,7 @@ export class UsageService {
         ...(this.subscriptionId ? { subscriptionId: this.subscriptionId } : {}),
         primaryLabel: "5-hour session",
         secondaryLabel: "Weekly",
+        limits: limitReadingsOf(data),
       });
     } catch {
       return this.commit(this.errorSnapshot("unavailable"));
@@ -262,6 +302,12 @@ export class UsageRegistry {
   constructor(
     private readonly base: UsageService,
     private readonly make: (account: HarnessAccount) => UsageService,
+    /**
+     * Whether a new account's poller runs its OWN timer. False when the limit
+     * sampler drives every account: two schedules against one token is two
+     * requests where one was allowed, and this endpoint 429s for half an hour.
+     */
+    private readonly autoStart = true,
   ) {}
 
   /** The poller for an account; absent or default means the base service. */
@@ -273,7 +319,7 @@ export class UsageRegistry {
     let svc = this.others.get(account.configDir);
     if (!svc) {
       svc = this.make(account);
-      svc.start();
+      if (this.autoStart) svc.start();
       this.others.set(account.configDir, svc);
     }
     svc.subscriptionId = account.subscriptionId;
