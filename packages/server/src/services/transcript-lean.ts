@@ -22,6 +22,7 @@
  *     a new field to a collapsed card means adding its key here.
  */
 import {
+  DISPATCH_INPUT_SUBTYPE,
   fileEditStat,
   fileResultStat,
   findTailPayloadLine,
@@ -197,6 +198,11 @@ export function leanRow(row: ChatMessage, toolName?: string): ChatMessage {
       // section with its size, and the MCP server/skill names. The section
       // BODIES — the whole system-prompt append, tens of KB — wait for the
       // drill-down to fetch the full row.
+      // A `dispatch-input` row IS its content — the turn Dispatch sent on its
+      // own — like a user row. A guard recovery quotes the blocked command, so a
+      // long heredoc commit pushes it past the limit, and projecting it to
+      // `{ model }` left the client nothing to render: the disclosure vanished.
+      if (row.subtype === DISPATCH_INPUT_SUBTYPE) return row;
       if (jsonBytes(row.data) <= RESULT_INLINE_LIMIT) return row;
       const model = (row.data as { model?: unknown } | undefined)?.model;
       const sent = readSentContext(row.data);

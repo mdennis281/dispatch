@@ -525,13 +525,17 @@ export function SentContextModal({
   initialKey?: string;
   onClose: () => void;
 }) {
-  const [full, setFull] = useState<SentContext | null>(sent.clipped ? null : sent);
-  const [loadingFull, setLoadingFull] = useState(sent.clipped === true);
+  // A `sameAs` row needs the row it names however it arrived: it carries no
+  // texts of its own, and one small enough to skip the lean projection (a Codex
+  // session's — no `tools` array) reaches here unflagged.
+  const needsFetch = sent.clipped === true || sent.sameAs !== undefined;
+  const [full, setFull] = useState<SentContext | null>(needsFetch ? null : sent);
+  const [loadingFull, setLoadingFull] = useState(needsFetch);
   // undefined = in flight, null = session not live.
   const [usage, setUsage] = useState<ContextUsage | null | undefined>(undefined);
 
   useEffect(() => {
-    if (!sent.clipped) return;
+    if (!needsFetch) return;
     let cancelled = false;
     const ids = sent.sameAs ? [row.id, sent.sameAs] : [row.id];
     api.chats
@@ -555,7 +559,7 @@ export function SentContextModal({
     return () => {
       cancelled = true;
     };
-  }, [row.chatId, row.id, sent.clipped, sent.sameAs]);
+  }, [row.chatId, row.id, needsFetch, sent.sameAs]);
 
   // Asked for any item, not only the usage one: the MCP view shows per-tool
   // tokens from the same answer, and one request is cheap.

@@ -34,6 +34,7 @@ import { spawnWithPid } from "../harness/claude/spawn.js";
 import { withStderrTail } from "../harness/claude/session.js";
 import { McpPrewarmService } from "./mcp-prewarm.js";
 import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 import {
   parseAssetReference,
   pathFromFileUri,
@@ -2523,9 +2524,9 @@ export class SessionBroker {
 
   private readonly sessions = new Map<string, LiveSession>();
   /**
-   * Per chat, the sent context last written in full and the init row holding
-   * it — outlives the LiveSession on purpose, since a resume is a new one.
-   * See `takeSentContext`.
+   * Per chat, a digest of the sent context last written in full and the init
+   * row holding it — outlives the LiveSession on purpose, since a resume is a
+   * new one; dropped with the chat (`drop`). See `takeSentContext`.
    */
   private readonly lastSentContext = new Map<string, { key: string; rowId: string }>();
   /**
@@ -3076,7 +3077,11 @@ export class SessionBroker {
     // resumes sessions all day, and every resume rebuilds the same prompt. Per
     // process, so a server restart writes it once more — the price of not
     // putting a hash on the chat record.
-    const key = JSON.stringify(pending.sections.map((s) => [s.id, s.label, s.text]));
+    // A digest, not the JSON itself: held per chat for the life of the process,
+    // the raw key would keep ~50KB of prompt resident per chat ever resumed.
+    const key = createHash("sha256")
+      .update(JSON.stringify(pending.sections.map((s) => [s.id, s.label, s.text])))
+      .digest("base64");
     const prior = this.lastSentContext.get(session.chatId);
     if (prior?.key === key) {
       return {
@@ -4226,6 +4231,7 @@ export class SessionBroker {
     // Tear down the chat's persistent shells alongside its session — a deleted
     // chat must not leak live powershell processes.
     this.terminals?.killChat(chatId);
+    this.lastSentContext.delete(chatId);
     return this.sessions.delete(chatId);
   }
 

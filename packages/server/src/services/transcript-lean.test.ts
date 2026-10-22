@@ -107,6 +107,20 @@ describe("lean transcript projection — large payloads are clipped + flagged", 
     expect(lean.data).toEqual({ model: "claude-opus-5" });
   });
 
+  it("ships a big dispatch-input row verbatim — the row IS the turn Dispatch sent", () => {
+    // A guard recovery quotes the blocked command; a heredoc commit takes it
+    // past the inline limit, and projecting it left nothing to render.
+    const row: SystemMessageRow = {
+      kind: "system",
+      id: "g1",
+      chatId: "c1",
+      ts: 1,
+      subtype: "dispatch-input",
+      data: { label: "Guard recovery — continue the task", text: BIG },
+    };
+    expect(leanRow(row)).toBe(row);
+  });
+
   it("keeps the sent-context summary on an init row, with section bodies clipped", () => {
     // The card under "Session started" draws one line per section with its
     // size — so the size must survive the clip, and the bodies must not ship.
