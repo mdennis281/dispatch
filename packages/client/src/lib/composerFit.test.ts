@@ -64,10 +64,9 @@ describe("demote", () => {
         if (states[i]![c.id] === "off" && states[i - 1]![c.id] !== "off") order.push(c.id);
       }
     }
-    // persona(0) → account(0.5) → context(1) → attach(2) → effort(3) → brain(4) → mode(5) → dictate(6).
+    // persona(0) → context(1) → attach(2) → effort(3) → brain(4) → mode(5) → dictate(6).
     expect(order).toEqual([
       "persona",
-      "account",
       "context",
       "attach",
       "effort",
