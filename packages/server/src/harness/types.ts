@@ -146,6 +146,18 @@ export interface HarnessLimitWindow {
   resetsAt?: number;
 }
 
+/** How a limit read may answer. */
+export interface HarnessLimitReadOpts {
+  /**
+   * Answer from the runtime or not at all: a failed read THROWS instead of
+   * falling back to the last cached snapshot. The limit history needs this —
+   * a cached answer recorded as a fresh read advances "last read" on an
+   * account nobody reached, and a cache last written by a one-bucket push
+   * looks like every other window vanished.
+   */
+  fresh?: boolean;
+}
+
 /** Account-level usage state, as far as the harness will tell us. */
 export interface HarnessLimits {
   /** The shorter/primary window (Codex: `primary`). */
@@ -166,7 +178,7 @@ export interface HarnessLimits {
   reachedType?: string;
   /**
    * EVERY window across every metered bucket, with ids stable for the account
-   * � what the limit history records. Kept apart from `windows` because that
+   * — what the limit history records. Kept apart from `windows` because that
    * list drives the card and the exhaustion check, and a side bucket (Codex's
    * `premium`) at 100% must not mark the whole account out.
    */
@@ -713,7 +725,7 @@ export interface Harness {
     refresh?: boolean;
   }): Promise<Record<string, number>>;
   /** Account usage state, or null when this harness can't report it. */
-  readLimits(account?: HarnessAccount): Promise<HarnessLimits | null>;
+  readLimits(account?: HarnessAccount, opts?: HarnessLimitReadOpts): Promise<HarnessLimits | null>;
   /**
    * Limits the runtime volunteers without being asked (Codex pushes
    * `account/rateLimits/updated` after every turn). Free, fresher readings for

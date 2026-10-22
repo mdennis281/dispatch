@@ -442,7 +442,7 @@ const MIGRATIONS: ReadonlyArray<string> = [
   CREATE INDEX metric_tokens_model        ON metric_tokens(model, ts);
   CREATE INDEX metric_tokens_chat         ON metric_tokens(chat_id, ts);
   `,
-  // 11 — subscription limit history: every window's reading over time, and the
+  // 11 â€” subscription limit history: every window's reading over time, and the
   // transitions between readings that mean something (a reset, an early reset,
   // a drop inside a window, a moved reset time).
   //
@@ -454,7 +454,7 @@ const MIGRATIONS: ReadonlyArray<string> = [
   // is exactly when a reset tends to slip past unseen.
   //
   // `limit_accounts` carries the account-level facts a window row has no slot
-  // for — the plan and Codex's reset-credit count — so a change in either is
+  // for â€” the plan and Codex's reset-credit count â€” so a change in either is
   // still detectable after a restart.
   `
   CREATE TABLE limit_samples (

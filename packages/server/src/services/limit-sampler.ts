@@ -115,7 +115,9 @@ export class HarnessLimitSource implements LimitSource {
   constructor(private readonly harness: Harness) {}
 
   async read(sub: ResolvedSubscription): Promise<LimitRead> {
-    const limits = await this.harness.readLimits(accountOf(sub));
+    // Fresh only: a throw lands in the sampler's failure/backoff branch, where
+    // a cached fallback would be booked as a successful read.
+    const limits = await this.harness.readLimits(accountOf(sub), { fresh: true });
     if (!limits) return { ok: false, error: "unavailable" };
     return {
       ok: true,

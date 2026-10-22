@@ -56,7 +56,7 @@ export const UsageSnapshotSchema = z.object({
    */
   windows: z.array(TitledUsageWindowSchema).optional(),
   /**
-   * EVERY window the provider reported, with stable ids — what the limit
+   * EVERY window the provider reported, with stable ids â€” what the limit
    * history records. Separate from `windows` because that list drives the card
    * and the exhaustion check, and a per-model weekly window at 100% must not
    * mark a whole account exhausted just because it is now being tracked.

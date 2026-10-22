@@ -24,6 +24,7 @@ import type {
   HarnessAccount,
   HarnessCapabilities,
   HarnessLimits,
+  HarnessLimitReadOpts,
   HarnessRuntimeInfo,
   HarnessSession,
   HarnessSessionSpec,
@@ -219,7 +220,7 @@ export class CodexHarness implements Harness {
     return this.efforts.get(model) ?? [];
   }
 
-  async readLimits(account?: HarnessAccount): Promise<HarnessLimits | null> {
+  async readLimits(account?: HarnessAccount, opts?: HarnessLimitReadOpts): Promise<HarnessLimits | null> {
     const key = accountKey(account);
     let held: { conn: CodexConnection; release: () => void } | undefined;
     try {
@@ -230,7 +231,8 @@ export class CodexHarness implements Harness {
       const limits = res.rateLimits ? toHarnessLimits(res.rateLimits, res) : null;
       this.limitsCache.set(key, limits);
       return limits;
-    } catch {
+    } catch (err) {
+      if (opts?.fresh) throw err;
       return this.limitsCache.get(key) ?? null;
     } finally {
       held?.release();

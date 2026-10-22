@@ -7,7 +7,14 @@ import { Store } from "../store/index.js";
 import type { HarnessRegistry } from "../harness/index.js";
 import { toHarnessLimits } from "../harness/codex/index.js";
 import { LimitLedger } from "./limit-ledger.js";
-import { LimitSampler, readingsOfLimits, type LimitRead, type LimitSource } from "./limit-sampler.js";
+import {
+  HarnessLimitSource,
+  LimitSampler,
+  readingsOfLimits,
+  type LimitRead,
+  type LimitSource,
+} from "./limit-sampler.js";
+import type { Harness } from "../harness/types.js";
 import type { UsageRegistry } from "./usage.js";
 import { limitReadingsOf } from "./usage.js";
 
@@ -135,6 +142,33 @@ describe("LimitSampler", () => {
     now += 6 * MIN;
     await s.tick();
     expect(ledger.events({}).map((e) => e.kind)).toEqual(["reset"]);
+  });
+});
+
+describe("HarnessLimitSource", () => {
+  it("asks for a fresh read, so a runtime failure is a failed read — not the cache", async () => {
+    const calls: unknown[] = [];
+    const harness = {
+      readLimits: async (_account: unknown, opts?: { fresh?: boolean }) => {
+        calls.push(opts);
+        if (opts?.fresh) throw new Error("timed out");
+        return { primary: { usedPercent: 50 } };
+      },
+    } as unknown as Harness;
+    const s = new LimitSampler({
+      ledger,
+      harnesses: { list: () => [], find: () => undefined } as unknown as HarnessRegistry,
+      usage: {} as UsageRegistry,
+      settings: async () => null,
+      now: () => now,
+      random: () => 0.5,
+      sourceFor: () => new HarnessLimitSource(harness),
+      accounts: async () => [sub("codex1", "codex")],
+    });
+    await s.tick();
+    expect(calls).toEqual([{ fresh: true }]);
+    expect(s.status()[0]).toMatchObject({ error: "timed out", lastOkAt: null });
+    expect(ledger.stats().rows).toBe(0);
   });
 });
 
