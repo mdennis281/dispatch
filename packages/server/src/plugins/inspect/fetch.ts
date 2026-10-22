@@ -11,7 +11,7 @@
  *
  *   GitHub  — `codeload.github.com/<o>/<r>/tar.gz/<sha>`, streamed through a
  *             byte counter, gunzip and the confined tar reader in `tar.ts`.
- *             Chosen over the shallow clone `cm plugin add` does because the
+ *             Chosen over the shallow clone `dispatch plugin add` does because the
  *             caps hold WHILE bytes arrive (a clone can only be measured after
  *             it has landed), because it addresses an exact sha (a
  *             `--depth 1` clone takes a branch tip, which may have moved since

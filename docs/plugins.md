@@ -249,7 +249,7 @@ scan, no model.
 `POST /api/plugins/install { url, sha, replace? }` re-fetches **that sha** (never the
 ref's current tip), re-runs the same report, refuses unless it is installable, and
 hands the extracted directory to the CLI's `addPlugin` — the same validate / claim /
-copy-without-`.git`-and-`node_modules` / rename path `cm plugin add` takes. Replacing
+copy-without-`.git`-and-`node_modules` / rename path `dispatch plugin add` takes. Replacing
 an installed copy needs `replace: true` (the card's "Update to x.y.z"). The plugin is
 not loaded: `PluginService.noteInstalled` lists a new id as inert, or flags an
 existing (enabled) one, with `needsRestart`. An active plugin whose files were

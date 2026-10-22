@@ -2,7 +2,7 @@
  * Inspect a plugin at a git URL, and install exactly what was inspected.
  * See docs/plugins.md → "Inspecting a plugin before installing it".
  *
- * Install is the SAME `addPlugin` `cm plugin add` runs — validate in the
+ * Install is the SAME `addPlugin` `dispatch plugin add` runs — validate in the
  * source, claim the slot, copy to a sibling tmp dir without `.git` /
  * `node_modules`, rename into place. The only thing that differs is how the
  * source directory came to exist: here it is the confined extraction of the

@@ -533,7 +533,7 @@ export async function inspectPluginDir(dir: string, opts: InspectDirOptions): Pr
         comparison: cmp === null ? "unknown" : cmp === 0 ? "same" : cmp > 0 ? "newer" : "older",
       };
       if (found.linked) {
-        warnings.push(`"${m.id}" is installed as a link to a working directory (cm plugin link); installing replaces the link with a copy — the directory it points at is left alone`);
+        warnings.push(`"${m.id}" is installed as a link to a working directory (dispatch plugin link); installing replaces the link with a copy — the directory it points at is left alone`);
       }
     }
   }

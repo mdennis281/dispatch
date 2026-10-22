@@ -40,8 +40,9 @@ dispatch plugin add . --config-dir <dir>     # validates, copies in; or `dispatc
 # restart Dispatch → Settings → Plugins
 ```
 
-`dispatch` is `node packages/cli/dist/index.js` in a checkout (`pnpm dispatch …`), or on PATH in an
-installed app. `--config-dir` is where the running server keeps `config.json`
+`dispatch` is `node packages/cli/dist/index.js` in a checkout (`pnpm dispatch …`). In an installed
+app it is `node <install root>/app/packages/cli/dist/index.js`; on macOS/Linux the `dispatch`
+launcher in `~/.local/bin` forwards `mcp|auth|token|plugin` to it, so plain `dispatch …` works there. `--config-dir` is where the running server keeps `config.json`
 (`DISPATCH_CONFIG_DIR`; a source checkout's default is `<repo>/.data`). The scaffold
 links `@dispatch/plugin-sdk` from the checkout that ran `dispatch`, so its types match the host
 you are installing into.

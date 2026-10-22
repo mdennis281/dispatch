@@ -1,7 +1,7 @@
 /**
  * A minimal, CONFINED tar reader for plugin inspection.
  *
- * Why not the system `tar` the CLI uses for `cm plugin add x.tgz`: that one is
+ * Why not the system `tar` the CLI uses for `dispatch plugin add x.tgz`: that one is
  * fed a file the owner already chose to install. Here the bytes are a stranger's,
  * and `tar -x` will happily create symlinks, write through them, honour
  * absolute names on some builds, and has no file-count or byte cap. Doing it in

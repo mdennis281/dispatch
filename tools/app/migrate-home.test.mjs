@@ -105,7 +105,7 @@ test("payloadKind tells a release install from a checkout build", () => {
   });
   assert.equal(payloadKind(old, "v9").tag, "v9");
   mkdirSync(join(old, "app", ".git"));
-  assert.deepEqual(payloadKind(old), { kind: "checkout", sha: "abc" });
+  assert.deepEqual(payloadKind(old), { kind: "checkout", sha: "abc", autostart: true });
 });
 
 test("--dry-run narrates the whole plan and changes nothing", async () => {
@@ -146,4 +146,24 @@ test("isStaleShortcut matches the old root and the dead Electron shell, not the 
   assert.ok(isStaleShortcut(lnk("claude-manager.lnk", `${from}\\shell\\claude-manager.exe`), from));
   assert.ok(!isStaleShortcut(lnk("Dispatch.lnk", "pythonw.exe", "C:\\Users\\a\\AppData\\Local\\dispatch\\app\\tools\\app\\launch.py"), from));
   assert.ok(!isStaleShortcut(lnk("Dispatch.lnk", "chrome_proxy.exe", "--app-id=abc"), from));
+});
+
+test("a failed rebuild puts app/ and the state files back, so renaming the root back is a full undo", async () => {
+  const old = seedLegacyInstall();
+  // A checkout build whose sha this repo does not have: publish.mjs fails fast, offline.
+  mkdirSync(join(old, "app", ".git"));
+  const stamp = JSON.parse(readFileSync(join(old, "current.json"), "utf8"));
+  writeFileSync(join(old, "current.json"), JSON.stringify({ ...stamp, sha: "0".repeat(40) }));
+  const before = readFileSync(join(old, "current.json"), "utf8");
+  const lines = [];
+  const code = await main(["--no-start"], { env: { LOCALAPPDATA: local }, log: (l) => lines.push(l) });
+  const out = lines.join("\n");
+  const moved = join(local, "dispatch");
+  assert.equal(code, 1, out);
+  assert.match(out, /FAILED at step 3/);
+  assert.match(out, /To roll back/);
+  assert.equal(existsSync(join(moved, "app", ".git")), true, "the original app/ is back");
+  assert.equal(existsSync(join(moved, "app.pre-migrate")), false);
+  assert.equal(readFileSync(join(moved, "current.json"), "utf8"), before, "current.json is restored verbatim");
+  assert.equal(existsSync(join(moved, "backups", "app-v1-1", "blob")), true, "nothing was deleted");
 });

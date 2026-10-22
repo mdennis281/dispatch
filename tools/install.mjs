@@ -563,6 +563,9 @@ export function resolveAutostart(flag, previousStamp) {
   return true;
 }
 
+/** The `dispatch` CLI's subcommands — see the switch in packages/cli/src/index.ts. */
+export const CLI_COMMANDS = ["mcp", "auth", "token", "plugin", "plugins"];
+
 function createPosixLauncher(root, python) {
   const bin = join(homedir(), ".local", "bin");
   const target = join(bin, "dispatch");
@@ -576,9 +579,16 @@ function createPosixLauncher(root, python) {
   // root) got a `dispatch` command that reported "not running" for the instance
   // it had just started — the login entry autostart.mjs writes never had this
   // bug because it always carried the root.
+  // The CLI is called `dispatch` too, and this shim is the only `dispatch` on
+  // PATH, so its subcommands are forwarded to the payload's CLI. Without that,
+  // `dispatch plugin add .` — what every doc and skill tells you to run — reached
+  // launch.py and died on an argparse error.
+  const cli = join(root, "app", "packages", "cli", "dist", "index.js");
   writeFileSync(
     target,
-    `#!/usr/bin/env sh\nexec ${pythonCommand} ${sq(launcher)} --target ${sq(root)} "$@"\n`,
+    `#!/usr/bin/env sh\n` +
+      `case "$1" in ${CLI_COMMANDS.join("|")}) exec ${sq(process.execPath)} ${sq(cli)} "$@" ;; esac\n` +
+      `exec ${pythonCommand} ${sq(launcher)} --target ${sq(root)} "$@"\n`,
   );
   chmodSync(target, 0o755);
   console.log(`created ${target}`);

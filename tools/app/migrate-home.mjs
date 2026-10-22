@@ -145,7 +145,7 @@ export function payloadKind(root, versionOverride) {
   const stamp = readJson(join(root, "current.json")) ?? {};
   if (existsSync(join(root, "app", ".git"))) {
     if (!stamp.sha) return { kind: "unknown", why: "app/ is a checkout but current.json has no sha" };
-    return { kind: "checkout", sha: stamp.sha };
+    return { kind: "checkout", sha: stamp.sha, autostart: stamp.autostart };
   }
   const tag = versionOverride ?? stamp.tag;
   if (tag) {
@@ -421,6 +421,10 @@ export async function main(argv = process.argv.slice(2), { env = process.env, lo
 
   // ── 2. State files ─────────────────────────────────────────────────────────
   narrate(log, 2, TOTAL, "Rewrite root paths in the state files");
+  // The pre-rewrite text of every file this changes. A failed rebuild puts them
+  // back, so "rename the root back" restores the old install exactly — not one
+  // whose current.json points its rollback target into the new root.
+  const originals = new Map();
   try {
     for (const name of STATE_FILES) {
       const file = join(dry ? from : to, name);
@@ -436,7 +440,10 @@ export async function main(argv = process.argv.slice(2), { env = process.env, lo
         continue;
       }
       say(`${name}: rewrite ${changed.join(", ")}`);
-      if (!dry) writeFileSync(join(to, name), `${JSON.stringify(value, null, 2)}\n`);
+      if (!dry) {
+        originals.set(name, readFileSync(file, "utf8"));
+        writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
+      }
     }
   } catch (err) {
     return fail(2, err);
@@ -476,6 +483,13 @@ export async function main(argv = process.argv.slice(2), { env = process.env, lo
             `  Before renaming back: delete ${app} and rename ${aside} to app.`;
         }
       }
+      for (const [name, text] of originals) {
+        try {
+          writeFileSync(join(to, name), text);
+        } catch (restoreErr) {
+          restored += `\nCOULD NOT restore ${name} (${restoreErr.message}); it still names ${to}.`;
+        }
+      }
       return fail(3, err, restored);
     }
   }
@@ -503,23 +517,36 @@ export async function main(argv = process.argv.slice(2), { env = process.env, lo
   // ── 5. Shortcuts and autostart ─────────────────────────────────────────────
   narrate(log, 5, TOTAL, "Recreate shortcuts and the login entry; remove the stale ones");
   try {
+    // Listed BEFORE recreating anything: for a checkout build the old Startup
+    // entry is also the only record of whether login-start was on.
+    const stale =
+      process.platform === "win32" ? listShortcuts().filter((s) => isStaleShortcut(s, from)) : [];
     if (kind.kind === "checkout") {
       // A release reinstall already recreated both (install.mjs does it for
       // every install); a checkout build is published without either.
-      const shortcut = [process.execPath, [join(repoRoot, "tools", "app", "create-shortcut.mjs"), "--target", to]];
-      const autostart = [
-        process.execPath,
-        [join(repoRoot, "tools", "app", "autostart.mjs"), "--enable", "--target", to, ...(args.start ? [] : ["--no-activate"])],
-      ];
-      for (const [cmd, cmdArgs] of [shortcut, autostart]) {
-        if (dry) log(`  (dry-run) $ ${[cmd, ...cmdArgs].join(" ")}`);
-        else runNode(cmd, cmdArgs, log);
+      const run = (cmdArgs) => {
+        if (dry) log(`  (dry-run) $ ${[process.execPath, ...cmdArgs].join(" ")}`);
+        else runNode(process.execPath, cmdArgs, log);
+      };
+      run([join(repoRoot, "tools", "app", "create-shortcut.mjs"), "--target", to]);
+      // Never switch login-start ON as a side effect of a move: honour the
+      // stamp's answer when it has one, else whether the old install had an entry.
+      const hadEntry = stale.some((s) => /[\\/]Startup[\\/]/i.test(s.path));
+      if (kind.autostart ?? hadEntry) {
+        run([
+          join(repoRoot, "tools", "app", "autostart.mjs"),
+          "--enable",
+          "--target",
+          to,
+          ...(args.start ? [] : ["--no-activate"]),
+        ]);
+      } else {
+        say("login entry: the old install had none, so none is created");
       }
     } else {
       say("Start-menu shortcut and login entry: recreated by install.mjs in step 3");
     }
     if (process.platform === "win32") {
-      const stale = listShortcuts().filter((s) => isStaleShortcut(s, from));
       if (!stale.length) say("no stale shortcuts found");
       for (const s of stale) {
         say(`remove ${s.path}  (runs ${s.target} ${s.args})`.trimEnd());

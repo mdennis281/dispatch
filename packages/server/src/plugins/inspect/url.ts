@@ -68,7 +68,7 @@ function segment(raw: string): string {
 
 export function parsePluginUrl(input: string): ParsedPluginUrl {
   let raw = input.trim();
-  // Same refusal `cm plugin add` makes, for the same reason: a "URL" starting
+  // Same refusal `dispatch plugin add` makes, for the same reason: a "URL" starting
   // with `-` handed to git is an option, not a remote.
   if (!raw || raw.startsWith("-")) bad("paste a GitHub or https git URL");
   const scp = /^git@github\.com:([^/]+)\/(.+?)(?:\.git)?\/?$/.exec(raw);
