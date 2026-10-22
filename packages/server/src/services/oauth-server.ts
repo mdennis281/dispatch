@@ -33,8 +33,9 @@
  */
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import {
-  INTEGRATION_SCOPES,
+  OFFERABLE_INTEGRATION_SCOPES,
   OAUTH_ACCESS_TOKEN_SECONDS,
+  isOfferableIntegrationScope,
   OAUTH_AUTHORIZE_NONCE_MS,
   OAUTH_CODE_MS,
   OAUTH_REFRESH_TOKEN_DAYS,
@@ -315,7 +316,7 @@ export class OAuthServer {
       token_endpoint: `${issuer}/api/oauth/token`,
       registration_endpoint: `${issuer}/api/oauth/register`,
       revocation_endpoint: `${issuer}/api/oauth/revoke`,
-      scopes_supported: [...INTEGRATION_SCOPES],
+      scopes_supported: [...OFFERABLE_INTEGRATION_SCOPES],
       response_types_supported: ["code"],
       response_modes_supported: ["query"],
       grant_types_supported: ["authorization_code", "refresh_token"],
@@ -338,7 +339,7 @@ export class OAuthServer {
     return {
       resource: `${issuer}${path}`,
       authorization_servers: [issuer],
-      scopes_supported: [...INTEGRATION_SCOPES],
+      scopes_supported: [...OFFERABLE_INTEGRATION_SCOPES],
       bearer_methods_supported: ["header"],
       resource_name: "Dispatch",
     };
@@ -374,7 +375,11 @@ export class OAuthServer {
         throw new OAuthError(400, "invalid_redirect_uri", `redirect_uri "${uri}" must be https, a loopback http URL, or a custom scheme, with no fragment.`);
       }
     }
-    let scopes: IntegrationScope[] = [...INTEGRATION_SCOPES];
+    // The OFFERABLE list, not every valid scope: a registration that says
+    // nothing used to be granted `tools:session` and friends, which the mount
+    // answers 404 for, and the consent page then listed them as if they were
+    // grants. See OFFERABLE_INTEGRATION_SCOPES in @dispatch/shared.
+    let scopes: IntegrationScope[] = [...OFFERABLE_INTEGRATION_SCOPES];
     if (input.scope !== undefined) {
       const parsed = parseIntegrationScopes(input.scope.split(/\s+/).filter(Boolean));
       if (!parsed.ok) throw new OAuthError(400, "invalid_client_metadata", `Unknown scope(s): ${parsed.unknown.join(", ")}.`);
@@ -503,6 +508,14 @@ export class OAuthServer {
     const outside = parsedScopes.scopes.filter((s) => !client.scopes.includes(s));
     if (outside.length) return back("invalid_scope", `This client did not register for: ${outside.join(", ")}.`);
     if (!parsedScopes.scopes.length) return back("invalid_scope", "At least one scope is required.");
+    // Narrow to what grants something (RFC 6749 §3.3 lets the server issue
+    // less than was asked; the token response reports what it issued). A
+    // `tools:*` over a category with no external tool is valid to parse but
+    // unlocks nothing — listing it on the consent page would ask the owner to
+    // approve a grant that does not exist, and storing it would show a dead
+    // chip on the grant forever.
+    const scopes = parsedScopes.scopes.filter(isOfferableIntegrationScope);
+    if (!scopes.length) return back("invalid_scope", "None of the requested scopes grant anything on this host.");
 
     const nonce = randomBytes(32).toString("base64url");
     this.bound(this.pending);
@@ -510,7 +523,7 @@ export class OAuthServer {
       nonce,
       client,
       redirectUri: q.redirect_uri,
-      scopes: parsedScopes.scopes,
+      scopes,
       ...(q.state !== undefined ? { state: q.state } : {}),
       codeChallenge: q.code_challenge,
       ...(q.resource ? { resource: q.resource } : {}),

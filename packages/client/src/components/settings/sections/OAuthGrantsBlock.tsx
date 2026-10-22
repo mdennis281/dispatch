@@ -10,6 +10,7 @@ import { Plug, Trash2 } from "lucide-react";
 import type { OAuthGrantSummary } from "@dispatch/shared";
 import { Button } from "../../ui/Button.js";
 import { Chip } from "../../ui/Chip.js";
+import { ScopeChips } from "../../ui/ScopeChips.js";
 import { InlineError } from "../../sidebar/Modal.js";
 import { sessionFetch, useAuth } from "../../../stores/auth.js";
 import { relTime } from "../../../lib/format.js";
@@ -46,13 +47,7 @@ function GrantRow({ grant, onRevoke }: { grant: OAuthGrantSummary; onRevoke: () 
           {state === "revoked" && <Chip tone="danger">revoked</Chip>}
           {state === "expired" && <Chip tone="warn">expired</Chip>}
         </div>
-        <div className="mt-1 flex flex-wrap gap-1">
-          {grant.scopes.map((s) => (
-            <Chip key={s} tone={s.startsWith("tools:") ? "agent" : "info"} className="!text-2xs">
-              {s}
-            </Chip>
-          ))}
-        </div>
+        <ScopeChips scopes={grant.scopes} className="mt-1 flex flex-wrap gap-1" />
         <p className="mt-1 text-2xs text-faint">
           approved {relTime(grant.createdAt, now)}
           {grant.lastRefreshedAt ? ` · renewed ${relTime(grant.lastRefreshedAt, now)}` : ""}

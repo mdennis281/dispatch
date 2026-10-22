@@ -8,7 +8,7 @@
  * Settings pane that offers the scope checkboxes, and the CLI that mints
  * offline. One list, one prefix, one validator.
  */
-import { MANAGER_CATEGORIES, type ManagerCategory } from "./manager-tools.js";
+import { MANAGER_CATEGORIES, externalManagerTools, type ManagerCategory } from "./manager-tools.js";
 
 /**
  * Every integration token starts with this. The auth gate branches on it
@@ -56,6 +56,44 @@ const SCOPE_SET: ReadonlySet<string> = new Set(INTEGRATION_SCOPES);
 
 export function isIntegrationScope(value: string): value is IntegrationScope {
   return SCOPE_SET.has(value);
+}
+
+/**
+ * The categories a `tools:*` scope can actually unlock: those with at least
+ * one tool marked external in `MANAGER_TOOL_EXTERNAL`. A category made of
+ * session, shell or PR tools has nothing an integration may call, and the
+ * mount answers 404 for it however the token was scoped — so `tools:session`
+ * is a valid scope that grants nothing.
+ *
+ * Derived rather than listed, because the list drifted the first time: the
+ * token form, the consent page, `scopes_supported` and the grant chips each
+ * iterated `MANAGER_CATEGORIES` and offered every dead category as if it were
+ * a grant. Every place that OFFERS a scope reads this; every place that
+ * VALIDATES one keeps reading {@link INTEGRATION_SCOPES}, so a token minted
+ * with a dead scope before this existed still parses.
+ */
+export const OFFERABLE_TOOL_CATEGORIES: readonly ManagerCategory[] = MANAGER_CATEGORIES.filter(
+  (category) => externalManagerTools(category).length > 0,
+);
+
+/** `tools:<category>` for every category in {@link OFFERABLE_TOOL_CATEGORIES}. */
+export const OFFERABLE_TOOL_SCOPES: readonly IntegrationToolScope[] = OFFERABLE_TOOL_CATEGORIES.map(toolScope);
+
+/**
+ * Every scope worth offering, in the pane's order: the fixed scopes, then the
+ * `tools:*` scopes with something behind them. What a registration without a
+ * `scope` gets, what the AS advertises, what the form ticks.
+ */
+export const OFFERABLE_INTEGRATION_SCOPES: readonly IntegrationScope[] = [
+  ...INTEGRATION_FIXED_SCOPES,
+  ...OFFERABLE_TOOL_SCOPES,
+];
+
+const OFFERABLE_SET: ReadonlySet<string> = new Set(OFFERABLE_INTEGRATION_SCOPES);
+
+/** Whether a scope grants anything — false for a `tools:*` over an empty category. */
+export function isOfferableIntegrationScope(scope: string): scope is IntegrationScope {
+  return OFFERABLE_SET.has(scope);
 }
 
 /**
