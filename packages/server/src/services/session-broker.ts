@@ -5021,9 +5021,11 @@ export class SessionBroker {
     session.started = true;
 
     try {
-      // Reuse the policy/config assembly that has years of Claude-specific edge
-      // cases, then project only its neutral pieces into the provider adapter.
-      const options = await this.buildOptions(session);
+      // Resolve the fallback BEFORE building options: `buildOptions` reads the
+      // provider descriptor for the skills dir, efforts and account. Built
+      // first, a chat on an uninstalled provider had its skills written to the
+      // placeholder's `.agents/skills` and then ran on Claude, which reads
+      // `.claude/skills` — so the turn started with skills on and none on disk.
       const resolved = this.harnesses.resolve(session.harnessKind);
       if (resolved.fellBack) {
         this.bus.publish({
@@ -5035,6 +5037,9 @@ export class SessionBroker {
         session.harnessKind = resolved.harness.kind;
         void this.patchChat(session.chatId, { harness: resolved.harness.kind });
       }
+      // Reuse the policy/config assembly that has years of Claude-specific edge
+      // cases, then project only its neutral pieces into the provider adapter.
+      const options = await this.buildOptions(session);
 
       const allMcp = (options.mcpServers ?? {}) as Record<string, unknown>;
       // Dispatch's own servers travel to the harness in their own field, so the
