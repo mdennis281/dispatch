@@ -587,12 +587,11 @@ browser (Chrome, Edge, Brave, Vivaldi…).
   upgrade.log        the detached swap's narration (rotated past 2 MB)
 ```
 
-<!-- TODO(remove after install migration) -->
-An install from before the rename lives in `%LOCALAPPDATA%\claude-manager`. Move it with
-`pnpm app:migrate-home` (stop the app first; `-- --dry-run` previews every step). It
-renames the root in place — no data is copied — then rebuilds `app\` there, because
-pnpm's junctions hold absolute paths into the old location. Until it has run, every
-launcher still finds the old root when the new one does not exist.
+An install from before the rename lives in `%LOCALAPPDATA%\claude-manager`, and nothing
+looks there any more — the launcher would start a fresh, empty install beside it. Move it
+first with `pnpm app:migrate-home` (stop the app first; `-- --dry-run` previews every
+step). It renames the root in place — no data is copied — then rebuilds `app\` there,
+because pnpm's junctions hold absolute paths into the old location.
 
 **`config/` is shared, `data/` is not.** Projects, agents and modes are written rarely and
 are miserable to maintain twice, so both instances read one copy.

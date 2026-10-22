@@ -85,15 +85,7 @@ def desktop_root() -> Path:
         local = str(Path.home() / "Library/Application Support")
     else:
         local = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local/share")
-    root = Path(local) / "dispatch"
-    if root.exists():
-        return root
-    # TODO(remove after install migration): an install that predates the rename
-    # still lives under `claude-manager` until `pnpm app:migrate-home` moves it.
-    legacy = Path(local) / "claude-manager"
-    if legacy.exists():
-        return legacy
-    return root
+    return Path(local) / "dispatch"
 
 
 class Paths:

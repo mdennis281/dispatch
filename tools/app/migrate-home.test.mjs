@@ -58,13 +58,12 @@ function snapshot(dir) {
   return out.sort();
 }
 
-test("desktopRoot prefers dispatch, falls back to an existing claude-manager, else dispatch", () => {
+test("desktopRoot is always dispatch, never the pre-rename claude-manager", () => {
   const env = { LOCALAPPDATA: local };
-  assert.equal(desktopRoot(env), join(local, "dispatch"), "neither exists: the new name");
+  // An old root sitting there must not be picked up: it is migrate-home's
+  // input, and a launcher that ran from it would race the move.
   mkdirSync(join(local, "claude-manager"));
-  assert.equal(desktopRoot(env), join(local, "claude-manager"), "only the old one exists");
-  mkdirSync(join(local, "dispatch"));
-  assert.equal(desktopRoot(env), join(local, "dispatch"), "both exist: the new one wins");
+  assert.equal(desktopRoot(env), join(local, "dispatch"));
   assert.equal(desktopRoot({ ...env, DISPATCH_HOME: join(local, "x") }), join(local, "x"));
   assert.equal(desktopRoot({ ...env, CM_HOME: join(local, "x") }), join(local, "dispatch"), "CM_HOME is gone");
 });
