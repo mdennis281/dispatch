@@ -1,6 +1,5 @@
 /**
- * CiView — the project's CI/CD page: every workflow with its recent runs
- * grouped under it, one workflow's full history, and any
+ * CiView — the project's CI/CD page: every workflow, its run history, and any
  * run drilled into down to the step and its log, with re-run / cancel / run
  * workflow on hand.
  *
@@ -15,12 +14,19 @@
  * has no GitHub repository at all, and that replaces the page with an empty
  * state, because every other section would fail the same way.
  *
- * LAYOUT, by width (see useBreakpoint):
- *   lg  workflow rail │ run list │ run detail
- *   md                  run list │ run detail   (workflows become a Select)
- *   sm  run list, OR run detail with a back button — a drill-down, the way
- *       Settings works at this width. The list stays mounted underneath so
- *       coming back keeps its filters, pages and scroll.
+ * LAYOUT. With no run open, the run list takes all the width beside the
+ * workflow rail. Opening a run hands the rail's slot to the run list — it
+ * becomes the secondary sidebar — and the run's breakdown takes the rest,
+ * under a back bar that returns to the wide list. A permanent third pane
+ * spent most of the screen on "Select a run" and squeezed the list to 340px.
+ *   lg  rail │ run list          →  run list │ run detail   (Select replaces rail)
+ *   md       run list            →  run list │ run detail
+ *   sm       run list            →  run detail             (list stays mounted,
+ *                                                           hidden, keeping scroll)
+ *
+ * RUNNING a workflow lives on the workflow — a Run button on each rail row,
+ * and beside the picker once one is chosen — not in the page header, which
+ * opened a dialog that then asked you which workflow you meant.
  */
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { ExternalLink, Play, RefreshCw, Workflow } from "lucide-react";
@@ -135,9 +141,21 @@ function CiPage({ project }: { project: Project }) {
   }
 
   const busy = summary.refreshing || workflows.refreshing;
-  const showRail = mode === "lg";
-  const showList = !compact || !selected;
-  const showDetail = !compact || !!selected;
+  // The rail gives its slot to the run list once a run is open.
+  const showRail = mode === "lg" && !selected;
+  const picked = workflows.data?.find((w) => w.id === workflowId);
+  const canRunPicked = !!picked && !picked.managed && picked.state === "active";
+  const runPicked = canRunPicked && (
+    <Button
+      size="sm"
+      variant="primary"
+      leftIcon={<Play />}
+      onClick={() => setDispatchFor({ workflowId: picked.id })}
+      className="shrink-0"
+    >
+      Run
+    </Button>
+  );
 
   return (
     <div className="flex min-w-0 flex-1 flex-col bg-app">
@@ -164,16 +182,6 @@ function CiPage({ project }: { project: Project }) {
           <IconButton tip="Refresh" onClick={refreshAll}>
             {busy ? <Spinner size={12} /> : <RefreshCw />}
           </IconButton>
-          <Button
-            size="sm"
-            variant="primary"
-            leftIcon={<Play />}
-            disabled={!workflows.data}
-            onClick={() => setDispatchFor({ workflowId })}
-            aria-label="Run workflow"
-          >
-            {compact ? "Run" : "Run workflow"}
-          </Button>
         </div>
       </div>
 
@@ -196,48 +204,58 @@ function CiPage({ project }: { project: Project }) {
 
         <div
           className={cn(
-            "flex min-h-0 flex-col bg-surface",
-            compact ? "w-full" : mode === "md" ? "w-[340px] shrink-0 border-r border-line" : "w-[380px] shrink-0 border-r border-line",
-            !showList && "hidden",
+            "flex min-h-0 min-w-0 flex-col bg-surface",
+            !selected
+              ? "flex-1"
+              : compact
+                ? "hidden"
+                : mode === "md"
+                  ? "w-[320px] shrink-0 border-r border-line"
+                  : "w-[360px] shrink-0 border-r border-line",
           )}
         >
           <CiRunList
             projectId={projectId}
             workflowId={workflowId}
-            workflows={workflows}
-            onShowAll={setWorkflowId}
-            onRun={(id) => setDispatchFor({ workflowId: id })}
             selectedRunId={selected?.id ?? null}
             onSelect={setSelected}
             refreshTick={tick}
             compact={compact}
             header={
-              showRail ? undefined : (
-                <CiWorkflowSelect res={workflows} selected={workflowId} onSelect={setWorkflowId} />
+              showRail ? (
+                picked && (
+                  <div className="flex items-center gap-2">
+                    <span className="min-w-0 flex-1 truncate text-sm font-semibold text-primary">
+                      {picked.name}
+                    </span>
+                    {runPicked}
+                  </div>
+                )
+              ) : (
+                <div className="flex items-center gap-2">
+                  <div className="min-w-0 flex-1">
+                    <CiWorkflowSelect res={workflows} selected={workflowId} onSelect={setWorkflowId} />
+                  </div>
+                  {runPicked}
+                </div>
               )
             }
           />
         </div>
 
-        {showDetail &&
-          (selected ? (
-            <CiRunDetail
-              // Fresh state per run: expanded jobs and open logs belong to the
-              // run they were opened on.
-              key={selected.id}
-              projectId={projectId}
-              runId={selected.id}
-              placeholder={selected}
-              compact={compact}
-              onBack={() => setSelected(null)}
-              onChanged={changed}
-            />
-          ) : (
-            <EmptyState
-              title="Select a run"
-              body="Pick a run to see its jobs, step-by-step logs and artifacts — and to re-run or cancel it."
-            />
-          ))}
+        {selected && (
+          <CiRunDetail
+            // Fresh state per run: expanded jobs and open logs belong to the
+            // run they were opened on.
+            key={selected.id}
+            projectId={projectId}
+            runId={selected.id}
+            placeholder={selected}
+            compact={compact}
+            onBack={() => setSelected(null)}
+            onChanged={changed}
+          />
+        )}
       </div>
 
       <CiDispatchModal

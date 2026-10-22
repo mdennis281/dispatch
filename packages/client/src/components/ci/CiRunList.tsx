@@ -1,9 +1,9 @@
 /**
  * Run history: filterable, paginated, live.
  *
- * With no workflow picked this is grouped by workflow (`CiRunGroups`); the
- * flat, paginated list below is one workflow's full history. The status and
- * branch filters apply to both.
+ * Always newest first, never grouped: with every workflow in one list, each
+ * row names its workflow as a chip so "which pipeline was that" is answered
+ * without opening it.
  *
  * Page 1 is a polled resource; "Load more" pages are held separately and
  * folded under it (`mergeRuns`), so a poll refreshes the top of the list
@@ -11,7 +11,7 @@
  */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { GitBranch, Search, X } from "lucide-react";
-import type { CiRun, CiWorkflow } from "@dispatch/shared";
+import type { CiRun } from "@dispatch/shared";
 import { ciIsActive } from "@dispatch/shared";
 import { api } from "../../lib/api.js";
 import { cn } from "../../lib/cn.js";
@@ -21,7 +21,6 @@ import { ScrollArea } from "../ui/ScrollArea.js";
 import { SegmentedControl } from "../ui/SegmentedControl.js";
 import { Spinner } from "../ui/Spinner.js";
 import { CiSectionError, CiSkeleton } from "./CiBits.js";
-import { CiRunGroups } from "./CiRunGroups.js";
 import { RunRow } from "./CiRunRow.js";
 import {
   appendRuns,
@@ -29,7 +28,7 @@ import {
   statusParam,
   type RunStatusFilter,
 } from "./ciModel.js";
-import { useResource, type Resource } from "./useResource.js";
+import { useResource } from "./useResource.js";
 
 const PER_PAGE = 30;
 /** Poll faster while something on screen is moving. */
@@ -46,9 +45,6 @@ const STATUS_SEGMENTS: { value: RunStatusFilter; label: string }[] = [
 export function CiRunList({
   projectId,
   workflowId,
-  workflows,
-  onShowAll,
-  onRun,
   selectedRunId,
   onSelect,
   refreshTick,
@@ -57,9 +53,6 @@ export function CiRunList({
 }: {
   projectId: string;
   workflowId: number | null;
-  workflows: Resource<CiWorkflow[]>;
-  onShowAll: (workflowId: number) => void;
-  onRun: (workflowId: number) => void;
   selectedRunId: number | null;
   onSelect: (run: CiRun) => void;
   /** Bumped by the page's Refresh / after an action — reload page 1. */
@@ -96,9 +89,7 @@ export function CiRunList({
   const [moreError, setMoreError] = useState<string | null>(null);
   const [anyLive, setAnyLive] = useState(false);
 
-  const grouped = workflowId === null;
-  // Grouped mode reads per workflow instead; a null key keeps this one idle.
-  const first = useResource(grouped ? null : filterKey, () => api.ci.runs(projectId, { ...filter, page: 1 }), {
+  const first = useResource(filterKey, () => api.ci.runs(projectId, { ...filter, page: 1 }), {
     pollMs: anyLive ? POLL_LIVE_MS : POLL_IDLE_MS,
   });
 
@@ -206,82 +197,68 @@ export function CiRunList({
         </div>
       </div>
 
-      {grouped ? (
-        <CiRunGroups
-          projectId={projectId}
-          workflows={workflows}
-          filter={{ status: filter.status, branch: filter.branch }}
-          filterKey={filterKey}
-          selectedRunId={selectedRunId}
-          onSelect={onSelect}
-          onShowAll={onShowAll}
-          onRun={onRun}
-          refreshTick={refreshTick}
-        />
-      ) : (
-        <ScrollArea className="min-h-0 flex-1">
-          {first.error && first.data && (
-            <div className="px-3 pt-2">
-              <CiSectionError message={first.error} onRetry={() => void first.reload()} slim />
-            </div>
-          )}
-          {!first.data ? (
-            first.error ? (
-              <div className="p-3">
-                <CiSectionError message={first.error} onRetry={() => void first.reload()} />
-              </div>
-            ) : (
-              <CiSkeleton rows={8} className="p-3" />
-            )
-          ) : runs.length === 0 ? (
-            <div className="px-4 py-10 text-center">
-              <p className="text-sm text-secondary">{filtered ? "No matching runs" : "No runs yet"}</p>
-              <p className="mt-1 text-xs text-faint">
-                {filtered
-                  ? "Try a different status or branch."
-                  : "Runs appear here as soon as a workflow is triggered."}
-              </p>
+      <ScrollArea className="min-h-0 flex-1">
+        {first.error && first.data && (
+          <div className="px-3 pt-2">
+            <CiSectionError message={first.error} onRetry={() => void first.reload()} slim />
+          </div>
+        )}
+        {!first.data ? (
+          first.error ? (
+            <div className="p-3">
+              <CiSectionError message={first.error} onRetry={() => void first.reload()} />
             </div>
           ) : (
-            <>
-              <ul className="py-1">
-                {runs.map((run) => (
-                  <RunRow
-                    key={run.id}
-                    run={run}
-                    now={now}
-                    selected={run.id === selectedRunId}
-                    showWorkflow={false}
-                    onSelect={() => onSelect(run)}
-                  />
-                ))}
-              </ul>
-              <div className="px-3 pb-4 pt-1 text-center">
-                {moreError && (
-                  <div className="mb-2 text-left">
-                    <CiSectionError message={moreError} onRetry={() => void loadMore()} slim />
-                  </div>
-                )}
-                {canLoadMore ? (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    disabled={moreLoading}
-                    leftIcon={moreLoading ? <Spinner size={12} /> : undefined}
-                    onClick={() => void loadMore()}
-                  >
-                    Load more · {runs.length.toLocaleString()} of {total.toLocaleString()}
-                  </Button>
-                ) : (
-                  <span className="text-2xs text-faint">
-                    {total.toLocaleString()} run{total === 1 ? "" : "s"}
-                  </span>
-                )}
-              </div>
-            </>
-          )}
-        </ScrollArea>
-      )}
+            <CiSkeleton rows={8} className="p-3" />
+          )
+        ) : runs.length === 0 ? (
+          <div className="px-4 py-10 text-center">
+            <p className="text-sm text-secondary">{filtered ? "No matching runs" : "No runs yet"}</p>
+            <p className="mt-1 text-xs text-faint">
+              {filtered
+                ? "Try a different status or branch."
+                : "Runs appear here as soon as a workflow is triggered."}
+            </p>
+          </div>
+        ) : (
+          <>
+            <ul className="py-1">
+              {runs.map((run) => (
+                <RunRow
+                  key={run.id}
+                  run={run}
+                  now={now}
+                  selected={run.id === selectedRunId}
+                  showWorkflow={workflowId === null}
+                  onSelect={() => onSelect(run)}
+                />
+              ))}
+            </ul>
+            <div className="px-3 pb-4 pt-1 text-center">
+              {moreError && (
+                <div className="mb-2 text-left">
+                  <CiSectionError message={moreError} onRetry={() => void loadMore()} slim />
+                </div>
+              )}
+              {canLoadMore ? (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={moreLoading}
+                  leftIcon={moreLoading ? <Spinner size={12} /> : undefined}
+                  onClick={() => void loadMore()}
+                >
+                  Load more · {runs.length.toLocaleString()} of {total.toLocaleString()}
+                </Button>
+              ) : (
+                <span className="text-2xs text-faint">
+                  {total.toLocaleString()} run{total === 1 ? "" : "s"}
+                </span>
+              )}
+            </div>
+          </>
+        )}
+      </ScrollArea>
     </div>
   );
 }

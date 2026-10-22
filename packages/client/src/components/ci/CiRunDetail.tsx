@@ -141,7 +141,7 @@ export function CiRunDetail({
   if (!run) {
     return (
       <div className="flex min-w-0 flex-1 flex-col bg-app">
-        {compact && onBack && <BackBar onBack={onBack} />}
+        {onBack && <BackBar onBack={onBack} />}
         <div className="p-4">
           {runRes.error ? (
             <CiSectionError message={runRes.error} onRetry={() => void runRes.reload()} />
@@ -161,7 +161,7 @@ export function CiRunDetail({
 
   return (
     <div className="flex min-w-0 flex-1 flex-col bg-app">
-      {compact && onBack && <BackBar onBack={onBack} />}
+      {onBack && <BackBar onBack={onBack} />}
       <ScrollArea className="min-h-0 flex-1">
         <div className={cn("mx-auto w-full max-w-[920px]", compact ? "px-3 py-3" : "px-5 py-4")}>
           {/* ---------------------------------------------------------- header */}
@@ -335,7 +335,7 @@ function BackBar({ onBack }: { onBack: () => void }) {
   return (
     <div className="flex h-10 shrink-0 items-center gap-1 px-1.5 cm-hairline-b">
       <Button variant="ghost" size="md" leftIcon={<ArrowLeft />} onClick={onBack}>
-        Runs
+        All runs
       </Button>
     </div>
   );

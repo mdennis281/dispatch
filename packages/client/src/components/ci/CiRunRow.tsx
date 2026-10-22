@@ -1,4 +1,5 @@
 /** One run in a list — shared by the flat history and the per-workflow groups. */
+import { Workflow } from "lucide-react";
 import type { CiRun } from "@dispatch/shared";
 import { cn } from "../../lib/cn.js";
 import { dur, relTimeShort } from "../../lib/format.js";
@@ -35,6 +36,14 @@ export function RunRow({
         <CiStatusIcon x={run} className="mt-0.5" />
         <span className="min-w-0 flex-1">
           <span className="flex items-baseline gap-2">
+            {showWorkflow && (
+              // A chip, not muted meta text: in the all-workflows list the
+              // pipeline is the first thing you scan for, ahead of the title.
+              <span className="inline-flex max-w-[40%] shrink-0 items-center gap-1 self-center rounded border border-line bg-panel-2 px-1.5 py-px text-2xs font-medium text-secondary">
+                <Workflow className="size-3 shrink-0 text-faint" />
+                <span className="truncate">{run.workflowName}</span>
+              </span>
+            )}
             <span className={cn("min-w-0 flex-1 truncate text-sm", selected ? "text-primary" : "text-secondary")}>
               {run.title || run.workflowName}
             </span>
@@ -43,7 +52,6 @@ export function RunRow({
             </span>
           </span>
           <span className="mt-0.5 flex items-center gap-1.5 text-2xs text-faint">
-            {showWorkflow && <span className="shrink-0 text-muted">{run.workflowName}</span>}
             <span className="cm-mono shrink-0">#{run.number}</span>
             {run.branch && (
               <span className="cm-mono min-w-0 truncate rounded bg-panel-2 px-1 text-info-hi">
