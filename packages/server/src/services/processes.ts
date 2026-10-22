@@ -60,6 +60,8 @@ export interface ProjectProcess {
   terminalName?: string;
   /** `${chatId}::${name}` — the join key the Terminals panel matches cards on. */
   terminalId?: string;
+  /** The runner's non-project owner (`plugin:<id>`), so the roster can group it. */
+  owner?: string;
 }
 
 /**
@@ -474,8 +476,13 @@ export class ProcessService {
    */
   async listForProject(projectId: string): Promise<ProjectProcess[]> {
     const project = await this.store.getProject(projectId).catch(() => null);
+    // This project's runners, plus every plugin-owned one. A plugin process
+    // belongs to no project — plugins are global — and "Ports & processes" is
+    // per project, so it is shown in every project's view rather than none.
+    // An ADOPTED record describes a process the other instance spawned; its
+    // port is still a port this instance must account for.
     const runners = (await this.store.listRunners().catch(() => []))
-      .filter((r) => r.projectId === projectId && ACTIVE_STATUSES.has(r.status));
+      .filter((r) => (r.projectId === projectId || !!r.owner) && ACTIVE_STATUSES.has(r.status));
     const shells = await this.shellsForProject(projectId);
 
     // Candidate ports: declared bases + hop window, plus runner-allocated ports.
@@ -537,6 +544,7 @@ export class ProcessService {
           subAppId: runner?.subAppId,
           branch: runner?.branch,
           worktreePath: runner?.worktreePath,
+          owner: runner?.owner,
           chatId: shell?.chatId,
           chatTitle: shell?.chatTitle,
           terminalName: shell?.name,

@@ -1,0 +1,29 @@
+# A plugin with NO server module that still changes what every session gets:
+# a mode, a skill, an instruction, a persona, an MCP server and a managed
+# process — one of each contribution kind. Linked into <configDir>/plugins/
+# it shows up in the composer's mode picker, the `/` menu, the MCP catalog
+# (kind `plugin`) and Ports & processes after a restart. See docs/plugins.md
+# → "Contributions". `packages/server/src/plugins/contributions.test.ts` loads
+# this directory as its fixture.
+id: contributions
+name: Contributions (example)
+version: 0.1.0
+dispatch: ">=1"
+description: One of every contribution kind, and nothing else.
+# `mcp` and `process` are what let the two files below do anything — a
+# manifest that names `contributes.mcpServers` without declaring `mcp` gets a
+# warning on its Settings row and no server.
+capabilities:
+  - mcp
+  - process
+# The only secret `mcp.yaml` may reference. An unlisted `${secret:X}` there
+# expands to "" and is reported on the plugin row.
+secrets:
+  - CONTRIB_ECHO_TOKEN
+contributes:
+  modes: ./modes
+  skills: ./skills
+  instructions: ./instructions
+  personas: ./personas
+  mcpServers: ./mcp.yaml
+  processes: ./processes.yaml

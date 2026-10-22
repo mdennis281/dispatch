@@ -148,6 +148,35 @@ describe("mode-editor", () => {
   });
 });
 
+describe("plugin modes", () => {
+  const pluginModes = (): ModeConfig[] => [
+    { id: "careful", name: "Careful", permissionMode: "plan", scope: "plugin", pluginId: "contributions" },
+  ];
+
+  it("lists a plugin mode after the authored scopes, tagged with its plugin, and above the built-ins", async () => {
+    const editor = createModeEditor({ store: fakeStore(), configPaths: null, builtin: BUILTIN, pluginModes });
+    const ids = (await editor.list()).map((m) => `${m.scope}:${m.id}`);
+    expect(ids).toEqual(["plugin:careful", "builtin:plan", "builtin:auto"]);
+    expect(await editor.read("careful")).toMatchObject({ scope: "plugin", plugin: "contributions", permissionMode: "plan" });
+    expect(await editor.read("careful", "plugin")).toMatchObject({ scope: "plugin" });
+    expect(await editor.read("careful", "global")).toBeNull();
+  });
+
+  it("is shadowed by a global (store) mode of the same id, which is what the broker resolves", async () => {
+    const store = fakeStore([{ id: "careful", name: "Careful (mine)", permissionMode: "auto", scope: "global" }]);
+    const editor = createModeEditor({ store, configPaths: null, builtin: BUILTIN, pluginModes });
+    expect(await editor.read("careful")).toMatchObject({ scope: "global", permissionMode: "auto" });
+    // Both are listed; the first is the one in effect.
+    expect((await editor.list()).filter((m) => m.id === "careful").map((m) => m.scope)).toEqual(["global", "plugin"]);
+  });
+
+  it("never removes a plugin mode: `remove` only knows the two writable scopes, and a global delete leaves it", async () => {
+    const editor = createModeEditor({ store: fakeStore(), configPaths: null, builtin: BUILTIN, pluginModes });
+    expect(await editor.remove("careful", "global")).toBe(false);
+    expect(await editor.read("careful")).toMatchObject({ scope: "plugin" });
+  });
+});
+
 describe("protected built-in modes", () => {
   it("reports only the built-in, even when an authored copy exists on disk", async () => {
     // The broker resolves a protected id from the built-in record BEFORE it

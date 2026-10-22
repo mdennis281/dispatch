@@ -240,10 +240,10 @@ function describeTransport(config: McpServerConfig): McpServerTransport {
   return { type: config.type === "sse" ? "sse" : "http" };
 }
 
-/** One spawnable server to describe: an external declaration or a bundled one. */
+/** One spawnable server to describe: an external declaration, a bundled one, or a plugin's. */
 interface SpawnableEntryInput {
   name: string;
-  kind: Extract<McpServerKind, "bundled" | "external">;
+  kind: Extract<McpServerKind, "bundled" | "external" | "plugin">;
   config: McpServerConfig;
   /** Enablement with neither layer pinning it (see {@link BundledCatalogServer}). */
   byDefault: boolean;
@@ -336,6 +336,22 @@ export interface BuildCatalogOptions {
   bundled?: readonly BundledCatalogServer[];
   /** App + project `mcpEnabled` pins (see `mcp-enablement.ts`). */
   enablement?: McpEnablementLayers;
+  /**
+   * Every plugin-contributed server, enabled plugin or not — same reason as
+   * `bundled`: a switched-off row is the only place to switch it back on.
+   * `config.cwd` is already the plugin dir, which is what the probe spawns in.
+   */
+  plugins?: readonly PluginCatalogServer[];
+}
+
+/** One plugin-contributed server, with the plugin's toggle as its default. */
+export interface PluginCatalogServer {
+  name: string;
+  pluginId: string;
+  config: McpServerConfig;
+  /** The plugin's own enabled state — see `PluginMcpDeclaration.byDefault`. */
+  byDefault: boolean;
+  defaultReason?: string;
 }
 
 /** One bundled server, with what its own config block says before any toggle. */
@@ -415,11 +431,19 @@ export async function buildProjectMcpCatalog(
     ).filter(([name]) => !isManagerServer(name)),
   );
   const cwd = opts.cwd ?? project.repoPath;
-  // A project may declare a server of the same name as a bundled one, in which
-  // case its declaration wins outright in the broker's merge — so listing both
-  // would show a bundled entry no session ever gets. Drop it here for the same
-  // reason and by the same rule.
-  const bundled = (opts.bundled ?? []).filter((b) => !(b.name in external));
+  // A project may declare a server of the same name as a bundled or plugin
+  // one, in which case its declaration wins outright in the broker's merge —
+  // so listing both would show an entry no session ever gets. Drop it here for
+  // the same reason and by the same rule; a plugin server likewise shadows a
+  // bundled one, and the first plugin (by id) to claim a name keeps it.
+  const pluginRows: PluginCatalogServer[] = [];
+  for (const p of opts.plugins ?? []) {
+    if (p.name in external || isManagerServer(p.name)) continue;
+    if (pluginRows.some((r) => r.name === p.name)) continue;
+    pluginRows.push(p);
+  }
+  const pluginNames = new Set(pluginRows.map((p) => p.name));
+  const bundled = (opts.bundled ?? []).filter((b) => !(b.name in external) && !pluginNames.has(b.name));
   const inputs: SpawnableEntryInput[] = [
     ...bundled.map(
       (b): SpawnableEntryInput => ({
@@ -429,6 +453,15 @@ export async function buildProjectMcpCatalog(
         byDefault: b.byDefault,
         ...(b.defaultReason ? { defaultReason: b.defaultReason } : {}),
         ...(b.unavailable ? { unavailable: b.unavailable } : {}),
+      }),
+    ),
+    ...pluginRows.map(
+      (p): SpawnableEntryInput => ({
+        name: p.name,
+        kind: "plugin",
+        config: p.config,
+        byDefault: p.byDefault,
+        ...(p.defaultReason ? { defaultReason: p.defaultReason } : {}),
       }),
     ),
     ...Object.entries(external).map(

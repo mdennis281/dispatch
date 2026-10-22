@@ -119,7 +119,11 @@ async function refreshConfig(): Promise<void> {
 export function ManageConfigDialog() {
   const { open, close: onClose } = useOverlay("agents");
   const agents = useProjects((s) => s.agents);
-  const modes = useProjects((s) => s.modes);
+  // The EDITABLE roster. A plugin's mode rides in `GET /api/modes` so the
+  // composer can offer it, but it has no store row or `.dispatch/` file this
+  // dialog could Save or Delete — listing it would 400 on every mutation, the
+  // same reason the server keeps protected built-ins out of the list.
+  const modes = useProjects((s) => s.modes).filter((m) => m.scope !== "plugin");
   // A project-scoped agent or mode is written into that repo's `.dispatch/`.
   // The pseudo-project has no repo, so it is not a scope anything can target.
   const projects = useRealProjects();

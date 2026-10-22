@@ -96,12 +96,16 @@ describe("toAuthoredName", () => {
 
 describe("scopes", () => {
   it("orders broadest-first, which is the injection + materialization order", () => {
-    expect(AUTHORED_SCOPES).toEqual(["shipped", "global", "project"]);
+    // `plugin` sits between shipped and global: installed on purpose (beats
+    // what Dispatch ships), still somebody else's files (loses to the
+    // operator's global dir and to a project).
+    expect(AUTHORED_SCOPES).toEqual(["shipped", "plugin", "global", "project"]);
   });
 
-  it("refuses `shipped` as a write target — an upgrade would overwrite it", () => {
+  it("refuses `shipped` and `plugin` as write targets — an upgrade or reinstall would overwrite them", () => {
     expect(isWritableScope("project")).toBe(true);
     expect(isWritableScope("global")).toBe(true);
     expect(isWritableScope("shipped")).toBe(false);
+    expect(isWritableScope("plugin")).toBe(false);
   });
 });

@@ -1,0 +1,14 @@
+# The same per-server shape a project's `mcpServers:` list uses. Two things
+# differ from a project server and both are the loader's doing, not this file's:
+#   - `cwd` defaults to THIS directory (a project server's default is the chat's
+#     tree), so `./mcp/echo-server.mjs` resolves against the plugin;
+#   - `${secret:NAME}` only expands for names plugin.yaml lists under `secrets:`.
+mcpServers:
+  - name: contrib-echo
+    transport:
+      type: stdio
+      command: node
+      args: ["./mcp/echo-server.mjs"]
+      env:
+        # Listed in plugin.yaml → filled from the global secret store (or "" when unset).
+        ECHO_TOKEN: "${secret:CONTRIB_ECHO_TOKEN}"

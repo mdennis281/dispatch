@@ -30,6 +30,11 @@ import { basename, extname, isAbsolute, join, resolve as resolvePath } from "nod
 import { readFile, realpath, stat } from "node:fs/promises";
 import { McpPortLeaseService, resolveMcpServers } from "./mcp-session.js";
 import { buildBrowserMcpServers, effectiveSubApps } from "./mcp/browser-mcp.js";
+import {
+  mergeDeclaredMcpServers,
+  selectPluginMcpServers,
+  type PluginMcpDeclaration,
+} from "../plugins/contributions.js";
 import { spawnWithPid } from "../harness/claude/spawn.js";
 import { withStderrTail } from "../harness/claude/session.js";
 import { McpPrewarmService } from "./mcp-prewarm.js";
@@ -1245,6 +1250,16 @@ export interface BrokerProjectConfig {
  * project id — the tool lets the agent omit `project` and mean "my own", and
  * only the broker knows which that is.
  */
+/**
+ * The slice of the plugin host a session needs: the modes enabled plugins
+ * contribute (a fourth home, resolved under project and store) and every
+ * declared plugin MCP server (selected per session by `selectPluginMcpServers`).
+ */
+export interface BrokerPluginContributions {
+  modes(): ModeConfig[];
+  mcpServers(): PluginMcpDeclaration[];
+}
+
 export interface BrokerInspect {
   findChats(q: FindChatsQuery): Promise<FindChatsResult>;
   readChat(q: ReadChatQuery): Promise<ReadChatResult>;
@@ -2499,6 +2514,13 @@ export class SessionBroker {
    * are not offered at all, rather than offered and broken.
    */
   messenger?: ChatMessenger;
+  /**
+   * The plugin host's contributions — modes and MCP servers. Settable after
+   * construction for the same reason `messenger` is: the plugin host adapts
+   * over the services the container builds AROUND this broker, so it cannot
+   * exist yet when the broker is constructed. Absent → no plugin contributes.
+   */
+  plugins?: BrokerPluginContributions;
   private readonly query: QueryFn;
   private readonly genId: () => string;
   private readonly now: () => number;
@@ -7121,24 +7143,30 @@ export class SessionBroker {
     const project = await this.store.getProject(projectId).catch(() => null);
     const appSettings = await this.store.getSettings().catch(() => undefined);
     const fresh = this.projectConfig.getMcpServers(projectId);
+    const pick = <T>(all: Record<string, T>): Record<string, T> =>
+      Object.fromEntries(serverNames.filter((n) => all[n]).map((n) => [n, all[n]!]));
     for (const session of this.sessions.values()) {
       if (session.projectId !== projectId) continue;
-      const enabled = applyMcpEnablement(
-        expandSecretsInMcpServers(
-          Object.fromEntries(serverNames.filter((n) => fresh[n]).map((n) => [n, fresh[n]!])),
-          this.secrets?.resolverFor(projectId),
+      const layers: McpEnablementLayers = {
+        app: appSettings?.mcpEnabled,
+        project: this.projectConfig.getMcpEnabled?.(projectId),
+        // Also on the LIVE-RELOAD path, or a manifest edit would hand a
+        // running session back a server its model pin had switched off.
+        ...harnessEnablementLayers(
+          appSettings?.mcpEnabledFor,
+          session.harnessKind,
+          session.model,
         ),
-        {
-          app: appSettings?.mcpEnabled,
-          project: this.projectConfig.getMcpEnabled?.(projectId),
-          // Also on the LIVE-RELOAD path, or a manifest edit would hand a
-          // running session back a server its model pin had switched off.
-          ...harnessEnablementLayers(
-            appSettings?.mcpEnabledFor,
-            session.harnessKind,
-            session.model,
-          ),
-        },
+      };
+      // The SAME merge as `buildOptions`, restricted to the names that changed:
+      // a plugin server whose secret rotated is refreshed too, and a project
+      // server still shadows a plugin one of the same name on the way back in.
+      const enabled = applyMcpEnablement(
+        mergeDeclaredMcpServers({
+          plugin: pick(this.pluginMcpServersFor(layers)),
+          config: expandSecretsInMcpServers(pick(fresh), this.secrets?.resolverFor(projectId)),
+        }),
+        layers,
       );
       if (!Object.keys(enabled).length) continue;
       const harness = session.harnessSession;
@@ -8003,9 +8031,35 @@ export class SessionBroker {
     return (
       this.projectConfig?.getMode(modeId) ??
       (await this.store.getMode(modeId).catch(() => null)) ??
-      // Other built-ins come LAST, so a project or the store can refine them.
+      // A plugin's mode sits under both authored homes: something the operator
+      // installed, but still somebody else's definition, so a project or the
+      // store can refine or replace it by id.
+      this.plugins?.modes().find((m) => m.id === modeId) ??
+      // Other built-ins come LAST, so a project, the store or a plugin can refine them.
       BUILTIN_MODE_CONFIGS[modeId] ??
       null
+    );
+  }
+
+  /**
+   * The plugin MCP servers ONE session gets, with secrets filled in — the
+   * hand-off moment, as for project servers. `${secret:NAME}` resolves through
+   * the GLOBAL store only (plugins are global; a project secret is a project's)
+   * and only for names the plugin's manifest lists; a refused name is logged
+   * once per server so the gap is findable.
+   */
+  private pluginMcpServersFor(layers: McpEnablementLayers): Record<string, McpServerConfig> {
+    const declarations = this.plugins?.mcpServers() ?? [];
+    if (!declarations.length) return {};
+    return selectPluginMcpServers(
+      declarations,
+      layers,
+      this.secrets?.resolverFor(undefined),
+      (plugin, server, name) =>
+        console.warn(
+          `[Dispatch] plugin "${plugin}" MCP server "${server}" references \${secret:${name}}, ` +
+            `which its manifest does not list under secrets: — expanded to "".`,
+        ),
     );
   }
 
@@ -8692,8 +8746,21 @@ export class SessionBroker {
             `resolved — its tools will be missing from this session.`,
         ),
     });
+    // Plugin servers go between the bundled pair and the project's own: an
+    // installed plugin outranks a default Dispatch picks, and a project shadows
+    // either by name. Selected against THEIR default (the plugin's toggle) here,
+    // before the merged record is run through the same layers again with the
+    // "declared ⇒ on" default — idempotent for anything that survived.
     const declaredMcp = expandSecretsInMcpServers(
-      applyMcpEnablement({ ...browserMcp, ...(project?.mcpServers ?? {}), ...configMcp }, mcpEnablement),
+      applyMcpEnablement(
+        mergeDeclaredMcpServers({
+          bundled: browserMcp,
+          plugin: this.pluginMcpServersFor(mcpEnablement),
+          project: project?.mcpServers ?? {},
+          config: configMcp,
+        }),
+        mcpEnablement,
+      ),
       // Filled in HERE, at the hand-off to the runtime, and nowhere upstream:
       // the config and project record carry the placeholder because they are
       // persisted and broadcast.
@@ -9108,6 +9175,9 @@ export class SessionBroker {
               store: this.store,
               configPaths: projectConfigPaths,
               builtin: BUILTIN_MODE_PERMISSION,
+              // The fourth home: listed read-only, so `mode_list` names what the
+              // picker offers and `mode_write` cannot be talked into "editing" one.
+              pluginModes: () => this.plugins?.modes() ?? [],
             })
           : undefined,
         // The escape hatch for a guard that has stranded this chat. Bound ONLY

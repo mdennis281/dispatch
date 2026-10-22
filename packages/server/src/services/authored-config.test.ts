@@ -130,6 +130,74 @@ describe("AuthoredConfigService", () => {
     expect(ids.some((id) => id.startsWith("shipped:"))).toBe(true);
   });
 
+  describe("the plugin scope", () => {
+    /** A plugin source contributing one skill, one instruction and one persona. */
+    const pluginSource = (pluginDir: string) => ({
+      skills: () => [
+        {
+          pluginId: "px",
+          skill: {
+            id: "mcp-setup",
+            name: "mcp-setup",
+            description: "from the plugin",
+            dir: "mcp-setup",
+            path: join(pluginDir, "skills", "mcp-setup", "SKILL.md"),
+            layout: "dir" as const,
+          },
+        },
+      ],
+      instructions: () => [
+        { pluginId: "px", file: { name: "rule", path: join(pluginDir, "instructions", "rule.md"), text: "PLUGIN-RULE" } },
+      ],
+      personas: () => [
+        { pluginId: "px", file: { name: "reviewer", path: join(pluginDir, "personas", "reviewer.md"), text: "# Reviewer\nplugin" } },
+      ],
+    });
+
+    it("materializes plugin skills AFTER global and BEFORE shipped, so each shadows the next", async () => {
+      await writeFileIn(join(root, "skills", "mcp-setup", "SKILL.md"), "---\nname: mcp-setup\ndescription: mine\n---\nlocal");
+      service.setPluginSource(pluginSource(join(root, "px")));
+      const dirs = service.appSkills().filter((s) => s.dir === "mcp-setup").map((s) => s.description);
+      expect(dirs).toEqual(["mine", "from the plugin", expect.any(String)]);
+      // Without the global copy the plugin's is first — it wins over shipped.
+      await rm(join(root, "skills"), { recursive: true, force: true });
+      expect(service.appSkills().find((s) => s.dir === "mcp-setup")!.description).toBe("from the plugin");
+    });
+
+    it("injects plugin instructions between shipped and global, and names them in the ledger", async () => {
+      await writeFileIn(join(root, "instructions", "mine.md"), "MY-GLOBAL-RULE");
+      service.setPluginSource(pluginSource(join(root, "px")));
+      const injection = (await service.buildInjection())!;
+      const shippedAt = injection.indexOf("Recording what you learn");
+      const pluginAt = injection.indexOf("PLUGIN-RULE");
+      const globalAt = injection.indexOf("MY-GLOBAL-RULE");
+      expect(shippedAt).toBeGreaterThanOrEqual(0);
+      expect(shippedAt).toBeLessThan(pluginAt);
+      expect(pluginAt).toBeLessThan(globalAt);
+      expect(await service.listInjected()).toContain("plugin:px:rule");
+    });
+
+    it("lists plugin items read-only with the plugin id, in broadest-first order", async () => {
+      service.setPluginSource(pluginSource(join(root, "px")));
+      for (const kind of ["skill", "instruction", "persona"] as const) {
+        const items = await service.list(kind);
+        const plugin = items.filter((i) => i.scope === "plugin");
+        expect(plugin, kind).toHaveLength(1);
+        expect(plugin[0]).toMatchObject({ writable: false, plugin: "px" });
+        const scopes = [...new Set(items.map((i) => i.scope))];
+        const order = ["shipped", "plugin", "global"].filter((s) => scopes.includes(s as never));
+        expect(scopes, kind).toEqual(order);
+      }
+    });
+
+    it("contributes nothing once the source is cleared", async () => {
+      service.setPluginSource(pluginSource(join(root, "px")));
+      service.setPluginSource(undefined);
+      expect((await service.list("skill")).some((i) => i.scope === "plugin")).toBe(false);
+      expect(await service.listInjected()).not.toContain("plugin:px:rule");
+    });
+  });
+
   it("writes a global skill as a SKILL.md with usable frontmatter", async () => {
     const path = await service.write("skill", "my-skill", "do the thing", "when X happens");
     expect(path.endsWith(join("skills", "my-skill", "SKILL.md"))).toBe(true);

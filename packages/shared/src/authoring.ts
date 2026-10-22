@@ -21,7 +21,7 @@
  *     refuse rather than let a fact quietly evaporate.
  *
  * PRECEDENCE is most-specific-wins, and it is spelled the same way in both
- * pipelines: `project > global > shipped`. Skills honour it by MATERIALIZATION
+ * pipelines: `project > global > plugin > shipped`. Skills honour it by MATERIALIZATION
  * ORDER (the copy never clobbers an existing target, so the first writer of a
  * name owns it); instructions honour it by INJECTION ORDER (broadest first, so
  * the most specific guidance is the last word the model reads).
@@ -35,8 +35,16 @@ export type AuthoredKind = z.infer<typeof AuthoredKindSchema>;
 /**
  * Where an authored item lives. Ordered BROADEST FIRST, which is also the order
  * skills are materialized and instructions are injected — see the module note.
+ *
+ * `plugin` is the fourth scope: contributions an installed plugin ships under
+ * `<configDir>/plugins/<id>/{skills,instructions,personas}/`. It sits between
+ * `shipped` and `global` because a plugin is something the operator chose to
+ * install (so it outranks what Dispatch ships) but is still somebody else's
+ * code (so the operator's own global dir, and a project, both override it).
+ * Read-only for the same reason `shipped` is: the files belong to the plugin,
+ * and a write there would be lost the moment the plugin is reinstalled.
  */
-export const AUTHORED_SCOPES = ["shipped", "global", "project"] as const;
+export const AUTHORED_SCOPES = ["shipped", "plugin", "global", "project"] as const;
 export const AuthoredScopeSchema = z.enum(AUTHORED_SCOPES);
 export type AuthoredScope = z.infer<typeof AuthoredScopeSchema>;
 
@@ -60,8 +68,10 @@ export const AuthoredItemSchema = z.object({
   description: z.string().optional(),
   /** Absolute path to the file that defines it (the `SKILL.md` for a skill). */
   path: z.string(),
-  /** Whether the config tools may overwrite/delete it (false for `shipped`). */
+  /** Whether the config tools may overwrite/delete it (false for `shipped` and `plugin`). */
   writable: z.boolean(),
+  /** The contributing plugin's id — set only for `scope: "plugin"`. */
+  plugin: z.string().optional(),
   /**
    * Only meaningful for `project` instructions: an instruction file is inert
    * until `project.yaml` lists it, so a stray file in `instructions/` is
@@ -129,6 +139,7 @@ export type Persona = z.infer<typeof PersonaSchema>;
 export const SlashCommandSourceSchema = z.enum([
   "project",
   "global",
+  "plugin",
   "shipped",
   "repo",
   "builtin",

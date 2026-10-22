@@ -4,7 +4,7 @@
  * The `config_*` tools take a bare `name` and an optional `scope`; this is where
  * that becomes a file. Two rules live here and nowhere else:
  *
- *  - **Reads resolve MOST-SPECIFIC-FIRST** (project → global → shipped), which
+ *  - **Reads resolve MOST-SPECIFIC-FIRST** (project → global → plugin → shipped), which
  *    is the inverse of the injection order and deliberately so. Injection goes
  *    broadest-first because the last text wins in a prompt; a LOOKUP wants the
  *    copy actually in effect, and when a project skill shadows a shipped one of
@@ -60,7 +60,8 @@ export function createAuthoringEditor(deps: AuthoringEditorDeps): ManagerMcpAuth
     },
 
     async read(kind, name, scope) {
-      const order: AuthoredScope[] = scope ? [scope] : ["project", "global", "shipped"];
+      // Most-specific-first: the inverse of AUTHORED_SCOPES' injection order.
+      const order: AuthoredScope[] = scope ? [scope] : ["project", "global", "plugin", "shipped"];
       for (const s of order) {
         if (s === "project") {
           if (!configPaths) continue;
@@ -68,8 +69,8 @@ export function createAuthoringEditor(deps: AuthoringEditorDeps): ManagerMcpAuth
           if (found) return { scope: s, path: found.path, text: found.text };
           continue;
         }
-        // `global` and `shipped` are both enumerable from the app-level service,
-        // so match its listing rather than re-deriving either directory here.
+        // `global`, `plugin` and `shipped` are all enumerable from the app-level
+        // service, so match its listing rather than re-deriving a directory here.
         const match = (await authored.list(kind)).find((i) => i.scope === s && i.name === name);
         if (!match) continue;
         const text = await readFile(match.path, "utf8").catch(() => null);

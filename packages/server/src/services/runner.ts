@@ -335,7 +335,20 @@ interface LiveRunner {
   /** Port parsed from the child's own output (reconciled once, then latched). */
   detectedPort?: number;
   /** What `start()` was called with, so {@link RunnerService.restart} can do it again. */
-  launch?: { worktreePath: string; subApp: SubApp; ctx: { projectId?: string; chatId?: string; branch?: string } };
+  launch?: { worktreePath: string; subApp: SubApp; ctx: RunnerLaunchContext };
+}
+
+/** Who a launch is for. All optional: a sidebar launch has a project and nothing else. */
+export interface RunnerLaunchContext {
+  projectId?: string;
+  chatId?: string;
+  branch?: string;
+  /**
+   * A non-project owner, recorded on the instance as `owner`. Plugin-managed
+   * processes pass `plugin:<id>` — they have no project or chat, and the
+   * process roster groups them by this instead.
+   */
+  owner?: string;
 }
 
 const TERMINAL: ReadonlySet<RunnerStatus> = new Set<RunnerStatus>([
@@ -419,7 +432,7 @@ export class RunnerService {
   async start(
     worktreePath: string,
     subApp: SubApp,
-    ctx: { projectId?: string; chatId?: string; branch?: string } = {},
+    ctx: RunnerLaunchContext = {},
   ): Promise<RunnerInstance> {
     const hasDev = !!subApp.dev;
     const usedDocker = !!subApp.dockerCompose;
@@ -470,6 +483,7 @@ export class RunnerService {
       worktreePath,
       branch: ctx.branch,
       subAppId: subApp.id,
+      ...(ctx.owner ? { owner: ctx.owner } : {}),
       kind: hasDev ? "process" : "docker",
       port: primary,
       ports: ports.length ? ports : undefined,
@@ -584,6 +598,43 @@ export class RunnerService {
     }
 
     return runner;
+  }
+
+  /**
+   * Record a process this instance did NOT spawn but found already listening
+   * on the port it would have used — a plugin's `singleton: true` process that
+   * the OTHER Dispatch instance (stable or dev; both load the same plugin)
+   * started first. The row exists so the Ports & processes panel, the plugin's
+   * `ctx.processes.list()` and the port allocator all know the port is taken
+   * by something that is ours in spirit; `stop()` on it marks the record
+   * stopped without killing anything, because the process belongs to the
+   * instance that holds its handle. No logs are captured for the same reason.
+   */
+  async adopt(
+    worktreePath: string,
+    subApp: SubApp,
+    ctx: RunnerLaunchContext,
+    port: number,
+  ): Promise<RunnerInstance> {
+    const url = subApp.url ? subApp.url.replace("{port}", String(port)) : `http://localhost:${port}`;
+    const runner: RunnerInstance = {
+      id: this.genId(),
+      projectId: ctx.projectId,
+      chatId: ctx.chatId,
+      worktreePath,
+      branch: ctx.branch,
+      subAppId: subApp.id,
+      ...(ctx.owner ? { owner: ctx.owner } : {}),
+      kind: "process",
+      port,
+      ports: [port],
+      url,
+      status: "running",
+      startedAt: this.now(),
+      adopted: true,
+    };
+    this.pushLog(runner.id, "stdout", `adopted a process already listening on :${port} (started by another instance)`);
+    return this.saveAndEmit(runner);
   }
 
   /** Stop a runner: tree-kill its process, `docker compose down` if it used docker. */

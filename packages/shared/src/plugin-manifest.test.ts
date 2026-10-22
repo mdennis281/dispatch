@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { PLUGIN_API_VERSION, PluginManifestSchema, manifestPathDir, pluginRangeAccepts } from "./plugin-manifest.js";
+import {
+  PLUGIN_API_VERSION,
+  PluginManifestSchema,
+  PluginMcpServersFileSchema,
+  PluginProcessSchema,
+  PluginProcessesFileSchema,
+  manifestPathDir,
+  pluginRangeAccepts,
+} from "./plugin-manifest.js";
 
 const base = { id: "voice", name: "Voice", version: "0.1.0", dispatch: ">=1" };
 
@@ -51,6 +59,26 @@ describe("PluginManifestSchema", () => {
   it("requires a dispatch range", () => {
     const { dispatch: _d, ...noRange } = base;
     expect(PluginManifestSchema.safeParse(noRange).success).toBe(false);
+  });
+});
+
+describe("contribution files", () => {
+  it("reads mcp.yaml as a bare list or wrapped in mcpServers, in the project server shape", () => {
+    const one = [{ name: "echo", transport: { type: "stdio", command: "node", args: ["s.mjs"] } }];
+    expect(PluginMcpServersFileSchema.parse(one)).toHaveLength(1);
+    expect(PluginMcpServersFileSchema.parse({ mcpServers: one })).toHaveLength(1);
+    expect(PluginMcpServersFileSchema.parse({})).toEqual([]);
+    expect(PluginMcpServersFileSchema.safeParse([{ name: "x" }]).success).toBe(false);
+  });
+
+  it("reads processes.yaml either way and insists a singleton declares a port", () => {
+    const p = { id: "hello-http", command: "node", args: ["s.mjs"], ports: [47311], singleton: true, autostart: true };
+    expect(PluginProcessesFileSchema.parse([p])).toHaveLength(1);
+    expect(PluginProcessesFileSchema.parse({ processes: [p] })).toHaveLength(1);
+    // Without a port the second instance has nothing to find the first by.
+    expect(PluginProcessSchema.safeParse({ id: "a", command: "node", singleton: true }).success).toBe(false);
+    expect(PluginProcessSchema.safeParse({ id: "Bad Id", command: "node" }).success).toBe(false);
+    expect(PluginProcessSchema.safeParse({ id: "ok", command: "node" }).success).toBe(true);
   });
 });
 

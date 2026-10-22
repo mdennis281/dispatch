@@ -1,0 +1,16 @@
+# A managed process: run through the same RunnerService as a project's sub-apps,
+# with owner `plugin:contributions` instead of a project and worktree. It gets a
+# leased port (`PORT`, and `{port}` in `url`), persisted logs, a row in Ports &
+# processes, and is stopped when the plugin deactivates or the server shuts down.
+processes:
+  - id: hello-http
+    name: Hello HTTP
+    command: node
+    args: ["./process/server.mjs"]
+    # The base to lease. Stable and dev both load this plugin, so `singleton`
+    # makes the second instance ADOPT whatever already listens here instead of
+    # starting a second copy one port up.
+    ports: [47311]
+    url: "http://localhost:{port}"
+    autostart: true
+    singleton: true

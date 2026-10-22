@@ -80,6 +80,21 @@ describe("groupProcesses", () => {
     expect(groups[2]?.title).toBe("Unaccounted for");
   });
 
+  it("groups a plugin-owned runner under its plugin, beside the app runners", () => {
+    const groups = groupProcesses(
+      [
+        port({ port: 47311, pid: 700, tracked: true, source: "runner", subAppId: "hello-http", owner: "plugin:contributions" }),
+        port({ port: 5173, pid: 100, tracked: true, source: "runner", subAppId: "game" }),
+        port({ port: 9, pid: 9 }),
+      ],
+      [],
+      title,
+    );
+    expect(groups.map((g) => g.id)).toEqual(["plugin:contributions", "runners", "orphans"]);
+    expect(groups[0]?.title).toBe("Plugin · contributions");
+    expect(groups[0]?.pids).toEqual([700]);
+  });
+
   it("orders chats by how much they are running, then by title", () => {
     const groups = groupProcesses(
       [

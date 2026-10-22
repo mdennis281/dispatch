@@ -1068,7 +1068,17 @@ export function createServices(
       configDir: config.configDir ?? config.dataDir,
       store,
       context: { bus, secrets, inspect, memory, attention, messenger: chatMessenger, broker, pluginOAuth },
+      // Plugin processes run through the SAME runner as sub-apps — port
+      // allocation, log ring, env quarantine, `stopAll()` at shutdown.
+      runner,
     });
+  // The `plugin` scope and the plugin mode/MCP homes. Wired after the fact
+  // because both consumers were constructed before the host existed; until
+  // this line they behave as if no plugin were installed, and `GET /api/modes`
+  // and the broker read these live so a toggle in Settings takes effect on the
+  // next session without a restart.
+  authored.setPluginSource(plugins);
+  broker.plugins = plugins;
   // "The chat you spawned is done" — armed by `broker.spawnChat` below, delivered
   // over the messenger above. Constructed here because it needs both, and
   // disposed in `dispose()` so a pending notice is not a reason the process
