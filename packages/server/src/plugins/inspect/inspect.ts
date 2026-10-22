@@ -517,8 +517,11 @@ export async function inspectPluginDir(dir: string, opts: InspectDirOptions): Pr
 
   /* -- installed ------------------------------------------------------ */
   let installed: PluginInspection["installed"];
-  if (id && opts.installed) {
-    const found = await opts.installed(id);
+  // Only a VALID manifest's id: an invalid one is unvalidated remote input,
+  // and the lookup turns it into a path (`PluginInspector.installed` checks
+  // the pattern again at that site).
+  if (m && opts.installed) {
+    const found = await opts.installed(m.id);
     if (found) {
       const version = m?.version ?? str(doc.version);
       const cmp = found.version && version ? compareVersions(version, found.version) : null;
@@ -530,7 +533,7 @@ export async function inspectPluginDir(dir: string, opts: InspectDirOptions): Pr
         comparison: cmp === null ? "unknown" : cmp === 0 ? "same" : cmp > 0 ? "newer" : "older",
       };
       if (found.linked) {
-        warnings.push(`"${id}" is installed as a link to a working directory (cm plugin link); installing replaces the link with a copy — the directory it points at is left alone`);
+        warnings.push(`"${m.id}" is installed as a link to a working directory (cm plugin link); installing replaces the link with a copy — the directory it points at is left alone`);
       }
     }
   }

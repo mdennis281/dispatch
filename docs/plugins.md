@@ -252,7 +252,9 @@ hands the extracted directory to the CLI's `addPlugin` — the same validate / c
 copy-without-`.git`-and-`node_modules` / rename path `cm plugin add` takes. Replacing
 an installed copy needs `replace: true` (the card's "Update to x.y.z"). The plugin is
 not loaded: `PluginService.noteInstalled` lists a new id as inert, or flags an
-existing one, with `needsRestart`. Both routes are owner-only (403 for a non-owner
+existing (enabled) one, with `needsRestart`. An active plugin whose files were
+replaced keeps its loaded server code but stops serving its client bundle until
+the restart, so a new client never talks to the old server half. Both routes are owner-only (403 for a non-owner
 session or an integration token; auth off means the single local user).
 
 Settings → Plugins is the same list with the enable toggle, status, error text,

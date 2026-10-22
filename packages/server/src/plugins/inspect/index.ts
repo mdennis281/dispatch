@@ -11,7 +11,7 @@
  */
 import { lstat, rm } from "node:fs/promises";
 import { join } from "node:path";
-import type { PluginInfo, PluginInspection } from "@dispatch/shared";
+import { PLUGIN_ID_PATTERN, type PluginInfo, type PluginInspection } from "@dispatch/shared";
 import { CmError, addPlugin } from "@dispatch/cli/core";
 import { pluginsRoot, readPluginDir } from "../manifest.js";
 import { fetchPlugin, type FetchDeps, type FetchLimits, type FetchedPlugin } from "./fetch.js";
@@ -46,6 +46,10 @@ export class PluginInspector {
   constructor(private readonly opts: PluginInspectorOptions) {}
 
   private async installed(id: string): Promise<InstalledLookup | undefined> {
+    // `id` may come from a manifest that FAILED validation — i.e. straight
+    // from a stranger's plugin.yaml. `id: ../../x` would otherwise probe an
+    // arbitrary server path and report whether it exists and its version.
+    if (!PLUGIN_ID_PATTERN.test(id)) return undefined;
     const dir = join(pluginsRoot(this.opts.configDir), id);
     try {
       await lstat(dir);

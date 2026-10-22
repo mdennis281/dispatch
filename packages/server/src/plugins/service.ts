@@ -80,6 +80,13 @@ interface PluginRecord extends DiscoveredPlugin {
   activationError?: string;
   /** Toggled on in this process: the pane says "restart to apply". */
   needsRestart: boolean;
+  /**
+   * Its directory was replaced under it by an install while its old code is
+   * still loaded. The client bundle is NOT served from then on: the files on
+   * disk are the new version, and a new client talking to the old in-memory
+   * server half (old routes, old `ctx` behaviour) is a skew nobody tested.
+   */
+  filesReplaced?: boolean;
   settings: Record<string, unknown>;
   module?: PluginModule;
   owned?: OwnedResources;
@@ -393,7 +400,9 @@ export class PluginService implements PluginContributionSource {
       // The ENTRY MODULE's URL, not the directory's: the SPA `import()`s this
       // string as-is, and the file's name is the manifest's to choose
       // (`client/main.js` is as valid as `client/index.js`).
-      ...(m?.client ? { clientUrl: `/plugins/${rec.id}/${basename(m.client)}` } : {}),
+      // Not advertised while the files on disk are newer than the loaded code
+      // (see `filesReplaced`): the loader would import a bundle that 404s.
+      ...(m?.client && !rec.filesReplaced ? { clientUrl: `/plugins/${rec.id}/${basename(m.client)}` } : {}),
       ...(rec.settingsSchema !== undefined ? { settingsSchema: rec.settingsSchema } : {}),
       settings: rec.settings,
       ...(m?.secrets ? { secrets: m.secrets } : {}),
@@ -503,6 +512,7 @@ export class PluginService implements PluginContributionSource {
     // Installed (or toggled on) since boot and never activated: its server
     // half is not running, so its client half has nothing to talk to.
     if (rec.needsRestart && rec.phase !== "active") return undefined;
+    if (rec.filesReplaced) return undefined;
     const base = resolve(rec.dir);
     const dir = resolve(base, manifestPathDir(client));
     if (dir === base || !dir.startsWith(base + sep)) return undefined;
@@ -568,7 +578,10 @@ export class PluginService implements PluginContributionSource {
   async noteInstalled(id: string): Promise<PluginInfo | undefined> {
     const existing = this.records.get(id);
     if (existing) {
-      existing.needsRestart = true;
+      existing.filesReplaced = true;
+      // A switched-off plugin will not load on restart either; `setEnabled`
+      // keeps `needsRestart` false for it, and so does this.
+      if (existing.enabled) existing.needsRestart = true;
       return this.info(existing);
     }
     const found = (await discoverPlugins(this.configDir)).find((p) => p.id === id);
