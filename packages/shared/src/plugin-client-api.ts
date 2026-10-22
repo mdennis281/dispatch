@@ -289,6 +289,23 @@ export interface ClientHostKit {
 export type ToastKind = "info" | "warn" | "error";
 
 /**
+ * The global `fetch`, as the CONSUMER compiles it — the browser's for a plugin
+ * or the SPA, undici's for the server — or `never` where there is none.
+ *
+ * Written as a conditional over `globalThis` because this package compiles
+ * without the DOM lib: `RequestInit` and `Response` are not names here (CI
+ * failed on exactly that; locally a hoisted `@types/node` hid it). TypeScript
+ * emits the conditional verbatim into the .d.ts, so it resolves in each
+ * consumer's environment rather than this one.
+ */
+type GlobalFetch = typeof globalThis extends { fetch: infer F extends (...args: never[]) => unknown } ? F : never;
+
+/** `host.api.fetch`: `fetch`'s own `init` and `Response`, with the path relative to the plugin's prefix. */
+export type PluginFetch = [GlobalFetch] extends [never]
+  ? (path: string, init?: object) => Promise<unknown>
+  : (path: string, init?: Parameters<GlobalFetch>[1]) => ReturnType<GlobalFetch>;
+
+/**
  * What `activate(host)` receives. One object per plugin — `pluginId`,
  * `events.onPlugin` and `api.fetch` are bound to it — and everything it
  * registers returns an unsubscribe.
@@ -332,7 +349,7 @@ export interface ClientHost {
   };
   api: {
     /** `sessionFetch` under `/api/plugins/<pluginId>/` — the plugin's own route table, authenticated. */
-    fetch(path: string, init?: RequestInit): Promise<Response>;
+    fetch: PluginFetch;
   };
 }
 
