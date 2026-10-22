@@ -176,8 +176,22 @@ const HOUR_MS = 60 * 60_000;
 
 const DAY_MS = 24 * 60 * 60_000;
 
+/**
+ * The at-rest form of a refresh token or client secret: a plain SHA-256, the
+ * same treatment `hashIntegrationToken` gives a `dsp_` token.
+ *
+ * NOT a password hash, on purpose. Every value that reaches this function is
+ * 32 bytes from `randomBytes` — 256 bits of entropy — so there is nothing for
+ * a KDF to stretch: brute-forcing the preimage of SHA-256 over that space is
+ * as hard as brute-forcing argon2 over it. The owner's PASSWORD, which a
+ * human chose and a KDF exists for, goes through argon2id in auth.ts. And a
+ * salted KDF could not serve here anyway: the token endpoint has to find the
+ * row BY the presented value, which needs a deterministic fingerprint, not a
+ * per-row salt. (The CodeQL rule keys on the identifier name containing
+ * "TOKEN" and cannot see the entropy; hence the suppression below.)
+ */
 function sha256(value: string): string {
-  return createHash("sha256").update(value).digest("base64url");
+  return createHash("sha256").update(value).digest("base64url"); // codeql[js/insufficient-password-hash]
 }
 
 function safeEqual(a: string, b: string): boolean {
