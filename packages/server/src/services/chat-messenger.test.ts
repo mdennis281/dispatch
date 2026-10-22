@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import type { Chat, ChatStatus, ContextUsage, PeerSender } from "@dispatch/shared";
+import type { Chat, ChatStatus, ContextUsage, ChannelSender, PeerSender } from "@dispatch/shared";
 import { EventBus } from "../bus.js";
 import {
   ChatMessenger,
@@ -13,7 +13,8 @@ import {
 interface Delivered {
   chatId: string;
   text: string;
-  peer: PeerSender;
+  peer?: PeerSender;
+  channel?: ChannelSender;
 }
 
 /**
@@ -71,12 +72,12 @@ function harness(
       }
     },
     getStatus: (id) => status.get(id),
-    send: async (chatId, text, { peer }) => {
+    send: async (chatId, text, { peer, channel }) => {
       opts.onSend?.();
       if (opts.gateSends) {
         await new Promise<void>((resolve) => sendGates.push(resolve));
       }
-      delivered.push({ chatId, text, peer });
+      delivered.push({ chatId, text, ...(peer ? { peer } : {}), ...(channel ? { channel } : {}) });
     },
     getContextUsage: async () => opts.contextUsage ?? null,
     deps: {
@@ -552,7 +553,7 @@ describe("ChatMessenger.ask / reply", () => {
 
     // The question rides on the row with an askId — that is how the asked chat
     // knows what to pass back to `chat_reply`.
-    const askId = h.delivered[0]?.peer.askId;
+    const askId = h.delivered[0]?.peer?.askId;
     expect(askId).toBeTruthy();
 
     const replied = h.messenger.reply({ from: "dev", askId: askId!, answer: "yes, #42" });
@@ -601,7 +602,7 @@ describe("ChatMessenger.ask / reply", () => {
       timeoutMs: 30_000,
     });
     await new Promise((r) => setImmediate(r));
-    const askId = h.delivered[0]!.peer.askId!;
+    const askId = h.delivered[0]!.peer!.askId!;
     h.fireTimers();
     await pending;
 
@@ -629,7 +630,7 @@ describe("ChatMessenger.ask / reply", () => {
       timeoutMs: 30_000,
     });
     await new Promise((r) => setImmediate(r));
-    const askId = h.delivered[0]!.peer.askId!;
+    const askId = h.delivered[0]!.peer!.askId!;
 
     const stolen = h.messenger.reply({ from: "nosy", askId, answer: "I'll take this" });
     expect(stolen.ok).toBe(false);
@@ -656,7 +657,7 @@ describe("ChatMessenger.ask / reply", () => {
     await new Promise((r) => setImmediate(r));
     expect(h.delivered).toHaveLength(1);
 
-    h.messenger.reply({ from: "dev", askId: h.delivered[0]!.peer.askId!, answer: "done" });
+    h.messenger.reply({ from: "dev", askId: h.delivered[0]!.peer!.askId!, answer: "done" });
     await expect(pending).resolves.toMatchObject({ answered: true, answer: "done" });
   });
 
@@ -796,7 +797,7 @@ describe("ChatMessenger.ask / reply", () => {
     });
     await new Promise((r) => setImmediate(r));
     expect(waits).toBe(1);
-    h.messenger.reply({ from: "dev", askId: h.delivered[0]!.peer.askId!, answer: "x" });
+    h.messenger.reply({ from: "dev", askId: h.delivered[0]!.peer!.askId!, answer: "x" });
     await pending;
   });
 
@@ -903,5 +904,57 @@ describe("ChatMessenger.state", () => {
     live.kill("dev");
     const dormant = await live.messenger.state("dev");
     expect(dormant?.contextPercent).toBeUndefined();
+  });
+});
+
+describe("ChatMessenger channel senders", () => {
+  it("delivers a channel message attributed to the integration, never as a peer", async () => {
+    const h = harness({ chats: [{ id: "dev", title: "Dev" }, { id: "lead", title: "Lead" }] });
+    h.setStatus("dev", "idle");
+    const r = await h.messenger.send({ channel: { name: "grok" }, to: "dev", message: "deploy is green" });
+    expect(r).toMatchObject({ ok: true, held: false });
+    expect(h.delivered).toEqual([{ chatId: "dev", text: "deploy is green", channel: { name: "grok" } }]);
+  });
+
+  it("holds a channel message while the target is awaiting input, like a peer's", async () => {
+    // The whole reason sends go through the messenger: the broker reads any
+    // incoming message as the human dismissing their open question card.
+    const h = harness({ chats: [{ id: "dev", title: "Dev" }] });
+    h.setStatus("dev", "awaiting-input");
+    const r = await h.messenger.send({ channel: { name: "grok" }, to: "dev", message: "x", delivery: "interrupt" });
+    expect(r).toMatchObject({ ok: true, held: true });
+    expect(h.delivered).toEqual([]);
+    h.settle("dev");
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(h.delivered).toEqual([{ chatId: "dev", text: "x", channel: { name: "grok" } }]);
+  });
+
+  it("rate-limits a channel per name, separately from every chat", async () => {
+    const h = harness({ chats: [{ id: "dev", title: "Dev" }, { id: "lead", title: "Lead" }] });
+    h.setStatus("dev", "idle");
+    for (let i = 0; i < PEER_PAIR_LIMIT; i++) {
+      expect((await h.messenger.send({ channel: { name: "grok" }, to: "dev", message: `m${i}` })).ok).toBe(true);
+    }
+    expect((await h.messenger.send({ channel: { name: "grok" }, to: "dev", message: "one more" })).refusal).toBe("rate-limited-pair");
+    // A different integration, and a chat, still have their own budgets.
+    expect((await h.messenger.send({ channel: { name: "other" }, to: "dev", message: "hi" })).ok).toBe(true);
+    expect((await h.messenger.send({ from: "lead", to: "dev", message: "hi" })).ok).toBe(true);
+  });
+
+  it("carries a channel ask's id on the channel, and routes the reply back", async () => {
+    const h = harness({ chats: [{ id: "dev", title: "Dev" }, { id: "lead", title: "Lead" }] });
+    h.setStatus("dev", "idle");
+    const pending = h.messenger.ask({ channel: { name: "grok" }, to: "dev", question: "done?", timeoutMs: 60_000 });
+    await new Promise((resolve) => setImmediate(resolve));
+    const askId = h.delivered[0]!.channel!.askId!;
+    expect(h.delivered[0]!.peer).toBeUndefined();
+    expect(h.messenger.reply({ from: "dev", askId, answer: "yes" })).toEqual({ ok: true, askerChatId: "channel:grok" });
+    expect(await pending).toMatchObject({ ok: true, answered: true, answer: "yes" });
+  });
+
+  it("refuses a send that names neither a chat nor a channel", async () => {
+    const h = harness({ chats: [{ id: "dev", title: "Dev" }, { id: "lead", title: "Lead" }] });
+    h.setStatus("dev", "idle");
+    await expect(h.messenger.send({ to: "dev", message: "x" })).rejects.toThrow(/sender/);
   });
 });

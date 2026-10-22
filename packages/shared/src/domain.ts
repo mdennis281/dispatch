@@ -15,7 +15,7 @@ import {
 } from "./common.js";
 import { HouseRulesModeSchema } from "./agent-context.js";
 import { ResumePlanSchema } from "./limits.js";
-import { PeerSenderSchema } from "./messages.js";
+import { PeerSenderSchema, ChannelSenderSchema } from "./messages.js";
 import { WorkflowConfigSchema } from "./workflow.js";
 import { ChatWorktreeRecordSchema } from "./worktree-history.js";
 
@@ -798,6 +798,8 @@ export const ChatInterruptionSchema = z.object({
         text: z.string(),
         /** The sending CHAT, when this came from `chat_send` / `chat_ask`. */
         peer: PeerSenderSchema.optional(),
+        /** The sending INTEGRATION, when it came through a token or a plugin. */
+        channel: ChannelSenderSchema.optional(),
       }),
     )
     .default([]),

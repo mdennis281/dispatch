@@ -118,6 +118,23 @@ export const PeerSenderSchema = z.object({
 });
 export type PeerSender = z.infer<typeof PeerSenderSchema>;
 
+/**
+ * The INTEGRATION that sent a message, when the sender was neither the human
+ * nor another chat — a bot behind an integration token, or a plugin calling
+ * `ctx.chats.send`. Rides with `origin: "channel"`.
+ *
+ * `name` is what the human sees on the row ("GROK → Claude Code"): the token's
+ * name, or the `sender` the caller passed. Denormalised for the same reason
+ * `PeerSender.title` is — the token may be revoked and renamed long before
+ * anyone reads this row, and a transcript is append-only.
+ */
+export const ChannelSenderSchema = z.object({
+  name: z.string(),
+  /** Set when this message is a `chat_ask` from the integration awaiting a `chat_reply`. */
+  askId: z.string().optional(),
+});
+export type ChannelSender = z.infer<typeof ChannelSenderSchema>;
+
 /** A user turn (or steering injection). */
 export const UserMessageRowSchema = z.object({
   ...MessageBase,
@@ -133,6 +150,8 @@ export const UserMessageRowSchema = z.object({
   origin: MessageOriginSchema.optional(),
   /** The sending chat, when `origin` is `"peer"`. */
   peer: PeerSenderSchema.optional(),
+  /** The sending integration, when `origin` is `"channel"`. */
+  channel: ChannelSenderSchema.optional(),
   effort: EffortSchema.optional(),
   /** True when this was queued mid-run to steer the agent. */
   steering: z.boolean().optional(),

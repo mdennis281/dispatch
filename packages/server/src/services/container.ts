@@ -39,6 +39,7 @@ import { resolveReviewer } from "./reviewer.js";
 import type { EventBus } from "../bus.js";
 import { createChat, ensureSession } from "../routes/dispatch.js";
 import { ChatMessenger } from "./chat-messenger.js";
+import { createIntegrationContext } from "./mcp/integration-context.js";
 import { ChatCompletionNotices } from "./chat-completion-notice.js";
 import { SessionBroker } from "./session-broker.js";
 import { TerminalService } from "./terminal.js";
@@ -1000,7 +1001,7 @@ export function createServices(
       // The broker's OWN send path, so a peer message is an ordinary turn in
       // every respect but its attribution — same row, same outbox, same
       // steering semantics as anything the human types.
-      send: (chatId, text, { peer }) => broker.sendMessage(chatId, text, { peer }),
+      send: (chatId, text, { peer, channel }) => broker.sendMessage(chatId, text, { peer, channel }),
       // Raw usage, not a pre-rounded percentage: the messenger derives one
       // itself for the harnesses that report only totals.
       getContextUsage: (chatId) => broker.getContextUsage(chatId),
@@ -1010,6 +1011,15 @@ export function createServices(
       isBlockedOnHuman: (chatId) => broker.getStatus(chatId) === "awaiting-input",
     });
   broker.messenger = chatMessenger;
+  // The external MCP mount: a category server per integration request, built
+  // from a context with no self chat. Wired here rather than in the bridge's
+  // constructor because it closes over services constructed after it.
+  managerMcp.setIntegrationContext((identity) =>
+    createIntegrationContext(
+      { bus, store, broker, inspect, messenger: chatMessenger, memory, memoryHistory, issues, authored },
+      identity,
+    ),
+  );
   // "The chat you spawned is done" — armed by `broker.spawnChat` below, delivered
   // over the messenger above. Constructed here because it needs both, and
   // disposed in `dispose()` so a pending notice is not a reason the process

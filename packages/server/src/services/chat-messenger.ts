@@ -28,7 +28,7 @@
  *     burning tokens with nobody watching. Subagents structurally cannot do
  *     this, so it is a genuinely new failure mode and it gets a real guard.
  */
-import type { Chat, ChatStatus, ContextUsage, PRRef, PeerSender } from "@dispatch/shared";
+import type { Chat, ChannelSender, ChatStatus, ContextUsage, PRRef, PeerSender } from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
 
 /* ------------------------------------------------------------ rate limits */
@@ -89,6 +89,25 @@ export const PEER_MESSAGE_LIMIT = 800;
 
 /** How a message reaches a target that is mid-turn. */
 export type PeerDelivery = "queue" | "interrupt";
+
+/**
+ * Who is sending. A CHAT (the `chat_send` tools, the completion notices) or an
+ * INTEGRATION — a bot behind a token, a plugin — which has no chat of its own.
+ * Both ride the same delivery path: same hold-while-busy rule, same rate
+ * limits, same wake-the-target behaviour. Only the attribution on the row
+ * differs, and that is the point: a message from outside must never arrive
+ * dressed as one the human typed OR as one another agent sent.
+ */
+export type MessageSender = { chatId: string } | { channel: ChannelSender };
+
+/**
+ * The rate-limit key for a sender. A channel's budget is per NAME: the "pair"
+ * limit then means one bot cannot flood one chat, and the per-target limit
+ * still backstops many bots aimed at one chat.
+ */
+function senderKey(sender: MessageSender): string {
+  return "chatId" in sender ? sender.chatId : `channel:${sender.channel.name}`;
+}
 
 /** Why a send was refused. Each maps to one guard, so callers can branch. */
 export type PeerRefusal =
@@ -197,11 +216,16 @@ export interface ChatMessengerOpts {
   /** The target's live status; undefined when it has no session. */
   getStatus: (chatId: string) => ChatStatus | undefined;
   /**
-   * Deliver. Must emit the `user` row (carrying `peer`) AND queue it for the
-   * subprocess — i.e. the broker's own `sendMessage`, not a bespoke path, so a
-   * peer message is an ordinary turn in every respect but its attribution.
+   * Deliver. Must emit the `user` row (carrying `peer` or `channel`) AND queue
+   * it for the subprocess — i.e. the broker's own `sendMessage`, not a bespoke
+   * path, so a peer or channel message is an ordinary turn in every respect but
+   * its attribution.
    */
-  send: (chatId: string, text: string, opts: { peer: PeerSender }) => Promise<void>;
+  send: (
+    chatId: string,
+    text: string,
+    opts: { peer?: PeerSender; channel?: ChannelSender },
+  ) => Promise<void>;
   /** Live context-window usage, when a subprocess is up. Optional. */
   getContextUsage?: (chatId: string) => Promise<ContextUsage | null>;
   /** Is this chat blocked on a human right now (open permission/question)? */
@@ -213,13 +237,19 @@ export interface ChatMessengerOpts {
 interface HeldMessage {
   from: string;
   text: string;
-  peer: PeerSender;
+  peer?: PeerSender;
+  channel?: ChannelSender;
+}
+
+/** The ask id a held message carries, whichever kind of sender it has. */
+function heldAskId(msg: { peer?: PeerSender; channel?: ChannelSender }): string | undefined {
+  return msg.peer?.askId ?? msg.channel?.askId;
 }
 
 /** An in-flight `ask` waiting for its `reply`. */
 interface PendingAsk {
   askId: string;
-  /** The chat that asked — the only one the answer is delivered to. */
+  /** The sender key of whoever asked (see {@link senderKey}) — the answer goes to them. */
   from: string;
   /** The chat that was asked — the only one allowed to answer. */
   to: string;
@@ -351,20 +381,23 @@ export class ChatMessenger {
    * which is exactly why it is not the default.
    */
   async send(input: {
-    from: string;
+    /** The sending chat. Omit when `channel` is set. */
+    from?: string;
+    /** The sending integration, for a message from outside any chat. */
+    channel?: ChannelSender;
     to: string;
     message: string;
     delivery?: PeerDelivery;
   }): Promise<PeerSendResult> {
-    const guard = await this.admit(input.from, input.to);
+    const sender = senderOf(input);
+    const guard = await this.admit(sender, input.to);
     if (!guard.ok) return guard;
 
-    const peer: PeerSender = guard.peer;
     return this.deliver({
-      from: input.from,
+      from: senderKey(sender),
       to: input.to,
       text: input.message,
-      peer,
+      ...guard.attribution,
       delivery: input.delivery ?? "queue",
     });
   }
@@ -377,7 +410,10 @@ export class ChatMessenger {
    * will try to fix by asking again.
    */
   async ask(input: {
-    from: string;
+    /** The asking chat. Omit when `channel` is set. */
+    from?: string;
+    /** The asking integration — its `chat_ask` over the external MCP mount. */
+    channel?: ChannelSender;
     to: string;
     question: string;
     timeoutMs: number;
@@ -396,11 +432,17 @@ export class ChatMessenger {
      */
     onWaiting?: () => void;
   }): Promise<PeerAskResult> {
-    const guard = await this.admit(input.from, input.to);
+    const sender = senderOf(input);
+    const from = senderKey(sender);
+    const guard = await this.admit(sender, input.to);
     if (!guard.ok) return { ...guard, answered: false };
 
     const askId = this.genId();
-    const peer: PeerSender = { ...guard.peer, askId };
+    // The ask id rides on whichever attribution this sender has, so the target's
+    // `chat_reply` can find it either way.
+    const attribution: Attribution = guard.attribution.peer
+      ? { peer: { ...guard.attribution.peer, askId } }
+      : { channel: { ...guard.attribution.channel!, askId } };
 
     // Registered BEFORE the send, not after: `queue` may deliver synchronously,
     // and a target that answers instantly would otherwise find no pending ask.
@@ -422,7 +464,7 @@ export class ChatMessenger {
         }
         this.pendingAsks.set(askId, {
           askId,
-          from: input.from,
+          from,
           to: input.to,
           resolve: (a) => finish({ answered: true, answer: a }),
           cancel: (reason) => finish({ answered: false, reason }),
@@ -437,10 +479,10 @@ export class ChatMessenger {
     );
 
     const sent = await this.deliver({
-      from: input.from,
+      from,
       to: input.to,
       text: input.question,
-      peer,
+      ...attribution,
       delivery: "queue",
     });
     if (!sent.ok) {
@@ -539,10 +581,11 @@ export class ChatMessenger {
    * denormalised attribution, since it needs the sender's record anyway.
    */
   private async admit(
-    from: string,
+    sender: MessageSender,
     to: string,
-  ): Promise<({ ok: true; peer: PeerSender }) | (PeerSendResult & { ok: false })> {
-    if (from === to) {
+  ): Promise<({ ok: true; attribution: Attribution }) | (PeerSendResult & { ok: false })> {
+    const from = senderKey(sender);
+    if ("chatId" in sender && sender.chatId === to) {
       return {
         ok: false,
         refusal: "self",
@@ -596,13 +639,20 @@ export class ChatMessenger {
       };
     }
 
-    const sender = await this.getChat(from);
+    if ("channel" in sender) {
+      // Attribution is the name only: an integration has no title to look up
+      // and no project of its own. `askId`, when there is one, is added by `ask`.
+      return { ok: true, attribution: { channel: { name: sender.channel.name } } };
+    }
+    const record = await this.getChat(sender.chatId);
     return {
       ok: true,
-      peer: {
-        chatId: from,
-        title: sender?.title,
-        projectId: sender?.projectId,
+      attribution: {
+        peer: {
+          chatId: sender.chatId,
+          title: record?.title,
+          projectId: record?.projectId,
+        },
       },
     };
   }
@@ -612,10 +662,11 @@ export class ChatMessenger {
     from: string;
     to: string;
     text: string;
-    peer: PeerSender;
+    peer?: PeerSender;
+    channel?: ChannelSender;
     delivery: PeerDelivery;
   }): Promise<PeerSendResult> {
-    const { from, to, text, peer, delivery } = input;
+    const { from, to, text, peer, channel, delivery } = input;
     const woke = this.getStatus(to) === undefined;
     // Established idiom (ResumeScheduler, PrReviewWatcher): a chat that finished
     // has no subprocess, and refusing to resume one would make a project manager
@@ -640,8 +691,9 @@ export class ChatMessenger {
     const blocking = status === "awaiting-input";
     if (status !== undefined && (blocking || (delivery === "queue" && MID_TURN.has(status)))) {
       const queue = this.held.get(to);
-      if (queue) queue.push({ from, text, peer });
-      else this.held.set(to, [{ from, text, peer }]);
+      const held: HeldMessage = { from, text, ...(peer ? { peer } : {}), ...(channel ? { channel } : {}) };
+      if (queue) queue.push(held);
+      else this.held.set(to, [held]);
       this.watchStatus();
       return { ok: true, held: true, woke };
     }
@@ -649,7 +701,7 @@ export class ChatMessenger {
     // `interrupt` needs nothing extra here: injecting mid-turn is simply what
     // the broker already does when a turn is live, so the ONLY difference
     // between the two deliveries is whether we parked the message first.
-    await this.sendFn(to, text, { peer });
+    await this.sendFn(to, text, { ...(peer ? { peer } : {}), ...(channel ? { channel } : {}) });
     return {
       ok: true,
       held: false,
@@ -712,9 +764,13 @@ export class ChatMessenger {
       // detached above, so an ask that expires WHILE this loop is awaiting an
       // earlier message is out of `dropHeld`'s reach. Delivering it anyway costs
       // the target a whole turn answering a question nobody is holding.
-      if (msg.peer.askId && !this.pendingAsks.has(msg.peer.askId)) continue;
+      const askId = heldAskId(msg);
+      if (askId && !this.pendingAsks.has(askId)) continue;
       try {
-        await this.sendFn(chatId, msg.text, { peer: msg.peer });
+        await this.sendFn(chatId, msg.text, {
+          ...(msg.peer ? { peer: msg.peer } : {}),
+          ...(msg.channel ? { channel: msg.channel } : {}),
+        });
       } catch {
         // The target died between parking and flushing. Dropping is the honest
         // outcome — re-parking it would spin against a session that is gone.
@@ -737,7 +793,7 @@ export class ChatMessenger {
   private dropHeld(chatId: string, askId: string): boolean {
     const queue = this.held.get(chatId);
     if (!queue) return false;
-    const i = queue.findIndex((m) => m.peer.askId === askId);
+    const i = queue.findIndex((m) => heldAskId(m) === askId);
     if (i < 0) return false;
     queue.splice(i, 1);
     if (queue.length === 0) {
@@ -763,6 +819,20 @@ export class ChatMessenger {
 }
 
 /* ------------------------------------------------------------- helpers */
+
+/** What a delivered row is stamped with — exactly one of the two. */
+type Attribution = { peer: PeerSender; channel?: undefined } | { channel: ChannelSender; peer?: undefined };
+
+/**
+ * Resolve the public `send`/`ask` input to a sender. `channel` wins when both
+ * are given: a caller that names an integration is speaking FOR it, and a chat
+ * id alongside would be a forged peer attribution.
+ */
+function senderOf(input: { from?: string; channel?: ChannelSender }): MessageSender {
+  if (input.channel) return { channel: input.channel };
+  if (input.from) return { chatId: input.from };
+  throw new Error("a message needs a sender: `from` (a chat) or `channel` (an integration)");
+}
 
 /** Drop timestamps older than `windowMs` and return what is left (in place). */
 function prune(

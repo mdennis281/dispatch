@@ -27,7 +27,8 @@ import { healthReport } from "./health.js";
 import { startPerfMonitor } from "./perf.js";
 import { registerRequestLog } from "./request-log.js";
 import { describeTrustProxy, parseTrustProxy, trustProxyError } from "./trust-proxy.js";
-import { AuthService, type RequestIdentity } from "./services/auth.js";
+import { AuthService, type AnyRequestIdentity } from "./services/auth.js";
+import { INTEGRATION_TOKEN_PREFIX } from "@dispatch/shared";
 import { realProjects } from "@dispatch/shared";
 
 /** Wired context shared across routes/services via `app.cm`. */
@@ -51,7 +52,7 @@ declare module "fastify" {
     requestShutdown?: (reason: string) => Promise<void>;
   }
   interface FastifyRequest {
-    authIdentity?: RequestIdentity;
+    authIdentity?: AnyRequestIdentity;
   }
 }
 
@@ -181,6 +182,23 @@ export async function buildApp(
     if (!path.startsWith("/api/")) return;
     const header = req.headers.authorization;
     const token = header?.startsWith("Bearer ") ? header.slice(7) : undefined;
+    // Integration tokens BEFORE the JWT path. They are not sessions: handing a
+    // `dsp_` bearer to `verifyJwt` would reject it with a message about sessions
+    // for a credential that was never one. The prefix is the discriminant.
+    if (token?.startsWith(INTEGRATION_TOKEN_PREFIX)) {
+      const integration = await auth.authenticateIntegration(token);
+      if (!integration) return reply.code(401).send({ error: "Invalid or revoked integration token." });
+      // Counted on the way in, so a flood is refused before it costs a handler.
+      const retryAfter = auth.tokens.checkRate(integration.tokenId);
+      if (retryAfter !== null) {
+        return reply
+          .code(429)
+          .header("retry-after", String(retryAfter))
+          .send({ error: "Rate limit exceeded for this token.", retryAfter });
+      }
+      req.authIdentity = integration;
+      return;
+    }
     const found = await auth.authenticateAccess(token);
     if (!found) return reply.code(401).send({ error: "Authentication required." });
     req.authIdentity = found;

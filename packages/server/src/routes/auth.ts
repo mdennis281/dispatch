@@ -33,6 +33,12 @@ function meta(req: FastifyRequest) {
 }
 function identity(req: FastifyRequest): RequestIdentity {
   if (!req.authIdentity) throw new AuthFailure(401, "Authentication required.");
+  // Every route here acts on a PERSON's account or session. An integration
+  // token has neither — and the WS ticket in particular is refused in v1: an
+  // integration gets webhooks, not a seat on the event stream.
+  if (req.authIdentity.kind !== "user") {
+    throw new AuthFailure(403, "Integration tokens cannot use this endpoint.");
+  }
   return req.authIdentity;
 }
 function sessionRequest(req: FastifyRequest): void {

@@ -51,6 +51,7 @@ export type AppSettingsSection =
   | "retention"
   | "notifications"
   | "auth"
+  | "integrations"
   | "updates"
   | "system";
 

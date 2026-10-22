@@ -203,6 +203,114 @@ export const MANAGER_TOOL_CATEGORY = {
 /** Bare name of every tool Dispatch serves. */
 export type ManagerToolName = keyof typeof MANAGER_TOOL_CATEGORY;
 
+/**
+ * Which tools an INTEGRATION may call — the external MCP mount
+ * (`/api/mcp/integration/<category>`) serves a category server built from a
+ * context that has no self chat, and this is what decides which of its tools
+ * are registered there.
+ *
+ * THE RULE: a tool that acts on the calling chat's own session, shell or tree,
+ * or that puts a card in front of the human on the calling chat's behalf, is
+ * NOT external. There is no calling chat, so `wait` has nothing to pace,
+ * `terminal` has no cwd to open in, and `ask_user` has no transcript to put a
+ * card in. Everything that reads or messages OTHER chats, reads projects, or
+ * curates memory and issues is external; so is `spawn_chat`, whose own consent
+ * card still applies when a context can host one.
+ *
+ * Every `*_write` / `*_delete` editor and the `mcp_*` config editors are out
+ * regardless of whether they technically need a chat: a bearer token that can
+ * rewrite the instructions every agent reads is a very different grant from
+ * one that can read a transcript, and v1 does not offer it.
+ *
+ * A TOTAL record over {@link ManagerToolName}, so a tool added to the registry
+ * without a verdict here fails the build instead of being served (or not) by
+ * accident. `manager-mcp.ts` cross-checks it against the factory the same way
+ * it does `TOOL_WIRE_NAME`.
+ */
+export const MANAGER_TOOL_EXTERNAL: Record<ManagerToolName, boolean> = {
+  /* github — every one acts on the calling chat's PR loop. */
+  create_pr: false,
+  approve_pr: false,
+  watch_pr: false,
+  post_review: false,
+  request_review: false,
+  resolve_thread: false,
+
+  /* confirm — a card in front of the human, on the calling chat's behalf. */
+  ask_user: false,
+  request_exemption: false,
+  request_human_review: false,
+
+  /* chat — reaching OTHER chats is the whole point of an integration. */
+  spawn_chat: true,
+  wait_for_chat: true,
+  chat_find: true,
+  chat_read: true,
+  chat_send: true,
+  chat_ask: true,
+  chat_reply: true,
+  chat_state: true,
+  /* …but re-posturing a chat is a write into its configuration, not a message. */
+  chat_set_mode: false,
+  chat_set_persona: false,
+
+  /* memory — the durable store, bound to a project rather than a chat. */
+  remember: true,
+  recall: true,
+  forget: true,
+  memory_list: true,
+  memory_search: true,
+  memory_history: true,
+  memory_similar: true,
+
+  /* config — reads only. */
+  config_list: true,
+  config_read: true,
+  config_write: false,
+  config_delete: false,
+  mode_list: true,
+  mode_read: false,
+  mode_write: false,
+  mode_delete: false,
+
+  /* workspace — the calling chat's own shells, trees and apps. */
+  worktree: false,
+  terminal: false,
+  terminal_output: false,
+  run_subapp: false,
+
+  /* mcp — editors of the project's own config. */
+  mcp_list: false,
+  mcp_add: false,
+  mcp_remove: false,
+  prewarm_mcp: false,
+
+  /* session — the agent acting on ITSELF; there is no self here. */
+  wait: false,
+  context_usage: false,
+  compact_context: false,
+
+  /* project — reads. */
+  project_info: true,
+  project_list: true,
+
+  /* secrets — `secret_request` is a card; the rest are the same grant family. */
+  secret_request: false,
+  secret_list: false,
+  secret_delete: false,
+
+  /* issues — the tracker is per project, not per chat. */
+  issue_list: true,
+  issue_read: true,
+  issue_comment: true,
+  issue_update: true,
+};
+
+/** Bare names of the tools in one category an integration may call. */
+export function externalManagerTools(category: ManagerCategory): ManagerToolName[] {
+  return managerToolsInCategory(category).filter((name) => MANAGER_TOOL_EXTERNAL[name]);
+}
+
 /** Every bare tool name, for iteration. */
 export const MANAGER_TOOL_NAMES = Object.keys(MANAGER_TOOL_CATEGORY) as ManagerToolName[];
 

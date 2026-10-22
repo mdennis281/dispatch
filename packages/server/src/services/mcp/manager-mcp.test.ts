@@ -18,11 +18,14 @@ import {
   HUMAN_REVIEW_ANSWERS,
   HUMAN_REVIEW_SUMMARY_MAX,
   managerToolQualifiedName,
+  MANAGER_TOOL_EXTERNAL,
+  MANAGER_TOOL_NAMES,
   type ManagerToolName,
 } from "@dispatch/shared";
 import {
   createManagerTools,
   createManagerMcpServers,
+  externalToolPolicy,
   SLOT_REACQUIRE_MIN_MS,
   withSlotReacquire,
   humanReviewQuestion,
@@ -5437,5 +5440,40 @@ describe("manager-mcp — a steering message interrupts blocking waits", () => {
       expect(vi.getTimerCount()).toBe(0);
       expect(steer.live()).toBe(0);
     });
+  });
+});
+
+describe("the external tool policy", () => {
+  it("denies exactly the tools the registry marks not external, by qualified name", () => {
+    const denied = new Set(externalToolPolicy().disallowedTools);
+    for (const name of MANAGER_TOOL_NAMES) {
+      expect(denied.has(managerToolQualifiedName(name)), name).toBe(!MANAGER_TOOL_EXTERNAL[name]);
+    }
+  });
+
+  it("leaves only external tools on a server built with it", () => {
+    // Every binding present, so what is dropped is dropped by the POLICY alone.
+    const ctx = {
+      chatId: "",
+      bus,
+      broker: fakeBroker({}),
+      toolPolicy: externalToolPolicy(),
+      memory: fakeMemory(),
+      messaging: {} as never,
+      inspect: {} as never,
+      authoring: {} as never,
+      modes: {} as never,
+      issues: {} as never,
+      terminals: {} as never,
+    };
+    const names = registeredNames(ctx);
+    expect(names.length).toBeGreaterThan(0);
+    for (const name of names) expect(MANAGER_TOOL_EXTERNAL[name as ManagerToolName], name).toBe(true);
+    expect(names).not.toContain("terminal");
+    expect(names).toContain("chat_find");
+    const servers = Object.keys(createManagerMcpServers(ctx));
+    expect(servers).not.toContain("dispatch-workspace");
+    expect(servers).not.toContain("dispatch-session");
+    expect(servers).not.toContain("dispatch-confirm");
   });
 });

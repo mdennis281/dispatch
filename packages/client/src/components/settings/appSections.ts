@@ -17,6 +17,7 @@ import {
   Layers,
   MessageSquare,
   Palette,
+  Plug,
   Power,
   Archive,
   ShieldCheck,
@@ -124,6 +125,16 @@ export const APP_SECTIONS: AppSectionDef[] = [
     blurb: "Who can reach this instance",
     explainer:
       "Dispatch listens on your network, not just localhost. This is the gate in front of it.",
+  },
+  {
+    id: "integrations",
+    icon: Plug,
+    label: "Integrations",
+    blurb: "Tokens for bots and scripts",
+    explainer:
+      "How something that is not a browser reaches this instance: a bot, a script, a remote " +
+      "MCP client. A token is shown once when it is made, carries only the scopes you give " +
+      "it, and dies with authentication — turning login off revokes every token.",
   },
   {
     id: "updates",

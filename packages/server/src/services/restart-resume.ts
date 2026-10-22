@@ -43,6 +43,7 @@ import {
   type ChatInterruption,
   type MessagePart,
   type PeerSender,
+  type ChannelSender,
   type RestartResumeStatus,
 } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
@@ -121,7 +122,7 @@ export interface RestartResumeOpts {
   send: (
     chatId: string,
     text: string,
-    opts?: { parts?: MessagePart[]; peer?: PeerSender },
+    opts?: { parts?: MessagePart[]; peer?: PeerSender; channel?: ChannelSender },
   ) => Promise<void>;
   /** Stop a resumed turn without tearing the session down (the undo button). */
   interrupt: (chatId: string) => Promise<void>;
@@ -464,7 +465,11 @@ export class RestartResumeService {
         // `chat_ask` loses the `askId`, so the resumed agent cannot reply even
         // if the asker is still waiting. Same misattribution the `brief` below
         // exists to avoid, in the other direction.
-        await this.send(chat.id, item.text, item.peer ? { peer: item.peer } : undefined);
+        await this.send(
+          chat.id,
+          item.text,
+          item.peer ? { peer: item.peer } : item.channel ? { channel: item.channel } : undefined,
+        );
       }
       return;
     }

@@ -158,6 +158,7 @@ import {
   HarnessKindSchema,
   PROVIDER_IDS,
   COMPACT_FOCUS_MAX,
+  MANAGER_TOOL_EXTERNAL,
 } from "@dispatch/shared";
 import { classifyActivity } from "../metrics-activity.js";
 import type { EventBus } from "../../bus.js";
@@ -1936,7 +1937,12 @@ export interface ManagerMcpExemptions {
 
 /** Per-session context the factory closes over. */
 export interface ManagerMcpContext {
-  /** The chat this session drives (for the waiting status label). */
+  /**
+   * The chat this session drives (for the waiting status label). EMPTY for an
+   * external context — the integration mount — which has no self chat; the
+   * tools that would act on it are not offered there (see
+   * {@link externalToolPolicy}), and the two that advertise a wait check for it.
+   */
   chatId: string;
   /**
    * The selected MODE's tool policy. A tool it denies is NOT REGISTERED —
@@ -3227,16 +3233,20 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         1000;
 
       // Advertise the wait in the UI header (reuses the working-status surface).
-      ctx.bus.publish({
-        type: "chat-status",
-        chatId: ctx.chatId,
-        status: "running",
-        activity: {
-          state: "tool",
-          label: `waiting for chat ${chatId}`,
-          toolName: "wait_for_chat",
-        },
-      });
+      // Not from an EXTERNAL context: it has no chat, and a status event for an
+      // empty id would put a phantom "running" row in every client's store.
+      if (ctx.chatId) {
+        ctx.bus.publish({
+          type: "chat-status",
+          chatId: ctx.chatId,
+          status: "running",
+          activity: {
+            state: "tool",
+            label: `waiting for chat ${chatId}`,
+            toolName: "wait_for_chat",
+          },
+        });
+      }
 
       const steer = steerInterrupt(ctx);
       // Declared for the scheduler: that chat is what this one is stuck on, so
@@ -7114,13 +7124,17 @@ ${look}` : "")
         // peer doesn't look like one that has hung — but only once the ask is
         // actually admitted. Published unconditionally up front, a refused call
         // (a self-send, an unknown id) flashed a wait that never happened.
-        onWaiting: () =>
+        onWaiting: () => {
+          // Same guard as `wait_for_chat`: an external context has no row to
+          // advertise on.
+          if (!ctx.chatId) return;
           ctx.bus.publish({
             type: "chat-status",
             chatId: ctx.chatId,
             status: "running",
             activity: { state: "tool", label: `asking chat ${to}`, toolName: "chat_ask" },
-          }),
+          });
+        },
       });
       } finally {
         ctx.broker.noteWaitingOn(ctx.chatId, { chatId: to }, false);
@@ -7744,6 +7758,36 @@ const TOOL_WIRE_NAME: Record<ManagerToolKey, ManagerToolName> = {
   projectInfo: "project_info",
   projectList: "project_list",
 };
+
+/**
+ * The compile-time half of `MANAGER_TOOL_EXTERNAL`'s guarantee, in the same
+ * shape as {@link TOOL_WIRE_NAME}: every tool the FACTORY builds has a verdict.
+ * The shared record is already total over the registry; this is what ties the
+ * registry to the factory, so a tool that exists only in one of them fails the
+ * build rather than being served to an integration by accident.
+ */
+const TOOL_EXTERNAL: Record<ManagerToolKey, boolean> = Object.fromEntries(
+  (Object.keys(TOOL_WIRE_NAME) as ManagerToolKey[]).map((key) => [
+    key,
+    MANAGER_TOOL_EXTERNAL[TOOL_WIRE_NAME[key]],
+  ]),
+) as Record<ManagerToolKey, boolean>;
+
+/**
+ * The tool policy an EXTERNAL context is built with: a denylist of every tool
+ * that is not external, by the qualified name {@link boundToolsByCategory}
+ * checks. Reusing the mode-policy seam means the rule is enforced at
+ * registration — a tool outside the set is never on the server, rather than
+ * present and refusing — and that it composes with whatever the token's
+ * bindings leave bound.
+ */
+export function externalToolPolicy(): { disallowedTools: string[] } {
+  return {
+    disallowedTools: (Object.keys(TOOL_WIRE_NAME) as ManagerToolKey[])
+      .filter((key) => !TOOL_EXTERNAL[key])
+      .map((key) => managerToolQualifiedName(TOOL_WIRE_NAME[key])),
+  };
+}
 
 /**
  * Which session binding gates a manager tool being OFFERED to the agent (see
