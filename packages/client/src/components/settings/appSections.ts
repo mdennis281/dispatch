@@ -43,9 +43,8 @@ export const APP_SECTIONS: AppSectionDef[] = [
     label: "Appearance",
     blurb: "Light, dark, or follow the OS",
     explainer:
-      "Saved server-side, so every browser and device you open Dispatch in agrees. The picker " +
-      "previews live — you can't judge a palette from the word for it — so leaving without " +
-      "saving keeps the preview until you discard it.",
+      "Remembered by this browser only, so a phone and a desktop can each keep their own. " +
+      "Takes effect the moment you pick it — there is nothing to save.",
   },
   {
     id: "chat",
