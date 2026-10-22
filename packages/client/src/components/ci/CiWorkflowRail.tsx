@@ -78,29 +78,26 @@ export function CiWorkflowRail({
   const { own, managed } = sortWorkflows(res.data ?? []);
   const now = Date.now();
   const row = (w: CiWorkflow) => (
-    <div key={w.id} className="group relative">
-      <RailRow
-        active={selected === w.id}
-        onClick={() => onSelect(w.id)}
-        icon={workflowIcon(w)}
-        label={w.name}
-        meta={w.lastRun ? relTimeShort(Date.parse(w.lastRun.createdAt), now) : undefined}
-        dim={w.state !== "active"}
-      />
-      {!w.managed && w.state === "active" && (
-        // Revealed on hover so the rail reads as a list, not a toolbar; always
-        // reachable by keyboard focus. Positioned by this wrapper, not the
-        // button: IconButton's tooltip wraps it in a `relative` span, which
-        // would become the containing block of an absolute button.
-        <div className="absolute right-1 top-1/2 flex -translate-y-1/2 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
-          <IconButton
-            tip={`Run ${w.name}`}
-            onClick={() => onRun(w.id)}
-            className="bg-surface shadow-sm ring-1 ring-line"
-          >
-            <Play />
-          </IconButton>
-        </div>
+    <div key={w.id} className="flex items-center gap-0.5">
+      <div className="min-w-0 flex-1">
+        <RailRow
+          active={selected === w.id}
+          onClick={() => onSelect(w.id)}
+          icon={workflowIcon(w)}
+          label={w.name}
+          meta={w.lastRun ? relTimeShort(Date.parse(w.lastRun.createdAt), now) : undefined}
+          dim={w.state !== "active"}
+        />
+      </div>
+      {/* Always shown, beside the row rather than over it: running a
+          workflow is done from the workflow, and a hover-only button was
+          unfindable on touch. The spacer keeps rows without one aligned. */}
+      {!w.managed && w.state === "active" ? (
+        <IconButton tip={`Run ${w.name}`} onClick={() => onRun(w.id)} className="shrink-0 text-muted hover:text-accent">
+          <Play />
+        </IconButton>
+      ) : (
+        <span className="size-6 shrink-0" aria-hidden />
       )}
     </div>
   );
