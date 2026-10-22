@@ -199,6 +199,7 @@ function commandPreview(
   if (tool === "terminal_output") return `read ${subject ?? "terminal"}`;
   if (tool === "issue_list") return `list ${textInput(use, "state") ?? "open"}`;
   if (tool === "issue_read") return `read ${subject ?? "issue"}`;
+  if (tool === "issue_create") return `open ${textInput(use, "title") ?? "issue"}`;
   if (tool === "issue_comment") return `comment ${subject ?? "issue"}`;
   if (tool === "issue_update") {
     const state = textInput(use, "state");

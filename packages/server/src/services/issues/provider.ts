@@ -12,6 +12,7 @@
 import type {
   Issue,
   IssueComment,
+  IssueDraft,
   IssuePatch,
   IssueProviderId,
   IssueSource,
@@ -40,6 +41,8 @@ export interface IssueProvider {
    */
   comments(source: IssueSource, number: number, limit?: number, total?: number): Promise<IssueComment[]>;
   comment(source: IssueSource, number: number, body: string): Promise<IssueComment>;
+  /** Open an issue, labels and all in ONE call — see `ISSUE_MANUAL_LABEL` for why. */
+  create(source: IssueSource, draft: IssueDraft): Promise<Issue>;
   /** Apply a patch and return the issue as it now stands. */
   update(source: IssueSource, number: number, patch: IssuePatch): Promise<Issue>;
 }

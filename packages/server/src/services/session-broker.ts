@@ -109,6 +109,7 @@ import type {
 } from "@dispatch/shared";
 import {
   BUILTIN_MODE_CONFIGS,
+  resolveIssuePolicy,
   GLOBAL_MODE,
   GLOBAL_MODE_ID,
   isGlobalProject,
@@ -226,6 +227,7 @@ import {
   createModePolicyHook,
   createBackgroundShellGuardHook,
   createWorktreeGuardHook,
+  createIssueCreateGuardHook,
 } from "./shell-guard.js";
 import { AgentCwdTracker } from "./agent-cwd.js";
 import { claudeExecutableOption } from "./runtime.js";
@@ -8366,6 +8368,43 @@ export class SessionBroker {
                     text:
                       "Blocked a shell-created worktree — redirected to " +
                       "mcp__dispatch-workspace__worktree, which records the owning chat.",
+                  });
+                },
+              }),
+            ],
+          },
+        ],
+      };
+    }
+
+    // …and refuse a raw `gh issue create` where the issue watcher would hand the
+    // new issue to another chat. Gated on the same service `issue_create` is
+    // bound from, so the refusal always has a tool to name.
+    if (this.issues && session.projectId) {
+      const projectId = session.projectId;
+      options.hooks = {
+        ...options.hooks,
+        PreToolUse: [
+          ...(options.hooks?.PreToolUse ?? []),
+          {
+            hooks: [
+              createIssueCreateGuardHook({
+                applies: async (repo) => {
+                  if (!resolveIssuePolicy(this.projectConfig?.getConfig?.(projectId)?.issues).enabled) return false;
+                  if (!repo) return true;
+                  const own = await this.issues?.sourceFor(projectId).catch(() => null);
+                  // Unknown source = cannot tell it is elsewhere; let it through
+                  // rather than strand an upstream report with nowhere to go.
+                  return own?.source.repo.toLowerCase() === repo;
+                },
+                onBlocked: () => {
+                  this.bus.publish({
+                    type: "notice",
+                    chatId: session.chatId,
+                    level: "info",
+                    text:
+                      "Blocked `gh issue create` — the issue watcher would have taken it. " +
+                      "Redirected to issue_create, which files it as dispatch:manual.",
                   });
                 },
               }),

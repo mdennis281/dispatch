@@ -144,6 +144,16 @@ describe("matchIssue", () => {
     });
   });
 
+  it("skips dispatch:manual with no config at all — the filer cannot read the project's filters", () => {
+    expect(matchIssue(issue({ labels: ["Dispatch:Manual"] }), policy)).toEqual({
+      ok: false,
+      reason: expect.stringContaining("dispatch:manual"),
+    });
+    // Not even a filter that REQUIRES the label lets the poll take it.
+    const wants = resolveIssuePolicy({ filters: { labels: ["dispatch:manual"] } });
+    expect(matchIssue(issue({ labels: ["dispatch:manual"] }), wants).ok).toBe(false);
+  });
+
   it("skips bots, assigned issues, excluded labels and non-matching titles", () => {
     expect(matchIssue(issue({ authorIsBot: true }), policy).ok).toBe(false);
     expect(matchIssue(issue({ assignees: ["bob"] }), policy).ok).toBe(false);

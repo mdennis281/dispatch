@@ -117,7 +117,9 @@ import {
   HUMAN_REVIEW_SUMMARY_MAX,
   HUMAN_REVIEW_TITLE_MAX,
   type HumanReviewPayload,
+  IssueDraftSchema,
   IssuePatchSchema,
+  ISSUE_MANUAL_LABEL,
   issueSourceLabel,
   type Issue,
   type IssueComment,
@@ -7545,6 +7547,48 @@ ${look}` : "")
       }),
   );
 
+  const issueCreate = tool(
+    "issue_create",
+    "Open a new issue in this project's tracker. Use this rather than `gh issue create`: when the " +
+      "project's issue watcher is on, it auto-starts a separate chat for every new issue it admits, " +
+      `and this tool labels the issue \`${ISSUE_MANUAL_LABEL}\` AT CREATION so the watcher never takes ` +
+      "it — the right default when you are filing issues to track work you or your own child chats " +
+      "will do. Pass `autoHandle: true` only when you want Dispatch's issue watcher to pick it up.",
+    {
+      title: IssueDraftSchema.shape.title,
+      body: IssueDraftSchema.shape.body.describe("Markdown."),
+      labels: IssueDraftSchema.shape.labels,
+      assignees: IssueDraftSchema.shape.assignees,
+      autoHandle: z
+        .boolean()
+        .optional()
+        .describe(`Default false: the issue gets ${ISSUE_MANUAL_LABEL} and the watcher skips it.`),
+    },
+    async ({ autoHandle, ...draft }): Promise<CallToolResult> =>
+      withTracker(async (t) => {
+        // Case-insensitive, like `matchIssue`: a hand-passed "Dispatch:Manual"
+        // would otherwise survive `autoHandle` and still keep the watcher off.
+        const labels = new Set((draft.labels ?? []).filter((l) => l.toLowerCase() !== ISSUE_MANUAL_LABEL));
+        if (!autoHandle) labels.add(ISSUE_MANUAL_LABEL);
+        let issue = await t.create({ ...draft, labels: [...labels] });
+        const details = [issue.url];
+        // GitHub drops labels SILENTLY when the token lacks push access. An
+        // issue that was meant to be exempt but isn't is the exact failure this
+        // tool exists to prevent, so retry once and say so if it still isn't.
+        const exempt = (i: Issue) => i.labels.some((l) => l.toLowerCase() === ISSUE_MANUAL_LABEL);
+        if (!autoHandle && !exempt(issue)) {
+          issue = await t.update(issue.number, { addLabels: [ISSUE_MANUAL_LABEL] }).catch(() => issue);
+          if (!exempt(issue)) details.push(`WARNING: could not label it ${ISSUE_MANUAL_LABEL} — the issue watcher may take it`);
+        }
+        const summary = `Opened #${issue.number}: ${issue.title}`;
+        return issueToolResult(`${summary}\n${details.join("\n")}\n${issueLine(issue)}`, {
+          tool: "issue_create",
+          outcome: { summary, ok: true, details },
+          issue,
+        });
+      }),
+  );
+
   const issueComment = tool(
     "issue_comment",
     "Post a comment on one of this project's issues, as the account Dispatch's issue tracker is " +
@@ -7610,6 +7654,7 @@ ${look}` : "")
   return {
     issueList,
     issueRead,
+    issueCreate,
     issueComment,
     issueUpdate,
     secretRequest,
@@ -7691,6 +7736,7 @@ type ManagerToolKey = keyof ManagerTools;
 const TOOL_WIRE_NAME: Record<ManagerToolKey, ManagerToolName> = {
   issueList: "issue_list",
   issueRead: "issue_read",
+  issueCreate: "issue_create",
   issueComment: "issue_comment",
   issueUpdate: "issue_update",
   secretRequest: "secret_request",
@@ -7807,6 +7853,7 @@ const MANAGER_TOOL_GATE: Record<ManagerToolName, ManagerToolBinding | null> = {
   secret_delete: "secrets",
   issue_list: "issues",
   issue_read: "issues",
+  issue_create: "issues",
   issue_comment: "issues",
   issue_update: "issues",
 };
@@ -7918,6 +7965,7 @@ function boundTools(ctx: ManagerMcpContext): Record<ManagerToolName, boolean> {
     // not say anything on it has no way to report back where the reporter looks.
     issue_list: Boolean(ctx.issues),
     issue_read: Boolean(ctx.issues),
+    issue_create: Boolean(ctx.issues),
     issue_comment: Boolean(ctx.issues),
     issue_update: Boolean(ctx.issues),
     // Cross-chat MESSAGING — the write path. All four together: a chat that can
