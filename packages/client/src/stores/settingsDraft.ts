@@ -66,9 +66,13 @@ interface AppDraftPair {
  * stores them under one key.
  */
 const SECTION_SLICE: Record<
-  "chat" | "context" | "retention" | "notifications",
+  "chat" | "context" | "retention" | "notifications" | "plugins",
   (s: AppSettings) => unknown
 > = {
+  // The pane never edits the draft (its routes are targeted patches), so this
+  // can only light up if something else moved the key — which is exactly the
+  // case worth a dot: it means a save from here would be about to delete it.
+  plugins: (s) => s.plugins,
   chat: (s) => [
     s.defaultModeId,
     s.showInjectedContext,

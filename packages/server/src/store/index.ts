@@ -108,6 +108,7 @@ import {
   McpEnabledMapSchema,
   ProjectConfigLocationSchema,
   SendModeSchema,
+  PluginSettingsEntrySchema,
   GLOBAL_PROJECT_ID,
   globalProject,
   isGlobalProject,
@@ -463,6 +464,18 @@ export const AppSettingsSchema = z.object({
       trustedProxies: z.string().optional(),
     })
     .optional(),
+  /**
+   * Per-plugin state, keyed by plugin id: the enable toggle (absent = on) and
+   * the plugin's own settings as its JSON Schema describes them.
+   *
+   * Owned by `PUT /api/plugins/:id/enabled` and `PUT /api/plugins/:id/settings`,
+   * which are targeted patches; the full-replace `PUT /api/settings` preserves
+   * this key by hand, exactly as it does `auth` and `updateChannel`, because a
+   * draft loaded before a toggle was flipped must not flip it back on save.
+   * In `config/` rather than the state database because both instances load
+   * the same plugin and should agree on whether it is on.
+   */
+  plugins: z.record(z.string(), PluginSettingsEntrySchema).optional(),
 });
 export type AppSettings = z.infer<typeof AppSettingsSchema>;
 

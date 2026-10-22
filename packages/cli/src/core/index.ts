@@ -37,6 +37,21 @@ export {
 } from "./mcp.js";
 
 export {
+  pluginsRoot,
+  readPluginDir,
+  discoverPlugins,
+  addPlugin,
+  linkPlugin,
+  removePlugin,
+  setPluginEnabled,
+  readPluginToggles,
+  consentLines,
+  looksLikeGitUrl,
+  type DiscoveredPlugin,
+  type InstallResult,
+} from "./plugins.js";
+
+export {
   parseArgs,
   transportFromArgs,
   parseEnvPairs,

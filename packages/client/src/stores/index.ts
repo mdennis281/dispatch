@@ -395,6 +395,12 @@ export function applyServerEvent(evt: WsServerEvent): void {
     case "pong":
       return;
 
+    // A plugin's own event for its client half. No store here reads it: the
+    // client plugin host (workstream E) subscribes to the socket and routes it
+    // by `plugin`. Listed so the exhaustive check still holds.
+    case "plugin-event":
+      return;
+
     case "error":
       useNotices.getState().push({
         level: "error",

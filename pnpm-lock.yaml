@@ -178,6 +178,9 @@ importers:
       fastify:
         specifier: ^5.12.5
         version: 5.12.5
+      find-my-way:
+        specifier: ^9.9.0
+        version: 9.9.0
       get-port:
         specifier: ^7.2.0
         version: 7.2.0

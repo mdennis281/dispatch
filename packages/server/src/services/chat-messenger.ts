@@ -506,6 +506,16 @@ export class ChatMessenger {
    * MUST be the one that was asked — otherwise a third chat that guessed (or
    * read) an askId could answer on its behalf.
    */
+  /**
+   * The chat a pending ask is waiting on, so a host-privileged caller (a
+   * plugin's `ctx.chats.reply`, answering on that chat's behalf) can satisfy
+   * `reply`'s identity check honestly instead of bypassing it. Undefined once
+   * the ask settles.
+   */
+  targetOf(askId: string): string | undefined {
+    return this.pendingAsks.get(askId)?.to;
+  }
+
   reply(input: { from: string; askId: string; answer: string }): PeerReplyResult {
     const pending = this.pendingAsks.get(input.askId);
     if (!pending) {

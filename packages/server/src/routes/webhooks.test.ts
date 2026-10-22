@@ -180,7 +180,7 @@ describe("/api/webhooks", () => {
   });
 
   it("test fires a synthetic delivery and reports the receiver's answer", async () => {
-    const sub = await create({ name: "t", url: receiverUrl });
+    const sub = await create({ name: "t", url: receiverUrl, filters: { events: ["chat-settled"] } });
     answer = 503;
     const res = await app.inject({ method: "POST", url: `/api/webhooks/${sub.id}/test` });
     expect(res.statusCode).toBe(200);
@@ -196,19 +196,20 @@ describe("/api/webhooks", () => {
   });
 
   it("redelivers a settled delivery with the same id", async () => {
-    const sub = await create({ name: "r", url: receiverUrl });
+    const sub = await create({ name: "r", url: receiverUrl, filters: { events: ["chat-settled"] } });
     const first = (await app.inject({ method: "POST", url: `/api/webhooks/${sub.id}/test` })).json() as WebhookDelivery;
     expect(first.status).toBe("delivered");
     const again = await app.inject({ method: "POST", url: `/api/webhooks/${sub.id}/deliveries/${first.id}/redeliver` });
     expect(again.statusCode).toBe(200);
     expect(again.json()).toMatchObject({ id: first.id, status: "delivered", attempts: 1 });
-    expect(hits).toHaveLength(2);
+    // Test fires bypass the filter; nothing else may have reached the receiver.
+    expect(hits.map((h) => h.headers["x-dispatch-event"])).toEqual(["webhook-test", "webhook-test"]);
     expect(hits[1]!.body).toBe(hits[0]!.body);
     expect(hits[1]!.headers["x-dispatch-delivery"]).toBe(first.id);
   });
 
   it("never follows a redirect, so a receiver cannot bounce the POST elsewhere", async () => {
-    const sub = await create({ name: "bouncer", url: receiverUrl.replace(/\/hook$/, "/redirect") });
+    const sub = await create({ name: "bouncer", url: receiverUrl.replace(/\/hook$/, "/redirect"), filters: { events: ["chat-settled"] } });
     const res = await app.inject({ method: "POST", url: `/api/webhooks/${sub.id}/test` });
     const d = res.json() as WebhookDelivery;
     expect(d).toMatchObject({ status: "pending", attempts: 1, lastStatus: 307 });

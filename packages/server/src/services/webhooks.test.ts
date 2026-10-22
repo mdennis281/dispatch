@@ -236,7 +236,10 @@ describe("WebhookService", () => {
     h.setRespond((req) => (req.url.startsWith("https://slow") ? held : { ok: true, status: 200 }));
     h.bus.publish(userRow("c1"));
     // Not `publish()`: that awaits idle, and the slow one is held on purpose.
-    for (let i = 0; i < 50 && h.received.length < 2; i++) await new Promise((r) => setImmediate(r));
+    // Real time, not a count of event-loop ticks: the scope lookup reads the
+    // chat record off disk, and on a fast CI box fifty setImmediates elapse
+    // before the threadpool answers.
+    for (let i = 0; i < 400 && h.received.length < 2; i++) await new Promise((r) => setTimeout(r, 5));
     expect(h.received.map((r) => r.url).sort()).toEqual(["https://fast.example/x", "https://slow.example/x"]);
     release();
     await h.svc.whenIdle();

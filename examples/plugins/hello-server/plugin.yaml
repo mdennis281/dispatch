@@ -1,0 +1,15 @@
+# The smallest server plugin that exercises every host seam the tests cover:
+# a route, a bus listener, a kv write, a settings read and a plugin-event.
+# Dropped into <configDir>/plugins/hello-server/ it appears in Settings →
+# Plugins after a restart. See docs/plugins.md.
+id: hello-server
+name: Hello (server)
+version: 0.1.0
+dispatch: ">=1"
+description: Answers /api/plugins/hello-server/hello and counts chat messages it has seen.
+server: ./server/index.js
+settings: ./settings.schema.json
+capabilities:
+  - events
+  - routes
+  - kv

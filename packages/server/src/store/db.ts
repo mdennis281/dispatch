@@ -279,7 +279,26 @@ const MIGRATIONS: ReadonlyArray<string> = [
   );
   `,
 
-  // 7 — outbound webhooks.
+  // 7 — plugin key/value storage (`ctx.kv`).
+  //
+  // A table and not a JSON file per plugin, for the reason runner state moved
+  // here: a plugin writing a counter on every bus event would be rewriting a
+  // whole file per event, and two instances sharing a plugin would race each
+  // other's writes. Per-instance (it lives in the STATE root, not config/), so
+  // the stable and dev servers each see their own values — the same split as
+  // every other table here. `value` is JSON, validated by nobody: it is the
+  // plugin's own data and the host only moves it.
+  `
+  CREATE TABLE plugin_kv (
+    plugin     TEXT NOT NULL,
+    key        TEXT NOT NULL,
+    value      TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (plugin, key)
+  );
+  `,
+
+  // 8 — outbound webhooks.
   //
   // `webhook_subscription` is one JSON body per subscription, like `pr` and
   // `issue`: the filter shape will grow (a new wire event is a new option) and
