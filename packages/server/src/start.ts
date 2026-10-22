@@ -155,6 +155,6 @@ export async function start({ dev = false }: { dev?: boolean } = {}): Promise<vo
     // legacy line too so that pairing still boots. Safe to delete once the shell
     // has been reinstalled (`pnpm desktop:install-shell`).
     // eslint-disable-next-line no-console
-    console.log(`[claude-manager] ready ${url}`);
+    console.log(`[dispatch] ready ${url}`);
   }
 }

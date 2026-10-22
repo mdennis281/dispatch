@@ -2,7 +2,7 @@
  * ReleaseService — "is there a newer Dispatch than the one I am?"
  *
  * The installed app is a release tarball, not a git clone: `%LOCALAPPDATA%\
- * claude-manager\app` has no `.git`, which is why `health.ts`'s `payloadSha()`
+ * dispatch\app` has no `.git`, which is why `health.ts`'s `payloadSha()`
  * comes back empty there. The authoritative answer to "which build is this" is
  * `app/release-manifest.json`, written by `tools/release/package.mjs`, plus
  * `<root>/current.json`, written by `tools/install.mjs`. Until now nothing in
