@@ -1,6 +1,12 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { demote, promote, reconcile, widestSizes, evictedCount } from "./composerFit.js";
-import { ALL_VISIBLE, COMPOSER_CONTROLS, type ComposerVisibility } from "./composerPrefs.js";
+import {
+  ALL_VISIBLE,
+  COMPOSER_CONTROLS,
+  allControls,
+  registerComposerControl,
+  type ComposerVisibility,
+} from "./composerPrefs.js";
 
 const none: ComposerVisibility = Object.fromEntries(
   COMPOSER_CONTROLS.map((c) => [c.id, false]),
@@ -137,5 +143,68 @@ describe("evictedCount", () => {
     // A control you switched off yourself is not an eviction — you have it
     // exactly as you asked, so the menu must not nag about it.
     expect(evictedCount(sizes, { ...ALL_VISIBLE, brain: false })).toBe(1);
+  });
+});
+
+describe("runtime (plugin) controls", () => {
+  // A plugin control enters the ladder with one `sm` rung at its priority and
+  // is shrunk, evicted and restored exactly like a built-in — the rule from
+  // the persona-row incident, applied to code the repo cannot see.
+  const def = {
+    id: "voice:talk",
+    label: "Talk",
+    hint: "voice mode",
+    priority: 1.5,
+    icon: null,
+    render: () => null,
+  };
+  let off: (() => void) | null = null;
+  afterEach(() => {
+    off?.();
+    off = null;
+  });
+
+  it("starts at `sm`, is evicted by priority among the icons, and comes back last-out-first-in", () => {
+    off = registerComposerControl(def);
+    const visible = { ...ALL_VISIBLE, "voice:talk": true };
+    const states = walkDown(visible);
+    expect(states[0]!["voice:talk"]).toBe("sm");
+    const evictedAt = (id: string) => states.findIndex((s) => s[id] === "off");
+    // persona (0) and account (0.5) and context (1) leave before it (1.5); attach (2) after.
+    expect(evictedAt("voice:talk")).toBeGreaterThan(evictedAt("context"));
+    expect(evictedAt("voice:talk")).toBeLessThan(evictedAt("attach"));
+    expect(evictedCount(states[states.length - 1]!, visible)).toBe(allControls().length);
+    // Growing back from the floor undoes the eviction in reverse order.
+    let s = states[states.length - 1]!;
+    const order: string[] = [];
+    for (;;) {
+      const next = promote(s, visible);
+      if (!next) break;
+      for (const c of allControls()) if (s[c.id] === "off" && next[c.id] !== "off") order.push(c.id);
+      s = next;
+    }
+    expect(order.indexOf("attach")).toBeLessThan(order.indexOf("voice:talk"));
+    expect(order.indexOf("voice:talk")).toBeLessThan(order.indexOf("context"));
+  });
+
+  it("reconcile adds a control registered after the first layout, and a hidden one goes off", () => {
+    const before = widestSizes(ALL_VISIBLE);
+    expect(before["voice:talk"]).toBeUndefined();
+    off = registerComposerControl(def);
+    const after = reconcile(before, { ...ALL_VISIBLE, "voice:talk": true });
+    expect(after["voice:talk"]).toBe("sm");
+    expect(reconcile(after, { ...ALL_VISIBLE, "voice:talk": false })["voice:talk"]).toBe("off");
+    // No saved preference means visible.
+    expect(widestSizes(ALL_VISIBLE)["voice:talk"]).toBe("sm");
+  });
+
+  it("refuses an id the ladder already has, and leaves the ladder when unregistered", () => {
+    off = registerComposerControl(def);
+    expect(() => registerComposerControl({ ...def })).toThrow(/already registered/);
+    expect(() => registerComposerControl({ ...def, id: "attach" })).toThrow(/already registered/);
+    off();
+    off = null;
+    expect(allControls().map((c) => c.id)).not.toContain("voice:talk");
+    expect(widestSizes(ALL_VISIBLE)["voice:talk"]).toBeUndefined();
   });
 });

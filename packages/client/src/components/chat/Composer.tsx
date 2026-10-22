@@ -36,6 +36,8 @@ import {
   Drama,
   KeyRound,
   RotateCcw,
+  Volume2,
+  AudioLines,
 } from "lucide-react";
 import type { Chat, Effort, AgentConfig, ModeConfig, ImageRef } from "@dispatch/shared";
 import {
@@ -102,11 +104,15 @@ import { AssetImage } from "../ui/AssetImage.js";
 import { useEffectiveEffort } from "../../lib/effectiveEffort.js";
 import { EFFORT_OPTIONS } from "../../lib/efforts.js";
 import {
-  COMPOSER_CONTROLS,
+  allControls,
   hiddenCount,
   useComposerPrefs,
+  useComposerRegistry,
   type ComposerControl,
 } from "../../lib/composerPrefs.js";
+import { useEngines, activeTtsEngine } from "../../lib/engines.js";
+import { PluginSlot } from "../../plugins/PluginSlot.js";
+import { SlotErrorBoundary } from "../ErrorBoundary.js";
 import {
   demote,
   promote,
@@ -312,7 +318,7 @@ function ConfigBackRow({
  * to show, nested a level down because it is a setting, not a thing you reach
  * for mid-turn.
  */
-type ConfigView = "root" | ComposerControl | "customize";
+type ConfigView = "root" | ComposerControl | "customize" | "voice";
 
 /** The chat composer: TipTap input + attachments + effort/mode/agent + send/steer. */
 export function Composer({ chat, agents, modes }: ComposerProps) {
@@ -413,6 +419,22 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   const visible = useComposerPrefs((s) => s.visible);
   const toggleControl = useComposerPrefs((s) => s.toggle);
   const showAllControls = useComposerPrefs((s) => s.showAll);
+  // Plugin controls (host.slots.composerControl). Subscribed so a plugin that
+  // activates after this composer mounted appears without a remount, and so
+  // `allControls()` below — which reads the same registry — is re-run.
+  const runtimeControls = useComposerRegistry((s) => s.runtime);
+  // Voice: which engines exist, which are picked, and whether replies are
+  // read aloud. All per browser (lib/engines), all surfaced in the options
+  // menu below — never as a row of their own in the box.
+  const speakReplies = useEngines((s) => s.speakReplies);
+  const setSpeakReplies = useEngines((s) => s.setSpeakReplies);
+  const dictationEngines = useEngines((s) => s.dictation);
+  const ttsEngines = useEngines((s) => s.tts);
+  const dictationId = useEngines((s) => s.dictationId);
+  const ttsId = useEngines((s) => s.ttsId);
+  const selectDictation = useEngines((s) => s.selectDictation);
+  const selectTts = useEngines((s) => s.selectTts);
+  const ttsLabel = activeTtsEngine({ tts: ttsEngines, ttsId }).label;
   const hidden = hiddenCount(visible);
   // How big each control is currently drawn — derived from measurement, never
   // stored. Starts at everything's widest and gets walked down by `fit` below.
@@ -1122,6 +1144,8 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     persona.label,
     modeLabel(modes, modeId),
     visible,
+    // A plugin control registering is a new icon the row has to make room for.
+    runtimeControls,
   ]);
 
   /* ------------------------------------------------------- shared menu bodies */
@@ -1330,15 +1354,15 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   const customizeRows = (dense: boolean) => (
     <div className="flex flex-col">
       <div className="px-2 py-1 text-2xs uppercase tracking-wide text-faint">Show in composer</div>
-      {COMPOSER_CONTROLS.map((c) => (
+      {allControls().map((c) => (
         <MenuItem
           key={c.id}
           dense={dense}
-          icon={visible[c.id] ? <Check className="text-accent" /> : <span className="size-3" />}
+          icon={(visible[c.id] ?? true) ? <Check className="text-accent" /> : <span className="size-3" />}
           hint={c.hint}
           onClick={() => toggleControl(c.id)}
         >
-          <span className={visible[c.id] ? "text-primary" : "text-muted"}>{c.label}</span>
+          <span className={(visible[c.id] ?? true) ? "text-primary" : "text-muted"}>{c.label}</span>
         </MenuItem>
       ))}
       {hidden > 0 && (
@@ -1441,6 +1465,16 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     if (moreView === "context")
       return <ContextPanelBody chatId={chat.id} model={model} close={close} />;
     if (moreView === "customize") return customizeRows(dense);
+    if (moreView === "voice") return voiceRows(dense);
+    const runtime = runtimeControls.find((c) => c.id === moreView);
+    if (runtime)
+      return (
+        <div className="flex flex-col">
+          <SlotErrorBoundary pluginId={runtime.owner ?? runtime.id} slot={`${runtime.label} menu`} resetKey={chat.id}>
+            {runtime.menu}
+          </SlotErrorBoundary>
+        </div>
+      );
     return (
       <div className="flex flex-col">
         <MenuItem
@@ -1518,7 +1552,52 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
         >
           Context
         </MenuItem>
+        {/* Plugin controls: a root row each, exactly like the built-ins above,
+            so an evicted one is still reachable here. A control with a `menu`
+            drills in; one without runs its action and closes. */}
+        {runtimeControls.map((c) => (
+          <MenuItem
+            key={c.id}
+            dense={dense}
+            icon={c.icon}
+            hint={c.hint}
+            onClick={() => {
+              if (c.menu !== undefined) {
+                setMoreView(c.id);
+              } else {
+                c.onSelect?.();
+                close();
+              }
+            }}
+          >
+            {c.label}
+          </MenuItem>
+        ))}
         <div className="my-1 h-px bg-line" />
+        {/* Read streamed replies aloud through the active TTS engine. A
+            toggle row here rather than a toolbar control: it is a standing
+            per-browser preference, not a per-turn choice, and the toolbar is
+            for things that change per message. */}
+        <MenuItem
+          dense={dense}
+          icon={<Volume2 className={cn(speakReplies && "text-accent")} />}
+          hint={speakReplies ? ttsLabel : "off"}
+          onClick={() => setSpeakReplies(!speakReplies)}
+        >
+          Speak replies
+        </MenuItem>
+        {/* Only once a plugin has registered an engine: with just the two
+            built-ins there is nothing to choose between. */}
+        {dictationEngines.length + ttsEngines.length > 2 && (
+          <MenuItem
+            dense={dense}
+            icon={<AudioLines />}
+            hint={`${dictationEngines.length + ttsEngines.length} engines`}
+            onClick={() => setMoreView("voice")}
+          >
+            Voice engines…
+          </MenuItem>
+        )}
         <MenuItem
           dense={dense}
           icon={<Settings2 />}
@@ -1531,6 +1610,50 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     );
   };
 
+  /**
+   * Which dictation and TTS engine this browser uses — the built-in plus
+   * whatever plugins registered (lib/engines). One list each, radio-style; an
+   * engine that says it cannot run here is listed disabled with the reason as
+   * its hint, so "why is Whisper greyed out" answers itself.
+   */
+  const voiceRows = (dense: boolean) => (
+    <div className="flex flex-col">
+      <div className="px-2 py-1 text-2xs uppercase tracking-wide text-faint">Dictation</div>
+      {dictationEngines.map((d) => {
+        const why = d.unavailable?.() ?? null;
+        return (
+          <MenuItem
+            key={d.id}
+            dense={dense}
+            icon={d.id === dictationId ? <Check className="text-accent" /> : <span className="size-3" />}
+            hint={why ?? undefined}
+            disabled={!!why}
+            onClick={() => selectDictation(d.id)}
+          >
+            {d.label}
+          </MenuItem>
+        );
+      })}
+      <div className="my-1 h-px bg-line" />
+      <div className="px-2 py-1 text-2xs uppercase tracking-wide text-faint">Speech</div>
+      {ttsEngines.map((d) => {
+        const why = d.unavailable?.() ?? null;
+        return (
+          <MenuItem
+            key={d.id}
+            dense={dense}
+            icon={d.id === ttsId ? <Check className="text-accent" /> : <span className="size-3" />}
+            hint={why ?? undefined}
+            disabled={!!why}
+            onClick={() => selectTts(d.id)}
+          >
+            {d.label}
+          </MenuItem>
+        );
+      })}
+    </div>
+  );
+
   const CONFIG_TITLE: Record<string, string> = {
     attach: "Attach",
     mode: "Mode & posture",
@@ -1539,6 +1662,8 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     persona: "Persona",
     context: "Context",
     customize: "Composer controls",
+    voice: "Voice engines",
+    ...Object.fromEntries(runtimeControls.map((c) => [c.id, c.label])),
   };
 
   const closeMore = () => setMoreOpen(false);
@@ -2027,6 +2152,23 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
           >
             {(close) => <PersonaRows picker={persona} close={close} dense={!phone} />}
           </Popover>
+          )}
+
+          {/* Plugin controls, after the built-ins and before the options menu.
+              Each is an icon the ladder sized like any other (`sm` or `off`);
+              what the icon IS is the plugin's `render`. */}
+          {runtimeControls.map(
+            (c) =>
+              sizes[c.id] !== "off" && (
+                <PluginSlot
+                  key={c.id}
+                  pluginId={c.owner ?? c.id}
+                  slot={`${c.label} control`}
+                  resetKey={chat.id}
+                  render={c.render}
+                  args={["sm"]}
+                />
+              ),
           )}
 
           <div className="ml-auto flex items-center gap-2">

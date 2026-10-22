@@ -961,6 +961,15 @@ export const ChatSchema = z.object({
   showInjectedContext: z.boolean().optional(),
   /** Transcript-shell categories shown for this chat; unset inherits the project. */
   shellFilter: ShellTranscriptFilterSchema.optional(),
+  /**
+   * Per-chat state owned by PLUGINS, keyed by plugin id. The host never reads
+   * a value in here; it only stores them, merges `PUT /api/chats/:id` writes
+   * per key (`null` clears one), and carries the row on `chat-update` so every
+   * tab's client half sees the same thing. One bag rather than a column per
+   * plugin, because the schema cannot know which plugins exist — and a plugin
+   * writing a top-level field would collide with the next host field by name.
+   */
+  ext: z.record(z.string(), z.unknown()).optional(),
   archived: z.boolean().optional(),
   /**
    * A pending (or just-settled) auto-resume after a usage limit. Persisted so a

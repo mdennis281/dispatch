@@ -32,17 +32,27 @@
  * width as 0.
  */
 import {
-  COMPOSER_CONTROLS,
+  allControls,
   ladderOf,
   rungCost,
   widestSize,
+  type BuiltinComposerControl,
   type ComposerControl,
   type ComposerVisibility,
   type ControlSize,
 } from "./composerPrefs.js";
 
-/** The size each control is currently drawn at; `off` means "not in the row". */
-export type ComposerSizes = Record<ComposerControl, ControlSize>;
+/**
+ * The size each control is currently drawn at; `off` means "not in the row".
+ * Built-ins are always present; a runtime (plugin) control appears under its
+ * id once `reconcile` has seen it registered.
+ */
+export type ComposerSizes = Record<BuiltinComposerControl, ControlSize> & Record<string, ControlSize>;
+
+/** The visibility of a control, where a runtime control with no saved preference counts as on. */
+function isVisible(visible: ComposerVisibility, id: ComposerControl): boolean {
+  return visible[id] ?? true;
+}
 
 /** The rung below `size` on this control's ladder, or `off` past the end. */
 function stepDown(id: ComposerControl, size: ControlSize): ControlSize | null {
@@ -67,7 +77,7 @@ function stepUp(id: ComposerControl, size: ControlSize): ControlSize | null {
 /** Everything visible at its widest — the layout we try for before measuring. */
 export function widestSizes(visible: ComposerVisibility): ComposerSizes {
   return Object.fromEntries(
-    COMPOSER_CONTROLS.map((c) => [c.id, visible[c.id] ? widestSize(c.id) : "off"]),
+    allControls().map((c) => [c.id, isVisible(visible, c.id) ? widestSize(c.id) : "off"]),
   ) as ComposerSizes;
 }
 
@@ -80,8 +90,11 @@ export function widestSizes(visible: ComposerVisibility): ComposerSizes {
 export function reconcile(sizes: ComposerSizes, visible: ComposerVisibility): ComposerSizes {
   let changed = false;
   const next = { ...sizes };
-  for (const c of COMPOSER_CONTROLS) {
-    const want = visible[c.id] ? (sizes[c.id] === "off" ? widestSize(c.id) : sizes[c.id]) : "off";
+  for (const c of allControls()) {
+    // A control the map has never seen (a plugin's, registered after the first
+    // layout) starts at its widest exactly like one just switched on.
+    const cur = sizes[c.id] ?? "off";
+    const want = isVisible(visible, c.id) ? (cur === "off" ? widestSize(c.id) : cur) : "off";
     if (want !== next[c.id]) {
       next[c.id] = want;
       changed = true;
@@ -99,9 +112,10 @@ export function demote(sizes: ComposerSizes, visible: ComposerVisibility): Compo
   let pick: ComposerControl | null = null;
   let pickCost = Infinity;
   let pickPriority = Infinity;
-  for (const c of COMPOSER_CONTROLS) {
-    if (!visible[c.id] || sizes[c.id] === "off") continue;
-    const cost = rungCost(sizes[c.id]);
+  for (const c of allControls()) {
+    const size = sizes[c.id] ?? "off";
+    if (!isVisible(visible, c.id) || size === "off") continue;
+    const cost = rungCost(size);
     // Strictly-biggest wins; equal-biggest goes to the lower priority.
     if (cost < pickCost || (cost === pickCost && c.priority < pickPriority)) {
       pick = c.id;
@@ -110,7 +124,7 @@ export function demote(sizes: ComposerSizes, visible: ComposerVisibility): Compo
     }
   }
   if (!pick) return null;
-  const next = stepDown(pick, sizes[pick]);
+  const next = stepDown(pick, sizes[pick] ?? "off");
   return next ? { ...sizes, [pick]: next } : null;
 }
 
@@ -123,10 +137,11 @@ export function promote(sizes: ComposerSizes, visible: ComposerVisibility): Comp
   let pick: ComposerControl | null = null;
   let pickCost = -Infinity;
   let pickPriority = -Infinity;
-  for (const c of COMPOSER_CONTROLS) {
-    if (!visible[c.id]) continue;
-    if (sizes[c.id] === widestSize(c.id)) continue;
-    const cost = rungCost(sizes[c.id]);
+  for (const c of allControls()) {
+    if (!isVisible(visible, c.id)) continue;
+    const size = sizes[c.id] ?? "off";
+    if (size === widestSize(c.id)) continue;
+    const cost = rungCost(size);
     if (cost > pickCost || (cost === pickCost && c.priority > pickPriority)) {
       pick = c.id;
       pickCost = cost;
@@ -134,11 +149,11 @@ export function promote(sizes: ComposerSizes, visible: ComposerVisibility): Comp
     }
   }
   if (!pick) return null;
-  const next = stepUp(pick, sizes[pick]);
+  const next = stepUp(pick, sizes[pick] ?? "off");
   return next ? { ...sizes, [pick]: next } : null;
 }
 
 /** How many visible controls the row had to push out into the options menu. */
 export function evictedCount(sizes: ComposerSizes, visible: ComposerVisibility): number {
-  return COMPOSER_CONTROLS.filter((c) => visible[c.id] && sizes[c.id] === "off").length;
+  return allControls().filter((c) => isVisible(visible, c.id) && (sizes[c.id] ?? "off") === "off").length;
 }

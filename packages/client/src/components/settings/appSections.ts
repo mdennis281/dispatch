@@ -10,6 +10,8 @@
  * The union itself lives in stores/view — it's navigation state before it's a
  * list of panes, and the palette addresses it directly.
  */
+import type { ComponentType } from "react";
+import { useMemo } from "react";
 import {
   Bell,
   BookMarked,
@@ -24,13 +26,15 @@ import {
   ShieldCheck,
   ShieldOff,
   ArrowUpCircle,
-  type LucideIcon,
 } from "lucide-react";
 import type { AppSettingsSection } from "../../stores/view.js";
+import { useSlots, type Registered } from "../../plugins/slots.js";
+import type { SettingsSectionDef } from "@dispatch/shared";
 
 export interface AppSectionDef {
   id: AppSettingsSection;
-  icon: LucideIcon;
+  /** A lucide icon, or any component taking `className` — a plugin's icon is the latter. */
+  icon: ComponentType<{ className?: string }>;
   label: string;
   blurb: string;
   /** Shown under the heading in the detail pane. Omitted where the section's
@@ -169,3 +173,21 @@ export const APP_SECTIONS: AppSectionDef[] = [
 ];
 
 export const APP_SECTION_BY_ID = new Map(APP_SECTIONS.map((s) => [s.id, s]));
+
+/** A plugin's section as the rail and the palette see it. Keyed by its namespaced slot key. */
+export function pluginSectionDef(entry: Registered<SettingsSectionDef>): AppSectionDef {
+  return { id: entry.key, icon: entry.def.icon, label: entry.def.label, blurb: entry.def.blurb };
+}
+
+/**
+ * Every section: the built-ins above, then whatever plugins registered
+ * (`host.slots.settingsSection`), in registration order. A hook, because a
+ * plugin activates after first paint and the rail has to pick it up.
+ */
+export function useAppSections(): AppSectionDef[] {
+  const plugins = useSlots((s) => s.settingsSections);
+  return useMemo(
+    () => (plugins.length ? [...APP_SECTIONS, ...plugins.map(pluginSectionDef)] : APP_SECTIONS),
+    [plugins],
+  );
+}

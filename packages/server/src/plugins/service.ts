@@ -26,10 +26,11 @@
  *   which deactivate empties. See `routes/plugins.ts` for the wildcard.
  */
 import { pathToFileURL } from "node:url";
-import { resolve } from "node:path";
+import { basename, resolve, sep } from "node:path";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import {
   PLUGIN_API_VERSION,
+  manifestPathDir,
   type ModeConfig,
   type PluginInfo,
   type PluginLog,
@@ -389,7 +390,10 @@ export class PluginService implements PluginContributionSource {
       ...(rec.needsRestart ? { needsRestart: true } : {}),
       capabilities: m?.capabilities ?? [],
       hasServer: !!m?.server,
-      ...(m?.client ? { clientUrl: `/plugins/${rec.id}/` } : {}),
+      // The ENTRY MODULE's URL, not the directory's: the SPA `import()`s this
+      // string as-is, and the file's name is the manifest's to choose
+      // (`client/main.js` is as valid as `client/index.js`).
+      ...(m?.client ? { clientUrl: `/plugins/${rec.id}/${basename(m.client)}` } : {}),
       ...(rec.settingsSchema !== undefined ? { settingsSchema: rec.settingsSchema } : {}),
       settings: rec.settings,
       ...(m?.secrets ? { secrets: m.secrets } : {}),
@@ -476,6 +480,30 @@ export class PluginService implements PluginContributionSource {
   /** The host API major, for the pane's "built for" text. */
   get apiVersion(): number {
     return PLUGIN_API_VERSION;
+  }
+
+  /**
+   * The absolute directory served publicly at `/plugins/<id>/`, or undefined
+   * when nothing should be: no such plugin, no `client` entry, invalid or
+   * incompatible manifest, or the toggle is off. Deactivation (`setEnabled`
+   * false) therefore also pulls the client bundle, which is the only "undo"
+   * the browser half has — there is no deactivate hook on that side.
+   *
+   * Belt and braces over the schema: `PluginManifestSchema` already refuses a
+   * `client` at the plugin root or beside the server module, but this is the
+   * one place a path becomes a public directory, so it re-checks that the
+   * resolved directory is strictly INSIDE the plugin dir and not the dir
+   * itself. A manifest that somehow got past validation (hand-edited after
+   * `load()`, a future schema relaxation) still cannot publish `plugin.yaml`.
+   */
+  clientRoot(id: string): string | undefined {
+    const rec = this.records.get(id);
+    const client = rec?.manifest?.client;
+    if (!rec || !client || !rec.enabled || rec.incompatible) return undefined;
+    const base = resolve(rec.dir);
+    const dir = resolve(base, manifestPathDir(client));
+    if (dir === base || !dir.startsWith(base + sep)) return undefined;
+    return dir;
   }
 
   /* ----------------------------------------------------------- mutations */

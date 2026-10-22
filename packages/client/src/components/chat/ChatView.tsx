@@ -640,6 +640,7 @@ export function ChatView({ chat }: { chat: Chat }) {
               prs={headerPrs}
               exemptions={exemptions}
               onRevokeExemption={revokeExemption}
+              chatId={chat.id}
             />
             <Popover
               align="end"

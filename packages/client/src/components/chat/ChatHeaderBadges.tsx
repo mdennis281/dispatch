@@ -10,6 +10,40 @@ import { openWorkspace } from "../../stores/workspace.js";
 // here; that side is `import type` and erased, so the cycle never exists at
 // runtime.
 import { rosterRows } from "./chatHeaderRefs.js";
+import { useSlots } from "../../plugins/slots.js";
+import { chatRefOf } from "../../plugins/host.js";
+import { PluginSlot } from "../../plugins/PluginSlot.js";
+import { useChats } from "../../stores/chats.js";
+
+/**
+ * Badges plugins registered through `host.slots.chatBadge`, for the chat in
+ * the header. Each `render` gets the host's projection of the chat and may
+ * return null; the row re-renders on `chat-update` because it subscribes to
+ * the chat itself (its `ext` is what a plugin badge usually reads).
+ */
+export function PluginChatBadges({ chatId }: { chatId: string }) {
+  const badges = useSlots((s) => s.chatBadges);
+  // Subscribed for the re-render, not for the value: `chatRefOf` reads the
+  // same store, and this keeps the two from disagreeing by a render.
+  useChats((s) => s.byId[chatId]);
+  if (badges.length === 0) return null;
+  const ref = chatRefOf(chatId);
+  if (!ref) return null;
+  return (
+    <>
+      {badges.map((b) => (
+        <PluginSlot
+          key={b.key}
+          pluginId={b.pluginId}
+          slot="chatBadge"
+          resetKey={`${b.key}:${chatId}`}
+          render={b.def.render}
+          args={[ref]}
+        />
+      ))}
+    </>
+  );
+}
 import { cn } from "../../lib/cn.js";
 
 /** One worktree this chat has ever owned — including ones since cleaned up. */
@@ -296,6 +330,8 @@ export interface ChatHeaderBadgesProps {
   /** Human-approved guard lifts live on this chat (usually none). */
   exemptions: WorkflowExemption[];
   onRevokeExemption: (id: string) => void;
+  /** The chat, for plugin badges (`host.slots.chatBadge`). Omit to render none. */
+  chatId?: string;
 }
 
 /**
@@ -322,11 +358,19 @@ export function ChatHeaderBadges({
   prs,
   exemptions,
   onRevokeExemption,
+  chatId,
 }: ChatHeaderBadgesProps) {
   // The exemption badge survives the early return the others share: a chat can
   // be running with a guard lifted and no worktree or PR yet — which is exactly
   // the state a `commit-on-trunk` or `pr-create-by-hand` lift leaves it in.
-  const exempt = <ExemptionBadge exemptions={exemptions} onRevoke={onRevokeExemption} />;
+  // Plugin badges ride with it for the same reason: what they show is theirs
+  // to decide and need not wait for a worktree.
+  const exempt = (
+    <>
+      {chatId && <PluginChatBadges chatId={chatId} />}
+      <ExemptionBadge exemptions={exemptions} onRevoke={onRevokeExemption} />
+    </>
+  );
   if (worktrees.length === 0 && prs.length === 0) return exempt;
 
   const primary = worktrees[0];

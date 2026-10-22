@@ -31,7 +31,8 @@
  * differently from the other thirty is a debugging tax nobody signed up for.
  */
 import { create } from "zustand";
-import type { FocusPanelTab } from "../components/panels/panelBus.js";
+import type { BuiltinPanelTab, FocusPanelTab } from "../components/panels/panelBus.js";
+import { pluginPanelTabGroup } from "../plugins/slots.js";
 import { currentMode, watchBreakpoint, type LayoutMode } from "../lib/useBreakpoint.js";
 
 export type { LayoutMode };
@@ -47,13 +48,23 @@ export type Pane = "chat" | "ship" | "run";
  */
 export type PanelGroup = "ship" | "run";
 
-export const PANEL_GROUP: Record<FocusPanelTab, PanelGroup> = {
+export const PANEL_GROUP: Record<BuiltinPanelTab, PanelGroup> = {
   worktrees: "ship",
   prs: "ship",
   agents: "run",
   terminals: "run",
   apps: "run",
 };
+
+/**
+ * The group of ANY tab: a built-in from the map above, a plugin's from its
+ * registration, and `run` for an id nobody knows (a plugin's tab persisted
+ * last session and not yet registered this one) — the group that exists on
+ * every chat, including the global one that has no Ship.
+ */
+export function groupOfTab(tab: FocusPanelTab): PanelGroup {
+  return (PANEL_GROUP as Record<string, PanelGroup | undefined>)[tab] ?? pluginPanelTabGroup(tab) ?? "run";
+}
 
 /** The tab a group opens on when it's selected from outside (nav slot, segment). */
 export const GROUP_HOME: Record<PanelGroup, FocusPanelTab> = {
@@ -149,7 +160,7 @@ export const useLayout = create<LayoutStore>((set) => ({
       if (pane === "chat") return { pane };
       // Keep the tab and the pane in the same group. Landing on Ship while
       // `panelTab` is "terminals" would show the Run tabs under a Ship-lit slot.
-      if (PANEL_GROUP[s.panelTab] === pane) return { pane };
+      if (groupOfTab(s.panelTab) === pane) return { pane };
       const panelTab = GROUP_HOME[pane];
       persistTab(panelTab);
       return { pane, panelTab };
@@ -163,7 +174,7 @@ export const useLayout = create<LayoutStore>((set) => ({
       // lg: the right panel is inline there, so the pane isn't in play and
       // moving it would only strand a Ship/Run pane for the next resize down.
       if (s.mode === "lg") return { panelTab };
-      return { panelTab, pane: PANEL_GROUP[panelTab] };
+      return { panelTab, pane: groupOfTab(panelTab) };
     }),
 }));
 
