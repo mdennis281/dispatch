@@ -498,6 +498,13 @@ const MIGRATIONS: ReadonlyArray<string> = [
     updated_at      INTEGER NOT NULL
   );
   `,
+  // 12 — how long each token row's turn RAN. A turn is booked when it ends, so
+  // without its length a 90-minute turn lands whole in its last hour, and the
+  // Limits tab's hourly "what did 1% buy" would put its tokens on the wrong
+  // side of every reading it spanned. NULL for rows booked before this existed.
+  `
+  ALTER TABLE metric_tokens ADD COLUMN duration_ms INTEGER;
+  `,
 ];
 
 /** Schema version a database must be at for this build to use it. */

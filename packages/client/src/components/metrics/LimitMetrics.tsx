@@ -15,18 +15,20 @@
  * show.
  */
 import { useEffect, useMemo } from "react";
-import { AlertTriangle, Clock, Info } from "lucide-react";
+import { AlertTriangle, Clock, Coins, Info } from "lucide-react";
 import {
   LIMIT_EVENT_LABELS,
   UNEXPECTED_LIMIT_EVENTS,
   type LimitEvent,
+  type LimitPeriod,
   type LimitWindowSeries,
+  type LimitYield,
 } from "@dispatch/shared";
 import { Select } from "../ui/Select.js";
 import { Spinner } from "../ui/Spinner.js";
 import { RANGE_PRESETS } from "../../stores/metrics.js";
 import { useLimitMetrics } from "../../stores/metrics-limits.js";
-import { Card, Hero, StatTile, ago, count } from "./chrome.js";
+import { Card, Hero, StatTile, ago, compact, count } from "./chrome.js";
 import { colorFor, useChartPalette } from "./palette.js";
 import { cn } from "../../lib/cn.js";
 
@@ -181,10 +183,187 @@ function AccountChart({
   );
 }
 
+/* ------------------------------------------------------------------ yields */
+
+const PERIOD_LABELS: Record<LimitPeriod, string> = {
+  "1h": "Hour",
+  "3h": "3 hours",
+  "6h": "6 hours",
+  "1d": "Day",
+};
+
+const usdFmt = new Intl.NumberFormat(undefined, { style: "currency", currency: "USD" });
+const usd = (v: number) => usdFmt.format(v);
+
+function periodLabel(y: LimitYield, period: LimitPeriod): string {
+  const day = new Date(y.start).toLocaleDateString(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+  });
+  if (period === "1d") return day;
+  const hm = (ms: number) => new Date(ms).toLocaleTimeString(undefined, { hour: "numeric" });
+  return `${day}, ${hm(y.start)}–${hm(y.end)}`;
+}
+
+/** A window's role in an account: the shortest (session) or longest (weekly). */
+type Role = "short" | "long";
+
+/**
+ * The account's shortest and longest timed windows. Both, because each is the
+ * right gauge at a different scale: the weekly window moves about a point an
+ * hour, so per hour it is all rounding, while the 5-hour window moves 2–13
+ * points an hour and resets several times a day — fine-grained by the hour,
+ * meaningless summed over a week. An account with one window has no "short".
+ */
+function windowOf(y: LimitYield, role: Role) {
+  const timed = y.windows.filter((w) => w.windowMinutes !== null);
+  if (!timed.length) return undefined;
+  const sorted = [...timed].sort((a, b) => a.windowMinutes! - b.windowMinutes!);
+  if (role === "long") return sorted.at(-1);
+  return sorted.length > 1 ? sorted[0] : undefined;
+}
+
+/** "$1.20" when priced, else tokens — Codex has no price, only tokens. */
+function perPoint(y: { costUsd: number | null; total: number }, points: number): string {
+  if (points <= 0) return "—";
+  return y.costUsd !== null ? usd(y.costUsd / points) : `${compact(y.total / points)} tok`;
+}
+
+function PerPointCell({ y, role }: { y: LimitYield; role: Role }) {
+  const w = windowOf(y, role);
+  const pts = w?.points ?? 0;
+  const weak = pts < 3;
+  return (
+    <td
+      className={cn("cm-mono px-2 py-1.5 text-right tabular-nums", weak ? "text-faint" : "text-primary")}
+      title={
+        w && pts > 0
+          ? `${compact(y.tokens.total / pts)} tokens per 1% of ${w.title}, over ${Math.round(pts)} point(s)` +
+            (weak ? " — under 3 points, so ±1-point rounding dominates" : "")
+          : undefined
+      }
+    >
+      {perPoint(y.tokens, pts)}
+    </td>
+  );
+}
+
+/** Each account's totals over every period shown — the steadier number. */
+function summarize(rows: LimitYield[]) {
+  const by = new Map<
+    string,
+    { label: string; windows: Map<string, { title: string; points: number }>; cost: number; priced: boolean; total: number }
+  >();
+  for (const y of rows) {
+    let s = by.get(y.subscriptionId);
+    if (!s) by.set(y.subscriptionId, (s = { label: y.subscriptionLabel, windows: new Map(), cost: 0, priced: false, total: 0 }));
+    s.total += y.tokens.total;
+    if (y.tokens.costUsd !== null) {
+      s.cost += y.tokens.costUsd;
+      s.priced = true;
+    }
+    for (const w of y.windows) {
+      const t = s.windows.get(w.windowId) ?? { title: w.title, points: 0 };
+      t.points += w.points;
+      s.windows.set(w.windowId, t);
+    }
+  }
+  return [...by.values()].flatMap((s) =>
+    [...s.windows.values()]
+      .filter((w) => w.points >= 1)
+      .map((w) => ({
+        key: `${s.label}|${w.title}`,
+        label: `${s.label} · 1% of ${w.title.toLowerCase()}`,
+        value: perPoint({ costUsd: s.priced ? s.cost : null, total: s.total }, w.points),
+        hint: `${compact(s.total / w.points)} tokens · over ${Math.round(w.points)} points`,
+      })),
+  );
+}
+
+function YieldTable({ yields, period }: { yields: LimitYield[]; period: LimitPeriod }) {
+  // Idle periods (nothing moved, nothing spent) would bury an hourly table.
+  const rows = yields.filter((y) => y.tokens.total > 0 || y.windows.some((w) => w.points > 0));
+  if (!rows.length) {
+    return <p className="px-3 py-3 text-xs text-muted">Nothing yet — this fills in as accounts are used.</p>;
+  }
+  const summary = summarize(rows);
+  const title = (role: Role) => {
+    const t = rows.map((y) => windowOf(y, role)?.title).find(Boolean);
+    return t ? t.toLowerCase() : role === "long" ? "longest window" : "shortest window";
+  };
+  const num = "cm-mono px-2 py-1.5 text-right tabular-nums";
+  return (
+    <div className="flex flex-col gap-2 p-1">
+      {summary.length > 0 && (
+        <div className="flex flex-wrap gap-2 px-2 pt-2">
+          {summary.map((s) => (
+            <StatTile key={s.key} label={s.label} value={s.value} hint={s.hint} />
+          ))}
+        </div>
+      )}
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-2xs text-muted">
+              <th className="px-2 py-1.5 text-left font-medium">{PERIOD_LABELS[period]}</th>
+              <th className="px-2 py-1.5 text-left font-medium">Account</th>
+              <th className="px-2 py-1.5 text-left font-medium">Points used</th>
+              <th className="px-2 py-1.5 text-right font-medium">API value</th>
+              <th className="px-2 py-1.5 text-right font-medium">Tokens</th>
+              <th className="px-2 py-1.5 text-right font-medium">Per 1% {title("short")}</th>
+              <th className="px-2 py-1.5 text-right font-medium">Per 1% {title("long")}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((y) => {
+              const cost = y.tokens.costUsd;
+              return (
+                <tr key={`${y.subscriptionId}|${y.start}`} className="border-t border-line-soft">
+                  <td className="whitespace-nowrap px-2 py-1.5 text-muted">
+                    {periodLabel(y, period)}
+                    {y.partial && (
+                      <span className="ml-1 text-faint" title="Tracking didn't cover all of this period">
+                        (partial)
+                      </span>
+                    )}
+                  </td>
+                  <td className="px-2 py-1.5 text-secondary">{y.subscriptionLabel}</td>
+                  <td className="px-2 py-1.5 text-muted">
+                    {y.windows
+                      .filter((w) => w.points > 0)
+                      .map((w) => `${w.title} +${Math.round(w.points)}`)
+                      .join(" · ") || "—"}
+                  </td>
+                  <td className={cn(num, "text-secondary")}>
+                    {cost === null ? "—" : usd(cost)}
+                    {y.tokens.unpriced > 0 && cost !== null && (
+                      <span
+                        className="text-faint"
+                        title={`${y.tokens.unpriced} turn(s) carried no price and aren't in this figure`}
+                      >
+                        *
+                      </span>
+                    )}
+                  </td>
+                  <td className={cn(num, "text-muted")}>{compact(y.tokens.total)}</td>
+                  <PerPointCell y={y} role="short" />
+                  <PerPointCell y={y} role="long" />
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 /* ----------------------------------------------------------------- subpage */
 
 export function LimitMetrics() {
-  const { report, rangeId, setRange, load, loading, refetching, error } = useLimitMetrics();
+  const { report, rangeId, setRange, period, setPeriod, load, loading, refetching, error } =
+    useLimitMetrics();
 
   useEffect(() => {
     void load();
@@ -282,6 +461,26 @@ export function LimitMetrics() {
               </div>
             </Card>
           ))}
+
+          <Card
+            title="What 1% bought"
+            icon={<Coins />}
+            controls={
+              <Select
+                options={(Object.keys(PERIOD_LABELS) as LimitPeriod[]).map((p) => ({
+                  value: p,
+                  label: PERIOD_LABELS[p],
+                }))}
+                value={period}
+                onChange={(v) => setPeriod(v as LimitPeriod)}
+                label="Per"
+                width={130}
+              />
+            }
+            note="Faint = under 3 points moved, so ±1-point rounding dominates · a turn's spend is spread over the time it ran"
+          >
+            <YieldTable yields={report?.yields ?? []} period={report?.period ?? period} />
+          </Card>
 
           <Card
             title="Resets and changes"

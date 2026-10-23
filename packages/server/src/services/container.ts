@@ -1543,6 +1543,11 @@ export function createServices(
               `[Dispatch] metrics: imported ${r.rows} token row(s) from ${r.chats} chat(s).`,
             );
           }
+          // After the import, so rows it just wrote are already complete and
+          // only older live rows are left to fill.
+          return tokenBackfill.fillDurations().then((n) => {
+            if (n) console.log(`[Dispatch] metrics: filled ${n} token row duration(s).`);
+          });
         },
         (err: unknown) => console.error("[Dispatch] token backfill failed:", err),
       );

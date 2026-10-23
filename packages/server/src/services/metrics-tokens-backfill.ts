@@ -31,6 +31,12 @@ import type { TokenLedger, TokenLine } from "./metrics-tokens.js";
 
 export const TOKEN_BACKFILL_VERSION = 1;
 export const TOKEN_BACKFILL_META_KEY = "backfill.tokens";
+/**
+ * Durations arrived after the token import had already run on every install,
+ * so they get their own pass and watermark rather than a re-run of the import —
+ * which would re-read every transcript to insert nothing.
+ */
+export const TOKEN_DURATION_BACKFILL_META_KEY = "backfill.tokenDurations";
 
 /** Cheap pre-filters before paying for JSON.parse; see MetricsBackfill. */
 const RESULT_MARKER = '"kind":"result"';
@@ -48,6 +54,7 @@ interface Line {
   usage?: unknown;
   costUsd?: number;
   turnCostUsd?: number;
+  durationMs?: number;
 }
 
 export interface TokenBackfillResult {
@@ -121,6 +128,59 @@ export class TokenBackfill {
     return { ran: true, chats: chats.length, rows };
   }
 
+  /**
+   * Give every token row that has no `duration_ms` the one its transcript
+   * result row recorded. Rows booked before durations were captured otherwise
+   * sit at the instant their turn ended — and the Limits tab's hourly view
+   * would put a 70-minute turn's whole spend in its last hour, forever.
+   * Once per install; a re-run finds nothing missing and does nothing.
+   */
+  async fillDurations(): Promise<number> {
+    const { metrics, tokens } = this.deps;
+    if (metrics.getMeta(TOKEN_DURATION_BACKFILL_META_KEY)) return 0;
+    let filled = 0;
+    for (const chatId of tokens.chatsMissingDuration()) {
+      try {
+        const durations = await this.durationsForChat(chatId);
+        if (durations.size) filled += tokens.setDurations(chatId, durations);
+      } catch (err) {
+        console.error(`[Dispatch] metrics: duration backfill skipped chat ${chatId}:`, err);
+      }
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    metrics.setMeta(
+      TOKEN_DURATION_BACKFILL_META_KEY,
+      JSON.stringify({ version: 1, completedAt: (this.deps.now ?? Date.now)(), filled }),
+    );
+    return filled;
+  }
+
+  private async durationsForChat(chatId: string): Promise<Map<string, number>> {
+    const out = new Map<string, number>();
+    const path = this.deps.store.chatTranscriptPath(chatId);
+    if (!existsSync(path)) return out;
+    const lines = createInterface({
+      input: createReadStream(path, { encoding: "utf8" }),
+      crlfDelay: Infinity,
+    });
+    try {
+      for await (const text of lines) {
+        if (!text.includes(RESULT_MARKER)) continue;
+        try {
+          const row = JSON.parse(text) as Line;
+          if (row.kind === "result" && row.id && typeof row.durationMs === "number" && row.durationMs > 0) {
+            out.set(row.id, row.durationMs);
+          }
+        } catch {
+          // A torn line is skipped, as everywhere else in this import.
+        }
+      }
+    } finally {
+      lines.close();
+    }
+    return out;
+  }
+
   private async linesForChat(
     chatId: string,
     chat: {
@@ -178,6 +238,7 @@ export class TokenBackfill {
           subscriptionId: chat.subscriptionId,
           model,
           turn: row.turn,
+          ...(typeof row.durationMs === "number" ? { durationMs: row.durationMs } : {}),
           source: "backfill",
         });
       }

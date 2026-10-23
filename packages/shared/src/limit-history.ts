@@ -112,11 +112,21 @@ export type LimitEvent = z.infer<typeof LimitEventSchema>;
 
 /* ------------------------------------------------------------------ query */
 
+/**
+ * How wide a yield period is. Hours, aligned to local midnight, so a "6h"
+ * period is always 00–06, 06–12, … and a day is a calendar day.
+ */
+export const LimitPeriodSchema = z.enum(["1h", "3h", "6h", "1d"]);
+export type LimitPeriod = z.infer<typeof LimitPeriodSchema>;
+export const LIMIT_PERIOD_HOURS: Record<LimitPeriod, number> = { "1h": 1, "3h": 3, "6h": 6, "1d": 24 };
+
 export const LimitQuerySchema = z.object({
   from: z.number().int().optional(),
   to: z.number().int().optional(),
   /** Narrow to these accounts; absent = all. */
   subscriptionIds: z.array(z.string()).optional(),
+  /** Width of the yield periods. */
+  period: LimitPeriodSchema.default("1d"),
 });
 export type LimitQuery = z.infer<typeof LimitQuerySchema>;
 export type LimitQueryInput = z.input<typeof LimitQuerySchema>;
@@ -157,8 +167,45 @@ export const LimitAccountStatusSchema = z.object({
 });
 export type LimitAccountStatus = z.infer<typeof LimitAccountStatusSchema>;
 
+/**
+ * One account over one period: how far each window moved, and what was spent.
+ *
+ * A turn's tokens are spread evenly over the time it RAN (its end minus its
+ * duration), not dropped on the instant it ended. Booked at the end, a
+ * 90-minute turn lands whole in its last hour — and one 33M-token turn booked
+ * a minute after a reset made one 5-hour window look 40× more generous than
+ * the next. Spread over its run, it is accurate to the hour; turns booked
+ * before durations were recorded still land at their end.
+ */
+export interface LimitYield {
+  /** Period start/end, epoch ms. */
+  start: number;
+  end: number;
+  subscriptionId: string;
+  subscriptionLabel: string;
+  provider: string;
+  /** Percentage points each window was driven up during the period. */
+  windows: { windowId: string; title: string; windowMinutes: number | null; points: number }[];
+  /** What the account's turns spent during the period (once tracking had begun). */
+  tokens: {
+    total: number;
+    output: number;
+    /** Null when nothing in the period carried a price (Codex). */
+    costUsd: number | null;
+    /** Turns that overlap the period (a turn spanning two periods counts in both). */
+    turns: number;
+    /** Of those, turns with no price — their API value is missing from `costUsd`. */
+    unpriced: number;
+  };
+  /** Readings didn't cover the whole period (tracking started/stopped inside it). */
+  partial: boolean;
+}
+
 export interface LimitReport {
   windows: LimitWindowSeries[];
+  /** Per account per period, newest first. */
+  yields: LimitYield[];
+  period: LimitPeriod;
   /** Newest first. */
   events: LimitEvent[];
   accounts: LimitAccountStatus[];
