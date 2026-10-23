@@ -12,7 +12,7 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { addPlugin, readPluginEntries, setPluginEnabled, setPluginSource, removePlugin } from "./plugins.js";
+import { addPlugin, readPluginEntries, setPluginEnabled, setPluginSource, removePlugin, withoutCredentials } from "./plugins.js";
 import { checkPluginUpdates, purgePluginData, updatePlugins } from "./plugin-lifecycle.js";
 
 let root: string;
@@ -57,6 +57,13 @@ describe("add records where a plugin came from", () => {
     await setPluginEnabled(configDir, "hello", false);
     await setPluginSource(configDir, "hello", result.source);
     expect((await readPluginEntries(configDir)).hello).toMatchObject({ enabled: false, source: { sha } });
+  });
+
+  it("never records credentials from a clone URL", () => {
+    expect(withoutCredentials("https://x-access-token:ghp_secret@github.com/o/private.git")).toBe("https://github.com/o/private.git");
+    expect(withoutCredentials("https://github.com/o/r.git")).toBe("https://github.com/o/r.git");
+    expect(withoutCredentials("git@github.com:o/r.git")).toBe("git@github.com:o/r.git");
+    expect(withoutCredentials(bare)).toBe(bare);
   });
 
   it("records a local directory as local", async () => {

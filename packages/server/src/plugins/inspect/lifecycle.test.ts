@@ -278,6 +278,19 @@ describe("recorded source", () => {
     expect(entry).toMatchObject({ enabled: false, settings: { a: 1 }, source: { sha: SHA_OLD, refKind: "branch" } });
   });
 
+  it("never serves credentials from a hand-edited source", async () => {
+    const { plugins } = await app(deps(), async (configDir) => {
+      await writePlugin(join(configDir, "plugins", "hello"), V1);
+      const url = "https://x-access-token:ghp_secret@github.com/o/r.git";
+      await writeFile(
+        join(configDir, "config.json"),
+        JSON.stringify({ plugins: { hello: { source: { type: "git", url, cloneUrl: url, ref: "main", refKind: "branch", subdir: "", sha: SHA_OLD, installedAt: 1 } } } }),
+      );
+    });
+    expect(JSON.stringify(plugins.get("hello"))).not.toContain("ghp_secret");
+    expect(plugins.get("hello")?.source).toMatchObject({ url: "https://github.com/o/r.git", cloneUrl: "https://github.com/o/r.git" });
+  });
+
   it("records a tag as a tag and a sha as pinned", async () => {
     const { json } = await app(deps());
     const tag = await json<{ plugin: PluginInfo }>("POST", "/api/plugins/install", { url: `${URL_MAIN}/tree/v0.1.0`, sha: SHA_OLD });

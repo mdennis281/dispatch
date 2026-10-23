@@ -185,21 +185,16 @@ export interface InstallResult {
 }
 
 /**
- * Git with prompts and credential helpers off: a private or mistyped
- * repository must fail with an error, not sit behind a credential window on
- * the host's desktop. Same switches the server's fetch uses.
+ * Run a command; resolve with its stdout.
+ *
+ * Git keeps the owner's credential helpers and prompts here — unlike the
+ * server's fetch, which turns them off because nobody is at its terminal. A
+ * CLI user installing from a private repo authenticates exactly as they would
+ * for `git clone`.
  */
-const QUIET_GIT = ["-c", "credential.helper=", "-c", "core.askPass="];
-function quietEnv(cmd: string): NodeJS.ProcessEnv | undefined {
-  if (cmd !== "git") return undefined;
-  return { ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never", GIT_ASKPASS: "", SSH_ASKPASS: "" };
-}
-
-/** Run a command; resolve with its stdout. */
 export function runOutput(cmd: string, args: string[], cwd?: string): Promise<string> {
   return new Promise((resolvePromise, reject) => {
-    const argv = cmd === "git" ? [...QUIET_GIT, ...args] : args;
-    const child = spawn(cmd, argv, { cwd, env: quietEnv(cmd), stdio: ["ignore", "pipe", "pipe"], shell: false });
+    const child = spawn(cmd, args, { cwd, stdio: ["ignore", "pipe", "pipe"], shell: false });
     let out = "";
     let err = "";
     child.stdout?.on("data", (d: Buffer) => (out += d.toString()));
@@ -235,6 +230,23 @@ export async function shallowClone(
   // Empty on a detached HEAD — which is what cloning a TAG gives.
   const branch = (await runOutput("git", ["-C", root, "symbolic-ref", "--short", "-q", "HEAD"]).catch(() => "")).trim();
   return { root, sha, ...(branch ? { branch } : {}) };
+}
+
+/**
+ * `https://user:token@host/r.git` → `https://host/r.git`. Anything that is not
+ * a parseable URL (`git@host:o/r.git`, a local `*.git` path) carries no
+ * secret in that position and is returned as-is.
+ */
+export function withoutCredentials(url: string): string {
+  try {
+    const u = new URL(url);
+    if (!u.username && !u.password) return url;
+    u.username = "";
+    u.password = "";
+    return u.toString();
+  } catch {
+    return url;
+  }
 }
 
 /** Is `source` something `git clone` should handle rather than the filesystem? */
@@ -277,8 +289,11 @@ async function materialise(source: string): Promise<{ pluginDir: string; scratch
         // The default branch, followed: `dispatch plugin update` checks its tip.
         source: {
           type: "git",
-          url: source,
-          cloneUrl: source,
+          // Never a token: the record is served by `GET /api/plugins` and shown
+          // on the row. A private repo then authenticates through the owner's
+          // credential helper on update, as it would for any `git fetch`.
+          url: withoutCredentials(source),
+          cloneUrl: withoutCredentials(source),
           ref: clone.branch ?? "HEAD",
           refKind: "branch",
           subdir: relative(clone.root, dir).split(sep).join("/"),

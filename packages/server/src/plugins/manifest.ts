@@ -10,5 +10,6 @@ export {
   readPluginDir,
   pluginsRoot,
   removePlugin,
+  withoutCredentials,
   type DiscoveredPlugin,
 } from "@dispatch/cli/core";

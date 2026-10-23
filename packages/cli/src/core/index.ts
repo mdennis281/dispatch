@@ -51,6 +51,7 @@ export {
   readPluginToggles,
   consentLines,
   looksLikeGitUrl,
+  withoutCredentials,
   type DiscoveredPlugin,
   type InstallResult,
 } from "./plugins.js";

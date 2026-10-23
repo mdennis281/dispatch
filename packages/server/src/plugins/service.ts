@@ -61,7 +61,14 @@ import {
   type PluginContextDeps,
   type ServerPluginRouteHandler,
 } from "./context.js";
-import { discoverPlugins, discoverPluginsAt, pluginsRoot, removePlugin, type DiscoveredPlugin } from "./manifest.js";
+import {
+  discoverPlugins,
+  discoverPluginsAt,
+  pluginsRoot,
+  removePlugin,
+  withoutCredentials,
+  type DiscoveredPlugin,
+} from "./manifest.js";
 import { pluginOAuthManifestView, type PluginOAuthManifestView } from "./oauth.js";
 import {
   EMPTY_CONTRIBUTIONS,
@@ -536,7 +543,17 @@ export class PluginService implements PluginContributionSource {
       ...(oauth?.length ? { oauth } : {}),
       ...(rec.contributions.warnings.length ? { warnings: rec.contributions.warnings } : {}),
       origin: this.originOf(rec),
-      ...(rec.source && !rec.linked ? { source: rec.source } : {}),
+      // Served to every signed-in user and drawn on the row, so a token
+      // someone put in a clone URL (the CLI strips it; a hand-edited config
+      // may not) never leaves the server.
+      ...(rec.source && !rec.linked
+        ? {
+            source:
+              rec.source.type === "git"
+                ? { ...rec.source, url: withoutCredentials(rec.source.url), cloneUrl: withoutCredentials(rec.source.cloneUrl) }
+                : rec.source,
+          }
+        : {}),
     };
   }
 
