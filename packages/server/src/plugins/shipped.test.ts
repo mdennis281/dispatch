@@ -26,17 +26,22 @@ async function writeProviderPlugin(root: string, id: string, version = "1.0.0"):
     join(dir, "plugin.yaml"),
     `id: ${id}\nname: ${id}\nversion: ${version}\ndispatch: '>=1'\nserver: ./server/main.js\ncapabilities:\n  - providers\n`,
   );
-  await writeFile(
-    join(dir, "server", "main.js"),
-    `export function activate(ctx) {
-       ctx.providers.register(
-         { kind: ${JSON.stringify(id)}, capabilities: {}, runtime: () => ({ kind: ${JSON.stringify(id)}, source: "installed", available: true }), listModels: async () => [] },
-         { id: ${JSON.stringify(id)}, label: "v${version}", shortLabel: ${JSON.stringify(id)}, blurb: "", fallbackModels: [], efforts: [], subagents: false, skillsDir: ".agents",
-           account: { configDirEnv: "X_HOME", defaultConfigDir: ".x", loginFile: "auth.json" } },
-       );
-     }\n`,
+  // The module is the same text for every plugin and reads its identity from
+  // a JSON file beside it — no value is ever spliced into code.
+  await writeFile(join(dir, "server", "meta.json"), JSON.stringify({ id, version }));
+  await writeFile(join(dir, "server", "main.js"), PROVIDER_MODULE);
+}
+
+const PROVIDER_MODULE = `import { readFileSync } from "node:fs";
+const { id, version } = JSON.parse(readFileSync(new URL("./meta.json", import.meta.url), "utf8"));
+export function activate(ctx) {
+  ctx.providers.register(
+    { kind: id, capabilities: {}, runtime: () => ({ kind: id, source: "installed", available: true }), listModels: async () => [] },
+    { id, label: "v" + version, shortLabel: id, blurb: "", fallbackModels: [], efforts: [], subagents: false, skillsDir: ".agents",
+      account: { configDirEnv: "X_HOME", defaultConfigDir: ".x", loginFile: "auth.json" } },
   );
 }
+`;
 
 async function host() {
   const base = await mkdtemp(join(tmpdir(), "dispatch-shipped-"));
