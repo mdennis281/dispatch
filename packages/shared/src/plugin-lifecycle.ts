@@ -65,10 +65,21 @@ interface TagVersion {
  * `b-v2.0.0`) only ever compares a plugin's tags with its own.
  */
 export function parseTagVersion(tag: string): TagVersion | null {
-  const m = /^(.*?)(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/.exec(tag);
-  if (!m) return null;
-  return { prefix: m[1]!, nums: [Number(m[2]), Number(m[3]), Number(m[4])], ...(m[5] ? { pre: m[5] } : {}) };
+  // Tag names come from someone else's remote. One regex with a lazy prefix
+  // (`^(.*?)(\d+)\.…`) backtracks polynomially on a name like "0000…" — so try
+  // each place a version could START (a digit not preceded by one) against an
+  // anchored pattern with no overlapping quantifiers, under a length cap.
+  if (tag.length > 200) return null;
+  for (let i = 0; i < tag.length; i++) {
+    if (!isDigit(tag[i]) || (i > 0 && isDigit(tag[i - 1]))) continue;
+    const m = VERSION_AT.exec(tag.slice(i));
+    if (m) return { prefix: tag.slice(0, i), nums: [Number(m[1]), Number(m[2]), Number(m[3])], ...(m[4] ? { pre: m[4] } : {}) };
+  }
+  return null;
 }
+
+const VERSION_AT = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/;
+const isDigit = (c: string | undefined) => c !== undefined && c >= "0" && c <= "9";
 
 /** Semver precedence, with prerelease identifiers compared field by field. */
 export function compareTagVersions(a: TagVersion, b: TagVersion): number {

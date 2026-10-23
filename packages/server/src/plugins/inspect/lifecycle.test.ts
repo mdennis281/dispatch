@@ -19,6 +19,7 @@ import {
   diffPluginSurfaces,
   newerTag,
   parseLsRemote,
+  parseTagVersion,
   resolveUpdateTarget,
   type PluginInfo,
   type PluginUninstallPreview,
@@ -182,6 +183,16 @@ describe("resolveUpdateTarget", () => {
     expect(newerTag("v1.0.0", ["v1.0.1", "v2.0.0", "other-v9.0.0", "v3.0.0-rc.1"])).toBe("v2.0.0");
     expect(newerTag("v3.0.0-rc.1", ["v3.0.0-rc.2", "v3.0.0"])).toBe("v3.0.0");
     expect(newerTag("hello-v1.0.0", ["v9.0.0", "hello-v1.1.0", "world-v5.0.0"])).toBe("hello-v1.1.0");
+  });
+
+  it("parses tag versions in linear time, whatever a remote names its tags", () => {
+    expect(parseTagVersion("hello-v1.2.3-rc.1")).toEqual({ prefix: "hello-v", nums: [1, 2, 3], pre: "rc.1" });
+    expect(parseTagVersion("v10.0.0")).toEqual({ prefix: "v", nums: [10, 0, 0] });
+    const started = Date.now();
+    expect(parseTagVersion("0".repeat(150) + "x")).toBeNull();
+    expect(parseTagVersion(`0.0.0-${"0.0.0--".repeat(25)}!`)).toBeNull();
+    expect(parseTagVersion("1".repeat(5000))).toBeNull();
+    expect(Date.now() - started).toBeLessThan(200);
   });
 
   it("reports a moved tag as an update, and pins a sha", () => {
