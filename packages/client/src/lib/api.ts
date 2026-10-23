@@ -10,6 +10,11 @@ import type {
   PluginInspection,
   PluginInstallResult,
   PluginOAuthConnectResult,
+  PluginSource,
+  PluginUninstallPreview,
+  PluginUninstallResult,
+  PluginUpdateCheck,
+  PluginUpdateResult,
   ReviewRoundsPolicy,
   GhCliStatus,
   RuntimeSetupStatus,
@@ -317,7 +322,7 @@ export interface AppSettings {
    * (same arrangement as `mcpEnabled`); carried raw through `normalize()` so a
    * full-replace save of anything else does not delete it.
    */
-  plugins?: Record<string, { enabled?: boolean; settings?: Record<string, unknown> }>;
+  plugins?: Record<string, { enabled?: boolean; settings?: Record<string, unknown>; source?: PluginSource }>;
   harness?: {
     defaultHarness?: HarnessKind;
     defaults?: Partial<Record<HarnessKind, HarnessDefaults>>;
@@ -1521,6 +1526,15 @@ export const api = {
     /** Install exactly the inspected `sha`. `replace` confirms overwriting an installed copy. Owner only. */
     install: (url: string, sha: string, replace = false) =>
       post<PluginInstallResult & { plugin?: PluginInfo }>("/api/plugins/install", { url, sha, replace }),
+    /** Resolve the recorded source against its remote; when newer, the target's report and its diff. Owner only. */
+    checkUpdate: (id: string) => post<PluginUpdateCheck>(`/api/plugins/${encodeURIComponent(id)}/check-update`),
+    /** Install the target `checkUpdate` showed. Refused (409) if the ref moved since. Owner only. */
+    update: (id: string, sha: string) => post<PluginUpdateResult>(`/api/plugins/${encodeURIComponent(id)}/update`, { sha }),
+    /** Exactly what Uninstall would remove — for the confirm dialog. Owner only. */
+    uninstallPreview: (id: string) => get<PluginUninstallPreview>(`/api/plugins/${encodeURIComponent(id)}/uninstall`),
+    /** Remove it; `purge` also deletes its settings, kv, secrets and OAuth tokens. Owner only. */
+    uninstall: (id: string, purge: boolean) =>
+      post<PluginUninstallResult>(`/api/plugins/${encodeURIComponent(id)}/uninstall`, { purge }),
   },
 
   settings: {

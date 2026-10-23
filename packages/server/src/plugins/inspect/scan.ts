@@ -116,6 +116,7 @@ const SERVER_MEMBERS: Record<string, { capability?: PluginCapability; methods?: 
   kv: { capability: "kv" },
   processes: { capability: "process" },
   oauth: { capability: "oauth" },
+  providers: { capability: "providers" },
   projects: {},
 };
 

@@ -131,7 +131,11 @@ and a manifest whose range excludes it — or cannot be parsed — is listed as
 | `process` | `contributes.processes`, `ctx.processes` |
 | `oauth` | `oauth.clients`, `ctx.oauth` |
 | `ui` | a `client` entry |
+<<<<<<< HEAD
 | `providers` | `ctx.providers.register` — see "Providers" |
+=======
+| `providers` | `ctx.providers.register` — an agent runtime chats can run on |
+>>>>>>> b76eebf2 (feat(plugins): record install source, check for updates, update, uninstall (#409))
 
 A capability the manifest does not declare is simply absent from the context
 object the plugin receives — the members are typed optional for that reason.
@@ -180,8 +184,10 @@ service container.
 `enabled`, `needsRestart`, `capabilities`, `hasServer`, `clientUrl` (the entry
 **module's** URL, `/plugins/<id>/<file>`, which the SPA imports as-is),
 `settingsSchema`, `settings`, the declared `secrets` names, `oauth[]` (per
-client: `connected`, `expiresAt`, `scopes`, `configError`) and `warnings[]`
-(non-fatal contribution problems, on the row rather than only in a server log).
+client: `connected`, `expiresAt`, `scopes`, `configError`), `warnings[]`
+(non-fatal contribution problems, on the row rather than only in a server log),
+`origin` (`url | local | linked | builtin | unknown`) and the recorded `source` —
+see "Updating and uninstalling".
 `PUT /api/plugins/:id/enabled` and `PUT /api/plugins/:id/settings` are targeted
 patches, not settings-draft writes; `POST /api/plugins/:id/reveal` opens the
 directory on the machine Dispatch runs on (from a remote browser the pane also
@@ -193,7 +199,9 @@ shows and copies the path).
 dispatch plugin init <id> [--server|--client|--both] [--name <n>] [--dir <parent>] [--sdk <path>]
 dispatch plugin add <path | git-url | tarball>   validate in the source, copy into plugins/<id>, print the consent summary
 dispatch plugin link <path>                      junction/symlink a working directory (development)
-dispatch plugin list | enable <id> | disable <id> | remove <id>
+dispatch plugin list | enable <id> | disable <id>
+dispatch plugin update [<id>] [--check] [--yes]  follow the recorded source; --yes accepts an update that asks for more
+dispatch plugin remove <id> [--purge] [--data-dir <dir>]
 ```
 
 `add` claims the slot by the manifest's id (not the source directory's name),
@@ -261,7 +269,67 @@ session or an integration token; auth off means the single local user).
 Settings → Plugins is the same list with the enable toggle, status, error text,
 capability and secret chips, warnings, a generic settings form rendered from the
 JSON schema (string / number / integer / boolean / enum), Connect / Disconnect
-per declared OAuth client, copy path, and "open folder".
+per declared OAuth client, the source line, copy path, "open folder", Check for
+updates and Uninstall.
+
+### Updating and uninstalling
+
+**The recorded source.** Every URL install — the pane's Install, and `dispatch
+plugin add <git-url>` — records `AppSettings.plugins[id].source` =
+`{ type: "git", url, cloneUrl, ref, refKind: branch | tag | sha, subdir, sha,
+installedAt }` in `config.json`; `add <path | tarball>` records `{ type: "local",
+path }`. It lives in host-owned config and **never** in the plugin directory:
+everything in there came from the plugin's author, and a source a plugin could
+write is one it could re-point, so Update would install whatever the plugin said
+to. It survives every other write to the entry (toggle, settings) and the
+full-replace `PUT /api/settings`, which preserves the whole `plugins` map. A
+plugin already on disk with no record — installed by hand or before #409 — is
+`origin: "unknown"` ("Source unknown"). It is not backfilled; reinstalling from
+its URL records one. `origin` is derived: `builtin` (shipped in the app
+payload — `DiscoveredPlugin.builtin`) wins, then `linked` (a junction), then the
+record's type.
+
+**Check for updates** (`POST /api/plugins/:id/check-update`, per row and "Check all
+for updates"; manual only, nothing polls) resolves the record against one `git
+ls-remote` with the shared `resolveUpdateTarget`
+(`packages/shared/src/plugin-lifecycle.ts`): a **branch** follows its tip (a deleted
+branch is an error, not "up to date"); a **tag** looks for the newest semver-greater
+tag with the same prefix (`v`, `hello-v`, `hello@`), skipping prereleases unless the
+installed tag is one, and reports a force-moved tag as an update; a **sha** is
+pinned. When there is a newer commit it is fetched and reported exactly like an
+inspect, the installed directory is scanned in place, and `diffPluginSurfaces`
+compares the two: **escalations first** — new capabilities, secrets, OAuth clients
+or scopes, new or re-pointed MCP servers and processes, newly undeclared uses, a
+server or browser half where there was none, a new instruction file — then the
+other changes (what it dropped, contributions, then "hooks used" with `io` first).
+A network failure is a row result (`status: "error"`), so Check all keeps going.
+
+**Update** (`POST /api/plugins/:id/update { sha }`) re-resolves the ref and refuses
+(409) if it no longer points at the sha the owner was shown — they consented to a
+diff of one commit. It then runs Install's own path pinned to that sha, refusing an
+invalid or incompatible target or one whose manifest id differs. Settings, the
+toggle, kv rows, secrets and OAuth tokens are all keyed by the id **outside** the
+directory, so replacing the directory keeps them with no copying. Same restart rule
+as Install. `dispatch plugin update` makes the same decisions offline, fetches with
+a shallow clone of the target ref, and compares manifests and contribution files
+(it has no scanner); an update that escalates is not installed without `--yes`.
+
+**Uninstall** (`GET /api/plugins/:id/uninstall` previews, `POST` with `{ purge }`
+does it) deactivates a running plugin in place — the teardown a toggle-off runs, so
+its routes 404, its processes stop and its contributions vanish with the record —
+then deletes the directory, or for a **linked** plugin removes only the junction and
+never touches the directory it points at. The recorded source always goes. The
+"Also delete its data" box (default off; `--purge` in the CLI) also removes the
+`plugins.<id>` entry, this instance's `plugin_kv` rows and `plugin_oauth_token` rows,
+and the global secrets its manifest lists — except any another installed plugin also
+lists, which are kept and named. kv rows and OAuth tokens are per instance (they
+live in `state.db`); the CLI reaches them only with `--data-dir`. A browser bundle an
+open tab already imported has no unload hook, so the result says those tabs keep it
+until they reload.
+
+**Built-in plugins** get none of this: no Update ("Built-in, updates with
+Dispatch"), no Uninstall, and Install refuses their ids. The enable toggle stays.
+All four routes are owner-only, like inspect and install.
 
 ## Server API
 

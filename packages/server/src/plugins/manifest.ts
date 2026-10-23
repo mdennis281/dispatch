@@ -4,4 +4,11 @@
  * exact code the loader runs on it afterwards. Re-exported here so the rest of
  * the plugin host has one local import for it.
  */
-export { discoverPlugins, discoverPluginsAt, readPluginDir, pluginsRoot, type DiscoveredPlugin } from "@dispatch/cli/core";
+export {
+  discoverPlugins,
+  discoverPluginsAt,
+  readPluginDir,
+  pluginsRoot,
+  removePlugin,
+  type DiscoveredPlugin,
+} from "@dispatch/cli/core";

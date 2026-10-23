@@ -12,6 +12,7 @@
  */
 import { resolve } from "node:path";
 import { PLUGIN_API_VERSION } from "@dispatch/shared";
+import type { PluginChange } from "@dispatch/shared";
 import {
   addPlugin,
   consentLines,
@@ -21,7 +22,9 @@ import {
   readPluginToggles,
   removePlugin,
   setPluginEnabled,
+  setPluginSource,
 } from "../core/plugins.js";
+import { checkPluginUpdates, purgePluginData, updatePlugins, type CliUpdateCheck } from "../core/plugin-lifecycle.js";
 import { initPlugin, type PluginScaffoldKind } from "../core/plugin-init.js";
 import { CmError } from "../core/manifest.js";
 import { flag, has, parseArgs, type ParsedArgs } from "../core/args.js";
@@ -54,7 +57,10 @@ const RESTART_NOTE = "  Restart Dispatch to apply (plugins are read at boot; not
 async function cmdAdd(args: ParsedArgs): Promise<void> {
   const [source] = args.positionals;
   if (!source) throw new CmError("Usage: dispatch plugin add <path | git-url | tarball> [--force]");
-  const result = await addPlugin(configDirOf(args), source, { force: has(args, "force") });
+  const configDir = configDirOf(args);
+  const result = await addPlugin(configDir, source, { force: has(args, "force") });
+  // Where it came from, in host-owned config — what `update` follows later.
+  if (result.source) await setPluginSource(configDir, result.plugin.manifest!.id, result.source);
   if (emitJson(args, result)) return;
   const m = result.plugin.manifest!;
   process.stdout.write(`${result.outcome === "replaced" ? "Replaced" : "Installed"} ${m.id} → ${result.dir}\n`);
@@ -65,7 +71,10 @@ async function cmdAdd(args: ParsedArgs): Promise<void> {
 async function cmdLink(args: ParsedArgs): Promise<void> {
   const [source] = args.positionals;
   if (!source) throw new CmError("Usage: dispatch plugin link <path> [--force]");
-  const result = await linkPlugin(configDirOf(args), source, { force: has(args, "force") });
+  const configDir = configDirOf(args);
+  const result = await linkPlugin(configDir, source, { force: has(args, "force") });
+  // A link is its own origin; a source recorded for a copy it replaced would lie.
+  await setPluginSource(configDir, result.plugin.manifest!.id, undefined);
   if (emitJson(args, result)) return;
   const m = result.plugin.manifest!;
   process.stdout.write(`Linked ${m.id} → ${result.dir}\n`);
@@ -108,11 +117,80 @@ async function cmdEnable(args: ParsedArgs, enabled: boolean): Promise<void> {
 
 async function cmdRemove(args: ParsedArgs): Promise<void> {
   const [id] = args.positionals;
-  if (!id) throw new CmError("Usage: dispatch plugin remove <id>");
-  const { removed, dir } = await removePlugin(configDirOf(args), id);
-  if (emitJson(args, { ok: removed, id, dir })) return;
-  if (!removed) throw new CmError(`No plugin "${id}" to remove.`);
-  process.stdout.write(`Removed ${id} (${dir})\n${RESTART_NOTE}`);
+  if (!id) throw new CmError("Usage: dispatch plugin remove <id> [--purge] [--data-dir <dir>]");
+  const configDir = configDirOf(args);
+  // Read before the directory goes: the manifest is what names its secrets.
+  const found = (await discoverPlugins(configDir)).find((p) => p.id === id);
+  const { removed, dir } = await removePlugin(configDir, id);
+  if (!removed) {
+    if (emitJson(args, { ok: false, id, dir })) return;
+    throw new CmError(`No plugin "${id}" to remove.`);
+  }
+  await setPluginSource(configDir, id, undefined);
+  const purge = has(args, "purge")
+    ? await purgePluginData(configDir, id, {
+        manifestSecrets: found?.manifest?.secrets ?? [],
+        dataDir: flag(args, "data-dir") ?? process.env.DISPATCH_DATA_DIR ?? process.env.CM_DATA_DIR,
+      })
+    : undefined;
+  if (emitJson(args, { ok: true, id, dir, linked: !!found?.linked, ...(purge ? { purged: purge } : {}) })) return;
+  process.stdout.write(`${found?.linked ? "Unlinked" : "Removed"} ${id} (${dir})${found?.linked ? " — the linked directory is untouched" : ""}\n`);
+  if (purge) {
+    const parts = [
+      purge.settings ? "its settings entry" : "",
+      purge.secrets.length ? `secrets ${purge.secrets.join(", ")}` : "",
+      purge.kvKeys ? `${purge.kvKeys} kv key(s)` : "",
+      purge.oauth?.length ? `OAuth tokens for ${purge.oauth.join(", ")}` : "",
+    ].filter(Boolean);
+    process.stdout.write(`  Purged: ${parts.length ? parts.join("; ") : "nothing was stored"}\n`);
+    if (purge.sharedSecrets.length) {
+      process.stdout.write(`  Kept (another plugin lists them): ${purge.sharedSecrets.join(", ")}\n`);
+    }
+    if (purge.stateSkipped) process.stdout.write(`  Not purged: ${purge.stateSkipped}\n`);
+  } else {
+    process.stdout.write("  Its settings, kv, secrets and OAuth tokens are kept — --purge removes them.\n");
+  }
+  process.stdout.write(RESTART_NOTE);
+}
+
+function changeLine(c: PluginChange): string {
+  const sign = c.change === "added" ? "+" : c.change === "removed" ? "-" : "~";
+  return `    ${sign} ${c.label}${c.detail ? ` — ${c.detail}` : ""}\n`;
+}
+
+function writeCheck(c: CliUpdateCheck & { updated?: boolean }): void {
+  const cur = c.current ? `${c.current.version ? `v${c.current.version} ` : ""}${c.current.ref}@${c.current.sha.slice(0, 7)}` : "";
+  const tgt = c.target ? `${c.target.version ? `v${c.target.version} ` : ""}${c.target.ref}@${c.target.sha.slice(0, 7)}` : "";
+  const state =
+    c.status === "available" ? (c.updated ? `updated ${cur} → ${tgt}` : `update available ${cur} → ${tgt}`) : c.status;
+  process.stdout.write(`  ${c.id.padEnd(20)} ${state}${c.message ? ` — ${c.message}` : ""}\n`);
+  if (!c.diff) return;
+  if (c.diff.escalations.length) {
+    process.stdout.write("    Asks for more:\n");
+    for (const e of c.diff.escalations) process.stdout.write(changeLine(e));
+  }
+  if (c.diff.changes.length) {
+    process.stdout.write("    Other changes:\n");
+    for (const e of c.diff.changes) process.stdout.write(changeLine(e));
+  }
+}
+
+async function cmdUpdate(args: ParsedArgs): Promise<void> {
+  const [id] = args.positionals;
+  const configDir = configDirOf(args);
+  const results = has(args, "check")
+    ? await checkPluginUpdates(configDir, { ...(id ? { id } : {}) })
+    : await updatePlugins(configDir, { ...(id ? { id } : {}), acceptEscalations: has(args, "yes") });
+  if (emitJson(args, results)) return;
+  if (!results.length) {
+    process.stdout.write(`No plugins in ${pluginsRoot(configDir)}\n`);
+    return;
+  }
+  for (const r of results) writeCheck(r);
+  if (results.some((r) => "updated" in r && r.updated)) process.stdout.write(RESTART_NOTE);
+  else if (!has(args, "check") && results.some((r) => r.status === "available")) {
+    process.stdout.write("  Nothing installed. Review the changes above, then re-run with --yes.\n");
+  }
 }
 
 async function cmdInit(args: ParsedArgs): Promise<void> {
@@ -157,11 +235,18 @@ Usage:
   dispatch plugin list                             List installed plugins and their state
   dispatch plugin enable <id>                      Turn a plugin on (takes effect after a restart)
   dispatch plugin disable <id>                     Turn a plugin off
-  dispatch plugin remove <id>                      Delete (or unlink) a plugin
+  dispatch plugin update [<id>] [--check] [--yes]  Check git-installed plugins for a newer commit / tag, and install it
+  dispatch plugin remove <id> [--purge]            Delete (or unlink) a plugin; --purge also deletes its data
 
 Options:
       --config-dir <dir>   Dispatch's config root (default: $DISPATCH_CONFIG_DIR, then $DISPATCH_DATA_DIR)
   -f, --force              Replace a plugin that is already installed
+      --check              update: report what would change, install nothing
+      --yes                update: install even when the new version asks for more
+                           (capabilities, secrets, OAuth clients, MCP servers, processes)
+      --purge              remove: also delete its settings entry, the secrets only it lists,
+                           and — with --data-dir — that instance's kv rows and OAuth tokens
+      --data-dir <dir>     The instance whose kv / OAuth tokens --purge clears (default: $DISPATCH_DATA_DIR)
       --json               Machine-readable output
 
 Plugins are global: both the stable and the dev instance load the same
@@ -201,6 +286,9 @@ export async function runPluginCommand(argv: readonly string[]): Promise<void> {
     case "rm":
     case "uninstall":
       return cmdRemove(args);
+    case "update":
+    case "upgrade":
+      return cmdUpdate(args);
     default:
       throw new CmError(`Unknown command "dispatch plugin ${sub}". Run \`dispatch plugin help\` for usage.`);
   }

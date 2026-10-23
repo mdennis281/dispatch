@@ -18,6 +18,7 @@ import type { PluginInfo, PluginInspection } from "@dispatch/shared";
 import { buildApp } from "../../app.js";
 import { EventBus } from "../../bus.js";
 import { Store } from "../../store/index.js";
+import type { PluginService } from "../service.js";
 import { DEFAULT_FETCH_LIMITS, fetchPlugin, type FetchDeps, type FetchLimits } from "./fetch.js";
 import { PluginInspector } from "./index.js";
 import { inspectPluginDir, readmeExcerpt, compareVersions } from "./inspect.js";
@@ -85,6 +86,7 @@ async function inspectExample(name: string): Promise<PluginInspection> {
     configDir: await tmp(),
     hostInfo: () => undefined,
     noteInstalled: async () => undefined,
+    recordSource: async () => {},
     fetchDeps: fakeDeps(exampleRepoTar),
   });
   return inspector.inspect(`https://github.com/mdennis281/dispatch/tree/main/examples/plugins/${name}`);
@@ -126,20 +128,20 @@ describe("resolvePluginRef", () => {
   const at = (url: string) => resolvePluginRef(parsePluginUrl(url), remote);
 
   it("defaults to the remote's HEAD branch at the root", () => {
-    expect(at("https://github.com/o/r")).toEqual({ ref: "main", sha: SHA_MAIN, subdir: "" });
+    expect(at("https://github.com/o/r")).toEqual({ ref: "main", refKind: "branch", sha: SHA_MAIN, subdir: "" });
   });
   it("splits a slashed branch from the subdir by the LONGEST matching ref", () => {
-    expect(at("https://github.com/o/r/tree/feat/x/plugins/a")).toEqual({ ref: "feat/x", sha: SHA_FEAT, subdir: "plugins/a" });
+    expect(at("https://github.com/o/r/tree/feat/x/plugins/a")).toEqual({ ref: "feat/x", refKind: "branch", sha: SHA_FEAT, subdir: "plugins/a" });
   });
   it("takes an annotated tag's peeled commit, not the tag object", () => {
-    expect(at("https://github.com/o/r/tree/v1.0.0")).toEqual({ ref: "v1.0.0", sha: SHA_TAG, subdir: "" });
+    expect(at("https://github.com/o/r/tree/v1.0.0")).toEqual({ ref: "v1.0.0", refKind: "tag", sha: SHA_TAG, subdir: "" });
   });
   it("uses a /blob/ file's directory", () => {
     expect(at("https://github.com/o/r/blob/main/examples/p/plugin.yaml").subdir).toBe("examples/p");
   });
   it("accepts a full sha, refuses an abbreviated one, and 404s an unknown ref", () => {
     const sha = "e".repeat(40);
-    expect(at(`https://github.com/o/r/tree/${sha}/p`)).toEqual({ ref: sha, sha, subdir: "p" });
+    expect(at(`https://github.com/o/r/tree/${sha}/p`)).toEqual({ ref: sha, refKind: "sha", sha, subdir: "p" });
     expect(() => at("https://github.com/o/r/tree/abc1234/p")).toThrow(/full 40-character/);
     expect(() => at("https://github.com/o/r/tree/nope/p")).toThrow(/no branch or tag named "nope"/);
   });
@@ -441,7 +443,7 @@ async function app(fetchDeps: FetchDeps, seed?: (configDir: string) => Promise<v
   await mkdir(join(configDir, "plugins"), { recursive: true });
   await mkdir(dataDir, { recursive: true });
   await seed?.(configDir);
-  let host: { get(id: string): PluginInfo | undefined; noteInstalled(id: string): Promise<PluginInfo | undefined> } | undefined;
+  let host: Pick<PluginService, "get" | "noteInstalled" | "recordSource"> | undefined;
   const instance = await buildApp({
     store: new Store(dataDir, configDir),
     bus: new EventBus(),
@@ -451,6 +453,7 @@ async function app(fetchDeps: FetchDeps, seed?: (configDir: string) => Promise<v
         configDir,
         hostInfo: (id) => host?.get(id),
         noteInstalled: async (id) => host?.noteInstalled(id),
+        recordSource: async (id, source) => host?.recordSource(id, source),
         fetchDeps,
       }),
     },

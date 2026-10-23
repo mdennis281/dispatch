@@ -17,6 +17,7 @@
  * shorthand is rewritten to its https clone URL rather than refused, because
  * that is what people copy from the green button.
  */
+import type { PluginRefKind, RemoteRefs } from "@dispatch/shared";
 
 export class PluginInspectError extends Error {
   constructor(
@@ -136,44 +137,14 @@ export function parsePluginUrl(input: string): ParsedPluginUrl {
   };
 }
 
-/** One line of `git ls-remote --symref` output, parsed. */
-export interface RemoteRefs {
-  /** `refs/heads/main` → sha, `refs/tags/v1` → sha (peeled `^{}` wins for annotated tags). */
-  refs: Map<string, string>;
-  /** What `HEAD` points at, when the remote said (`--symref`). */
-  headRef?: string;
-  headSha?: string;
-}
-
-export function parseLsRemote(out: string): RemoteRefs {
-  const refs = new Map<string, string>();
-  let headRef: string | undefined;
-  let headSha: string | undefined;
-  for (const line of out.split(/\r?\n/)) {
-    const sym = /^ref:\s+(\S+)\s+HEAD$/.exec(line);
-    if (sym) {
-      headRef = sym[1];
-      continue;
-    }
-    const m = /^([0-9a-f]{40})\s+(\S+)$/.exec(line);
-    if (!m) continue;
-    const [, sha, name] = m as unknown as [string, string, string];
-    if (name === "HEAD") {
-      headSha = sha;
-    } else if (name.endsWith("^{}")) {
-      // An annotated tag's peeled commit. The tag OBJECT's sha would not name
-      // a tree a tarball can be cut from, so the commit replaces it.
-      refs.set(name.slice(0, -3), sha);
-    } else if (!refs.has(name)) {
-      refs.set(name, sha);
-    }
-  }
-  return { refs, headRef, headSha };
-}
+// Moved to shared so `dispatch plugin update` resolves refs with the same code.
+export { parseLsRemote, type RemoteRefs } from "@dispatch/shared";
 
 export interface ResolvedRef {
   /** Display name of the ref (`main`, `v1.0.0`, or the sha itself). */
   ref: string;
+  /** What the install records, and so what Check for updates follows. */
+  refKind: PluginRefKind;
   sha: string;
   /** Directory inside the repository, `""` for the root. */
   subdir: string;
@@ -192,14 +163,16 @@ export function resolvePluginRef(parsed: ParsedPluginUrl, remote: RemoteRefs): R
   if (!segs.length) {
     const sha = remote.headSha;
     if (!sha) throw new PluginInspectError("the remote did not report a default branch (HEAD)", 502);
-    return { ref: remote.headRef?.replace(/^refs\/heads\//, "") ?? "HEAD", sha, subdir: "" };
+    return { ref: remote.headRef?.replace(/^refs\/heads\//, "") ?? "HEAD", refKind: "branch", sha, subdir: "" };
   }
-  if (SHA.test(segs[0]!)) return { ref: segs[0]!, sha: segs[0]!, subdir: dirOf(segs.slice(1)) };
+  if (SHA.test(segs[0]!)) return { ref: segs[0]!, refKind: "sha", sha: segs[0]!, subdir: dirOf(segs.slice(1)) };
   for (let n = segs.length; n >= 1; n--) {
     const name = segs.slice(0, n).join("/");
     // Branch before tag when both exist — GitHub's router makes the same call.
-    const sha = remote.refs.get(`refs/heads/${name}`) ?? remote.refs.get(`refs/tags/${name}`);
-    if (sha) return { ref: name, sha, subdir: dirOf(segs.slice(n)) };
+    const branch = remote.refs.get(`refs/heads/${name}`);
+    if (branch) return { ref: name, refKind: "branch", sha: branch, subdir: dirOf(segs.slice(n)) };
+    const tag = remote.refs.get(`refs/tags/${name}`);
+    if (tag) return { ref: name, refKind: "tag", sha: tag, subdir: dirOf(segs.slice(n)) };
   }
   if (/^[0-9a-f]{7,39}$/.test(segs[0]!)) {
     throw new PluginInspectError(`"${segs[0]}" looks like an abbreviated commit — use the full 40-character sha`, 400);

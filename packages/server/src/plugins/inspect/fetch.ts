@@ -42,6 +42,7 @@ import {
   resolvePluginRef,
   type ParsedPluginUrl,
   type RemoteRefs,
+  type ResolvedRef,
 } from "./url.js";
 
 export interface FetchLimits extends TarCaps {
@@ -81,6 +82,7 @@ export interface FetchDeps {
 export interface FetchedPlugin {
   parsed: ParsedPluginUrl;
   ref: string;
+  refKind: ResolvedRef["refKind"];
   sha: string;
   subdir: string;
   browseUrl?: string;
@@ -169,6 +171,16 @@ export const realFetchDeps: FetchDeps = {
 
 /* ------------------------------------------------------------- the fetch */
 
+/** `git ls-remote --symref` of the URL's repository, parsed; failures mapped to a status. */
+export async function listRefs(parsed: ParsedPluginUrl, deps: FetchDeps, signal: AbortSignal): Promise<RemoteRefs> {
+  try {
+    return parseLsRemote(await deps.lsRemote(parsed.cloneUrl, signal));
+  } catch (err) {
+    if (err instanceof PluginInspectError) throw err;
+    throw new PluginInspectError(`could not list refs of ${parsed.repo}: ${err instanceof Error ? err.message : String(err)}`, 502);
+  }
+}
+
 /** Count bytes through an async iterable and stop at `max`. */
 async function* bounded(src: AsyncIterable<Uint8Array>, max: number, what: string): AsyncIterable<Buffer> {
   let n = 0;
@@ -186,21 +198,24 @@ async function* bounded(src: AsyncIterable<Uint8Array>, max: number, what: strin
  */
 export async function fetchPlugin(
   url: string,
-  opts: { pinSha?: string; limits?: FetchLimits; deps?: FetchDeps } = {},
+  opts: {
+    pinSha?: string;
+    /**
+     * Already resolved — an update, whose ref and subdir come from the
+     * recorded source rather than the URL (a newer TAG is not the one the URL
+     * names, and the old one may since have been deleted). Skips `ls-remote`.
+     */
+    target?: ResolvedRef;
+    limits?: FetchLimits;
+    deps?: FetchDeps;
+  } = {},
 ): Promise<FetchedPlugin> {
   const limits = opts.limits ?? DEFAULT_FETCH_LIMITS;
   const deps = opts.deps ?? realFetchDeps;
   const parsed = parsePluginUrl(url);
   const signal = AbortSignal.timeout(limits.timeoutMs);
 
-  let remote: RemoteRefs;
-  try {
-    remote = parseLsRemote(await deps.lsRemote(parsed.cloneUrl, signal));
-  } catch (err) {
-    if (err instanceof PluginInspectError) throw err;
-    throw new PluginInspectError(`could not list refs of ${parsed.repo}: ${err instanceof Error ? err.message : String(err)}`, 502);
-  }
-  const resolved = resolvePluginRef(parsed, remote);
+  const resolved = opts.target ?? resolvePluginRef(parsed, await listRefs(parsed, deps, signal));
   // Install pins to the sha the owner was shown. The URL is still resolved —
   // it is what says where the ref ends and the subdir begins — but its tip is
   // ignored: a push between Inspect and Install must not change what lands.
@@ -253,6 +268,9 @@ export async function fetchPlugin(
     return {
       parsed,
       ref: resolved.ref,
+      // A URL that named a branch but was installed at a pinned sha still
+      // follows the branch: Install pins what lands, not what is followed.
+      refKind: resolved.refKind,
       sha,
       subdir: resolved.subdir,
       browseUrl: browseUrl(parsed, sha, resolved.subdir),
