@@ -331,7 +331,14 @@ export function buildPluginContext(
         providers.register(harness, descriptor);
         // Torn down with the plugin, like a route or a bus listener: a
         // switched-off plugin's runtime must not keep taking new sessions.
-        owned.offs.push(() => void providers.unregister(harness.kind));
+        // Caught here: `offs` run synchronously during teardown, and a
+        // harness whose `dispose()` rejects would otherwise be an unhandled
+        // rejection — fatal to the whole process.
+        owned.offs.push(() => {
+          providers.unregister(harness.kind).catch((err: unknown) => {
+            deps.log.error(`provider "${harness.kind}" failed to dispose`, err);
+          });
+        });
       },
     };
   }

@@ -302,8 +302,8 @@ export interface PluginContext<Req = unknown, Reply = unknown> {
    * what every surface labels, picks and accounts it by, and its `id` must
    * equal `harness.kind`. Throws when the id is already taken, so a plugin
    * cannot shadow `claude` (the fallback) or another plugin's provider.
-   * Deactivation unregisters it and calls `harness.dispose()`; a chat pinned to
-   * it then falls back to Claude.
+   * Deactivation unregisters it and calls `harness.dispose()` — which may end
+   * sessions in flight — and a chat pinned to it then falls back to Claude.
    */
   providers?: {
     register(harness: Harness, descriptor: ProviderDescriptor): void;

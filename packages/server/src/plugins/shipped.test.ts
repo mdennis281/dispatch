@@ -126,6 +126,39 @@ describe("built-in plugins", () => {
     h.store.close();
   });
 
+  it("hold a chat's provider wait until an installed provider plugin has activated", async () => {
+    // `warm()` runs resume.restore() BEFORE activateAll, so "activation not
+    // started yet" must not read as "settled" — that is the window in which a
+    // restored chat on this provider would fall back and be rewritten.
+    const h = await host();
+    await writeProviderPlugin(join(h.configDir, "plugins"), "installedish");
+    const svc = h.make();
+    await svc.load();
+    await svc.activateShipped();
+    const early = await Promise.race([
+      svc.activationSettled().then(() => "settled"),
+      new Promise((r) => setTimeout(() => r("waiting"), 50)),
+    ]);
+    expect(early).toBe("waiting");
+    await svc.activateAll();
+    await expect(svc.activationSettled()).resolves.toBeUndefined();
+    expect(h.registered).toEqual(["installedish:v1.0.0"]);
+    await svc.dispose();
+    h.store.close();
+  });
+
+  it("settle at once when nothing installed could register a provider", async () => {
+    const h = await host();
+    await writeProviderPlugin(h.shippedRoot, "codexish");
+    const svc = h.make();
+    await svc.load();
+    await svc.activateShipped();
+    // Only a built-in, now active: no warm-up can bring in another provider.
+    await expect(svc.activationSettled()).resolves.toBeUndefined();
+    await svc.dispose();
+    h.store.close();
+  });
+
   it("are found beside this server package — Codex and goose both ship", () => {
     const root = findShippedPluginsRoot();
     expect(root).toBeDefined();

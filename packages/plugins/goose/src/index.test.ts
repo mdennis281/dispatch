@@ -360,8 +360,8 @@ describe("GOOSE_AGENT.env", () => {
     // Asserted on BOTH platforms rather than skipping off-Windows: CI runs the
     // full suite on Linux, so a win32-only assertion here would never execute
     // there and a regression in the value — or an inverted condition — would
-    // sail through. `src/harness/acp/index.test.ts` is also listed in the
-    // windows-sensitive job in ci.yml so the win32 arm runs for real.
+    // sail through. This file is also run by the windows-sensitive job in
+    // .github/workflows/promote.yml so the win32 arm runs for real.
     const { GOOSE_AGENT } = await import("./index.js");
     const { windowsShell } = await import("./runtime.js");
     const env = GOOSE_AGENT.env("m");

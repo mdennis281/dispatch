@@ -176,9 +176,19 @@ export class PluginService implements PluginContributionSource {
   private loaded = false;
   /** Memoised `activateAll`, so a second call joins the first instead of re-running it. */
   private activating: Promise<void> | undefined;
+  /**
+   * Settles once no plugin that could still register a PROVIDER is waiting to
+   * activate. Created up front rather than derived from `activating`, which
+   * does not exist until `warm()` reaches `activateAll` — and `warm()` runs
+   * `resume.restore()` before that, which can restart exactly the chat this
+   * exists to hold. "Not started" must never read as "settled".
+   */
+  private readonly providersSettled: { promise: Promise<void>; resolve: () => void };
   private disposed = false;
 
   constructor(opts: PluginServiceOptions) {
+    let settle!: () => void;
+    this.providersSettled = { promise: new Promise<void>((r) => (settle = r)), resolve: () => settle() };
     this.configDir = opts.configDir;
     this.shippedRoot = opts.shippedRoot;
     this.store = opts.store;
@@ -204,6 +214,18 @@ export class PluginService implements PluginContributionSource {
    * plugin), so it belongs in `start()`; nothing a plugin wrote runs here.
    */
   async load(): Promise<void> {
+    try {
+      await this.discover();
+    } finally {
+      // Nothing left that could register a provider — or discovery itself
+      // failed, which leaves nothing that could: settle now, so a chat on an
+      // unknown provider falls back at once instead of waiting on a warm-up
+      // that will never bring it in. Re-checked after the built-ins activate.
+      this.settleProvidersIfNoneWaiting();
+    }
+  }
+
+  private async discover(): Promise<void> {
     const settings = await this.store.getSettings().catch(() => ({}) as { plugins?: undefined });
     const map = settings.plugins ?? {};
     this.records.clear();
@@ -249,6 +271,14 @@ export class PluginService implements PluginContributionSource {
     this.loaded = true;
   }
 
+  /** Resolve {@link providersSettled} when no pending plugin declares `providers`. */
+  private settleProvidersIfNoneWaiting(): void {
+    const waiting = [...this.records.values()].some(
+      (r) => r.phase === "pending" && (r.manifest?.capabilities ?? []).includes("providers"),
+    );
+    if (!waiting) this.providersSettled.resolve();
+  }
+
   /**
    * Activate the BUILT-IN plugins now — called from `start()`, before the port
    * opens (see the header for why). One that declares managed processes waits
@@ -262,14 +292,16 @@ export class PluginService implements PluginContributionSource {
         await this.activateOne(rec);
       }
     }
+    this.settleProvidersIfNoneWaiting();
   }
 
   /**
-   * Resolves when `activateAll` has finished, or at once when it has not been
-   * started (still inside `start()`, where no session runs). Never rejects.
+   * Resolves once every plugin that could register a provider has had its
+   * `activate` (or its budget ran out) — immediately when none is installed.
+   * Never rejects.
    */
   activationSettled(): Promise<void> {
-    return (this.activating ?? Promise.resolve()).catch(() => {});
+    return this.providersSettled.promise;
   }
 
   /**
@@ -283,7 +315,7 @@ export class PluginService implements PluginContributionSource {
           if (this.disposed) return;
           if (rec.phase === "pending") await this.activateOne(rec);
         }
-      })();
+      })().finally(() => this.providersSettled.resolve());
     }
     return this.activating;
   }
@@ -424,6 +456,8 @@ export class PluginService implements PluginContributionSource {
    */
   async dispose(): Promise<void> {
     this.disposed = true;
+    // Nothing more will activate; release anything still waiting on it.
+    this.providersSettled.resolve();
     const recs = [...this.records.values()].sort((a, b) => b.id.localeCompare(a.id));
     for (const rec of recs) {
       if (rec.phase === "active" || rec.phase === "error") await this.deactivateOne(rec);

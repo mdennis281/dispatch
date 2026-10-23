@@ -244,6 +244,16 @@ jobs:
           src/services/mcp/manager-mcp.integration.test.ts
           src/harness/acp/index.test.ts
 
+      # goose moved out of the server into a built-in plugin package, so the
+      # server filter above no longer finds its test on a tag cut after that
+      # move — it is left in for the tags cut before it. On an older tag this
+      # filter matches no package and pnpm runs nothing, which is the same
+      # "a file a tag predates matches nothing" rule as the list above.
+      - name: Test goose plugin (windows-sensitive)
+        run: >
+          pnpm --filter @dispatch/plugin-goose exec vitest run
+          src/index.test.ts
+
       - name: Test release installer (Windows)
         run: node --test tools/install.test.mjs
 

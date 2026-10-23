@@ -455,7 +455,9 @@ ctx.providers.register(harness, descriptor);
 - Registering an id that is already taken throws, so nothing can shadow
   `claude` or another plugin's provider. Deactivation (the toggle) unregisters
   it and calls `harness.dispose()`; a chat pinned to it then falls back to
-  Claude and is told so.
+  Claude and is told so. `dispose()` may end sessions in flight — switching
+  Codex off tears down its shared app-server, so a Codex turn running at that
+  moment errors rather than finishing.
 
 **Built-in plugins** load from `packages/plugins/` in the app payload, found
 by `findShippedPluginsRoot()` (`server/src/plugins/shipped.ts`), never from

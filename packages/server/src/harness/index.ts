@@ -80,8 +80,10 @@ export class HarnessRegistry {
 
   /**
    * Drop a registered provider and release its runtime — its plugin was
-   * switched off. Sessions already running on it keep their adapter until they
-   * end; the next start of one of its chats falls back to Claude.
+   * switched off. `dispose()` is the harness's to define, and it may end
+   * sessions in flight: Codex's tears down its shared app-server, so a Codex
+   * turn running at the moment of the toggle errors. The next start of one of
+   * its chats falls back to Claude.
    */
   async unregister(kind: HarnessKind): Promise<void> {
     if ((BUILTIN_HARNESS_KINDS as readonly string[]).includes(kind)) {
