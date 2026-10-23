@@ -286,10 +286,18 @@ export class PluginService implements PluginContributionSource {
     this.loaded = true;
   }
 
-  /** Resolve {@link providersSettled} when no pending plugin declares `providers`. */
+  /**
+   * Resolve {@link providersSettled} when no pending plugin declares
+   * `providers` or `terminals` — the two capabilities whose registrations a
+   * chat can be pinned to, and which a chat restored before `warm()` would
+   * otherwise find missing (a provider falls back to Claude; a terminal comes
+   * up local and warns that its backend "is not installed").
+   */
   private settleProvidersIfNoneWaiting(): void {
     const waiting = [...this.records.values()].some(
-      (r) => r.phase === "pending" && (r.manifest?.capabilities ?? []).includes("providers"),
+      (r) =>
+        r.phase === "pending" &&
+        (r.manifest?.capabilities ?? []).some((c) => c === "providers" || c === "terminals"),
     );
     if (!waiting) this.providersSettled.resolve();
   }
@@ -311,7 +319,8 @@ export class PluginService implements PluginContributionSource {
   }
 
   /**
-   * Resolves once every plugin that could register a provider has had its
+   * Resolves once every plugin that could register a provider or a terminal
+   * backend has had its
    * `activate` (or its budget ran out) — immediately when none is installed.
    * Never rejects.
    */

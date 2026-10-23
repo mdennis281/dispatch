@@ -19,6 +19,7 @@ import { PeerSenderSchema, ChannelSenderSchema } from "./messages.js";
 import { TokenFiguresSchema } from "./metrics-tokens.js";
 import { WorkflowConfigSchema } from "./workflow.js";
 import { ChatWorktreeRecordSchema } from "./worktree-history.js";
+import { TERMINAL_BACKEND_ID_PATTERN, TerminalLocationSchema } from "./terminal-backend.js";
 
 /* ------------------------------------------------------------------ subApps */
 
@@ -959,6 +960,14 @@ export const ChatSchema = z.object({
    * the same context either way, so toggling it can't change how a chat runs.
    */
   showInjectedContext: z.boolean().optional(),
+  /**
+   * Which terminal backend this chat's managed shells run on, pinned for this
+   * chat (`local`, or a plugin backend's id). Unset inherits the project's
+   * `defaults.terminalBackend`, then local — see `resolveTerminalBackend`.
+   * Read when a shell is OPENED, so changing it moves the next new shell, not
+   * one already running.
+   */
+  terminalBackend: z.string().regex(TERMINAL_BACKEND_ID_PATTERN).optional(),
   /** Transcript-shell categories shown for this chat; unset inherits the project. */
   shellFilter: ShellTranscriptFilterSchema.optional(),
   /**
@@ -1259,6 +1268,13 @@ export const TerminalInfoSchema = z.object({
    * can still read it; you cannot run in it.
    */
   archived: z.boolean().optional(),
+  /**
+   * Where this shell runs when a plugin terminal backend is involved — the
+   * backend asked for, and whether it is up, connecting, or fell back to a
+   * local shell (with the reason). Absent: a local shell chosen as local,
+   * which is every terminal on an install with no backend plugin.
+   */
+  location: TerminalLocationSchema.optional(),
 });
 export type TerminalInfo = z.infer<typeof TerminalInfoSchema>;
 

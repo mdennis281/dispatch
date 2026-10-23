@@ -132,6 +132,8 @@ export interface ChatDefaultsDraft {
   model?: string;
   showInjectedContext?: boolean;
   autoApprove?: boolean;
+  /** `defaults.terminalBackend` — only offered when a plugin registered a backend. */
+  terminalBackend?: string;
 }
 
 /** The manifest patch that turns `saved` into `draft` — only the keys that moved. */
@@ -142,7 +144,7 @@ export function chatDefaultsPatch(
   const out: ProjectDefaultsPatch = {};
   const moved = <K extends keyof ChatDefaultsDraft>(key: K) => saved[key] !== draft[key];
   const value = <K extends keyof ChatDefaultsDraft>(key: K) => draft[key] ?? null;
-  for (const key of ["harness", "mode", "effort", "model", "showInjectedContext"] as const) {
+  for (const key of ["harness", "mode", "effort", "model", "showInjectedContext", "terminalBackend"] as const) {
     if (moved(key)) (out.defaults ??= {})[key] = value(key) as never;
   }
   if (moved("autoApprove")) out.spawnChat = { autoApprove: value("autoApprove") };

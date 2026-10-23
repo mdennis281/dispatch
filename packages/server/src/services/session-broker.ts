@@ -174,6 +174,7 @@ import type { AppSettings, Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
 import type { ChatMessenger } from "./chat-messenger.js";
 import type { TerminalService } from "./terminal.js";
+import type { TerminalBackendRegistry } from "./terminal-backends.js";
 import type { MemoryService } from "./memory.js";
 import type { MetricsService } from "./metrics.js";
 import type { TokenLedger, TokenLine } from "./metrics-tokens.js";
@@ -1299,6 +1300,12 @@ export interface SessionBrokerOptions {
   idleSweepMs?: number;
   /** Persistent-terminal service exposed to sessions as `mcp__dispatch-workspace__terminal`. */
   terminals?: TerminalService;
+  /**
+   * Plugin terminal backends (#414): told when the idle sweep retires a chat,
+   * asked for the "where your terminal runs" prompt section, and the source of
+   * the forwarded ports terminal results list. Absent or empty ⇒ none of that.
+   */
+  terminalBackends?: Pick<TerminalBackendRegistry, "size" | "chatIdle" | "agentNote" | "ports">;
   /** Per-project agent memory: injected at start + exposed as `mcp__dispatch-memory__remember|recall|forget`. */
   memory?: MemoryService;
   /**
@@ -2456,6 +2463,7 @@ export class SessionBroker {
   private idleMs: number;
   private idleSweep?: ReturnType<typeof setInterval>;
   private readonly terminals?: TerminalService;
+  private readonly terminalBackends?: SessionBrokerOptions["terminalBackends"];
   private readonly memory?: MemoryService;
   private readonly secrets?: SecretsService;
   private readonly issues?: IssueService;
@@ -2619,6 +2627,7 @@ export class SessionBroker {
       this.idleSweep.unref?.();
     }
     this.terminals = opts.terminals;
+    this.terminalBackends = opts.terminalBackends;
     this.memory = opts.memory;
     this.secrets = opts.secrets;
     this.issues = opts.issues;
@@ -4289,6 +4298,18 @@ export class SessionBroker {
     return this.sessions.delete(chatId);
   }
 
+  /**
+   * The chat's forwarded terminal ports, shaped for a tool result — or nothing
+   * at all, so a result on an install with no backend is byte-identical.
+   */
+  private forwardedPorts(chatId: string): { ports?: { remotePort: number; url: string; label?: string }[] } {
+    if (!this.terminalBackends?.size) return {};
+    const ports = this.terminalBackends.ports(chatId);
+    return ports.length
+      ? { ports: ports.map(({ remotePort, url, label }) => ({ remotePort, url, ...(label ? { label } : {}) })) }
+      : {};
+  }
+
   /* ------------------------------------------------------ introspection */
 
   has(chatId: string): boolean {
@@ -4729,6 +4750,11 @@ export class SessionBroker {
       void this.stop(chatId).catch(() => {
         /* best-effort: a chat that refuses to stop is retried next sweep */
       });
+      // The shells survive (above), but a backend that provisioned a machine
+      // for this chat gets to decide whether that machine should keep running
+      // for a chat nobody is talking to. Its shells come back on the next
+      // command either way — TerminalService re-opens an exited one.
+      this.terminalBackends?.chatIdle({ chatId, projectId: session.projectId });
     }
   }
 
@@ -8574,6 +8600,14 @@ export class SessionBroker {
     if (workflowDirective) {
       append("workflow", `Workflow profile — ${workflow.profile}`, workflowDirective);
     }
+    // Only for a chat whose shells resolve to a plugin backend — never a global
+    // instruction. The agent's Bash stays local while its terminal does not,
+    // and nothing else would tell it that a build run through Bash is a build
+    // on the wrong machine. The terminal tool's first result repeats it.
+    const terminalNote = await this.terminalBackends?.agentNote(session.chatId);
+    if (terminalNote) {
+      append("terminal-location", "Where your terminal runs", `# Where your terminal runs\n\n${terminalNote}`);
+    }
 
     // The global chat's one standing block: what projects exist, and where.
     //
@@ -9062,20 +9096,24 @@ export class SessionBroker {
         // worktree, else the repo root), so the agent just picks a name.
         terminals: terminals
           ? {
-              run: (a) =>
-                terminals.run({
+              run: async (a) => {
+                const res = await terminals.run({
                   chatId: session.chatId,
                   projectId: session.projectId,
                   origin: "agent",
                   cwd,
                   ...a,
-                }),
-              tail: (a) =>
-                terminals.tail(session.chatId, a.name, a.lines, {
+                });
+                return { ...res, ...this.forwardedPorts(session.chatId) };
+              },
+              tail: async (a) => ({
+                ...(await terminals.tail(session.chatId, a.name, a.lines, {
                   q: a.q,
                   since: a.since,
                   stream: a.stream,
-                }),
+                })),
+                ...this.forwardedPorts(session.chatId),
+              }),
               list: (a) =>
                 terminals.catalog({
                   scope: a.scope ?? "chat",

@@ -25,6 +25,10 @@ import type {
   PluginSendResult,
   ProviderDescriptor,
   QuestionAnswer,
+  TerminalBackend,
+  TerminalBackendHandle,
+  TerminalPortForward,
+  TerminalSpawnInfo,
   WsServerEvent,
   WsServerEventType,
 } from "@dispatch/shared";
@@ -117,6 +121,24 @@ export interface TestContext {
   oauthTokens: Map<string, string>;
   /** Every `ctx.providers.register` call, in order. */
   providers: Array<{ harness: Harness; descriptor: ProviderDescriptor }>;
+  /** Backends `ctx.terminals.registerBackend` received, by id. */
+  terminalBackends: Map<string, TerminalBackend>;
+  /** Ports currently published through `ctx.terminals.publishPort` (withdrawn ones removed). */
+  terminalPorts: TerminalPortForward[];
+  /**
+   * Play the HOST's side of a terminal backend — the calls core makes — so a
+   * plugin's test can drive spawn and the lifecycle hooks without a server.
+   * `spawn` fills `name`/`cwd`/`signal` with defaults; pass your own signal
+   * to test that the backend gives up when it is aborted.
+   */
+  terminals: {
+    spawn(
+      backendId: string,
+      info: Partial<TerminalSpawnInfo> & { chatId: string },
+    ): Promise<TerminalBackendHandle>;
+    chatIdle(chatId: string, projectId?: string): Promise<void>;
+    chatDeleted(chatId: string, projectId?: string): Promise<void>;
+  };
   /** How many listeners the bus currently holds — zero after a clean deactivate. */
   listenerCount(): number;
 }
@@ -194,6 +216,8 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
   const processes = new Map<string, { id: string; status: string; ports?: number[]; url?: string }>();
   const oauthTokens = new Map<string, string>();
   const providers: TestContext["providers"] = [];
+  const terminalBackends = new Map<string, TerminalBackend>();
+  const terminalPorts: TerminalPortForward[] = [];
   const projects = opts.projects ?? [];
   const chats = opts.chats ?? [];
 
@@ -394,6 +418,41 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
     };
   }
 
+  if (has("terminals")) {
+    ctx.terminals = {
+      // The host's refusals, so a plugin's test sees them before a real host does.
+      registerBackend: (backend) => {
+        if (!/^[a-z0-9][a-z0-9-]{0,47}$/.test(backend.id) || backend.id === "local") {
+          throw new Error(`terminal backend id "${backend.id}" is invalid or reserved`);
+        }
+        if (terminalBackends.has(backend.id)) {
+          throw new Error(`terminal backend "${backend.id}" is already registered`);
+        }
+        terminalBackends.set(backend.id, backend);
+      },
+      publishPort: (backendId, port) => {
+        if (!terminalBackends.has(backendId)) {
+          throw new Error(`terminal backend "${backendId}" was not registered by plugin "${id}"`);
+        }
+        const forward: TerminalPortForward = { ...port, backend: backendId };
+        const at = terminalPorts.findIndex((p) => p.chatId === port.chatId && p.remotePort === port.remotePort);
+        if (at >= 0) terminalPorts.splice(at, 1, forward);
+        else terminalPorts.push(forward);
+        return () => {
+          const i = terminalPorts.indexOf(forward);
+          if (i >= 0) terminalPorts.splice(i, 1);
+        };
+      },
+      ports: (chatId) => terminalPorts.filter((p) => p.chatId === chatId),
+    };
+  }
+
+  const backendOf = (backendId: string): TerminalBackend => {
+    const b = terminalBackends.get(backendId);
+    if (!b) throw new Error(`no terminal backend "${backendId}" registered — have: ${[...terminalBackends.keys()].join(", ") || "(none)"}`);
+    return b;
+  };
+
   return {
     ctx,
     publish: (evt) => {
@@ -447,6 +506,24 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
     processes,
     oauthTokens,
     providers,
+    terminalBackends,
+    terminalPorts,
+    terminals: {
+      spawn: (backendId, info) =>
+        backendOf(backendId).spawn({
+          name: "main",
+          cwd: "/repo",
+          signal: new AbortController().signal,
+          ...info,
+        }),
+      chatIdle: async (chatId, projectId) => {
+        for (const b of terminalBackends.values()) await b.onChatIdle?.({ chatId, projectId });
+      },
+      chatDeleted: async (chatId, projectId) => {
+        for (const p of terminalPorts.filter((f) => f.chatId === chatId)) terminalPorts.splice(terminalPorts.indexOf(p), 1);
+        for (const b of terminalBackends.values()) await b.onChatDeleted?.({ chatId, projectId });
+      },
+    },
     listenerCount: () => listeners.size,
   };
 }

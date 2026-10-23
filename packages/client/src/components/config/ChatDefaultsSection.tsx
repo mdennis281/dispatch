@@ -15,7 +15,7 @@
  * a config dir has nowhere to keep them and the pane says so instead of
  * offering controls whose save would fail.
  */
-import { Cpu, MessagesSquare } from "lucide-react";
+import { Container, Cpu, MessagesSquare, Monitor, TerminalSquare } from "lucide-react";
 import {
   listProviders,
   projectHarnessOf,
@@ -32,6 +32,7 @@ import { harnessLabel } from "../../lib/harness.js";
 import { useProviderCatalogs } from "../../lib/useProviderCatalogs.js";
 import { useProjects } from "../../stores/projects.js";
 import { useSettings } from "../../stores/settings.js";
+import { useTerminals } from "../../stores/terminals.js";
 import type { ChatDefaultsDraft } from "../../stores/settingsDraft.js";
 import { modeLabel } from "../chat/ModeControl.js";
 import { Select, type SelectOption } from "../ui/Select.js";
@@ -51,6 +52,7 @@ export function ChatDefaultsSection({
   disabled?: boolean;
 }) {
   const app = useSettings((s) => s.app);
+  const terminalBackends = useTerminals((s) => s.backends);
   const modes = useProjects((s) => s.modes);
   const { harnesses, catalogs } = useProviderCatalogs();
   const off = disabled || !hasDir;
@@ -273,6 +275,50 @@ export function ChatDefaultsSection({
               disabled={off}
             />
           </LayeredField>
+
+          {/* Only when a plugin has registered a terminal backend: with none,
+              "local" is the only answer and a picker with one option is noise. */}
+          {(terminalBackends.length > 0 ||
+            (value.terminalBackend !== undefined && value.terminalBackend !== "local")) && (
+            <LayeredField
+              label="Terminals run on"
+              description="Where this repo's chats run their managed terminals. A chat can pick its own in its Terminals panel."
+              pinned={value.terminalBackend !== undefined}
+              source={value.terminalBackend !== undefined ? "project" : "default"}
+              inheritedLabel="This machine"
+              inheritedSource="default"
+              onReset={() => patch({ terminalBackend: undefined })}
+              disabled={off}
+            >
+              <Select
+                width={220}
+                align="end"
+                leftIcon={<TerminalSquare />}
+                value={value.terminalBackend ?? "local"}
+                onChange={(terminalBackend) => patch({ terminalBackend })}
+                options={[
+                  { value: "local", label: "This machine", icon: <Monitor /> },
+                  ...terminalBackends.map((b) => ({
+                    value: b.id,
+                    label: b.label,
+                    icon: <Container />,
+                    hint: b.pluginId,
+                  })),
+                  ...(value.terminalBackend &&
+                  value.terminalBackend !== "local" &&
+                  !terminalBackends.some((b) => b.id === value.terminalBackend)
+                    ? [{ value: value.terminalBackend, label: value.terminalBackend, hint: "not installed" }]
+                    : []),
+                ]}
+                inherit={{
+                  label: "Inherit · This machine",
+                  hint: "the default",
+                  active: value.terminalBackend === undefined,
+                  onSelect: () => patch({ terminalBackend: undefined }),
+                }}
+              />
+            </LayeredField>
+          )}
 
           <LayeredField
             label="Auto-approve spawned chats"

@@ -330,6 +330,44 @@ describe("manager-mcp integration — terminal over a real TerminalService", () 
       events.some((e) => e.type === "terminal-closed" && e.chatId === "c1"),
     ).toBe(true);
   });
+
+  it("leads the first result with a backend's notice and lists forwarded ports (#414)", async () => {
+    const svc = new TerminalService({
+      bus,
+      deps: { spawn: (cwd) => new FakeShell(cwd), genId: () => "t1", now: () => 1000 },
+    });
+    let ran = 0;
+    const { terminal, terminalOutput } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: nullBroker,
+      terminals: {
+        // What the broker's binding hands back for a chat on a backend.
+        run: async (a) => ({
+          ...(await svc.run({ chatId: "c1", cwd: "C:\\start", ...a })),
+          ...(ran++ === 0 ? { notice: "This chat's managed terminals run on Box, NOT on the Dispatch host." } : {}),
+          ports: [{ remotePort: 5173, url: "http://127.0.0.1:41000", label: "vite" }],
+        }),
+        tail: async (a) => ({
+          ...(await svc.tail("c1", a.name, a.lines)),
+          ports: [{ remotePort: 5173, url: "http://127.0.0.1:41000" }],
+        }),
+        list: (a) => svc.catalog({ scope: a.scope ?? "chat", chatId: "c1", q: a.q }),
+      },
+    });
+    const first = resultText(
+      await terminal.handler({ name: "b", command: "printout hi", timeoutMs: undefined, background: undefined }, {}),
+    );
+    expect(first.startsWith("This chat's managed terminals run on Box")).toBe(true);
+    expect(first).toContain("Forwarded ports (open these, not localhost:<port>):\n  :5173 → http://127.0.0.1:41000 (vite)");
+    const second = resultText(
+      await terminal.handler({ name: "b", command: "printout again", timeoutMs: undefined, background: undefined }, {}),
+    );
+    expect(second.startsWith("[b]")).toBe(true);
+    const tail = resultText(await terminalOutput.handler({ name: "b", lines: undefined, grep: undefined, since: undefined, stream: undefined, scope: undefined }, {}));
+    expect(tail).toContain(":5173 → http://127.0.0.1:41000");
+    svc.dispose();
+  });
 });
 
 /* -------------------------------------------------- watch_pr: real GitHubService */

@@ -326,6 +326,10 @@ function reduceServerEvent(evt: WsServerEvent): void {
       useTerminals.getState().close(evt.terminalId);
       return;
 
+    case "terminal-backends":
+      useTerminals.getState().setBackends(evt.backends, evt.ports);
+      return;
+
     case "checkpoint":
       // Rollback anchor — record it so the chat can offer "Roll back here" only
       // where a restore point exists.
@@ -570,6 +574,12 @@ export async function hydrateFromServer(): Promise<boolean> {
   void setAttentionBadge(useAttention.getState().visible.length);
   useRunners.getState().hydrate(runners, {});
   useTerminals.getState().hydrate(terminals, {});
+  // Where shells can run besides here. Best-effort and non-gating: an older
+  // server has no route, and "no backends" is exactly what it means anyway.
+  void api.terminals
+    .backends()
+    .then((r) => useTerminals.getState().setBackends(r.backends, r.ports))
+    .catch(() => {});
   usePrs.getState().hydrate(prs);
   // NOT `useMessages.hydrate({})`. Blanking every transcript here is what made a
   // reconnect feel like a page refresh: the open chat's rows went to `[]`, the

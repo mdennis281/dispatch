@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
-import type { TerminalInfo } from "@dispatch/shared";
+import type { TerminalBackendInfo, TerminalInfo, TerminalPortForward } from "@dispatch/shared";
 
 /** One line of terminal I/O for the read-only view. */
 export interface TerminalLine {
@@ -20,6 +20,15 @@ interface TerminalsStore {
   appendLine: (id: string, line: TerminalLine) => void;
   /** Replace a terminal's scrollback (lazy fetch on panel open). */
   setLines: (id: string, lines: TerminalLine[]) => void;
+
+  /**
+   * Plugin terminal backends (#414) and the remote ports they forward. Empty
+   * unless a backend plugin is active — every surface that shows a location
+   * reads `backends.length` first and renders nothing on an install without one.
+   */
+  backends: TerminalBackendInfo[];
+  forwards: TerminalPortForward[];
+  setBackends: (backends: TerminalBackendInfo[], forwards: TerminalPortForward[]) => void;
 }
 
 const LINE_CAP = 1000;
@@ -59,6 +68,10 @@ export const useTerminals = create<TerminalsStore>((set) => ({
     }),
 
   setLines: (id, lines) => set((s) => ({ lines: { ...s.lines, [id]: lines } })),
+
+  backends: [],
+  forwards: [],
+  setBackends: (backends, forwards) => set({ backends, forwards }),
 }));
 
 /** One chat's shells that still have a process behind them. */

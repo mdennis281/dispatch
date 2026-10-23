@@ -132,6 +132,7 @@ and a manifest whose range excludes it — or cannot be parsed — is listed as
 | `oauth` | `oauth.clients`, `ctx.oauth` |
 | `ui` | a `client` entry |
 | `providers` | `ctx.providers.register` — see "Providers" |
+| `terminals` | `ctx.terminals.registerBackend/publishPort/ports` — see "Terminal backends" |
 
 A capability the manifest does not declare is simply absent from the context
 object the plugin receives — the members are typed optional for that reason.
@@ -540,6 +541,113 @@ by `findShippedPluginsRoot()` (`server/src/plugins/shipped.ts`), never from
   it hot-reloads with the server instead of running a stale build.
 
 The Settings row shows a `built-in` chip; the toggle works as for any plugin.
+
+## Terminal backends
+
+A chat's managed terminals — `mcp__dispatch-workspace__terminal` and the
+Terminals panel — are local `powershell`/`bash` children of the server. A
+plugin declaring `terminals` can supply somewhere else for them to run (a
+container, a VM, another machine) without core knowing what that is. The first
+one is `mdennis281/dispatch-proxmox-terminal`, a per-chat Proxmox LXC; it is
+optional and lives in its own repo.
+
+```ts
+ctx.terminals.registerBackend({
+  id: "proxmox",            // ^[a-z0-9][a-z0-9-]{0,47}$, never "local"
+  label: "Proxmox container",
+  shell: "bash",            // the dialect of the sentinel probe core appends
+  spawnTimeoutMs: 180_000,  // default 120 s, capped at 10 min
+  async spawn({ chatId, projectId, name, cwd, repoPath, signal }) {
+    // provision, connect, then hand back stdio
+    return handle;          // TerminalBackendHandle — see below
+  },
+  agentNote: ({ chatId }) => "How your local edits reach the container: …",
+  onChatIdle: ({ chatId }) => { /* stop what you made, maybe */ },
+  onChatDeleted: ({ chatId }) => { /* destroy what you made */ },
+  dispose: () => { /* close connections */ },
+});
+```
+
+**The handle** is the stdio shape TerminalService already drives: `stdin`
+(`write`, optional `end`/`on("error")`), `stdout` and `stderr` emitting
+`data`, `kill()`, and `on("exit" | "error")`. A Node `ChildProcess` satisfies
+it; so does an ssh2 exec channel with a few lines of adapter. The sentinel
+protocol, scrollback, background runs and transcripts are core's and work
+unchanged over any transport that carries a line each way. It has **no
+`pid`**: core reads a pid as a local process it may tree-kill and walk the
+process table under, so it strips one if present. `kill()` must take down the
+remote shell *and what it started* — it is the only teardown core can ask for.
+
+**Selection** is `resolveTerminalBackend` (shared): the chat's
+`terminalBackend` pin, else the project's `defaults.terminalBackend` in
+`project.yaml`, else `local`. The picker is in the chat's Terminals panel and
+the project's Settings → Chat defaults. Both appear while a backend is
+registered, or while a pin still names one that is not, so a stale pin can be
+seen and cleared. Selection is read when a shell OPENS; changing it moves the
+next shell, not one already running. A shell that fell back stays local until
+it is closed, even after its backend returns.
+
+The registry keeps every chat's non-local pin in memory: seeded from the store
+at boot, and kept current from `chat-update`. That lets TerminalService decide
+synchronously whether a shell needs resolving at all. `size > 0` alone would not
+do: a chat pinned to the only backend plugin, while that plugin is off or still
+activating, sees an empty registry, and must still get the warning (or the
+boot wait) rather than a plain local shell.
+
+**Failure is loud and falls back.** A spawn that rejects, or does not settle
+within `spawnTimeoutMs`, brings up a LOCAL shell instead. The reason lands in
+three places: a `[dispatch]` line in the terminal, a `notice` in the chat, and
+the next tool result. The row's location badge turns amber, with the reason in
+its tooltip. A pin to a backend that is not registered (plugin uninstalled or
+switched off) falls back the same way rather than quietly reading as local.
+During boot, a chat pinned to an installed plugin's backend waits for that
+plugin to activate before deciding it is missing.
+
+**Telling the agent.** The agent's own Bash tool stays local while its terminal
+does not, so core says so, only to chats on a backend and never as a global
+instruction. A session prompt section, "Where your terminal runs", is written
+when the chat resolves to a registered backend, and the first result from each
+new shell repeats it. Core's text covers what every backend shares: builds,
+tests and dev servers go through the terminal tool, git stays local, and
+servers are reached through forwarded URLs. `agentNote` appends what only the
+backend knows.
+
+**Lifecycle.** `onChatIdle` fires when the idle sweep retires the chat's
+session. Core does NOT kill the shells; stopping is the backend's call, and a
+shell that dies comes back on the next command because TerminalService re-opens
+an exited name. `onChatDeleted` fires after the chat's shells are killed. Both
+fan out to every registered backend, which must keep its own record of what it
+made. They are fire-and-forget, contained, and bounded at 60 s.
+
+**Ports.** A remote listener is useless to a browser on the Dispatch host until
+the backend forwards it. The backend owns the transport, so it does the
+forwarding and then announces it:
+
+```ts
+const withdraw = ctx.terminals.publishPort("proxmox", {
+  chatId, remotePort: 5173, url: "http://127.0.0.1:53211", label: "vite",
+});
+```
+
+Published ports appear in the terminal tool's results ("Forwarded ports"), in
+`terminal_output`, and in the Terminals panel. A plugin may publish only for
+backends it registered. Publishing the same chat + remote port again replaces
+the entry, and a stale `withdraw` does not remove its replacement.
+
+**Deactivation** unregisters every backend the plugin registered. Its shells
+end with a `[dispatch]` line saying why, its ports are withdrawn, and
+`dispose()` is called. The next command on one of those names re-resolves.
+The pin still names the gone backend, so it comes up local, with a warning.
+
+**What does not change with no backend plugin in use** (none registered, and
+no chat or project naming one): TerminalService takes its original synchronous
+spawn path, `TerminalInfo` has no `location`, no `terminal-backends` event is
+ever published, no prompt section is written, and the panel shows no picker or
+badge.
+
+`createTestContext` records `terminalBackends` and `terminalPorts`, and
+`t.terminals.spawn(id, { chatId })` / `chatIdle` / `chatDeleted` play the
+host's side, so a backend can be unit-tested with no server.
 
 ## Client host
 

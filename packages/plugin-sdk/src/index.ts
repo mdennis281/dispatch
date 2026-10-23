@@ -59,6 +59,17 @@ export type {
   HarnessTextRequest,
   ProviderDescriptor,
   RuntimeLoginStatus,
+  // terminal backends — implement `TerminalBackend`, hand it to
+  // `ctx.terminals.registerBackend` (docs/plugins.md → "Terminal backends")
+  TerminalBackend,
+  TerminalBackendHandle,
+  TerminalBackendReadable,
+  TerminalBackendShell,
+  TerminalChatEvent,
+  TerminalChunk,
+  TerminalPortForward,
+  TerminalPortForwardInput,
+  TerminalSpawnInfo,
   // client host
   ClientHost,
   ClientHostKit,

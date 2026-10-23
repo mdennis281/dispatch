@@ -36,6 +36,7 @@ import { AttentionFilterSchema } from "./notify.js";
 import { ProjectConfigSchema, ProjectConfigErrorSchema } from "./project-config.js";
 import { UsageSnapshotSchema } from "./usage.js";
 import { WorkflowExemptionSchema } from "./workflow.js";
+import { TerminalBackendInfoSchema, TerminalPortForwardSchema } from "./terminal-backend.js";
 
 /* =============================================================== server → client */
 
@@ -261,6 +262,18 @@ export const TerminalClosedEventSchema = z.object({
   type: z.literal("terminal-closed"),
   terminalId: z.string(),
   chatId: z.string(),
+});
+
+/**
+ * The terminal backends registered by plugins, and the remote ports they
+ * forward, changed. A full snapshot — both lists are tiny, and a snapshot
+ * cannot drift the way a stream of deltas can across a reconnect. Never sent
+ * on an install with no backend plugin.
+ */
+export const TerminalBackendsEventSchema = z.object({
+  type: z.literal("terminal-backends"),
+  backends: z.array(TerminalBackendInfoSchema),
+  ports: z.array(TerminalPortForwardSchema),
 });
 
 /** A per-turn rollback checkpoint was written. */
@@ -591,6 +604,7 @@ export const WsServerEventSchema = z.discriminatedUnion("type", [
   TerminalUpdateEventSchema,
   TerminalOutputEventSchema,
   TerminalClosedEventSchema,
+  TerminalBackendsEventSchema,
   CheckpointEventSchema,
   ChatUpdateEventSchema,
   ChatDeletedEventSchema,
