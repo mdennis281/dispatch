@@ -36,6 +36,25 @@
  * The shell spawn is injected (`deps.spawn`) so tests drive a scripted fake
  * process — no real PowerShell, fully deterministic.
  *
+ * ── Plugin terminal backends (#414) ─────────────────────────────────────────
+ * A plugin can register somewhere ELSE for a chat's shells to run (a container,
+ * a VM). The protocol above needs nothing but a line of text each way, so a
+ * backend only answers "get me a shell over there" and everything else —
+ * sentinel, scrollback, background runs, transcripts — stays here, unchanged.
+ *
+ * Two things differ. Provisioning is slow, so a backend's spawn is ASYNC: the
+ * terminal registers at once with a placeholder process and its run queue
+ * starts on the connect, so a command written meanwhile waits rather than
+ * going to a shell that does not exist yet. And a backend fails — the
+ * hypervisor API has had outages — so a spawn that rejects or overruns its
+ * deadline brings up a LOCAL shell instead, and says so in the terminal, in
+ * the chat and in the next tool result. A silent fallback would be worse than
+ * none: the agent would believe its tests ran in the container.
+ *
+ * With no backend registered, `open()` takes the original synchronous path
+ * and none of the backend fields below is ever set — "nothing changes" is
+ * literal.
+ *
  * ── Background commands, and why they belong HERE ────────────────────────────
  * A dev server can't run through the sentinel path: `vite --port …` never
  * returns, so the marker never lands and that shell is wedged for the rest of
@@ -57,7 +76,10 @@ import treeKill from "tree-kill";
 import { nanoid } from "nanoid";
 import {
   applyRegistryQuery,
+  LOCAL_TERMINAL_BACKEND,
   type RegistryQuery,
+  type TerminalBackend,
+  type TerminalLocation,
   type TerminalInfo,
   type TerminalLineRecord,
   type TerminalOrigin,
@@ -184,6 +206,34 @@ export type KillTreeFn = (pid: number) => void | Promise<void>;
 const defaultKillTree: KillTreeFn = (pid) =>
   new Promise<void>((resolve) => treeKill(pid, "SIGTERM", () => resolve()));
 
+/**
+ * What the selection rule decided for one chat — supplied by the
+ * `TerminalBackendRegistry`, narrowed here so tests can fake it.
+ */
+export interface TerminalBackendResolution {
+  /** The id the chat → project → `local` rule produced. */
+  requested: string;
+  /** The registered backend `requested` names. Absent for `local` AND for a missing one. */
+  backend?: TerminalBackend;
+  /** `requested` names no registered backend (its plugin is uninstalled or off). */
+  missing?: boolean;
+  /** The project's primary checkout, handed to the backend's spawn. */
+  repoPath?: string;
+  /** Core's agent-facing note for this backend (where the shell runs, what that means). */
+  note?: string;
+}
+
+/** The registry, as TerminalService sees it. */
+export interface TerminalBackendSource {
+  /** Registered backends. 0 ⇒ the synchronous local path, exactly as before backends existed. */
+  readonly size: number;
+  resolve(ident: { chatId: string; projectId?: string }): Promise<TerminalBackendResolution>;
+}
+
+/** How long a backend's spawn may take before the shell falls back to local. */
+export const DEFAULT_BACKEND_SPAWN_TIMEOUT_MS = 120_000;
+const MAX_BACKEND_SPAWN_TIMEOUT_MS = 600_000;
+
 export interface TerminalServiceDeps {
   spawn?: SpawnShell;
   /** Which probe dialect the injected `spawn` speaks; defaults to this platform's. */
@@ -208,6 +258,8 @@ export interface TerminalServiceOptions {
   retentionMs?: number;
   /** Write-behind flush cadence for output lines (default 1s). */
   flushIntervalMs?: number;
+  /** Plugin terminal backends. Absent (or empty) ⇒ every shell is local. */
+  backends?: TerminalBackendSource;
   deps?: TerminalServiceDeps;
 }
 
@@ -251,6 +303,12 @@ export interface RunTerminalResult {
   timedOut?: boolean;
   /** True when this returned early because `background` was requested. */
   backgrounded?: boolean;
+  /**
+   * Said ONCE per shell, on the first result after it opened: where it runs
+   * (a backend's note) or why it is not running where the chat asked (a
+   * fallback). The agent's only window onto a location it cannot otherwise see.
+   */
+  notice?: string;
 }
 
 /* ------------------------------------------------------------------- markers */
@@ -311,6 +369,36 @@ interface Terminal {
   };
   /** Set while a `background` command holds this shell (see `run`). */
   background?: { command: string; since: number };
+  /** The probe dialect THIS shell speaks — a backend's bash under a Windows host. */
+  flavour: ShellFlavour;
+  /** Where it runs, when a backend was involved (see {@link TerminalLocation}). */
+  location?: TerminalLocation;
+  /** The registered backend actually serving this shell (not set on a fallback). */
+  backendId?: string;
+  /** Delivered with the next run result, then cleared. */
+  notice?: string;
+}
+
+/**
+ * Stands in for a shell whose backend is still provisioning. Nothing is ever
+ * written to it — runs queue behind the connect — so all it has to do is
+ * notice being killed, and tell the backend to give up via the signal.
+ */
+class ConnectingShell implements ShellProcess {
+  readonly abort = new AbortController();
+  killed = false;
+  readonly stdin = {
+    write: (): void => {
+      throw new Error("Terminal is still connecting.");
+    },
+  };
+  readonly stdout = { on: (): void => {} };
+  readonly stderr = { on: (): void => {} };
+  kill(): void {
+    this.killed = true;
+    this.abort.abort();
+  }
+  on(): void {}
 }
 
 /* =============================================================== TerminalService */
@@ -326,6 +414,7 @@ export class TerminalService {
   private readonly killTree: KillTreeFn;
 
   private readonly store?: Store;
+  private readonly backends?: TerminalBackendSource;
   private readonly retentionMs: number;
   private readonly flushIntervalMs: number;
 
@@ -359,6 +448,7 @@ export class TerminalService {
     this.maxPerChat = Math.max(1, opts.maxPerChat ?? 8);
     this.scrollbackCap = Math.max(1, opts.scrollbackCap ?? 500);
     this.store = opts.store;
+    this.backends = opts.backends;
     this.retentionMs = Math.max(60_000, opts.retentionMs ?? DEFAULT_RETENTION_MS);
     this.flushIntervalMs = Math.max(100, opts.flushIntervalMs ?? 1_000);
   }
@@ -484,7 +574,11 @@ export class TerminalService {
     cwd: string,
     ident: { chatId: string; projectId?: string; origin?: TerminalOrigin },
   ): Terminal {
-    const proc = this.spawn(cwd);
+    // A registered backend means this chat MIGHT run elsewhere, and finding out
+    // is async (the chat's pin is on disk). With none registered, spawn here
+    // and now, exactly as before backends existed.
+    const connecting = (this.backends?.size ?? 0) > 0 ? new ConnectingShell() : undefined;
+    const proc = connecting ?? this.spawn(cwd);
     const now = this.now();
     // Re-opening a name whose transcript we still hold keeps writing to the SAME
     // log: a shell that died and was restarted under one name is one story, and
@@ -513,11 +607,28 @@ export class TerminalService {
       stderrBuf: "",
       scrollback: [],
       queue: Promise.resolve(),
+      flavour: this.flavour,
     };
     this.archived.delete(key);
     this.terminals.set(key, term);
     this.track(this.persist(term));
 
+    if (connecting) {
+      // The run queue STARTS on the connect, so `run()` — which chains onto
+      // `term.queue` — writes nothing until there is a real shell to write to.
+      // `connect` never rejects.
+      term.queue = this.connect(term, connecting, ident, cwd);
+    } else {
+      this.attach(term, proc);
+    }
+
+    this.publishUpdate(term);
+    return term;
+  }
+
+  /** Wire a live shell's streams into this terminal. */
+  private attach(term: Terminal, proc: ShellProcess): void {
+    term.proc = proc;
     proc.stdout.on("data", (c) => this.onData(term, "stdout", c.toString()));
     proc.stderr.on("data", (c) => this.onData(term, "stderr", c.toString()));
     proc.on("error", () => this.onExit(term));
@@ -527,13 +638,160 @@ export class TerminalService {
     // `.write()` calls in `run` cannot see. Unlistened, that 'error' event is an
     // uncaught exception — a dead terminal would have taken the server with it.
     proc.stdin.on?.("error", () => this.onExit(term));
+  }
 
+  /**
+   * Resolve which backend this chat's shell belongs on and bring it up there,
+   * falling back to a local shell — loudly — when that is not possible.
+   * Never rejects: it IS the terminal's run queue.
+   */
+  private async connect(
+    term: Terminal,
+    placeholder: ConnectingShell,
+    ident: { chatId: string; projectId?: string },
+    cwd: string,
+  ): Promise<void> {
+    // Closed while connecting: `kill()` already took it off the map. Detached
+    // (its backend went away) leaves it ON the map, and that one must end as an
+    // exited shell rather than sit forever behind a placeholder.
+    const abandoned = (): boolean => {
+      if (!placeholder.killed) return false;
+      if (this.terminals.get(term.id) === term) this.onExit(term);
+      return true;
+    };
+    let res: TerminalBackendResolution;
+    try {
+      res = await this.backends!.resolve(ident);
+    } catch {
+      // The selection could not even be read (a corrupt chat row). That is not
+      // a backend failing, and there is no backend to name — plain local.
+      res = { requested: LOCAL_TERMINAL_BACKEND };
+    }
+    if (abandoned()) return;
+
+    if (!res.backend) {
+      if (res.missing) {
+        this.fallBack(
+          term,
+          cwd,
+          res.requested,
+          res.requested,
+          `the terminal backend "${res.requested}" is not installed, or its plugin is switched off`,
+        );
+      } else {
+        this.attach(term, this.spawn(cwd));
+      }
+      return;
+    }
+
+    const backend = res.backend;
+    term.location = { backend: backend.id, label: backend.label, state: "connecting" };
+    this.record(term, "stderr", `[dispatch] Starting a shell on ${backend.label}…`);
     this.publishUpdate(term);
-    return term;
+
+    const timeoutMs = Math.min(
+      MAX_BACKEND_SPAWN_TIMEOUT_MS,
+      Math.max(1_000, backend.spawnTimeoutMs ?? DEFAULT_BACKEND_SPAWN_TIMEOUT_MS),
+    );
+    let handle: ShellProcess;
+    try {
+      const spawned = Promise.resolve().then(
+        () =>
+          backend.spawn({
+            chatId: ident.chatId,
+            projectId: ident.projectId,
+            name: term.name,
+            cwd,
+            repoPath: res.repoPath,
+            signal: placeholder.abort.signal,
+          }) as Promise<ShellProcess>,
+      );
+      handle = withoutPid(await settleWithin(spawned, timeoutMs, placeholder.abort));
+    } catch (err) {
+      if (abandoned()) return;
+      const why = err instanceof Error ? err.message : String(err);
+      this.fallBack(term, cwd, backend.id, backend.label, `${backend.label} could not start a shell: ${why}`);
+      return;
+    }
+    if (abandoned()) {
+      try {
+        handle.kill();
+      } catch {
+        /* already gone */
+      }
+      return;
+    }
+    term.flavour = backend.shell === "powershell" ? "powershell" : "posix";
+    term.backendId = backend.id;
+    term.location = { backend: backend.id, label: backend.label, state: "ready" };
+    term.notice = res.note;
+    this.attach(term, handle);
+    this.publishUpdate(term);
+  }
+
+  /** Bring up a LOCAL shell in place of the backend the chat asked for, and say so everywhere. */
+  private fallBack(term: Terminal, cwd: string, backendId: string, label: string, reason: string): void {
+    const text = `${capitalize(reason)}. This shell is running LOCALLY on the Dispatch host instead.`;
+    term.flavour = this.flavour;
+    term.location = { backend: backendId, label, state: "fallback", fallback: reason };
+    term.notice =
+      `WARNING: ${text} Commands in terminal '${term.name}' run on this machine, not on ${label}; ` +
+      `close it and open a new one to retry.`;
+    this.record(term, "stderr", `[dispatch] ${text}`);
+    this.bus.publish({
+      type: "notice",
+      chatId: term.chatId,
+      level: "warn",
+      text: `Terminal '${term.name}': ${text}`,
+    });
+    this.attach(term, this.spawn(cwd));
+    this.publishUpdate(term);
+  }
+
+  /**
+   * End every shell a backend is serving — its plugin is going away, and with
+   * it whatever was carrying the stdio. Each says so in its transcript and ends
+   * as an exited shell, so the next command on that name re-resolves (local,
+   * or wherever the chat points now) instead of writing into a dead channel.
+   * Returns how many it ended.
+   */
+  detachBackend(backendId: string, reason = "its plugin was switched off"): number {
+    let n = 0;
+    for (const term of [...this.terminals.values()]) {
+      if (term.status !== "live") continue;
+      const connectingThere =
+        term.location?.backend === backendId && term.location.state === "connecting";
+      if (term.backendId !== backendId && !connectingThere) continue;
+      n += 1;
+      this.record(
+        term,
+        "stderr",
+        `[dispatch] The terminal backend "${backendId}" went away (${reason}); this shell has ended.`,
+      );
+      try {
+        term.proc.kill();
+      } catch {
+        /* the backend may already have torn its transport down */
+      }
+      // A placeholder's kill only flags it — `connect` ends it. A live handle
+      // whose plugin is gone may never emit `exit`, so end it here.
+      if (!(term.proc instanceof ConnectingShell)) this.onExit(term);
+    }
+    return n;
   }
 
   /** Write one command + its sentinel probe, and resolve when the marker lands. */
   private exec(term: Terminal, args: RunTerminalArgs): Promise<RunTerminalResult> {
+    // Taken here, at the run that will actually report back — not when the
+    // shell opened, which for a UI-opened terminal may be long before any
+    // agent ran anything in it.
+    const notice = term.notice;
+    term.notice = undefined;
+    const run = this.execInner(term, args);
+    return notice ? run.then((r) => ({ ...r, notice })) : run;
+  }
+
+  private execInner(term: Terminal, args: RunTerminalArgs): Promise<RunTerminalResult> {
     if (term.status === "exited") {
       return Promise.resolve({
         output: "",
@@ -624,7 +882,7 @@ export class TerminalService {
 
       // The probe: the marker line `<marker>|<exit>|<ok>|<cwd>`, in whichever
       // dialect the shell under this terminal speaks.
-      const probe = probeLine(marker, this.flavour);
+      const probe = probeLine(marker, term.flavour);
       try {
         term.proc.stdin.write(command + "\n");
         term.proc.stdin.write(probe + "\n");
@@ -1228,6 +1486,7 @@ export class TerminalService {
       bytes: t.bytes,
       ...(t.background ? { background: t.background } : {}),
       ...(typeof t.proc.pid === "number" ? { pid: t.proc.pid } : {}),
+      ...(t.location ? { location: t.location } : {}),
     };
   }
 
@@ -1270,4 +1529,71 @@ function filterLines(
     out = out.filter((l) => l.chunk.toLowerCase().includes(needle));
   }
   return opts.tail && opts.tail > 0 ? out.slice(-opts.tail) : out.slice();
+}
+
+/** First letter up — reasons are phrased to sit mid-sentence elsewhere. */
+function capitalize(s: string): string {
+  return s ? s[0]!.toUpperCase() + s.slice(1) : s;
+}
+
+/**
+ * A backend handle re-shaped so it CANNOT carry a pid. Core reads `pid` as a
+ * local process it may tree-kill and walk the process table under; a remote
+ * shell's number would name some unrelated process on this machine.
+ */
+function withoutPid(h: ShellProcess): ShellProcess {
+  return {
+    stdin: h.stdin,
+    stdout: h.stdout,
+    stderr: h.stderr,
+    kill: (signal?: string) => h.kill(signal),
+    on: ((event: "exit" | "error", listener: (arg: never) => void) => {
+      h.on(event as "exit", listener as (code: number | null) => void);
+    }) as ShellProcess["on"],
+  };
+}
+
+/**
+ * `p`, or a rejection once `ms` passes or `abort` fires. Either way the
+ * signal is aborted so the backend can stop provisioning, and a handle that
+ * arrives LATE is killed rather than leaked — the terminal has already moved
+ * on to a local shell and nothing else holds a reference to it.
+ */
+function settleWithin(
+  p: Promise<ShellProcess>,
+  ms: number,
+  abort: AbortController,
+): Promise<ShellProcess> {
+  return new Promise<ShellProcess>((resolve, reject) => {
+    let done = false;
+    const giveUp = (why: string): void => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      abort.signal.removeEventListener("abort", onAbort);
+      if (!abort.signal.aborted) abort.abort();
+      reject(new Error(why));
+    };
+    const onAbort = (): void => giveUp("the terminal was closed while connecting");
+    const timer = setTimeout(() => giveUp(`no shell after ${Math.round(ms / 1000)}s`), ms);
+    timer.unref?.();
+    abort.signal.addEventListener("abort", onAbort);
+    p.then(
+      (h) => {
+        if (done) {
+          try {
+            h.kill();
+          } catch {
+            /* nothing to leak */
+          }
+          return;
+        }
+        done = true;
+        clearTimeout(timer);
+        abort.signal.removeEventListener("abort", onAbort);
+        resolve(h);
+      },
+      (err: unknown) => giveUp(err instanceof Error ? err.message : String(err)),
+    );
+  });
 }

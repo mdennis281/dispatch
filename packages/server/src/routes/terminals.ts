@@ -6,6 +6,7 @@
  *   POST   /api/terminals/run           → run a command in one
  *   POST   /api/terminals/kill-all      → kill every live shell a query selects
  *   DELETE /api/terminals/:id?purge=1   → kill one (purge also drops its transcript)
+ *   GET    /api/terminals/backends      → { backends, ports } registered by plugins (#414)
  *
  * The GETs are read-only snapshots so a (re)connecting client re-materializes the
  * live Terminals view; live output rides the `terminal-output` / `terminal-update`
@@ -51,7 +52,16 @@ async function resolveCwd(
 }
 
 export function registerTerminalRoutes(app: FastifyInstance): void {
-  const { terminals } = app.services;
+  const { terminals, terminalBackends } = app.services;
+
+  // The plugin terminal backends and the ports they forward — the snapshot the
+  // `terminal-backends` event later replaces. Both lists are empty on an
+  // install with no backend plugin, which is how the SPA knows to show no
+  // picker and no location badge at all.
+  app.get("/api/terminals/backends", async () => ({
+    backends: terminalBackends?.list() ?? [],
+    ports: terminalBackends?.ports() ?? [],
+  }));
 
   // The catalog read. `?chatId=` keeps its old meaning; with no ids it sweeps
   // app-wide, and it includes ARCHIVED shells — ones whose process is gone but

@@ -155,3 +155,34 @@ describe("createTestContext providers", () => {
     expect(() => t.ctx.providers!.register(harness("a"), descriptor("b"))).toThrow(/does not match/);
   });
 });
+
+describe("createTestContext terminals", () => {
+  it("records a backend, plays the host's spawn and hooks, and scopes ports", async () => {
+    const t = createTestContext();
+    const calls: string[] = [];
+    t.ctx.terminals!.registerBackend({
+      id: "box",
+      label: "Box",
+      shell: "bash",
+      spawn: async (info) => {
+        calls.push(`spawn:${info.chatId}:${info.name}`);
+        return { stdin: { write: () => {} }, stdout: { on: () => {} }, stderr: { on: () => {} }, kill: () => {}, on: () => {} };
+      },
+      onChatIdle: (e) => void calls.push(`idle:${e.chatId}`),
+      onChatDeleted: (e) => void calls.push(`deleted:${e.chatId}`),
+    });
+    expect([...t.terminalBackends.keys()]).toEqual(["box"]);
+    expect(() => t.ctx.terminals!.registerBackend({ ...t.terminalBackends.get("box")! })).toThrow(/already registered/);
+    expect(() => t.ctx.terminals!.registerBackend({ ...t.terminalBackends.get("box")!, id: "local" })).toThrow(/reserved/);
+
+    await t.terminals.spawn("box", { chatId: "c1" });
+    const withdraw = t.ctx.terminals!.publishPort("box", { chatId: "c1", remotePort: 5173, url: "http://127.0.0.1:1" });
+    expect(t.ctx.terminals!.ports("c1")).toEqual([{ chatId: "c1", remotePort: 5173, url: "http://127.0.0.1:1", backend: "box" }]);
+    expect(() => t.ctx.terminals!.publishPort("other", { chatId: "c1", remotePort: 1, url: "http://x" })).toThrow(/not registered/);
+    withdraw();
+    expect(t.terminalPorts).toEqual([]);
+    await t.terminals.chatIdle("c1");
+    await t.terminals.chatDeleted("c1");
+    expect(calls).toEqual(["spawn:c1:main", "idle:c1", "deleted:c1"]);
+  });
+});

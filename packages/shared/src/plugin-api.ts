@@ -17,6 +17,7 @@ import type { MemoryType } from "./domain.js";
 import type { QuestionAnswer, WsServerEvent, WsServerEventType } from "./wire.js";
 import type { Harness } from "./harness.js";
 import type { ProviderDescriptor } from "./providers.js";
+import type { TerminalBackend, TerminalPortForward, TerminalPortForwardInput } from "./terminal-backend.js";
 
 export interface PluginModule {
   activate(ctx: PluginContext): Promise<void> | void;
@@ -307,5 +308,25 @@ export interface PluginContext<Req = unknown, Reply = unknown> {
    */
   providers?: {
     register(harness: Harness, descriptor: ProviderDescriptor): void;
+  };
+  /**
+   * `terminals` — supply somewhere else for a chat's managed shells to run
+   * (docs/plugins.md → "Terminal backends"). `registerBackend` throws when the
+   * id is `local` or already taken. Deactivation unregisters every backend
+   * the plugin registered, ends the shells still running on them (each says
+   * so in its transcript; the next command comes up on whatever the chat now
+   * resolves to), withdraws its published ports, and calls `dispose()`.
+   */
+  terminals?: {
+    registerBackend(backend: TerminalBackend): void;
+    /**
+     * Announce a remote listener the backend has made reachable locally, so
+     * the agent's terminal results, the Terminals panel and anything driving a
+     * browser can find it. Returns the withdraw function; publishing the same
+     * chat + remote port again replaces the earlier entry.
+     */
+    publishPort(backendId: string, port: TerminalPortForwardInput): () => void;
+    /** Ports currently published for a chat, by any backend. */
+    ports(chatId: string): TerminalPortForward[];
   };
 }

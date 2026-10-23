@@ -339,6 +339,23 @@ export interface ManagerMcpBroker {
   ): Promise<ManagerHumanReviewResult>;
 }
 
+/** A remote port a terminal backend made reachable on this machine. */
+interface ForwardedPort {
+  remotePort: number;
+  url: string;
+  label?: string;
+}
+
+/**
+ * Tool-result lines for the chat's forwarded ports — empty when there are none,
+ * which is always on an install with no terminal backend.
+ */
+function portsNote(ports: ForwardedPort[] | undefined): string {
+  if (!ports?.length) return "";
+  const rows = ports.map((p) => `  :${p.remotePort} → ${p.url}${p.label ? ` (${p.label})` : ""}`);
+  return `\nForwarded ports (open these, not localhost:<port>):\n${rows.join("\n")}`;
+}
+
 /**
  * The narrow terminal surface the manager MCP needs — a single `run` that
  * executes a command in a named PERSISTENT shell (cwd/env survive across calls),
@@ -358,6 +375,10 @@ export interface ManagerMcpTerminals {
     error?: string;
     timedOut?: boolean;
     backgrounded?: boolean;
+    /** Once per shell: where it runs, or why it fell back to local (see TerminalService). */
+    notice?: string;
+    /** Remote listeners a terminal backend forwards for this chat. Absent with no backend. */
+    ports?: ForwardedPort[];
   }>;
   /** Recent output of a named shell — how a backgrounded command is read back. */
   tail(args: {
@@ -368,7 +389,7 @@ export interface ManagerMcpTerminals {
     /** Only lines at/after this epoch-ms — "what's new since I last looked". */
     since?: number;
     stream?: "stdout" | "stderr";
-  }): Promise<{ output: string; found: boolean }>;
+  }): Promise<{ output: string; found: boolean; ports?: ForwardedPort[] }>;
   /** The shell roster, filtered — how an agent finds a terminal it has lost. */
   list(args: { scope?: RegistryScope; q?: string }): TerminalInfo[];
 }
@@ -5072,18 +5093,25 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         background: args.background === true,
       });
 
+      // Where the shell runs — or why it is not where the chat asked — leads
+      // the result: it changes how everything after it should be read.
+      const notice = res.notice ? `${res.notice}\n\n` : "";
       if (res.backgrounded) {
         return textResult(
-          `[${name}] started in the background (cwd=${res.cwd}). ` +
+          `${notice}[${name}] started in the background (cwd=${res.cwd}). ` +
             `Read its output with terminal_output({ name: "${name}" }). ` +
-            `It is tracked against this chat and stops when the chat is torn down.`,
+            `It is tracked against this chat and stops when the chat is torn down.` +
+            portsNote(res.ports),
         );
       }
 
       const header = `[${name}] cwd=${res.cwd} exit=${res.exitCode ?? "n/a"}`;
       const body = res.output ? `\n${res.output}` : "";
       const note = res.error ? `\n(${res.error})` : "";
-      return textResult(`${header}${body}${note}`, !!res.error && !res.timedOut);
+      return textResult(
+        `${notice}${header}${body}${note}${portsNote(res.ports)}`,
+        !!res.error && !res.timedOut,
+      );
     },
   );
 
@@ -5159,7 +5187,9 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       if (!res.found) {
         return textResult(`No terminal named '${name}' in this chat.`, true);
       }
-      return textResult(res.output ? `[${name}]\n${res.output}` : `[${name}] (no output matched)`);
+      return textResult(
+        (res.output ? `[${name}]\n${res.output}` : `[${name}] (no output matched)`) + portsNote(res.ports),
+      );
     },
   );
 

@@ -26,6 +26,7 @@ import {
 } from "./common.js";
 import { SubAppSchema, AgentConfigSchema } from "./domain.js";
 import { WorkflowConfigSchema } from "./workflow.js";
+import { TERMINAL_BACKEND_ID_PATTERN } from "./terminal-backend.js";
 import { IssueConfigSchema } from "./issues.js";
 import { ProjectAgentContextSchema } from "./agent-context.js";
 import { ProjectRetentionSchema } from "./retention.js";
@@ -304,6 +305,13 @@ export const ManifestDefaultsSchema = z.object({
   showInjectedContext: z.boolean().optional(),
   /** Transcript-shell categories enabled by default for chats in this project. */
   shellFilter: ShellTranscriptFilterSchema.optional(),
+  /**
+   * Where this project's managed terminals run: `local`, or the id of a
+   * terminal backend a plugin registers. Unset is local. A chat can pin its
+   * own (`Chat.terminalBackend`). Naming a backend that is not installed is
+   * not an error here — the shell comes up local and says why.
+   */
+  terminalBackend: z.string().regex(TERMINAL_BACKEND_ID_PATTERN).optional(),
 });
 export type ManifestDefaults = z.infer<typeof ManifestDefaultsSchema>;
 
@@ -454,6 +462,8 @@ export const ProjectConfigDefaultsSchema = z.object({
   /** Project-level default for the transcript's injected-context disclosure. */
   showInjectedContext: z.boolean().optional(),
   shellFilter: ShellTranscriptFilterSchema.optional(),
+  /** Project default terminal backend (`ManifestDefaultsSchema.terminalBackend`). */
+  terminalBackend: z.string().regex(TERMINAL_BACKEND_ID_PATTERN).optional(),
 });
 export type ProjectConfigDefaults = z.infer<typeof ProjectConfigDefaultsSchema>;
 

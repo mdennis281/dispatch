@@ -141,6 +141,8 @@ import type {
   GrowthProgress,
   GrowthReport,
   RetentionSettings,
+  TerminalBackendInfo,
+  TerminalPortForward,
 } from "@dispatch/shared";
 import {
   DEFAULT_HARNESS,
@@ -159,7 +161,13 @@ import type {
 } from "@dispatch/shared";
 
 /** The pins on a chat that `null` un-sets — see `api.chats.update`. */
-export type ChatTriState = "shellFilter" | "showInjectedContext" | "effort" | "model" | "modeId";
+export type ChatTriState =
+  | "shellFilter"
+  | "showInjectedContext"
+  | "effort"
+  | "model"
+  | "modeId"
+  | "terminalBackend";
 export type ChatPatch = Omit<Partial<Chat>, ChatTriState> & {
   [K in ChatTriState]?: Chat[K] | null;
 };
@@ -177,6 +185,7 @@ export interface ProjectDefaultsPatch {
     model?: string | null;
     showInjectedContext?: boolean | null;
     shellFilter?: ShellTranscriptFilter | null;
+    terminalBackend?: string | null;
   };
   spawnChat?: { autoApprove?: boolean | null };
 }
@@ -1148,6 +1157,13 @@ export const api = {
      */
     killAll: (query: Partial<RegistryQuery> = {}) =>
       post<{ killed: number; ids: string[] }>("/api/terminals/kill-all", query),
+    /**
+     * Terminal backends plugins registered, and the remote ports they forward.
+     * Both empty on an install with no backend plugin — which is what keeps the
+     * picker and the location badges off the screen entirely.
+     */
+    backends: () =>
+      get<{ backends: TerminalBackendInfo[]; ports: TerminalPortForward[] }>("/api/terminals/backends"),
   },
 
   /* the tracked-PR catalog — the Workspace view's third registry */

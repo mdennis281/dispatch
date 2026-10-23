@@ -32,6 +32,8 @@ export const PLUGIN_CAPABILITY_LINES: Record<z.infer<typeof PluginCapabilitySche
   oauth: "Connects to outside services with OAuth and holds their tokens.",
   ui: "Runs code in your browser: controls, panels, settings pages, badges.",
   providers: "Adds an agent runtime your chats can run on, and runs that runtime's CLI on this machine.",
+  terminals:
+    "Runs your chats' managed terminals somewhere else (a container, another machine) and sees every command and its output there.",
 };
 
 /** Where the inspected files came from, and exactly which commit. */

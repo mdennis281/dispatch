@@ -117,6 +117,7 @@ const SERVER_MEMBERS: Record<string, { capability?: PluginCapability; methods?: 
   processes: { capability: "process" },
   oauth: { capability: "oauth" },
   providers: { capability: "providers" },
+  terminals: { capability: "terminals" },
   projects: {},
 };
 

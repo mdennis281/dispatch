@@ -43,6 +43,7 @@ import { createIntegrationContext } from "./mcp/integration-context.js";
 import { ChatCompletionNotices } from "./chat-completion-notice.js";
 import { SessionBroker } from "./session-broker.js";
 import { TerminalService } from "./terminal.js";
+import { TerminalBackendRegistry } from "./terminal-backends.js";
 import { MemoryService } from "./memory.js";
 import { AuthoredConfigService } from "./authored-config.js";
 import { HouseRulesService, houseRulesDirFor } from "./house-rules.js";
@@ -119,6 +120,7 @@ export interface ServiceOverrides {
   managerMcp?: ManagerMcpBridge;
   broker?: SessionBroker;
   terminals?: TerminalService;
+  terminalBackends?: TerminalBackendRegistry;
   memory?: MemoryService;
   authored?: AuthoredConfigService;
   houseRules?: HouseRulesService;
@@ -185,6 +187,8 @@ export interface Services extends ServiceBase {
   /** Pushes a changed secret through config, live chats and running sub-apps. */
   secretRefresher: SecretRefresher;
   terminals: TerminalService;
+  /** Plugin-supplied places for those shells to run, and the ports they forward (#414). */
+  terminalBackends: TerminalBackendRegistry;
   memory: MemoryService;
   /** App-level (shipped + user-global) instructions and skills. */
   authored: AuthoredConfigService;
@@ -337,7 +341,31 @@ export function createServices(
   // Persistent named shells exposed to sessions as `mcp__dispatch-workspace__terminal`.
   // The store makes them durable: the roster and each shell's transcript survive
   // a restart, so "what did that build print?" outlives the process that ran it.
-  const terminals = overrides.terminals ?? new TerminalService({ bus, store });
+  //
+  // Where they run is the `terminals` plugin capability's business: with no
+  // backend registered the registry is empty and every shell is local, exactly
+  // as before. The closures read `projectConfig` lazily — it is constructed a
+  // few lines below, and nothing calls them before a plugin has activated.
+  const terminalBackends =
+    overrides.terminalBackends ??
+    new TerminalBackendRegistry({
+      bus,
+      chat: async (chatId) => {
+        const chat = await store.getChat(chatId).catch(() => null);
+        return chat ? { terminalBackend: chat.terminalBackend, projectId: chat.projectId } : null;
+      },
+      projectDefault: (projectId) => projectConfig.getDefaults(projectId)?.terminalBackend,
+      repoPath: async (projectId) => (await store.getProject(projectId).catch(() => null))?.repoPath,
+      log: (message, err) => console.warn(`[terminals] ${message}`, err ?? ""),
+      // `plugins` is assigned further down; only called once a chat opens a shell.
+      settled: () => plugins.activationSettled(),
+    });
+  const terminals =
+    overrides.terminals ?? new TerminalService({ bus, store, backends: terminalBackends });
+  // A backend whose plugin goes away takes the transport its shells ride on
+  // with it; end them now so the next command re-resolves instead of writing
+  // into a dead channel.
+  terminalBackends.onDetach((id) => terminals.detachBackend(id));
   // Self-contained project config: discovers + validates the authored config for
   // a managed project — the repo's committed `.dispatch/` or the install-owned
   // dir, resolved per project by `config-location.ts` — syncs it into the
@@ -497,6 +525,7 @@ export function createServices(
       maxActiveSessions: config.maxActiveSessions,
       idleSessionMinutes: config.idleSessionMinutes,
       terminals,
+      terminalBackends,
       memory,
       secrets,
       issues,
@@ -1121,6 +1150,7 @@ export function createServices(
           register: (harness, descriptor) => harnesses.register(harness, descriptor),
           unregister: (kind) => harnesses.unregister(kind),
         },
+        terminals: terminalBackends,
       },
       // Plugin processes run through the SAME runner as sub-apps — port
       // allocation, log ring, env quarantine, `stopAll()` at shutdown.
@@ -1410,6 +1440,7 @@ export function createServices(
     issues,
     secretRefresher,
     terminals,
+    terminalBackends,
     memory,
     authored,
     houseRules,

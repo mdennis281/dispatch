@@ -67,6 +67,7 @@ export const PLUGIN_CAPABILITIES = [
   "oauth",
   "ui",
   "providers",
+  "terminals",
 ] as const;
 export const PluginCapabilitySchema = z.enum(PLUGIN_CAPABILITIES);
 export type PluginCapability = z.infer<typeof PluginCapabilitySchema>;

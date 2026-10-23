@@ -22,7 +22,10 @@ export type ChatDeletionDeps = Pick<
   | "chatProcesses"
   | "processes"
   | "checkpoints"
->;
+> &
+  // Optional so the callers and tests that predate terminal backends keep
+  // compiling; absent is "no backend could own anything for this chat".
+  Partial<Pick<Services, "terminalBackends">>;
 
 /**
  * Kill whatever OS processes are still attributed to a chat after its session
@@ -43,6 +46,10 @@ export async function deleteChat(deps: ChatDeletionDeps, id: string): Promise<vo
   // Tear the subprocess down, THEN forget the session so it can't leak.
   await broker.stop(id).catch(() => {});
   terminals.killChat(id);
+  // After the shells are killed, so a backend destroying the machine they ran
+  // on is not racing its own live channels. Fire-and-forget: a hypervisor that
+  // takes a minute to destroy a container must not hold the delete open.
+  deps.terminalBackends?.chatDeleted({ chatId: id, projectId: existing?.projectId });
   // A browser shim can outlive the provider that launched it. Reap while the
   // chat id still exists as an ownership key; after deletion the UI has no
   // row from which a human could recover the orphan.

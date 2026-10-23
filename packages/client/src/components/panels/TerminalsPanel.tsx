@@ -7,8 +7,17 @@ import {
   CornerDownLeft,
   Activity,
   ChevronRight,
+  Container,
+  ExternalLink,
+  Monitor,
+  TriangleAlert,
 } from "lucide-react";
-import type { Chat, TerminalInfo } from "@dispatch/shared";
+import {
+  LOCAL_TERMINAL_BACKEND,
+  resolveTerminalBackend,
+  type Chat,
+  type TerminalInfo,
+} from "@dispatch/shared";
 import {
   isActiveTerminal,
   isLiveChatTerminal,
@@ -24,6 +33,9 @@ import { IconButton } from "../ui/IconButton.js";
 import { cn } from "../../lib/cn.js";
 import { midTruncate } from "../../lib/format.js";
 import { useProcesses, useTerminalPorts } from "../../stores/processes.js";
+import { useChats } from "../../stores/chats.js";
+import { useProjectLayer } from "../../stores/config.js";
+import { Select, type SelectOption } from "../ui/Select.js";
 
 const EMPTY_LINES: TerminalLine[] = [];
 
@@ -111,6 +123,132 @@ function CommandInput({ terminal }: { terminal: TerminalInfo }) {
   );
 }
 
+/**
+ * Where a shell runs, when a plugin terminal backend exists to make that a
+ * question. Renders nothing on an install with no backend — the "nothing
+ * changes" promise covers the screen too.
+ */
+function LocationChip({ terminal }: { terminal: TerminalInfo }) {
+  const hasBackends = useTerminals((s) => s.backends.length > 0);
+  const loc = terminal.location;
+  if (!loc) {
+    if (!hasBackends) return null;
+    return (
+      <Chip tone="muted" icon={<Monitor />} title="Runs on this machine">
+        local
+      </Chip>
+    );
+  }
+  if (loc.state === "fallback") {
+    // Amber, with the reason in the tooltip: a shell that is NOT where the chat
+    // asked is the one fact on this row that changes what its output means.
+    return (
+      <Chip
+        tone="warn"
+        icon={<TriangleAlert />}
+        title={`Running locally — ${loc.fallback ?? "backend unavailable"}`}
+      >
+        local · {loc.label} unavailable
+      </Chip>
+    );
+  }
+  if (loc.state === "connecting") {
+    return (
+      <Chip tone="neutral" icon={<Container />} title={`Starting a shell on ${loc.label}`}>
+        connecting · {loc.label}
+      </Chip>
+    );
+  }
+  return (
+    <Chip tone="info" icon={<Container />} title={`Runs on ${loc.label}`}>
+      {loc.label}
+    </Chip>
+  );
+}
+
+/**
+ * The chat's own pick of where NEW shells run: inherit the project's default,
+ * or pin one. Only rendered when a backend is registered. Read at spawn time,
+ * so it moves the next shell, never one already running.
+ */
+function TerminalBackendPicker({ chat }: { chat: Chat }) {
+  const backends = useTerminals((s) => s.backends);
+  const project = useProjectLayer(chat.projectId);
+  if (backends.length === 0) return null;
+
+  const projectPick = resolveTerminalBackend({ project: project?.terminalBackend });
+  const effective = resolveTerminalBackend({
+    chat: chat.terminalBackend,
+    project: project?.terminalBackend,
+  });
+  const labelOf = (id: string) =>
+    id === LOCAL_TERMINAL_BACKEND ? "This machine" : (backends.find((b) => b.id === id)?.label ?? id);
+  const options: SelectOption<string>[] = [
+    { value: LOCAL_TERMINAL_BACKEND, label: "This machine", icon: <Monitor /> },
+    ...backends.map((b) => ({ value: b.id, label: b.label, icon: <Container />, hint: b.pluginId })),
+  ];
+  // A pin to a backend whose plugin is gone is still the answer; show it
+  // rather than a blank chip — its shells come up local and say why.
+  if (!options.some((o) => o.value === effective.id)) {
+    options.push({ value: effective.id, label: effective.id, icon: <TriangleAlert />, hint: "not installed" });
+  }
+  const pin = (next: string | null) => {
+    useChats.getState().upsertChat({ ...chat, terminalBackend: next ?? undefined });
+    void api.chats.update(chat.id, { terminalBackend: next }).catch(() => {});
+  };
+
+  return (
+    <div className="flex items-center gap-2 rounded-md border border-line-soft bg-panel-2/30 py-1 pl-2.5 pr-1">
+      <span className="text-2xs text-faint" title="Applies to shells opened from now on">
+        New shells run on
+      </span>
+      <span className="flex-1" />
+      <Select
+        width={220}
+        align="end"
+        value={effective.id}
+        onChange={(v) => pin(v)}
+        options={options}
+        inherit={{
+          label: `Inherit · ${labelOf(projectPick.id)}`,
+          hint: projectPick.source === "project" ? "from the project's defaults" : "the default",
+          active: chat.terminalBackend === undefined,
+          onSelect: () => pin(null),
+        }}
+      />
+    </div>
+  );
+}
+
+/**
+ * Remote listeners the chat's backend forwards here. The far side's port is
+ * meaningless on this machine; the local URL is the one a browser — or the
+ * agent's Playwright — can open.
+ */
+function ForwardedPorts({ chatId }: { chatId: string }) {
+  const all = useTerminals((s) => s.forwards);
+  const ports = all.filter((p) => p.chatId === chatId);
+  if (ports.length === 0) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 rounded-md border border-line-soft bg-panel-2/30 px-2.5 py-1.5">
+      <span className="text-2xs text-faint">Forwarded</span>
+      {ports.map((p) => (
+        <a
+          key={`${p.backend}:${p.remotePort}`}
+          href={p.url}
+          target="_blank"
+          rel="noreferrer"
+          title={`${p.label ? `${p.label} — ` : ""}:${p.remotePort} on the backend, reachable at ${p.url}`}
+          className="inline-flex items-center gap-1 rounded-[5px] border border-info-line bg-info-ghost px-1.5 py-px cm-mono !text-2xs text-info-hi hover:underline"
+        >
+          :{p.remotePort} → {p.url.replace(/^https?:\/\//, "")}
+          <ExternalLink className="size-3" />
+        </a>
+      ))}
+    </div>
+  );
+}
+
 /** What the shell is doing, in the two words the header and the collapsed row share. */
 function statusText(terminal: TerminalInfo): string {
   // A shell held by a dev server is busy FOREVER by design. Saying "running…"
@@ -194,6 +332,7 @@ function TerminalCard({
           <StatusDot tone={live ? "success" : "muted"} size={4} />
           <span className="truncate text-2xs text-faint">{statusText(terminal)}</span>
         </Button>
+        <LocationChip terminal={terminal} />
         {/* A collapsed shell can still be holding a port — the one thing about
             it that isn't recoverable by expanding it later, because it's what
             makes the next launch fail. */}
@@ -243,9 +382,20 @@ function TerminalCard({
             </span>
           </span>
         </Button>
+        <LocationChip terminal={terminal} />
         {exitChip}
         {closeButton}
       </div>
+
+      {terminal.location?.state === "fallback" && (
+        <div className="flex items-start gap-1.5 border-t border-line-soft bg-warn-ghost px-3 py-1.5 text-2xs text-warn">
+          <TriangleAlert className="mt-px size-3 shrink-0" />
+          <span>
+            Running on this machine: {terminal.location.fallback}. Close this shell and open a new
+            one to retry {terminal.location.label}.
+          </span>
+        </div>
+      )}
 
       <div className="flex items-center gap-1.5 border-t border-line-soft px-3 py-1.5 text-2xs text-faint">
         <FolderClosed className="size-3 shrink-0" />
@@ -331,18 +481,22 @@ export function TerminalsPanel({ chat }: { chat: Chat }) {
 
   if (live.length === 0) {
     return (
-      <div className="px-4 py-10 text-center">
-        <TerminalSquare className="mx-auto mb-2 size-5 text-faint" />
-        <p className="text-sm text-muted">No terminals running.</p>
-        <p className="mt-0.5 text-xs text-faint">
-          Persistent shells — cwd and env survive across commands. The agent opens
-          them with its <span className="cm-mono !text-2xs">terminal</span> tool;
-          you can open one too.
-        </p>
-        <div className="mt-3 flex justify-center">
-          <Button size="sm" variant="subtle" leftIcon={<Plus />} disabled={opening} onClick={openShell}>
-            New shell
-          </Button>
+      <div className="flex flex-col gap-2 p-3">
+        <TerminalBackendPicker chat={chat} />
+        <ForwardedPorts chatId={chat.id} />
+        <div className="px-1 py-7 text-center">
+          <TerminalSquare className="mx-auto mb-2 size-5 text-faint" />
+          <p className="text-sm text-muted">No terminals running.</p>
+          <p className="mt-0.5 text-xs text-faint">
+            Persistent shells — cwd and env survive across commands. The agent opens
+            them with its <span className="cm-mono !text-2xs">terminal</span> tool;
+            you can open one too.
+          </p>
+          <div className="mt-3 flex justify-center">
+            <Button size="sm" variant="subtle" leftIcon={<Plus />} disabled={opening} onClick={openShell}>
+              New shell
+            </Button>
+          </div>
         </div>
       </div>
     );
@@ -353,6 +507,8 @@ export function TerminalsPanel({ chat }: { chat: Chat }) {
     // stubs, and card spacing wider than the row itself reads as a gap in the
     // list rather than a list of small things.
     <div className="flex flex-col gap-2 p-3">
+      <TerminalBackendPicker chat={chat} />
+      <ForwardedPorts chatId={chat.id} />
       {live.map((t) => (
         <TerminalCard key={t.id} terminal={t} projectId={chat.projectId} />
       ))}

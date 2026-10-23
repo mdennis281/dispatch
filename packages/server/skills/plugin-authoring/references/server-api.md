@@ -108,7 +108,32 @@ await ctx.oauth.connectUrl(name) / token(name) / disconnect(name)
 // `harness` implements Harness from @dispatch/shared; descriptor.id === harness.kind.
 // Throws if the id is taken; the toggle unregisters it and calls harness.dispose().
 ctx.providers.register(harness, descriptor)
+
+// terminals — somewhere else for chats' managed shells to run (docs/plugins.md →
+// "Terminal backends"). spawn is async and resolves to stdio (stdin/stdout/stderr,
+// kill, on exit|error) with NO pid; reject or overrun spawnTimeoutMs and core brings
+// up a LOCAL shell and says why. Throws on "local" or a taken id; the toggle ends the
+// backend's shells, withdraws its ports and calls dispose().
+ctx.terminals.registerBackend({
+  id: "box", label: "My box", shell: "bash",
+  spawn: async ({ chatId, projectId, name, cwd, repoPath, signal }) => handle,
+  agentNote: ({ chatId }) => "what the agent can't infer (how code gets there, what isn't shared)",
+  onChatIdle: ({ chatId }) => {},     // session retired by the idle sweep — shells are NOT killed by core
+  onChatDeleted: ({ chatId }) => {},  // shells already gone — destroy what you made
+})
+const withdraw = ctx.terminals.publishPort("box", { chatId, remotePort: 5173, url: "http://127.0.0.1:53211" })
+ctx.terminals.ports(chatId)
 ```
+
+Gotchas for a terminal backend:
+- Never put a `pid` on the handle — core strips it, because a remote pid names some
+  unrelated local process. `kill()` has to end the remote shell AND its children.
+- The selection is read when a shell OPENS (chat pin → project `defaults.terminalBackend`
+  → local). Lifecycle hooks fan out to EVERY backend, so keep your own chatId → resource map.
+- Tell the agent what only you know in `agentNote`. Core already says: run builds, tests
+  and servers through the terminal tool, keep git local, open the forwarded URLs.
+- Test with `createTestContext`: `t.terminals.spawn("box", { chatId })`, `t.terminals.chatIdle(...)`,
+  `t.terminals.chatDeleted(...)`, and `t.terminalPorts`.
 
 Working examples of `providers`: the built-in Codex and goose plugins,
 `packages/plugins/codex` and `packages/plugins/goose` (`src/main.ts` is the

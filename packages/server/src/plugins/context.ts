@@ -26,6 +26,9 @@ import {
   type Harness,
   type ProviderDescriptor,
   type PluginCapability,
+  type TerminalBackend,
+  type TerminalPortForward,
+  type TerminalPortForwardInput,
   type PluginContext,
   type PluginLog,
   type PluginManifest,
@@ -111,6 +114,17 @@ export interface PluginContextDeps {
   providers?: {
     register(harness: Harness, descriptor: ProviderDescriptor): void;
     unregister(kind: string): Promise<void>;
+  };
+  /**
+   * Where `ctx.terminals` lands — the host's `TerminalBackendRegistry`. Absent
+   * in a host built without one; then the member is absent too.
+   */
+  terminals?: {
+    register(backend: TerminalBackend, owner?: string): void;
+    unregister(id: string): Promise<void>;
+    has(id: string): boolean;
+    publishPort(backendId: string, port: TerminalPortForwardInput): () => void;
+    ports(chatId?: string): TerminalPortForward[];
   };
 }
 
@@ -340,6 +354,34 @@ export function buildPluginContext(
           });
         });
       },
+    };
+  }
+
+  if (has("terminals") && deps.terminals) {
+    const terminals = deps.terminals;
+    // Bound to this plugin: it may publish ports only for backends IT
+    // registered, so one plugin cannot advertise a URL as another's.
+    const mine = new Set<string>();
+    ctx.terminals = {
+      registerBackend: (backend) => {
+        terminals.register(backend, id);
+        mine.add(backend.id);
+        // Torn down with the plugin, like a provider: the shells on it are
+        // ended (each says so), its ports withdrawn, its `dispose()` called.
+        owned.offs.push(() => {
+          mine.delete(backend.id);
+          terminals.unregister(backend.id).catch((err: unknown) => {
+            deps.log.error(`terminal backend "${backend.id}" failed to unregister`, err);
+          });
+        });
+      },
+      publishPort: (backendId, port) => {
+        if (!mine.has(backendId)) {
+          throw new Error(`terminal backend "${backendId}" was not registered by plugin "${id}"`);
+        }
+        return terminals.publishPort(backendId, port);
+      },
+      ports: (chatId) => terminals.ports(chatId),
     };
   }
 

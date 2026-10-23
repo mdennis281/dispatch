@@ -66,6 +66,7 @@ export * from "./authoring.js";
 export * from "./global-chat.js";
 export * from "./auto-allow.js";
 export * from "./plugin-manifest.js";
+export * from "./terminal-backend.js";
 export * from "./plugin-api.js";
 export * from "./plugin-inspection.js";
 export * from "./plugin-lifecycle.js";
