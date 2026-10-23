@@ -131,11 +131,7 @@ and a manifest whose range excludes it — or cannot be parsed — is listed as
 | `process` | `contributes.processes`, `ctx.processes` |
 | `oauth` | `oauth.clients`, `ctx.oauth` |
 | `ui` | a `client` entry |
-<<<<<<< HEAD
 | `providers` | `ctx.providers.register` — see "Providers" |
-=======
-| `providers` | `ctx.providers.register` — an agent runtime chats can run on |
->>>>>>> b76eebf2 (feat(plugins): record install source, check for updates, update, uninstall (#409))
 
 A capability the manifest does not declare is simply absent from the context
 object the plugin receives — the members are typed optional for that reason.
