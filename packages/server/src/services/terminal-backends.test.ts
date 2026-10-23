@@ -24,14 +24,18 @@ class FakeShell extends EventEmitter implements ShellProcess {
   readonly stdout = new EventEmitter();
   readonly stderr = new EventEmitter();
   killed = false;
+  private hanging = false;
   readonly stdin = {
     write: (chunk: string): void => {
       this.writes.push(chunk);
       for (const line of chunk.split("\n")) {
         const say = line.match(/^say\s+(.+)$/);
         if (say) this.stdout.emit("data", Buffer.from(`${say[1]}\n`));
+        // `hang` never returns, like a dev server: its marker never prints.
+        if (line === "hang") this.hanging = true;
         const marker = line.match(/CMTERMSENTINEL_[A-Za-z0-9_-]+/);
-        if (marker) this.stdout.emit("data", Buffer.from(`${marker[0]}|0|True|${this.cwd}\n`));
+        if (marker && this.hanging) this.hanging = false;
+        else if (marker) this.stdout.emit("data", Buffer.from(`${marker[0]}|0|True|${this.cwd}\n`));
       }
     },
   };
@@ -235,6 +239,20 @@ describe("async spawn", () => {
 
     const again = await h.svc.run({ chatId: "c1", name: "build", command: "say again" });
     expect(again.notice).toBeUndefined();
+  });
+
+  it("takes the shell's starting cwd from the handle, so a background first command reports the far side's", async () => {
+    const h = setup();
+    h.registry.register(
+      fakeBackend({
+        spawn: async () => Object.assign(new FakeShell("/srv/repo"), { cwd: "/srv/repo" }),
+      }),
+      "plug",
+    );
+    h.chats.set("c1", { terminalBackend: "box" });
+    const res = await h.svc.run({ chatId: "c1", name: "dev", command: "hang", cwd: "C:\\work", background: true });
+    expect(res.backgrounded).toBe(true);
+    expect(res.cwd).toBe("/srv/repo");
   });
 
   it("closing a terminal while it connects aborts the spawn and kills a late handle", async () => {

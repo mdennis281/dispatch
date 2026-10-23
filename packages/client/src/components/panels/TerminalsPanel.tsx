@@ -134,7 +134,7 @@ function LocationChip({ terminal }: { terminal: TerminalInfo }) {
   if (!loc) {
     if (!hasBackends) return null;
     return (
-      <Chip tone="muted" icon={<Monitor />} title="Runs on this machine">
+      <Chip tone="muted" icon={<Monitor />} className="shrink-0" title="Runs on this machine">
         local
       </Chip>
     );
@@ -142,25 +142,28 @@ function LocationChip({ terminal }: { terminal: TerminalInfo }) {
   if (loc.state === "fallback") {
     // Amber, with the reason in the tooltip: a shell that is NOT where the chat
     // asked is the one fact on this row that changes what its output means.
+    // Kept short — the first cut named the backend here and squeezed the
+    // shell's own name out of the header; the strip under it carries the rest.
     return (
       <Chip
         tone="warn"
         icon={<TriangleAlert />}
-        title={`Running locally — ${loc.fallback ?? "backend unavailable"}`}
+        className="shrink-0"
+        title={`Running locally — ${loc.label}: ${loc.fallback ?? "unavailable"}`}
       >
-        local · {loc.label} unavailable
+        local · fallback
       </Chip>
     );
   }
   if (loc.state === "connecting") {
     return (
-      <Chip tone="neutral" icon={<Container />} title={`Starting a shell on ${loc.label}`}>
+      <Chip tone="neutral" icon={<Container />} className="max-w-[45%] shrink-0 truncate" title={`Starting a shell on ${loc.label}`}>
         connecting · {loc.label}
       </Chip>
     );
   }
   return (
-    <Chip tone="info" icon={<Container />} title={`Runs on ${loc.label}`}>
+    <Chip tone="info" icon={<Container />} className="max-w-[45%] shrink-0 truncate" title={`Runs on ${loc.label}`}>
       {loc.label}
     </Chip>
   );

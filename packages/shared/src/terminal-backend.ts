@@ -85,6 +85,13 @@ export interface TerminalBackendHandle {
   kill(signal?: string): void;
   on(event: "exit", listener: (code: number | null) => void): unknown;
   on(event: "error", listener: (err: Error) => void): unknown;
+  /**
+   * The directory the shell starts in ON THE FAR SIDE, when the backend knows
+   * it. Core otherwise only learns a shell's cwd from the first command's
+   * probe, so until then the terminal would show the LOCAL path it was asked
+   * for — wrong for a background first command, which never reports back.
+   */
+  cwd?: string;
 }
 
 /** Passed to the lifecycle hooks. */

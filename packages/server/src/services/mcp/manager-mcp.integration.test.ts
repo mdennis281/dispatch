@@ -344,7 +344,7 @@ describe("manager-mcp integration — terminal over a real TerminalService", () 
       terminals: {
         // What the broker's binding hands back for a chat on a backend.
         run: async (a) => ({
-          ...(await svc.run({ chatId: "c1", cwd: "C:\start", ...a })),
+          ...(await svc.run({ chatId: "c1", cwd: "C:\\start", ...a })),
           ...(ran++ === 0 ? { notice: "This chat's managed terminals run on Box, NOT on the Dispatch host." } : {}),
           ports: [{ remotePort: 5173, url: "http://127.0.0.1:41000", label: "vite" }],
         }),

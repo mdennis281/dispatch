@@ -694,6 +694,7 @@ export class TerminalService {
       Math.max(1_000, backend.spawnTimeoutMs ?? DEFAULT_BACKEND_SPAWN_TIMEOUT_MS),
     );
     let handle: ShellProcess;
+    let remoteCwd: string | undefined;
     try {
       const spawned = Promise.resolve().then(
         () =>
@@ -706,7 +707,10 @@ export class TerminalService {
             signal: placeholder.abort.signal,
           }) as Promise<ShellProcess>,
       );
-      handle = withoutPid(await settleWithin(spawned, timeoutMs, placeholder.abort));
+      const raw = await settleWithin(spawned, timeoutMs, placeholder.abort);
+      const declared = (raw as { cwd?: unknown }).cwd;
+      remoteCwd = typeof declared === "string" && declared ? declared : undefined;
+      handle = withoutPid(raw);
     } catch (err) {
       if (abandoned()) return;
       const why = err instanceof Error ? err.message : String(err);
@@ -723,6 +727,7 @@ export class TerminalService {
     }
     term.flavour = backend.shell === "powershell" ? "powershell" : "posix";
     term.backendId = backend.id;
+    if (remoteCwd) term.cwd = remoteCwd;
     term.location = { backend: backend.id, label: backend.label, state: "ready" };
     term.notice = res.note;
     this.attach(term, handle);
