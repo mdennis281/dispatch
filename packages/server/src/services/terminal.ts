@@ -225,8 +225,14 @@ export interface TerminalBackendResolution {
 
 /** The registry, as TerminalService sees it. */
 export interface TerminalBackendSource {
-  /** Registered backends. 0 ⇒ the synchronous local path, exactly as before backends existed. */
+  /** Registered backends. */
   readonly size: number;
+  /**
+   * Whether this chat's shell needs resolving at all. False ⇒ the synchronous
+   * local path, exactly as before backends existed. Optional so a fake can
+   * leave it out, in which case `size > 0` decides.
+   */
+  wantsResolve?(ident: { chatId: string; projectId?: string }): boolean;
   resolve(ident: { chatId: string; projectId?: string }): Promise<TerminalBackendResolution>;
 }
 
@@ -574,10 +580,16 @@ export class TerminalService {
     cwd: string,
     ident: { chatId: string; projectId?: string; origin?: TerminalOrigin },
   ): Terminal {
-    // A registered backend means this chat MIGHT run elsewhere, and finding out
-    // is async (the chat's pin is on disk). With none registered, spawn here
-    // and now, exactly as before backends existed.
-    const connecting = (this.backends?.size ?? 0) > 0 ? new ConnectingShell() : undefined;
+    // A registered backend, or a pin to one that is not registered right now,
+    // means this chat MIGHT run elsewhere — and finding out is async (the pin
+    // is on disk). Otherwise spawn here and now, exactly as before backends
+    // existed. Checking `size` alone let a chat pinned to the only backend
+    // plugin, while it was off, get a local shell with no warning at all.
+    const backends = this.backends;
+    const resolveFirst = backends
+      ? (backends.wantsResolve?.({ chatId: ident.chatId, projectId: ident.projectId }) ?? backends.size > 0)
+      : false;
+    const connecting = resolveFirst ? new ConnectingShell() : undefined;
     const proc = connecting ?? this.spawn(cwd);
     const now = this.now();
     // Re-opening a name whose transcript we still hold keeps writing to the SAME

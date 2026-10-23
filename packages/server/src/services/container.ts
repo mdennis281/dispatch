@@ -1374,6 +1374,14 @@ export function createServices(
     // Adopt the persisted terminal roster (as archived — this process owns no
     // shells yet) and start the retention sweep. `unref` so a timer can never
     // be the reason the process won't exit.
+    // Before anything can open a shell: which chats are pinned to a terminal
+    // backend, so one pinned to a plugin that has not activated yet still
+    // resolves (and waits for it) instead of quietly coming up local.
+    try {
+      terminalBackends.seed(await store.listChats());
+    } catch {
+      /* an unreadable chat list costs the warning, never the boot */
+    }
     try {
       await terminals.reconcile();
       await terminals.sweep();

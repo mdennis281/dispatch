@@ -278,7 +278,8 @@ export function ChatDefaultsSection({
 
           {/* Only when a plugin has registered a terminal backend: with none,
               "local" is the only answer and a picker with one option is noise. */}
-          {terminalBackends.length > 0 && (
+          {(terminalBackends.length > 0 ||
+            (value.terminalBackend !== undefined && value.terminalBackend !== "local")) && (
             <LayeredField
               label="Terminals run on"
               description="Where this repo's chats run their managed terminals. A chat can pick its own in its Terminals panel."

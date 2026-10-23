@@ -177,7 +177,13 @@ function LocationChip({ terminal }: { terminal: TerminalInfo }) {
 function TerminalBackendPicker({ chat }: { chat: Chat }) {
   const backends = useTerminals((s) => s.backends);
   const project = useProjectLayer(chat.projectId);
-  if (backends.length === 0) return null;
+  // Also shown with NO backend registered when the chat or project still names
+  // one — its plugin is off or gone, its shells come up local with a warning,
+  // and this is the only place to see the stale pin and clear it.
+  const stalePin = [chat.terminalBackend, project?.terminalBackend].some(
+    (p) => p && p !== LOCAL_TERMINAL_BACKEND,
+  );
+  if (backends.length === 0 && !stalePin) return null;
 
   const projectPick = resolveTerminalBackend({ project: project?.terminalBackend });
   const effective = resolveTerminalBackend({

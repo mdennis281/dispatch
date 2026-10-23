@@ -63,11 +63,49 @@ const HOOK_TIMEOUT_MS = 60_000;
 
 export class TerminalBackendRegistry implements TerminalBackendSource {
   private readonly entries = new Map<string, Entry>();
+  /**
+   * Chats pinned to a NON-local backend, kept synchronously so TerminalService
+   * can decide without a disk read whether a shell needs resolving at all.
+   *
+   * With zero backends registered — exactly the state of a chat pinned to the
+   * one backend plugin there is, while that plugin is off, uninstalled or not
+   * yet activated — `size` alone said "nothing to resolve" and the pinned chat
+   * got a plain local shell with no warning (review on #415). Seeded from the
+   * store at boot, kept current from `chat-update` / `chat-deleted`.
+   */
+  private readonly pins = new Map<string, string>();
   /** `${chatId}\u0000${remotePort}` → forward. */
   private readonly forwards = new Map<string, TerminalPortForward>();
   private readonly detachListeners = new Set<DetachListener>();
 
-  constructor(private readonly opts: TerminalBackendRegistryOptions) {}
+  constructor(private readonly opts: TerminalBackendRegistryOptions) {
+    opts.bus.on("chat-update", (e) => this.notePin(e.chat.id, e.chat.terminalBackend));
+    opts.bus.on("chat-deleted", (e) => this.pins.delete(e.chatId));
+  }
+
+  /** Record (or clear) one chat's pin. */
+  notePin(chatId: string, pin: string | undefined): void {
+    if (pin && pin !== LOCAL_TERMINAL_BACKEND) this.pins.set(chatId, pin);
+    else this.pins.delete(chatId);
+  }
+
+  /** Load every chat's pin — once, at boot, before any shell can open. */
+  seed(chats: Iterable<{ id: string; terminalBackend?: string }>): void {
+    for (const c of chats) this.notePin(c.id, c.terminalBackend);
+  }
+
+  /**
+   * Whether a shell for this chat must go through {@link resolve}: some backend
+   * is registered, or the chat or its project names one that is not. False only
+   * when the answer is certainly a plain local shell — every shell on an install
+   * where no backend plugin was ever used.
+   */
+  wantsResolve(ident: { chatId: string; projectId?: string }): boolean {
+    if (this.entries.size > 0 || this.pins.has(ident.chatId)) return true;
+    if (!ident.projectId) return false;
+    const project = this.opts.projectDefault(ident.projectId);
+    return Boolean(project && project !== LOCAL_TERMINAL_BACKEND);
+  }
 
   get size(): number {
     return this.entries.size;

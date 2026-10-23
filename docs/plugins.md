@@ -581,9 +581,18 @@ remote shell *and what it started* — it is the only teardown core can ask for.
 **Selection** is `resolveTerminalBackend` (shared): the chat's
 `terminalBackend` pin, else the project's `defaults.terminalBackend` in
 `project.yaml`, else `local`. The picker is in the chat's Terminals panel and
-the project's Settings → Chat defaults, and both appear only while a backend
-is registered. Selection is read when a shell OPENS; changing it moves the next
-shell, not one already running.
+the project's Settings → Chat defaults. Both appear while a backend is
+registered, or while a pin still names one that is not, so a stale pin can be
+seen and cleared. Selection is read when a shell OPENS; changing it moves the
+next shell, not one already running. A shell that fell back stays local until
+it is closed, even after its backend returns.
+
+The registry keeps every chat's non-local pin in memory: seeded from the store
+at boot, and kept current from `chat-update`. That lets TerminalService decide
+synchronously whether a shell needs resolving at all. `size > 0` alone would not
+do: a chat pinned to the only backend plugin, while that plugin is off or still
+activating, sees an empty registry, and must still get the warning (or the
+boot wait) rather than a plain local shell.
 
 **Failure is loud and falls back.** A spawn that rejects, or does not settle
 within `spawnTimeoutMs`, brings up a LOCAL shell instead. The reason lands in
@@ -630,10 +639,11 @@ end with a `[dispatch]` line saying why, its ports are withdrawn, and
 `dispose()` is called. The next command on one of those names re-resolves.
 The pin still names the gone backend, so it comes up local, with a warning.
 
-**What does not change with no backend registered:** the registry is empty,
-TerminalService takes its original synchronous spawn path, `TerminalInfo` has
-no `location`, no `terminal-backends` event is ever published, no prompt
-section is written, and the panel shows no picker or badge.
+**What does not change with no backend plugin in use** (none registered, and
+no chat or project naming one): TerminalService takes its original synchronous
+spawn path, `TerminalInfo` has no `location`, no `terminal-backends` event is
+ever published, no prompt section is written, and the panel shows no picker or
+badge.
 
 `createTestContext` records `terminalBackends` and `terminalPorts`, and
 `t.terminals.spawn(id, { chatId })` / `chatIdle` / `chatDeleted` play the

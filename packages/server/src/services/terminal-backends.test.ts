@@ -369,6 +369,93 @@ describe("a backend going away mid-session", () => {
   });
 });
 
+describe("with exactly one backend plugin (the real case)", () => {
+  // The registry is EMPTY in every one of these — the one backend plugin is
+  // off, uninstalled, or not activated yet. `size === 0` must not be read as
+  // "nothing to resolve" for a chat that names a backend (review on #415).
+
+  it("a chat pinned to the only backend, while it is unregistered, falls back loudly", async () => {
+    const h = setup();
+    h.registry.notePin("c1", "proxmox");
+    h.chats.set("c1", { terminalBackend: "proxmox" });
+    const res = await h.svc.run({ chatId: "c1", name: "main", command: "say x", cwd: "/w" });
+    expect(res.notice).toMatch(/"proxmox" is not installed/);
+    expect(h.svc.listChat("c1")[0]!.location).toMatchObject({ backend: "proxmox", state: "fallback" });
+  });
+
+  it("a project default naming a backend resolves too, pin or no pin", async () => {
+    const h = setup();
+    h.projectDefaults.set("p1", "proxmox");
+    h.chats.set("c1", { projectId: "p1" });
+    const res = await h.svc.run({ chatId: "c1", projectId: "p1", name: "main", command: "say x", cwd: "/w" });
+    expect(res.notice).toMatch(/"proxmox" is not installed/);
+  });
+
+  it("an unpinned chat in an unpinned project still takes the synchronous local path", () => {
+    const h = setup();
+    h.svc.create("c1", "main", "/w", { projectId: "p1" });
+    expect(h.local).toHaveLength(1);
+    expect(h.svc.listChat("c1")[0]!.location).toBeUndefined();
+  });
+
+  it("pins arrive by seed and by chat-update, and leave by chat-deleted or a local pin", () => {
+    const h = setup();
+    h.registry.seed([{ id: "a", terminalBackend: "proxmox" }, { id: "b" }, { id: "c", terminalBackend: "local" }]);
+    expect(h.registry.wantsResolve({ chatId: "a" })).toBe(true);
+    expect(h.registry.wantsResolve({ chatId: "b" })).toBe(false);
+    expect(h.registry.wantsResolve({ chatId: "c" })).toBe(false);
+    bus.publish({ type: "chat-update", chat: { id: "b", terminalBackend: "proxmox" } as never });
+    expect(h.registry.wantsResolve({ chatId: "b" })).toBe(true);
+    bus.publish({ type: "chat-update", chat: { id: "b", terminalBackend: "local" } as never });
+    expect(h.registry.wantsResolve({ chatId: "b" })).toBe(false);
+    bus.publish({ type: "chat-deleted", chatId: "a" });
+    expect(h.registry.wantsResolve({ chatId: "a" })).toBe(false);
+  });
+
+  it("a pinned chat opened before the plugin activates waits for it, then runs there", async () => {
+    let settle!: () => void;
+    const settled = new Promise<void>((r) => (settle = r));
+    const chats = new Map([["c1", { terminalBackend: "proxmox" }]]);
+    const registry = new TerminalBackendRegistry({
+      bus,
+      chat: async (id) => chats.get(id) ?? null,
+      projectDefault: () => undefined,
+      settled: () => settled,
+    });
+    registry.seed([{ id: "c1", terminalBackend: "proxmox" }]);
+    const local: FakeShell[] = [];
+    const svc = new TerminalService({
+      bus,
+      backends: registry,
+      deps: { spawn: (cwd) => (local.push(new FakeShell(cwd)), local.at(-1)!), flavour: "powershell" },
+    });
+    services.push(svc);
+    const running = svc.run({ chatId: "c1", name: "main", command: "say there", cwd: "/w" });
+    await flush();
+    const backend = fakeBackend({ id: "proxmox", label: "Proxmox" });
+    registry.register(backend, "proxmox-terminal");
+    settle();
+    const res = await running;
+    expect(res.output).toBe("there");
+    expect(backend.spawned).toHaveLength(1);
+    expect(local).toHaveLength(0);
+  });
+
+  it("deactivating the only backend ends its shells, and the next command warns", async () => {
+    const h = setup();
+    h.registry.register(fakeBackend({ id: "proxmox", label: "Proxmox" }), "proxmox-terminal");
+    h.chats.set("c1", { terminalBackend: "proxmox" });
+    h.registry.notePin("c1", "proxmox");
+    await h.svc.run({ chatId: "c1", name: "main", command: "say up", cwd: "/w" });
+    await h.registry.unregister("proxmox");
+    expect(h.registry.size).toBe(0);
+    expect(h.svc.listChat("c1")[0]!.status).toBe("exited");
+    const next = await h.svc.run({ chatId: "c1", name: "main", command: "say back", cwd: "/w" });
+    expect(next.output).toBe("back");
+    expect(next.notice).toMatch(/"proxmox" is not installed/);
+  });
+});
+
 describe("lifecycle hooks and ports", () => {
   it("fans chatIdle / chatDeleted out to every backend; delete drops the chat's ports", async () => {
     const h = setup();
