@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { LimitReading, ResolvedSubscription } from "@dispatch/shared";
 import { Store } from "../store/index.js";
 import type { HarnessRegistry } from "../harness/index.js";
-import { toHarnessLimits } from "../harness/codex/index.js";
+import { toHarnessLimits } from "@dispatch/plugin-codex/harness";
 import { LimitLedger } from "./limit-ledger.js";
 import {
   HarnessLimitSource,

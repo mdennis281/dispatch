@@ -1,0 +1,30 @@
+{
+  "name": "@dispatch/plugin-goose",
+  "private": true,
+  "type": "module",
+  "version": "1.0.0",
+  "description": "Built-in Dispatch plugin: runs chats on goose over the Agent Client Protocol, against local models via Ollama.",
+  "exports": {
+    "./descriptor": {
+      "types": "./src/descriptor.ts",
+      "import": "./server/descriptor.js"
+    },
+    "./harness": {
+      "types": "./src/index.ts",
+      "import": "./server/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@dispatch/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11"
+  }
+}

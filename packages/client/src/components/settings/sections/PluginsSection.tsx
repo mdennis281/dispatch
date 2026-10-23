@@ -128,6 +128,10 @@ function PluginCard({ plugin, onChange }: { plugin: PluginInfo; onChange: (next:
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <span className="text-sm font-semibold text-primary">{plugin.name}</span>
             {plugin.version && <Chip mono>v{plugin.version}</Chip>}
+            {/* Ships with Dispatch (Codex, goose): upgraded with the app, never
+                installed or removed by hand, so it reads differently from one
+                the owner added. */}
+            {plugin.builtin && <Chip tone="muted">built-in</Chip>}
             <span className="inline-flex items-center gap-1.5 text-xs text-secondary">
               <StatusDot tone={status.tone} />
               {status.label}

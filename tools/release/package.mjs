@@ -68,6 +68,15 @@ const files = [
   "packages/plugin-sdk/package.json",
   "packages/plugin-sdk/README.md",
   "packages/plugin-sdk/dist",
+  // The BUILT-IN plugins — Codex and goose are not compiled into the server
+  // any more, so a payload without these runs every chat on Claude. Loaded
+  // from here by `findShippedPluginsRoot()` (server plugins/shipped.ts).
+  "packages/plugins/codex/package.json",
+  "packages/plugins/codex/plugin.yaml",
+  "packages/plugins/codex/server",
+  "packages/plugins/goose/package.json",
+  "packages/plugins/goose/plugin.yaml",
+  "packages/plugins/goose/server",
   "tools/app/autostart.mjs",
   "tools/app/create-shortcut.mjs",
   "tools/app/launch.py",
@@ -88,7 +97,16 @@ for (const relative of files) {
 // so frozen release installs are governed by the same lockfile rules as source.
 // The prebuilt client is static data; excluding its package avoids installing
 // React/Monaco when the browser bundle already contains them.
-const releaseWorkspaces = ["packages/server", "packages/shared", "packages/cli", "packages/plugin-sdk"];
+// The built-in plugins are workspaces too: the install is what links each one's
+// `@dispatch/shared` to the host's own copy.
+const releaseWorkspaces = [
+  "packages/server",
+  "packages/shared",
+  "packages/cli",
+  "packages/plugin-sdk",
+  "packages/plugins/codex",
+  "packages/plugins/goose",
+];
 const sourceWorkspace = readFileSync(join(repoRoot, "pnpm-workspace.yaml"), "utf8");
 const releasePackages =
   "packages:\n" + releaseWorkspaces.map((workspace) => `  - '${workspace}'\n`).join("");

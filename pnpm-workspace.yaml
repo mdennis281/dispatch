@@ -1,5 +1,9 @@
 packages:
   - 'packages/*'
+  # Built-in plugins (Codex, goose): workspace packages so they resolve the
+  # host's own @dispatch/shared, and ship in the app payload. See
+  # docs/plugins.md → "Providers".
+  - 'packages/plugins/*'
   # The example plugins build in CI (`pnpm -r build`) so the client-host
   # contract — a bundle against the globals shim — cannot rot unnoticed.
   - 'examples/plugins/*'

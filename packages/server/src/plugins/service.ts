@@ -19,13 +19,21 @@
  *   Boot never fails because of a plugin; the Settings pane is where the owner
  *   finds out.
  *
+ *   BUILT-IN PLUGINS ACTIVATE IN `start()`, BEFORE LISTEN. Codex and goose
+ *   ship in the app payload (`packages/plugins/`) and register providers. Left
+ *   to `warm()`, a chat resumed in the gap between listen and activation would
+ *   find its provider unknown, fall back to Claude and have `harness` rewritten
+ *   on its row — so first-party code that is cheap to activate goes first, and
+ *   the budget argument above applies only to what a user installed.
+ *
  *   ROUTES ARE A TABLE. Fastify can neither add nor remove a route on a
  *   listening instance, and plugins activate after listen and deactivate on a
  *   toggle. So `buildApp` registers one wildcard per prefix and the handler
  *   consults the plugin's own find-my-way table (`OwnedResources.routes`),
  *   which deactivate empties. See `routes/plugins.ts` for the wildcard.
  */
-import { pathToFileURL } from "node:url";
+import { existsSync } from "node:fs";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { basename, resolve, sep } from "node:path";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import {
@@ -48,7 +56,7 @@ import {
   type PluginContextDeps,
   type ServerPluginRouteHandler,
 } from "./context.js";
-import { discoverPlugins, pluginsRoot, type DiscoveredPlugin } from "./manifest.js";
+import { discoverPlugins, discoverPluginsAt, pluginsRoot, type DiscoveredPlugin } from "./manifest.js";
 import { pluginOAuthManifestView, type PluginOAuthManifestView } from "./oauth.js";
 import {
   EMPTY_CONTRIBUTIONS,
@@ -57,6 +65,9 @@ import {
   type PluginMcpDeclaration,
 } from "./contributions.js";
 import { PluginProcessHost, type PluginProcessRunner } from "./processes.js";
+
+/** The host is running its TypeScript sources (tsx in `pnpm dev`), not `dist/`. */
+const RUNNING_FROM_SOURCE = fileURLToPath(import.meta.url).endsWith(".ts");
 
 /** Spec budget for one `activate` (docs/plugins.md → "Lifecycle"). */
 export const ACTIVATE_BUDGET_MS = 30_000;
@@ -75,6 +86,8 @@ type Phase =
 
 interface PluginRecord extends DiscoveredPlugin {
   enabled: boolean;
+  /** Loaded from the shipped root, not `<configDir>/plugins/`. */
+  builtin: boolean;
   phase: Phase;
   /** The `activate` failure, when `phase` is `error`. */
   activationError?: string;
@@ -97,6 +110,11 @@ interface PluginRecord extends DiscoveredPlugin {
 export interface PluginServiceOptions {
   /** The config root — plugins live under `<configDir>/plugins/`. */
   configDir: string;
+  /**
+   * Where the BUILT-IN plugins live — `packages/plugins/` in the app payload.
+   * Absent in tests that want only installed plugins.
+   */
+  shippedRoot?: string;
   store: Store;
   /** Everything the context adapts over, minus what the service supplies itself. */
   context: Omit<PluginContextDeps, "log" | "settings" | "store" | "processes">;
@@ -145,6 +163,7 @@ function moduleOf(ns: unknown): PluginModule | undefined {
 export class PluginService implements PluginContributionSource {
   private readonly records = new Map<string, PluginRecord>();
   private readonly configDir: string;
+  private readonly shippedRoot: string | undefined;
   private readonly store: Store;
   private readonly ctxDeps: PluginServiceOptions["context"];
   /** Present when the container handed over a runner; see {@link PluginServiceOptions.runner}. */
@@ -161,6 +180,7 @@ export class PluginService implements PluginContributionSource {
 
   constructor(opts: PluginServiceOptions) {
     this.configDir = opts.configDir;
+    this.shippedRoot = opts.shippedRoot;
     this.store = opts.store;
     this.ctxDeps = opts.context;
     this.activateBudgetMs = opts.activateBudgetMs ?? ACTIVATE_BUDGET_MS;
@@ -187,7 +207,20 @@ export class PluginService implements PluginContributionSource {
     const settings = await this.store.getSettings().catch(() => ({}) as { plugins?: undefined });
     const map = settings.plugins ?? {};
     this.records.clear();
-    for (const found of await discoverPlugins(this.configDir)) {
+    const shipped = this.shippedRoot ? await discoverPluginsAt(this.shippedRoot) : [];
+    const builtinIds = new Set(shipped.map((p) => p.id));
+    const installed = (await discoverPlugins(this.configDir)).filter((found) => {
+      if (!builtinIds.has(found.id)) return true;
+      // A built-in owns its id. An installed copy under the same name is not
+      // loaded: two providers registering `codex` would make the second throw,
+      // and which one won would depend on discovery order.
+      this.log(`[dispatch] plugin "${found.id}" in ${found.dir} is ignored — "${found.id}" is a built-in plugin`);
+      return false;
+    });
+    for (const [builtin, found] of [
+      ...shipped.map((p) => [true, p] as const),
+      ...installed.map((p) => [false, p] as const),
+    ]) {
       const entry = map[found.id];
       const enabled = entry?.enabled ?? true;
       const eligible = !!found.manifest && !found.incompatible && enabled;
@@ -202,6 +235,7 @@ export class PluginService implements PluginContributionSource {
           : EMPTY_CONTRIBUTIONS;
       this.records.set(found.id, {
         ...found,
+        builtin,
         enabled,
         phase: eligible ? "pending" : "inactive",
         needsRestart: false,
@@ -213,6 +247,29 @@ export class PluginService implements PluginContributionSource {
       }
     }
     this.loaded = true;
+  }
+
+  /**
+   * Activate the BUILT-IN plugins now — called from `start()`, before the port
+   * opens (see the header for why). One that declares managed processes waits
+   * for `activateAll`: the runner reconcile that must precede an autostart runs
+   * in `warm()`.
+   */
+  async activateShipped(): Promise<void> {
+    for (const rec of [...this.records.values()].sort((a, b) => a.id.localeCompare(b.id))) {
+      if (this.disposed) return;
+      if (rec.builtin && rec.phase === "pending" && !rec.contributions.processes.length) {
+        await this.activateOne(rec);
+      }
+    }
+  }
+
+  /**
+   * Resolves when `activateAll` has finished, or at once when it has not been
+   * started (still inside `start()`, where no session runs). Never rejects.
+   */
+  activationSettled(): Promise<void> {
+    return (this.activating ?? Promise.resolve()).catch(() => {});
   }
 
   /**
@@ -247,7 +304,7 @@ export class PluginService implements PluginContributionSource {
     const owned = newOwnedResources();
     rec.owned = owned;
     try {
-      const url = pathToFileURL(resolve(rec.dir, manifest.server)).href;
+      const url = pathToFileURL(this.serverEntry(rec, manifest.server)).href;
       const ns = await withBudget(this.importModule(url), this.activateBudgetMs, "import");
       const mod = moduleOf(ns);
       if (!mod) throw new Error(`${manifest.server} does not export activate()`);
@@ -304,6 +361,24 @@ export class PluginService implements PluginContributionSource {
     this.teardown(rec);
     await this.stopProcesses(rec);
     rec.phase = "inactive";
+  }
+
+  /**
+   * The file to import for a plugin's server half.
+   *
+   * Always the manifest's path — except for a BUILT-IN whose compiled module is
+   * missing while the host itself runs from TypeScript (`pnpm dev`, under tsx).
+   * Then its `src/` twin is imported instead: tsx compiles it with the host's
+   * dev path mapping, so the plugin sees the SAME `@dispatch/shared` module the
+   * host does, and an edit to Codex hot-reloads like an edit to the server.
+   * Without this, dev ran whatever the last `pnpm build` left in `server/` —
+   * the stale-snapshot failure tsconfig.dev.json exists to prevent.
+   */
+  private serverEntry(rec: PluginRecord, server: string): string {
+    const built = resolve(rec.dir, server);
+    if (!rec.builtin || !RUNNING_FROM_SOURCE || existsSync(built)) return built;
+    const source = resolve(rec.dir, "src", basename(server).replace(/\.js$/, ".ts"));
+    return existsSync(source) ? source : built;
   }
 
   /** Start the plugin's `autostart` processes; a failure is a row warning, never an activation failure. */
@@ -391,6 +466,7 @@ export class PluginService implements PluginContributionSource {
       ...(m?.version ? { version: m.version } : {}),
       ...(m?.description ? { description: m.description } : {}),
       dir: rec.dir,
+      ...(rec.builtin ? { builtin: true } : {}),
       status: this.statusOf(rec),
       ...(error ? { error } : {}),
       enabled: rec.enabled,
@@ -590,6 +666,7 @@ export class PluginService implements PluginContributionSource {
     const entry = settings.plugins?.[id];
     const rec: PluginRecord = {
       ...found,
+      builtin: false,
       enabled: entry?.enabled ?? true,
       phase: "inactive",
       needsRestart: true,

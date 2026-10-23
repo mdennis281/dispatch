@@ -3,7 +3,7 @@ import { PassThrough } from "node:stream";
 import { AcpConnection, type AcpProcess } from "./rpc.js";
 import { AcpSession, toAcpMcpServers, toSlashCommands, splitPermissionTitle } from "./session.js";
 import { toEnvironmentBlock } from "./options.js";
-import type { HarnessEvent, HarnessSessionSpec } from "../types.js";
+import type { HarnessEvent, HarnessSessionSpec } from "@dispatch/shared";
 
 /**
  * A scripted ACP agent.

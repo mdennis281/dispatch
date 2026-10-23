@@ -24,7 +24,7 @@
  *     reset timestamp, where the Claude path has to parse English prose.
  */
 import { figuresOfUsage, type TokenFigures } from "@dispatch/shared";
-import type { HarnessEvent, HarnessLimitHit, HarnessQuestion } from "../types.js";
+import type { HarnessEvent, HarnessLimitHit, HarnessQuestion } from "@dispatch/shared";
 import type { RpcFrame } from "./rpc.js";
 
 /** A Codex ThreadItem, loosely typed — we probe fields rather than model 20 variants. */

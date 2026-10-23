@@ -131,6 +131,7 @@ and a manifest whose range excludes it — or cannot be parsed — is listed as
 | `process` | `contributes.processes`, `ctx.processes` |
 | `oauth` | `oauth.clients`, `ctx.oauth` |
 | `ui` | a `client` entry |
+| `providers` | `ctx.providers.register` — see "Providers" |
 
 A capability the manifest does not declare is simply absent from the context
 object the plugin receives — the members are typed optional for that reason.
@@ -427,6 +428,52 @@ rows and kv are per instance, and the port is the only identity both can see —
 hence the schema requires `ports` on a singleton.
 
 Reference: `examples/plugins/contributions` (no code; one of each).
+
+## Providers
+
+An agent runtime — what a chat actually runs on — is a plugin contribution.
+Claude is the only one compiled into the host: it is the fallback every
+unavailable provider resolves to, and it drives the background jobs (titles,
+commit messages). **Codex and goose are built-in plugins** in
+`packages/plugins/codex` and `packages/plugins/goose`.
+
+A provider plugin declares the `providers` capability and calls, from
+`activate`:
+
+```ts
+ctx.providers.register(harness, descriptor);
+```
+
+- `harness` implements `Harness` (`@dispatch/shared` → `harness.ts`): the
+  session factory, the model list, limits, and optionally `probeLogin(exe, env)`
+  for the setup card. A harness without `probeLogin` is shown as "login not
+  checked" — the host no longer guesses by provider id.
+- `descriptor` is the `ProviderDescriptor` every surface labels, picks and
+  accounts it by (label, seed models, efforts, skills dir, how an account is
+  selected). Its `id` must equal `harness.kind` and match
+  `^[a-z][a-z0-9-]{0,39}$`; it is what chats, projects and subscriptions store.
+- Registering an id that is already taken throws, so nothing can shadow
+  `claude` or another plugin's provider. Deactivation (the toggle) unregisters
+  it and calls `harness.dispose()`; a chat pinned to it then falls back to
+  Claude and is told so.
+
+**Built-in plugins** load from `packages/plugins/` in the app payload, found
+by `findShippedPluginsRoot()` (`server/src/plugins/shipped.ts`), never from
+`<configDir>/plugins/`. Three things differ from an installed plugin:
+
+- They activate in `start()`, **before the port opens** (`activateShipped`).
+  Left to `warm()`, a chat resumed in the gap would find its provider unknown
+  and fall back to Claude. One that declares managed processes still waits for
+  `warm()`, behind the runner reconcile.
+- They own their ids. An installed plugin with a built-in's id is ignored (and
+  logged), and Settings → Plugins → Inspect refuses to install one.
+- They are workspace packages, so they resolve the host's own
+  `@dispatch/shared` and may import its values freely — unlike an installed
+  plugin, whose server module must be self-contained. Under `pnpm dev`, a
+  built-in whose `server/` output is missing loads its `src/` through tsx, so
+  it hot-reloads with the server instead of running a stale build.
+
+The Settings row shows a `built-in` chip; the toggle works as for any plugin.
 
 ## Client host
 
@@ -831,6 +878,10 @@ outbound webhooks (#385), OAuth (#392), contributions (#394), the client host
 (#393), and the authoring layer (#397 and the docs PR that followed). Each PR
 body carries a "Deviations" section against the spec as first written; this
 document has been corrected to what shipped.
+
+Providers became a contribution in two later PRs: #408 opened the provider id
+(it had been a closed `z.enum` that was also the persistence schema), and the
+next moved Codex and goose out of the server into built-in plugins.
 
 ## Rules every change to this layer inherits
 

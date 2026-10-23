@@ -1,0 +1,769 @@
+/**
+ * THE HARNESS INTERFACE.
+ *
+ * A "harness" is the agent runtime that actually executes a chat: Claude Code
+ * (via the Agent SDK) or Codex (via `codex app-server`). Everything above this
+ * file — the SessionBroker, the store, the wire protocol, the client — speaks
+ * only the neutral vocabulary declared here. Everything below it is one
+ * adapter's problem.
+ *
+ * WHY A SEAM AT ALL. Before this existed the broker imported the Agent SDK's
+ * `Options` and `Query` types verbatim, switched on the SDK's raw message union,
+ * and called SDK-only control methods (`setPermissionMode`, `supportedModels`).
+ * Three different runtimes' worth of concepts were fused into one 2800-line
+ * class, so "run this chat on something else" was not a configuration — it was a
+ * rewrite.
+ *
+ * WHAT THE SEAM IS SHAPED LIKE. Both runtimes turn out to agree on the same
+ * five nouns, which is what makes one interface honest rather than a lowest
+ * common denominator:
+ *
+ *   session   a long-lived conversation with an id that can be resumed later
+ *             (SDK session / Codex thread)
+ *   turn      one user message and everything the agent does in response
+ *   item      a thing that happened inside a turn — assistant text, a tool call,
+ *             a tool result, reasoning
+ *   ask       the agent blocking on the human: a permission prompt or a
+ *             structured question
+ *   budget    tokens spent, context remaining, and the account-level rate limit
+ *             that can pause the whole thing
+ *
+ * So an adapter's whole job is: accept a {@link HarnessSessionSpec}, translate
+ * it into its runtime's native launch config, and translate that runtime's
+ * event stream into {@link HarnessEvent}. Nothing else leaks.
+ *
+ * WHAT IS DELIBERATELY *NOT* HERE. Dispatch policy — the manager-tools
+ * directive, the workflow contract, memory injection, which mode maps to which
+ * posture — stays in the broker and arrives as neutral input (system-prompt
+ * appends, a permission posture, a tool-guard predicate). An adapter decides how
+ * to *deliver* policy on its runtime; it never decides what the policy is.
+ */
+import type {
+  Effort,
+  PermissionMode,
+  ModelOption,
+  McpServerConfig,
+  ImageRef,
+  HarnessKind,
+  SlashCommandInfo,
+  TokenFigures,
+  RuntimeLoginStatus,
+} from "./index.js";
+
+/**
+ * The host's `AbortSignal`, named without naming it. This file moved here from
+ * the server, and shared compiles with no ambient types (it is bundled into the
+ * browser too), so `AbortSignal` is not a name in scope. Resolved in the
+ * CONSUMER's environment instead, the way `PluginFetch` resolves `fetch`.
+ */
+export type HostAbortSignal = typeof globalThis extends { AbortSignal: { prototype: infer T } } ? T : never;
+
+/* ------------------------------------------------------------- capabilities */
+
+/**
+ * What a given harness can actually do.
+ *
+ * Read by the UI so it can HIDE what a harness lacks rather than render a
+ * control that silently does nothing. Every field is a real behavioral
+ * difference we found in the two runtimes — not speculative future-proofing.
+ */
+export interface HarnessCapabilities {
+  /**
+   * Every tool call can be gated individually. Claude prompts per tool via
+   * `canUseTool`; Codex only asks about command execution, file changes, and
+   * permission escalations — an MCP tool call is not individually approvable.
+   */
+  toolPermissions: boolean;
+  /** A structured multiple-choice question channel back to the human. */
+  questions: boolean;
+  /** Named subagents with their own prompt / model / effort. */
+  subagents: boolean;
+  /** Filesystem-discovered skills. */
+  skills: boolean;
+  /** In-band context compaction the host can trigger. */
+  compaction: boolean;
+  /** Fork a session at a chosen point into a new one. */
+  fork: boolean;
+  /** Account-level rate-limit reporting (see {@link Harness.readLimits}). */
+  usageLimits: boolean;
+  /** Switch model without restarting the session. */
+  liveModelSwitch: boolean;
+  /** Switch permission posture without restarting the session. */
+  livePermissionSwitch: boolean;
+  /**
+   * Reasoning-effort levels this runtime accepts. Codex additionally offers
+   * "ultra" on some models, which Dispatch's shared `Effort` enum has no member
+   * for; the adapter clamps it. The UI renders only these.
+   */
+  efforts: Effort[];
+  /**
+   * True when the runtime can BLOCK a tool call before it runs on the strength
+   * of a host-side predicate (Claude's PreToolUse hook). When false the
+   * workflow guard degrades to deny-at-approval plus interrupt-on-sighting;
+   * see the Codex adapter for exactly what that costs.
+   */
+  preToolGuard: boolean;
+  /**
+   * True when the guard sees an MCP call under its QUALIFIED
+   * `mcp__<server>__<tool>` name.
+   *
+   * Separate from {@link preToolGuard} because they fail independently, and
+   * ACP is the proof: it vetoes before the call (so `preToolGuard` is true and
+   * earns its name), but its permission requests carry no extension/server —
+   * only a title like `worktree · …` — so `worktree` is the most it can
+   * recover. A denylist entry of `mcp__dispatch-workspace__worktree` simply
+   * does not match, and the call becomes a prompt a human can approve.
+   *
+   * It matters because a posture is mostly a list of MCP tools. `Bash` and
+   * `Edit` are named the same everywhere and are caught on every runtime;
+   * everything that moves a PR, cuts a worktree or writes config is namespaced
+   * and is only enforceable where this is true.
+   */
+  guardsMcpToolNames: boolean;
+  /**
+   * How this runtime wants Dispatch's own `mcp__dispatch-*__*` tools attached.
+   *
+   * The one place a runtime difference legitimately reaches the broker, because
+   * the two answers need different things BUILT: "in-process" needs a live
+   * server object wired to the real services, "http" needs a minted bearer
+   * grant against the bridge. Pretending these are interchangeable would mean
+   * constructing both every time. See services/mcp/manager-http.ts.
+   */
+  managerTransport: "in-process" | "http";
+}
+
+/* ------------------------------------------------------------------- limits */
+
+/**
+ * One rolling usage window, normalized across runtimes.
+ *
+ * Claude only tells us about a limit by ending a turn with an English sentence
+ * ("You've hit your session limit · resets 4:50pm"), so its windows are
+ * populated only at the moment of failure and `usedPercent` stays undefined.
+ * Codex reports the same thing continuously and numerically. The shape is the
+ * union of both so the UI can show a meter when there is one and fall back to
+ * "paused until 4:50pm" when there isn't.
+ */
+export interface HarnessLimitWindow {
+  /** 0–100, when the runtime reports it. */
+  usedPercent?: number;
+  /** Length of the rolling window in minutes, when known. */
+  windowMinutes?: number;
+  /** Epoch ms at which this window resets. */
+  resetsAt?: number;
+}
+
+/** How a limit read may answer. */
+export interface HarnessLimitReadOpts {
+  /**
+   * Answer from the runtime or not at all: a failed read THROWS instead of
+   * falling back to the last cached snapshot. The limit history needs this —
+   * a cached answer recorded as a fresh read advances "last read" on an
+   * account nobody reached, and a cache last written by a one-bucket push
+   * looks like every other window vanished.
+   */
+  fresh?: boolean;
+}
+
+/** Account-level usage state, as far as the harness will tell us. */
+export interface HarnessLimits {
+  /** The shorter/primary window (Codex: `primary`). */
+  primary?: HarnessLimitWindow;
+  /** The longer/secondary window, when the plan has one. */
+  secondary?: HarnessLimitWindow;
+  /** Plan name the runtime reports, for display only. */
+  planType?: string;
+  /**
+   * Every window, named, for a runtime with more than a primary and secondary.
+   * When present it is what the usage card shows; `primary`/`secondary` stay
+   * the ones the resume scheduler and gauge read.
+   */
+  windows?: Array<HarnessLimitWindow & { title: string }>;
+  /** True when the account is currently OUT of budget, not merely near it. */
+  reached?: boolean;
+  /** Machine-readable reason when `reached`, e.g. "usage_limit_reached". */
+  reachedType?: string;
+  /**
+   * EVERY window across every metered bucket, with ids stable for the account
+   * — what the limit history records. Kept apart from `windows` because that
+   * list drives the card and the exhaustion check, and a side bucket (Codex's
+   * `premium`) at 100% must not mark the whole account out.
+   */
+  tracked?: Array<HarnessLimitWindow & { id: string; title: string }>;
+  /** Backend-granted reset credits still available (Codex). */
+  resetCredits?: number;
+}
+
+/**
+ * A usage limit that ended a turn — the thing {@link ResumeScheduler} arms on.
+ *
+ * This is the ONE place the two runtimes differ in kind rather than degree:
+ * Claude hands us prose we must parse, Codex hands us an error code plus an
+ * exact reset timestamp. Normalizing here means the scheduler stopped owning a
+ * regex, and the Codex path is strictly more reliable than the Claude one.
+ */
+export interface HarnessLimitHit {
+  /** Epoch ms the window reopens; undefined when the runtime wouldn't say. */
+  resetsAt?: number;
+  /** Verbatim text to show on the paused card. */
+  reason: string;
+}
+
+/* ------------------------------------------------------------------ account */
+
+/**
+ * Which login a runtime call runs under — a subscription, resolved.
+ *
+ * Only ever a directory and the env that selects it. The login itself was made
+ * by the provider's CLI; an adapter applies `env` to what it spawns and must
+ * never read a credential out of `configDir`.
+ */
+export interface HarnessAccount {
+  subscriptionId: string;
+  /** The provider config dir in effect, resolved (never absent). */
+  configDir: string;
+  /**
+   * Env to overlay on the runtime's process. Empty for the provider's default
+   * account, so a chat on it inherits the server's env exactly as before.
+   */
+  env: Record<string, string>;
+}
+
+/* --------------------------------------------------------------- session in */
+
+/** A subagent definition, neutral across runtimes. */
+export interface HarnessAgentSpec {
+  id: string;
+  description: string;
+  prompt: string;
+  tools?: string[];
+  disallowedTools?: string[];
+  model?: string;
+  permissionMode?: PermissionMode;
+  effort?: Effort;
+}
+
+/** A skill directory to expose to the session. */
+export interface HarnessSkillSpec {
+  /** Directory containing SKILL.md, already materialized on disk. */
+  dir: string;
+  name: string;
+}
+
+/**
+ * A host-side veto on a tool call, evaluated BEFORE the call runs.
+ *
+ * This is how the workflow guard reaches into a runtime without the broker
+ * knowing whether that runtime has hooks. Return a string to block with that
+ * reason, or null to allow. Adapters wire it to the best mechanism they have
+ * (Claude: a PreToolUse hook; Codex: auto-deny at the approval prompt and
+ * interrupt on sighting) and advertise the difference via
+ * {@link HarnessCapabilities.preToolGuard}.
+ */
+export type HarnessToolGuard = (
+  toolName: string,
+  input: Record<string, unknown>,
+) => string | null;
+
+/** Everything needed to open a session, in neutral terms. */
+/**
+ * A mode's tool gate: an allowlist (absent = everything) and a denylist over
+ * it. An allowlist that is DEFINED BUT EMPTY permits nothing — the strictest
+ * policy expressible, and the one a `.length` check turns into the loosest.
+ */
+export interface HarnessToolPolicy {
+  allowedTools?: string[];
+  disallowedTools?: string[];
+}
+
+export interface HarnessSessionSpec {
+  /** Working directory for the session. */
+  cwd?: string;
+  /** Starting permission posture. */
+  permissionMode: PermissionMode;
+  /** Starting reasoning effort. */
+  effort: Effort;
+  /** Model id from this harness's own picker, or undefined for its default. */
+  model?: string;
+  /**
+   * The real context window, when the broker could resolve one — see
+   * {@link Harness.contextWindow}. Preferred over whatever the runtime
+   * volunteers mid-turn, which for goose is a constant unrelated to the model.
+   */
+  contextWindow?: number;
+  /**
+   * Blocks appended to the runtime's stock system prompt, in order. The broker
+   * builds these (manager tools, workflow contract, mode overlay, project
+   * instructions, memory) with no idea which runtime receives them.
+   */
+  systemPromptAppends: string[];
+  /** The single agent this session runs as, when one is pinned. */
+  agent?: HarnessAgentSpec;
+  /**
+   * Tool gating from the selected MODE: an allowlist (absent = everything) and
+   * a denylist over it, in the runtime's own tool names.
+   *
+   * ADVISORY, and measured as such. Handing these to the runtime does drop the
+   * named BUILT-IN tools from the model's catalogue, which is the cheap win —
+   * no description in context, and nothing to reach for. It does NOT reliably
+   * drop MCP tools: a global chat given `mcp__dispatch-github__request_review`
+   * on this list still reported seeing it in its toolbox.
+   *
+   * So the enforcement is {@link HarnessSessionSpec.toolGuard}, which runs as a
+   * PreToolUse veto, fires for subagent calls too, and is not skipped under
+   * `bypassPermissions`. Both are set from one resolved mode, so the catalogue
+   * the model sees and the rule applied to it cannot disagree about intent —
+   * only about how early the refusal lands.
+   */
+  allowedTools?: string[];
+  disallowedTools?: string[];
+  /** External MCP servers to attach, by name. */
+  mcpServers: Record<string, McpServerConfig>;
+  /**
+   * Dispatch's own manager tools, in whichever form this harness asked for via
+   * {@link HarnessCapabilities.managerTransport}. Absent means don't attach
+   * them (a probe session, or a harness that couldn't be granted).
+   */
+  managerMcp?:
+    /** Server name (`dispatch-github`, …) → the SDK server object. */
+    | { transport: "in-process"; servers: Record<string, unknown> }
+    /**
+     * One bearer token for the whole session, and one endpoint per category —
+     * the token is scoped to the CHAT, so splitting it per category would buy
+     * nothing and multiply what a session has to keep alive.
+     */
+    | {
+        transport: "http";
+        urls: Record<string, string>;
+        token: string;
+        tokenEnvVar: string;
+      };
+  /** Skills to expose. */
+  skills: HarnessSkillSpec[];
+  /** Resume this prior session id instead of starting fresh. */
+  resumeSessionId?: string;
+  /** When forking, the item id to fork at (inclusive). */
+  forkAtId?: string;
+  /** True when `resumeSessionId` should be forked rather than continued. */
+  fork?: boolean;
+  /** Host-side tool veto; see {@link HarnessToolGuard}. */
+  toolGuard?: HarnessToolGuard;
+  /** Auto-compact when the window fills (default true). */
+  autoCompact?: boolean;
+  /** Compaction reserve window, when the host pins one. */
+  autoCompactWindow?: number;
+  /** App-level ceiling for model context retained by one chat. */
+  contextTokenLimit?: number;
+  /** Aborts the session. */
+  abortSignal?: HostAbortSignal;
+  /** The login account to run under; absent means the provider's default. */
+  account?: HarnessAccount;
+}
+
+/** A message pushed into a live session. */
+export interface HarnessInput {
+  text: string;
+  images?: ImageRef[];
+  /** Steering priority, where the runtime honors one. */
+  priority?: "now" | "next" | "later";
+  /** Per-message effort override. */
+  effort?: Effort;
+}
+
+/**
+ * A small, stateless text request owned by a harness.
+ *
+ * This is deliberately separate from {@link HarnessSession}: incidental app
+ * features such as chat titles need one answer, not a persisted/resumable
+ * agent with project tools. Each provider can choose its economical model and
+ * the native way to suppress settings, tools, and history.
+ */
+export interface HarnessTextRequest {
+  prompt: string;
+  /** Lets an adapter choose a purpose-appropriate model and runtime posture. */
+  purpose: "title";
+  /** Wall-clock budget for the complete native request. */
+  timeoutMs?: number;
+  /** The login account to spend it on; absent means the provider's default. */
+  account?: HarnessAccount;
+}
+
+/* -------------------------------------------------------------- session out */
+
+/** The session handshake — emitted once the runtime is live. */
+export interface HarnessInitEvent {
+  type: "init";
+  /** The runtime's own session id, persisted for later resume. */
+  sessionId: string;
+  model?: string;
+  permissionMode?: string;
+  tools?: unknown;
+  mcpServers?: unknown;
+  /** Context window in tokens, when the runtime states it up front. */
+  contextWindow?: number;
+}
+
+/** A finalized assistant message. */
+export interface HarnessAssistantEvent {
+  type: "assistant";
+  /** Correlates with any `delta` events that streamed it. */
+  id: string;
+  text: string;
+  thinking?: string;
+  model?: string;
+  /** Runtime-native message uuid, for fork points. */
+  uuid?: string;
+  /** Set when this came from a subagent rather than the main loop. */
+  parentToolUseId?: string | null;
+  subagentType?: string;
+  /** Effort the runtime actually ran this thread at, when it reports it. */
+  effort?: Effort;
+}
+
+/** A token-level partial of an in-flight assistant message. */
+export interface HarnessDeltaEvent {
+  type: "delta";
+  id: string;
+  channel: "text" | "thinking";
+  delta: string;
+}
+
+/** A tool call starting. */
+export interface HarnessToolUseEvent {
+  type: "tool-use";
+  toolUseId: string;
+  name: string;
+  input: Record<string, unknown>;
+  /** MCP server name when this is an `mcp__server__tool` call. */
+  server?: string;
+  parentToolUseId?: string | null;
+  subagentType?: string;
+  effort?: Effort;
+  uuid?: string;
+}
+
+/** A tool call's outcome. */
+export interface HarnessToolResultEvent {
+  type: "tool-result";
+  toolUseId: string;
+  ok: boolean;
+  /** Runtime-native content blocks; the broker persists images out of these. */
+  content: unknown;
+  parentToolUseId?: string | null;
+  subagentType?: string;
+}
+
+/**
+ * The agent is blocked on permission to run a tool.
+ *
+ * Answered with {@link HarnessSession.resolvePermission}. The adapter owns
+ * whatever plumbing the answer needs (returning from `canUseTool`, replying to
+ * a JSON-RPC request) — the broker only decides allow or deny.
+ */
+export interface HarnessPermissionEvent {
+  type: "permission-request";
+  requestId: string;
+  toolName: string;
+  input: Record<string, unknown>;
+  /** Why the runtime is asking, when it says. */
+  reason?: string;
+  /** Human-readable target ("src/app.ts", "git push"), when derivable. */
+  target?: string;
+  parentToolUseId?: string | null;
+}
+
+/** One question in a {@link HarnessQuestionEvent}. */
+export interface HarnessQuestion {
+  id: string;
+  header: string;
+  question: string;
+  multiSelect: boolean;
+  /** Free-text is an accepted answer. */
+  allowOther: boolean;
+  options: { label: string; description?: string }[];
+}
+
+/** The agent is blocked on a structured question. */
+export interface HarnessQuestionEvent {
+  type: "question-request";
+  requestId: string;
+  questions: HarnessQuestion[];
+  parentToolUseId?: string | null;
+}
+
+/** A backgrounded task settled (async subagent, backgrounded shell). */
+export interface HarnessTaskNotificationEvent {
+  type: "task-notification";
+  taskId: string;
+  toolUseId?: string;
+  status: "completed" | "failed" | "stopped";
+  summary?: string;
+  totalTokens?: number;
+  toolUses?: number;
+  durationMs?: number;
+}
+
+/** Rolling token accounting for the main loop. */
+export interface HarnessUsageEvent {
+  type: "usage";
+  /** Tokens currently occupying the context window. */
+  contextTokens?: number;
+  /** Size of that window. */
+  contextWindow?: number;
+}
+
+/** Something worth telling the user, outside the transcript's item flow. */
+export interface HarnessNoticeEvent {
+  type: "notice";
+  level: "info" | "warn" | "error";
+  text: string;
+}
+
+/**
+ * A host policy rejected one tool call.
+ *
+ * Adapters report the runtime consequence rather than implementing product
+ * recovery themselves. A runtime with a real pre-tool veto keeps the current
+ * turn alive; a runtime that can only catch a command after it starts must end
+ * that turn, and the broker immediately resumes it with a recovery directive.
+ */
+export interface HarnessGuardBlockedEvent {
+  type: "guard-blocked";
+  toolName: string;
+  input: Record<string, unknown>;
+  reason: string;
+  continuation: "in-place" | "restart-turn";
+}
+
+/** The session compacted its own context and continued. */
+export interface HarnessCompactedEvent {
+  type: "compacted";
+}
+
+/** A turn finished, successfully or not. */
+export interface HarnessTurnEndEvent {
+  type: "turn-end";
+  ok: boolean;
+  /** Runtime subtype ("success", "error_max_turns", "interrupted", …). */
+  subtype: string;
+  /** Final assistant text / error message. */
+  result?: string;
+  numTurns?: number;
+  durationMs?: number;
+  costUsd?: number;
+  /** Raw usage payload, persisted for the usage view. */
+  usage?: unknown;
+  /**
+   * THIS TURN's tokens, normalised. The broker books them to the session's
+   * current model unless {@link modelUsage} gives it a per-model split.
+   */
+  turnTokens?: TokenFigures;
+  /**
+   * Per-model counters, CUMULATIVE across the session (Claude's `modelUsage`,
+   * which counts subagents on other models too). The broker diffs them against
+   * the chat's stored baseline, like `costUsd`.
+   */
+  modelUsage?: Record<string, TokenFigures>;
+  contextTokens?: number;
+  contextWindow?: number;
+  /** Set when this turn ended because the account ran out of budget. */
+  limit?: HarnessLimitHit;
+}
+
+export type HarnessEvent =
+  | HarnessInitEvent
+  | HarnessAssistantEvent
+  | HarnessDeltaEvent
+  | HarnessToolUseEvent
+  | HarnessToolResultEvent
+  | HarnessPermissionEvent
+  | HarnessQuestionEvent
+  | HarnessTaskNotificationEvent
+  | HarnessUsageEvent
+  | HarnessNoticeEvent
+  | HarnessGuardBlockedEvent
+  | HarnessCompactedEvent
+  | HarnessTurnEndEvent;
+
+/* ------------------------------------------------------------------ answers */
+
+/** Host answer to a {@link HarnessPermissionEvent}. */
+export interface HarnessPermissionResolution {
+  decision: "allow" | "deny";
+  /** Replace the tool input on allow, where the runtime supports it. */
+  updatedInput?: Record<string, unknown>;
+  /** Deny reason / allow note. */
+  message?: string;
+}
+
+/** Host answer to one question of a {@link HarnessQuestionEvent}. */
+export interface HarnessQuestionAnswer {
+  questionId: string;
+  /** Chosen option labels, or free text when the human typed their own. */
+  selected: string[];
+  /** Extra notes the human attached. */
+  notes?: string;
+}
+
+/* ------------------------------------------------------------------ session */
+
+/**
+ * A live session. Created by {@link Harness.createSession}; the runtime is not
+ * spawned until the first {@link HarnessSession.send}, so opening a session is
+ * cheap and a queued chat costs nothing.
+ */
+export interface HarnessSession {
+  /** The neutral event stream. Ends when the session is done or disposed. */
+  events: AsyncIterable<HarnessEvent>;
+  /** Queue a message. Starts the runtime on first call. */
+  send(input: HarnessInput): void;
+  /** How many queued messages the runtime has not consumed yet. */
+  pending(): number;
+  /** Stop the current turn but keep the session alive. */
+  interrupt(): Promise<void>;
+  /**
+   * Switch posture mid-session, where supported.
+   *
+   * `policy` is the newly resolved mode's tool gate, passed because a mode
+   * switch can change it and the spec's copy was fixed at construction. Most
+   * adapters ignore it — the host guard is the enforcement. ACP does not have
+   * that luxury: its only interception point is the agent's own permission
+   * request, so it has to know whether to keep asking for one.
+   */
+  setPermissionMode(mode: PermissionMode, policy?: HarnessToolPolicy): Promise<void>;
+  /** Switch model mid-session, where supported. */
+  setModel(model: string): Promise<void>;
+  /** Switch effort mid-session. */
+  setEffort(effort: Effort): Promise<void>;
+  /**
+   * Compact the context in place, where supported. `focus` is what the summary
+   * must keep (the task, open decisions, paths still needed) — Claude takes it
+   * as `/compact <focus>`; Codex has no argument on `thread/compact/start`, so
+   * the adapter injects it as a user note the summarizer reads.
+   */
+  compact(focus?: string): Promise<void>;
+  /**
+   * Replace some of the session's EXTERNAL MCP server definitions in place —
+   * the ones whose `${secret:…}` changed — without restarting the chat. Merged
+   * over the servers the session started with; Dispatch's own servers are kept.
+   * Optional: a runtime that can't swap servers mid-session simply lacks it,
+   * and the change applies from the chat's next session instead.
+   */
+  updateMcpServers?(servers: Record<string, McpServerConfig>): Promise<void>;
+  /** Answer a pending permission request. */
+  resolvePermission(requestId: string, resolution: HarnessPermissionResolution): void;
+  /** Answer a pending question. */
+  resolveQuestion(requestId: string, answers: HarnessQuestionAnswer[]): void;
+  /** The context window of the model currently running, when knowable. */
+  contextWindow(): Promise<number | undefined>;
+  /**
+   * Every `/` command this runtime accepts — built-ins, plugin commands and the
+   * skills it discovered — for the composer's command menu.
+   *
+   * Only a LIVE session can answer, which is exactly why the answer is worth
+   * caching: a brand-new chat has no session yet, and the built-in list does not
+   * vary by project. Optional because a harness may have no such concept; a
+   * missing implementation means the menu shows only what Dispatch can derive
+   * from disk (see `slash-commands.ts`).
+   */
+  slashCommands?(): Promise<SlashCommandInfo[]>;
+  /**
+   * Pid of this session's runtime subprocess, when the harness spawns one it
+   * can name — the ROOT of the chat's process tree, since every MCP server the
+   * session runs descends from it.
+   *
+   * Optional because not every harness has a per-session process to point at:
+   * the Codex adapter borrows ONE process-wide `app-server` connection across
+   * every chat (see `harness/codex/rpc.ts`), so a pid from it would attribute
+   * one shared tree to whichever chat asked last.
+   */
+  pid?(): number | undefined;
+  /** Tear the runtime down and end the event stream. */
+  dispose(): Promise<void>;
+}
+
+/* ------------------------------------------------------------------ harness */
+
+/** Where a harness's executable came from, for the boot log. */
+export interface HarnessRuntimeInfo {
+  kind: HarnessKind;
+  /** Path we spawn, or undefined when the runtime is bundled/in-process. */
+  path?: string;
+  version?: string;
+  source: "override" | "installed" | "bundled" | "missing";
+  /** False when the runtime isn't installed — the UI greys the option out. */
+  available: boolean;
+}
+
+/** One agent runtime Dispatch can drive. */
+export interface Harness {
+  readonly kind: HarnessKind;
+  readonly capabilities: HarnessCapabilities;
+  /** Runtime resolution, for the boot log and the settings pane. */
+  runtime(): HarnessRuntimeInfo;
+  /**
+   * Is the runtime logged in, for the setup card. `exe` is the resolved
+   * executable and `env` already carries the default account's overlay.
+   *
+   * Optional, and absent means "not checked" for anything but Claude, whose
+   * probe the host owns. The host used to switch on the provider id here, so
+   * every provider it did not know fell through to `claude auth status`.
+   * Never throws: an unrunnable binary is `checked: false`.
+   */
+  probeLogin?(exe: string, env: Readonly<Record<string, string | undefined>>): Promise<RuntimeLoginStatus>;
+  /**
+   * Models for the picker. Never throws — degrades to a static list. Per
+   * account, because which models a login may use is a fact about its plan.
+   */
+  listModels(opts?: { refresh?: boolean; account?: HarnessAccount }): Promise<ModelOption[]>;
+  /**
+   * The context window the model will ACTUALLY be served, in tokens.
+   *
+   * Optional because only a provider that can ask gets to answer. It exists
+   * because the number a runtime volunteers can be fiction: goose reports
+   * `size: 128000` in every `usage_update` regardless of the model, while the
+   * Ollama behind it was serving 32768 — so the meter showed plenty of room
+   * right up until the request was rejected outright.
+   *
+   * Worth knowing BEFORE the session starts, not just for the meter: what
+   * Dispatch attaches has a token price, and on a small window the bundled
+   * browser servers alone are a third of it.
+   */
+  contextWindow?(opts?: { model?: string; account?: HarnessAccount }): Promise<number | undefined>;
+  /**
+   * Every picker model's window at once, keyed by `ModelOption.value`, for the
+   * settings pane's per-model compact sliders. Separate from
+   * {@link contextWindow} because the broker awaits that one at session start,
+   * and Claude's answer here costs a probe step per model (tens of seconds
+   * cold). Ids the runtime can't size are absent — never a guess.
+   */
+  contextWindows?(opts?: {
+    account?: HarnessAccount;
+    refresh?: boolean;
+  }): Promise<Record<string, number>>;
+  /** Account usage state, or null when this harness can't report it. */
+  readLimits(account?: HarnessAccount, opts?: HarnessLimitReadOpts): Promise<HarnessLimits | null>;
+  /**
+   * Limits the runtime volunteers without being asked (Codex pushes
+   * `account/rateLimits/updated` after every turn). Free, fresher readings for
+   * the limit history. Optional: absent means the runtime only answers polls.
+   */
+  onLimits?(listener: (subscriptionId: string | undefined, limits: HarnessLimits) => void): () => void;
+  /**
+   * Carry a native session from one account of this provider to another, so a
+   * chat switching accounts resumes with its context instead of a transcript
+   * handoff. Resolves false when it can't (no session file, unsupported); the
+   * broker then falls back to the handoff. Optional: absent means "can't".
+   */
+  transferSession?(
+    sessionId: string,
+    from: HarnessAccount,
+    to: HarnessAccount,
+  ): Promise<boolean>;
+  /** Run a stateless one-shot text request without opening a chat session. */
+  generateText(request: HarnessTextRequest): Promise<string>;
+  /** Open a session (lazily — nothing spawns until the first send). */
+  createSession(spec: HarnessSessionSpec): HarnessSession;
+  /** Release any shared process this harness holds. */
+  dispose?(): Promise<void>;
+}

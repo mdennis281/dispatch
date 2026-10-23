@@ -4,7 +4,7 @@ import {
   compactCommand,
   normalizeCompactFocus,
   perModelThreshold,
-} from "./compact.js";
+} from "./harness-compact.js";
 
 describe("compactCommand", () => {
   it("is the bare slash command without a focus", () => {

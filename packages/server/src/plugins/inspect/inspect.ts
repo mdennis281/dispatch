@@ -55,6 +55,12 @@ export interface InspectDirOptions {
   fetched: PluginInspection["fetched"];
   /** What is installed under the same id, if anything. */
   installed?: (id: string) => Promise<InstalledLookup | undefined>;
+  /**
+   * True for an id a BUILT-IN plugin owns (`codex`, `goose`). Installing one
+   * would put a copy under `<configDir>/plugins/` that the host then ignores,
+   * so the report refuses it up front instead of letting it look installed.
+   */
+  builtin?: (id: string) => boolean;
 }
 
 class Confined {
@@ -542,7 +548,9 @@ export async function inspectPluginDir(dir: string, opts: InspectDirOptions): Pr
     ? "the manifest is invalid"
     : !compatible
       ? `built for plugin API ${JSON.stringify(range)}; this Dispatch is ${PLUGIN_API_VERSION}`
-      : undefined;
+      : m && opts.builtin?.(m.id)
+        ? `"${m.id}" is a built-in plugin and cannot be replaced`
+        : undefined;
 
   return {
     source: opts.source,

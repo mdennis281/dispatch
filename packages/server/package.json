@@ -34,6 +34,8 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@dispatch/plugin-codex": "workspace:*",
+    "@dispatch/plugin-goose": "workspace:*",
     "@fastify/middie": "^9.0.3",
     "@types/node": "^26.1.0",
     "@types/web-push": "^3.6.4",

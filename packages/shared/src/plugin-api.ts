@@ -15,6 +15,8 @@ import type { ChatStatus } from "./common.js";
 import type { AttentionItem } from "./messages.js";
 import type { MemoryType } from "./domain.js";
 import type { QuestionAnswer, WsServerEvent, WsServerEventType } from "./wire.js";
+import type { Harness } from "./harness.js";
+import type { ProviderDescriptor } from "./providers.js";
 
 export interface PluginModule {
   activate(ctx: PluginContext): Promise<void> | void;
@@ -294,5 +296,16 @@ export interface PluginContext<Req = unknown, Reply = unknown> {
     connectUrl(name: string): Promise<string>;
     token(name: string): Promise<string | undefined>;
     disconnect(name: string): Promise<void>;
+  };
+  /**
+   * `providers` — register an agent runtime chats can run on. `descriptor` is
+   * what every surface labels, picks and accounts it by, and its `id` must
+   * equal `harness.kind`. Throws when the id is already taken, so a plugin
+   * cannot shadow `claude` (the fallback) or another plugin's provider.
+   * Deactivation unregisters it and calls `harness.dispose()`; a chat pinned to
+   * it then falls back to Claude.
+   */
+  providers?: {
+    register(harness: Harness, descriptor: ProviderDescriptor): void;
   };
 }

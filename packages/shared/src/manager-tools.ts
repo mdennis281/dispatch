@@ -500,3 +500,15 @@ const LEGACY_MENTION_RE = new RegExp(
 export function findLegacyManagerMentions(text: string): string[] {
   return [...new Set(text.match(new RegExp(LEGACY_MENTION_RE, "g")) ?? [])];
 }
+
+/**
+ * The longest any bounded Dispatch tool blocks on its own. Here rather than in
+ * the server's tool definitions because a runtime adapter has to know them: a
+ * Codex `tool_timeout_sec` shorter than these cuts a legitimate `wait` off
+ * mid-call, and the adapter lives in a provider plugin that cannot import the
+ * server.
+ */
+/** Hard ceiling on a single `wait` (also the default `wait_for_chat` timeout). */
+export const WAIT_CAP_SECONDS = 3600;
+/** Longest inactivity timeout an agent may put on a question card. */
+export const ASK_USER_TIMEOUT_CAP_SECONDS = 3_600;

@@ -75,7 +75,7 @@ import {
   normalizeCompactFocus,
   oneLineFocus,
   perModelThreshold,
-} from "../harness/compact.js";
+} from "@dispatch/shared";
 import type {
   Options,
   Query,
@@ -262,7 +262,7 @@ import type {
   HarnessSession,
   HarnessSessionSpec,
 } from "../harness/types.js";
-import { guardRecoveryInput } from "../harness/guard.js";
+import { guardRecoveryInput } from "@dispatch/shared";
 import type { HarnessRegistry } from "../harness/index.js";
 import { accountOf, chatSubscription, envWithAccount } from "./subscriptions.js";
 import type { ManagerMcpBridge, ManagerMcpGrant } from "./mcp/manager-http.js";
@@ -1273,6 +1273,12 @@ export interface BrokerProjectConfig {
 export interface BrokerPluginContributions {
   modes(): ModeConfig[];
   mcpServers(): PluginMcpDeclaration[];
+  /**
+   * Resolves once every installed plugin has had its `activate` (or its budget
+   * ran out). Awaited only when a chat's provider is not registered — see
+   * `startHarnessSession`.
+   */
+  activationSettled?(): Promise<void>;
 }
 
 export interface BrokerInspect {
@@ -5026,6 +5032,12 @@ export class SessionBroker {
       // first, a chat on an uninstalled provider had its skills written to the
       // placeholder's `.agents/skills` and then ran on Claude, which reads
       // `.claude/skills` — so the turn started with skills on and none on disk.
+      // An INSTALLED provider plugin activates in `warm()`, after listen. A chat
+      // on it that starts in that window must wait for it rather than fall
+      // back — the fallback rewrites `harness` on the row, so the chat would
+      // stay on Claude after the plugin came up. Built-ins never get here:
+      // they register before the port opens.
+      if (!this.harnesses.find(session.harnessKind)) await this.plugins?.activationSettled?.();
       const resolved = this.harnesses.resolve(session.harnessKind);
       if (resolved.fellBack) {
         this.bus.publish({

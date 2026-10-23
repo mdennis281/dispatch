@@ -17,8 +17,8 @@ import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, delimiter } from "node:path";
 import { execFileSync } from "node:child_process";
-import { envVar } from "../../config.js";
-import type { HarnessRuntimeInfo } from "../types.js";
+import { envVar } from "@dispatch/shared";
+import type { HarnessRuntimeInfo } from "@dispatch/shared";
 
 const IS_WIN = process.platform === "win32";
 /** Basename of a directly-spawnable goose binary on this platform. */

@@ -219,6 +219,38 @@ importers:
         specifier: ^5.0.2
         version: 5.0.14(@types/react@18.3.31)(immer@11.1.17)(react@18.3.1)(use-sync-external-store@1.6.0(react@18.3.1))
 
+  packages/plugins/codex:
+    dependencies:
+      '@dispatch/shared':
+        specifier: workspace:*
+        version: link:../../shared
+    devDependencies:
+      '@types/node':
+        specifier: ^26.1.0
+        version: 26.1.0
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: ^4.1.11
+        version: 4.1.11(@types/node@26.1.0)(vite@6.4.3(@types/node@26.1.0)(jiti@2.7.0)(lightningcss@1.32.0)(tsx@4.22.4)(yaml@2.9.0))
+
+  packages/plugins/goose:
+    dependencies:
+      '@dispatch/shared':
+        specifier: workspace:*
+        version: link:../../shared
+    devDependencies:
+      '@types/node':
+        specifier: ^26.1.0
+        version: 26.1.0
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: ^4.1.11
+        version: 4.1.11(@types/node@26.1.0)(vite@6.4.3(@types/node@26.1.0)(jiti@2.7.0)(lightningcss@1.32.0)(tsx@4.22.4)(yaml@2.9.0))
+
   packages/server:
     dependencies:
       '@anthropic-ai/claude-agent-sdk':
@@ -285,6 +317,12 @@ importers:
         specifier: ^4.4.3
         version: 4.4.3
     devDependencies:
+      '@dispatch/plugin-codex':
+        specifier: workspace:*
+        version: link:../plugins/codex
+      '@dispatch/plugin-goose':
+        specifier: workspace:*
+        version: link:../plugins/goose
       '@fastify/middie':
         specifier: ^9.0.3
         version: 9.3.3

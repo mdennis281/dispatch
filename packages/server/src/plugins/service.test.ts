@@ -92,7 +92,9 @@ describe("discovery", () => {
     await writePlugin(r.configDir, "future", "id: future\nname: F\nversion: 1.0.0\ndispatch: '>=99'\n");
     await writePlugin(r.configDir, "escapes", "id: escapes\nname: E\nversion: 1.0.0\ndispatch: '>=1'\nserver: ../../x.js\n");
     const { instance } = await app(r);
-    const rows = await list(instance);
+    // The built-ins (Codex, goose) are always there; this case is about what
+    // discovery makes of the INSTALLED directories.
+    const rows = (await list(instance)).filter((p) => !p.builtin);
     expect(rows.map((p) => [p.id, p.status])).toEqual([
       ["broken", "invalid"],
       ["escapes", "invalid"],

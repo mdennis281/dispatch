@@ -131,64 +131,6 @@ export const FALLBACK_MODELS: ModelOption[] = [
   { value: "haiku", label: "Haiku", hint: "fast" },
 ];
 
-/**
- * Codex's equivalent seed list.
- *
- * Unlike Claude's, these are concrete ids rather than aliases — Codex's
- * `model/list` has no "default" alias, it flags one row `isDefault`. A stale
- * entry here therefore degrades to a dead id rather than a wrong label, which
- * is why the live list is always preferred and this is only ever a last resort.
- *
- * It is also what an agent finds when it greps the built app for model ids, so
- * it must mirror the live catalogue (`~/.codex/models_cache.json`, rows with
- * `visibility: "list"`, in priority order). It once topped out at GPT-5.6-Sol
- * after GPT-6-Astra shipped, and a chat told to use Astra concluded from this
- * list that no such model existed.
- */
-export const FALLBACK_MODELS_CODEX: ModelOption[] = [
-  {
-    value: "gpt-6-astra",
-    label: "GPT-6-Astra",
-    hint: "recommended",
-    description: "Our most capable model for complex, demanding work.",
-  },
-  { value: "gpt-5.6-sol", label: "GPT-5.6-Sol", description: "Reliable agentic workhorse for everyday tasks." },
-  { value: "gpt-5.6-terra", label: "GPT-5.6-Terra", description: "Balanced agentic coding model for everyday work." },
-  // `hint: "fast"` is load-bearing: CodexHarness picks the title model by it.
-  // The catalogue's own "fast and affordable" row; gpt-5.4-mini, which held it
-  // before, is gone from the catalogue.
-  { value: "gpt-5.6-luna", label: "GPT-5.6-Luna", hint: "fast", description: "Fast and affordable agentic coding model." },
-  { value: "gpt-5.5", label: "GPT-5.5", description: "Proven previous-generation model for coding and general work." },
-  { value: "gpt-5.3-codex-spark", label: "GPT-5.3-Codex-Spark", description: "Ultra-fast coding model." },
-];
-
-/**
- * Seed model list for an ACP agent running local models.
- *
- * Unlike Claude's aliases and Codex's catalogue, these ids belong to whatever
- * Ollama instance the agent is pointed at, so there is no list that is correct
- * for every install. `AcpHarness.listModels` therefore asks Ollama's `/api/tags`
- * for the REAL list and this is only what the picker shows when that endpoint
- * can't be reached — chosen as the models most commonly pulled for agentic
- * coding, so a stale entry degrades to "not on this box" rather than a
- * plausible-looking id that silently 404s at turn start.
- */
-export const FALLBACK_MODELS_GOOSE: ModelOption[] = [
-  {
-    value: "qwen3-coder:30b",
-    label: "qwen3-coder:30b",
-    hint: "recommended",
-    description: "MoE coding model; ~19GB at Q4, fits a 24GB card with room for context.",
-  },
-  {
-    value: "qwen3:30b-a3b-instruct-2507-q4_K_M",
-    label: "qwen3:30b-a3b",
-    description: "General MoE instruct model with solid tool calling.",
-  },
-  { value: "devstral:24b", label: "devstral:24b", description: "Tuned for agentic edit loops." },
-  { value: "qwen2.5:14b", label: "qwen2.5:14b", hint: "fast", description: "Smaller, quicker, weaker at long tool chains." },
-];
-
 export const BUILTIN_PROVIDERS = {
   claude: {
     id: "claude",
@@ -205,67 +147,6 @@ export const BUILTIN_PROVIDERS = {
       defaultConfigDir: ".claude",
       loginFile: ".credentials.json",
       loginCommand: "claude auth login",
-    },
-  },
-  codex: {
-    id: "codex",
-    label: "Codex",
-    shortLabel: "Codex",
-    blurb: "OpenAI's agent CLI, driven over its app-server protocol.",
-    fallbackModels: FALLBACK_MODELS_CODEX,
-    efforts: ["low", "medium", "high", "xhigh", "max"],
-    // Codex has multi-agent collaboration, but not Dispatch-authored agent
-    // definitions with their own prompt/model/effort.
-    subagents: false,
-    skillsDir: ".agents",
-    account: {
-      configDirEnv: "CODEX_HOME",
-      defaultConfigDir: ".codex",
-      loginFile: "auth.json",
-      loginCommand: "codex login",
-    },
-  },
-  goose: {
-    id: "goose",
-    label: "goose",
-    shortLabel: "goose",
-    blurb: "Open-source agent driven over the Agent Client Protocol. Runs local models via Ollama.",
-    // No "default" alias: an Ollama model id is concrete, and which ids exist
-    // is a fact about the box the models are pulled on. An unpinned chat sends
-    // none and lets the agent's own configured model stand.
-    fallbackModels: FALLBACK_MODELS_GOOSE,
-    // ACP has NO reasoning-effort concept — there is no field on session/new or
-    // session/prompt to carry one. Empty rather than a plausible ladder, so the
-    // composer hides the control instead of rendering one that does nothing.
-    efforts: [],
-    subagents: false,
-    // goose discovers skills in `.agents/skills` — the same directory Codex
-    // uses, verified with `goose skills list`. So `materializeSkills` needs no
-    // new branch for this provider.
-    skillsDir: ".agents",
-    account: {
-      // goose resolves its config dir from the platform's config location and
-      // honours no override env var (probed: GOOSE_CONFIG_DIR, GOOSE_HOME and
-      // XDG_CONFIG_HOME all leave `goose info` pointing at the default). The
-      // var below is therefore inert, which is harmless: a local model needs no
-      // login, so a directory is not what a second goose account selects.
-      //
-      // The ENDPOINT is. See `endpointEnv` below: one account is the Ollama on
-      // this machine, another is the box with the big GPU, and a chat picks
-      // between them exactly the way it picks between two Claude logins.
-      configDirEnv: "GOOSE_CONFIG_DIR",
-      // Correct on Linux/macOS. Windows keeps it under
-      // `AppData/Roaming/Block/goose/config`; the only thing that reads this is
-      // the settings pane's "is there a login" dot, which is cosmetic here.
-      defaultConfigDir: ".config/goose",
-      loginFile: "config.yaml",
-      endpointEnv: "OLLAMA_HOST",
-      // Ollama's own default. Note this is the SERVER's loopback, not the
-      // user's: an install that never sets a host talks to whatever is running
-      // beside Dispatch, which is very often not the machine holding the
-      // models they meant. That silent mismatch is what accounts fix.
-      defaultEndpoint: "http://127.0.0.1:11434",
-      endpointLabel: "Ollama host",
     },
   },
 } as const satisfies Record<BuiltinHarnessKind, ProviderDescriptor>;
@@ -293,6 +174,18 @@ export function registerProvider(descriptor: ProviderDescriptor): void {
   if (!parsed.success) throw new Error(`invalid provider id "${descriptor.id}"`);
   if (descriptor.unregistered) throw new Error(`cannot register a placeholder for "${descriptor.id}"`);
   registry.set(descriptor.id, descriptor);
+}
+
+/**
+ * Drop a provider registered at runtime — its plugin was switched off. A
+ * built-in cannot be dropped: it is the fallback a chat on the dropped
+ * provider resolves to.
+ */
+export function unregisterProvider(id: HarnessKind): void {
+  if ((BUILTIN_HARNESS_KINDS as readonly string[]).includes(id)) {
+    throw new Error(`cannot unregister built-in provider "${id}"`);
+  }
+  registry.delete(id);
 }
 
 /** True when something has registered this id (built-ins always have). */

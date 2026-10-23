@@ -4,9 +4,9 @@ import {
   ASK_USER_TIMEOUT_CAP_SECONDS,
   WAIT_CAP_SECONDS,
   WATCH_PR_DEFAULT_TIMEOUT_SECONDS,
-} from "../../services/mcp/manager-mcp.js";
+} from "@dispatch/shared";
 import type { CodexConnection, RpcFrame, ServerRequest } from "./rpc.js";
-import type { HarnessEvent, HarnessSessionSpec } from "../types.js";
+import type { HarnessEvent, HarnessSessionSpec } from "@dispatch/shared";
 
 /**
  * A scripted stand-in for {@link CodexConnection}: records every call and lets

@@ -516,13 +516,13 @@ describe("POST /api/plugins/inspect + /install", () => {
     };
     const { instance } = await app(fakeDeps(exampleRepoTar), seed);
     await instance.services.plugins.activateAll();
-    const before = ((await instance.inject({ url: "/api/plugins" })).json() as PluginInfo[])[0]!;
+    const before = ((await instance.inject({ url: "/api/plugins" })).json() as PluginInfo[]).find((p) => p.id === "hello-server")!;
     expect(before).toMatchObject({ status: "active", clientUrl: "/plugins/hello-server/index.js" });
     expect((await instance.inject({ url: "/plugins/hello-server/index.js" })).statusCode).toBe(200);
 
     const upd = await instance.inject({ method: "POST", url: "/api/plugins/install", payload: { url, sha: SHA_MAIN, replace: true } });
     expect(upd.json()).toMatchObject({ outcome: "replaced", plugin: { status: "active", needsRestart: true } });
-    const after = ((await instance.inject({ url: "/api/plugins" })).json() as PluginInfo[])[0]!;
+    const after = ((await instance.inject({ url: "/api/plugins" })).json() as PluginInfo[]).find((p) => p.id === "hello-server")!;
     expect(after.clientUrl).toBeUndefined();
     expect((await instance.inject({ url: "/plugins/hello-server/index.js" })).statusCode).toBe(404);
   });

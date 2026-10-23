@@ -23,7 +23,7 @@
  * long-running command for no user-visible gain.
  */
 import { figuresOfUsage } from "@dispatch/shared";
-import type { HarnessEvent } from "../types.js";
+import type { HarnessEvent } from "@dispatch/shared";
 import type { RpcFrame } from "./rpc.js";
 
 /** One ACP session update, loosely typed — we probe fields rather than model every variant. */

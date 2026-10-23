@@ -124,7 +124,16 @@ export async function readPluginDir(dir: string, expectedId?: string): Promise<D
  * the owner sees why in Settings instead of wondering where it went.
  */
 export async function discoverPlugins(configDir: string): Promise<DiscoveredPlugin[]> {
-  const root = pluginsRoot(configDir);
+  return discoverPluginsAt(pluginsRoot(configDir));
+}
+
+/**
+ * Every plugin directory directly under `root`. Split from
+ * {@link discoverPlugins} so the host can read its BUILT-IN plugins — which
+ * ship in the app payload, not under the config dir — with the same validation
+ * an installed plugin gets.
+ */
+export async function discoverPluginsAt(root: string): Promise<DiscoveredPlugin[]> {
   let names: string[];
   try {
     names = await readdir(root);

@@ -14,10 +14,10 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
-  fallbackModels,
   limitWindowTitle,
   type Effort,
   type ModelOption,
+  type RuntimeLoginStatus,
 } from "@dispatch/shared";
 import type {
   Harness,
@@ -29,10 +29,12 @@ import type {
   HarnessSession,
   HarnessSessionSpec,
   HarnessTextRequest,
-} from "../types.js";
+} from "@dispatch/shared";
 import { codexHome, codexRuntime } from "./runtime.js";
-import { acquireCodexConnection, type CodexConnection } from "./rpc.js";
+import { acquireCodexConnection, disposeSharedCodexConnection, type CodexConnection } from "./rpc.js";
 import { CodexSession } from "./session.js";
+import { CODEX_PROVIDER } from "./descriptor.js";
+import { probeCodexLogin } from "./login.js";
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
 /** Cap on catalogue/limit probes so a wedged app server can't pin a request. */
@@ -109,6 +111,19 @@ export class CodexHarness implements Harness {
     this.now = opts.now ?? (() => Date.now());
   }
 
+  probeLogin(exe: string, env: Readonly<Record<string, string | undefined>>): Promise<RuntimeLoginStatus> {
+    return probeCodexLogin(exe, env);
+  }
+
+  /**
+   * Release every account's app-server. The host's registry used to reach in
+   * and do this by name; now it only knows to call `dispose` on whatever
+   * harness is going away — a shutdown, or this plugin switched off.
+   */
+  async dispose(): Promise<void> {
+    disposeSharedCodexConnection();
+  }
+
   runtime(): HarnessRuntimeInfo {
     return this.opts.runtime ?? codexRuntime();
   }
@@ -150,7 +165,7 @@ export class CodexHarness implements Harness {
     }
     const models = await probe;
     // Never throw: a picker with a stale list beats a picker that errored.
-    if (!models) return this.modelCache.get(key)?.models ?? fallbackModels("codex");
+    if (!models) return this.modelCache.get(key)?.models ?? CODEX_PROVIDER.fallbackModels;
     this.modelCache.set(key, { at: this.now(), models });
     return models;
   }

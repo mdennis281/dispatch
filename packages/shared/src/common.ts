@@ -74,8 +74,12 @@ export const HarnessKindSchema = z
   .regex(/^[a-z][a-z0-9-]{0,39}$/, "a provider id is lowercase letters, digits and dashes");
 
 /**
- * The providers that ship in this repo. Every other id is registered at
- * runtime (see `registerProvider`), which is why {@link HarnessKind} is open.
+ * The providers compiled into the host. Only Claude: it is the fallback every
+ * unavailable provider resolves to and it drives the background jobs (titles,
+ * commit messages), so it cannot be something a toggle switches off. Codex and
+ * goose ship too, but as built-in PLUGINS under `packages/plugins/`, which
+ * register at boot (see `registerProvider`) — which is why {@link HarnessKind}
+ * is open.
  *
  * It was a closed `z.enum` of exactly these three, and that enum was also the
  * PERSISTENCE schema for chats, projects, subscriptions and settings — so a row
@@ -83,7 +87,7 @@ export const HarnessKindSchema = z
  * it. That made a provider that can be uninstalled impossible by construction:
  * removing it would brick every chat that ever ran on it.
  */
-export const BUILTIN_HARNESS_KINDS = ["claude", "codex", "goose"] as const;
+export const BUILTIN_HARNESS_KINDS = ["claude"] as const;
 export type BuiltinHarnessKind = (typeof BUILTIN_HARNESS_KINDS)[number];
 
 /**

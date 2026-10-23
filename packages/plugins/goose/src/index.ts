@@ -11,8 +11,8 @@
  * configuration of the agent rather than as a second implementation.
  *
  * That is why the runtime-specific facts live in {@link AcpAgentSpec} rather
- * than being hard-coded: adding OpenCode later should be a second `BUILTIN_PROVIDERS`
- * row and a second spec, not a second adapter.
+ * than being hard-coded: adding OpenCode later should be a second provider
+ * plugin with its own descriptor and spec, not a second adapter.
  *
  * MODELS COME FROM OLLAMA, NOT FROM ACP. The protocol has no model-listing
  * method — the agent resolves its model from its own config. So `listModels`
@@ -21,7 +21,7 @@
  * back to the static seed rather than erroring, on the same principle as the
  * other two harnesses: a stale list beats a broken picker.
  */
-import { endpointOrigin, fallbackModels, providerFor, type ModelOption } from "@dispatch/shared";
+import { endpointOrigin, type ModelOption, type RuntimeLoginStatus } from "@dispatch/shared";
 import type {
   Harness,
   HarnessAccount,
@@ -31,10 +31,11 @@ import type {
   HarnessSession,
   HarnessSessionSpec,
   HarnessTextRequest,
-} from "../types.js";
+} from "@dispatch/shared";
 import { gooseRuntime, windowsShell } from "./runtime.js";
 import { AcpConnection } from "./rpc.js";
 import { AcpSession } from "./session.js";
+import { GOOSE_PROVIDER } from "./descriptor.js";
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
 /** Cap on the model probe so an unreachable Ollama can't pin a request. */
@@ -247,6 +248,14 @@ export class AcpHarness implements Harness {
   }
 
   /**
+   * Nothing to probe: a local model has no account, no plan and no credential.
+   * Asking anyway is what once put goose's CLI usage error on the setup card.
+   */
+  async probeLogin(): Promise<RuntimeLoginStatus> {
+    return { checked: true, loggedIn: true, notRequired: true, method: "local model" };
+  }
+
+  /**
    * The endpoint an account serves models from.
    *
    * An account's own host wins over the server's ambient `OLLAMA_HOST`, which
@@ -255,7 +264,7 @@ export class AcpHarness implements Harness {
    * the same place `accountOf` writes it from.
    */
   private hostFor(account?: HarnessAccount): string {
-    const key = providerFor(this.kind).account.endpointEnv;
+    const key = GOOSE_PROVIDER.account.endpointEnv;
     const named = key ? account?.env[key]?.trim() : undefined;
     return named ? endpointOrigin(named) : ollamaHost();
   }
@@ -269,7 +278,7 @@ export class AcpHarness implements Harness {
 
     const models = await this.refreshModels(host);
     // Never throw: a picker with a stale list beats a picker that errored.
-    if (!models?.length) return cached?.models ?? fallbackModels(this.kind);
+    if (!models?.length) return cached?.models ?? GOOSE_PROVIDER.fallbackModels;
     return models;
   }
 

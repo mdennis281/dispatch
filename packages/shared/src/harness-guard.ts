@@ -1,4 +1,4 @@
-import type { HarnessGuardBlockedEvent, HarnessSessionSpec } from "./types.js";
+import type { HarnessGuardBlockedEvent, HarnessSessionSpec } from "./harness.js";
 
 /**
  * Evaluate the harness-neutral policy callback and describe how this runtime

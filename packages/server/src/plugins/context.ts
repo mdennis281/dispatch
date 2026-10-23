@@ -23,6 +23,8 @@ import Router from "find-my-way";
 import {
   realProjects,
   type ChannelSender,
+  type Harness,
+  type ProviderDescriptor,
   type PluginCapability,
   type PluginContext,
   type PluginLog,
@@ -102,6 +104,14 @@ export interface PluginContextDeps {
    * in which case the member is absent too, capability or not.
    */
   processes?: PluginContext["processes"];
+  /**
+   * Where `ctx.providers.register` lands — the host's `HarnessRegistry`. Absent
+   * in a host built without one (unit tests); then the member is absent too.
+   */
+  providers?: {
+    register(harness: Harness, descriptor: ProviderDescriptor): void;
+    unregister(kind: string): Promise<void>;
+  };
 }
 
 /** What the host must tear down when the plugin goes away. */
@@ -312,6 +322,18 @@ export function buildPluginContext(
 
   if (has("process") && deps.processes) {
     ctx.processes = deps.processes;
+  }
+
+  if (has("providers") && deps.providers) {
+    const providers = deps.providers;
+    ctx.providers = {
+      register: (harness, descriptor) => {
+        providers.register(harness, descriptor);
+        // Torn down with the plugin, like a route or a bus listener: a
+        // switched-off plugin's runtime must not keep taking new sessions.
+        owned.offs.push(() => void providers.unregister(harness.kind));
+      },
+    };
   }
 
   if (has("memory")) {

@@ -35,8 +35,7 @@ import type {
   HarnessSession,
   HarnessSessionSpec,
 } from "../types.js";
-import { catchToolGuard } from "../guard.js";
-import { compactCommand } from "../compact.js";
+import { catchToolGuard, compactCommand } from "@dispatch/shared";
 import { ClaudeStreamDecoder, QUESTION_TOOL } from "./stream.js";
 import { buildQuestionAnswer, neutralQuestions } from "./questions.js";
 import { claudeExecutableOption } from "../../services/runtime.js";

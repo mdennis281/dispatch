@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import type { Harness } from "../harness/types.js";
 import {
   probeClaudeLogin,
-  probeCodexLogin,
   probeRuntimeLogins,
   type RunProbe,
 } from "./runtime-login.js";
@@ -74,24 +73,6 @@ describe("probeClaudeLogin", () => {
   });
 });
 
-describe("probeCodexLogin", () => {
-  it("exit 0 is logged in, with the method scraped from the prose", async () => {
-    const run = ran({ stdout: "Logged in using ChatGPT\n" });
-    expect(await probeCodexLogin("/x/codex", {}, run)).toEqual({
-      checked: true,
-      loggedIn: true,
-      method: "ChatGPT",
-    });
-  });
-
-  it("non-zero is logged out, and the fix is named", async () => {
-    const run = ran({ code: 1, stderr: "Not logged in\n" });
-    const status = await probeCodexLogin("/x/codex", {}, run);
-    expect(status).toMatchObject({ checked: true, loggedIn: false });
-    expect(status.error).toContain("codex login");
-  });
-});
-
 describe("probeRuntimeLogins", () => {
   const harness = (
     kind: string,
@@ -99,24 +80,38 @@ describe("probeRuntimeLogins", () => {
   ) =>
     ({ kind, runtime: () => ({ kind, source: "installed", available: true, ...runtime }) }) as unknown as Harness;
 
-  it("does not run a login probe for a local-model runtime", async () => {
+  it("asks a provider's own probe instead of switching on its id", async () => {
     // Regression: the dispatcher was `kind === "codex" ? codex : claude`, so a
-    // third provider fell through to `claude auth status`. goose has no `auth`
-    // subcommand, so its CLI usage error was rendered onto the setup card as
-    // "Login not checked — error: unrecognized subcommand 'auth'".
+    // third provider fell through to `claude auth status` — goose's CLI usage
+    // error landed on the setup card. Providers bring their probe now.
     let ranAnything = false;
     const run: RunProbe = async () => {
       ranAnything = true;
       return { code: 1, stdout: "", stderr: "error: unrecognized subcommand 'auth'" };
     };
-    const [status] = await probeRuntimeLogins(
-      [harness("goose", { path: "/x/goose", version: "1.51.0" })],
-      null,
-      { run, env: {} },
-    );
+    const asked: Array<[string, string | undefined]> = [];
+    const own = {
+      ...harness("goose", { path: "/x/goose", version: "1.51.0" }),
+      probeLogin: async (exe: string, env: Readonly<Record<string, string | undefined>>) => {
+        asked.push([exe, env.MARKER]);
+        return { checked: true, loggedIn: true, notRequired: true };
+      },
+    } as unknown as Harness;
+    const [status] = await probeRuntimeLogins([own], null, { run, env: { MARKER: "base" } });
     expect(ranAnything).toBe(false);
+    expect(asked).toEqual([["/x/goose", "base"]]);
     expect(status!.login).toMatchObject({ checked: true, notRequired: true });
-    expect(status!.login.error).toBeUndefined();
+  });
+
+  it("reports a provider probe that throws as unchecked, not as a failed boot", async () => {
+    const throwing = {
+      ...harness("codex", { path: "/x/codex" }),
+      probeLogin: async () => {
+        throw new Error("app-server exploded");
+      },
+    } as unknown as Harness;
+    const [status] = await probeRuntimeLogins([throwing], null, { env: {} });
+    expect(status!.login).toMatchObject({ checked: false, loggedIn: false, error: "app-server exploded" });
   });
 
   it("does not probe a runtime-registered provider as if it were Claude", async () => {

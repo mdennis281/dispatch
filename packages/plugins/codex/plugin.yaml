@@ -1,0 +1,11 @@
+# Built-in: ships inside the app payload and loads from there (never from
+# <configDir>/plugins/), activating before the server opens its port so no chat
+# can start before Codex is registered. See docs/plugins.md → "Providers".
+id: codex
+name: Codex
+version: 1.0.0
+dispatch: ">=1"
+description: Runs chats on OpenAI's Codex CLI, driven over its app-server protocol.
+server: ./server/main.js
+capabilities:
+  - providers

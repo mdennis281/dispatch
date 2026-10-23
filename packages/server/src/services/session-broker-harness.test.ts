@@ -12,6 +12,10 @@ import type {
   HarnessSessionSpec,
 } from "../harness/types.js";
 import { HarnessRegistry } from "../harness/index.js";
+// The real descriptors, because these suites assert on what a Codex or goose
+// chat gets — its efforts, skills dir and account env all come from them.
+import { CODEX_PROVIDER } from "@dispatch/plugin-codex/descriptor";
+import { GOOSE_PROVIDER } from "@dispatch/plugin-goose/descriptor";
 import { Store } from "../store/index.js";
 import { EventBus } from "../bus.js";
 import { AuthoredConfigService } from "./authored-config.js";
@@ -157,7 +161,7 @@ describe("SessionBroker neutral harness path", () => {
     broker = new SessionBroker({
       store,
       bus: (bus = new EventBus()),
-      harnesses: new HarnessRegistry({ harnesses: { codex } }),
+      harnesses: new HarnessRegistry({ providers: [{ harness: codex, descriptor: CODEX_PROVIDER }] }),
       authored: new AuthoredConfigService({ globalRoot: join(dir, "global") }),
       deps: { stopTimeoutMs: 5 },
     });
@@ -214,6 +218,48 @@ describe("SessionBroker neutral harness path", () => {
       await expect(readdir(join(repo, ".agents"))).rejects.toThrow();
     } finally {
       await ghostBroker.dispose();
+    }
+  });
+
+  it("waits for an installed provider plugin to activate instead of falling back", async () => {
+    // Installed plugins activate in `warm()`, after listen. A chat on one that
+    // starts in that window used to fall back to Claude and have `harness`
+    // rewritten on its row, so it stayed on Claude once the plugin was up.
+    const lateSpecs: HarnessSessionSpec[] = [];
+    const late: Harness = {
+      kind: "late",
+      capabilities: caps as unknown as Harness["capabilities"],
+      runtime: () => ({ kind: "late", source: "installed", available: true }),
+      listModels: async () => [],
+      readLimits: async () => null,
+      generateText: async () => "title",
+      createSession: (spec: HarnessSessionSpec) => { lateSpecs.push(spec); return new FakeHarnessSession(); },
+    };
+    const registry = new HarnessRegistry({ providers: [{ harness: { ...late, kind: "codex" }, descriptor: CODEX_PROVIDER }] });
+    const lateBroker = new SessionBroker({
+      store,
+      bus: new EventBus(),
+      harnesses: registry,
+      authored: new AuthoredConfigService({ globalRoot: join(dir, "global") }),
+      deps: { stopTimeoutMs: 5 },
+    });
+    lateBroker.plugins = {
+      modes: () => [],
+      mcpServers: () => [],
+      // Activation lands while the chat is waiting on it.
+      activationSettled: async () => {
+        registry.register(late, { ...CODEX_PROVIDER, id: "late", label: "Late" });
+      },
+    };
+    try {
+      const chat = await store.saveChat({ id: "late-chat", projectId: "p1", title: "Late", modeId: "plan", effort: "low", harness: "late", worktrees: [], prs: [], createdAt: 1 });
+      lateBroker.create(chat);
+      await lateBroker.sendMessage(chat.id, "hello");
+      await lateBroker.waitFor(chat.id, "idle");
+      expect(lateSpecs).toHaveLength(1);
+      expect((await store.getChat(chat.id))!.harness).toBe("late");
+    } finally {
+      await lateBroker.dispose();
     }
   });
 
@@ -1287,7 +1333,7 @@ describe("SessionBroker neutral harness path", () => {
       broker = new SessionBroker({
         store,
         bus: (bus = new EventBus()),
-        harnesses: new HarnessRegistry({ harnesses: { goose: noLiveSwitchHarness() } }),
+        harnesses: new HarnessRegistry({ providers: [{ harness: noLiveSwitchHarness(), descriptor: GOOSE_PROVIDER }] }),
         authored: new AuthoredConfigService({ globalRoot: join(dir, "global") }),
         deps: { stopTimeoutMs: 5 },
       });
@@ -1329,7 +1375,7 @@ describe("SessionBroker neutral harness path", () => {
       broker = new SessionBroker({
         store,
         bus: (bus = new EventBus()),
-        harnesses: new HarnessRegistry({ harnesses: { goose: noLiveSwitchHarness() } }),
+        harnesses: new HarnessRegistry({ providers: [{ harness: noLiveSwitchHarness(), descriptor: GOOSE_PROVIDER }] }),
         authored: new AuthoredConfigService({ globalRoot: join(dir, "global") }),
         deps: { stopTimeoutMs: 5 },
       });
@@ -1465,7 +1511,8 @@ describe("SessionBroker neutral harness path", () => {
         store,
         bus: (bus = new EventBus()),
         harnesses: new HarnessRegistry({
-          harnesses: { claude, goose: unavailableLocalHarness(() => (probes += 1)) },
+          harnesses: { claude },
+          providers: [{ harness: unavailableLocalHarness(() => (probes += 1)), descriptor: GOOSE_PROVIDER }],
         }),
         authored: new AuthoredConfigService({ globalRoot: join(dir, "global") }),
         deps: { stopTimeoutMs: 5 },
