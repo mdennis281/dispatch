@@ -1545,9 +1545,17 @@ export function createServices(
           }
           // After the import, so rows it just wrote are already complete and
           // only older live rows are left to fill.
-          return tokenBackfill.fillDurations().then((n) => {
-            if (n) console.log(`[Dispatch] metrics: filled ${n} token row duration(s).`);
-          });
+          // Its own catch: the rejection handler below only covers `run()`,
+          // not a promise returned from this one, and an uncaught failure here
+          // would be logged as a crash rather than as a failed backfill.
+          return tokenBackfill
+            .fillDurations()
+            .then((n) => {
+              if (n) console.log(`[Dispatch] metrics: filled ${n} token row duration(s).`);
+            })
+            .catch((err: unknown) =>
+              console.error("[Dispatch] token duration backfill failed:", err),
+            );
         },
         (err: unknown) => console.error("[Dispatch] token backfill failed:", err),
       );
