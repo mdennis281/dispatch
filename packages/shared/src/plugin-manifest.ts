@@ -66,6 +66,7 @@ export const PLUGIN_CAPABILITIES = [
   "process",
   "oauth",
   "ui",
+  "providers",
 ] as const;
 export const PluginCapabilitySchema = z.enum(PLUGIN_CAPABILITIES);
 export type PluginCapability = z.infer<typeof PluginCapabilitySchema>;
@@ -333,6 +334,12 @@ export const PluginInfoSchema = z.object({
   description: z.string().optional(),
   /** Absolute path of the plugin directory — what "open folder" opens. */
   dir: z.string(),
+  /**
+   * Ships inside the app (Codex, goose) rather than under `<configDir>/plugins/`.
+   * It can be switched off but not replaced or removed: its directory is part
+   * of the payload an upgrade swaps out.
+   */
+  builtin: z.boolean().optional(),
   status: PluginStatusSchema,
   /** The message behind an `error` / `invalid` / `incompatible` status. */
   error: z.string().optional(),

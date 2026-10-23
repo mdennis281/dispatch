@@ -37,11 +37,11 @@ import type {
   HarnessQuestionAnswer,
   HarnessSession,
   HarnessSessionSpec,
-} from "../types.js";
+} from "@dispatch/shared";
 import { CodexStreamDecoder, codexToolCall, legacySubagentToolUseId, questionsOf } from "./stream.js";
 import { toCodexPosture, toDeveloperInstructions, clampEffort } from "./options.js";
-import { catchToolGuard } from "../guard.js";
-import { codexCompactNote, normalizeCompactFocus } from "../compact.js";
+import { catchToolGuard } from "@dispatch/shared";
+import { codexCompactNote, normalizeCompactFocus } from "@dispatch/shared";
 import type { CodexConnection, RpcFrame, ServerRequest } from "./rpc.js";
 
 /** A server→client request we owe an answer to. */

@@ -78,6 +78,7 @@ oauth:                          # see external-api.md → "OAuth client flow"
 | `process` | `contributes.processes` is honoured, `ctx.processes` |
 | `oauth` | `oauth.clients` is honoured, `ctx.oauth` |
 | `ui` | a `client` entry (declare it; the consent card reads the list) |
+| `providers` | `ctx.providers.register` — add an agent runtime (`codex` and `goose` are taken by built-ins) |
 
 A capability the manifest does not declare is **absent from the object** `activate`
 receives — the member is `undefined`, not a stub that throws. `settings`, `projects`,

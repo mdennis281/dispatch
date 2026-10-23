@@ -3,7 +3,7 @@ import { mkdtempSync, existsSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AcpHarness, ollamaHost } from "./index.js";
-import type { HarnessEvent } from "../types.js";
+import type { HarnessEvent } from "@dispatch/shared";
 
 /**
  * END-TO-END against a REAL agent and a REAL model.

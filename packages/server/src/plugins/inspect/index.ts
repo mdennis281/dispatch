@@ -80,6 +80,7 @@ export class PluginInspector {
       },
       fetched: { files: f.extract.files, bytes: f.extract.bytes, skipped: f.extract.skipped },
       installed: (id) => this.installed(id),
+      builtin: (id) => this.opts.hostInfo(id)?.builtin === true,
     });
   }
 

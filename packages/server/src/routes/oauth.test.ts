@@ -705,7 +705,7 @@ describe("plugin client flow", () => {
 
     // Not set yet: the pane says so instead of letting Connect fail at the provider.
     let rows = (await instance.inject({ url: "/api/plugins" })).json() as PluginInfo[];
-    expect(rows[0]!.oauth).toMatchObject([{ name: "fake", connected: false, configError: expect.stringMatching(/FAKE_SECRET/) }]);
+    expect(rows.find((p) => p.id === "oauther")!.oauth).toMatchObject([{ name: "fake", connected: false, configError: expect.stringMatching(/FAKE_SECRET/) }]);
     expect((await instance.inject({ method: "POST", url: "/api/plugins/oauther/oauth/fake/connect" })).statusCode).toBe(409);
 
     await instance.services.secrets.set({ name: "FAKE_SECRET", scope: "global" }, "fake-secret");
@@ -750,8 +750,8 @@ describe("plugin client flow", () => {
     expect(decodeURIComponent((await instance.inject({ url: `/oauth/callback/oauther/fake?code=good-code&state=${state}` })).headers.location!)).toMatch(/oauthError/);
 
     rows = (await instance.inject({ url: "/api/plugins" })).json() as PluginInfo[];
-    expect(rows[0]!.oauth).toMatchObject([{ name: "fake", connected: true, scopes: ["read", "write"] }]);
-    expect(rows[0]!.oauth![0]!.expiresAt).toBeGreaterThan(Date.now());
+    expect(rows.find((p) => p.id === "oauther")!.oauth).toMatchObject([{ name: "fake", connected: true, scopes: ["read", "write"] }]);
+    expect(rows.find((p) => p.id === "oauther")!.oauth![0]!.expiresAt).toBeGreaterThan(Date.now());
     expect(JSON.stringify(rows)).not.toContain("at-1");
 
     // 30 s to live is inside the refresh-ahead window: the plugin's first read already refreshes.

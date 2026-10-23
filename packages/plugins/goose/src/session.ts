@@ -36,12 +36,12 @@ import type {
   HarnessSession,
   HarnessSessionSpec,
   HarnessToolPolicy,
-} from "../types.js";
+} from "@dispatch/shared";
 import { readFileSync } from "node:fs";
 import type { ImageRef, SlashCommandInfo } from "@dispatch/shared";
 import type { AcpConnection, AgentRequest, RpcFrame } from "./rpc.js";
 import { AcpStreamDecoder, turnEndOf, toolNameOf, remapInput } from "./stream.js";
-import { catchToolGuard } from "../guard.js";
+import { catchToolGuard } from "@dispatch/shared";
 import {
   toAcpMode,
   toEnvironmentBlock,

@@ -3,6 +3,15 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { registerProvider } from "@dispatch/shared";
+import { CODEX_PROVIDER } from "@dispatch/plugin-codex/descriptor";
+import { GOOSE_PROVIDER } from "@dispatch/plugin-goose/descriptor";
+
+// Codex and goose are plugins now; outside a running host nothing registers
+// them. These cases are about a directory login beside an endpoint account, so
+// they register the real descriptors — the account fields are the point.
+registerProvider(CODEX_PROVIDER);
+registerProvider(GOOSE_PROVIDER);
 import {
   accountOf,
   chatSubscription,

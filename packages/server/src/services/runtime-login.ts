@@ -22,7 +22,6 @@
 import { execFile } from "node:child_process";
 import {
   subscriptionFor,
-  type HarnessKind,
   type RuntimeLoginStatus,
   type RuntimeSetupStatus,
   type SubscriptionSettings,
@@ -106,64 +105,30 @@ export async function probeClaudeLogin(
 }
 
 /**
- * `codex login status` → exit 0 with "Logged in using ChatGPT" (or an API key),
- * non-zero with "Not logged in". The method is scraped from the prose because
- * that is all the command offers.
- */
-export async function probeCodexLogin(
-  exe: string,
-  env: NodeJS.ProcessEnv,
-  run: RunProbe = runProbe,
-): Promise<RuntimeLoginStatus> {
-  const ran = await run(exe, ["login", "status"], env);
-  if (ran.spawnError) return { checked: false, loggedIn: false, error: trim(ran.spawnError) };
-  const text = trim(`${ran.stdout}\n${ran.stderr}`);
-  if (ran.code === 0) {
-    const method = /logged in (?:using|with|via) (.+?)(?:[.,]|$)/i.exec(text)?.[1]?.trim();
-    return { checked: true, loggedIn: true, ...(method ? { method } : {}) };
-  }
-  return {
-    checked: true,
-    loggedIn: false,
-    error: text ? `${text} — run \`codex login\`` : "not logged in — run `codex login`",
-  };
-}
-
-/**
- * The login probe for a provider.
+ * The login probe for a provider: its own when it has one, the host's for
+ * Claude, and "not checked" for anything else.
  *
- * An exhaustive switch rather than a ternary defaulting to Claude. The previous
- * shape — `kind === "codex" ? codex : claude` — was correct for two providers
- * and silently wrong for a third: `goose` fell through to `claude auth status`,
- * which shelled out to a binary with no `auth` subcommand and printed its usage
- * error onto the setup card. Exactly the failure `providers.ts` warns about.
+ * Not a switch on the provider id any more. That shape was right for the
+ * providers the host knew and silently wrong for the next one: `goose` once
+ * fell through to `claude auth status`, which shelled out to a binary with no
+ * `auth` subcommand and printed its usage error onto the setup card. Codex and
+ * goose are plugins now and bring their own probes.
  */
 async function probeLogin(
-  kind: HarnessKind,
+  harness: Harness,
   exe: string,
   env: NodeJS.ProcessEnv,
   run: RunProbe,
 ): Promise<RuntimeLoginStatus> {
-  switch (kind) {
-    case "codex":
-      return probeCodexLogin(exe, env, run);
-    case "goose":
-      // Nothing to probe: a local model has no account, no plan and no
-      // credential. Asking anyway is what produced the usage-error card.
-      return {
-        checked: true,
-        loggedIn: true,
-        notRequired: true,
-        method: "local model",
-      };
-    case "claude":
-      return probeClaudeLogin(exe, env, run);
-    default:
-      // A provider registered at runtime. Probing it as Claude is the same
-      // fall-through the comment above describes — until a provider can
-      // supply its own probe, say we could not check rather than guess.
-      return { checked: false, loggedIn: false, error: `no login probe for ${kind}` };
+  if (harness.probeLogin) {
+    return harness.probeLogin(exe, env).catch((err: unknown) => ({
+      checked: false,
+      loggedIn: false,
+      error: trim(err instanceof Error ? err.message : String(err)),
+    }));
   }
+  if (harness.kind === "claude") return probeClaudeLogin(exe, env, run);
+  return { checked: false, loggedIn: false, error: `no login probe for ${harness.kind}` };
 }
 
 export interface RuntimeLoginDeps {
@@ -213,7 +178,7 @@ export async function probeRuntimeLogins(
         };
       }
       const env = { ...baseEnv, ...accountOf(subscriptionFor(settings, rt.kind)).env };
-      return { ...base, login: await probeLogin(rt.kind, exe, env, run) };
+      return { ...base, login: await probeLogin(harness, exe, env, run) };
     }),
   );
 }

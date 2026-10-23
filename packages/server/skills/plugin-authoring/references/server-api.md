@@ -103,7 +103,16 @@ await ctx.processes.start(id) / stop(id) / list()   // [{ id, status, ports?, ur
 
 // oauth (see external-api.md)
 await ctx.oauth.connectUrl(name) / token(name) / disconnect(name)
+
+// providers — an agent runtime chats can run on (docs/plugins.md → "Providers").
+// `harness` implements Harness from @dispatch/shared; descriptor.id === harness.kind.
+// Throws if the id is taken; the toggle unregisters it and calls harness.dispose().
+ctx.providers.register(harness, descriptor)
 ```
+
+Working examples of `providers`: the built-in Codex and goose plugins,
+`packages/plugins/codex` and `packages/plugins/goose` (`src/main.ts` is the
+whole entry; `src/descriptor.ts` is the descriptor).
 
 ### Routes
 

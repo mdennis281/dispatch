@@ -10,6 +10,7 @@ import { pathToFileURL } from "node:url";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createTestContext } from "./testing.js";
+import type { Harness, ProviderDescriptor } from "./index.js";
 import type { PluginModule } from "./index.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -138,5 +139,19 @@ describe("the members no example reaches", () => {
       q: { x: "1" },
       h: "Bearer t",
     });
+  });
+});
+
+describe("createTestContext providers", () => {
+  const harness = (kind: string) => ({ kind }) as unknown as Harness;
+  const descriptor = (id: string) => ({ id }) as unknown as ProviderDescriptor;
+
+  it("records registrations and refuses what the host would", () => {
+    const t = createTestContext();
+    t.ctx.providers!.register(harness("opencode"), descriptor("opencode"));
+    expect(t.providers.map((p) => p.descriptor.id)).toEqual(["opencode"]);
+    expect(() => t.ctx.providers!.register(harness("opencode"), descriptor("opencode"))).toThrow(/already registered/);
+    expect(() => t.ctx.providers!.register(harness("claude"), descriptor("claude"))).toThrow(/already registered/);
+    expect(() => t.ctx.providers!.register(harness("a"), descriptor("b"))).toThrow(/does not match/);
   });
 });

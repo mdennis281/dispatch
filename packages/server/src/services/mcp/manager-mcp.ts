@@ -192,8 +192,9 @@ import {
   type PeerSendResult,
 } from "../chat-messenger.js";
 
-/** Hard ceiling on a single `wait` (also the default `wait_for_chat` timeout). */
-export const WAIT_CAP_SECONDS = 3600;
+// In shared so a provider plugin can size its own tool timeout past them.
+import { ASK_USER_TIMEOUT_CAP_SECONDS, WAIT_CAP_SECONDS } from "@dispatch/shared";
+export { ASK_USER_TIMEOUT_CAP_SECONDS, WAIT_CAP_SECONDS };
 
 /** How often `watch_pr` re-polls a PR's checks / review threads / merge state. */
 export const PR_POLL_INTERVAL_MS = WATCH_PR_POLL_INTERVAL_MS;
@@ -254,8 +255,6 @@ export type ManagerAskResult =
   | { status: "timed_out"; message: string }
   | { status: "unavailable"; message: string };
 
-/** Longest inactivity timeout an agent may put on a question card. */
-export const ASK_USER_TIMEOUT_CAP_SECONDS = 3_600;
 
 /** What an agent puts in front of the human with `request_human_review`. */
 export interface ManagerHumanReviewRequest {

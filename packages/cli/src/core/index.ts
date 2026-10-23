@@ -40,6 +40,7 @@ export {
   pluginsRoot,
   readPluginDir,
   discoverPlugins,
+  discoverPluginsAt,
   addPlugin,
   linkPlugin,
   removePlugin,

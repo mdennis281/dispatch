@@ -128,7 +128,8 @@ export const APP_SECTIONS: AppSectionDef[] = [
     label: "Plugins",
     blurb: "Extensions installed on this machine",
     explainer:
-      "Code from outside Dispatch, loaded from the shared config directory, so both the " +
+      "Built-in plugins ship with Dispatch (the Codex and goose providers) and update with " +
+      "it. Installed ones are loaded from the shared config directory, so both the " +
       "installed app and a dev server see the same list. Each row says what the plugin " +
       "declared it will touch. Turning one off takes effect now; turning one on, or " +
       "changing its files, needs a restart.",

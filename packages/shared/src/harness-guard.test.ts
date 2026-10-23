@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { catchToolGuard, guardRecoveryInput } from "./guard.js";
+import { catchToolGuard, guardRecoveryInput } from "./harness-guard.js";
 
 describe("harness-neutral tool guard", () => {
   it.each(["in-place", "restart-turn"] as const)(

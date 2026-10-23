@@ -100,6 +100,7 @@ import { FsExplorerService } from "./fs-explorer.js";
 import { HarnessRegistry } from "../harness/index.js";
 import { ManagerMcpBridge } from "./mcp/manager-http.js";
 import { PluginService } from "../plugins/service.js";
+import { findShippedPluginsRoot } from "../plugins/shipped.js";
 import { PluginInspector } from "../plugins/inspect/index.js";
 import { PluginOAuthService } from "../plugins/oauth.js";
 
@@ -1103,8 +1104,24 @@ export function createServices(
     overrides.plugins ??
     new PluginService({
       configDir: config.configDir ?? config.dataDir,
+      // Codex and goose. Resolved from this module, so a test container that
+      // builds its own `PluginService` override never loads them by accident.
+      shippedRoot: findShippedPluginsRoot(),
       store,
-      context: { bus, secrets, inspect, memory, attention, messenger: chatMessenger, broker, pluginOAuth },
+      context: {
+        bus,
+        secrets,
+        inspect,
+        memory,
+        attention,
+        messenger: chatMessenger,
+        broker,
+        pluginOAuth,
+        providers: {
+          register: (harness, descriptor) => harnesses.register(harness, descriptor),
+          unregister: (kind) => harnesses.unregister(kind),
+        },
+      },
       // Plugin processes run through the SAME runner as sub-apps — port
       // allocation, log ring, env quarantine, `stopAll()` at shutdown.
       runner,
@@ -1540,6 +1557,21 @@ export function createServices(
       safeStart("webhooks", () => void webhooks.start().catch((err: unknown) =>
         console.error("[Dispatch] webhooks failed to start:", err)));
       safeStart("push", () => push.start());
+      // Ahead of the limit sampler, so its first pass already sees the
+      // built-in providers' accounts.
+      //
+      // Discovery — a readdir and a YAML parse per plugin, so it is bounded
+      // and `GET /api/plugins` can answer from the first request. No
+      // INSTALLED plugin's code runs until `warm()`.
+      await plugins.load().catch((err: unknown) => {
+        console.error("[Dispatch] plugin discovery failed (continuing):", err);
+      });
+      // The built-in providers (Codex, goose) register HERE, before listen —
+      // see the header of plugins/service.ts. A failure is the plugin's row,
+      // not the boot's: chats on it fall back to Claude, the pane says why.
+      await plugins.activateShipped().catch((err: unknown) => {
+        console.error("[Dispatch] built-in plugin activation failed (continuing):", err);
+      });
       // Every account's limit windows, on one schedule — which is also what
       // keeps the header meter's usage snapshots fresh (a missing token /
       // offline just yields an "unavailable" snapshot the meter hides on).
@@ -1550,12 +1582,6 @@ export function createServices(
       // loaded would ask the stable endpoint on behalf of an unstable install.
       await release.hydrate().catch(() => {});
       safeStart("release", () => release.start());
-      // Discovery only — a readdir and a YAML parse per plugin, so it is
-      // bounded and `GET /api/plugins` can answer from the first request. No
-      // plugin code runs until `warm()`.
-      await plugins.load().catch((err: unknown) => {
-        console.error("[Dispatch] plugin discovery failed (continuing):", err);
-      });
       // AI title: generate one from the first user message IFF the chat is still
       // on its default "New chat" title. We fire as soon as the user's prompt
       // lands (`user` row) so a new chat is named right after the first send

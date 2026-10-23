@@ -1,39 +1,43 @@
 /**
  * The harness registry — one place that knows which runtimes exist.
  *
- * Harnesses are singletons per process because both hold expensive shared
+ * Harnesses are singletons per process because they hold expensive shared
  * state: Claude caches its model catalogue, Codex owns a ref-counted app-server
  * process. Handing out a fresh instance per chat would spawn a second app
  * server and re-probe the catalogue on every send.
  *
- * `resolveHarness` never throws for an unknown or unavailable kind — it falls
- * back to Claude and says so. A project whose harness was uninstalled must
- * still open, because the alternative is a project the user cannot get into to
- * change the setting.
+ * Only Claude is compiled in. Codex and goose are built-in PLUGINS
+ * (`packages/plugins/`) that register through `ctx.providers` while the server
+ * starts, before the port opens — see `PluginService.activateShipped`.
+ *
+ * `resolve` never throws for an unknown or unavailable kind — it falls back to
+ * Claude and says so. A project whose harness was uninstalled must still open,
+ * because the alternative is a project the user cannot get into to change the
+ * setting.
  */
 import {
   BUILTIN_HARNESS_KINDS,
   DEFAULT_HARNESS,
   registerProvider,
+  unregisterProvider,
   type BuiltinHarnessKind,
   type HarnessKind,
   type ProviderDescriptor,
 } from "@dispatch/shared";
 import type { Harness, HarnessRuntimeInfo } from "./types.js";
 import { ClaudeHarness } from "./claude/index.js";
-import { CodexHarness } from "./codex/index.js";
-import { AcpHarness } from "./acp/index.js";
-import { disposeSharedCodexConnection } from "./codex/rpc.js";
 
 export * from "./types.js";
-export * from "./guard.js";
 export { ClaudeHarness, CLAUDE_CAPABILITIES, parseClaudeLimitHit } from "./claude/index.js";
-export { CodexHarness, CODEX_CAPABILITIES } from "./codex/index.js";
-export { AcpHarness, ACP_CAPABILITIES } from "./acp/index.js";
 
 export interface HarnessRegistryOpts {
-  /** Injectable harnesses (tests, and the E2E fake SDK). */
+  /** Injectable built-in harnesses (tests, and the E2E fake SDK). */
   harnesses?: Partial<Record<BuiltinHarnessKind, Harness>>;
+  /**
+   * Providers to register up front, as a plugin would — for tests that drive a
+   * fake Codex or goose without loading the plugin host.
+   */
+  providers?: Array<{ harness: Harness; descriptor: ProviderDescriptor }>;
 }
 
 /**
@@ -44,8 +48,6 @@ export interface HarnessRegistryOpts {
  */
 const HARNESS_FACTORIES: Record<BuiltinHarnessKind, () => Harness> = {
   claude: () => new ClaudeHarness(),
-  codex: () => new CodexHarness(),
-  goose: () => new AcpHarness(),
 };
 
 export class HarnessRegistry {
@@ -55,10 +57,11 @@ export class HarnessRegistry {
     for (const kind of BUILTIN_HARNESS_KINDS) {
       this.map.set(kind, opts.harnesses?.[kind] ?? HARNESS_FACTORIES[kind]());
     }
+    for (const { harness, descriptor } of opts.providers ?? []) this.register(harness, descriptor);
   }
 
   /**
-   * Add a provider that does not ship in this repo, with the descriptor the
+   * Add a provider that is not compiled into the host, with the descriptor the
    * rest of the app labels it by.
    *
    * Refuses an id that is already taken. Replacing a live harness would leave
@@ -73,6 +76,24 @@ export class HarnessRegistry {
     if (this.map.has(harness.kind)) throw new Error(`provider "${harness.kind}" is already registered`);
     registerProvider(descriptor);
     this.map.set(harness.kind, harness);
+  }
+
+  /**
+   * Drop a registered provider and release its runtime — its plugin was
+   * switched off. `dispose()` is the harness's to define, and it may end
+   * sessions in flight: Codex's tears down its shared app-server, so a Codex
+   * turn running at the moment of the toggle errors. The next start of one of
+   * its chats falls back to Claude.
+   */
+  async unregister(kind: HarnessKind): Promise<void> {
+    if ((BUILTIN_HARNESS_KINDS as readonly string[]).includes(kind)) {
+      throw new Error(`cannot unregister built-in provider "${kind}"`);
+    }
+    const harness = this.map.get(kind);
+    if (!harness) return;
+    this.map.delete(kind);
+    unregisterProvider(kind);
+    await harness.dispose?.();
   }
 
   /** Every registered harness, for the settings pane and the boot log. */
@@ -107,6 +128,5 @@ export class HarnessRegistry {
   /** Release every shared runtime (process teardown). */
   async dispose(): Promise<void> {
     for (const h of this.map.values()) await h.dispose?.();
-    disposeSharedCodexConnection();
   }
 }

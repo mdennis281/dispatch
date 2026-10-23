@@ -1,0 +1,11 @@
+# Built-in: ships inside the app payload and loads from there (never from
+# <configDir>/plugins/), activating before the server opens its port so no chat
+# can start before goose is registered. See docs/plugins.md → "Providers".
+id: goose
+name: goose
+version: 1.0.0
+dispatch: ">=1"
+description: Runs chats on goose over the Agent Client Protocol, against local models via Ollama.
+server: ./server/main.js
+capabilities:
+  - providers

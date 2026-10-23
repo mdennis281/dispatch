@@ -31,6 +31,7 @@ export const PLUGIN_CAPABILITY_LINES: Record<z.infer<typeof PluginCapabilitySche
   process: "Starts and stops long-running processes on this machine.",
   oauth: "Connects to outside services with OAuth and holds their tokens.",
   ui: "Runs code in your browser: controls, panels, settings pages, badges.",
+  providers: "Adds an agent runtime your chats can run on, and runs that runtime's CLI on this machine.",
 };
 
 /** Where the inspected files came from, and exactly which commit. */

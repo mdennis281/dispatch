@@ -15,6 +15,7 @@
  */
 import type {
   AttentionItem,
+  Harness,
   PluginAskResult,
   PluginCapability,
   PluginChatState,
@@ -22,6 +23,7 @@ import type {
   PluginMemoryInput,
   PluginProjectSummary,
   PluginSendResult,
+  ProviderDescriptor,
   QuestionAnswer,
   WsServerEvent,
   WsServerEventType,
@@ -113,6 +115,8 @@ export interface TestContext {
   processes: Map<string, { id: string; status: string; ports?: number[]; url?: string }>;
   /** OAuth: what `ctx.oauth.token(name)` returns. Set to simulate a connected provider. */
   oauthTokens: Map<string, string>;
+  /** Every `ctx.providers.register` call, in order. */
+  providers: Array<{ harness: Harness; descriptor: ProviderDescriptor }>;
   /** How many listeners the bus currently holds — zero after a clean deactivate. */
   listenerCount(): number;
 }
@@ -189,6 +193,7 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
   const memory = new Map<string, Map<string, PluginMemoryInput>>();
   const processes = new Map<string, { id: string; status: string; ports?: number[]; url?: string }>();
   const oauthTokens = new Map<string, string>();
+  const providers: TestContext["providers"] = [];
   const projects = opts.projects ?? [];
   const chats = opts.chats ?? [];
 
@@ -373,6 +378,22 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
     };
   }
 
+  if (has("providers")) {
+    ctx.providers = {
+      // The host's two refusals, so a plugin's test sees them before a real
+      // host does: a mismatched id, and an id already taken.
+      register: (harness, descriptor) => {
+        if (harness.kind !== descriptor.id) {
+          throw new Error(`harness kind "${harness.kind}" does not match descriptor id "${descriptor.id}"`);
+        }
+        if (descriptor.id === "claude" || providers.some((p) => p.descriptor.id === descriptor.id)) {
+          throw new Error(`provider "${descriptor.id}" is already registered`);
+        }
+        providers.push({ harness, descriptor });
+      },
+    };
+  }
+
   return {
     ctx,
     publish: (evt) => {
@@ -425,6 +446,7 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
     memory,
     processes,
     oauthTokens,
+    providers,
     listenerCount: () => listeners.size,
   };
 }
