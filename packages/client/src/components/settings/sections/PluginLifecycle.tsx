@@ -168,13 +168,20 @@ export function PluginUpdatePanel({
   const installable = !!r?.installable && r.id === plugin.id;
   const hooks = d?.changes.filter((c) => c.kind === "hook") ?? [];
   const declared = d?.changes.filter((c) => c.kind !== "hook") ?? [];
+  // A branch moves without the author bumping `version:`; "v0.1.0 → v0.1.0"
+  // read like a bug, so a same-version update is named by its commit.
+  const sameVersion = !d?.toVersion || d.fromVersion === d.toVersion;
+  const heading = sameVersion
+    ? `Update available: a new commit${d?.toVersion ? ` of v${d.toVersion}` : ""}`
+    : `Update available: v${d?.fromVersion ?? "?"} → v${d?.toVersion}`;
+  const buttonLabel = sameVersion ? `Update to ${shortSha(t.sha)}` : `Update to v${t.version}`;
 
   const update = async () => {
     setBusy(true);
     setError(null);
     try {
       const res = await api.plugins.update(plugin.id, t.sha);
-      setDone(`Updated to ${t.version ? `v${t.version}` : shortSha(res.sha)} at ${shortSha(res.sha)}. Restart Dispatch to load it — plugins are not hot-reloaded.`);
+      setDone(`Updated to ${t.version ? `v${t.version} at ` : ""}${shortSha(res.sha)}. Restart Dispatch to load it — plugins are not hot-reloaded.`);
       onUpdated(res.plugin);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -186,9 +193,7 @@ export function PluginUpdatePanel({
   return (
     <div className="space-y-1 rounded-md bg-inset/40 px-2.5 py-2" data-testid={`plugin-update-${plugin.id}`}>
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <span className="text-xs font-semibold text-primary">
-          Update available{d?.fromVersion || d?.toVersion ? `: v${d?.fromVersion ?? "?"} → v${d?.toVersion ?? "?"}` : ""}
-        </span>
+        <span className="text-xs font-semibold text-primary">{heading}</span>
         <Chip mono tone="info" title={`ref ${t.ref}`}>
           {t.ref.length === 40 ? shortSha(t.ref) : t.ref}
         </Chip>
@@ -272,7 +277,7 @@ export function PluginUpdatePanel({
             disabled={busy || !installable}
             onClick={() => void update()}
           >
-            {busy ? "Updating…" : t.version ? `Update to v${t.version}` : "Update"}
+            {busy ? "Updating…" : buttonLabel}
           </Button>
         )}
       </div>

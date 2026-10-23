@@ -265,23 +265,21 @@ function PluginCard({
         </div>
       ) : null}
 
-      <div className="flex items-center gap-1.5">
-        <code className="min-w-0 flex-1 truncate cm-mono text-2xs text-faint" title={plugin.dir}>
-          {plugin.dir}
-        </code>
-        <IconButton tip="Copy path" onClick={() => copy(plugin.dir, "Plugin path")}>
-          <Copy />
-        </IconButton>
-        <Button variant="ghost" size="sm" leftIcon={<FolderOpen />} onClick={() => void reveal()}>
-          Open folder
-        </Button>
-      </div>
-
-      {/* Built-ins ship with the app: no Update (it updates with Dispatch) and
-          no Uninstall (the next start would find it again). The switch above
-          is the whole of their lifecycle. */}
-      {plugin.origin !== "builtin" && (
-        <div className="flex flex-wrap items-center justify-end gap-1">
+      {/* One row: the path shrinks first, and at phone width the actions wrap
+          under it rather than squeezing it to nothing. */}
+      <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
+        <div className="flex min-w-0 flex-1 basis-48 items-center gap-1.5">
+          <code className="min-w-0 flex-1 truncate cm-mono text-2xs text-faint" title={plugin.dir}>
+            {plugin.dir}
+          </code>
+          <IconButton tip="Copy path" onClick={() => copy(plugin.dir, "Plugin path")}>
+            <Copy />
+          </IconButton>
+        </div>
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-1">
+          <Button variant="ghost" size="sm" leftIcon={<FolderOpen />} onClick={() => void reveal()}>
+            Open folder
+          </Button>
           {plugin.origin === "url" && (
             <Button
               variant="ghost"
@@ -293,16 +291,21 @@ function PluginCard({
               Check for updates
             </Button>
           )}
-          <Button
-            variant="ghost"
-            size="sm"
-            leftIcon={plugin.origin === "linked" ? <Unlink2 /> : <Trash2 />}
-            onClick={() => setUninstalling(true)}
-          >
-            {plugin.origin === "linked" ? "Unlink" : "Uninstall"}
-          </Button>
+          {/* Built-ins ship with the app: no Update (it updates with Dispatch)
+              and no Uninstall (the next start would find it again). The switch
+              above is the whole of their lifecycle. */}
+          {plugin.origin !== "builtin" && (
+            <Button
+              variant="ghost"
+              size="sm"
+              leftIcon={plugin.origin === "linked" ? <Unlink2 /> : <Trash2 />}
+              onClick={() => setUninstalling(true)}
+            >
+              {plugin.origin === "linked" ? "Unlink" : "Uninstall"}
+            </Button>
+          )}
         </div>
-      )}
+      </div>
       <PluginUninstallDialog
         plugin={plugin}
         open={uninstalling}
