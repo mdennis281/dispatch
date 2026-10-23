@@ -6,6 +6,10 @@
  *   POST /api/plugins/:id/reveal       → open the plugin directory on the HOST machine
  *   POST /api/plugins/inspect          → { url } → PluginInspection, read without running anything (owner only)
  *   POST /api/plugins/install          → { url, sha, replace? } → install exactly that sha (owner only)
+ *   POST /api/plugins/:id/check-update → PluginUpdateCheck — resolve the recorded source, diff the target (owner only)
+ *   POST /api/plugins/:id/update       → { sha } → install the checked target (owner only)
+ *   GET  /api/plugins/:id/uninstall    → PluginUninstallPreview — what Uninstall would remove (owner only)
+ *   POST /api/plugins/:id/uninstall    → { purge? } → PluginUninstallResult (owner only)
  *   *    /api/plugins/:id/*            → the plugin's own route table
  *
  * The wildcard is registered HERE, at build time, because Fastify cannot add a
@@ -13,16 +17,22 @@
  * route for every plugin; `PluginService.handle` does the per-plugin lookup
  * and answers 503 while the plugin is activating, 404 when it is off.
  *
- * The three static routes above it win over the wildcard for their exact
- * paths (find-my-way prefers static segments), which means a plugin cannot
- * define `PUT enabled` or `PUT settings` under its own prefix. Acceptable: both
- * names are the host's, and a plugin that wants them has worse problems.
+ * The static routes above it win over the wildcard for their exact paths
+ * (find-my-way prefers static segments), which means a plugin cannot define
+ * `PUT enabled`, `PUT settings`, `POST update` or `* uninstall` under its own
+ * prefix. Acceptable: those names are the host's, and a plugin that wants them
+ * has worse problems.
  */
 import { spawn } from "node:child_process";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import * as z from "zod";
-import { PluginInspectRequestSchema, PluginInstallRequestSchema } from "@dispatch/shared";
-import { PluginNotFound } from "../plugins/service.js";
+import {
+  PluginInspectRequestSchema,
+  PluginInstallRequestSchema,
+  PluginUninstallRequestSchema,
+  PluginUpdateRequestSchema,
+} from "@dispatch/shared";
+import { PluginLifecycleError, PluginNotFound } from "../plugins/service.js";
 import { PluginInspectError } from "../plugins/inspect/index.js";
 
 const EnabledBody = z.object({ enabled: z.boolean() });
@@ -44,12 +54,15 @@ function refuseNonOwner(req: FastifyRequest, reply: FastifyReply): FastifyReply 
   const who = req.authIdentity;
   if (!who) return null;
   if (who.kind !== "user") return reply.code(403).send({ error: "Integration tokens cannot install plugins." });
-  if (!who.user.owner) return reply.code(403).send({ error: "Only the owner can inspect or install plugins." });
+  if (!who.user.owner) return reply.code(403).send({ error: "Only the owner can install, update or remove plugins." });
   return null;
 }
 
 function inspectFailure(reply: FastifyReply, err: unknown): FastifyReply {
-  if (err instanceof PluginInspectError) return reply.code(err.status).send({ error: err.message });
+  if (err instanceof PluginInspectError || err instanceof PluginLifecycleError) {
+    return reply.code(err.status).send({ error: err.message });
+  }
+  if (err instanceof PluginNotFound) return reply.code(404).send({ error: err.message });
   throw err;
 }
 
@@ -127,6 +140,52 @@ export function registerPluginRoutes(app: FastifyInstance): void {
     try {
       const { url, sha, replace } = parsed.data;
       return await app.services.pluginInspector.install(url, sha, !!replace);
+    } catch (err) {
+      return inspectFailure(reply, err);
+    }
+  });
+
+  // Owner-only for the same reason as inspect: a check makes this server
+  // fetch from the recorded remote, and an update installs code.
+  app.post<{ Params: { id: string } }>("/api/plugins/:id/check-update", async (req, reply) => {
+    const refused = refuseNonOwner(req, reply);
+    if (refused) return refused;
+    try {
+      return await app.services.pluginInspector.checkUpdate(req.params.id);
+    } catch (err) {
+      return inspectFailure(reply, err);
+    }
+  });
+
+  app.post<{ Params: { id: string } }>("/api/plugins/:id/update", async (req, reply) => {
+    const refused = refuseNonOwner(req, reply);
+    if (refused) return refused;
+    const parsed = PluginUpdateRequestSchema.safeParse(req.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues.map((i) => i.message).join("; ") });
+    try {
+      return await app.services.pluginInspector.update(req.params.id, parsed.data.sha);
+    } catch (err) {
+      return inspectFailure(reply, err);
+    }
+  });
+
+  app.get<{ Params: { id: string } }>("/api/plugins/:id/uninstall", async (req, reply) => {
+    const refused = refuseNonOwner(req, reply);
+    if (refused) return refused;
+    try {
+      return await plugins.uninstallPreview(req.params.id);
+    } catch (err) {
+      return inspectFailure(reply, err);
+    }
+  });
+
+  app.post<{ Params: { id: string } }>("/api/plugins/:id/uninstall", async (req, reply) => {
+    const refused = refuseNonOwner(req, reply);
+    if (refused) return refused;
+    const parsed = PluginUninstallRequestSchema.safeParse(req.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: "purge must be a boolean" });
+    try {
+      return await plugins.uninstall(req.params.id, { purge: !!parsed.data.purge });
     } catch (err) {
       return inspectFailure(reply, err);
     }

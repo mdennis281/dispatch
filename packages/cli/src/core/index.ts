@@ -45,12 +45,28 @@ export {
   linkPlugin,
   removePlugin,
   setPluginEnabled,
+  setPluginSource,
+  updatePluginEntry,
+  readPluginEntries,
   readPluginToggles,
   consentLines,
   looksLikeGitUrl,
+  withoutCredentials,
   type DiscoveredPlugin,
   type InstallResult,
 } from "./plugins.js";
+
+export {
+  checkPluginUpdates,
+  updatePlugins,
+  purgePluginData,
+  pluginSurface,
+  realGitDeps,
+  type GitDeps,
+  type CliUpdateCheck,
+  type CliUpdateOutcome,
+  type PurgeResult,
+} from "./plugin-lifecycle.js";
 
 export {
   initPlugin,

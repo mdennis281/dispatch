@@ -15,7 +15,7 @@ import { cp, lstat, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, symlink
 import { existsSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
   PLUGIN_API_VERSION,
@@ -25,6 +25,7 @@ import {
   pluginRangeAccepts,
   type PluginManifest,
   type PluginSettingsEntry,
+  type PluginSource,
 } from "@dispatch/shared";
 import { CmError } from "./manifest.js";
 
@@ -174,18 +175,78 @@ export interface InstallResult {
   outcome: "copied" | "linked" | "replaced";
   /** Where it landed. */
   dir: string;
+  /**
+   * What the CALLER should record as `AppSettings.plugins[id].source`. Not
+   * written here: the server installs through this function from a scratch
+   * extraction and records the git URL it fetched from instead, through its
+   * own settings store.
+   */
+  source?: PluginSource;
 }
 
-function run(cmd: string, args: string[], cwd?: string): Promise<void> {
+/**
+ * Run a command; resolve with its stdout.
+ *
+ * Git keeps the owner's credential helpers and prompts here — unlike the
+ * server's fetch, which turns them off because nobody is at its terminal. A
+ * CLI user installing from a private repo authenticates exactly as they would
+ * for `git clone`.
+ */
+export function runOutput(cmd: string, args: string[], cwd?: string): Promise<string> {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(cmd, args, { cwd, stdio: ["ignore", "ignore", "pipe"], shell: false });
+    const child = spawn(cmd, args, { cwd, stdio: ["ignore", "pipe", "pipe"], shell: false });
+    let out = "";
     let err = "";
+    child.stdout?.on("data", (d: Buffer) => (out += d.toString()));
     child.stderr?.on("data", (d: Buffer) => (err += d.toString()));
     child.on("error", (e) => reject(new CmError(`could not run ${cmd}: ${e.message}`)));
     child.on("close", (code) =>
-      code === 0 ? resolvePromise() : reject(new CmError(`${cmd} ${args[0]} failed (exit ${code}): ${err.trim()}`)),
+      code === 0 ? resolvePromise(out) : reject(new CmError(`${cmd} ${args[0]} failed (exit ${code}): ${err.trim()}`)),
     );
   });
+}
+
+async function run(cmd: string, args: string[], cwd?: string): Promise<void> {
+  await runOutput(cmd, args, cwd);
+}
+
+/**
+ * Shallow-clone `url` (at `ref` when given — a branch or a tag) into
+ * `<scratch>/src` and say which commit landed and which branch that was.
+ * `--` ends option parsing, so a URL shaped like `--upload-pack=…` is one git
+ * fails on rather than an option git obeys; the explicit `-` refusal is
+ * belt-and-braces for the same thing.
+ */
+export async function shallowClone(
+  url: string,
+  scratch: string,
+  ref?: string,
+): Promise<{ root: string; sha: string; branch?: string }> {
+  if (url.startsWith("-")) throw new CmError(`not a git URL: ${url}`);
+  if (ref?.startsWith("-")) throw new CmError(`not a ref: ${ref}`);
+  const root = join(scratch, "src");
+  await run("git", ["clone", "--depth", "1", "--quiet", ...(ref && ref !== "HEAD" ? ["--branch", ref] : []), "--", url, root]);
+  const sha = (await runOutput("git", ["-C", root, "rev-parse", "HEAD"])).trim();
+  // Empty on a detached HEAD — which is what cloning a TAG gives.
+  const branch = (await runOutput("git", ["-C", root, "symbolic-ref", "--short", "-q", "HEAD"]).catch(() => "")).trim();
+  return { root, sha, ...(branch ? { branch } : {}) };
+}
+
+/**
+ * `https://user:token@host/r.git` → `https://host/r.git`. Anything that is not
+ * a parseable URL (`git@host:o/r.git`, a local `*.git` path) carries no
+ * secret in that position and is returned as-is.
+ */
+export function withoutCredentials(url: string): string {
+  try {
+    const u = new URL(url);
+    if (!u.username && !u.password) return url;
+    u.username = "";
+    u.password = "";
+    return u.toString();
+  } catch {
+    return url;
+  }
 }
 
 /** Is `source` something `git clone` should handle rather than the filesystem? */
@@ -214,17 +275,36 @@ async function manifestDirIn(root: string): Promise<string | null> {
  * a scratch dir and return the plugin directory inside it. The caller owns
  * cleanup of `scratch`.
  */
-async function materialise(source: string): Promise<{ pluginDir: string; scratch?: string }> {
+async function materialise(source: string): Promise<{ pluginDir: string; scratch?: string; source: PluginSource }> {
+  const installedAt = Date.now();
   if (looksLikeGitUrl(source)) {
-    // `--` ends option parsing, so a source shaped like `--upload-pack=…` is a
-    // URL git fails on rather than an option git obeys. The explicit refusal
-    // is belt-and-braces for the same thing — a URL never starts with `-`.
-    if (source.startsWith("-")) throw new CmError(`not a git URL: ${source}`);
     const scratch = await mkdtemp(join(tmpdir(), "cm-plugin-"));
-    await run("git", ["clone", "--depth", "1", "--quiet", "--", source, join(scratch, "src")]);
-    const dir = await manifestDirIn(join(scratch, "src"));
-    if (!dir) throw new CmError(`no ${PLUGIN_MANIFEST_FILE} at the root of ${source}`);
-    return { pluginDir: dir, scratch };
+    try {
+      const clone = await shallowClone(source, scratch);
+      const dir = await manifestDirIn(clone.root);
+      if (!dir) throw new CmError(`no ${PLUGIN_MANIFEST_FILE} at the root of ${source}`);
+      return {
+        pluginDir: dir,
+        scratch,
+        // The default branch, followed: `dispatch plugin update` checks its tip.
+        source: {
+          type: "git",
+          // Never a token: the record is served by `GET /api/plugins` and shown
+          // on the row. A private repo then authenticates through the owner's
+          // credential helper on update, as it would for any `git fetch`.
+          url: withoutCredentials(source),
+          cloneUrl: withoutCredentials(source),
+          ref: clone.branch ?? "HEAD",
+          refKind: "branch",
+          subdir: relative(clone.root, dir).split(sep).join("/"),
+          sha: clone.sha,
+          installedAt,
+        },
+      };
+    } catch (err) {
+      await rm(scratch, { recursive: true, force: true }).catch(() => {});
+      throw err;
+    }
   }
   const abs = resolve(source);
   let st;
@@ -236,7 +316,7 @@ async function materialise(source: string): Promise<{ pluginDir: string; scratch
   if (st.isDirectory()) {
     const dir = await manifestDirIn(abs);
     if (!dir) throw new CmError(`no ${PLUGIN_MANIFEST_FILE} in ${abs}`);
-    return { pluginDir: dir };
+    return { pluginDir: dir, source: { type: "local", path: abs, installedAt } };
   }
   if (/\.(tgz|tar\.gz|tar)$/i.test(abs)) {
     const scratch = await mkdtemp(join(tmpdir(), "cm-plugin-"));
@@ -245,7 +325,7 @@ async function materialise(source: string): Promise<{ pluginDir: string; scratch
     await run("tar", ["-xf", abs, "-C", scratch]);
     const dir = await manifestDirIn(scratch);
     if (!dir) throw new CmError(`no ${PLUGIN_MANIFEST_FILE} inside ${basename(abs)}`);
-    return { pluginDir: dir, scratch };
+    return { pluginDir: dir, scratch, source: { type: "local", path: abs, installedAt } };
   }
   throw new CmError(`${abs} is neither a directory, a .tgz/.tar.gz, nor a git URL`);
 }
@@ -302,7 +382,7 @@ export async function addPlugin(
   source: string,
   opts: { force?: boolean } = {},
 ): Promise<InstallResult> {
-  const { pluginDir, scratch } = await materialise(source);
+  const { pluginDir, scratch, source: recorded } = await materialise(source);
   try {
     const found = await validated(pluginDir);
     const root = pluginsRoot(configDir);
@@ -333,7 +413,7 @@ export async function addPlugin(
     });
     await rename(tmp, target);
     const plugin = await readPluginDir(target, id);
-    return { plugin, outcome: replaced ? "replaced" : "copied", dir: target };
+    return { plugin, outcome: replaced ? "replaced" : "copied", dir: target, source: recorded };
   } finally {
     if (scratch) await rm(scratch, { recursive: true, force: true }).catch(() => {});
   }
@@ -386,6 +466,20 @@ export async function removePlugin(configDir: string, id: string): Promise<{ rem
  * is interpreted — a config.json written by a newer server round-trips.
  */
 export async function setPluginEnabled(configDir: string, id: string, enabled: boolean): Promise<void> {
+  await updatePluginEntry(configDir, id, (entry) => ({ ...entry, enabled }));
+}
+
+/**
+ * Read-modify-write ONE `AppSettings.plugins[id]` entry in config.json,
+ * atomically (tmp + rename). `fn` returning `undefined` deletes the entry.
+ * Nothing else in the file is interpreted, so a config.json written by a
+ * newer server round-trips.
+ */
+export async function updatePluginEntry(
+  configDir: string,
+  id: string,
+  fn: (entry: PluginSettingsEntry | undefined) => PluginSettingsEntry | undefined,
+): Promise<void> {
   const file = join(configDir, "config.json");
   let current: Record<string, unknown> = {};
   try {
@@ -394,26 +488,43 @@ export async function setPluginEnabled(configDir: string, id: string, enabled: b
     if (existsSync(file)) throw new CmError(`could not read ${file}: ${describe(err)}`);
   }
   const plugins = { ...((current.plugins as Record<string, PluginSettingsEntry> | undefined) ?? {}) };
-  plugins[id] = { ...plugins[id], enabled };
-  const next = { ...current, plugins };
+  const next = fn(plugins[id]);
+  if (next === undefined) delete plugins[id];
+  else plugins[id] = next;
   await mkdir(dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
-  await writeFile(tmp, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+  await writeFile(tmp, `${JSON.stringify({ ...current, plugins }, null, 2)}\n`, "utf8");
   await rename(tmp, file);
 }
 
-/** The stored toggle for every plugin — absent means enabled. */
-export async function readPluginToggles(configDir: string): Promise<Record<string, boolean>> {
+/**
+ * Record (or, with `undefined`, forget) where a plugin came from. Host-owned
+ * config, never the plugin directory — see `PluginSourceSchema`.
+ */
+export async function setPluginSource(configDir: string, id: string, source: PluginSource | undefined): Promise<void> {
+  await updatePluginEntry(configDir, id, (entry) => {
+    const { source: _old, ...rest } = entry ?? {};
+    if (source) return { ...rest, source };
+    return Object.keys(rest).length ? rest : undefined;
+  });
+}
+
+/** Every `AppSettings.plugins` entry as stored. */
+export async function readPluginEntries(configDir: string): Promise<Record<string, PluginSettingsEntry>> {
   try {
     const raw = JSON.parse(await readFile(join(configDir, "config.json"), "utf8")) as {
       plugins?: Record<string, PluginSettingsEntry>;
     };
-    return Object.fromEntries(
-      Object.entries(raw.plugins ?? {}).map(([id, entry]) => [id, entry?.enabled ?? true]),
-    );
+    return raw.plugins ?? {};
   } catch {
     return {};
   }
+}
+
+/** The stored toggle for every plugin — absent means enabled. */
+export async function readPluginToggles(configDir: string): Promise<Record<string, boolean>> {
+  const entries = await readPluginEntries(configDir);
+  return Object.fromEntries(Object.entries(entries).map(([id, entry]) => [id, entry?.enabled ?? true]));
 }
 
 /** The consent summary `add` prints: what the plugin declared it will touch. */

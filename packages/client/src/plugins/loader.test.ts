@@ -13,6 +13,7 @@ function row(id: string, extra: Partial<PluginInfo> = {}): PluginInfo {
     hasServer: false,
     clientUrl: `/plugins/${id}/index.js`,
     settings: {},
+    origin: "unknown",
     ...extra,
   };
 }

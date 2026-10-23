@@ -16,7 +16,9 @@ dispatch plugin init <id> [--server|--client|--both] [--name <n>] [--dir <parent
 dispatch plugin add <path | git-url | .tgz>   validate in the SOURCE, then copy to plugins/<id> (tmp dir + rename, so an
                                         interrupted copy never leaves a half-plugin); prints the consent summary
 dispatch plugin link <path>                   junction (Windows) / symlink a working directory — edits are live on the next restart
-dispatch plugin list | enable <id> | disable <id> | remove <id>
+dispatch plugin list | enable <id> | disable <id>
+dispatch plugin update [<id>] [--check] [--yes]   follow the recorded source (git installs only)
+dispatch plugin remove <id> [--purge] [--data-dir <dir>]
       --config-dir <dir>   (or DISPATCH_CONFIG_DIR)    -f, --force   replace an installed plugin    --json
 ```
 
@@ -49,6 +51,24 @@ install from a URL:
   `chats:write`, and a declared capability with no use, as mismatches.
 - Keep `ctx` / `host` (or `activate`'s parameter) as the name you call through; an
   alias the scan does not follow shows as "nothing uses it".
+
+## How your users get updates
+
+A URL install records where it came from (in the host's config, not your plugin
+dir), and **Check for updates** follows it: a **branch** URL updates to the branch's
+latest commit, a **tag** URL to the newest higher semver tag *with the same prefix*
+(`v1.2.0` → `v1.3.0`; in a monorepo, tag per plugin as `myplugin-v1.2.0`), and a
+**sha** URL is pinned. Prereleases (`v2.0.0-beta.1`) are only offered to someone
+already on a prerelease. So: bump `version:` in `plugin.yaml` with every release, and
+tag releases if you want users on a tag to see them.
+
+Before updating, the owner sees what the new version asks for that the installed
+one did not — new capabilities, secrets, OAuth clients or scopes, MCP servers,
+processes, undeclared uses. Keep those changes rare and say why in your README;
+`dispatch plugin update` will not install such an update without `--yes`. The
+plugin's settings, kv, secrets and OAuth sign-ins survive an update (they are keyed
+by the id, outside the directory), so do not rename `id:`. An update to a different
+id is refused.
 
 ## The restart rule
 

@@ -1139,6 +1139,7 @@ export function createServices(
       configDir: config.configDir ?? config.dataDir,
       hostInfo: (id) => plugins.get(id),
       noteInstalled: (id) => plugins.noteInstalled(id),
+      recordSource: (id, source) => plugins.recordSource(id, source),
     });
   // "The chat you spawned is done" — armed by `broker.spawnChat` below, delivered
   // over the messenger above. Constructed here because it needs both, and

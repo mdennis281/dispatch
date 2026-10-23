@@ -308,6 +308,61 @@ export const PluginProcessesFileSchema = z.union([
   z.object({ processes: z.array(PluginProcessSchema).default([]) }).transform((o) => o.processes),
 ]);
 
+/* --------------------------------------------------------- install source */
+
+/** How a git source's ref was named: a branch follows its tip, a tag looks for a newer semver tag, a sha is pinned. */
+export const PluginRefKindSchema = z.enum(["branch", "tag", "sha"]);
+export type PluginRefKind = z.infer<typeof PluginRefKindSchema>;
+
+/**
+ * Where an installed plugin came from, as the HOST recorded it at install
+ * time — `AppSettings.plugins[id].source` in `<configDir>/config.json`.
+ *
+ * Never read from the plugin directory: everything in there arrived from the
+ * plugin's author, and a source a plugin could write itself is a source it
+ * could point at a different repository, so "Update" would install whatever
+ * the plugin said it should. Config is the host's.
+ */
+export const PluginGitSourceSchema = z.object({
+  type: z.literal("git"),
+  /** The URL as the owner gave it (a GitHub /tree/ link, a clone URL). */
+  url: z.string(),
+  /** What `git ls-remote` / `git clone` are pointed at — so nothing has to re-parse `url`. */
+  cloneUrl: z.string(),
+  /** Branch or tag name, or the sha itself; `HEAD` when the remote never said which branch was default. */
+  ref: z.string(),
+  refKind: PluginRefKindSchema,
+  /** Directory inside the repository holding `plugin.yaml`; `""` for the root. */
+  subdir: z.string(),
+  /** The exact commit that is installed. */
+  sha: z.string().regex(/^[0-9a-f]{40}$/),
+  /** Epoch ms. */
+  installedAt: z.number(),
+});
+export type PluginGitSource = z.infer<typeof PluginGitSourceSchema>;
+
+/** Copied from a directory or tarball (`dispatch plugin add ./x`) — nothing to check for updates against. */
+export const PluginLocalSourceSchema = z.object({
+  type: z.literal("local"),
+  path: z.string(),
+  installedAt: z.number(),
+});
+
+export const PluginSourceSchema = z.discriminatedUnion("type", [PluginGitSourceSchema, PluginLocalSourceSchema]);
+export type PluginSource = z.infer<typeof PluginSourceSchema>;
+
+/**
+ * Where a plugin row came from, which decides what the pane offers for it:
+ *
+ *   url      — installed from a git URL; a source is recorded; Check / Update / Uninstall
+ *   local    — copied from a path or tarball; Uninstall only
+ *   linked   — a `dispatch plugin link` junction; Uninstall UNLINKS and never touches the target
+ *   builtin  — shipped in the app payload; updates with Dispatch; enable/disable only
+ *   unknown  — on disk with no recorded source (installed before sources were recorded, or by hand); Uninstall only
+ */
+export const PluginOriginSchema = z.enum(["url", "local", "linked", "builtin", "unknown"]);
+export type PluginOrigin = z.infer<typeof PluginOriginSchema>;
+
 /* ------------------------------------------------------------ API rows */
 
 /**
@@ -384,6 +439,10 @@ export const PluginInfoSchema = z.object({
    * other place it shows is a server log nobody reads.
    */
   warnings: z.array(z.string()).optional(),
+  /** Where it came from — see {@link PluginOriginSchema}. */
+  origin: PluginOriginSchema,
+  /** The recorded install source, when there is one (`url` and `local` origins). */
+  source: PluginSourceSchema.optional(),
 });
 export type PluginInfo = z.infer<typeof PluginInfoSchema>;
 
@@ -391,5 +450,7 @@ export type PluginInfo = z.infer<typeof PluginInfoSchema>;
 export const PluginSettingsEntrySchema = z.object({
   enabled: z.boolean().optional(),
   settings: z.record(z.string(), z.unknown()).optional(),
+  /** Written by install and update only — see {@link PluginSourceSchema}. */
+  source: PluginSourceSchema.optional(),
 });
 export type PluginSettingsEntry = z.infer<typeof PluginSettingsEntrySchema>;

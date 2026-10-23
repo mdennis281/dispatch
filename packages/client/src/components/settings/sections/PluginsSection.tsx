@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import { Copy, FolderOpen, Link2, RefreshCw, Save, Unlink2 } from "lucide-react";
-import type { PluginInfo, PluginOAuthStatus, PluginStatus } from "@dispatch/shared";
+import { Copy, FolderOpen, Link2, RefreshCw, RotateCw, Save, Trash2, Unlink2 } from "lucide-react";
+import type { PluginInfo, PluginOAuthStatus, PluginStatus, PluginUninstallResult } from "@dispatch/shared";
 import { Field, InlineError, TextArea, TextInput } from "../../sidebar/Modal.js";
 import { Button } from "../../ui/Button.js";
 import { IconButton } from "../../ui/IconButton.js";
@@ -14,6 +14,7 @@ import { useCopyId } from "../../../lib/useCopyId.js";
 import { useNotices } from "../../../stores/notices.js";
 import { coerceNumber, displayValue, fieldsFromSchema, type SettingsField } from "./pluginSettingsForm.js";
 import { PluginInspectPanel } from "./PluginInspectPanel.js";
+import { PluginSourceLine, PluginUninstallDialog, PluginUpdatePanel, type CheckState } from "./PluginLifecycle.js";
 
 /**
  * Settings → Plugins: every directory under `<configDir>/plugins/`, with the
@@ -28,6 +29,10 @@ import { PluginInspectPanel } from "./PluginInspectPanel.js";
 export function PluginsSection() {
   const [plugins, setPlugins] = useState<PluginInfo[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Held here, not per card, so "Check all" and a row's own button share one
+  // answer. Manual only — nothing here polls (#409).
+  const [checks, setChecks] = useState<Record<string, CheckState>>({});
+  const pushToast = useNotices((s) => s.push);
 
   const load = useCallback(() => {
     setError(null);
@@ -40,6 +45,39 @@ export function PluginsSection() {
 
   const replace = (next: PluginInfo) =>
     setPlugins((rows) => rows?.map((p) => (p.id === next.id ? next : p)) ?? rows);
+
+  const check = useCallback(async (id: string) => {
+    setChecks((c) => ({ ...c, [id]: "checking" }));
+    try {
+      const res = await api.plugins.checkUpdate(id);
+      setChecks((c) => ({ ...c, [id]: res }));
+    } catch (e) {
+      setChecks((c) => ({
+        ...c,
+        [id]: { id, status: "error", origin: "url", message: e instanceof Error ? e.message : String(e), checkedAt: Date.now() },
+      }));
+    }
+  }, []);
+
+  const checkable = plugins?.filter((p) => p.origin === "url") ?? [];
+  const checkingAll = checkable.some((p) => checks[p.id] === "checking");
+  const checkAll = async () => {
+    // A few at a time: each check is an ls-remote, and an available one a
+    // tarball download plus two scans.
+    const queue = [...checkable];
+    const worker = async () => {
+      for (let p = queue.shift(); p; p = queue.shift()) await check(p.id);
+    };
+    await Promise.all([worker(), worker(), worker()]);
+  };
+
+  const removed = (p: PluginInfo, res: PluginUninstallResult) => {
+    setPlugins((rows) => rows?.filter((r) => r.id !== p.id) ?? rows);
+    setChecks(({ [p.id]: _gone, ...rest }) => rest);
+    const what = res.removed === "link" ? "Unlinked" : "Uninstalled";
+    const data = res.purged ? " and deleted its data" : "";
+    pushToast({ level: "info", text: `${what} ${p.name}${data}.${res.note ? ` ${res.note}` : ""}` });
+  };
 
   if (plugins === null && !error) {
     return (
@@ -63,9 +101,30 @@ export function PluginsSection() {
           </p>
         </div>
       ) : (
-        plugins?.map((p) => <PluginCard key={p.id} plugin={p} onChange={replace} />)
+        plugins?.map((p) => (
+          <PluginCard
+            key={p.id}
+            plugin={p}
+            onChange={replace}
+            check={checks[p.id]}
+            onCheck={() => void check(p.id)}
+            onRemoved={(res) => removed(p, res)}
+          />
+        ))
       )}
-      <div className="flex justify-end">
+      <div className="flex flex-wrap justify-end gap-1">
+        {checkable.length > 0 && (
+          <Button
+            variant="ghost"
+            size="sm"
+            leftIcon={checkingAll ? <Spinner size={12} /> : <RotateCw />}
+            disabled={checkingAll}
+            onClick={() => void checkAll()}
+            title="Check every plugin installed from a URL against its source"
+          >
+            {checkingAll ? "Checking…" : "Check all for updates"}
+          </Button>
+        )}
         <Button variant="ghost" size="sm" leftIcon={<RefreshCw />} onClick={load}>
           Refresh
         </Button>
@@ -84,11 +143,24 @@ const STATUS: Record<PluginStatus, { tone: DotTone; label: string }> = {
   incompatible: { tone: "warn", label: "Incompatible" },
 };
 
-function PluginCard({ plugin, onChange }: { plugin: PluginInfo; onChange: (next: PluginInfo) => void }) {
+function PluginCard({
+  plugin,
+  onChange,
+  check,
+  onCheck,
+  onRemoved,
+}: {
+  plugin: PluginInfo;
+  onChange: (next: PluginInfo) => void;
+  check?: CheckState;
+  onCheck: () => void;
+  onRemoved: (result: PluginUninstallResult) => void;
+}) {
   const pushToast = useNotices((s) => s.push);
   const copy = useCopyId();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [uninstalling, setUninstalling] = useState(false);
   // An enabled plugin the host has not loaded yet (installed or switched on
   // since boot) reports `disabled`; "Off" beside a switch that is ON read as a
   // contradiction, so the row names what is actually pending.
@@ -178,6 +250,9 @@ function PluginCard({ plugin, onChange }: { plugin: PluginInfo; onChange: (next:
         )}
       </div>
 
+      <PluginSourceLine plugin={plugin} />
+      {check && <PluginUpdatePanel plugin={plugin} check={check} onUpdated={(row) => row && onChange(row)} />}
+
       {plugin.settingsSchema !== undefined && plugin.status !== "invalid" && (
         <PluginSettingsForm plugin={plugin} onChange={onChange} />
       )}
@@ -190,17 +265,56 @@ function PluginCard({ plugin, onChange }: { plugin: PluginInfo; onChange: (next:
         </div>
       ) : null}
 
-      <div className="flex items-center gap-1.5">
-        <code className="min-w-0 flex-1 truncate cm-mono text-2xs text-faint" title={plugin.dir}>
-          {plugin.dir}
-        </code>
-        <IconButton tip="Copy path" onClick={() => copy(plugin.dir, "Plugin path")}>
-          <Copy />
-        </IconButton>
-        <Button variant="ghost" size="sm" leftIcon={<FolderOpen />} onClick={() => void reveal()}>
-          Open folder
-        </Button>
+      {/* One row: the path shrinks first, and at phone width the actions wrap
+          under it rather than squeezing it to nothing. */}
+      <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
+        <div className="flex min-w-0 flex-1 basis-48 items-center gap-1.5">
+          <code className="min-w-0 flex-1 truncate cm-mono text-2xs text-faint" title={plugin.dir}>
+            {plugin.dir}
+          </code>
+          <IconButton tip="Copy path" onClick={() => copy(plugin.dir, "Plugin path")}>
+            <Copy />
+          </IconButton>
+        </div>
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-1">
+          <Button variant="ghost" size="sm" leftIcon={<FolderOpen />} onClick={() => void reveal()}>
+            Open folder
+          </Button>
+          {plugin.origin === "url" && (
+            <Button
+              variant="ghost"
+              size="sm"
+              leftIcon={check === "checking" ? <Spinner size={12} /> : <RotateCw />}
+              disabled={check === "checking"}
+              onClick={onCheck}
+            >
+              Check for updates
+            </Button>
+          )}
+          {/* Built-ins ship with the app: no Update (it updates with Dispatch)
+              and no Uninstall (the next start would find it again). The switch
+              above is the whole of their lifecycle. */}
+          {plugin.origin !== "builtin" && (
+            <Button
+              variant="ghost"
+              size="sm"
+              leftIcon={plugin.origin === "linked" ? <Unlink2 /> : <Trash2 />}
+              onClick={() => setUninstalling(true)}
+            >
+              {plugin.origin === "linked" ? "Unlink" : "Uninstall"}
+            </Button>
+          )}
+        </div>
       </div>
+      <PluginUninstallDialog
+        plugin={plugin}
+        open={uninstalling}
+        onClose={() => setUninstalling(false)}
+        onRemoved={(res) => {
+          setUninstalling(false);
+          onRemoved(res);
+        }}
+      />
     </div>
   );
 }

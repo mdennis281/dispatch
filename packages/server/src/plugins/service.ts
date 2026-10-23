@@ -33,6 +33,7 @@
  *   which deactivate empties. See `routes/plugins.ts` for the wildcard.
  */
 import { existsSync } from "node:fs";
+import { realpath } from "node:fs/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { basename, resolve, sep } from "node:path";
 import type { FastifyReply, FastifyRequest } from "fastify";
@@ -43,7 +44,11 @@ import {
   type PluginInfo,
   type PluginLog,
   type PluginModule,
+  type PluginOrigin,
+  type PluginSource,
   type PluginStatus,
+  type PluginUninstallPreview,
+  type PluginUninstallResult,
   type SkillConfig,
 } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
@@ -56,7 +61,14 @@ import {
   type PluginContextDeps,
   type ServerPluginRouteHandler,
 } from "./context.js";
-import { discoverPlugins, discoverPluginsAt, pluginsRoot, type DiscoveredPlugin } from "./manifest.js";
+import {
+  discoverPlugins,
+  discoverPluginsAt,
+  pluginsRoot,
+  removePlugin,
+  withoutCredentials,
+  type DiscoveredPlugin,
+} from "./manifest.js";
 import { pluginOAuthManifestView, type PluginOAuthManifestView } from "./oauth.js";
 import {
   EMPTY_CONTRIBUTIONS,
@@ -101,6 +113,8 @@ interface PluginRecord extends DiscoveredPlugin {
    */
   filesReplaced?: boolean;
   settings: Record<string, unknown>;
+  /** `AppSettings.plugins[id].source` — what install recorded; absent for hand-installed plugins. */
+  source?: PluginSource;
   module?: PluginModule;
   owned?: OwnedResources;
   /** Snapshot of the plugin's static contributions, read once at `load()`. */
@@ -262,6 +276,7 @@ export class PluginService implements PluginContributionSource {
         phase: eligible ? "pending" : "inactive",
         needsRestart: false,
         settings: entry?.settings ?? {},
+        ...(entry?.source ? { source: entry.source } : {}),
         contributions,
       });
       if (contributions.processes.length) {
@@ -489,6 +504,15 @@ export class PluginService implements PluginContributionSource {
     return pluginOAuthManifestView(rec.manifest);
   }
 
+  /** See `PluginOriginSchema`. A link wins over a recorded source: what is on disk is the author's working tree. */
+  private originOf(rec: PluginRecord): PluginOrigin {
+    if (rec.builtin) return "builtin";
+    if (rec.linked) return "linked";
+    if (rec.source?.type === "git") return "url";
+    if (rec.source?.type === "local") return "local";
+    return "unknown";
+  }
+
   info(rec: PluginRecord): PluginInfo {
     const m = rec.manifest;
     const error = rec.phase === "error" ? rec.activationError : rec.error;
@@ -518,6 +542,18 @@ export class PluginService implements PluginContributionSource {
       ...(m?.secrets ? { secrets: m.secrets } : {}),
       ...(oauth?.length ? { oauth } : {}),
       ...(rec.contributions.warnings.length ? { warnings: rec.contributions.warnings } : {}),
+      origin: this.originOf(rec),
+      // Served to every signed-in user and drawn on the row, so a token
+      // someone put in a clone URL (the CLI strips it; a hand-edited config
+      // may not) never leaves the server.
+      ...(rec.source && !rec.linked
+        ? {
+            source:
+              rec.source.type === "git"
+                ? { ...rec.source, url: withoutCredentials(rec.source.url), cloneUrl: withoutCredentials(rec.source.cloneUrl) }
+                : rec.source,
+          }
+        : {}),
     };
   }
 
@@ -687,8 +723,13 @@ export class PluginService implements PluginContributionSource {
    */
   async noteInstalled(id: string): Promise<PluginInfo | undefined> {
     const existing = this.records.get(id);
+    const settings = await this.store.getSettings().catch(() => ({}) as { plugins?: undefined });
+    const entry = settings.plugins?.[id];
     if (existing) {
       existing.filesReplaced = true;
+      // An install replaces a link with a copy, and records where it came from.
+      existing.linked = false;
+      existing.source = entry?.source;
       // A switched-off plugin will not load on restart either; `setEnabled`
       // keeps `needsRestart` false for it, and so does this.
       if (existing.enabled) existing.needsRestart = true;
@@ -696,8 +737,6 @@ export class PluginService implements PluginContributionSource {
     }
     const found = (await discoverPlugins(this.configDir)).find((p) => p.id === id);
     if (!found) return undefined;
-    const settings = await this.store.getSettings().catch(() => ({}) as { plugins?: undefined });
-    const entry = settings.plugins?.[id];
     const rec: PluginRecord = {
       ...found,
       builtin: false,
@@ -705,10 +744,153 @@ export class PluginService implements PluginContributionSource {
       phase: "inactive",
       needsRestart: true,
       settings: entry?.settings ?? {},
+      ...(entry?.source ? { source: entry.source } : {}),
       contributions: EMPTY_CONTRIBUTIONS,
     };
     this.records.set(id, rec);
     return this.info(rec);
+  }
+
+  /**
+   * Record where a plugin came from. Host-owned config, written only here and
+   * by the CLI — see `PluginSourceSchema` for why never the plugin dir. Every
+   * other key of the entry (toggle, settings) is left as it is.
+   */
+  async recordSource(id: string, source: PluginSource): Promise<void> {
+    await this.store.updateSettings((current) => ({
+      ...current,
+      plugins: { ...current.plugins, [id]: { ...current.plugins?.[id], source } },
+    }));
+    const rec = this.records.get(id);
+    if (rec) rec.source = source;
+  }
+
+  /* ----------------------------------------------------------- uninstall */
+
+  private uninstallable(id: string): PluginRecord {
+    const rec = this.records.get(id);
+    if (!rec) throw new PluginNotFound(id);
+    if (rec.builtin) throw new PluginLifecycleError(`"${id}" is built into Dispatch — switch it off instead`, 409);
+    return rec;
+  }
+
+  /**
+   * Exactly what `uninstall` would remove, so the confirm dialog can name it
+   * instead of saying "and its data". kv rows and OAuth tokens are counted in
+   * THIS instance's database; the other instance (stable vs dev) has its own.
+   */
+  async uninstallPreview(id: string): Promise<PluginUninstallPreview> {
+    const rec = this.uninstallable(id);
+    const entry = (await this.store.getSettings()).plugins?.[id];
+    const db = this.store.stateDb;
+    const kvKeys = (db.prepare("SELECT COUNT(*) AS n FROM plugin_kv WHERE plugin = ?").get(id) as { n: number }).n;
+    const oauth = (
+      db.prepare("SELECT name FROM plugin_oauth_token WHERE plugin = ? ORDER BY name").all(id) as Array<{ name: string }>
+    ).map((r) => r.name);
+    // Secrets are named by the manifest and live in the GLOBAL store, where
+    // nothing records who wrote them. One that another installed plugin also
+    // lists is kept: deleting it would break that plugin, and the owner asked
+    // to remove this one.
+    const stored = new Set((await this.ctxDeps.secrets.list()).filter((s) => s.scope === "global").map((s) => s.name));
+    const secrets: string[] = [];
+    const sharedSecrets: PluginUninstallPreview["data"]["sharedSecrets"] = [];
+    for (const name of rec.manifest?.secrets ?? []) {
+      if (!stored.has(name)) continue;
+      const alsoUsedBy = [...this.records.values()]
+        .filter((r) => r.id !== id && r.manifest?.secrets?.includes(name))
+        .map((r) => r.id);
+      if (alsoUsedBy.length) sharedSecrets.push({ name, alsoUsedBy });
+      else secrets.push(name);
+    }
+    const linkTarget = rec.linked ? await realpath(rec.dir).catch(() => undefined) : undefined;
+    return {
+      id,
+      name: rec.manifest?.name ?? id,
+      origin: this.originOf(rec),
+      dir: rec.dir,
+      removes: rec.linked ? "link" : "directory",
+      ...(linkTarget ? { linkTarget } : {}),
+      active: rec.phase === "active",
+      hasClient: !!rec.manifest?.client,
+      data: {
+        settings: entry?.enabled !== undefined || Object.keys(entry?.settings ?? {}).length > 0,
+        kvKeys,
+        secrets,
+        sharedSecrets,
+        oauth,
+      },
+    };
+  }
+
+  /**
+   * Remove a plugin: deactivate it in place (the teardown a toggle-off runs —
+   * routes, listeners and processes go, and its contributions vanish with the
+   * record), then delete its directory, or only the link for a linked one.
+   * The recorded source always goes. With `purge`, so does everything keyed
+   * by its id outside the directory: the config entry, this instance's kv
+   * rows and OAuth tokens, and the secrets it alone listed.
+   *
+   * Without `purge` the toggle and settings stay, so reinstalling the same id
+   * picks up where it left off.
+   */
+  async uninstall(id: string, opts: { purge?: boolean } = {}): Promise<PluginUninstallResult> {
+    const rec = this.uninstallable(id);
+    if (rec.phase === "activating") {
+      throw new PluginLifecycleError(`"${id}" is still activating — try again in a moment`, 409);
+    }
+    const preview = await this.uninstallPreview(id);
+    const wasRunning = rec.phase === "active" || rec.phase === "error";
+    // Down BEFORE the files go: a process it started may hold its directory
+    // open (Windows refuses to delete a process's cwd), and a `pending` record
+    // must not be picked up by an `activateAll` still walking its snapshot.
+    if (wasRunning || rec.phase === "pending") await this.deactivateOne(rec);
+    rec.phase = "inactive";
+    this.processHost?.unregister(id);
+    try {
+      await removePlugin(this.configDir, id);
+    } catch (err) {
+      throw new PluginLifecycleError(`could not remove ${rec.dir}: ${describe(err)}`, 500);
+    }
+    this.records.delete(id);
+    await this.store.updateSettings((current) => {
+      const plugins = { ...current.plugins };
+      if (opts.purge) {
+        delete plugins[id];
+      } else if (plugins[id]) {
+        const { source: _dropped, ...rest } = plugins[id]!;
+        if (Object.keys(rest).length) plugins[id] = rest;
+        else delete plugins[id];
+      }
+      return { ...current, plugins };
+    });
+    let purged: PluginUninstallResult["purged"];
+    if (opts.purge) {
+      const db = this.store.stateDb;
+      db.prepare("DELETE FROM plugin_kv WHERE plugin = ?").run(id);
+      db.prepare("DELETE FROM plugin_oauth_token WHERE plugin = ?").run(id);
+      const deleted: string[] = [];
+      for (const name of preview.data.secrets) {
+        try {
+          await this.ctxDeps.secrets.delete({ scope: "global", name });
+          deleted.push(name);
+        } catch (err) {
+          this.fault(`plugin "${id}" uninstall: secret ${name} was not deleted`, err);
+        }
+      }
+      purged = { settings: preview.data.settings, kvKeys: preview.data.kvKeys, secrets: deleted, oauth: preview.data.oauth };
+    }
+    // The server half is gone. The browser half is not: a bundle an open tab
+    // already imported has no unload hook (the same limit a toggle-off has),
+    // so it lingers there until the tab reloads.
+    const clientLoaded = preview.hasClient && rec.enabled && wasRunning;
+    return {
+      id,
+      removed: preview.removes,
+      deactivated: wasRunning,
+      needsRestart: clientLoaded,
+      ...(clientLoaded ? { note: "Its browser code stays loaded in tabs that are already open until they reload." } : {}),
+      ...(purged ? { purged } : {}),
+    };
   }
 
   /* ------------------------------------------------------------- routing */
@@ -753,6 +935,17 @@ export class PluginService implements PluginContributionSource {
   /** Whether `load()` has run — the routes refuse to answer before it. */
   get isLoaded(): boolean {
     return this.loaded;
+  }
+}
+
+/** A lifecycle request the host refuses (built-in, still activating) or could not carry out; `status` is the HTTP answer. */
+export class PluginLifecycleError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "PluginLifecycleError";
   }
 }
 
