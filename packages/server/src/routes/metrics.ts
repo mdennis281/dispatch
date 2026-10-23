@@ -115,6 +115,8 @@ export function registerMetricsRoutes(app: FastifyInstance): void {
     const stats = limits.stats();
     const report: LimitReport = {
       windows: limits.windows(parsed.data, (id) => label("subscription", id)),
+      yields: limits.yields(parsed.data, (id) => label("subscription", id), parsed.data.period),
+      period: parsed.data.period,
       events: limits.events(parsed.data),
       accounts: limitSampler.status(),
       sampleRows: stats.rows,

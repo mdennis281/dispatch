@@ -5681,7 +5681,11 @@ export class SessionBroker {
   private bookTokens(
     session: LiveSession,
     row: { id: string; ts: number; turn: number },
-    event: { turnTokens?: TokenFigures; modelUsage?: Record<string, TokenFigures> },
+    event: {
+      turnTokens?: TokenFigures;
+      modelUsage?: Record<string, TokenFigures>;
+      durationMs?: number;
+    },
     turnCostUsd: number | undefined,
   ): void {
     let split: Record<string, TokenFigures> | undefined;
@@ -5713,6 +5717,7 @@ export class SessionBroker {
       harness: session.harnessKind,
       subscriptionId: session.account?.subscriptionId ?? session.subscriptionId,
       turn: row.turn,
+      durationMs: event.durationMs,
     };
     const lines: TokenLine[] = split
       ? Object.entries(split)
@@ -6450,6 +6455,7 @@ export class SessionBroker {
           {
             turnTokens: figuresOfUsage((m as { usage?: unknown }).usage),
             modelUsage: figuresOfModelUsage((m as { modelUsage?: unknown }).modelUsage),
+            durationMs: (m as { duration_ms?: number }).duration_ms,
           },
           legacyTurnCost,
         );

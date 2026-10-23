@@ -17,13 +17,16 @@
  * "hold point". Without it the chart would draw a slow ramp across a gap that
  * was really flat-then-jump, which is precisely the shape a sudden drop has.
  */
-import type {
-  LimitEvent,
-  LimitEventKind,
-  LimitPoint,
-  LimitQuery,
-  LimitReading,
-  LimitWindowSeries,
+import {
+  LIMIT_PERIOD_HOURS,
+  type LimitEvent,
+  type LimitEventKind,
+  type LimitPeriod,
+  type LimitPoint,
+  type LimitQueryInput,
+  type LimitReading,
+  type LimitWindowSeries,
+  type LimitYield,
 } from "@dispatch/shared";
 import type { StateDb } from "../store/db.js";
 import { classifyStep, readingChanged, type Seen } from "./limit-detect.js";
@@ -328,7 +331,7 @@ export class LimitLedger {
 
   /* ------------------------------------------------------------------ read */
 
-  windows(q: LimitQuery, label: LimitAccountLabeller): LimitWindowSeries[] {
+  windows(q: LimitQueryInput, label: LimitAccountLabeller): LimitWindowSeries[] {
     const to = q.to ?? this.now() + 1;
     const from = q.from ?? 0;
     const subs = q.subscriptionIds?.length ? q.subscriptionIds : null;
@@ -403,7 +406,7 @@ export class LimitLedger {
     );
   }
 
-  events(q: LimitQuery, limit = 500): LimitEvent[] {
+  events(q: LimitQueryInput, limit = 500): LimitEvent[] {
     const to = q.to ?? this.now() + 1;
     const from = q.from ?? 0;
     const subs = q.subscriptionIds?.length ? q.subscriptionIds : null;
@@ -434,10 +437,183 @@ export class LimitLedger {
     }));
   }
 
+  /**
+   * Per account per period: the points each window climbed, beside what the
+   * account's turns spent — the "what did 1% buy" table.
+   *
+   * POINTS are summed step by step. A rise counts as itself; a reset (or early
+   * reset) counts the post-reset figure, since that much was spent after the
+   * window emptied; a mid-window DROP counts nothing — usage didn't go
+   * negative, and what was spent across it is unknowable. A step lands in the
+   * period of the reading that saw it.
+   *
+   * TOKENS are spread evenly over the time each turn ran (`duration_ms`), so a
+   * long turn's spend is shared by every period it overlapped rather than
+   * dumped on the one it ended in. Only spend from the account's first reading
+   * onward counts: before it there are no points to set it against.
+   */
+  yields(q: LimitQueryInput, label: LimitAccountLabeller, period: LimitPeriod = "1d"): LimitYield[] {
+    const hours = LIMIT_PERIOD_HOURS[period];
+    const to = Math.min(q.to ?? this.now() + 1, this.now() + 1);
+    const cover = new Map(
+      (
+        this.db
+          .prepare(
+            "SELECT subscription_id AS s, MIN(ts) AS lo, MAX(ts) AS hi FROM limit_samples GROUP BY s",
+          )
+          .all() as { s: string; lo: number; hi: number }[]
+      ).map((r) => [r.s, { lo: Number(r.lo), hi: Number(r.hi) }]),
+    );
+    const wanted = q.subscriptionIds?.length ? new Set(q.subscriptionIds) : null;
+    const subs = [...cover.keys()].filter((s) => !wanted || wanted.has(s));
+    if (!subs.length) return [];
+    const from = q.from ?? Math.min(...subs.map((s) => cover.get(s)!.lo));
+
+    interface Cell {
+      sub: string;
+      start: number;
+      points: Map<string, number>;
+      total: number;
+      output: number;
+      cost: number;
+      priced: boolean;
+      turns: number;
+      unpriced: number;
+    }
+    const cells = new Map<string, Cell>();
+    const cell = (sub: string, start: number): Cell => {
+      const key = `${sub}|${start}`;
+      let c = cells.get(key);
+      if (!c) {
+        c = { sub, start, points: new Map(), total: 0, output: 0, cost: 0, priced: false, turns: 0, unpriced: 0 };
+        cells.set(key, c);
+      }
+      return c;
+    };
+
+    /* ---- points ---- */
+    const meta = new Map<
+      string,
+      { provider: string; windows: Map<string, { title: string; windowMinutes: number | null }> }
+    >();
+    for (const series of this.windows({ from, to, subscriptionIds: subs }, label)) {
+      let m = meta.get(series.subscriptionId);
+      if (!m) meta.set(series.subscriptionId, (m = { provider: series.provider, windows: new Map() }));
+      m.windows.set(series.windowId, { title: series.title, windowMinutes: series.windowMinutes });
+      const pts = series.points;
+      for (let i = 1; i < pts.length; i++) {
+        const prev = pts[i - 1]!;
+        const next = pts[i]!;
+        if (next.ts < from || next.ts >= to) continue;
+        const kind = classifyStep(prev, next, series.windowMinutes);
+        const gained =
+          kind === "reset" || kind === "early_reset"
+            ? next.percent
+            : kind === "drop"
+              ? 0
+              : Math.max(0, next.percent - prev.percent);
+        if (gained <= 0) continue;
+        const c = cell(series.subscriptionId, periodStart(next.ts, hours));
+        c.points.set(series.windowId, (c.points.get(series.windowId) ?? 0) + gained);
+      }
+    }
+
+    /* ---- tokens, spread over each turn's run ---- */
+    // A day of lookahead on `ts`: a turn that ENDED after the range may have
+    // run inside it.
+    const rows = this.db
+      .prepare(
+        `SELECT subscription_id AS s, ts, duration_ms AS d,
+                input + output + cache_read + cache_write AS tot, output AS out, cost_usd AS c
+           FROM metric_tokens
+          WHERE ts >= ? AND ts < ? AND subscription_id IN (${subs.map(() => "?").join(",")})`,
+      )
+      .all(from, to + 86_400_000, ...subs) as {
+      s: string;
+      ts: number;
+      d: number | null;
+      tot: number;
+      out: number;
+      c: number | null;
+    }[];
+    for (const r of rows) {
+      const end = Number(r.ts);
+      const run = r.d ? Number(r.d) : 0;
+      const begin = end - run;
+      const lo = Math.max(begin, from, cover.get(r.s)!.lo);
+      const hi = Math.min(end, to);
+      // A point-in-time row (no duration) counts only if its instant is in range.
+      if (run === 0 ? end < lo || end >= to : hi <= lo) continue;
+      for (let p = periodStart(lo, hours); p <= hi; p = periodEnd(p, hours)) {
+        const share = run === 0 ? 1 : (Math.min(hi, periodEnd(p, hours)) - Math.max(lo, p)) / run;
+        if (share <= 0) continue;
+        const c = cell(r.s, p);
+        c.total += Number(r.tot) * share;
+        c.output += Number(r.out) * share;
+        c.turns += 1;
+        if (r.c === null) c.unpriced += 1;
+        else {
+          c.cost += Number(r.c) * share;
+          c.priced = true;
+        }
+        if (run === 0) break;
+      }
+    }
+
+    const out: LimitYield[] = [];
+    for (const c of cells.values()) {
+      const m = meta.get(c.sub);
+      const range = cover.get(c.sub)!;
+      const end = periodEnd(c.start, hours);
+      out.push({
+        start: c.start,
+        end,
+        subscriptionId: c.sub,
+        subscriptionLabel: label(c.sub),
+        provider: m?.provider ?? "",
+        // Every window the account has, zero or not — a period in which the
+        // weekly window didn't move is information, not a gap.
+        windows: [...(m?.windows ?? [])].map(([windowId, w]) => ({
+          windowId,
+          title: w.title,
+          windowMinutes: w.windowMinutes,
+          points: c.points.get(windowId) ?? 0,
+        })),
+        tokens: {
+          total: Math.round(c.total),
+          output: Math.round(c.output),
+          costUsd: c.priced ? c.cost : null,
+          turns: c.turns,
+          unpriced: c.unpriced,
+        },
+        partial: c.start < range.lo || end > range.hi,
+      });
+    }
+    return out
+      .sort((a, b) => b.start - a.start || a.subscriptionLabel.localeCompare(b.subscriptionLabel))
+      .slice(0, 2000);
+  }
+
   stats(): { rows: number; oldest: number | null } {
     const r = this.db
       .prepare("SELECT COUNT(*) AS n, MIN(ts) AS lo FROM limit_samples")
       .get() as { n: number; lo: number | null } | undefined;
     return { rows: Number(r?.n ?? 0), oldest: r?.lo === null || r?.lo === undefined ? null : Number(r.lo) };
   }
+}
+
+/** The local-time period containing `ts`: hours aligned to midnight, or the day. */
+export function periodStart(ts: number, hours: number): number {
+  const d = new Date(ts);
+  d.setMinutes(0, 0, 0);
+  d.setHours(hours >= 24 ? 0 : Math.floor(d.getHours() / hours) * hours);
+  return d.getTime();
+}
+
+/** Where the period starting at `start` ends — calendar arithmetic, so DST-safe. */
+export function periodEnd(start: number, hours: number): number {
+  const d = new Date(start);
+  if (hours >= 24) d.setDate(d.getDate() + 1);
+  else d.setHours(d.getHours() + hours);
+  return d.getTime();
 }

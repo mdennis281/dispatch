@@ -46,6 +46,8 @@ export interface TokenLine extends TokenFigures {
   subscriptionId?: string;
   model?: string;
   turn?: number;
+  /** How long the turn ran; its tokens are spread over (ts − duration, ts]. */
+  durationMs?: number;
   source?: "live" | "backfill";
 }
 
@@ -71,8 +73,8 @@ const MEASURE: Record<TokenMeasure, string> = {
 const INSERT_SQL = `
 INSERT OR IGNORE INTO metric_tokens
   (ts, project_id, chat_id, harness, subscription_id, model, turn,
-   input, output, cache_read, cache_write, cost_usd, source, usage_key)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+   input, output, cache_read, cache_write, cost_usd, source, usage_key, duration_ms)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 `;
 
 /**
@@ -156,6 +158,7 @@ export class TokenLedger {
             l.costUsd ?? null,
             l.source ?? "live",
             usageKey(l),
+            typeof l.durationMs === "number" && l.durationMs > 0 ? Math.round(l.durationMs) : null,
           );
           written += Number(res.changes ?? 0);
         }
@@ -195,6 +198,40 @@ export class TokenLedger {
       out.add(rest.slice(0, rest.indexOf(":")));
     }
     return out;
+  }
+
+  /** Chats with any row that has no `duration_ms` (see `TokenBackfill.fillDurations`). */
+  chatsMissingDuration(): string[] {
+    return (
+      this.db
+        .prepare(
+          "SELECT DISTINCT chat_id AS c FROM metric_tokens WHERE duration_ms IS NULL AND chat_id IS NOT NULL",
+        )
+        .all() as { c: string }[]
+    ).map((r) => r.c);
+  }
+
+  /** Set durations by result id on one chat's rows that lack one. Returns rows changed. */
+  setDurations(chatId: string, byResult: ReadonlyMap<string, number>): number {
+    try {
+      return this.db.tx(() => {
+        const update = this.db.prepare(
+          `UPDATE metric_tokens SET duration_ms = ?
+            WHERE chat_id = ? AND substr(usage_key, 1, ?) = ? AND duration_ms IS NULL`,
+        );
+        let changed = 0;
+        for (const [resultId, ms] of byResult) {
+          // The key is `chat:result:model`. A prefix compare, not LIKE: ids are
+          // nanoids, and `_` — a LIKE wildcard — is in their alphabet.
+          const prefix = `${chatId}:${resultId}:`;
+          changed += Number(update.run(Math.round(ms), chatId, prefix.length, prefix).changes ?? 0);
+        }
+        return changed;
+      });
+    } catch (err) {
+      console.error("[Dispatch] metrics: duration backfill write failed:", err);
+      return 0;
+    }
   }
 
   private where(from: number, to: number, filter: TokenFilter | undefined) {
