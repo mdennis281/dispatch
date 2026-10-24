@@ -235,11 +235,7 @@ export function TokenMetrics() {
             />
             {/* The runtime's figure is API list price. On a subscription it is
                 not a bill, and "Cost" read as $16k of spend on a flat-rate plan. */}
-            <StatTile
-              label="API equivalent value"
-              value={usd(t?.costUsd ?? null)}
-              hint="At API list prices — not billed on subscriptions"
-            />
+            <StatTile label="API equivalent value" value={usd(t?.costUsd ?? null)} />
             <StatTile label="Input" value={compact(t?.input ?? 0)} />
             <StatTile label="Output" value={compact(t?.output ?? 0)} />
             <StatTile label="Cache read" value={compact(t?.cacheRead ?? 0)} />
