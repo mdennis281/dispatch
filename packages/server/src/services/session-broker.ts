@@ -2353,6 +2353,15 @@ interface LiveSession {
    */
   lastContextTokens?: number;
   /**
+   * The `lastContextTokens` reading the broker last auto-compacted at. The
+   * compaction is itself a turn, and its turn end runs the threshold check
+   * again; when it changes nothing (the CLI answering "Not enough messages to
+   * compact") the reading is unchanged, still past the limit, and it fired
+   * again — thousands of times in one chat, 0.1s apart. Only a NEW reading
+   * may trigger another attempt.
+   */
+  autoCompactedAt?: number;
+  /**
    * The model's context-window size (tokens) for this session, learned from the
    * SDK's `getContextUsage()` control (`maxTokens`) at init and after a model
    * switch. Stamped onto each `result` row so the composer meter divides by the
@@ -3977,6 +3986,9 @@ export class SessionBroker {
     const settings = await this.store.getSettings().catch(() => undefined);
     const limit = this.compactThreshold(session, settings);
     if (!limit || (session.lastContextTokens ?? 0) < limit) return;
+    // Already tried at this exact reading — see `autoCompactedAt`.
+    if (session.autoCompactedAt === session.lastContextTokens) return;
+    session.autoCompactedAt = session.lastContextTokens;
     const focus = normalizeCompactFocus(settings?.autoCompact?.instructions);
     if (session.harnessSession) {
       void session.harnessSession.compact(focus);

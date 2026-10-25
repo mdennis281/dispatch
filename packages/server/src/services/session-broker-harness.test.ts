@@ -102,8 +102,15 @@ class FakeHarnessSession implements HarnessSession {
   async setModel() {}
   async setEffort() {}
   readonly compactions: (string | undefined)[] = [];
+  /** Make `compact` end a turn of its own, the way a real runtime's does. */
+  compactEndsTurn = false;
   async compact(focus?: string) {
     this.compactions.push(focus);
+    // No `usage` event: a compaction that had nothing to do leaves the reading
+    // where it was — the Claude CLI's "Not enough messages to compact".
+    if (this.compactEndsTurn) {
+      this.emit({ type: "turn-end", ok: true, subtype: "success", result: "Not enough messages to compact." });
+    }
   }
   resolvePermission(_id: string, _resolution: HarnessPermissionResolution) {}
   resolveQuestion(_id: string, _answers: HarnessQuestionAnswer[]) {}
@@ -1064,6 +1071,23 @@ describe("SessionBroker neutral harness path", () => {
       await broker.sendMessage(chat.id, "hi");
       await broker.waitFor(chat.id, "idle");
       expect(session.compactions).toEqual(["keep the plan"]);
+    });
+
+    it("does not re-compact when the compaction's own turn leaves the reading unchanged", async () => {
+      await store.saveSettings({
+        ...(await store.getSettings()),
+        autoCompact: { enabled: true, perModel: { "gpt-test": 40 } },
+      });
+      session.compactEndsTurn = true;
+      const chat = await codexChat("compact-noop", "gpt-test");
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "hi");
+      await waitUntil(async () =>
+        (await store.readMessages(chat.id)).filter((r) => r.kind === "result").length >= 2,
+      );
+      // Give a looping broker room to fire again before asserting it didn't.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(session.compactions).toHaveLength(1);
     });
 
     it("does not compact at turn end while under the threshold", async () => {
