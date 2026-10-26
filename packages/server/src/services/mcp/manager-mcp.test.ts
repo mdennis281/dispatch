@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type {
   ChatStatus,
@@ -491,7 +492,7 @@ describe("manager-mcp — withSlotReacquire", () => {
     // bound if `buildCategoryServer` applies it.
     const { calls, broker } = recording();
     const servers = createManagerMcpServers({ chatId: "c1", bus, broker, now: slowClock() });
-    const session = servers["dispatch-session"]!.instance as unknown as {
+    const session = servers["dispatch-session"] as unknown as {
       _registeredTools: Record<string, { handler: (a: unknown, e: unknown) => Promise<unknown> }>;
     };
     await session._registeredTools["wait"]!.handler({ seconds: 0.01 }, {});
@@ -4673,13 +4674,12 @@ describe("manager-mcp — spawn_chat", () => {
 const registeredNames = (ctx: Parameters<typeof createManagerMcpServers>[0]): string[] =>
   Object.values(createManagerMcpServers(ctx)).flatMap((server) =>
     Object.keys(
-      (server as unknown as { instance: { _registeredTools?: Record<string, unknown> } })
-        .instance._registeredTools ?? {},
+      (server as unknown as { _registeredTools?: Record<string, unknown> })._registeredTools ?? {},
     ),
   );
 
 describe("manager-mcp — server factory", () => {
-  it("builds one in-process SDK server per category, all `dispatch-` prefixed", () => {
+  it("builds one plain MCP-SDK server per category, all `dispatch-` prefixed", () => {
     const servers = createManagerMcpServers({
       chatId: "c1",
       bus,
@@ -4689,10 +4689,11 @@ describe("manager-mcp — server factory", () => {
     // always-on categories are built — an unbound category is ABSENT rather
     // than registered empty.
     expect(Object.keys(servers).sort()).toEqual(["dispatch-chat", "dispatch-confirm", "dispatch-session"]);
+    // Provider-neutral: no Claude `{ type: "sdk" }` wrapper — the Claude
+    // adapter adds that at its own boundary (harness/claude/manager-servers.ts).
     for (const [name, server] of Object.entries(servers)) {
-      expect(server.type).toBe("sdk");
-      expect(server.name).toBe(name);
-      expect(server.instance).toBeDefined();
+      expect(server).toBeInstanceOf(McpServer);
+      expect((server.server as unknown as { _serverInfo: { name: string } })._serverInfo.name).toBe(name);
     }
   });
 
@@ -4753,8 +4754,7 @@ describe("manager-mcp — server factory", () => {
     });
     const all = Object.values(servers).flatMap((server) =>
       Object.keys(
-        (server as unknown as { instance: { _registeredTools?: Record<string, unknown> } })
-          .instance._registeredTools ?? {},
+        (server as unknown as { _registeredTools?: Record<string, unknown> })._registeredTools ?? {},
       ),
     );
     // A tool registered on two servers would give the agent two names for one
@@ -4789,8 +4789,7 @@ describe("manager-mcp — server factory", () => {
     });
     for (const [name, server] of Object.entries(servers)) {
       const tools = Object.keys(
-        (server as unknown as { instance: { _registeredTools?: Record<string, unknown> } })
-          .instance._registeredTools ?? {},
+        (server as unknown as { _registeredTools?: Record<string, unknown> })._registeredTools ?? {},
       );
       for (const tool of tools) {
         expect(managerToolQualifiedName(tool as ManagerToolName)).toBe(`mcp__${name}__${tool}`);
@@ -5313,8 +5312,7 @@ describe("manager-mcp — mode tools and chat posture", () => {
     );
     const names = (server: unknown) =>
       Object.keys(
-        (server as { instance: { _registeredTools?: Record<string, unknown> } }).instance
-          ._registeredTools ?? {},
+        (server as { _registeredTools?: Record<string, unknown> })._registeredTools ?? {},
       );
     expect(names(servers["dispatch-config"])).toEqual(
       expect.arrayContaining(["mode_list", "mode_read", "mode_write", "mode_delete"]),

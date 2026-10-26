@@ -25,6 +25,7 @@ import type {
   HookJSONOutput,
   McpServerConfig as SdkMcpServerConfig,
 } from "@anthropic-ai/claude-agent-sdk";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Effort, McpServerConfig, PermissionMode, SlashCommandInfo } from "@dispatch/shared";
 import { EffortSchema } from "@dispatch/shared";
 import type {
@@ -41,6 +42,7 @@ import { buildQuestionAnswer, neutralQuestions } from "./questions.js";
 import { claudeExecutableOption } from "../../services/runtime.js";
 import { envWithAccount } from "../../services/subscriptions.js";
 import { spawnWithPid } from "./spawn.js";
+import { claudeSdkMcpServers } from "./manager-servers.js";
 
 /** The subset of the SDK `query` signature this session calls. */
 export type QueryFn = (params: {
@@ -444,12 +446,13 @@ export class ClaudeSession implements HarnessSession {
       ...(this.spec.mcpServers as unknown as Record<string, SdkMcpServerConfig>),
     };
     // Applied LAST so a project-configured server can't shadow Dispatch's own
-    // tools even if it manages to collide with a `dispatch-*` name.
+    // tools even if it manages to collide with a `dispatch-*` name. Re-wrapping
+    // on every swap is safe: the SDK keys a connected in-process server by name
+    // and keeps the one it has, so a fresh config around the SAME instance
+    // reconnects nothing.
     const manager = this.spec.managerMcp;
     if (manager?.transport === "in-process") {
-      for (const [name, server] of Object.entries(manager.servers)) {
-        servers[name] = server as SdkMcpServerConfig;
-      }
+      Object.assign(servers, claudeSdkMcpServers(manager.servers as Record<string, McpServer>));
     }
     return servers;
   }

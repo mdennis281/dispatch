@@ -9,7 +9,7 @@ import { EventBus } from "../bus.js";
 import type { WsServerEvent, Chat, Project } from "@dispatch/shared";
 import { EMPTY_REFRESH_REPORT, HUMAN_REVIEW_ANSWERS, SECRET_ANSWERS, isPrSettledIdle, readSentContext } from "@dispatch/shared";
 import { SecretsService, plainKeyProtector } from "./secrets.js";
-import { EXEMPTION_ANSWERS, managerMcpContextOf } from "./mcp/manager-mcp.js";
+import { EXEMPTION_ANSWERS, type ManagerMcpContext } from "./mcp/manager-mcp.js";
 import {
   buildManagerToolsDirective,
   SessionBroker,
@@ -1933,10 +1933,11 @@ describe("SessionBroker — steering & concurrency", () => {
 
     await broker.sendMessage("c1", "go");
     await until(() => controllers.length === 1);
-    const servers = controllers[0]?.options?.mcpServers as Record<string, unknown> | undefined;
-    const ctx = Object.values(servers ?? {})
-      .map(managerMcpContextOf)
-      .find(Boolean);
+    const ctx = (
+      broker as unknown as {
+        sessions: Map<string, { managerMcp?: { context: ManagerMcpContext } }>;
+      }
+    ).sessions.get("c1")?.managerMcp?.context;
     const onSteer = ctx?.onSteer;
     expect(onSteer).toBeTypeOf("function");
     if (!onSteer) throw new Error("unreachable");

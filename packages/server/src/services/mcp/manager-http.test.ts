@@ -11,10 +11,22 @@
  * Nothing failed on an auth-DISABLED install, which is why no existing test
  * caught it and why these exist.
  */
-import { describe, it, expect } from "vitest";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+import { afterEach, describe, it, expect } from "vitest";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { MANAGER_CATEGORIES, managerServerName } from "@dispatch/shared";
 import { EventBus } from "../../bus.js";
-import { createManagerMcpServers, managerMcpContextOf } from "./manager-mcp.js";
+import type { IntegrationIdentity } from "../integration-tokens.js";
+import {
+  createManagerMcpServers,
+  externalToolPolicy,
+  type ManagerMcpBroker,
+  type ManagerMcpContext,
+} from "./manager-mcp.js";
 import {
   INTEGRATION_MCP_PATH,
   INTEGRATION_MCP_ROUTE,
@@ -101,35 +113,202 @@ describe("the route and the URLs it must serve", () => {
   });
 });
 
-describe("recovering the live context from a session's server map", () => {
-  /** How `session-broker` picks the context to mint a Codex grant against. */
-  const pick = (servers: Record<string, unknown>) =>
-    Object.values(servers).map(managerMcpContextOf).find(Boolean);
-
-  const real = () =>
-    createManagerMcpServers({ chatId: "c1", bus: new EventBus(), broker: {} as never });
-
-  it("finds the context even when a foreign entry sorts first", () => {
-    // `allMcp` is `{ ...externalMcp, ...managerServers }` and the split filters
-    // by NAME, so a project that hand-declared `dispatch-github` keeps that
-    // earlier key position — and its plain `{url}` config sits there whenever
-    // this session doesn't build that category. Taking `[0]` blind yielded
-    // undefined and the Codex session came up with no Dispatch tools, silently.
-    const servers = { "dispatch-github": { url: "https://example.com/mcp" }, ...real() };
-    expect(Object.keys(servers)[0]).toBe("dispatch-github");
-    expect(pick(servers)).toBeDefined();
+/*
+ * The servers themselves, end to end, on every front door they have. The
+ * factory used to build them with the Claude Agent SDK and hand the HTTP side
+ * a context fished back off a hidden symbol; these pin that a plain MCP-SDK
+ * server, given its context explicitly, serves the same tools to Codex/goose
+ * (HTTP), to an integration, and in-process — with the context and the abort
+ * reaching the handler on each.
+ */
+describe("serving the manager tools", () => {
+  const closers: (() => Promise<unknown>)[] = [];
+  afterEach(async () => {
+    await Promise.all(closers.splice(0).map((close) => close().catch(() => {})));
   });
 
-  it("is undefined when there is genuinely nothing of ours", () => {
-    expect(pick({ "dispatch-github": { url: "https://example.com/mcp" } })).toBeUndefined();
-    expect(pick({})).toBeUndefined();
+  /** A broker that records which chat asked, and parks `onSteer` listeners. */
+  function context(extra: Partial<ManagerMcpContext> = {}) {
+    const asked: string[] = [];
+    const steerListeners = new Set<() => void>();
+    const broker = {
+      has: () => false,
+      getStatus: () => undefined,
+      getContextUsage: async (chatId: string) => {
+        asked.push(chatId);
+        return null;
+      },
+      acquireSlot: async () => {},
+      noteWaitingOn: () => {},
+    } as unknown as ManagerMcpBroker;
+    const ctx: ManagerMcpContext = {
+      chatId: "c1",
+      bus: new EventBus(),
+      broker,
+      onSteer: (listener) => {
+        steerListeners.add(listener);
+        return () => steerListeners.delete(listener);
+      },
+      ...extra,
+    };
+    return { ctx, asked, steerListeners };
+  }
+
+  /** Mount the bridge on a real loopback server, the way the Fastify route does. */
+  async function listen(
+    bridge: ManagerMcpBridge,
+    mount: "chat" | "integration",
+    identity?: IntegrationIdentity,
+  ): Promise<string> {
+    const server = createServer(async (req, res) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(chunk as Buffer);
+      const raw = Buffer.concat(chunks).toString("utf8");
+      const body: unknown = raw ? JSON.parse(raw) : undefined;
+      const category = req.url?.split("/").pop();
+      if (mount === "chat") {
+        await bridge.handle(req, res, body, req.headers.authorization, category);
+      } else {
+        await bridge.handleIntegration(req, res, body, identity, category);
+      }
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    closers.push(
+      () =>
+        new Promise((resolve) => {
+          server.closeAllConnections();
+          server.close(resolve);
+        }),
+    );
+    return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  }
+
+  async function connect(url: string, token?: string): Promise<Client> {
+    const client = new Client({ name: "test", version: "1.0.0" });
+    await client.connect(
+      new StreamableHTTPClientTransport(new URL(url), {
+        requestInit: token ? { headers: { authorization: `Bearer ${token}` } } : undefined,
+      }),
+    );
+    closers.push(() => client.close());
+    return client;
+  }
+
+  const text = (result: unknown) =>
+    ((result as CallToolResult).content[0] as { text: string }).text;
+
+  const until = async (check: () => boolean) => {
+    for (let i = 0; i < 400 && !check(); i++) await new Promise((r) => setTimeout(r, 5));
+    expect(check()).toBe(true);
+  };
+
+  it("serves a chat's tools over HTTP against the context the grant was minted with", async () => {
+    const { ctx, asked } = context();
+    const bridge = new ManagerMcpBridge();
+    bridge.setOrigin(await listen(bridge, "chat"));
+    const grant = bridge.mint("c1", () => ctx);
+    const client = await connect(grant.urlFor("dispatch-session"), grant.token);
+
+    const { tools } = await client.listTools();
+    expect(tools.map((t) => t.name).sort()).toEqual(["compact_context", "context_usage", "wait"]);
+    // Parameter descriptions are what an agent reads to call a tool right. The
+    // Claude SDK copied them into ITS zod registry by hand; they must survive
+    // the plain MCP SDK's own schema conversion too.
+    const wait = tools.find((t) => t.name === "wait")!;
+    expect(wait.inputSchema.properties?.seconds).toMatchObject({
+      type: "number",
+      description: expect.stringContaining("How long to wait"),
+    });
+
+    const result = await client.callTool({ name: "context_usage", arguments: {} });
+    expect(text(result)).toContain("Context usage is unavailable");
+    expect(asked).toEqual(["c1"]);
   });
 
-  it("recovers the SAME context from every category server", () => {
-    // The grant is per-chat, not per-category, so any one of them must do.
-    const servers = real();
-    const contexts = Object.values(servers).map(managerMcpContextOf);
-    expect(contexts.length).toBeGreaterThan(1);
-    expect(new Set(contexts).size).toBe(1);
+  it("refuses a request with no grant before building anything", async () => {
+    const bridge = new ManagerMcpBridge();
+    const origin = await listen(bridge, "chat");
+    await expect(connect(`${origin}${MANAGER_MCP_PATH}/session`)).rejects.toThrow();
+  });
+
+  it("ends a tool blocked over HTTP when the owning session aborts", async () => {
+    const stop = new AbortController();
+    const { ctx, steerListeners } = context({ signal: stop.signal });
+    const bridge = new ManagerMcpBridge();
+    bridge.setOrigin(await listen(bridge, "chat"));
+    const grant = bridge.mint("c1", () => ctx);
+    const client = await connect(grant.urlFor("dispatch-session"), grant.token);
+
+    const call = client.callTool({ name: "wait", arguments: { seconds: 60 } });
+    // Parked inside the handler: it subscribes to steering before it sleeps.
+    await until(() => steerListeners.size === 1);
+    stop.abort();
+    expect(text(await call)).toContain("Wait cancelled");
+  });
+
+  it("unwinds an in-process handler when the caller cancels the call", async () => {
+    // The in-process path Claude uses: the runtime's cancel arrives as the MCP
+    // `extra.signal`, not as a session abort.
+    const { ctx, steerListeners } = context();
+    const server = createManagerMcpServers(ctx)["dispatch-session"]!;
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverSide);
+    const client = new Client({ name: "test", version: "1.0.0" });
+    await client.connect(clientSide);
+    closers.push(
+      () => client.close(),
+      () => server.close(),
+    );
+
+    const cancel = new AbortController();
+    const call = client.callTool({ name: "wait", arguments: { seconds: 60 } }, undefined, {
+      signal: cancel.signal,
+    });
+    await until(() => steerListeners.size === 1);
+    cancel.abort();
+    await expect(call).rejects.toThrow();
+    // The handler drops its steer subscription on the way out — it really ended.
+    await until(() => steerListeners.size === 0);
+  });
+
+  it("serves only external tools on the integration mount, by scope", async () => {
+    const { ctx } = context({ chatId: "", toolPolicy: externalToolPolicy() });
+    const bridge = new ManagerMcpBridge();
+    bridge.setIntegrationContext(() => ctx);
+    const identity: IntegrationIdentity = {
+      kind: "integration",
+      tokenId: "t1",
+      name: "bot",
+      scopes: ["tools:chat"],
+    };
+    const origin = await listen(bridge, "integration", identity);
+
+    const client = await connect(`${origin}${INTEGRATION_MCP_PATH}/chat`);
+    const { tools } = await client.listTools();
+    expect(tools.map((t) => t.name)).toEqual(["wait_for_chat"]);
+    const result = await client.callTool({ name: "wait_for_chat", arguments: { chatId: "nope" } });
+    expect((result as CallToolResult).isError).toBe(true);
+
+    // No scope for it — and nothing external in it either way.
+    await expect(connect(`${origin}${INTEGRATION_MCP_PATH}/session`)).rejects.toThrow();
+  });
+});
+
+describe("ManagerMcpBridge.resolve", () => {
+  it("reads the token however it is spaced, and only after the Bearer scheme", () => {
+    const bridge = new ManagerMcpBridge();
+    const { token } = bridge.mint("c1", () => ({}) as never);
+    expect(bridge.resolve(`Bearer ${token}`)?.chatId).toBe("c1");
+    expect(bridge.resolve(`bearer    ${token}  `)?.chatId).toBe("c1");
+    expect(bridge.resolve(token)).toBeUndefined();
+    expect(bridge.resolve("Bearer")).toBeUndefined();
+  });
+
+  it("answers a pathological run of spaces at once", () => {
+    // The unauthenticated input a local process controls; `\s+(.+)$` took
+    // polynomial time on exactly this shape.
+    const started = performance.now();
+    expect(new ManagerMcpBridge().resolve(`Bearer ${" ".repeat(50_000)}x`)).toBeUndefined();
+    expect(performance.now() - started).toBeLessThan(500);
   });
 });

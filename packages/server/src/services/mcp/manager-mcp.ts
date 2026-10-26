@@ -1,9 +1,9 @@
 /**
- * manager-mcp — Dispatch's own in-process SDK MCP tools.
+ * manager-mcp — Dispatch's own MCP tools, for every provider.
  *
  * ONE factory, EIGHT servers. `createManagerTools` builds every tool definition
  * and owns the helpers they share; {@link createManagerMcpServers} partitions
- * that output by {@link ManagerCategory} and hands the SDK one server per
+ * that output by {@link ManagerCategory} into one MCP-SDK `McpServer` per
  * category. Registered on EVERY live session (see `SessionBroker.buildOptions`),
  * so the tools appear to the agent as `mcp__dispatch-<category>__<tool>` —
  * `mcp__dispatch-session__wait`, `mcp__dispatch-github__create_pr`.
@@ -81,11 +81,7 @@
  * the reusable in-process-MCP pattern the later Batch-6 features build on: a
  * per-session factory closed over `{ chatId, bus, broker, signal }`.
  */
-import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
-import type {
-  McpSdkServerConfigWithInstance,
-  SdkMcpToolDefinition,
-} from "@anthropic-ai/claude-agent-sdk";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod";
 import {
@@ -195,6 +191,39 @@ import {
 // In shared so a provider plugin can size its own tool timeout past them.
 import { ASK_USER_TIMEOUT_CAP_SECONDS, WAIT_CAP_SECONDS } from "@dispatch/shared";
 export { ASK_USER_TIMEOUT_CAP_SECONDS, WAIT_CAP_SECONDS };
+
+/**
+ * One manager tool, before it is registered on any server: what the catalog
+ * reads (`name`/`description`/`inputSchema`) and what a server calls
+ * (`handler`).
+ *
+ * Ours, not the Claude Agent SDK's `SdkMcpToolDefinition`, though the shape is
+ * deliberately the same. These tools are served to EVERY provider — Codex and
+ * goose dial them over HTTP — and building them with the Claude SDK's `tool()`
+ * meant Dispatch could not load its own toolbox without Claude installed (#422).
+ * Args are typed the way that SDK typed them (every key present, optional ones
+ * as `T | undefined`) so none of the handlers below had to change.
+ */
+export interface ManagerToolDefinition<Shape extends z.ZodRawShape = z.ZodRawShape> {
+  name: string;
+  description: string;
+  inputSchema: Shape;
+  /** `extra` is the MCP SDK's `RequestHandlerExtra`; only its `signal` is read. */
+  handler: (args: ManagerToolArgs<Shape>, extra: unknown) => Promise<CallToolResult>;
+}
+
+type ManagerToolArgs<Shape extends z.ZodRawShape> = {
+  [K in keyof Shape]: z.output<Shape[K]>;
+};
+
+function tool<Shape extends z.ZodRawShape>(
+  name: string,
+  description: string,
+  inputSchema: Shape,
+  handler: ManagerToolDefinition<Shape>["handler"],
+): ManagerToolDefinition<Shape> {
+  return { name, description, inputSchema, handler };
+}
 
 /** How often `watch_pr` re-polls a PR's checks / review threads / merge state. */
 export const PR_POLL_INTERVAL_MS = WATCH_PR_POLL_INTERVAL_MS;
@@ -8132,23 +8161,24 @@ export function managerToolDescriptors(
 
 /**
  * Build Dispatch's own MCP servers for one session — one per {@link ManagerCategory},
- * keyed by the server name the SDK should register it under.
+ * keyed by the server name the runtime should register it under.
  *
  * A PARTITION, not eight factories: `createManagerTools` still holds every
  * definition and every shared helper (`textResult`, the binding checks, the PR
  * renderers), and this only decides which server each one is handed to. Splitting
  * the factory itself would let those helpers drift apart file by file.
  *
- * Spread the result into `Options.mcpServers` — the SDK exposes the tools as
- * `mcp__dispatch-session__wait`, `mcp__dispatch-github__create_pr`, and so on.
+ * Plain MCP-SDK `McpServer`s, not provider configs: the agent sees the tools as
+ * `mcp__dispatch-session__wait`, `mcp__dispatch-github__create_pr`, and so on,
+ * whichever runtime mounts them. Claude takes each one in-process, wrapped as
+ * `{ type: "sdk", instance }` by `claudeSdkMcpServers` at its own boundary;
+ * Codex/goose reach them over HTTP through {@link createManagerCategoryServer}.
  * A category with no bound tool on this session is omitted entirely rather than
  * registered empty, so a session without GitHub advertises no `dispatch-github`
  * at all.
  */
-export function createManagerMcpServers(
-  ctx: ManagerMcpContext,
-): Record<string, McpSdkServerConfigWithInstance> {
-  const servers: Record<string, McpSdkServerConfigWithInstance> = {};
+export function createManagerMcpServers(ctx: ManagerMcpContext): Record<string, McpServer> {
+  const servers: Record<string, McpServer> = {};
   for (const [category, categoryTools] of boundToolsByCategory(ctx)) {
     servers[managerServerName(category)] = buildCategoryServer(ctx, category, categoryTools);
   }
@@ -8183,23 +8213,20 @@ function buildCategoryServer(
   ctx: ManagerMcpContext,
   category: ManagerCategory,
   categoryTools: ManagerTools[ManagerToolKey][],
-): McpSdkServerConfigWithInstance {
-  const server = createSdkMcpServer({
-    name: managerServerName(category),
-    version: "1.0.0",
-    tools: categoryTools.map((def) => withSlotReacquire(ctx, category, def)),
-  });
-  // Non-enumerable host metadata, on EVERY category server. The Claude SDK only
-  // sees the ordinary MCP config, while the harness broker can recover the SAME
-  // live context and put it behind ManagerMcpBridge for Codex. This avoids
-  // duplicating the manager tool wiring (terminals, memory, GitHub, runners,
-  // spawn consent) per runtime.
-  Object.defineProperty(server, MANAGER_CONTEXT, { value: ctx });
+): McpServer {
+  const server = new McpServer({ name: managerServerName(category), version: "1.0.0" });
+  for (const def of categoryTools) {
+    const { name, description, inputSchema, handler } = withSlotReacquire(ctx, category, def);
+    // The cast is the heterogeneous list's, not a shape mismatch: each
+    // definition's handler is typed by its OWN schema, which a
+    // `ManagerTools[ManagerToolKey]` union cannot express to `registerTool`.
+    server.registerTool(name, { description, inputSchema }, handler as never);
+  }
   return server;
 }
 
 /**
- * Build ONE category server for a session — the Codex bridge's entry point,
+ * Build ONE category server for a session — the HTTP bridge's entry point,
  * which serves a single category per HTTP path.
  *
  * Constructs ONLY the category asked for. Going through
@@ -8214,7 +8241,7 @@ function buildCategoryServer(
 export function createManagerCategoryServer(
   ctx: ManagerMcpContext,
   category: ManagerCategory,
-): McpSdkServerConfigWithInstance | undefined {
+): McpServer | undefined {
   const categoryTools = boundToolsByCategory(ctx).get(category);
   return categoryTools?.length ? buildCategoryServer(ctx, category, categoryTools) : undefined;
 }
@@ -8234,7 +8261,7 @@ export function createManagerCategoryServer(
  * admits first. The call's own abort and the session's both end the hold —
  * an answer returning into a torn-down turn needs no slot.
  */
-export function withSlotReacquire<T extends Pick<SdkMcpToolDefinition<never>, "name" | "handler">>(
+export function withSlotReacquire<T extends Pick<ManagerToolDefinition<never>, "name" | "handler">>(
   ctx: ManagerMcpContext,
   category: ManagerCategory,
   def: T,
@@ -8268,11 +8295,3 @@ export function withSlotReacquire<T extends Pick<SdkMcpToolDefinition<never>, "n
  * back. Two seconds: longer than any GitHub round trip, shorter than any wait.
  */
 export const SLOT_REACQUIRE_MIN_MS = 2_000;
-
-const MANAGER_CONTEXT = Symbol("dispatch.managerMcpContext");
-
-/** Recover the live context attached by {@link createManagerMcpServers}. */
-export function managerMcpContextOf(value: unknown): ManagerMcpContext | undefined {
-  if (!value || typeof value !== "object") return undefined;
-  return (value as { [MANAGER_CONTEXT]?: ManagerMcpContext })[MANAGER_CONTEXT];
-}
