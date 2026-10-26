@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { toModelOptions, ollamaHost, AcpHarness } from "./index.js";
 
 /** A `/api/tags` row, shaped as Ollama really returns it. */
@@ -94,6 +94,36 @@ describe("AcpHarness.listModels", () => {
   it("prefers the live list once it answers", async () => {
     const live = toModelOptions([tag("mine:1b", 10)]);
     expect(await harness(async () => live).listModels()).toEqual(live);
+  });
+});
+
+describe("AcpHarness.generateText", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  /** The `options` body sent to Ollama's /api/generate for one request. */
+  async function optionsFor(maxOutput?: number): Promise<unknown> {
+    let sent: { options?: unknown } | undefined;
+    vi.stubGlobal("fetch", async (_url: string, init: { body: string }) => {
+      sent = JSON.parse(init.body) as { options?: unknown };
+      return { ok: true, json: async () => ({ response: "feat: x" }) };
+    });
+    const harness = new AcpHarness({
+      runtime: { kind: "goose", source: "installed", available: true, path: "/x/goose" },
+      fetchModels: async () => toModelOptions([tag("small:1b", 10)]),
+    });
+    await harness.generateText({
+      prompt: "p",
+      purpose: maxOutput ? "commit-message" : "title",
+      ...(maxOutput ? { maxOutput } : {}),
+    });
+    return sent?.options;
+  }
+
+  it("keeps a title to its short cap, but gives a commit message the room it asks for", async () => {
+    // Regression (#430 review): 64 tokens was sized for a title and cut a
+    // commit message's body off mid-sentence on a goose-only install.
+    expect(await optionsFor()).toEqual({ num_predict: 64 });
+    expect(await optionsFor(400)).toEqual({ num_predict: 400 });
   });
 });
 
