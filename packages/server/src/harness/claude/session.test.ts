@@ -15,8 +15,8 @@ describe("ClaudeSession workflow guard", () => {
     const session = new ClaudeSession({
       spec: {
         ...SPEC,
-        toolGuard: (_name, input) =>
-          input.command === "git push origin main" ? "use create_pr" : null,
+        toolGuard: async (_name, input, ctx) =>
+          input.command === "git push origin main" && ctx.cwd === "/repo" ? "use create_pr" : null,
       },
       genId: () => "id-1",
     });
@@ -43,7 +43,8 @@ describe("ClaudeSession workflow guard", () => {
     expect(event.value as HarnessEvent).toEqual({
       type: "guard-blocked",
       toolName: "Bash",
-      input: { command: "git push origin main", cwd: "/repo" },
+      // The cwd reached the guard through its context, not the input.
+      input: { command: "git push origin main" },
       reason: "use create_pr",
       continuation: "in-place",
     });

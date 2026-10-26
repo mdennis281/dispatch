@@ -4389,9 +4389,10 @@ describe("SessionBroker — effort on the transcript", () => {
 
 describe("SessionBroker — the wrong-worktree guard", () => {
   /**
-   * The cwd guard is the SECOND unmatched PreToolUse entry the broker
-   * registers (the effort observer is the first). Both are unmatched because
-   * both have to see every call, not just the ones they act on.
+   * The cwd guard lives in the composed tool guard, which is the SECOND
+   * unmatched PreToolUse entry the broker registers (the effort observer is
+   * the first). Both are unmatched because both have to see every call, not
+   * just the ones they act on.
    *
    * Taken by that INDEX rather than as the last unmatched entry, which is
    * what this did and is not the same thing. It was only ever equivalent

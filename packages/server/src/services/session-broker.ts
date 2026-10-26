@@ -137,9 +137,7 @@ import {
   GLOBAL_MODE_ID,
   isGlobalProject,
   isProtectedMode,
-  isToolAllowed,
   enforceGlobalPosture,
-  deniedToolRefusal,
   isAutoAllowed,
   withAutoAllowed,
   buildGlobalProjectIndex,
@@ -152,7 +150,6 @@ import {
   EffortSchema,
   applyMcpEnablement,
   harnessEnablementLayers,
-  classifyWorkflowViolation,
   describeExemptionScope,
   HTTP_URL_RE,
   isPrSettledIdle,
@@ -242,17 +239,12 @@ import type { HouseRulesService } from "./house-rules.js";
 import type { SlashCommandService } from "./slash-commands.js";
 import { materializeSkills, cleanupMaterializedSkills } from "./skill-materializer.js";
 import { bundledSkills } from "./bundled-skills.js";
+import { buildWorkflowDirective, createWorkflowGuard, inspectCwd } from "./workflow.js";
 import {
-  buildWorkflowDirective,
-  createWorkflowGuardHook,
-  inspectCwd,
-  inspectCwdSync,
-} from "./workflow.js";
-import {
-  createModePolicyHook,
-  createBackgroundShellGuardHook,
-  createWorktreeGuardHook,
-  createIssueCreateGuardHook,
+  createModePolicyGuard,
+  createBackgroundShellGuard,
+  createWorktreeGuard,
+  createIssueCreateGuard,
 } from "./shell-guard.js";
 import { AgentCwdTracker } from "./agent-cwd.js";
 import { claudeExecutableOption } from "../harness/claude/runtime.js";
@@ -265,8 +257,9 @@ import type {
   HarnessQuestionAnswer,
   HarnessSession,
   HarnessSessionSpec,
+  HarnessToolGuard,
 } from "../harness/types.js";
-import { guardRecoveryInput } from "@dispatch/shared";
+import { composeToolGuards, guardRecoveryInput } from "@dispatch/shared";
 import type { HarnessRegistry } from "../harness/index.js";
 import { accountOf, chatSubscription, envWithAccount } from "./subscriptions.js";
 import type { ManagerMcpBridge, ManagerMcpGrant } from "./mcp/manager-http.js";
@@ -5334,53 +5327,11 @@ export class SessionBroker {
         contextWindow: session.contextWindow,
         abortSignal: session.abortController.signal,
         account: session.account,
-        toolGuard: (toolName, input) => {
-          // The MODE's tool policy is checked first and is unconditional:
-          // unlike the workflow guard below it has no `off` setting, because
-          // the mode that uses it is the one a chat with no project runs
-          // under. Both halves are enforced here — a runtime that ignores the
-          // SDK allowlist must not thereby be unrestricted.
-          if (
-            !isToolAllowed(toolName, {
-              allowedTools: session.allowedTools,
-              disallowedTools: session.deniedTools,
-            })
-          ) {
-            return deniedToolRefusal(
-              toolName,
-              session.modeName ?? session.modeId,
-              session.modeId,
-            );
-          }
-          if (toolName !== "Bash" || session.workflow?.guard === "off") return null;
-          const command = typeof input.command === "string" ? input.command : "";
-          // The call's real cwd outranks the directory the chat started in. This
-          // is especially load-bearing for harness-created worktrees: Dispatch
-          // may not own that cwd, but the runtime reports it on the tool call.
-          const callSite =
-            typeof input.cwd === "string" ? inspectCwdSync(input.cwd) : null;
-          const violation = classifyWorkflowViolation(command, {
-            defaultBranch: session.trunk ?? "main",
-            currentBranch: callSite?.branch ?? session.branch ?? null,
-            inWorktree: callSite?.linked ?? Boolean(session.inWorktree),
-            autoMerge: session.workflow?.autoMerge === "on-green",
-            requirePr: Boolean(session.workflow?.requirePr),
-          });
-          if (!violation) return null;
-          const blocked = session.workflow?.guard === "deny";
-          // Blocked calls are reported by the adapter as `guard-blocked`, which
-          // gives every harness the same persisted notice and recovery path.
-          // Warn-only policy does not produce that event, so surface it here.
-          if (!blocked) {
-            this.bus.publish({
-              type: "notice",
-              chatId: session.chatId,
-              level: "info",
-              text: `Workflow warning: ${violation.reason}`,
-            });
-          }
-          return blocked ? violation.reason : null;
-        },
+        // The same composed guard the direct Claude path installs as a hook.
+        // Refusals are NOT noticed from inside it here: the adapter reports
+        // each one as `guard-blocked`, which already becomes a persisted
+        // "Blocked: …" notice and drives restart-turn recovery.
+        toolGuard: this.buildToolGuard(session, { reportsBlocks: true }),
       };
 
       // A posture whose entire point is its denylist needs TWO things from a
@@ -5402,15 +5353,31 @@ export class SessionBroker {
       // isn't holding.
       const caps = resolved.harness.capabilities;
       if (isProtectedMode(session.modeId) && !(caps.preToolGuard && caps.guardsMcpToolNames)) {
+        // Name the runtimes that CAN hold it, from what is actually installed —
+        // not "Claude", which may not be installed, logged in or wanted here
+        // (#422: Dispatch has to be usable with no Claude at all).
+        const able = this.harnesses
+          .list()
+          .filter(
+            (h) =>
+              h.kind !== resolved.harness.kind &&
+              h.capabilities.preToolGuard &&
+              h.capabilities.guardsMcpToolNames &&
+              h.runtime().available,
+          )
+          .map((h) => providerFor(h.kind).label);
         throw new Error(
-          `${session.modeName ?? session.modeId} mode cannot run on ${resolved.harness.kind}: ` +
+          `${session.modeName ?? session.modeId} mode cannot run on ${providerFor(resolved.harness.kind).label}: ` +
             (caps.preToolGuard
               ? "that runtime cannot tell which MCP tool a call is for until after it runs, " +
                 "and almost everything this posture denies is an MCP tool."
               : "that runtime cannot refuse a tool call before it runs, and this posture is " +
                 "nothing but a list of calls to refuse.") +
-            " Switch this chat to a runtime that can (Claude) from the composer's provider " +
-            "picker.",
+            (able.length
+              ? ` Switch this chat to a runtime that can (${able.join(", ")}) from the ` +
+                "composer's provider picker."
+              : " No runtime installed here can enforce it: one has to refuse a call before it " +
+                "runs and see which MCP tool the call is for."),
         );
       }
       session.harnessSession = resolved.harness.createSession(spec);
@@ -6010,6 +5977,10 @@ export class SessionBroker {
         return;
       case "tool-use": {
         session.toolTurn.set(event.toolUseId, session.turn);
+        // What lets the subagent cwd guard find a run's spawner on this path
+        // too: a child run's id is its `Agent` call's id, and this records
+        // which thread issued that call.
+        this.noteToolThread(session, event.toolUseId, event.parentToolUseId ?? null);
         const cardTool = managerCardTool(event.name);
         if (cardTool) session.cardCalls.set(event.toolUseId, cardTool);
         // The ledger row for this call. Classified the same way the transcript
@@ -6081,6 +6052,14 @@ export class SessionBroker {
         return;
       }
       case "permission-request":
+        // A self-gated tool asks the human itself, with its own card; a generic
+        // card in front of it asks "may the agent ask you?" first. The direct
+        // Claude path has always stepped aside for these at `handlePermission`
+        // — this path did not, so goose showed two cards for one `ask_user`.
+        if (session.harnessSession && SELF_GATED_TOOLS.has(event.toolName)) {
+          session.harnessSession.resolvePermission(event.requestId, { decision: "allow" });
+          return;
+        }
         // The same prompt-free list a Claude chat gets at `canUseTool`, so the
         // list means one thing whichever provider a chat runs on.
         if (session.harnessSession && (await this.autoAllows(session, event.toolName))) {
@@ -8337,7 +8316,168 @@ export class SessionBroker {
   }
 
   /**
-   * PreToolUse guard: keep a subagent writing in the worktree it started in.
+   * THE tool guard: every Dispatch guard, composed into the one
+   * {@link HarnessToolGuard} that every provider gets.
+   *
+   * Before #424 there were two. The direct Claude path installed six separate
+   * PreToolUse hooks; every other provider got a hand-copied subset in
+   * `HarnessSessionSpec.toolGuard` — the mode policy and a workflow guard that
+   * never read `session.exemptions`. So on Codex and goose a granted exemption
+   * changed nothing, and the background-shell, shell-worktree, issue-create
+   * and subagent-cwd guards did not exist. One function, one list, and a guard
+   * added here reaches every runtime.
+   *
+   * ORDER MATTERS — {@link composeToolGuards} stops at the first refusal. The
+   * mode policy leads because it is the most categorical: a tool the mode
+   * forbids is forbidden whatever the command says. The workflow guard comes
+   * LAST because it is the one that spends exemptions, and a one-shot grant
+   * must only ever be spent on a call that will actually run.
+   *
+   * Everything is read through closures so a live `setMode`, a workflow edit
+   * or a grant that lands mid-turn applies to the very next call.
+   *
+   * `reportsBlocks`: whether the CALLER turns a refusal into a notice. A harness
+   * adapter does (it emits `guard-blocked`, which the broker persists as
+   * "Blocked: …"), so the per-guard notices are skipped there or every refusal
+   * would be shown twice. The direct Claude hook does not, so they stay.
+   * Warnings — a `warn`-rung violation, an exemption spent, a subagent that has
+   * drifted — are not refusals and are published either way.
+   */
+  private buildToolGuard(
+    session: LiveSession,
+    opts: { reportsBlocks: boolean },
+  ): HarnessToolGuard {
+    const blocked = (text: string, level: "info" | "warn" = "info"): void => {
+      if (opts.reportsBlocks) return;
+      this.bus.publish({ type: "notice", chatId: session.chatId, level, text });
+    };
+    const modeName = () => session.modeName ?? session.modeId;
+    return composeToolGuards(
+      [
+        createModePolicyGuard({
+          policy: () => ({
+            allowedTools: session.allowedTools,
+            disallowedTools: session.deniedTools,
+          }),
+          mode: () => ({ name: modeName(), id: session.modeId }),
+          onBlocked: (tool) => blocked(`${modeName()} mode refused ${tool}.`),
+        }),
+        this.agentCwdGuard(session, blocked),
+        // Only where there IS somewhere to redirect to: no TerminalService, no
+        // tracked alternative, no guard. See services/shell-guard.ts.
+        createBackgroundShellGuard({
+          enabled: () => Boolean(this.terminals),
+          onBlocked: () =>
+            blocked(
+              "Blocked a background shell — redirected to " +
+                "mcp__dispatch-workspace__terminal({ background: true }), which is tracked.",
+            ),
+        }),
+        // Gated on the same service the `worktree` tool is bound from, so the
+        // refusal always has a tool to name.
+        createWorktreeGuard({
+          enabled: () => Boolean(this.worktrees),
+          onBlocked: () =>
+            blocked(
+              "Blocked a shell-created worktree — redirected to " +
+                "mcp__dispatch-workspace__worktree, which records the owning chat.",
+            ),
+        }),
+        // Gated on the same service `issue_create` is bound from, for the same
+        // reason.
+        createIssueCreateGuard({
+          applies: async (repo) => {
+            const projectId = session.projectId;
+            if (!this.issues || !projectId) return false;
+            if (!resolveIssuePolicy(this.projectConfig?.getConfig?.(projectId)?.issues).enabled) {
+              return false;
+            }
+            if (!repo) return true;
+            const own = await this.issues.sourceFor(projectId).catch(() => null);
+            // Unknown source = cannot tell it is elsewhere; let it through
+            // rather than strand an upstream report with nowhere to go.
+            return own?.source.repo.toLowerCase() === repo;
+          },
+          onBlocked: () =>
+            blocked(
+              "Blocked `gh issue create` — the issue watcher would have taken it. " +
+                "Redirected to issue_create, which files it as dispatch:manual.",
+            ),
+        }),
+        createWorkflowGuard({
+          context: () =>
+            session.workflow
+              ? {
+                  workflow: session.workflow,
+                  trunk: session.trunk ?? "main",
+                  inWorktree: Boolean(session.inWorktree),
+                  branch: session.branch ?? null,
+                }
+              : null,
+          onViolation: (violation, isBlock) => {
+            if (isBlock) {
+              blocked(`Blocked: ${violation.reason}`, "warn");
+              return;
+            }
+            this.bus.publish({
+              type: "notice",
+              chatId: session.chatId,
+              level: "info",
+              text: `Workflow warning: ${violation.reason}`,
+            });
+          },
+          // Read fresh per call, not captured: the agent asks for an exemption
+          // the moment it is refused and retries in the SAME turn, so a list
+          // snapshotted at turn start would never contain the grant that was
+          // the whole point of asking.
+          exemptions: () => session.exemptions,
+          onExempted: (exemption, violation, command) =>
+            this.consumeExemption(session, exemption, violation, command),
+        }),
+      ],
+      (err) => console.warn(`[broker] a tool guard threw for chat ${session.chatId}:`, err),
+    );
+  }
+
+  /**
+   * {@link buildToolGuard} as a Claude PreToolUse hook — the direct Claude
+   * path's way in, and the only thing on that path that still speaks the
+   * SDK's hook shape. It goes when #427 routes Claude chats through
+   * `ClaudeHarness`, whose adapter makes the same translation.
+   *
+   * A hook rather than `canUseTool` because a hook still fires under
+   * `bypassPermissions` and for subagent calls; no matcher, because the mode
+   * policy and the cwd guard have to see every tool, not just `Bash`.
+   */
+  private toolGuardHook(session: LiveSession): HookCallback {
+    const guard = this.buildToolGuard(session, { reportsBlocks: false });
+    return async (input: HookInput): Promise<HookJSONOutput> => {
+      const i = input as {
+        cwd?: unknown;
+        agent_id?: unknown;
+        tool_use_id?: unknown;
+        tool_name?: unknown;
+        tool_input?: unknown;
+      };
+      if (typeof i.tool_name !== "string" || !i.tool_name) return {};
+      const reason = await guard(i.tool_name, (i.tool_input ?? {}) as Record<string, unknown>, {
+        cwd: typeof i.cwd === "string" ? i.cwd : undefined,
+        agentId: typeof i.agent_id === "string" && i.agent_id ? i.agent_id : undefined,
+        toolUseId: typeof i.tool_use_id === "string" ? i.tool_use_id : undefined,
+      });
+      if (!reason) return {};
+      return {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: reason,
+        },
+      } as unknown as HookJSONOutput;
+    };
+  }
+
+  /**
+   * Keep a subagent writing in the worktree it started in.
    *
    * WHY (2026-08-07). Five background subagents shared one session; the main
    * loop called `EnterWorktree` to go commit one of their branches, and because
@@ -8346,44 +8486,37 @@ export class SessionBroker {
    * `git add -A`. The full account, and why refusing is the strongest thing
    * available on this side, is in `agent-cwd.ts`.
    *
-   * A hook rather than `canUseTool` for the same reason the workflow guard is
-   * one: it still fires under `bypassPermissions`, which is the posture the
-   * incident happened in.
+   * Needs the call's real cwd; a runtime that does not report one (goose's
+   * permission requests) is simply not tracked rather than tracked wrongly
+   * from the chat's starting directory.
    */
-  private agentCwdGuardHook(session: LiveSession): HookCallback {
-    return async (input: HookInput): Promise<HookJSONOutput> => {
-      const tracker = session.cwdTracker;
-      const i = input as {
-        cwd?: string;
-        agent_id?: string;
-        tool_use_id?: string;
-        tool_name?: string;
-        tool_input?: unknown;
-      };
-      if (!tracker || typeof i.cwd !== "string" || !i.tool_name) return {};
-      // Same correlation the effort observer uses: a subagent's call carries
-      // `agent_id`, and the RUN it belongs to is recovered from the tool_use id.
-      // When that lookup misses (a hook that beat its own row, an id we trimmed)
-      // fall back to `agent_id` itself — still one key per thread, just one the
-      // spawn map can't reach, so the call is tracked rather than dropped.
-      const thread = i.agent_id
-        ? (i.tool_use_id ? session.threadOfTool.get(i.tool_use_id) : undefined) ??
-          `agent:${i.agent_id}`
+  private agentCwdGuard(
+    session: LiveSession,
+    blocked: (text: string, level?: "info" | "warn") => void,
+  ): HarnessToolGuard {
+    const tracker = this.ensureCwdTracker(session);
+    return async (toolName, input, ctx) => {
+      if (!ctx.cwd) return null;
+      // A subagent's run is the spawning tool_use id. The adapter may name it
+      // outright; otherwise recover it from the call's own id, which
+      // `noteToolThread` stamped when the call's row went out. When that lookup
+      // misses (a hook that beat its own row, an id we trimmed) fall back to
+      // the agent id itself — still one key per thread, just one the spawn map
+      // can't reach, so the call is tracked rather than dropped.
+      const sub = ctx.agentId ?? ctx.parentToolUseId;
+      const thread = sub
+        ? ctx.parentToolUseId ??
+          (ctx.toolUseId ? session.threadOfTool.get(ctx.toolUseId) : undefined) ??
+          `agent:${sub}`
         : MAIN_THREAD;
-      const refusal = await tracker.observe({
-        thread,
-        toolName: i.tool_name,
-        cwd: i.cwd,
-        input: (i.tool_input ?? {}) as Record<string, unknown>,
-      });
-      if (!refusal) return {};
-      return {
-        hookSpecificOutput: {
-          hookEventName: "PreToolUse",
-          permissionDecision: "deny",
-          permissionDecisionReason: refusal.reason,
-        },
-      } as unknown as HookJSONOutput;
+      const refusal = await tracker.observe({ thread, toolName, cwd: ctx.cwd, input });
+      if (!refusal) return null;
+      blocked(
+        `Blocked: a subagent tried to write into ${refusal.attempted}, which is a ` +
+          `different worktree from the ${refusal.pinned} it started in.`,
+        "warn",
+      );
+      return refusal.reason;
     };
   }
 
@@ -8406,16 +8539,6 @@ export class SessionBroker {
             `A subagent's working directory moved: it started in ${loc.pinned} and is ` +
             `now in ${loc.current}. Check which branch its work is landing on before ` +
             `you commit.`,
-        });
-      },
-      onRefused: (loc, refusal) => {
-        this.bus.publish({
-          type: "notice",
-          chatId: session.chatId,
-          level: "warn",
-          text:
-            `Blocked: a subagent tried to write into ${refusal.attempted}, which is a ` +
-            `different worktree from the ${loc.pinned} it started in.`,
         });
       },
     });
@@ -8847,189 +8970,16 @@ export class SessionBroker {
       ],
     };
 
-    // …and keep each subagent writing where it started. No matcher, because the
-    // guard has to SEE every call to know where a thread is before it can judge
-    // a write — a `Bash` that `cd`s into another worktree is the move that
-    // matters, even though only the write that follows is refused. See
-    // `agentCwdGuardHook` for the incident this exists for.
-    this.ensureCwdTracker(session);
+    // …and every Dispatch guard, as ONE hook: the same composed guard every
+    // other provider is handed as `HarnessSessionSpec.toolGuard`. See
+    // `buildToolGuard` for what is in it and why the order matters.
     options.hooks = {
       ...options.hooks,
       PreToolUse: [
         ...(options.hooks?.PreToolUse ?? []),
-        { hooks: [this.agentCwdGuardHook(session)] },
+        { hooks: [this.toolGuardHook(session)] },
       ],
     };
-
-    // …and refuse `run_in_background`, which spawns outside the server's process
-    // tree and orphans onto its port when the session ends. Only where there IS
-    // somewhere to redirect to: no TerminalService, no tracked alternative, no
-    // guard. See services/shell-guard.ts for the incident.
-    if (this.terminals) {
-      options.hooks = {
-        ...options.hooks,
-        PreToolUse: [
-          ...(options.hooks?.PreToolUse ?? []),
-          {
-            hooks: [
-              createBackgroundShellGuardHook({
-                enabled: () => Boolean(this.terminals),
-                onBlocked: () => {
-                  this.bus.publish({
-                    type: "notice",
-                    chatId: session.chatId,
-                    level: "info",
-                    text:
-                      "Blocked a background shell — redirected to " +
-                      "mcp__dispatch-workspace__terminal({ background: true }), which is tracked.",
-                  });
-                },
-              }),
-            ],
-          },
-        ],
-      };
-    }
-
-    // The MODE's tool policy, as a hook — so the direct Claude path (which
-    // never builds `HarnessSessionSpec.toolGuard`) enforces exactly what the
-    // neutral harness path does. Installed FIRST among the guards because it
-    // is the most categorical: a tool the mode forbids is forbidden whatever
-    // the command says. Read through closures so a live `setMode` applies to
-    // the very next call rather than the next session.
-    options.hooks = {
-      ...options.hooks,
-      PreToolUse: [
-        ...(options.hooks?.PreToolUse ?? []),
-        {
-          hooks: [
-            createModePolicyHook({
-              policy: () => ({
-                allowedTools: session.allowedTools,
-                disallowedTools: session.deniedTools,
-              }),
-              mode: () => ({ name: session.modeName ?? session.modeId, id: session.modeId }),
-              onBlocked: (tool) => {
-                this.bus.publish({
-                  type: "notice",
-                  chatId: session.chatId,
-                  level: "info",
-                  text: `${session.modeName ?? session.modeId} mode refused ${tool}.`,
-                });
-              },
-            }),
-          ],
-        },
-      ],
-    };
-
-    // …and refuse a shell-cut worktree, which lands in the catalog attributed to
-    // nobody. Gated on the same service the `worktree` tool is bound from, so
-    // the refusal always has a tool to name.
-    if (this.worktrees) {
-      options.hooks = {
-        ...options.hooks,
-        PreToolUse: [
-          ...(options.hooks?.PreToolUse ?? []),
-          {
-            hooks: [
-              createWorktreeGuardHook({
-                enabled: () => Boolean(this.worktrees),
-                onBlocked: () => {
-                  this.bus.publish({
-                    type: "notice",
-                    chatId: session.chatId,
-                    level: "info",
-                    text:
-                      "Blocked a shell-created worktree — redirected to " +
-                      "mcp__dispatch-workspace__worktree, which records the owning chat.",
-                  });
-                },
-              }),
-            ],
-          },
-        ],
-      };
-    }
-
-    // …and refuse a raw `gh issue create` where the issue watcher would hand the
-    // new issue to another chat. Gated on the same service `issue_create` is
-    // bound from, so the refusal always has a tool to name.
-    if (this.issues && session.projectId) {
-      const projectId = session.projectId;
-      options.hooks = {
-        ...options.hooks,
-        PreToolUse: [
-          ...(options.hooks?.PreToolUse ?? []),
-          {
-            hooks: [
-              createIssueCreateGuardHook({
-                applies: async (repo) => {
-                  if (!resolveIssuePolicy(this.projectConfig?.getConfig?.(projectId)?.issues).enabled) return false;
-                  if (!repo) return true;
-                  const own = await this.issues?.sourceFor(projectId).catch(() => null);
-                  // Unknown source = cannot tell it is elsewhere; let it through
-                  // rather than strand an upstream report with nowhere to go.
-                  return own?.source.repo.toLowerCase() === repo;
-                },
-                onBlocked: () => {
-                  this.bus.publish({
-                    type: "notice",
-                    chatId: session.chatId,
-                    level: "info",
-                    text:
-                      "Blocked `gh issue create` — the issue watcher would have taken it. " +
-                      "Redirected to issue_create, which files it as dispatch:manual.",
-                  });
-                },
-              }),
-            ],
-          },
-        ],
-      };
-    }
-
-    // …and enforce the same contract. A PreToolUse hook (not `canUseTool`) so it
-    // still fires under `bypassPermissions`, which is exactly when an unattended
-    // agent is most likely to reach for `git push origin main`.
-    if (workflow.guard !== "off") {
-      options.hooks = {
-        ...options.hooks,
-        PreToolUse: [
-          ...(options.hooks?.PreToolUse ?? []),
-          {
-            matcher: "Bash",
-            hooks: [
-              createWorkflowGuardHook({
-                context: () =>
-                  session.workflow
-                    ? {
-                        workflow: session.workflow,
-                        trunk: session.trunk ?? "main",
-                        inWorktree: Boolean(session.inWorktree),
-                      }
-                    : null,
-                onViolation: (violation, blocked) => {
-                  this.bus.publish({
-                    type: "notice",
-                    chatId: session.chatId,
-                    level: blocked ? "warn" : "info",
-                    text: `${blocked ? "Blocked" : "Workflow warning"}: ${violation.reason}`,
-                  });
-                },
-                // Read fresh per call, not captured: the agent asks for an
-                // exemption the moment it is refused and retries in the SAME
-                // turn, so a list snapshotted at turn start would never contain
-                // the grant that was the whole point of asking.
-                exemptions: () => session.exemptions,
-                onExempted: (exemption, violation, command) =>
-                  this.consumeExemption(session, exemption, violation, command),
-              }),
-            ],
-          },
-        ],
-      };
-    }
 
     if (mode?.instructions) {
       append("mode", `Mode — ${mode.name || session.modeId}`, mode.instructions);

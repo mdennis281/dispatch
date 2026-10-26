@@ -28,17 +28,19 @@
  * it. A foreground command with a `timeout` is the other honest answer, and the
  * message says so.
  *
- * PreToolUse rather than `canUseTool`, for the same reason as the trunk guard:
- * `canUseTool` is skipped entirely under `bypassPermissions`, which is exactly
- * the posture a long autonomous run uses — i.e. the guard would be missing
- * precisely when it matters most.
+ * A veto before the call rather than `canUseTool`, for the same reason as the
+ * trunk guard: `canUseTool` is skipped entirely under `bypassPermissions`,
+ * which is exactly the posture a long autonomous run uses — i.e. the guard
+ * would be missing precisely when it matters most.
+ *
+ * Every guard here is a plain {@link HarnessToolGuard}: no runtime's hook types,
+ * a refusal string or null. The broker composes them into the one guard every
+ * provider is handed, so a Codex or goose chat gets the same refusals a Claude
+ * chat does — before #424 they got only the mode policy and the workflow guard.
  */
-import type { HookCallback, HookJSONOutput } from "@anthropic-ai/claude-agent-sdk";
+import type { HarnessToolGuard } from "@dispatch/shared";
 import { looksLikeWorktreeCreate } from "./worktree-detector.js";
 import { deniedToolRefusal, isToolAllowed } from "@dispatch/shared";
-
-/** Pass-through: the hook takes no position on this call. */
-const ALLOW: HookJSONOutput = {};
 
 /** The two harness shell tools that take `run_in_background`. */
 const SHELL_TOOLS = new Set(["Bash", "PowerShell"]);
@@ -80,29 +82,14 @@ export function backgroundShellRefusal(): string {
  * not decidable from a command line (`npm test -- --watch` is one, `npm run
  * build` is not), and the tracked path is strictly better for both.
  */
-export function createBackgroundShellGuardHook(
-  deps: BackgroundShellGuardDeps,
-): HookCallback {
-  return async (input): Promise<HookJSONOutput> => {
-    if (input.hook_event_name !== "PreToolUse") return ALLOW;
-    if (!SHELL_TOOLS.has(input.tool_name)) return ALLOW;
-    if (!deps.enabled()) return ALLOW;
+export function createBackgroundShellGuard(deps: BackgroundShellGuardDeps): HarnessToolGuard {
+  return async (toolName, input) => {
+    if (!SHELL_TOOLS.has(toolName)) return null;
+    if (!deps.enabled()) return null;
+    if (input.run_in_background !== true) return null;
 
-    const toolInput = input.tool_input as
-      | { run_in_background?: unknown; command?: unknown }
-      | null;
-    if (toolInput?.run_in_background !== true) return ALLOW;
-
-    const command = typeof toolInput.command === "string" ? toolInput.command : "";
-    deps.onBlocked?.(command);
-
-    return {
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "deny",
-        permissionDecisionReason: backgroundShellRefusal(),
-      },
-    };
+    deps.onBlocked?.(typeof input.command === "string" ? input.command : "");
+    return backgroundShellRefusal();
   };
 }
 
@@ -146,23 +133,16 @@ export interface WorktreeGuardDeps {
 }
 
 /** Deny worktree-CREATING commands on any tool that can run a shell command. */
-export function createWorktreeGuardHook(deps: WorktreeGuardDeps): HookCallback {
-  return async (input): Promise<HookJSONOutput> => {
-    if (input.hook_event_name !== "PreToolUse") return ALLOW;
-    if (!COMMAND_TOOLS.has(input.tool_name)) return ALLOW;
-    if (!deps.enabled()) return ALLOW;
+export function createWorktreeGuard(deps: WorktreeGuardDeps): HarnessToolGuard {
+  return async (toolName, input) => {
+    if (!COMMAND_TOOLS.has(toolName)) return null;
+    if (!deps.enabled()) return null;
 
-    const command = (input.tool_input as { command?: unknown } | null)?.command;
-    if (typeof command !== "string" || !looksLikeWorktreeCreate(command)) return ALLOW;
+    const command = input.command;
+    if (typeof command !== "string" || !looksLikeWorktreeCreate(command)) return null;
 
     deps.onBlocked?.(command);
-    return {
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "deny",
-        permissionDecisionReason: worktreeCommandRefusal(),
-      },
-    };
+    return worktreeCommandRefusal();
   };
 }
 
@@ -224,44 +204,34 @@ export interface IssueCreateGuardDeps {
   onBlocked?: (command: string) => void;
 }
 
-export function createIssueCreateGuardHook(deps: IssueCreateGuardDeps): HookCallback {
-  return async (input): Promise<HookJSONOutput> => {
-    if (input.hook_event_name !== "PreToolUse") return ALLOW;
-    if (!COMMAND_TOOLS.has(input.tool_name)) return ALLOW;
-    const command = (input.tool_input as { command?: unknown } | null)?.command;
-    if (typeof command !== "string" || !looksLikeGhIssueCreate(command)) return ALLOW;
-    if (!(await deps.applies(ghIssueCreateRepo(command)))) return ALLOW;
+export function createIssueCreateGuard(deps: IssueCreateGuardDeps): HarnessToolGuard {
+  return async (toolName, input) => {
+    if (!COMMAND_TOOLS.has(toolName)) return null;
+    const command = input.command;
+    if (typeof command !== "string" || !looksLikeGhIssueCreate(command)) return null;
+    if (!(await deps.applies(ghIssueCreateRepo(command)))) return null;
 
     deps.onBlocked?.(command);
-    return {
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "deny",
-        permissionDecisionReason: issueCreateRefusal(),
-      },
-    };
+    return issueCreateRefusal();
   };
 }
 
 /* ------------------------------------------------------- the mode tool policy */
 
 /**
- * Enforce the selected MODE's tool policy as a PreToolUse veto.
+ * Enforce the selected MODE's tool policy as a veto before the call.
  *
- * The broker builds the same rule into `HarnessSessionSpec.toolGuard`, which
- * covers every runtime reached through the neutral harness layer. The DIRECT
- * Claude path does not go through that: `startQuery` hands `buildOptions`'
- * `Options` straight to the SDK, so the spec's guard is never constructed and
- * the only thing standing between a denied tool and a call was the SDK's own
- * `disallowedTools`.
+ * Handing the policy to the runtime as `allowedTools`/`disallowedTools` is not
+ * enough to rest a posture on. The SDK calls it advisory, it does not filter
+ * MCP tools out of the catalogue (a global chat reported still seeing
+ * `request_review` with that name on the list), and `canUseTool` — the other
+ * gate — is skipped entirely under `bypassPermissions`. A pre-tool veto is
+ * not: Claude's PreToolUse fires for subagent calls too and runs whatever the
+ * permission mode.
  *
- * That is not enough to rest a posture on. It is advisory by the SDK's own
- * account, it does not filter MCP tools out of the catalogue (a global chat
- * reported still seeing `request_review` with that name on the list), and
- * `canUseTool` — the other gate on that path — is skipped entirely under
- * `bypassPermissions`. A hook is not: PreToolUse fires for subagent calls too
- * and runs whatever the permission mode. Same rule, same refusal text, both
- * paths.
+ * Unconditional, unlike the workflow guard: there is no `off` setting, because
+ * the mode that uses it is the one a chat with no project runs under. A runtime
+ * that ignores the allowlist must not thereby be unrestricted.
  */
 export interface ModePolicyGuardDeps {
   /** The policy in force RIGHT NOW — read per call, so a live `setMode` lands. */
@@ -271,18 +241,11 @@ export interface ModePolicyGuardDeps {
   onBlocked?: (tool: string) => void;
 }
 
-export function createModePolicyHook(deps: ModePolicyGuardDeps): HookCallback {
-  return async (input): Promise<HookJSONOutput> => {
-    if (input.hook_event_name !== "PreToolUse") return ALLOW;
-    if (isToolAllowed(input.tool_name, deps.policy())) return ALLOW;
+export function createModePolicyGuard(deps: ModePolicyGuardDeps): HarnessToolGuard {
+  return async (toolName) => {
+    if (isToolAllowed(toolName, deps.policy())) return null;
     const { name, id } = deps.mode();
-    deps.onBlocked?.(input.tool_name);
-    return {
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "deny",
-        permissionDecisionReason: deniedToolRefusal(input.tool_name, name, id),
-      },
-    };
+    deps.onBlocked?.(toolName);
+    return deniedToolRefusal(toolName, name, id);
   };
 }

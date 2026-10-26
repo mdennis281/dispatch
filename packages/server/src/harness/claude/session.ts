@@ -489,23 +489,37 @@ export class ClaudeSession implements HarnessSession {
     };
   }
 
-  /** Blocks a Bash call the workflow contract forbids. */
+  /** Runs the host's composed tool guard on every call, before it runs. */
   private guardHook(): HookCallback {
     return async (input: HookInput): Promise<HookJSONOutput> => {
-      const toolInput = ((input as unknown as { tool_input?: unknown }).tool_input ?? {}) as Record<
-        string,
-        unknown
-      >;
-      const guardInput =
-        typeof input.cwd === "string" ? { ...toolInput, cwd: input.cwd } : toolInput;
+      const i = input as unknown as {
+        tool_input?: unknown;
+        tool_name?: unknown;
+        agent_id?: unknown;
+        tool_use_id?: unknown;
+      };
+      const toolInput = (i.tool_input ?? {}) as Record<string, unknown>;
+      const agentId = typeof i.agent_id === "string" && i.agent_id ? i.agent_id : undefined;
+      const toolUseId = typeof i.tool_use_id === "string" ? i.tool_use_id : undefined;
+      // The run a subagent's call belongs to, when the stream has already
+      // shown us the call — the host can do this lookup itself, but only once
+      // its row has gone out, and a hook can beat it.
+      const parent = agentId && toolUseId ? this.toolThreads.get(toolUseId) : undefined;
       // The real tool name, not a hardcoded "Bash": the hook is unmatched now,
-      // so the guard must be told which tool it is being asked about.
-      const toolName = (input as unknown as { tool_name?: unknown }).tool_name;
-      const blocked = catchToolGuard(
+      // so the guard must be told which tool it is being asked about. The cwd
+      // goes in the CONTEXT: splicing it into the input (as this used to) made
+      // the blocked row show a `cwd` argument the model never passed.
+      const blocked = await catchToolGuard(
         this.spec.toolGuard,
-        typeof toolName === "string" ? toolName : "Bash",
-        guardInput,
+        typeof i.tool_name === "string" ? i.tool_name : "Bash",
+        toolInput,
         "in-place",
+        {
+          cwd: typeof input.cwd === "string" ? input.cwd : undefined,
+          agentId,
+          toolUseId,
+          parentToolUseId: parent ?? undefined,
+        },
       );
       if (!blocked) return {};
       this.emit(blocked);

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -22,7 +22,9 @@ import { AuthoredConfigService } from "./authored-config.js";
 import { SessionBroker } from "./session-broker.js";
 import { ManagerMcpBridge } from "./mcp/manager-http.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { GLOBAL_MODE_ID, GLOBAL_PROJECT_ID } from "@dispatch/shared";
+import { GLOBAL_MODE_ID, GLOBAL_PROJECT_ID, resolveWorkflow } from "@dispatch/shared";
+import type { WsServerEvent } from "@dispatch/shared";
+import { EXEMPTION_ANSWERS } from "./mcp/manager-mcp.js";
 
 let transfers: unknown[][] = [];
 /**
@@ -114,7 +116,10 @@ class FakeHarnessSession implements HarnessSession {
       this.emit({ type: "turn-end", ok: true, subtype: "success", result: "Not enough messages to compact." });
     }
   }
-  resolvePermission(_id: string, _resolution: HarnessPermissionResolution) {}
+  readonly resolutions: [string, HarnessPermissionResolution][] = [];
+  resolvePermission(id: string, resolution: HarnessPermissionResolution) {
+    this.resolutions.push([id, resolution]);
+  }
   resolveQuestion(_id: string, _answers: HarnessQuestionAnswer[]) {}
   async contextWindow() { return 1_000; }
   async dispose() {
@@ -443,19 +448,19 @@ describe("SessionBroker neutral harness path", () => {
       const guard = specs[0]!.toolGuard!;
 
       // The three the posture exists to stop…
-      expect(guard("mcp__dispatch-workspace__worktree", { action: "create" })).toMatch(
+      expect(await guard("mcp__dispatch-workspace__worktree", { action: "create" }, {})).toMatch(
         /not available in Global mode/,
       );
-      expect(guard("mcp__dispatch-github__approve_pr", { number: 1 })).toMatch(
+      expect(await guard("mcp__dispatch-github__approve_pr", { number: 1 }, {})).toMatch(
         /not available in Global mode/,
       );
-      expect(guard("Edit", { file_path: "C:/x.ts" })).toMatch(/not available in Global mode/);
+      expect(await guard("Edit", { file_path: "C:/x.ts" }, {})).toMatch(/not available in Global mode/);
       // …and the shell, which is otherwise all three in one command.
-      expect(guard("Bash", { command: "echo hi" })).toMatch(/not available in Global mode/);
+      expect(await guard("Bash", { command: "echo hi" }, {})).toMatch(/not available in Global mode/);
 
       // …and the one it exists to ENABLE.
-      expect(guard("mcp__dispatch-chat__spawn_chat", { prompt: "go" })).toBeNull();
-      expect(guard("Read", { file_path: "C:/x.ts" })).toBeNull();
+      expect(await guard("mcp__dispatch-chat__spawn_chat", { prompt: "go" }, {})).toBeNull();
+      expect(await guard("Read", { file_path: "C:/x.ts" }, {})).toBeNull();
     });
 
     it("ignores a mode pinned on the row, however it got there", async () => {
@@ -482,7 +487,7 @@ describe("SessionBroker neutral harness path", () => {
       await broker.waitFor(chat.id, "idle");
       expect(specs[0]!.disallowedTools).toContain("Bash");
       expect(specs[0]!.permissionMode).not.toBe("bypassPermissions");
-      expect(specs[0]!.toolGuard!("Bash", { command: "echo hi" })).toMatch(/not available/);
+      expect(await specs[0]!.toolGuard!("Bash", { command: "echo hi" }, {})).toMatch(/not available/);
     });
 
     it("refuses a runtime that cannot name an MCP call, even if it vetoes in time", async () => {
@@ -517,8 +522,39 @@ describe("SessionBroker neutral harness path", () => {
       });
       broker.create(chat);
       await broker.sendMessage(chat.id, "hello");
-      await waitUntil(() => errors.some((m) => /cannot run on codex/.test(m)));
+      await waitUntil(() => errors.some((m) => /cannot run on Codex/.test(m)));
       expect(specs).toHaveLength(0);
+    });
+
+    it("names the installed runtimes that CAN hold the posture, not a hard-coded Claude", async () => {
+      // #422: Dispatch must work with no Claude at all, so "switch to Claude"
+      // is advice the human may have no way to take.
+      caps.preToolGuard = false;
+      const goose: Harness = {
+        kind: "goose",
+        capabilities: {
+          ...(caps as unknown as Harness["capabilities"]),
+          preToolGuard: true,
+          guardsMcpToolNames: true,
+        },
+        runtime: () => ({ kind: "goose", source: "installed", available: true }),
+        listModels: async () => [],
+        readLimits: async () => null,
+        generateText: async () => "title",
+        createSession: () => session,
+      };
+      (broker as unknown as { harnesses: HarnessRegistry }).harnesses.register(goose, GOOSE_PROVIDER);
+      const chat = await globalChat();
+      const errors: string[] = [];
+      bus.subscribe((e) => {
+        if (e.type === "error") errors.push(`${e.message} ${e.detail ?? ""}`);
+      });
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "hello");
+      await waitUntil(() => errors.some((m) => /cannot run on Codex/.test(m)));
+      const message = errors.find((m) => /cannot run on Codex/.test(m))!;
+      expect(message).toMatch(new RegExp(`runtime that can \\([^)]*${GOOSE_PROVIDER.label}`));
+      expect(message).not.toMatch(/\(Claude\)/);
     });
 
     it("carries the project index and the posture overlay, and nothing bigger", async () => {
@@ -948,6 +984,214 @@ describe("SessionBroker neutral harness path", () => {
     // and retention treats the file as theirs.
     const row = (await store.readMessages(chat.id)).find((r) => r.kind === "user");
     expect(row && "images" in row ? row.images?.map((i) => i.id) : []).toEqual(["image-1", "file-1"]);
+  });
+
+  /**
+   * #424: every guard reaches a provider on the neutral seam.
+   *
+   * Before it, a Codex or goose chat got the mode policy and a hand-copied
+   * workflow guard that ignored exemptions — and nothing else. Each case here
+   * drives the guard the FAKE PROVIDER was actually handed in its spec, which
+   * is the one function a real adapter calls.
+   */
+  describe("every guard, on the harness path", () => {
+    type Live = {
+      workflow?: ReturnType<typeof resolveWorkflow>;
+      trunk?: string;
+      branch?: string | null;
+      inWorktree?: boolean;
+    };
+
+    async function started(id = "guarded") {
+      const chat = await store.saveChat({
+        id,
+        projectId: "p1",
+        title: "Guarded",
+        harness: "codex",
+        worktrees: [],
+        prs: [],
+        createdAt: 1,
+      });
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "hello");
+      await broker.waitFor(chat.id, "idle");
+      const live = (broker as unknown as { sessions: Map<string, Live> }).sessions.get(id)!;
+      return { chat, live, guard: specs[0]!.toolGuard! };
+    }
+
+    /** Wire the services a guard is gated on, the way `index.ts` would. */
+    function provide(services: Record<string, unknown>) {
+      Object.assign(broker as unknown as Record<string, unknown>, services);
+    }
+
+    function notices(): string[] {
+      const seen: string[] = [];
+      bus.subscribe((e) => {
+        if (e.type === "notice") seen.push(e.text);
+      });
+      return seen;
+    }
+
+    /** A `review` project the chat is sitting on the trunk of. */
+    function onTrunk(live: Live) {
+      live.workflow = resolveWorkflow({ workflow: { profile: "review" } });
+      live.trunk = "main";
+      live.branch = "main";
+      live.inWorktree = false;
+    }
+
+    /** Answer the exemption card the broker raises, the way the human would. */
+    async function grant(chatId: string, lifetime: "once" | "session") {
+      const reqP = new Promise<string>((resolve) => {
+        const off = bus.subscribe((e: WsServerEvent) => {
+          if (e.type === "permission-request" && e.request.chatId === chatId) {
+            off();
+            resolve(e.request.id);
+          }
+        });
+      });
+      const verdictP = broker.requestExemption(chatId, {
+        scope: "push-to-trunk",
+        command: "git push origin main",
+        reason: "create_pr is down",
+      });
+      const reqId = await reqP;
+      const answer = EXEMPTION_ANSWERS[lifetime]!;
+      broker.answerQuestion(reqId, { answers: [{ questionIndex: 0, optionId: answer, answer }] });
+      return verdictP;
+    }
+
+    it("honours an exemption granted MID-CHAT — and spends a one-shot exactly once", async () => {
+      // The headline bug: the harness guard never read `session.exemptions`,
+      // so the human approved the card and the agent stayed stuck.
+      const { chat, live, guard } = await started();
+      onTrunk(live);
+      const push = { command: "git push origin main" };
+
+      expect(await guard("Bash", push, {})).toMatch(/request_exemption/);
+      expect(await grant(chat.id, "once")).toMatchObject({ granted: true });
+
+      expect(await guard("Bash", push, {})).toBeNull();
+      expect(broker.listExemptions(chat.id)).toEqual([]);
+      expect(await guard("Bash", push, {})).toMatch(/workflow profile/);
+    });
+
+    it("never spends a grant on a call another guard refused", async () => {
+      // As parallel Claude hooks, the background-shell guard could refuse a
+      // call while the workflow guard burned the one-shot on it anyway.
+      const { chat, live, guard } = await started();
+      provide({ terminals: {} });
+      onTrunk(live);
+      expect(await grant(chat.id, "once")).toMatchObject({ granted: true });
+
+      expect(
+        await guard("Bash", { command: "git push origin main", run_in_background: true }, {}),
+      ).toMatch(/run_in_background/);
+      expect(broker.listExemptions(chat.id)).toHaveLength(1);
+    });
+
+    it("reads the branch from the call's cwd, and falls back to the session's without one", async () => {
+      const { live, guard } = await started();
+      onTrunk(live);
+      // goose reports no cwd: the chat's own branch (`main`) stands.
+      expect(await guard("Bash", { command: "git commit -m x" }, {})).toMatch(/workflow profile/);
+      // A cwd outside any repo is no evidence either way — same fallback.
+      expect(await guard("Bash", { command: "git commit -m x" }, { cwd: dir })).toMatch(
+        /workflow profile/,
+      );
+    });
+
+    it("refuses a background shell, where there is a tracked terminal to send it to", async () => {
+      const { guard } = await started();
+      const bg = { command: "npm run dev", run_in_background: true };
+      expect(await guard("Bash", bg, {})).toBeNull();
+      provide({ terminals: {} });
+      expect(await guard("Bash", bg, {})).toMatch(/mcp__dispatch-workspace__terminal/);
+    });
+
+    it("refuses a shell-cut worktree, including through Dispatch's own terminal tool", async () => {
+      const { guard } = await started();
+      provide({ worktrees: {} });
+      const cut = { command: "git worktree add -b feat/x ../wt/x" };
+      expect(await guard("Bash", cut, {})).toMatch(/mcp__dispatch-workspace__worktree/);
+      expect(await guard("mcp__dispatch-workspace__terminal", cut, {})).toMatch(/worktree/);
+      expect(await guard("Bash", { command: "git worktree list" }, {})).toBeNull();
+    });
+
+    it("refuses `gh issue create` where the watcher would take it, and only there", async () => {
+      let watching = true;
+      // Provided after the start: these stubs answer only what the guard asks,
+      // and session setup asks the real services a good deal more.
+      const { guard } = await started();
+      provide({
+        issues: { sourceFor: async () => ({ source: { repo: "Acme/API" } }) },
+        projectConfig: { getConfig: () => ({ issues: { enabled: watching } }) },
+      });
+      expect(await guard("Bash", { command: 'gh issue create -t "x"' }, {})).toMatch(/issue_create/);
+      expect(await guard("Bash", { command: 'gh issue create -R upstream/lib -t "x"' }, {})).toBeNull();
+      watching = false;
+      expect(await guard("Bash", { command: 'gh issue create -t "x"' }, {})).toBeNull();
+    });
+
+    it("holds a subagent to the worktree it started in, and lets the main loop roam", async () => {
+      const base = await mkdtemp(join(tmpdir(), "cm-harness-wt-"));
+      const home = join(base, "home");
+      const other = join(base, "other");
+      for (const wt of [home, other]) {
+        await mkdir(wt, { recursive: true });
+        await writeFile(join(wt, ".git"), `gitdir: ${join(base, ".bare", "worktrees", "x")}`);
+      }
+      try {
+        const { guard } = await started();
+        const sub = { parentToolUseId: "task-1", agentId: "child-thread" };
+        expect(
+          await guard("Edit", { file_path: join(home, "a.ts") }, { ...sub, cwd: home }),
+        ).toBeNull();
+        const refusal = await guard("Edit", { file_path: join(other, "b.ts") }, { ...sub, cwd: other });
+        expect(refusal).toContain(home);
+        expect(refusal).toContain(other);
+        // The main loop moving between worktrees is its job.
+        expect(await guard("Edit", { file_path: join(other, "c.ts") }, { cwd: other })).toBeNull();
+        // No cwd from the runtime: not tracked, rather than tracked wrongly.
+        expect(await guard("Edit", { file_path: join(other, "d.ts") }, { ...sub })).toBeNull();
+      } finally {
+        await rm(base, { recursive: true, force: true });
+      }
+    });
+
+    it("leaves refusal notices to the adapter's guard-blocked, but still publishes warnings", async () => {
+      // The adapter turns every refusal into a persisted "Blocked: …" row; a
+      // guard-specific notice as well would show the human each one twice.
+      const { live, guard } = await started();
+      provide({ terminals: {} });
+      const seen = notices();
+      await guard("Bash", { command: "npm run dev", run_in_background: true }, {});
+      expect(seen).toEqual([]);
+
+      live.workflow = resolveWorkflow({ workflow: { profile: "review", guard: "warn" } });
+      live.trunk = "main";
+      live.branch = "main";
+      expect(await guard("Bash", { command: "git push origin main" }, {})).toBeNull();
+      expect(seen.some((t) => t.startsWith("Workflow warning:"))).toBe(true);
+    });
+
+    it("answers a self-gated tool's permission prompt itself — one card, not two", async () => {
+      const { chat } = await started();
+      const cards: string[] = [];
+      bus.subscribe((e) => {
+        if (e.type === "permission-request") cards.push(e.request.toolName);
+      });
+      session.emit({
+        type: "permission-request",
+        requestId: "perm-1",
+        toolName: "mcp__dispatch-confirm__ask_user",
+        input: { questions: [] },
+      });
+      await waitUntil(() => session.resolutions.length > 0);
+      expect(session.resolutions).toEqual([["perm-1", { decision: "allow" }]]);
+      expect(cards).toEqual([]);
+      expect(broker.getSession(chat.id)?.status).not.toBe("awaiting-input");
+    });
   });
 
   describe("switching login accounts", () => {

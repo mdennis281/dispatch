@@ -548,7 +548,7 @@ describe("CodexSession approvals", () => {
 
   it("auto-declines a command the workflow guard forbids, without asking the human", async () => {
     const { session, fake } = makeSession({
-      toolGuard: (name, input) =>
+      toolGuard: async (name, input) =>
         name === "Bash" && String(input.command).includes("push origin main")
           ? "pushes to trunk are not allowed"
           : null,
@@ -592,7 +592,7 @@ describe("CodexSession approvals", () => {
     ] as const) {
       const { session, fake } = makeSession({
         permissionMode: "bypassPermissions",
-        toolGuard: () => "not allowed here",
+        toolGuard: async () => "not allowed here",
       });
       const events: HarnessEvent[] = [];
       void (async () => {
@@ -615,7 +615,7 @@ describe("CodexSession approvals", () => {
     // can only catch it once the item is already running.
     const { session, fake } = makeSession({
       permissionMode: "bypassPermissions",
-      toolGuard: () => "not allowed here",
+      toolGuard: async () => "not allowed here",
     });
     const events: HarnessEvent[] = [];
     void (async () => {
@@ -651,6 +651,160 @@ describe("CodexSession approvals", () => {
       continuation: "restart-turn",
     });
     expect(fake.calls.some((c) => c.method === "turn/interrupt")).toBe(true);
+  });
+
+  it("hands the guard the call's cwd and item id as context", async () => {
+    const seen: unknown[] = [];
+    const { session, fake } = makeSession({
+      permissionMode: "bypassPermissions",
+      toolGuard: async (_name, _input, ctx) => {
+        seen.push(ctx);
+        return null;
+      },
+    });
+    session.send({ text: "go" });
+    await fake.tick();
+    fake.push("turn/started", { threadId: "thread-1", turn: { id: "turn-1" } });
+    fake.push("item/started", {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: { type: "commandExecution", id: "c9", command: "ls", cwd: "/repo/wt" },
+    });
+    await fake.tick();
+    expect(seen).toEqual([{ cwd: "/repo/wt", toolUseId: "c9" }]);
+  });
+
+  it("does not ask the guard again on sighting an item it passed at the approval prompt", async () => {
+    // The guard is stateful: passing a call can spend a one-shot exemption.
+    // Asked a second time when the SAME item starts, it would refuse the very
+    // call the human just granted — and interrupt the turn over it.
+    let asked = 0;
+    const { session, fake } = makeSession({
+      toolGuard: async () => (++asked === 1 ? null : "the one-shot is spent"),
+    });
+    const events: HarnessEvent[] = [];
+    void (async () => {
+      for await (const e of session.events) events.push(e);
+    })();
+    session.send({ text: "go" });
+    await fake.tick();
+    fake.push("turn/started", { threadId: "thread-1", turn: { id: "turn-1" } });
+    fake.request({
+      id: 21,
+      method: "item/commandExecution/requestApproval",
+      params: { threadId: "thread-1", itemId: "c1", command: "git push origin main" },
+    });
+    await fake.tick();
+    const ask = events.find((e) => e.type === "permission-request")!;
+    session.resolvePermission((ask as { requestId: string }).requestId, { decision: "allow" });
+    fake.push("item/started", {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: { type: "commandExecution", id: "c1", command: "git push origin main" },
+    });
+    await fake.tick();
+
+    expect(asked).toBe(1);
+    expect(events.some((e) => e.type === "guard-blocked")).toBe(false);
+    expect(fake.calls.some((c) => c.method === "turn/interrupt")).toBe(false);
+  });
+
+  it("shares one verdict when the item is sighted BEFORE its approval prompt", async () => {
+    // The other order. Keyed one way only, the sighting spent the grant and
+    // the approval prompt then refused the call the human had granted.
+    let asked = 0;
+    const { session, fake } = makeSession({
+      toolGuard: async () => (++asked === 1 ? null : "the one-shot is spent"),
+    });
+    const events: HarnessEvent[] = [];
+    void (async () => {
+      for await (const e of session.events) events.push(e);
+    })();
+    session.send({ text: "go" });
+    await fake.tick();
+    fake.push("turn/started", { threadId: "thread-1", turn: { id: "turn-1" } });
+    fake.push("item/started", {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: { type: "commandExecution", id: "c1", command: "git push origin main" },
+    });
+    // Separate deliveries, as from the app-server: the sighting is decided
+    // before the request arrives.
+    await fake.tick();
+    fake.request({
+      id: 22,
+      method: "item/commandExecution/requestApproval",
+      params: { threadId: "thread-1", itemId: "c1", command: "git push origin main" },
+    });
+    await fake.tick();
+
+    expect(asked).toBe(1);
+    expect(events.some((e) => e.type === "guard-blocked")).toBe(false);
+    expect(events.some((e) => e.type === "permission-request")).toBe(true);
+    expect(fake.responses.some((r) => r.id === 22)).toBe(false);
+  });
+
+  it("reports a refusal once when the sighting and the approval prompt both meet it", async () => {
+    const { session, fake } = makeSession({ toolGuard: async () => "not allowed here" });
+    const events: HarnessEvent[] = [];
+    void (async () => {
+      for await (const e of session.events) events.push(e);
+    })();
+    session.send({ text: "go" });
+    await fake.tick();
+    fake.push("turn/started", { threadId: "thread-1", turn: { id: "turn-1" } });
+    fake.push("item/started", {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: { type: "commandExecution", id: "c1", command: "git push origin main" },
+    });
+    // Separate deliveries, as from the app-server: the sighting is decided
+    // before the request arrives.
+    await fake.tick();
+    fake.request({
+      id: 23,
+      method: "item/commandExecution/requestApproval",
+      params: { threadId: "thread-1", itemId: "c1", command: "git push origin main" },
+    });
+    await fake.tick();
+
+    expect(events.filter((e) => e.type === "guard-blocked")).toHaveLength(1);
+    expect(fake.responses).toContainEqual({ id: 23, result: { decision: "decline" } });
+  });
+
+  it("never lets a turn end overtake a guard verdict still being reached", async () => {
+    // One stdout chunk can carry item/started, item/completed and
+    // turn/completed, dispatched back to back. An async refusal that landed
+    // after the turn end would have nothing to recover — the turn would just
+    // be over, which a guard hit must never cause.
+    const { session, fake } = makeSession({
+      permissionMode: "bypassPermissions",
+      toolGuard: () => new Promise((resolve) => setTimeout(() => resolve("not allowed here"), 5)),
+    });
+    const events: HarnessEvent[] = [];
+    void (async () => {
+      for await (const e of session.events) events.push(e);
+    })();
+    session.send({ text: "go" });
+    await fake.tick();
+    fake.push("turn/started", { threadId: "thread-1", turn: { id: "turn-1" } });
+    const item = { type: "commandExecution", id: "c1", command: "git push origin main" };
+    fake.push("item/started", { threadId: "thread-1", turnId: "turn-1", item });
+    fake.push("item/completed", {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: { ...item, status: "completed", exitCode: 0, aggregatedOutput: "" },
+    });
+    fake.push("turn/completed", {
+      threadId: "thread-1",
+      turn: { id: "turn-1", status: "interrupted" },
+    });
+    await new Promise((r) => setTimeout(r, 30));
+
+    const blocked = events.findIndex((e) => e.type === "guard-blocked");
+    const ended = events.findIndex((e) => e.type === "turn-end");
+    expect(blocked).toBeGreaterThanOrEqual(0);
+    expect(ended).toBeGreaterThan(blocked);
   });
 
   it("answers a question with the per-question payload Codex expects", async () => {
