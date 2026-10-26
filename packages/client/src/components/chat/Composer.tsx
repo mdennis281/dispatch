@@ -38,10 +38,10 @@ import {
   RotateCcw,
   Volume2,
   AudioLines,
+  TriangleAlert,
 } from "lucide-react";
-import type { Chat, Effort, AgentConfig, ModeConfig, ImageRef } from "@dispatch/shared";
+import type { Chat, Effort, AgentConfig, ModeConfig, ImageRef, HarnessKind } from "@dispatch/shared";
 import {
-  DEFAULT_HARNESS,
   isGlobalProject,
   accountLabel,
   chatAccountOf,
@@ -95,6 +95,7 @@ import { blockingQuestion, composerDeferred, isDoubleTap } from "../../lib/compo
 import { useChats } from "../../stores/chats.js";
 import { useModels } from "../../stores/models.js";
 import { useHarnesses } from "../../stores/harnesses.js";
+import { useAvailableProviders, useProviderAvailability } from "../../lib/providerAvailability.js";
 import { useSubscriptions } from "../../stores/subscriptions.js";
 import { useLayoutMode } from "../../stores/layout.js";
 import { Drawer } from "../layout/Drawer.js";
@@ -323,7 +324,13 @@ type ConfigView = "root" | ComposerControl | "customize" | "voice";
 /** The chat composer: TipTap input + attachments + effort/mode/agent + send/steer. */
 export function Composer({ chat, agents, modes }: ComposerProps) {
   const upsertChat = useChats((s) => s.upsertChat);
-  const harness = chat.harness ?? DEFAULT_HARNESS;
+  // Exactly the row's provider — no default fills an absent one in (#426).
+  const harness = chat.harness;
+  // Why this chat cannot run right now, if it can't: its provider plugin is off,
+  // its CLI is missing, or it names none. Derived from the live provider list,
+  // so the banner below clears by itself the moment the provider comes back.
+  const unavailable = useProviderAvailability(harness);
+  const switchable = useAvailableProviders();
   // What this chat RUNS as. `chat.effort` / `chat.modeId` / `chat.model` are
   // pins and may be absent; the resolved values below are what every control
   // displays, and each carries where it came from for the inherit rows.
@@ -368,7 +375,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   // and a separate toolbar control for it duplicated the provider switch (an
   // account on another provider moves the chat there anyway).
   const accounts = useSubscriptions((s) => s.list);
-  const account = chatAccountOf(accounts, chat, harness);
+  const account = harness ? chatAccountOf(accounts, chat, harness) : undefined;
   const accountName = account ? accountLabel(account) : undefined;
   // Which provider's accounts the model menu has drilled into, if any. Swapped
   // IN PLACE for the same reason `moreView` is — never a popover in a popover.
@@ -385,7 +392,11 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   const project = useProjects((s) => s.projects.find((p) => p.id === chat.projectId));
   const pickerRoot = project ? chatRoot(chat, project) : chat.worktrees[0];
   const [model, setModelState] = useState<string>(
-    () => modelByChat.get(chat.id) ?? posture.model.effective ?? defaultModelFor(harness) ?? "",
+    () =>
+      modelByChat.get(chat.id) ??
+      posture.model.effective ??
+      (harness ? defaultModelFor(harness) : undefined) ??
+      "",
   );
   // Selectable models come from the server (the live Claude Code runtime list,
   // or a static fallback), seeded so the picker is never empty. `findModel`
@@ -403,6 +414,12 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   const selectedModel = chat.agentId ? undefined : findModel(models, model);
 
   useEffect(() => {
+    // No provider, no catalogue — the picker empties rather than keeping the
+    // previous chat's list, whose ids this chat could never send.
+    if (!harness) {
+      useModels.getState().setModels([], undefined);
+      return;
+    }
     const cached = useModels.getState().byHarness[harness];
     if (cached?.length) useModels.getState().setModels(cached, harness);
     void api.models
@@ -606,7 +623,12 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     setUploading(0);
     setError(null);
     setIsEmpty(editor.isEmpty);
-    setModelState(modelByChat.get(chat.id) ?? posture.model.effective ?? defaultModelFor(harness) ?? "");
+    setModelState(
+      modelByChat.get(chat.id) ??
+        posture.model.effective ??
+        (harness ? defaultModelFor(harness) : undefined) ??
+        "",
+    );
 
     // Land the caret in the composer so an opened chat — brand new, picked from
     // the sidebar, or jumped to from the palette — is typeable immediately. Every
@@ -929,7 +951,9 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   const chooseModel = (m: string | null) => {
     if (m === null) modelByChat.delete(chat.id);
     else modelByChat.set(chat.id, m);
-    setModelState(m ?? posture.model.inherited ?? defaultModelFor(harness) ?? "");
+    setModelState(
+      m ?? posture.model.inherited ?? (harness ? defaultModelFor(harness) : undefined) ?? "",
+    );
     upsertChat({ ...chat, model: m ?? undefined });
     actions.setModel(chat.id, m);
     // A plain model and a custom agent are mutually-exclusive "brains" here —
@@ -971,7 +995,10 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   );
   const currentAgent = scopedAgents.find((a) => a.id === chat.agentId);
 
-  const canSend = (!isEmpty || attachments.length > 0) && uploading === 0;
+  // A chat whose provider cannot run is not sendable: the server refuses that
+  // turn anyway, and refusing here keeps the draft instead of losing it to a
+  // round trip that ends in an error toast.
+  const canSend = (!isEmpty || attachments.length > 0) && uploading === 0 && !unavailable;
 
   /* ----------------------------------------------- standing down for a question */
 
@@ -1148,6 +1175,25 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     runtimeControls,
   ]);
 
+  /**
+   * Move this chat onto another provider. Optimistic, mirroring what the server
+   * writes: a provider move drops the native session and the model pin, which
+   * belonged to the old provider's catalogue. The ONE switch path, shared by
+   * the provider menu and the unavailable banner.
+   */
+  const switchProvider = (kind: HarnessKind) => {
+    modelByChat.delete(chat.id);
+    setModelState("");
+    upsertChat({
+      ...chat,
+      harness: kind,
+      sessionId: undefined,
+      model: undefined,
+      status: "idle",
+    });
+    actions.setHarness(chat.id, kind);
+  };
+
   /* ------------------------------------------------------- shared menu bodies */
 
   /**
@@ -1176,6 +1222,25 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     ) : (
     <>
       <div className="px-2 py-1 text-2xs uppercase tracking-wide text-faint">Provider</div>
+      {/* The chat's own provider when nothing registers it any more (its plugin
+          is off or gone). Without this row the menu listed only the OTHER
+          providers, so the one the chat is actually on — and the reason it
+          won't run — was nowhere in the place you go to change it. */}
+      {harness && !harnesses.some((h) => h.kind === harness) && (
+        <MenuItem
+          icon={<TriangleAlert />}
+          dense={dense}
+          active
+          disabled
+          hint="not available"
+          title={unavailable?.message}
+        >
+          <span className="flex items-center gap-2">
+            {providerFor(harness).label}
+            <Check className="size-3 text-accent" />
+          </span>
+        </MenuItem>
+      )}
       {harnesses.map((candidate) => {
         // A provider with a choice of accounts drills into them rather than
         // switching outright — picking the account IS the switch, so a bare
@@ -1213,16 +1278,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
               return;
             }
             if (active) return;
-            modelByChat.delete(chat.id);
-            setModelState("");
-            upsertChat({
-              ...chat,
-              harness: candidate.kind,
-              sessionId: undefined,
-              model: undefined,
-              status: "idle",
-            });
-            actions.setHarness(chat.id, candidate.kind);
+            switchProvider(candidate.kind);
             close();
           }}
         >
@@ -1235,7 +1291,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
       })}
       <div className="my-1 h-px bg-line" />
       <div className="px-2 py-1 text-2xs uppercase tracking-wide text-faint">
-        Model · {harness}
+        Model · {providerFor(harness).label}
       </div>
       <MenuItem
         icon={<RotateCcw />}
@@ -1710,6 +1766,40 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
           <span className="text-xs text-muted">
             {pending === 1 ? "message" : "messages"} will send when this turn finishes
           </span>
+        </div>
+      )}
+      {/* Provider unavailable — a STATE, not a toast (#426). It used to flash
+          "x is unavailable; using claude" and quietly move the chat to Claude
+          for good. Now the chat stays on its provider and says why it can't
+          run; it clears by itself when the provider comes back, and the way
+          out — another provider — is offered right here. */}
+      {unavailable && (
+        <div
+          role="status"
+          data-testid="provider-unavailable"
+          className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-md border border-warn-line bg-warn-ghost px-3 py-2 text-xs text-secondary [&_svg]:size-3.5"
+        >
+          <span className="flex min-w-0 flex-1 items-center gap-2">
+            <TriangleAlert className="shrink-0 text-warn" />
+            <span className="min-w-0">
+              {unavailable.message}{" "}
+              <span className="text-muted">
+                {switchable.length
+                  ? "Switch provider to keep going, or bring this one back."
+                  : "No other provider is available — enable one in Settings → Plugins."}
+              </span>
+            </span>
+          </span>
+          {switchable.slice(0, 3).map((h) => (
+            <Button
+              key={h.kind}
+              size="sm"
+              leftIcon={<Cpu />}
+              onClick={() => switchProvider(h.kind)}
+            >
+              Switch to {providerFor(h.kind).label}
+            </Button>
+          ))}
         </div>
       )}
 

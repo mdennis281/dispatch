@@ -1,6 +1,5 @@
 import { create } from "zustand";
 import {
-  DEFAULT_HARNESS,
   usageWindowsOf,
   type UsageOverview,
   type UsageSnapshot,
@@ -29,8 +28,11 @@ interface UsageStore {
   bySubscription: Record<string, UsageSnapshot>;
   /** Accounts with a manual refresh in flight (spins the card's button). */
   refreshing: Record<string, boolean>;
-  /** The account the header gauge reads: the active chat's, else the app default's. */
-  target: UsageTarget;
+  /**
+   * The account the header gauge reads: the active chat's, else the app
+   * default's — or null when neither names a provider (#426).
+   */
+  target: UsageTarget | null;
   /**
    * Every logged-in account's windows, for the card. Null until the card first
    * opens — the gauge never needs it, and reading every account (a Codex
@@ -104,7 +106,8 @@ export const useUsage = create<UsageStore>((set, get) => {
   return {
     bySubscription: {},
     refreshing: {},
-    target: { harness: DEFAULT_HARNESS },
+    // No provider yet: the gauge has nothing to show until `load` finds one.
+    target: null,
     overview: null,
     overviewLoading: false,
 
@@ -122,7 +125,10 @@ export const useUsage = create<UsageStore>((set, get) => {
     },
 
     set: (usage) => {
-      const harness = usage.provider ?? DEFAULT_HARNESS;
+      // An unstamped push is unattributable now that there is no default
+      // provider to file it under; the next stamped read replaces it.
+      const harness = usage.provider;
+      if (!harness) return;
       // A push the server couldn't stamp comes from the poller it started at
       // boot, which is the account at the provider's default directory.
       const subscriptionId =
@@ -156,7 +162,11 @@ export const useUsage = create<UsageStore>((set, get) => {
       const seq = ++loadSeq;
       const settings = requested ? null : await api.settings.get().catch(() => null);
       if (seq !== loadSeq) return;
-      const target = requested ?? { harness: settings?.harness?.defaultHarness ?? DEFAULT_HARNESS };
+      const harness = requested?.harness ?? settings?.harness?.defaultHarness;
+      // No chat provider and no app default: no meter, honestly, rather than
+      // reading somebody's Claude windows in its place.
+      if (!harness) return;
+      const target = requested ?? { harness };
       await get().loadTarget(target);
       // Move the gauge only once the new account has windows to show. The gauge
       // renders nothing without them, so moving first unmounted it (and an open

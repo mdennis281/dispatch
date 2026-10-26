@@ -19,7 +19,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { SlidersHorizontal, Save, Undo2 } from "lucide-react";
-import { DEFAULT_HARNESS, SHELL_TRANSCRIPT_CATEGORIES } from "@dispatch/shared";
+import { SHELL_TRANSCRIPT_CATEGORIES } from "@dispatch/shared";
 import type { HarnessKind, ModelOption } from "@dispatch/shared";
 import { InlineError } from "../sidebar/Modal.js";
 import { Button } from "../ui/Button.js";
@@ -129,7 +129,10 @@ function normalize(s: AppSettings): AppSettings {
       reviewKinds: s.attentionQueue?.reviewKinds ?? {},
     },
     harness: {
-      defaultHarness: s.harness?.defaultHarness ?? DEFAULT_HARNESS,
+      // As stored — absent stays absent. Filling Claude in here meant saving
+      // ANY setting wrote `defaultHarness: "claude"` onto an install that might
+      // not have Claude at all (#426).
+      defaultHarness: s.harness?.defaultHarness,
       defaults: s.harness?.defaults ?? {},
       contextLimits: s.harness?.contextLimits ?? {},
     },
@@ -235,7 +238,7 @@ export function AppSettingsView() {
       },
       harness: {
         ...draft.harness,
-        defaultHarness: draft.harness?.defaultHarness ?? DEFAULT_HARNESS,
+        defaultHarness: draft.harness?.defaultHarness || undefined,
         defaults: draft.harness?.defaults ?? {},
         contextLimits: normalizeContextLimits(draft.harness?.contextLimits ?? {}),
       },

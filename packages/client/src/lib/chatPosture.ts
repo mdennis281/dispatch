@@ -15,7 +15,6 @@
  * case the source label exists to explain.
  */
 import {
-  DEFAULT_HARNESS,
   layerSourceLabel,
   layerSourceShort,
   resolveChatPosture,
@@ -36,7 +35,10 @@ export function useChatPosture(chatId: string | null): ChatPosture {
     enforceGlobalPosture(chat?.projectId, {
       chat: chat
         ? {
-            harness: chat.harness ?? DEFAULT_HARNESS,
+            // Exactly the row's provider. An absent one is NO provider (the
+            // server backfilled every legacy row to an explicit "claude"), so
+            // the chain must not quietly read Claude into it.
+            harness: chat.harness,
             subscriptionId: chat.subscriptionId,
             modeId: chat.modeId,
             effort: chat.effort,

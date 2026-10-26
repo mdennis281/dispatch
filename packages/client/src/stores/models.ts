@@ -1,32 +1,33 @@
 import { create } from "zustand";
-import {
-  DEFAULT_HARNESS,
-  fallbackModels,
-  type HarnessKind,
-  type ModelOption,
-} from "@dispatch/shared";
+import { fallbackModels, type HarnessKind, type ModelOption } from "@dispatch/shared";
 
 interface ModelsStore {
   /** Selectable session models for the composer's model picker. */
   models: ModelOption[];
-  activeHarness: HarnessKind;
+  /** Whose catalogue `models` is; undefined before any provider has answered. */
+  activeHarness: HarnessKind | undefined;
   byHarness: Partial<Record<HarnessKind, ModelOption[]>>;
-  setModels: (models: ModelOption[], harness?: HarnessKind) => void;
+  /** No provider means no catalogue: an empty picker, not somebody else's list. */
+  setModels: (models: ModelOption[], harness: HarnessKind | undefined) => void;
 }
 
 /**
- * The composer's selectable session models. Seeded with the static fallback so
- * the picker renders instantly, then replaced on hydrate by the server list —
- * which the server reads live from the Claude Code runtime, so it matches what
- * `/model` offers in the CLI. An empty server reply keeps the fallback rather
- * than blanking the picker.
+ * The composer's selectable session models, replaced on hydrate and on every
+ * provider change by the server list — which each runtime reads live, so it
+ * matches what that CLI offers. An empty server reply falls back to the
+ * provider's own static seed rather than blanking the picker.
+ *
+ * Starts EMPTY. It used to start on Claude's aliases, so a chat on any other
+ * provider — or on a machine with no Claude at all — briefly offered Opus and
+ * Sonnet, and a pick made in that window sent a Claude id to Codex (#426).
  */
 export const useModels = create<ModelsStore>((set) => ({
-  models: fallbackModels(DEFAULT_HARNESS),
-  activeHarness: DEFAULT_HARNESS,
-  byHarness: { [DEFAULT_HARNESS]: fallbackModels(DEFAULT_HARNESS) },
-  setModels: (models, harness = DEFAULT_HARNESS) =>
+  models: [],
+  activeHarness: undefined,
+  byHarness: {},
+  setModels: (models, harness) =>
     set((state) => {
+      if (!harness) return { models: [], activeHarness: undefined };
       const next = models.length ? models : fallbackModels(harness);
       return {
         models: next,

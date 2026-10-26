@@ -104,11 +104,12 @@ test("live cockpit: set up → create project → chat → send message → pane
   await expect(page.getByRole("heading", { name: "GitHub CLI" })).toBeVisible();
   await page.getByRole("button", { name: /^Continue/ }).click();
 
-  // 4) The agent runtime step BLOCKS on having one. Claude Code always resolves
-  //    (the SDK bundles its own runtime), so it is preselected and Continue is
-  //    live — if that ever stops being true this assertion is the alarm. The
-  //    step also probes the LOGIN and relabels the button "Continue anyway" on
-  //    a machine with none, which a CI box is; hence the prefix match.
+  // 4) The agent runtime step never blocks (#426): Dispatch runs with no
+  //    provider at all, so Continue is live whether or not one resolves. When
+  //    one does it is preselected and Continue saves it as the app default —
+  //    which the chat created below depends on, since there is no implicit
+  //    default provider any more. The button reads "Continue anyway" with no
+  //    runtime or no login (a CI box has neither login); hence the prefix match.
   await expect(page.getByRole("heading", { name: "Agent runtime" })).toBeVisible();
   const continueHarness = page.getByRole("button", { name: /^Continue/ });
   await expect(continueHarness).toBeEnabled();

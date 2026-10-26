@@ -146,8 +146,9 @@ import type {
   TerminalPortForward,
 } from "@dispatch/shared";
 import {
-  DEFAULT_HARNESS,
+  providerIds,
   registerProvider,
+  unregisterProvider,
   type HarnessDefaults,
   type ProviderDescriptor,
   type Subscription,
@@ -788,9 +789,10 @@ export const api = {
     remove: (id: string) => del<void>(`/api/modes/${id}`),
   },
 
-  /* available session models (live from the Claude Code runtime, or static fallback) */
+  /* a provider's session models (live from its runtime, or its static seed) */
   models: {
-    list: (harness: HarnessKind = DEFAULT_HARNESS) =>
+    /** Required: there is no default provider whose list an absent one means. */
+    list: (harness: HarnessKind) =>
       get<ModelOption[]>(`/api/models?harness=${encodeURIComponent(harness)}`),
     /** Each model's context window as the runtime reports it; absent = unknown. */
     contextWindows: (harness: HarnessKind) =>
@@ -807,6 +809,12 @@ export const api = {
     list: async () => {
       const list = await get<HarnessInfo[]>("/api/harnesses");
       for (const h of list) registerProvider(h.descriptor);
+      // And FORGET what the server stopped listing. Registering alone meant a
+      // provider whose plugin was switched off stayed in every picker for the
+      // life of the tab, and the built-in Claude descriptor compiled into this
+      // bundle was offered on a server that had no Claude at all (#426).
+      const listed = new Set(list.map((h) => h.kind));
+      for (const id of providerIds()) if (!listed.has(id)) unregisterProvider(id);
       return list;
     },
   },
@@ -1725,10 +1733,10 @@ export const api = {
 
   usage: {
     /** One ACCOUNT's windows; a bare provider means that provider's default account. */
-    get: (target: UsageTarget = { harness: DEFAULT_HARNESS }) =>
+    get: (target: UsageTarget) =>
       get<UsageSnapshot>(`/api/usage?${usageQuery(target)}`),
     /** Force a fresh fetch now (the "refresh" button). */
-    refresh: (target: UsageTarget = { harness: DEFAULT_HARNESS }) =>
+    refresh: (target: UsageTarget) =>
       post<UsageSnapshot>(`/api/usage/refresh?${usageQuery(target)}`),
     /** Every logged-in account's windows at once — the card's stacked list. */
     overview: (refresh = false) =>

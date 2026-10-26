@@ -1,8 +1,7 @@
 import { useMemo } from "react";
-import { Cpu } from "lucide-react";
+import { Cpu, TriangleAlert } from "lucide-react";
 import {
   AGENT_TASKS,
-  DEFAULT_HARNESS,
   DEFAULT_REVIEW_MAX_ROUNDS,
   DEFAULT_REVIEW_ROUNDS,
   DEFAULT_MODE_ID,
@@ -112,14 +111,30 @@ export function ChatSection({ draft, patch, harnesses, catalogs }: AppPaneProps)
     ...modes.map((m) => ({ value: m.id, label: m.name, hint: m.permissionMode })),
   ];
 
-  const harnessOptions: SelectOption<HarnessKind>[] = listProviders().map((provider) => {
-    const runtime = harnesses.find((h) => h.kind === provider.id)?.runtime;
-    return {
-      value: provider.id,
-      label: provider.label,
-      hint: runtime?.available ? runtime.version ?? runtime.source : "not installed",
-    };
-  });
+  const harnessOptions: SelectOption<HarnessKind>[] = [
+    // A real choice, not an error: with no default, a new chat has to name its
+    // provider, and creation says so (#426).
+    { value: "", label: "None", hint: "chats must pick one" },
+    ...listProviders().map((provider) => {
+      const runtime = harnesses.find((h) => h.kind === provider.id)?.runtime;
+      return {
+        value: provider.id,
+        label: provider.label,
+        hint: runtime?.available ? (runtime.version ?? runtime.source) : "not installed",
+      };
+    }),
+  ];
+  // A default naming a provider nothing registers any more (its plugin is off)
+  // is still the stored answer — show it, flagged, rather than a blank chip.
+  const savedDefault = harness.defaultHarness;
+  if (savedDefault && !harnessOptions.some((o) => o.value === savedDefault)) {
+    harnessOptions.push({
+      value: savedDefault,
+      label: savedDefault,
+      icon: <TriangleAlert />,
+      hint: "not available",
+    });
+  }
 
   return (
     <div className="space-y-4">
@@ -129,8 +144,10 @@ export function ChatSection({ draft, patch, harnesses, catalogs }: AppPaneProps)
           <Select
             width={280}
             align="start"
-            value={harness.defaultHarness ?? DEFAULT_HARNESS}
-            onChange={(defaultHarness) => patch({ harness: { ...harness, defaultHarness } })}
+            value={harness.defaultHarness ?? ""}
+            onChange={(defaultHarness) =>
+              patch({ harness: { ...harness, defaultHarness: defaultHarness || undefined } })
+            }
             options={harnessOptions}
           />
         </Field>

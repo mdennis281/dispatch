@@ -157,6 +157,9 @@ async function seed(dir: string): Promise<{ chatId: string }> {
   const chat = await post("/api/chats", {
     projectId: project.id,
     title: CHAT_TITLE,
+    // Named outright: a fresh install has no default provider (#426), and this
+    // spec skips the wizard step that would have set one.
+    harness: "claude",
   });
   const chatId = String(chat.id);
 
