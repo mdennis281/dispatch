@@ -20,16 +20,20 @@
  * under a back bar that returns to the wide list. A permanent third pane
  * spent most of the screen on "Select a run" and squeezed the list to 340px.
  *   lg  rail │ run list          →  run list │ run detail   (Select replaces rail)
- *   md       run list            →  run list │ run detail
- *   sm       run list            →  run detail             (list stays mounted,
+ *   md  rail │ run list          →  run list │ run detail
+ *   sm  rail → run list          →  run detail             (each step a drill-in;
+ *                                                           the list stays mounted,
  *                                                           hidden, keeping scroll)
+ * At `md` the rail used to be dropped for the Select, which hid what every
+ * workflow last did behind a click; at `sm` the run list was the landing page,
+ * so the same question took opening a dropdown.
  *
  * RUNNING a workflow lives on the workflow — a Run button on each rail row,
  * and beside the picker once one is chosen — not in the page header, which
  * opened a dialog that then asked you which workflow you meant.
  */
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { ExternalLink, Play, RefreshCw, Workflow } from "lucide-react";
+import { ArrowLeft, ExternalLink, Play, RefreshCw, Workflow } from "lucide-react";
 import type { CiRun } from "@dispatch/shared";
 import { isGlobalProject, type Project } from "@dispatch/shared";
 import { api } from "../../lib/api.js";
@@ -99,6 +103,8 @@ function CiPage({ project }: { project: Project }) {
   // The whole row, not just its id: the detail header paints from it while
   // the full read is in flight.
   const [selected, setSelected] = useState<CiRun | null>(null);
+  // `sm` only: past the workflow list into a workflow's run history.
+  const [browsing, setBrowsing] = useState(false);
   const [tick, setTick] = useState(0);
   const [dispatchFor, setDispatchFor] = useState<{ workflowId: number | null } | null>(null);
 
@@ -141,8 +147,14 @@ function CiPage({ project }: { project: Project }) {
   }
 
   const busy = summary.refreshing || workflows.refreshing;
-  // The rail gives its slot to the run list once a run is open.
-  const showRail = mode === "lg" && !selected;
+  // The rail gives its slot to the run list once a run is open. At `sm` it is
+  // the landing page, and picking a workflow drills past it.
+  const showRail = compact ? !browsing && !selected : !selected;
+  const showList = compact ? browsing && !selected : true;
+  const pickWorkflow = (id: number | null) => {
+    setWorkflowId(id);
+    if (compact) setBrowsing(true);
+  };
   const picked = workflows.data?.find((w) => w.id === workflowId);
   const canRunPicked = !!picked && !picked.managed && picked.state === "active";
   const runPicked = canRunPicked && (
@@ -197,18 +209,19 @@ function CiPage({ project }: { project: Project }) {
           <CiWorkflowRail
             res={workflows}
             selected={workflowId}
-            onSelect={setWorkflowId}
+            onSelect={pickWorkflow}
             onRun={(id) => setDispatchFor({ workflowId: id })}
+            fill={compact}
           />
         )}
 
         <div
           className={cn(
             "flex min-h-0 min-w-0 flex-col bg-surface",
-            !selected
-              ? "flex-1"
-              : compact
-                ? "hidden"
+            !showList
+              ? "hidden"
+              : !selected
+                ? "flex-1"
                 : mode === "md"
                   ? "w-[320px] shrink-0 border-r border-line"
                   : "w-[360px] shrink-0 border-r border-line",
@@ -222,7 +235,23 @@ function CiPage({ project }: { project: Project }) {
             refreshTick={tick}
             compact={compact}
             header={
-              showRail ? (
+              compact ? (
+                <div className="-ml-1.5 flex items-center gap-1">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    leftIcon={<ArrowLeft />}
+                    onClick={() => setBrowsing(false)}
+                    className="shrink-0"
+                  >
+                    Workflows
+                  </Button>
+                  <span className="min-w-0 flex-1 truncate text-sm font-semibold text-primary">
+                    {picked?.name ?? "All workflows"}
+                  </span>
+                  {runPicked}
+                </div>
+              ) : showRail ? (
                 picked && (
                   <div className="flex items-center gap-2">
                     <span className="min-w-0 flex-1 truncate text-sm font-semibold text-primary">
@@ -267,7 +296,7 @@ function CiPage({ project }: { project: Project }) {
         defaultRef={project.defaultBranch || "main"}
         onDispatched={(id) => {
           // Show the workflow that was just started, so the new run lands in view.
-          setWorkflowId(id);
+          pickWorkflow(id);
           changed();
         }}
       />
