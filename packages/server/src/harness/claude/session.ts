@@ -13,6 +13,8 @@
  *    as a rewritten tool input. Both are surfaced here as distinct neutral
  *    events so the broker no longer has to know that.
  */
+import { readFileSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 import { query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 import type {
   Options,
@@ -26,8 +28,15 @@ import type {
   McpServerConfig as SdkMcpServerConfig,
 } from "@anthropic-ai/claude-agent-sdk";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { Effort, McpServerConfig, PermissionMode, SlashCommandInfo } from "@dispatch/shared";
-import { EffortSchema } from "@dispatch/shared";
+import type {
+  ContextUsage,
+  Effort,
+  ImageRef,
+  McpServerConfig,
+  PermissionMode,
+  SlashCommandInfo,
+} from "@dispatch/shared";
+import { EffortSchema, mediaTypeFromName } from "@dispatch/shared";
 import type {
   HarnessEvent,
   HarnessInput,
@@ -68,16 +77,26 @@ export const BUILTIN_MODE_PERMISSION: Record<string, PermissionMode> = {
  * LEGACY effort lever — a fixed thinking-token budget per level.
  *
  * Superseded by the SDK's first-class `effort`, which the runtime interprets
- * per model and uses to guide adaptive thinking. Kept only as the fallback for
- * `setEffort` on a runtime without the live control.
+ * per model and uses to guide adaptive thinking, and on a live session by
+ * `applyFlagSettings({ effortLevel })`. Kept only as the last fallback for
+ * `setEffort` on a CLI that has neither, so a live change never silently
+ * no-ops. These are the numbers the broker's direct loop shipped with; there
+ * used to be a second, disagreeing table here.
  */
 export const EFFORT_THINKING_TOKENS: Record<Effort, number> = {
-  low: 4_000,
-  medium: 10_000,
-  high: 20_000,
+  low: 2_000,
+  medium: 8_000,
+  high: 16_000,
   xhigh: 32_000,
   max: 60_000,
 };
+
+/**
+ * How long a `getContextUsage()` read inside the message loop may take. Bounded
+ * because the loop waits on it, and a stalled control request must not stall
+ * the stream behind it.
+ */
+const LIVE_USAGE_TIMEOUT_MS = 3_000;
 
 /**
  * A buffered async iterable of user messages.
@@ -188,6 +207,28 @@ export class ClaudeSession implements HarnessSession {
   private livePid?: number;
 
   /**
+   * Why the runtime died, when it did — rethrown by the event iterator so the
+   * host settles the chat as errored rather than as a failed turn. See
+   * `HarnessSession.events`.
+   */
+  private fatal?: Error;
+
+  /**
+   * This session's own abort, linked to the host's `spec.abortSignal`. Owned
+   * here rather than borrowed so `dispose()` can kill the subprocess tree
+   * whether or not the host aborts: closing the input alone leaves the CLI to
+   * notice on its own.
+   */
+  private readonly abort = new AbortController();
+
+  /**
+   * The `autoCompactWindow` the live query was spawned with, so
+   * `setContextTokenLimit` can tell a move the CLI would notice from one it
+   * would clamp away.
+   */
+  private spawnWindow?: number;
+
+  /**
    * The dead subprocess's last stderr, kept for the error message.
    *
    * Providing `spawnClaudeCodeProcess` is what stops the SDK collecting its own
@@ -208,6 +249,14 @@ export class ClaudeSession implements HarnessSession {
       effortOf: (parent) => this.threadEfforts.get(parent),
       onToolThread: (id, parent) => this.toolThreads.set(id, parent),
     });
+    // What the host already knew carries over a respawn, so the first turn-end
+    // of a resumed session has a denominator before the runtime is asked.
+    this.decoder.contextWindow = opts.spec.contextWindow;
+    const hostSignal = opts.spec.abortSignal;
+    if (hostSignal) {
+      if (hostSignal.aborted) this.abort.abort();
+      else hostSignal.addEventListener("abort", () => void this.dispose(), { once: true });
+    }
   }
 
   get events(): AsyncIterable<HarnessEvent> {
@@ -217,7 +266,14 @@ export class ClaudeSession implements HarnessSession {
           for (;;) {
             const next = this.queue.shift();
             if (next) return { value: next, done: false };
-            if (this.ended) return { value: undefined as never, done: true };
+            if (this.ended) {
+              // Once: a consumer that keeps pulling after the throw sees an
+              // ordinary end, not the same death reported twice.
+              const fatal = this.fatal;
+              this.fatal = undefined;
+              if (fatal) throw fatal;
+              return { value: undefined as never, done: true };
+            }
             await new Promise<void>((resolve) => (this.waiter = resolve));
           }
         },
@@ -265,6 +321,8 @@ export class ClaudeSession implements HarnessSession {
     // land in the channel rather than being dropped.
     this.input = new InputChannel();
     const options = this.buildOptions();
+    this.spawnWindow = (options.settings as { autoCompactWindow?: number } | undefined)
+      ?.autoCompactWindow;
     this.query = this.queryFn({ prompt: this.input, options });
     this.flush();
     void this.consume();
@@ -276,23 +334,57 @@ export class ClaudeSession implements HarnessSession {
     this.outbox = [];
   }
 
-  /** A Dispatch message → the SDK's user-message envelope. */
+  /**
+   * A Dispatch message → the SDK's user-message envelope: the text, THEN its
+   * images.
+   *
+   * Images go as bytes. The API takes `base64` and `url` sources and nothing
+   * that names a local file — the `{ type: "file", path }` this used to send is
+   * not a source the API knows, so an uploaded screenshot never reached the
+   * model. A text-only message stays a plain string, as it always was.
+   */
   private toSdkMessage(msg: HarnessInput): SDKUserMessage {
-    const content: unknown[] = [];
-    for (const img of msg.images ?? []) {
-      if (!img.path) continue;
-      content.push(
-        /^(https?:|data:)/.test(img.path)
-          ? { type: "image", source: { type: "url", url: img.path } }
-          : { type: "image", source: { type: "file", path: img.path } },
-      );
-    }
-    if (msg.text) content.push({ type: "text", text: msg.text });
+    const images = (msg.images ?? [])
+      .map((img) => this.imageSource(img))
+      .filter((s): s is Record<string, unknown> => !!s);
+    const content: unknown = images.length
+      ? [
+          ...(msg.text ? [{ type: "text", text: msg.text }] : []),
+          ...images.map((source) => ({ type: "image", source })),
+        ]
+      : msg.text;
     return {
       type: "user",
+      parent_tool_use_id: null,
       message: { role: "user", content },
       ...(msg.priority ? { priority: msg.priority } : {}),
     } as unknown as SDKUserMessage;
+  }
+
+  /**
+   * One image as an API source. Read synchronously because `send()` is: the
+   * order messages reach the input channel is the order they were sent, and an
+   * async read would let a text-only message overtake an image one. An
+   * unreadable file is skipped — the text still goes.
+   */
+  private imageSource(img: ImageRef): Record<string, unknown> | undefined {
+    const path = img.path;
+    if (!path) return undefined;
+    if (/^https?:/i.test(path)) return { type: "url", url: path };
+    const data = /^data:([^;]+);base64,(.*)$/s.exec(path);
+    if (data) return { type: "base64", media_type: data[1], data: data[2] };
+    try {
+      const abs = isAbsolute(path) || !this.spec.cwd ? path : join(this.spec.cwd, path);
+      return {
+        type: "base64",
+        // These become `image` blocks, which the API rejects with a non-image
+        // type — so an unrecognised extension still has to guess an image.
+        media_type: img.mimeType ?? mediaTypeFromName(path, "image/png"),
+        data: readFileSync(abs).toString("base64"),
+      };
+    } catch {
+      return undefined;
+    }
   }
 
   private async consume(): Promise<void> {
@@ -300,21 +392,36 @@ export class ClaudeSession implements HarnessSession {
     if (!q) return;
     try {
       for await (const msg of q) {
-        for (const event of this.decoder.decode(msg)) this.emit(event);
+        for (const event of this.decoder.decode(msg)) {
+          if (event.type === "compacted") {
+            // `post_tokens` counts the summary and kept messages only — not the
+            // system prompt and tools — so it read 3k on a chat whose very next
+            // request was 29k. The CLI's own breakdown counts everything.
+            const live = (await this.readContextUsage(LIVE_USAGE_TIMEOUT_MS))?.totalTokens;
+            if (typeof live === "number" && Number.isFinite(live) && live >= 0) {
+              event.postTokens = live;
+              this.decoder.setContextTokens(live);
+            }
+          }
+          this.emit(event);
+          // The window is the meter's denominator and only the runtime knows
+          // it: learn it once the process is live, and again after every turn,
+          // since a model fallback can move it mid-session.
+          if (event.type === "init" || event.type === "turn-end") void this.refreshWindow();
+        }
       }
     } catch (err) {
       // An abort is an expected end, not a failure.
-      if (!this.disposed) this.fail(err);
+      if (!this.disposed && !this.abort.signal.aborted) this.fail(err);
     }
     this.end();
   }
 
+  /** The runtime died — see `HarnessSession.events` for why that is not a turn-end. */
   private fail(err: unknown): void {
-    const message = withStderrTail(
-      err instanceof Error ? err.message : String(err),
-      this.lastStderrTail,
+    this.fatal = new Error(
+      withStderrTail(err instanceof Error ? err.message : String(err), this.lastStderrTail),
     );
-    this.emit({ type: "turn-end", ok: false, subtype: "error", result: message });
     this.end();
   }
 
@@ -335,9 +442,7 @@ export class ClaudeSession implements HarnessSession {
       effort: this.effort,
       settingSources: ["user", "project", "local"],
       includePartialMessages: true,
-      ...(this.spec.abortSignal
-        ? { abortController: abortControllerFor(this.spec.abortSignal) }
-        : {}),
+      abortController: this.abort,
       // Run on the user's installed Claude Code when it's newer than the SDK's
       // bundled one. MUST match what the model probe uses, or the picker would
       // offer models the session can't run.
@@ -428,6 +533,11 @@ export class ClaudeSession implements HarnessSession {
 
     options.mcpServers = this.mcpServerSet();
 
+    // The skills the host put on disk under the cwd are only DISCOVERED by the
+    // CLI; `'all'` is what enables every one it found. Omitted is not "off" —
+    // it is the CLI's own default, which is what a session with none gets.
+    if (this.spec.skills.length) options.skills = "all";
+
     // Mode tool gating — see `HarnessSessionSpec.allowedTools`. Keeps a denied
     // tool out of the catalogue entirely; `toolGuard` above is what enforces it.
     // `!== undefined`, not `.length` — see the broker's `stampModeGate`: a
@@ -470,21 +580,33 @@ export class ClaudeSession implements HarnessSession {
     await this.query?.setMcpServers(this.mcpServerSet());
   }
 
-  /** Reads the runtime's reported effort off every PreToolUse input. */
+  /**
+   * Reads the runtime's reported effort off every PreToolUse input. Read-only:
+   * it always returns an empty verdict, so it can never block a call.
+   *
+   * The level is `input.effort.level`. This read `input.effort` itself — an
+   * object, which never parses as a level — so every run card showed the
+   * configured effort instead of what the runtime actually applied.
+   */
   private observeEffortHook(): HookCallback {
     return async (input: HookInput): Promise<HookJSONOutput> => {
-      const raw = (input as unknown as Record<string, unknown>).effort;
-      const parsed = EffortSchema.safeParse(raw);
-      if (parsed.success) {
-        // `agent_id` names the subagent thread; its absence means the main loop.
-        const agentId = (input as unknown as { agent_id?: unknown }).agent_id;
-        const toolUseId = (input as unknown as { tool_use_id?: unknown }).tool_use_id;
-        const thread =
-          typeof agentId === "string" && agentId
-            ? this.toolThreads.get(String(toolUseId ?? "")) ?? null
-            : null;
-        this.threadEfforts.set(thread, parsed.data);
+      const i = input as unknown as {
+        effort?: { level?: unknown };
+        agent_id?: unknown;
+        tool_use_id?: unknown;
+      };
+      const level = EffortSchema.safeParse(i.effort?.level);
+      if (!level.success) return {}; // a model without effort support
+      // `agent_id` names a subagent thread; its absence means the main loop.
+      // A subagent call whose run we can't name yet (a hook that beat its own
+      // row) is skipped rather than credited to the main loop.
+      if (typeof i.agent_id !== "string" || !i.agent_id) {
+        this.threadEfforts.set(null, level.data);
+        return {};
       }
+      const thread =
+        typeof i.tool_use_id === "string" ? this.toolThreads.get(i.tool_use_id) : undefined;
+      if (thread) this.threadEfforts.set(thread, level.data);
       return {};
     };
   }
@@ -542,7 +664,17 @@ export class ClaudeSession implements HarnessSession {
   private onCanUseTool(
     name: string,
     input: Record<string, unknown>,
-    opts: { signal?: AbortSignal } | undefined,
+    opts:
+      | {
+          signal?: AbortSignal;
+          title?: string;
+          displayName?: string;
+          description?: string;
+          decisionReason?: string;
+          toolUseID?: string;
+          agentID?: string;
+        }
+      | undefined,
   ): Promise<PermissionResult> {
     const requestId = this.genId();
     return new Promise<PermissionResult>((resolve) => {
@@ -569,9 +701,19 @@ export class ClaudeSession implements HarnessSession {
       this.pendingPermissions.set(requestId, settle);
       signal?.addEventListener("abort", onAbort, { once: true });
 
+      // The run asking: the stream named this call's thread before the CLI
+      // asked about it. A subagent call it didn't name stays unattributed
+      // rather than being charged to the main loop.
+      const thread = opts?.toolUseID ? this.toolThreads.get(opts.toolUseID) : undefined;
+      const parentToolUseId = thread ?? (opts?.agentID ? undefined : null);
       if (name === QUESTION_TOOL) {
         this.questionInputs.set(requestId, input);
-        this.emit({ type: "question-request", requestId, questions: neutralQuestions(input) });
+        this.emit({
+          type: "question-request",
+          requestId,
+          questions: neutralQuestions(input),
+          parentToolUseId,
+        });
         return;
       }
       this.emit({
@@ -580,6 +722,13 @@ export class ClaudeSession implements HarnessSession {
         toolName: name,
         input,
         target: deriveTarget(input),
+        // The CLI's own wording for the card — the direct loop always showed
+        // it, and a card rebuilt from the tool name alone read "Allow Bash?".
+        title: opts?.title,
+        displayName: opts?.displayName,
+        description: opts?.description,
+        reason: opts?.decisionReason,
+        parentToolUseId,
       });
     });
   }
@@ -639,27 +788,43 @@ export class ClaudeSession implements HarnessSession {
 
   async setModel(model: string): Promise<void> {
     this.modelOverride = model;
-    try {
-      await this.query?.setModel(model);
-    } catch {
-      /* takes effect next turn */
-    }
+    if (!this.query) return;
+    await this.query.setModel(model);
+    // A switch can move the window (200k ↔ the 1M variant); relearn it so the
+    // meter's denominator follows the model rather than the one before.
+    void this.refreshWindow();
   }
 
   /**
    * Push a new effort level at a live session.
    *
-   * The SDK's live control is a thinking-token budget, not the first-class
-   * `effort` — that is fixed at launch — so this is a best-effort approximation
-   * until the next turn re-launches with the real lever.
+   * `effort` is a start-of-query option, so the live twin is the flag-settings
+   * layer: `applyFlagSettings({ effortLevel })` merges over user/project
+   * settings and takes effect on the next request — subagents spawned after it
+   * included. Falls back to the legacy thinking budget when the running CLI
+   * predates the control or rejects the level, and REJECTS when that fails too,
+   * so the host can say the change didn't land.
    */
   async setEffort(effort: Effort): Promise<void> {
     this.effort = effort;
-    try {
-      await this.query?.setMaxThinkingTokens(EFFORT_THINKING_TOKENS[effort]);
-    } catch {
-      /* not supported by this runtime */
+    // Everything observed so far described the OLD level; drop it so the next
+    // hook re-reports, and a downgrade for this level is learned fresh.
+    this.threadEfforts.clear();
+    const q = this.query;
+    if (!q) return;
+    const apply = (q as Partial<Query>).applyFlagSettings;
+    if (typeof apply === "function") {
+      try {
+        // `Settings.effortLevel` is typed low..xhigh while the query option
+        // takes "max" too; the CLI reads the same strings for both, so pass it
+        // through rather than silently clamping a chat that asked for max.
+        await apply.call(q, { effortLevel: effort as "low" | "medium" | "high" | "xhigh" });
+        return;
+      } catch {
+        /* fall through to the thinking-budget fallback */
+      }
     }
+    await q.setMaxThinkingTokens(EFFORT_THINKING_TOKENS[effort]);
   }
 
   /**
@@ -691,23 +856,87 @@ export class ClaudeSession implements HarnessSession {
     }
   }
 
+  /**
+   * Compact via the CLI's own `/compact` — a slash command on the input
+   * channel, with no control-channel equivalent. The focus rides the way the
+   * CLI's `/compact focus on the API changes` does.
+   *
+   * Through `send()`, as an ordinary message, because that is what it is to the
+   * CLI: it answers with a result like any turn (`controlTurns`). Pushed
+   * straight at the channel, as this used to be, a compaction asked of a session
+   * that had not started yet went nowhere.
+   */
   async compact(focus?: string): Promise<void> {
-    // The SDK compacts via a slash command on the input channel; there is no
-    // control-channel equivalent. The argument rides the same way the CLI's
-    // `/compact focus on the API changes` does.
-    this.input?.push({
-      type: "user",
-      message: { role: "user", content: [{ type: "text", text: compactCommand(focus) }] },
-    } as unknown as SDKUserMessage);
+    this.send({ text: compactCommand(focus), priority: "next" });
+  }
+
+  /**
+   * The CLI's `/clear`, in place. The session id moves (the CLI opens a new
+   * one), which the host sees at the next `init`; the subprocess, its MCP
+   * servers and everything they hold are kept.
+   */
+  async clear(): Promise<void> {
+    this.send({ text: "/clear", priority: "next" });
+  }
+
+  /**
+   * Accept a moved limit without a respawn when the window it derives is the
+   * one the CLI is already running with — two limits below its floor clamp to
+   * the same window, and respawning for that buys nothing. A window that DID
+   * move is refused: `applyFlagSettings({ autoCompactWindow })` is accepted and
+   * changes nothing (measured), so only a respawn moves it.
+   */
+  async setContextTokenLimit(limit: number | undefined, autoCompactWindow?: number): Promise<void> {
+    const next = claudeCompactWindow(limit, autoCompactWindow);
+    if (this.query && next !== this.spawnWindow) {
+      throw new Error("Claude Code fixes its compaction window when it starts");
+    }
+    this.spec = { ...this.spec, contextTokenLimit: limit, autoCompactWindow };
   }
 
   async contextWindow(): Promise<number | undefined> {
     return this.decoder.contextWindow;
   }
 
-  /** Set once the host learns the window, so turn-end rows carry a denominator. */
-  setContextWindow(window: number | undefined): void {
-    this.decoder.contextWindow = window;
+  /** The CLI's own breakdown, for the meter's detail view. */
+  async contextUsage(): Promise<ContextUsage | undefined> {
+    return this.readContextUsage();
+  }
+
+  /**
+   * `getContextUsage()`, optionally bounded, never throwing. A fresh read also
+   * refreshes the window the turn-end rows carry.
+   */
+  private async readContextUsage(timeoutMs?: number): Promise<ContextUsage | undefined> {
+    const q = this.query;
+    if (!q?.getContextUsage) return undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const read = q.getContextUsage();
+      const usage = await (timeoutMs === undefined
+        ? read
+        : Promise.race([
+            read,
+            new Promise<undefined>((resolve) => {
+              timer = setTimeout(() => resolve(undefined), timeoutMs);
+            }),
+          ]));
+      if (!usage) return undefined;
+      if (typeof usage.maxTokens === "number" && usage.maxTokens > 0) {
+        this.decoder.contextWindow = usage.maxTokens;
+      }
+      return usage as unknown as ContextUsage;
+    } catch {
+      return undefined;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Learn the live model's window and hand it to the host's meter. */
+  private async refreshWindow(): Promise<void> {
+    const max = (await this.readContextUsage())?.maxTokens;
+    if (typeof max === "number" && max > 0) this.emit({ type: "usage", contextWindow: max });
   }
 
   async dispose(): Promise<void> {
@@ -719,12 +948,13 @@ export class ClaudeSession implements HarnessSession {
     }
     this.pendingPermissions.clear();
     this.questionInputs.clear();
+    // Close the input, then kill the tree — the broker's direct loop did exactly
+    // this for years. Closing only asks the CLI to wind down; the abort is what
+    // the SDK turns into a kill of the process and every MCP server hanging off
+    // it. No `interrupt()` first: awaiting a control request on a runtime that
+    // has stopped answering would hold the kill behind it.
     this.input?.close();
-    try {
-      await this.query?.interrupt();
-    } catch {
-      /* already down */
-    }
+    this.abort.abort();
     this.end();
   }
 }
@@ -738,10 +968,3 @@ function deriveTarget(input: Record<string, unknown>): string | undefined {
   return undefined;
 }
 
-/** Bridge an AbortSignal to the AbortController the SDK wants. */
-function abortControllerFor(signal: AbortSignal): AbortController {
-  const controller = new AbortController();
-  if (signal.aborted) controller.abort();
-  else signal.addEventListener("abort", () => controller.abort(), { once: true });
-  return controller;
-}

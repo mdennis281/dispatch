@@ -241,6 +241,15 @@ async function probeWindows(
 }
 
 /**
+ * One model's window from whatever {@link listContextWindows} last learned for
+ * this account, without probing. Undefined on a miss, never a guess.
+ */
+export function cachedContextWindow(model: string, account?: HarnessAccount): number | undefined {
+  const key = account && Object.keys(account.env).length ? account.configDir : "";
+  return windowsCache.get(key)?.windows[model];
+}
+
+/**
  * Context window per picker model id, from the runtime itself. Never throws:
  * failure degrades to the last good map, then to `{}` — and the settings pane
  * treats an absent id as "unknown", not as a guess.

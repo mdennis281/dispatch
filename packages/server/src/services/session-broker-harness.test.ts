@@ -23,7 +23,7 @@ import { SessionBroker } from "./session-broker.js";
 import { ManagerMcpBridge } from "./mcp/manager-http.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { GLOBAL_MODE_ID, GLOBAL_PROJECT_ID, resolveWorkflow } from "@dispatch/shared";
-import type { WsServerEvent } from "@dispatch/shared";
+import type { ContextUsage, WsServerEvent } from "@dispatch/shared";
 import { EXEMPTION_ANSWERS } from "./mcp/manager-mcp.js";
 
 let transfers: unknown[][] = [];
@@ -104,7 +104,10 @@ class FakeHarnessSession implements HarnessSession {
   async interrupt() {}
   async setPermissionMode() {}
   async setModel() {}
-  async setEffort() {}
+  readonly efforts: string[] = [];
+  async setEffort(effort: string) {
+    this.efforts.push(effort);
+  }
   readonly compactions: (string | undefined)[] = [];
   /** Make `compact` end a turn of its own, the way a real runtime's does. */
   compactEndsTurn = false;
@@ -122,6 +125,10 @@ class FakeHarnessSession implements HarnessSession {
   }
   resolveQuestion(_id: string, _answers: HarnessQuestionAnswer[]) {}
   async contextWindow() { return 1_000; }
+  /** Optional on the interface; a test installs them to model a runtime that has them. */
+  clear?: () => Promise<void>;
+  contextUsage?: () => Promise<ContextUsage | undefined>;
+  setContextTokenLimit?: (limit: number | undefined, window?: number) => Promise<void>;
   async dispose() {
     if (!this.endOnDispose) return;
     this.ended = true;
@@ -621,6 +628,174 @@ describe("SessionBroker neutral harness path", () => {
       expect(appended).not.toContain(GLOBAL_PROJECT_ID);
       // And the posture explains itself in the transcript's own terms.
       expect(appended).toContain("You are the GLOBAL chat");
+    });
+  });
+
+  describe("what the direct Claude loop did, on the seam (#427)", () => {
+    const chatFor = (id: string) =>
+      store.saveChat({
+        id,
+        projectId: "project-1",
+        title: id,
+        modeId: "plan",
+        effort: "low",
+        harness: "codex",
+        worktrees: [],
+        prs: [],
+        createdAt: 1,
+      });
+
+    it("puts the runtime's own wording on the permission card", async () => {
+      session = new FakeHarnessSession(true);
+      const chat = await chatFor("perm-words");
+      broker.create(chat);
+      const cards: Array<Record<string, unknown>> = [];
+      bus.subscribe((e) => {
+        if (e.type === "permission-request") cards.push(e.request as unknown as Record<string, unknown>);
+      });
+      await broker.sendMessage(chat.id, "read it");
+      session.emit(
+        { type: "init", sessionId: "t1" },
+        {
+          type: "permission-request",
+          requestId: "req-1",
+          // Not a read-only tool: plan mode would wave one of those through.
+          toolName: "Bash",
+          input: { command: "rm -rf /x" },
+          title: "Claude wants to run rm -rf /x",
+          displayName: "Run command",
+          description: "Deletes /x",
+          reason: "outside the project",
+        },
+      );
+      await waitUntil(() => cards.length > 0);
+      // A card rebuilt from the tool name alone read "Allow Bash?".
+      expect(cards[0]).toMatchObject({
+        title: "Claude wants to run rm -rf /x",
+        displayName: "Run command",
+        description: "Deletes /x",
+      });
+    });
+
+    it("aborts the session's signal on Stop, so Dispatch's own waits end with it", async () => {
+      const chat = await chatFor("stop-aborts");
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "go");
+      await broker.waitFor(chat.id, "idle");
+      expect(specs[0]!.abortSignal?.aborted).toBe(false);
+      await broker.stop(chat.id);
+      // What a blocked `wait_for_chat` listens to. Only the direct loop used to
+      // abort it; a harness stop left the call running against a dead session.
+      expect(specs[0]!.abortSignal?.aborted).toBe(true);
+    });
+
+    it("queues a compaction as a TURN, starting a session that is not live yet", async () => {
+      caps.controlTurns = true;
+      session = new FakeHarnessSession(true);
+      session.compactEndsTurn = true;
+      const chat = await chatFor("compact-turn");
+      broker.create(chat);
+
+      const idle = broker.waitFor(chat.id, "idle");
+      await broker.compact(chat.id, "keep the API notes");
+      await idle;
+
+      // Handed to the runtime as its own call — not as "/compact" text, and not
+      // dropped because nothing had started yet.
+      expect(session.compactions).toEqual(["keep the API notes"]);
+      expect(session.sent).toEqual([]);
+      // …and booked as the turn it is.
+      expect((await store.readMessages(chat.id)).map((r) => r.kind)).toContain("result");
+    });
+
+    it("leaves a runtime without control turns compacting on the side", async () => {
+      const chat = await chatFor("compact-side");
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "go");
+      await broker.waitFor(chat.id, "idle");
+
+      await broker.compact(chat.id);
+      await waitUntil(() => session.compactions.length > 0);
+      // Codex's compaction is a control call with no turn of its own; queueing
+      // it as one would leave the chat running forever.
+      expect(broker.getStatus(chat.id)).toBe("idle");
+    });
+
+    it("clears in place where the runtime can, instead of retiring it", async () => {
+      caps.controlTurns = true;
+      session = new FakeHarnessSession(true);
+      let clears = 0;
+      session.clear = async () => {
+        clears++;
+        session.emit({ type: "turn-end", ok: true, subtype: "success" });
+      };
+      const chat = await chatFor("clear-in-place");
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "go");
+      session.emit(
+        { type: "init", sessionId: "t1" },
+        { type: "turn-end", ok: true, subtype: "success" },
+      );
+      await broker.waitFor(chat.id, "idle");
+
+      const idle = broker.waitFor(chat.id, "idle");
+      broker.clearContext(chat.id);
+      await idle;
+      expect(clears).toBe(1);
+      // One session the whole way: a retire would have built a second.
+      expect(specs).toHaveLength(1);
+      expect((await store.getChat(chat.id))?.sessionId).toBe("t1");
+    });
+
+    it("answers the meter's detail from the runtime's own breakdown", async () => {
+      const chat = await chatFor("context-usage");
+      session.contextUsage = async () => ({
+        totalTokens: 300,
+        maxTokens: 1_000,
+        percentage: 30,
+        categories: [{ name: "System tools", tokens: 120 }],
+      });
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "go");
+      await broker.waitFor(chat.id, "idle");
+
+      const usage = await broker.getContextUsage(chat.id);
+      expect(usage).toMatchObject({ totalTokens: 300, maxTokens: 1_000 });
+      expect(usage?.categories).toEqual([{ name: "System tools", tokens: 120 }]);
+    });
+
+    it("pushes a per-message effort into the live runtime, not only the next one", async () => {
+      const chat = await chatFor("effort-live");
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "go");
+      await broker.waitFor(chat.id, "idle");
+
+      await broker.sendMessage(chat.id, "think harder", { effort: "high" });
+      await broker.waitFor(chat.id, "idle");
+      expect(session.efforts).toContain("high");
+    });
+
+    it("hands a moved compaction window to a live runtime rather than respawning blind", async () => {
+      const chat = await chatFor("window-hint");
+      const moves: Array<[number | undefined, number | undefined]> = [];
+      session.setContextTokenLimit = async (limit, window) => {
+        moves.push([limit, window]);
+      };
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "go");
+      await broker.waitFor(chat.id, "idle");
+
+      await store.updateSettings((s) => ({
+        ...s,
+        autoCompact: { enabled: true, ...s.autoCompact, window: 400_000 },
+      }));
+      await broker.sendMessage(chat.id, "again");
+      await broker.waitFor(chat.id, "idle");
+
+      // The window moves a window-triggered runtime's trigger as surely as the
+      // limit does; the adapter is asked, and accepting it spares the respawn.
+      expect(moves).toEqual([[undefined, 400_000]]);
+      expect(specs).toHaveLength(1);
     });
   });
 
