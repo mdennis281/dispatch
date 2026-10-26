@@ -20,6 +20,8 @@ import { Store } from "../store/index.js";
 import { EventBus } from "../bus.js";
 import { AuthoredConfigService } from "./authored-config.js";
 import { SessionBroker } from "./session-broker.js";
+import { ManagerMcpBridge } from "./mcp/manager-http.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { GLOBAL_MODE_ID, GLOBAL_PROJECT_ID } from "@dispatch/shared";
 
 let transfers: unknown[][] = [];
@@ -190,6 +192,69 @@ describe("SessionBroker neutral harness path", () => {
     expect(specs[0]!.agent).toBeUndefined();
     await broker.setHarness(chat.id, "claude");
     expect((await store.getChat(chat.id))!.personaId).toBe("product-owner");
+  });
+
+  describe("Dispatch's own tools", () => {
+    // Handed over explicitly — the neutral servers and the context they close
+    // over — rather than recovered off Claude-SDK config objects, which is what
+    // tied a Codex or goose chat's toolbox to the Claude SDK (#423).
+    let bridge: ManagerMcpBridge;
+
+    beforeEach(async () => {
+      await broker.dispose();
+      bridge = new ManagerMcpBridge("http://127.0.0.1:4319");
+      const codex: Harness = {
+        kind: "codex",
+        capabilities: caps as unknown as Harness["capabilities"],
+        runtime: () => ({ kind: "codex", source: "installed", available: true }),
+        listModels: async () => [],
+        readLimits: async () => null,
+        generateText: async () => "title",
+        createSession: (spec: HarnessSessionSpec) => { specs.push(spec); return session; },
+      };
+      broker = new SessionBroker({
+        store,
+        bus,
+        harnesses: new HarnessRegistry({ providers: [{ harness: codex, descriptor: CODEX_PROVIDER }] }),
+        authored: new AuthoredConfigService({ globalRoot: join(dir, "global") }),
+        managerMcp: bridge,
+        deps: { stopTimeoutMs: 5 },
+      });
+    });
+
+    async function run(id: string): Promise<HarnessSessionSpec> {
+      const chat = await store.saveChat({ id, projectId: "p1", title: "t", modeId: "plan", effort: "low", harness: "codex", worktrees: [], prs: [], createdAt: 1 });
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "go");
+      await broker.waitFor(chat.id, "idle");
+      return specs.at(-1)!;
+    }
+
+    it("mints an HTTP grant against the session's own context, one URL per built category", async () => {
+      const spec = await run("http");
+      const manager = spec.managerMcp;
+      if (manager?.transport !== "http") throw new Error(`expected http, got ${manager?.transport}`);
+      expect(Object.keys(manager.urls)).toEqual(
+        expect.arrayContaining(["dispatch-chat", "dispatch-confirm", "dispatch-session"]),
+      );
+      expect(manager.urls["dispatch-session"]).toBe("http://127.0.0.1:4319/api/mcp/manager/session");
+      const grant = bridge.resolve(`Bearer ${manager.token}`);
+      expect(grant?.chatId).toBe("http");
+      expect(grant?.context().chatId).toBe("http");
+    });
+
+    it("hands an in-process runtime plain MCP-SDK servers, not Claude configs", async () => {
+      caps.managerTransport = "in-process";
+      const spec = await run("inproc");
+      const manager = spec.managerMcp;
+      if (manager?.transport !== "in-process") throw new Error(`expected in-process, got ${manager?.transport}`);
+      expect(Object.keys(manager.servers)).toEqual(
+        expect.arrayContaining(["dispatch-chat", "dispatch-confirm", "dispatch-session"]),
+      );
+      for (const server of Object.values(manager.servers)) expect(server).toBeInstanceOf(McpServer);
+      // No grant: an in-process runtime never dials the bridge.
+      expect(bridge.size()).toBe(0);
+    });
   });
 
   it("falls back BEFORE building options, so an uninstalled provider's skills land where Claude reads", async () => {
