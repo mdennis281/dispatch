@@ -41,6 +41,7 @@ import {
   prRecordKey,
   projectHarnessOf,
   providerDefaults,
+  providerFor,
   reviewingPurposeLabel,
   issueHandlingPurposeLabel,
   IssueSchema,
@@ -61,6 +62,7 @@ import {
   type MessagePart,
   type Project,
   type ProjectConfig,
+  type ProviderDescriptor,
   type ReviewThread,
 } from "@dispatch/shared";
 import type { Services } from "./container.js";
@@ -105,12 +107,26 @@ function dirsFor(config: ProjectConfig | null): ConfigDirs {
   };
 }
 
+/** A provider's descriptor, or none for an id nothing has registered. */
+function descriptorOf(kind: HarnessKind | undefined): ProviderDescriptor | undefined {
+  if (!kind) return undefined;
+  const d = providerFor(kind);
+  return d.unregistered ? undefined : d;
+}
+
 /* ------------------------------------------------------------ config briefs */
 
-/** Per-config-section briefing: where the artifact lives + its house rules. */
+/**
+ * Per-config-section briefing: where the artifact lives + its house rules.
+ *
+ * `provider` is the one the task's chat will run on — undefined when it can't
+ * be told (no default provider, or one since uninstalled). Rules that name a
+ * runtime's own files read them off its descriptor: they used to say
+ * `.claude/skills/` and `~/.claude.json` to a Codex chat, which has neither.
+ */
 interface ConfigBrief {
   location: (dirs: ConfigDirs) => string;
-  rules: (dirs: ConfigDirs) => string[];
+  rules: (dirs: ConfigDirs, provider: ProviderDescriptor | undefined) => string[];
 }
 
 const CONFIG_BRIEFS: Record<string, ConfigBrief> = {
@@ -123,8 +139,11 @@ const CONFIG_BRIEFS: Record<string, ConfigBrief> = {
         `A file that isn't listed in the manifest is NOT loaded.`,
       `Instructions are appended to the system prompt of EVERY session in this project, ` +
         `on every turn. Keep it short and imperative; this is not documentation.`,
+      // Both names, whichever provider runs this: the repo's own instruction
+      // files are read by whichever runtime a later chat is on.
       `Say what the agent must do differently here. Don't restate general good practice, ` +
-        `and don't duplicate what CLAUDE.md or the workflow profile already covers.`,
+        `and don't duplicate what the repo's own CLAUDE.md / AGENTS.md or the workflow ` +
+        `profile already covers.`,
     ],
   },
   "config:agents": {
@@ -155,7 +174,7 @@ const CONFIG_BRIEFS: Record<string, ConfigBrief> = {
   },
   "config:skills": {
     location: (d) => `${d.configDir}/${d.skills}/<name>/SKILL.md`,
-    rules: (d) => [
+    rules: (d, p) => [
       `Either a directory \`${d.configDir}/${d.skills}/<name>/SKILL.md\` (plus any ` +
         `supporting files it references) or a single flat \`${d.configDir}/${d.skills}/<name>.md\`. ` +
         `Use a directory whenever the skill ships scripts, templates or reference docs.`,
@@ -163,15 +182,22 @@ const CONFIG_BRIEFS: Record<string, ConfigBrief> = {
         "FIRE — write it as trigger conditions (\"use when the user asks to …\"), not as a " +
         "summary, or the model will never load it.",
       "The body is the procedure: the steps, the gotchas, the commands that actually work " +
-        "in this repo. Skills are materialized into each session's `.claude/skills/`.",
+        "in this repo. " +
+        (p
+          ? `Skills are materialized into each session's \`${p.skillsDir}/skills/\` — don't write there by hand.`
+          : "Skills are materialized into each session's own skills directory — don't write there by hand."),
     ],
   },
   "config:mcp": {
     location: (d) => `${d.configDir}/${d.manifest}`,
-    rules: () => [
+    rules: (_d, p) => [
       "**Use the `mcp__dispatch-mcp__mcp_add` tool** — do not hand-edit the manifest, and do not " +
-        "write `.mcp.json`, `~/.claude.json` or `.claude/settings.json`; this harness reads " +
-        "none of those.",
+        (p?.account.defaultConfigDir
+          ? `write \`.mcp.json\`, anything under \`~/${p.account.defaultConfigDir}*\` or the repo's ` +
+            `\`${p.skillsDir}/\`; Dispatch generates what each session needs from the manifest, ` +
+            `and ${p.label} is only one of the providers that must see the server.`
+          : "write `.mcp.json` or a provider's own config files; Dispatch generates what each " +
+            "session needs from the manifest."),
       "Load the `mcp-setup` skill before you start: it has the real procedure and the " +
         "defaults you'd otherwise guess wrong.",
       "Secrets go in as `${VAR}` placeholders, never literal keys — this file is committed.",
@@ -194,7 +220,12 @@ const CONFIG_BRIEFS: Record<string, ConfigBrief> = {
 };
 
 /** The composed briefing for a config-authoring task. */
-function configBriefText(taskId: AgentTaskId, config: ProjectConfig | null, params: Record<string, unknown>): string {
+function configBriefText(
+  taskId: AgentTaskId,
+  config: ProjectConfig | null,
+  params: Record<string, unknown>,
+  provider: HarnessKind | undefined,
+): string {
   if (taskId === "config:personas") {
     const scope = params.scope === "global" ? "global" : "project";
     const name = typeof params.personaId === "string" ? params.personaId : undefined;
@@ -220,7 +251,7 @@ function configBriefText(taskId: AgentTaskId, config: ProjectConfig | null, para
     "",
     "**How this config works**",
     "",
-    ...brief.rules(dirs).map((r) => `- ${r}`),
+    ...brief.rules(dirs, descriptorOf(provider)).map((r) => `- ${r}`),
     "",
     "**Before you write anything**",
     "",
@@ -1224,6 +1255,8 @@ interface BriefContext {
   pr?: PrReviewContext | null;
   /** Issue handling only: the batch this chat was spawned for. */
   issueBatch?: IssueHandleContext | null;
+  /** The provider the chat will run on, when it can be told. */
+  provider?: HarnessKind;
 }
 
 /**
@@ -1353,7 +1386,7 @@ export function buildTaskParts(ctx: BriefContext): MessagePart[] {
     parts.push({
       kind: "brief",
       label: `${meta.action} — how this config works`,
-      text: configBriefText(ctx.taskId, ctx.config, ctx.params),
+      text: configBriefText(ctx.taskId, ctx.config, ctx.params, ctx.provider),
     });
   }
 
@@ -1544,6 +1577,14 @@ export async function launchAgentTask(
   const pr =
     input.taskId === "pr:review" ? await readPrReviewContext(services, project, params) : undefined;
   const issueBatch = input.taskId === "issue:handle" ? readIssueContext(params) : undefined;
+  // Resolved BEFORE the briefing, which names the provider's own files.
+  const run = await runOn(services, input, project);
+  const provider =
+    run.harness ??
+    projectHarnessOf(
+      services.projectConfig?.getDefaults(project.id),
+      await services.store.getSettings().catch(() => null),
+    );
 
   const parts = buildTaskParts({
     taskId: input.taskId,
@@ -1558,9 +1599,9 @@ export async function launchAgentTask(
     memory,
     pr,
     issueBatch,
+    provider,
   });
   const prompt = composeMessageText(parts);
-  const run = await runOn(services, input, project);
 
   const chat = await createChat(services, {
     projectId: input.projectId,
