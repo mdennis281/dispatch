@@ -28,11 +28,16 @@ import {
   RotateCw,
   Trash2,
 } from "lucide-react";
-import type { GitBranch as GitBranchInfo, GitCommitFile, WorktreeInfo } from "@dispatch/shared";
+import type {
+  CommitMessageAvailability,
+  GitBranch as GitBranchInfo,
+  GitCommitFile,
+  WorktreeInfo,
+} from "@dispatch/shared";
 import { useActiveProject } from "../../stores/projects.js";
 import { useGit, type GitTab } from "../../stores/git.js";
 import { useNotices } from "../../stores/notices.js";
-import { api } from "../../lib/api.js";
+import { api, ApiError } from "../../lib/api.js";
 import { Button } from "../ui/Button.js";
 import { IconButton } from "../ui/IconButton.js";
 import { Chip } from "../ui/Chip.js";
@@ -229,6 +234,17 @@ export function GitView() {
   const [expandedStash, setExpandedStash] = useState<string | null>(null);
   const [stashFiles, setStashFiles] = useState<Record<string, GitCommitFile[]>>({});
   const [generating, setGenerating] = useState(false);
+  // Read when the view opens: with no usable default provider the draft button
+  // shows WHY it is off, instead of failing on every click.
+  const [draft, setDraft] = useState<CommitMessageAvailability | null>(null);
+  const loadDraft = useCallback(() => {
+    api.git
+      .commitMessageAvailability()
+      .then(setDraft)
+      // An unreadable answer leaves the button as it was; a click still reports.
+      .catch(() => {});
+  }, []);
+  useEffect(loadDraft, [loadDraft]);
   const [cleaning, setCleaning] = useState(false);
   const [resetting, setResetting] = useState(false);
 
@@ -324,6 +340,8 @@ export function GitView() {
         text: "Couldn't draft a commit message",
         detail: err instanceof Error ? err.message : String(err),
       });
+      // The provider may have gone away since the view opened.
+      if (err instanceof ApiError && err.status === 409) loadDraft();
     } finally {
       setGenerating(false);
     }
@@ -550,6 +568,7 @@ export function GitView() {
               amend={amend}
               busy={busy}
               generating={generating}
+              draft={draft}
               onSelect={select}
               onMessage={setMessage}
               onAmend={setAmend}

@@ -20,7 +20,7 @@ import {
   Undo2,
   X,
 } from "lucide-react";
-import type { GitFileChange, GitStatus } from "@dispatch/shared";
+import type { CommitMessageAvailability, GitFileChange, GitStatus } from "@dispatch/shared";
 import { Button } from "../ui/Button.js";
 import { IconButton } from "../ui/IconButton.js";
 import { Spinner } from "../ui/Spinner.js";
@@ -184,6 +184,7 @@ function CommitBox({
   amend,
   busy,
   generating,
+  draft,
   onMessage,
   onAmend,
   onGenerate,
@@ -194,6 +195,7 @@ function CommitBox({
   amend: boolean;
   busy: string | null;
   generating: boolean;
+  draft: CommitMessageAvailability | null;
   onMessage: (v: string) => void;
   onAmend: (v: boolean) => void;
   onGenerate: () => void;
@@ -245,11 +247,14 @@ function CommitBox({
           <IconButton
             size="sm"
             tip={
-              stagedCount === 0
-                ? "Stage changes first"
-                : "Draft a message from the staged diff (AI)"
+              // The provider reason first: staging more won't help with it.
+              draft && !draft.available
+                ? `Can't draft a message: ${draft.reason}`
+                : stagedCount === 0
+                  ? "Stage changes first"
+                  : `Draft a message from the staged diff${draft?.available ? ` with ${draft.label}` : ""} (AI)`
             }
-            disabled={stagedCount === 0 || generating}
+            disabled={stagedCount === 0 || generating || (!!draft && !draft.available)}
             onClick={onGenerate}
           >
             {generating ? <Spinner size={12} /> : <Sparkles className="text-accent-hi" />}
@@ -296,6 +301,8 @@ export interface ChangesTabProps {
   amend: boolean;
   busy: string | null;
   generating: boolean;
+  /** Can the AI draft run, and on what — null until the first answer. */
+  draft: CommitMessageAvailability | null;
   onSelect: (s: GitSelection) => void;
   onMessage: (v: string) => void;
   onAmend: (v: boolean) => void;
@@ -341,6 +348,7 @@ export function ChangesTab(props: ChangesTabProps) {
         amend={props.amend}
         busy={busy}
         generating={props.generating}
+        draft={props.draft}
         onMessage={props.onMessage}
         onAmend={props.onAmend}
         onGenerate={props.onGenerate}

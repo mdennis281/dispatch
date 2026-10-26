@@ -5,6 +5,7 @@
  * changing call sites.
  */
 import type {
+  CommitMessageAvailability,
   Persona,
   PluginInfo,
   PluginInspection,
@@ -1391,6 +1392,8 @@ export const api = {
     /** One-shot AI draft from the staged diff (throws when nothing is staged). */
     commitMessage: (repoPath: string, hint?: string) =>
       post<{ message: string }>("/api/git/commit-message", { repoPath, hint }),
+    /** Whether a draft can be made at all — and on which provider, or why not. */
+    commitMessageAvailability: () => get<CommitMessageAvailability>("/api/git/commit-message"),
 
     checkout: (repoPath: string, branch: string, opts?: { create?: boolean; from?: string }) =>
       post<GitStatus>("/api/git/checkout", {
