@@ -797,6 +797,24 @@ describe("SessionBroker neutral harness path", () => {
       expect(moves).toEqual([[undefined, 400_000]]);
       expect(specs).toHaveLength(1);
     });
+
+    it("never respawns a runtime that ignores the window hint over that hint", async () => {
+      // Codex: `nativeContextLimit`, no `setContextTokenLimit`, and no use for
+      // a compaction window. Editing that Settings field must not retire it.
+      const chat = await chatFor("window-hint-ignored");
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "go");
+      await broker.waitFor(chat.id, "idle");
+
+      await store.updateSettings((s) => ({
+        ...s,
+        autoCompact: { enabled: true, ...s.autoCompact, window: 400_000 },
+      }));
+      await broker.sendMessage(chat.id, "again");
+      await broker.waitFor(chat.id, "idle");
+
+      expect(specs).toHaveLength(1);
+    });
   });
 
   it("persists neutral Codex events and keeps the native thread id", async () => {

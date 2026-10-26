@@ -322,6 +322,56 @@ describe("ClaudeSession parity with the broker's direct loop", () => {
     await s.dispose();
   });
 
+  it("hands the ORIGINAL input back on an allow that names no replacement", async () => {
+    const { fn, q } = fakeQuery();
+    const s = new ClaudeSession({ spec: SPEC, query: fn, genId: () => "req-1" });
+    const events = reader(s);
+    s.send({ text: "go" });
+    await settle();
+    const canUseTool = q().options.canUseTool as (
+      n: string,
+      i: Record<string, unknown>,
+      o: Record<string, unknown>,
+    ) => Promise<unknown>;
+    const verdict = canUseTool("Bash", { command: "ls" }, { toolUseID: "t1" });
+    await settle();
+    expect(events.seen.some((e) => e.type === "permission-request")).toBe(true);
+    // How the host answers an auto-allowed or self-gated tool: no input at all.
+    s.resolvePermission("req-1", { decision: "allow" });
+    // The SDK runs the tool with exactly this — `{}` ran it with no arguments.
+    expect(await verdict).toEqual({ behavior: "allow", updatedInput: { command: "ls" } });
+    await s.dispose();
+  });
+
+  it("reads the runtime only as fast as the host takes events, so pending() stays true", async () => {
+    // A lazy SDK, like the real one's input side: it pulls the next message
+    // only once it has finished answering the last.
+    const fn = ((params: { prompt: AsyncIterable<{ message: { content: unknown } }> }) => {
+      async function* gen() {
+        yield { type: "system", subtype: "init", session_id: "s1" };
+        for await (const m of params.prompt) {
+          yield { type: "result", subtype: "success", is_error: false, result: String(m.message.content) };
+        }
+      }
+      return gen();
+    }) as unknown as QueryOpt;
+    const s = new ClaudeSession({ spec: SPEC, query: fn, genId: () => "g" });
+    s.send({ text: "one" });
+    s.send({ text: "two" });
+    const it = s.events[Symbol.asyncIterator]();
+    let first: HarnessEvent | undefined;
+    while (!first) {
+      const n = await it.next();
+      if (n.value?.type === "turn-end") first = n.value;
+    }
+    await settle();
+    // The host decides at this turn end whether another turn is coming. Read
+    // ahead in a loop of its own, the stream had already pulled "two" and this
+    // said 0 — and the chat went idle with a turn still to run.
+    expect(s.pending()).toBe(1);
+    await s.dispose();
+  });
+
   it("starts the session for a compaction asked before anything ran", async () => {
     const { fn, q } = fakeQuery();
     const s = new ClaudeSession({ spec: SPEC, query: fn, genId: () => "g" });

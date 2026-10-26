@@ -3443,16 +3443,24 @@ export class SessionBroker {
         // the per-question answers — keyed exactly as the non-harness path keys
         // them, by question text, so the card looks them up the same way.
         const byQuestion: Record<string, string> = {};
+        // The one-line summary the card and the attention list show, built the
+        // way the direct Claude loop built it: each value with its notes, and
+        // the question's header in front only when there were several. The
+        // bare `answer.answer` this used to record is empty for a multi-question
+        // answer and drops the notes on a single one.
+        const summary: string[] = [];
         for (const a of answers) {
           const q = pending.questions?.find((x) => x.id === a.questionId);
-          if (q?.question) byQuestion[q.question] = withNotes(a.selected.join(", "), a.notes);
+          const value = withNotes(a.selected.join(", "), a.notes);
+          if (q?.question) byQuestion[q.question] = value;
+          summary.push(q?.header && answers.length > 1 ? `${q.header}: ${value}` : value);
         }
         this.recordResolvedPermission(
           session,
           requestId,
           pending,
           "allow",
-          answer.answer,
+          summary.length ? summary.join(" · ") : answer.answer,
           Object.keys(byQuestion).length ? byQuestion : undefined,
         );
         return true;
@@ -4091,10 +4099,18 @@ export class SessionBroker {
         return;
       }
     } else {
-      // The window hint moves the trigger as surely as the limit does, on a
-      // runtime whose trigger is a window — see `autoCompactWindow`.
+      // The window hint moves the trigger as surely as the limit does — but only
+      // on a runtime that reads it, and the one sign of that is a session that
+      // takes both live. Codex declares `nativeContextLimit` and ignores the
+      // hint, so counting it there retired an idle Codex chat over a Claude-only
+      // setting it never reads.
       const windowHint = settings?.autoCompact?.window;
-      if (limit === session.compactLimit && windowHint === session.compactWindowHint) return;
+      const live = session.harnessSession;
+      const hintMoved = Boolean(live?.setContextTokenLimit) && windowHint !== session.compactWindowHint;
+      if (limit === session.compactLimit && !hintMoved) {
+        session.compactWindowHint = windowHint;
+        return;
+      }
       // A runtime that never reads the limit is held to it by the turn-end
       // check alone, which reads Settings live: just move the host's number.
       const caps = this.harnesses?.find(session.harnessKind)?.capabilities;
@@ -4103,7 +4119,6 @@ export class SessionBroker {
         session.compactWindowHint = windowHint;
         return;
       }
-      const live = session.harnessSession;
       if (live?.setContextTokenLimit) {
         try {
           // The adapter accepts a move its runtime would not notice (Claude:

@@ -172,6 +172,10 @@ export class ClaudeSession implements HarnessSession {
 
   private input?: InputChannel;
   private query?: Query;
+  /** The SDK stream, read one message at a time — see {@link absorb}. */
+  private sdk?: AsyncIterator<unknown>;
+  /** A read of {@link sdk} in flight, kept across wake-ups so none is lost. */
+  private pull?: Promise<{ result: IteratorResult<unknown> } | { error: unknown }>;
   private started = false;
   private disposed = false;
   private outbox: HarnessInput[] = [];
@@ -180,8 +184,14 @@ export class ClaudeSession implements HarnessSession {
 
   /** Resolvers for in-flight `canUseTool` calls, keyed by our request id. */
   private readonly pendingPermissions = new Map<string, (r: PermissionResult) => void>();
-  /** The tool input each pending question was asked with, for answer building. */
-  private readonly questionInputs = new Map<string, Record<string, unknown>>();
+  /**
+   * The tool input each pending request was asked with: a question's, to build
+   * its answer on, and a permission's, to hand back on an allow that names no
+   * replacement. The SDK runs the tool with exactly the `updatedInput` it gets,
+   * so an allow answered with `{}` ran every auto-allowed call with no
+   * arguments at all.
+   */
+  private readonly requestInputs = new Map<string, Record<string, unknown>>();
 
   /**
    * Effort the runtime reports per thread, learned from PreToolUse hooks.
@@ -274,7 +284,25 @@ export class ClaudeSession implements HarnessSession {
               if (fatal) throw fatal;
               return { value: undefined as never, done: true };
             }
-            await new Promise<void>((resolve) => (this.waiter = resolve));
+            // Nothing queued: read the runtime's NEXT message — only now, when
+            // the host has finished with everything before it — or take an
+            // event raised on the side (a permission prompt, a guard refusal),
+            // whichever comes first. A read already in flight is kept, never
+            // re-issued.
+            if (this.sdk && !this.pull) {
+              this.pull = this.sdk.next().then(
+                (result) => ({ result }),
+                (error: unknown) => ({ error }),
+              );
+            }
+            const pushed = new Promise<undefined>((resolve) => {
+              this.waiter = () => resolve(undefined);
+            });
+            const read = await (this.pull ? Promise.race([this.pull, pushed]) : pushed);
+            if (read) {
+              this.pull = undefined;
+              await this.absorb(read);
+            }
           }
         },
       }),
@@ -325,7 +353,10 @@ export class ClaudeSession implements HarnessSession {
       ?.autoCompactWindow;
     this.query = this.queryFn({ prompt: this.input, options });
     this.flush();
-    void this.consume();
+    this.sdk = this.query[Symbol.asyncIterator]();
+    // A consumer already parked on an empty queue starts reading now.
+    this.waiter?.();
+    this.waiter = undefined;
   }
 
   private flush(): void {
@@ -387,34 +418,48 @@ export class ClaudeSession implements HarnessSession {
     }
   }
 
-  private async consume(): Promise<void> {
-    const q = this.query;
-    if (!q) return;
-    try {
-      for await (const msg of q) {
-        for (const event of this.decoder.decode(msg)) {
-          if (event.type === "compacted") {
-            // `post_tokens` counts the summary and kept messages only — not the
-            // system prompt and tools — so it read 3k on a chat whose very next
-            // request was 29k. The CLI's own breakdown counts everything.
-            const live = (await this.readContextUsage(LIVE_USAGE_TIMEOUT_MS))?.totalTokens;
-            if (typeof live === "number" && Number.isFinite(live) && live >= 0) {
-              event.postTokens = live;
-              this.decoder.setContextTokens(live);
-            }
-          }
-          this.emit(event);
-          // The window is the meter's denominator and only the runtime knows
-          // it: learn it once the process is live, and again after every turn,
-          // since a model fallback can move it mid-session.
-          if (event.type === "init" || event.type === "turn-end") void this.refreshWindow();
+  /**
+   * Turn one read of the SDK stream into queued events.
+   *
+   * The stream is read only as fast as the host consumes events — one message,
+   * fully handled, then the next — which is exactly how the broker's direct
+   * loop read it. That backpressure is load-bearing: the CLI's input channel is
+   * only pulled as its stream is, so `pending()` at a turn end still counts
+   * the messages that will open the next turns. Read eagerly in a loop of its
+   * own, as this adapter used to, the stream ran ahead of the host, `pending()`
+   * read 0 while two chained turns were already under way, and the chat went
+   * idle in the middle of them.
+   */
+  private async absorb(
+    read: { result: IteratorResult<unknown> } | { error: unknown },
+  ): Promise<void> {
+    if ("error" in read) {
+      // An abort is an expected end, not a failure.
+      if (!this.disposed && !this.abort.signal.aborted) this.fail(read.error);
+      else this.end();
+      return;
+    }
+    if (read.result.done) {
+      this.end();
+      return;
+    }
+    for (const event of this.decoder.decode(read.result.value as never)) {
+      if (event.type === "compacted") {
+        // `post_tokens` counts the summary and kept messages only — not the
+        // system prompt and tools — so it read 3k on a chat whose very next
+        // request was 29k. The CLI's own breakdown counts everything.
+        const live = (await this.readContextUsage(LIVE_USAGE_TIMEOUT_MS))?.totalTokens;
+        if (typeof live === "number" && Number.isFinite(live) && live >= 0) {
+          event.postTokens = live;
+          this.decoder.setContextTokens(live);
         }
       }
-    } catch (err) {
-      // An abort is an expected end, not a failure.
-      if (!this.disposed && !this.abort.signal.aborted) this.fail(err);
+      this.emit(event);
+      // The window is the meter's denominator and only the runtime knows it:
+      // learn it once the process is live, and again after every turn, since a
+      // model fallback can move it mid-session.
+      if (event.type === "init" || event.type === "turn-end") void this.refreshWindow();
     }
-    this.end();
   }
 
   /** The runtime died — see `HarnessSession.events` for why that is not a turn-end. */
@@ -691,6 +736,7 @@ export class ClaudeSession implements HarnessSession {
       const signal = opts?.signal;
       const onAbort = (): void => {
         if (this.pendingPermissions.delete(requestId)) {
+          this.requestInputs.delete(requestId);
           resolve({ behavior: "deny", message: "interrupted" });
         }
       };
@@ -706,8 +752,8 @@ export class ClaudeSession implements HarnessSession {
       // rather than being charged to the main loop.
       const thread = opts?.toolUseID ? this.toolThreads.get(opts.toolUseID) : undefined;
       const parentToolUseId = thread ?? (opts?.agentID ? undefined : null);
+      this.requestInputs.set(requestId, input);
       if (name === QUESTION_TOOL) {
-        this.questionInputs.set(requestId, input);
         this.emit({
           type: "question-request",
           requestId,
@@ -737,11 +783,12 @@ export class ClaudeSession implements HarnessSession {
     const resolve = this.pendingPermissions.get(requestId);
     if (!resolve) return;
     this.pendingPermissions.delete(requestId);
-    this.questionInputs.delete(requestId);
+    const original = this.requestInputs.get(requestId) ?? {};
+    this.requestInputs.delete(requestId);
     if (resolution.decision === "allow") {
       resolve({
         behavior: "allow",
-        updatedInput: resolution.updatedInput ?? {},
+        updatedInput: resolution.updatedInput ?? original,
       } as unknown as PermissionResult);
     } else {
       resolve({ behavior: "deny", message: resolution.message ?? "denied" } as PermissionResult);
@@ -758,9 +805,9 @@ export class ClaudeSession implements HarnessSession {
   resolveQuestion(requestId: string, answers: HarnessQuestionAnswer[]): void {
     const resolve = this.pendingPermissions.get(requestId);
     if (!resolve) return;
-    const input = this.questionInputs.get(requestId) ?? {};
+    const input = this.requestInputs.get(requestId) ?? {};
     this.pendingPermissions.delete(requestId);
-    this.questionInputs.delete(requestId);
+    this.requestInputs.delete(requestId);
     resolve({
       behavior: "allow",
       updatedInput: buildQuestionAnswer(input, answers),
@@ -947,7 +994,7 @@ export class ClaudeSession implements HarnessSession {
       resolve({ behavior: "deny", message: "session stopped" } as PermissionResult);
     }
     this.pendingPermissions.clear();
-    this.questionInputs.clear();
+    this.requestInputs.clear();
     // Close the input, then kill the tree — the broker's direct loop did exactly
     // this for years. Closing only asks the CLI to wind down; the abort is what
     // the SDK turns into a kill of the process and every MCP server hanging off
