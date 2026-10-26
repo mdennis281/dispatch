@@ -11,6 +11,7 @@ import {
   WorktreeDetector,
   parseEnterWorktreeResult,
 } from "./worktree-detector.js";
+import { seedDefaultProvider } from "../harness/registry.testkit.js";
 
 /* -------------------------------------------------- real temp git repo fixture */
 
@@ -157,6 +158,7 @@ beforeEach(async () => {
   bus.subscribe((e) => events.push(e));
   store = new Store(dataDir);
   await store.init();
+  await seedDefaultProvider(store);
   worktrees = new WorktreeService({ bus, store });
   detector = new WorktreeDetector({ store, bus, worktrees });
 

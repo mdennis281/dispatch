@@ -18,7 +18,6 @@ import type { ServerConfig } from "../config.js";
 // second Store over the installed instance's roots for `instance: "stable"`.
 import { Store } from "../store/index.js";
 import {
-  DEFAULT_HARNESS,
   findSubscription,
   pinnedIdOf,
   PrSnapshotSchema,
@@ -1135,9 +1134,19 @@ export function createServices(
         messenger: chatMessenger,
         broker,
         pluginOAuth,
+        // Announced on the bus either way: a chat's provider-unavailable state
+        // is derived from the registered list, so an open tab re-reads it here
+        // and a chat on a plugin that was just re-enabled recovers without a
+        // reload (#426).
         providers: {
-          register: (harness, descriptor) => harnesses.register(harness, descriptor),
-          unregister: (kind) => harnesses.unregister(kind),
+          register: (harness, descriptor) => {
+            harnesses.register(harness, descriptor);
+            bus.publish({ type: "providers-changed" });
+          },
+          unregister: async (kind) => {
+            await harnesses.unregister(kind);
+            bus.publish({ type: "providers-changed" });
+          },
         },
         terminals: terminalBackends,
       },
@@ -1209,9 +1218,10 @@ export function createServices(
     // started from the UI, not for a child silently changing runtimes
     // underneath its parent.
     const parent = await store.getChat(parentChatId).catch(() => null);
-    // Legacy chats predate the persisted harness field; those chats are Claude,
-    // which was the only provider when their rows were written.
-    const parentProvider = parent ? (parent.harness ?? DEFAULT_HARNESS) : undefined;
+    // A parent that names no provider hands none down; the child then needs
+    // the request, the project or the app to name one, and `createChat` says
+    // so clearly when none does.
+    const parentProvider = parent?.harness;
     const settings = await store.getSettings().catch(() => null);
     const named = findSubscription(settings, request.subscription);
     if (request.subscription && !named) {
@@ -1307,7 +1317,8 @@ export function createServices(
       title: chat.title,
       projectId: chat.projectId,
       projectName: project.name,
-      provider: chat.harness ?? DEFAULT_HARNESS,
+      // `createChat` refuses a chat with no provider, so this is always set.
+      provider: chat.harness!,
       model: chat.model,
     };
   };

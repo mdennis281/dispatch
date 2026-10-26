@@ -13,7 +13,6 @@
  */
 import type { FastifyInstance } from "fastify";
 import {
-  DEFAULT_HARNESS,
   SubscriptionListSchema,
   providerFor,
   findSubscription,
@@ -28,11 +27,12 @@ export function registerModelRoutes(app: FastifyInstance): void {
     "/api/models",
     async (req) => {
       const settings = await store.getSettings().catch(() => null);
-      const kind = req.query.harness || DEFAULT_HARNESS;
-      // No runtime, no catalogue. Answering an uninstalled provider with the
-      // default's list would put Claude ids in that chat's picker.
-      const harness = app.services.harnesses.find(kind);
-      if (!harness) return [];
+      const kind = req.query.harness;
+      // No runtime, no catalogue — and no provider asked for, no catalogue
+      // either. Answering either with the default's list put Claude ids in a
+      // picker for a chat that could never send them.
+      const harness = kind ? app.services.harnesses.find(kind) : undefined;
+      if (!kind || !harness) return [];
       // A named account wins, but only on ITS provider: `?harness=codex&subscription=claude2`
       // is a stale client, and answering it with Claude's catalogue would put a
       // Claude id in a Codex picker.
@@ -48,9 +48,9 @@ export function registerModelRoutes(app: FastifyInstance): void {
     "/api/models/context-windows",
     async (req) => {
       const settings = await store.getSettings().catch(() => null);
-      const kind = req.query.harness || DEFAULT_HARNESS;
-      const harness = app.services.harnesses.find(kind);
-      if (!harness) return {};
+      const kind = req.query.harness;
+      const harness = kind ? app.services.harnesses.find(kind) : undefined;
+      if (!kind || !harness) return {};
       const windows = await harness.contextWindows?.({
         refresh: req.query.refresh === "1",
         account: accountOf(subscriptionFor(settings, kind)),

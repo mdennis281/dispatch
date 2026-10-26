@@ -71,10 +71,11 @@ export function mcpEnablementKeys(harness: string, model?: string): string[] {
  */
 export function harnessEnablementLayers(
   byKey: Record<string, Record<string, boolean>> | undefined,
-  harness: string,
+  /** Undefined for a chat that names no provider — no runtime layer applies. */
+  harness: string | undefined,
   model?: string,
 ): Pick<McpEnablementLayers, "harness" | "model"> {
-  if (!byKey) return {};
+  if (!byKey || !harness) return {};
   const [harnessKey, modelKey] = mcpEnablementKeys(harness, model);
   return {
     ...(harnessKey && byKey[harnessKey] ? { harness: byKey[harnessKey] } : {}),

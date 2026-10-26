@@ -10,7 +10,6 @@
  */
 import type { FastifyInstance } from "fastify";
 import {
-  DEFAULT_HARNESS,
   isKnownProvider,
   findSubscription,
   accountLabel,
@@ -37,8 +36,12 @@ interface UsageQuery {
 async function accountFor(app: FastifyInstance, query: UsageQuery) {
   const settings = await app.cm.store.getSettings().catch(() => null);
   const named = findSubscription(settings, query.subscription);
-  const kind = isKnownProvider(query.harness) ? query.harness : DEFAULT_HARNESS;
-  return named ?? subscriptionFor(settings, kind);
+  if (named) return named;
+  // An unknown or absent provider has no account — it is not Claude's. This
+  // used to answer `?harness=<disabled plugin>` with the Claude login's
+  // windows, so a chat on a provider that was gone showed somebody else's
+  // meter (#426).
+  return isKnownProvider(query.harness) ? subscriptionFor(settings, query.harness) : undefined;
 }
 
 async function snapshotFor(
@@ -47,6 +50,8 @@ async function snapshotFor(
   refresh: boolean,
 ): Promise<UsageSnapshot> {
   const sub = await accountFor(app, query);
+  // An honest "no meter" rather than a borrowed one.
+  if (!sub) return { fiveHour: null, sevenDay: null, fetchedAt: Date.now(), error: "unavailable" };
   const usage = await readAccountUsage(app.services, sub, refresh);
   return usage.snapshot;
 }

@@ -107,8 +107,8 @@ describe("TitleService.maybeGenerateInitialTitle", () => {
     const { store, saves } = makeStore(current, [user("inspect child agents")]);
     const generateText = vi.fn(async () => "Codex Agent Detail");
     const resolve = vi.fn(() => ({
+      ok: true,
       harness: { kind: "codex", generateText },
-      fellBack: false,
     }));
     const svc = new TitleService({
       store,
@@ -129,6 +129,37 @@ describe("TitleService.maybeGenerateInitialTitle", () => {
       }),
     );
     expect(saves[0]?.title).toBe("Codex Agent Detail");
+  });
+
+  it("skips a chat whose provider cannot run — quietly, and never on another provider (#426)", async () => {
+    const current = { ...chat(DEFAULT_CHAT_TITLE), harness: "codex" as const };
+    const { store, saves } = makeStore(current, [user("inspect child agents")]);
+    const resolve = vi.fn(() => ({
+      ok: false,
+      unavailable: { code: "provider-unavailable", provider: "codex", reason: "unregistered", message: "gone" },
+    }));
+    const bus = new EventBus();
+    const notices: unknown[] = [];
+    bus.on("notice", (e) => notices.push(e));
+    const svc = new TitleService({
+      store,
+      bus,
+      harnesses: { resolve } as unknown as Pick<HarnessRegistry, "resolve">,
+      sleep: async () => {},
+    });
+
+    await svc.maybeGenerateInitialTitle("c1");
+
+    expect(resolve).toHaveBeenCalledTimes(1);
+    expect(saves).toHaveLength(0);
+    expect(notices).toEqual([]);
+
+    // A Regenerate somebody clicked is told why nothing happened.
+    await svc.regenerate("c1");
+    expect(saves).toHaveLength(0);
+    expect(notices).toEqual([
+      expect.objectContaining({ level: "warn", text: "Can't regenerate the title: gone" }),
+    ]);
   });
 });
 

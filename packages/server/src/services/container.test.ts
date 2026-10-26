@@ -12,6 +12,8 @@ import {
   recoverInterruptedChatStatuses,
   type ServiceOverrides,
 } from "./container.js";
+import { HarnessRegistry, type Harness } from "../harness/index.js";
+import { providerFor } from "@dispatch/shared";
 
 /**
  * A stub whose every accessed member is an async no-op function, EXCEPT the
@@ -419,7 +421,9 @@ describe("broker.spawnChat attribution", () => {
         store: stub<Store>({
           getProject: async () => ({ id: "p1", name: "Hivebreak" }),
           projectConfigDir: () => join(tmpdir(), "dispatch-no-personas-spawn-config"),
-          getSettings: async () => ({}),
+          // A default provider, as setup leaves one — `createChat` refuses a
+          // chat nothing names a provider for (#426).
+          getSettings: async () => ({ harness: { defaultHarness: "claude", defaults: {} } }),
           saveChat: async (c: Chat) => {
             saved.push(c);
             return c;
@@ -435,6 +439,20 @@ describe("broker.spawnChat attribution", () => {
         // `has: true` so `ensureSession` short-circuits instead of trying to
         // start a real subprocess.
         broker: stub({ has: () => true, sendMessage }),
+        // Codex registered, as its plugin would: a spawn onto a provider
+        // nothing registered is refused now rather than created dead.
+        harnesses: new HarnessRegistry({
+          providers: [
+            {
+              harness: {
+                kind: "codex",
+                capabilities: {},
+                runtime: () => ({ kind: "codex", source: "installed", available: true }),
+              } as unknown as Harness,
+              descriptor: { ...providerFor("claude"), id: "codex", label: "Codex", shortLabel: "Codex" },
+            },
+          ],
+        }),
         authored: new AuthoredConfigService({ globalRoot: join(tmpdir(), "dispatch-no-personas-spawn-global") }),
         terminals: stub(),
         memory: stub(),

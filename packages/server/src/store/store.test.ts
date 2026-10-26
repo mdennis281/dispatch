@@ -916,3 +916,63 @@ describe("Store issue claims + watch", () => {
     expect(await store.getIssueWatch("p1")).toBeNull();
   });
 });
+
+/**
+ * #426: an absent provider used to MEAN Claude, re-derived at a dozen read
+ * sites that doubled as a silent fallback. The store makes that meaning
+ * explicit once, so absent can mean none everywhere else.
+ */
+describe("legacy provider backfill", () => {
+  /** A root that already holds data, so `init()` treats it as an upgrade. */
+  async function legacyRoot(): Promise<string> {
+    const root = await mkdtemp(join(tmpdir(), "cm-legacy-"));
+    await mkdir(join(root, "chats", "old"), { recursive: true });
+    await mkdir(join(root, "chats", "codex1"), { recursive: true });
+    await writeFile(
+      join(root, "chats", "old", "chat.json"),
+      JSON.stringify({ ...chat("old", "p1"), harness: undefined, futureField: 1 }),
+    );
+    await writeFile(join(root, "chats", "codex1", "chat.json"), JSON.stringify({ ...chat("codex1", "p1"), harness: "codex" }));
+    await writeFile(join(root, "config.json"), JSON.stringify({ theme: "dark" }));
+    return root;
+  }
+
+  it("writes claude onto chats and the app default that named no provider, and leaves the rest", async () => {
+    const root = await legacyRoot();
+    const s = new Store(root);
+    try {
+      await s.init();
+      expect((await s.getChat("old"))?.harness).toBe("claude");
+      expect((await s.getChat("codex1"))?.harness).toBe("codex");
+      expect((await s.getSettings()).harness?.defaultHarness).toBe("claude");
+      // Raw rewrite: a key this build does not know survives the pass.
+      expect((await readJson(join(root, "chats", "old", "chat.json")) as Record<string, unknown>).futureField).toBe(1);
+    } finally {
+      s.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("runs ONCE — a default the human clears afterwards stays cleared", async () => {
+    const root = await legacyRoot();
+    const first = new Store(root);
+    await first.init();
+    await first.saveSettings({ ...(await first.getSettings()), harness: { defaults: {} } });
+    first.close();
+    const second = new Store(root);
+    try {
+      await second.init();
+      expect((await second.getSettings()).harness?.defaultHarness).toBeUndefined();
+    } finally {
+      second.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("gives a fresh install no provider at all", async () => {
+    // `store` is built on an empty temp dir by beforeEach.
+    expect((await store.getSettings()).harness?.defaultHarness).toBeUndefined();
+    await store.saveChat({ ...chat("fresh", "p1"), harness: undefined });
+    expect((await store.getChat("fresh"))?.harness).toBeUndefined();
+  });
+});

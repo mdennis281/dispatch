@@ -531,7 +531,12 @@ function services(
   const sent: { chatId: string; text: string; parts?: unknown }[] = [];
   const store = {
     getProject: async () => over.project ?? { id: "p1", repoPath: "/repo" },
-    getSettings: async () => over.settings ?? { theme: "dark" },
+    // An app-default provider, as setup leaves one: with none, `createChat`
+    // refuses the chat — there is no implicit Claude any more (#426).
+    getSettings: async () => ({
+      harness: { defaultHarness: "claude", defaults: {} },
+      ...(over.settings ?? { theme: "dark" }),
+    }),
     saveChat: async (c: Chat) => {
       saved.push(c);
       return c;

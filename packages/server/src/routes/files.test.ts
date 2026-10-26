@@ -16,6 +16,7 @@ import { Store } from "../store/index.js";
 import { FileIndexService } from "../services/file-index.js";
 import { chatRoot } from "./files.js";
 import type { ExecFn } from "../services/worktree.js";
+import { seedDefaultProvider } from "../harness/registry.testkit.js";
 
 let app: FastifyInstance;
 let dir: string;
@@ -33,6 +34,7 @@ beforeEach(async () => {
   };
   const store = new Store(dir);
   await store.init();
+  await seedDefaultProvider(store);
   const bus = new EventBus();
   app = await buildApp({
     config: { ...loadConfig(), dataDir: dir },

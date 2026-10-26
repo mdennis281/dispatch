@@ -26,7 +26,7 @@ import { stripTitleMarks, titlePrefixOf, withTitlePrefix } from "@dispatch/share
 import type { Chat, ChatMessage } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
-import type { HarnessRegistry } from "../harness/index.js";
+import { ProviderUnavailableError, type HarnessRegistry } from "../harness/index.js";
 
 /** The default title a chat is born with — the gate for auto-generation. */
 export const DEFAULT_CHAT_TITLE = "New chat";
@@ -180,7 +180,12 @@ export class TitleService {
     if (opts.generateText) this.generateText = opts.generateText;
     else if (opts.harnesses) {
       this.generateText = async (chat, prompt, timeoutMs) => {
-        const { harness } = opts.harnesses!.resolve(chat.harness);
+        // The chat's own provider or nothing. Titling used to run on the
+        // fallback provider, so a Codex chat whose plugin was off still spent
+        // a Claude call naming itself (#426).
+        const resolved = opts.harnesses!.resolve(chat.harness);
+        if (!resolved.ok) throw new ProviderUnavailableError(resolved.unavailable);
+        const { harness } = resolved;
         // Spent on the chat's OWN account: a title for a chat on a second
         // subscription must not draw down the first one's budget.
         const settings = await opts.store.getSettings().catch(() => null);
@@ -260,6 +265,7 @@ export class TitleService {
     }
     const run = this.runGeneration(chatId, prompt, opts.prefix ?? null, {
       requireDefaultTitle: opts.requireDefaultTitle === true,
+      userInitiated: opts.userInitiated === true,
     });
     this.inFlight.set(chatId, run);
     try {
@@ -276,7 +282,7 @@ export class TitleService {
     chatId: string,
     prompt: string,
     prefix: string | null,
-    guard: { requireDefaultTitle: boolean },
+    guard: { requireDefaultTitle: boolean; userInitiated: boolean },
   ): Promise<void> {
     let lastError = "";
     for (let attempt = 0; attempt < TITLE_ATTEMPTS; attempt++) {
@@ -308,6 +314,22 @@ export class TitleService {
         this.bus.publish({ type: "chat-update", chat: saved });
         return;
       } catch (err) {
+        // Not worth retrying: nothing changes in the next few seconds. The
+        // automatic path stays quiet — the chat already shows its provider is
+        // unavailable, and it is titled on a later turn once that is back. A
+        // Regenerate somebody clicked is owed an answer, though; a click that
+        // silently does nothing reads as a broken button.
+        if (err instanceof ProviderUnavailableError) {
+          if (guard.userInitiated) {
+            this.bus.publish({
+              type: "notice",
+              chatId,
+              level: "warn",
+              text: `Can't regenerate the title: ${err.message}`,
+            });
+          }
+          return;
+        }
         lastError = err instanceof Error ? err.message : String(err);
       }
     }

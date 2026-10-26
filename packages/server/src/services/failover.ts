@@ -30,7 +30,6 @@
  * sentence rebuild it — because it is a cache of something the provider owns.
  */
 import {
-  DEFAULT_HARNESS,
   accountLabel,
   fallbackChain,
   usageWindowsOf,
@@ -183,9 +182,10 @@ export class FailoverService {
     // available if we try — see MOVE_COOLDOWN_MS.
     const lastMove = this.moved.get(chatId);
     if (lastMove !== undefined && this.now() - lastMove < MOVE_COOLDOWN_MS) return null;
+    if (!chat.harness) return null;
     const settings = await this.store.getSettings().catch(() => null);
     const from = chatSubscription(settings, {
-      harness: chat.harness ?? DEFAULT_HARNESS,
+      harness: chat.harness,
       subscriptionId: chat.subscriptionId,
     });
     this.markExhausted(from.id, resetsAt);

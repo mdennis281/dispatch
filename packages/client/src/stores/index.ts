@@ -330,6 +330,16 @@ function reduceServerEvent(evt: WsServerEvent): void {
       useTerminals.getState().setBackends(evt.backends, evt.ports);
       return;
 
+    // A provider plugin was enabled or disabled. Re-read the list: a chat's
+    // "provider unavailable" state is derived from it, so this is what lets a
+    // chat on a re-enabled plugin recover without a reload (#426).
+    case "providers-changed":
+      void api.harnesses
+        .list()
+        .then((h) => useHarnesses.getState().setHarnesses(h))
+        .catch(() => {});
+      return;
+
     case "checkpoint":
       // Rollback anchor — record it so the chat can offer "Roll back here" only
       // where a restore point exists.

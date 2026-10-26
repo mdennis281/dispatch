@@ -13,6 +13,7 @@ import { loadConfig } from "../config.js";
 import { EventBus } from "../bus.js";
 import { Store } from "../store/index.js";
 import { IMAGE_PREVIEW_LIMIT_BYTES } from "./worktrees.js";
+import { seedDefaultProvider } from "../harness/registry.testkit.js";
 
 /** A 1×1 transparent PNG. */
 const PNG_B64 =
@@ -26,6 +27,7 @@ beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "cm-assets-"));
   store = new Store(dir);
   await store.init();
+  await seedDefaultProvider(store);
   const config = { ...loadConfig(), dataDir: dir };
   app = await buildApp({ config, store, bus: new EventBus() });
 });

@@ -3,7 +3,8 @@
  *
  * `createChat` walks ONE chain — the request, then (for a spawn) the parent,
  * then the project manifest's `defaults`, then the app's per-provider defaults,
- * then a built-in floor — and only PINS what the request or the parent chose.
+ * then a built-in floor (for everything but the provider, which has none —
+ * #426) — and only PINS what the request or the parent chose.
  * Everything the project or app answered is left off the row so the chat keeps
  * inheriting it live. The whole chain is dead weight if a caller pins a value
  * it could have omitted: the UI's new-chat buttons used to send
@@ -22,6 +23,9 @@ import { Store } from "../store/index.js";
 import { AuthoredConfigService } from "../services/authored-config.js";
 import { createChat } from "./dispatch.js";
 import type { Services } from "../services/container.js";
+import { claudeOnlyRegistry, seedDefaultProvider } from "../harness/registry.testkit.js";
+import { ProviderUnavailableError, type Harness } from "../harness/index.js";
+import { providerFor } from "@dispatch/shared";
 
 let root: string;
 let bus: EventBus;
@@ -48,6 +52,7 @@ beforeEach(async () => {
   bus = new EventBus();
   store = new Store(join(root, "data"));
   await store.init();
+  await seedDefaultProvider(store);
   await store.saveProject({
     id: "p1",
     name: "P",
@@ -196,4 +201,53 @@ it.each(["claude", "codex"] as const)("persists explicit personas for %s, defaul
   expect((await store.getChat(selected.id))!.personaId).toBe("product-owner");
   expect(selected.harness).toBe(harness);
   await expect(createChat(deps, { projectId: "p1", harness, personaId: "missing" })).rejects.toThrow("unavailable");
+});
+
+/** #426: no provider, no chat — and never a chat quietly put on Claude. */
+describe("createChat provider refusals", () => {
+  const late = {
+    kind: "late",
+    capabilities: {},
+    runtime: () => ({ kind: "late", source: "installed", available: true }),
+  } as unknown as Harness;
+  const lateDescriptor = { ...providerFor("claude"), id: "late", label: "Late", shortLabel: "Late" };
+
+  function withRegistry(activationSettled?: () => Promise<void>): {
+    svc: Services;
+    registry: ReturnType<typeof claudeOnlyRegistry>;
+  } {
+    const registry = claudeOnlyRegistry();
+    const svc = {
+      store,
+      bus,
+      projectConfig: { getDefaults: () => null },
+      harnesses: registry,
+      plugins: activationSettled ? { activationSettled } : undefined,
+    } as unknown as Services;
+    return { svc, registry };
+  }
+
+  it("refuses when nothing names a provider", async () => {
+    await store.saveSettings({ theme: "dark" });
+    const { svc } = withRegistry();
+    await expect(createChat(svc, { projectId: "p1" })).rejects.toMatchObject({
+      code: "provider-unavailable",
+      unavailable: { reason: "unset" },
+    });
+  });
+
+  it("refuses a provider nothing registers", async () => {
+    const { svc } = withRegistry(async () => {});
+    const err = await createChat(svc, { projectId: "p1", harness: "gemini" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ProviderUnavailableError);
+    expect(err).toMatchObject({ unavailable: { provider: "gemini", reason: "unregistered" } });
+  });
+
+  it("waits for a provider plugin still activating after listen instead of refusing it", async () => {
+    let registry!: ReturnType<typeof claudeOnlyRegistry>;
+    const made = withRegistry(async () => registry.register(late, lateDescriptor));
+    registry = made.registry;
+    const chat = await createChat(made.svc, { projectId: "p1", harness: "late" });
+    expect(chat.harness).toBe("late");
+  });
 });

@@ -100,7 +100,10 @@ export class TokenBackfill {
     let rows = 0;
     for (const chat of chats) {
       try {
-        const harness = (chat.harness ?? "claude") as HarnessKind;
+        // The store backfill gives every legacy row an explicit provider, so
+        // one with none was never run and has no tokens to book.
+        if (!chat.harness) continue;
+        const harness: HarnessKind = chat.harness;
         const subscriptionId = subscriptionFor(settings, harness, chat.subscriptionId).id;
         rows += tokens.record(
           await this.linesForChat(chat.id, {

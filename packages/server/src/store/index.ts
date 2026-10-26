@@ -112,6 +112,7 @@ import {
   GLOBAL_PROJECT_ID,
   globalProject,
   isGlobalProject,
+  LEGACY_HARNESS,
 } from "@dispatch/shared";
 import {
   AgentContextSettingsSchema,
@@ -899,8 +900,80 @@ export class Store {
       mkdir(this.chatsDir(), { recursive: true }),
       mkdir(this.globalProjectDir(), { recursive: true }),
     ]);
+    // Before `freeReservedProjectId`, which lists (and so caches) every chat:
+    // run after it, the cache kept serving the rows this pass rewrote.
+    await this.backfillLegacyHarness();
     await this.freeReservedProjectId();
     this.db.open();
+  }
+
+  /**
+   * Write `"claude"` onto every row that predates provider selection and so
+   * names no provider — once.
+   *
+   * An absent `chat.harness`, and an absent `settings.harness.defaultHarness`,
+   * meant Claude: it was the only provider when those rows were written. That
+   * rule used to be re-applied at a dozen read sites (`chat.harness ??
+   * DEFAULT_HARNESS`), and every one of them doubled as a silent fallback for a
+   * chat that genuinely had no provider. Making the legacy meaning explicit on
+   * disk is what let those fallbacks be deleted (#426): after this runs, absent
+   * means none, and a chat with none shows that rather than running on Claude.
+   *
+   * ONCE, by marker, not "whenever the field is absent". The settings field is
+   * optional now and the human may clear it on purpose; a backfill that ran on
+   * every boot would put Claude back each time. Two markers because the two
+   * live in different roots: chats are per-instance (`dataDir`), settings are
+   * shared between instances (`configDir`) — each instance backfills its own
+   * chats, and whichever boots first backfills the shared settings.
+   *
+   * A fresh install has nothing legacy, so it only writes the markers. A chat
+   * that fails to read or write leaves its marker unwritten, so the next boot
+   * retries rather than silently stranding that chat with no provider.
+   */
+  private async backfillLegacyHarness(): Promise<void> {
+    const chatsMarker = join(this.dataDir, ".legacy-harness-chats");
+    const settingsMarker = join(this.configDir, ".legacy-harness-settings");
+    const note = `Rows written before provider selection were given "${LEGACY_HARNESS}" once. Do not delete.\n`;
+
+    if (!existsSync(chatsMarker)) {
+      let failed = 0;
+      if (!this.freshInstall) {
+        const entries = await readdir(this.chatsDir(), { withFileTypes: true }).catch(() => []);
+        for (const entry of entries) {
+          if (!entry.isDirectory() || !isEntityId(entry.name)) continue;
+          const file = join(this.chatsDir(), entry.name, "chat.json");
+          try {
+            const raw = (await readJson(file)) as Record<string, unknown> | undefined;
+            if (!raw || typeof raw !== "object" || raw.harness) continue;
+            // Raw JSON, not `saveChat`: the row is rewritten exactly as it was
+            // plus one field, so a key this build's schema does not know (a
+            // newer build's, sharing nothing but the file) survives the pass.
+            await writeJsonAtomic(file, { ...raw, harness: LEGACY_HARNESS });
+            this.chatCache.delete(entry.name);
+          } catch (err) {
+            failed += 1;
+            console.error(`[Dispatch] provider backfill skipped chat ${entry.name}:`, err);
+          }
+        }
+      }
+      if (!failed) await fsWriteFile(chatsMarker, note, "utf8");
+    }
+
+    if (!existsSync(settingsMarker)) {
+      if (!this.freshInstall) {
+        const raw = (await readJson(this.settingsFile())) as Record<string, unknown> | undefined;
+        const harness = raw?.harness as Record<string, unknown> | undefined;
+        if (raw && !harness?.defaultHarness) {
+          await this.mutex.run("settings", () =>
+            writeJsonAtomic(this.settingsFile(), {
+              ...raw,
+              harness: { ...harness, defaultHarness: LEGACY_HARNESS },
+            }),
+          );
+        }
+      }
+      await fsWriteFile(settingsMarker, note, "utf8");
+    }
   }
 
   /** Snapshot taken before boot-time seeding; stable for this process lifetime. */

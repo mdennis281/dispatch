@@ -12,6 +12,7 @@ import { buildApp } from "../app.js";
 import { EventBus } from "../bus.js";
 import { Store } from "../store/index.js";
 import { contentTypeFor, resolveInside } from "./plugin-client.js";
+import { seedDefaultProvider } from "../harness/registry.testkit.js";
 
 const dirs: string[] = [];
 const apps: FastifyInstance[] = [];
@@ -63,6 +64,7 @@ async function app(opts: { configDir: string; dataDir: string; bus?: EventBus })
     },
   });
   apps.push(instance);
+  await seedDefaultProvider(store);
   return { instance, store, bus, plugins: instance.services.plugins };
 }
 

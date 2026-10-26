@@ -22,6 +22,7 @@ import { EventBus } from "../bus.js";
 import { Store } from "../store/index.js";
 import { TerminalService, type ShellProcess, type SpawnShell } from "../services/terminal.js";
 import { GLOBAL_PROJECT_ID } from "@dispatch/shared";
+import { seedDefaultProvider } from "../harness/registry.testkit.js";
 
 /** A shell that only knows how to echo the service's sentinel marker back. */
 class FakeShell extends EventEmitter implements ShellProcess {
@@ -66,6 +67,7 @@ beforeEach(async () => {
   };
   const store = new Store(dir);
   await store.init();
+  await seedDefaultProvider(store);
   const bus = new EventBus();
   app = await buildApp({
     config: { ...loadConfig(), dataDir: dir },

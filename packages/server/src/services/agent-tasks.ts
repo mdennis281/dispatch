@@ -1677,7 +1677,7 @@ async function runOn(
   const provider =
     picked.harness ??
     projectHarnessOf(services.projectConfig?.getDefaults(project.id), settings);
-  const defaults = providerDefaults(settings?.harness, provider).reviewer;
+  const defaults = provider ? providerDefaults(settings?.harness, provider).reviewer : undefined;
   return { ...picked, model: picked.model ?? defaults?.model, effort: defaults?.effort };
 }
 

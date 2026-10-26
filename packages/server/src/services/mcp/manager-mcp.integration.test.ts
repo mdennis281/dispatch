@@ -38,6 +38,7 @@ import {
   type ManagerMcpBroker,
   type ManagerMcpGitHub,
 } from "./manager-mcp.js";
+import { claudeOnlyRegistry } from "../../harness/registry.testkit.js";
 
 /* ------------------------------------------------------------------ fixtures */
 
@@ -63,6 +64,7 @@ function chatFor(id: string, projectId = "p1"): Chat {
   return {
     id,
     projectId,
+    harness: "claude",
     title: "Untitled",
     modeId: "auto",
     effort: "medium",
@@ -182,6 +184,7 @@ describe("manager-mcp integration — wait_for_chat over a real SessionBroker", 
     let idc = 0;
     let clock = 1000;
     broker = new SessionBroker({
+      harnesses: claudeOnlyRegistry(),
       store,
       bus,
       deps: { query: gatedFakeQuery(gate), genId: () => `id-${++idc}`, now: () => ++clock },
@@ -211,6 +214,7 @@ describe("manager-mcp integration — wait_for_chat over a real SessionBroker", 
     let idc = 0;
     let clock = 1000;
     broker = new SessionBroker({
+      harnesses: claudeOnlyRegistry(),
       store,
       bus,
       deps: { query: gatedFakeQuery(Promise.resolve()), genId: () => `id-${++idc}`, now: () => ++clock },
@@ -602,6 +606,7 @@ describe("manager-mcp integration — memory tools over a real MemoryService", (
     let idc = 0;
     let clock = 1000;
     broker = new SessionBroker({
+      harnesses: claudeOnlyRegistry(),
       store,
       bus,
       memory,
