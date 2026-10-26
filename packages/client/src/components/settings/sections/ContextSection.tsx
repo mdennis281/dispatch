@@ -224,7 +224,10 @@ export function ContextSection({ draft, patch, serverDefaults, catalogs }: AppPa
       </div>
 
       <div className={cn("transition-opacity", !enabled && "pointer-events-none opacity-45")}>
-        <Field label="Reserve window" hint="tokens; blank = SDK default">
+        {/* This is Claude Code's `autoCompactWindow` — the window SIZE it
+            compacts ~33k short of, 100k–1M — not a reserve. It used to be
+            labelled one with a 20000 placeholder, a value the CLI drops. */}
+        <Field label="Claude compaction window" hint="tokens, 100k–1M; blank = from thresholds">
           <TextInput
             mono
             inputMode="numeric"
@@ -232,7 +235,7 @@ export function ContextSection({ draft, patch, serverDefaults, catalogs }: AppPa
             onChange={(e) =>
               patch({ autoCompact: { ...ac, window: numberField(e.target.value) } })
             }
-            placeholder="e.g. 20000"
+            placeholder="e.g. 400000"
           />
         </Field>
       </div>

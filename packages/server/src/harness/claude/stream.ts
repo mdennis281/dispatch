@@ -18,7 +18,7 @@
  * broker stop caring which runtime it is talking to.
  */
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
-import { figuresOfModelUsage, figuresOfUsage, type Effort } from "@dispatch/shared";
+import { compactedEvent, figuresOfModelUsage, figuresOfUsage, type Effort } from "@dispatch/shared";
 import type { HarnessEvent } from "../types.js";
 
 /** Tool whose call is rendered as a question card, not a generic tool row. */
@@ -151,6 +151,16 @@ export class ClaudeStreamDecoder {
         tools: (m as { tools?: unknown }).tools,
         mcpServers: (m as { mcp_servers?: unknown }).mcp_servers,
       });
+    }
+
+    // The CLI compacted. The post-compaction size is the main loop's new
+    // occupancy; without it `turn-end` would report the pre-compaction reading.
+    if (subtype === "compact_boundary") {
+      const event = compactedEvent(
+        (m as { compact_metadata?: Record<string, unknown> }).compact_metadata,
+      );
+      if (event.postTokens !== undefined) this.lastContextTokens = event.postTokens;
+      out.push(event);
     }
 
     // A backgrounded task (async `Agent` spawn, backgrounded `Bash`) settled.

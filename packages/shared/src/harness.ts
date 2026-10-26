@@ -538,6 +538,11 @@ export interface HarnessGuardBlockedEvent {
 /** The session compacted its own context and continued. */
 export interface HarnessCompactedEvent {
   type: "compacted";
+  /** "auto" for the runtime's own trigger, "manual" for a `/compact`. */
+  trigger?: "auto" | "manual";
+  /** Context occupancy just before / after, when the runtime reports them. */
+  preTokens?: number;
+  postTokens?: number;
 }
 
 /** A turn finished, successfully or not. */

@@ -10,6 +10,7 @@ import {
   CircleSlash,
   XCircle,
   Cpu,
+  FoldVertical,
 } from "lucide-react";
 import {
   DISPATCH_INPUT_SUBTYPE,
@@ -236,6 +237,9 @@ export const SystemRowView = memo(function SystemRowView({ row }: { row: SystemM
         {sent && <SentContextCard row={row} sent={sent} />}
       </>
     );
+  }
+  if (row.subtype === "compact") {
+    return <CenterNote icon={<FoldVertical />}>{row.text ?? "Context compacted."}</CenterNote>;
   }
   return (
     <CenterNote>

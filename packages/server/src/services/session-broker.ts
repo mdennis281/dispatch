@@ -71,7 +71,10 @@ import {
   type TokenFigures,
 } from "@dispatch/shared";
 import {
+  claudeCompactWindow,
   compactCommand,
+  compactedEvent,
+  compactedText,
   normalizeCompactFocus,
   oneLineFocus,
   perModelThreshold,
@@ -2362,6 +2365,19 @@ interface LiveSession {
    */
   autoCompactedAt?: number;
   /**
+   * The `autoCompactWindow` this Claude query was spawned with, so the next
+   * message can tell when a model switch or Settings edit has moved the
+   * threshold out from under it. See `respawnForCompactWindow`.
+   */
+  compactWindow?: number;
+  /**
+   * The threshold `compactWindow` was derived from. Once the CLI holds a
+   * derived window, `getContextUsage().maxTokens` reports THAT (threshold plus
+   * headroom — 133k for a 100k limit), a number nobody typed; the meter shows
+   * this instead, so it reads "99k / 100k" right before the drop.
+   */
+  compactLimit?: number;
+  /**
    * The model's context-window size (tokens) for this session, learned from the
    * SDK's `getContextUsage()` control (`maxTokens`) at init and after a model
    * switch. Stamped onto each `result` row so the composer meter divides by the
@@ -2819,6 +2835,8 @@ export class SessionBroker {
     }
     // A fast Send after selecting a persona must wait for the idle runtime to retire.
     if (session.personaChange) await session.personaChange.catch(() => {});
+    // A model switch or Settings edit moved this chat's compact threshold.
+    await this.respawnForCompactWindow(session);
     // Before the user row is written, not only in `buildOptions`: the row below
     // is stamped `effort: session.effort`, and on an unpinned chat's FIRST turn
     // of a session that was still `create()`'s placeholder — so the transcript
@@ -3899,8 +3917,18 @@ export class SessionBroker {
     if (!q?.getContextUsage) return null;
     try {
       const u = await q.getContextUsage();
-      // Cache the window off this fresh read so idle meters stay correct too.
-      if (session && typeof u.maxTokens === "number") session.contextWindow = u.maxTokens;
+      if (session && typeof u.maxTokens === "number" && u.maxTokens > 0) {
+        const max = this.meterWindow(session, u.maxTokens);
+        // Cache the window off this fresh read so idle meters stay correct too.
+        session.contextWindow = max;
+        if (max !== u.maxTokens) {
+          return {
+            ...u,
+            maxTokens: max,
+            percentage: Math.round((u.totalTokens / max) * 1000) / 10,
+          } as ContextUsage;
+        }
+      }
       return u as ContextUsage;
     } catch (err) {
       this.bus.publish({
@@ -3972,6 +4000,67 @@ export class SessionBroker {
       if (hit) return hit;
     }
     return settings?.harness?.contextLimits?.perChatTokens;
+  }
+
+  /**
+   * Retire an idle Claude runtime whose auto-compact window no longer matches
+   * the chat's threshold, so the message about to be sent respawns it (resumed,
+   * context intact) with the right one. The window is fixed at spawn:
+   * `applyFlagSettings({ autoCompactWindow })` is accepted by CLI 2.1.293 and
+   * changes nothing — measured, `getContextUsage()` still reported the old
+   * window, and a chat switched from a 100k-limit model to a 150k one kept
+   * compacting at 100k. Same retire-and-resume the persona switch and the idle
+   * sweep already do; it only costs the next message a slower start.
+   */
+  private async respawnForCompactWindow(session: LiveSession): Promise<void> {
+    if (!session.query || !session.started || session.turnOpen) return;
+    if (!RETIRABLE_STATUS.has(session.status) || session.outbox.length > 0) return;
+    const settings = await this.store.getSettings().catch(() => undefined);
+    const next = claudeCompactWindow(
+      this.compactThreshold(session, settings),
+      settings?.autoCompact?.window,
+    );
+    if (next === session.compactWindow) return;
+    // Re-checked after the await: a message may have started the turn meanwhile.
+    if (session.turnOpen || !RETIRABLE_STATUS.has(session.status)) return;
+    // Quiet, like the idle sweep: a retired runtime is not a finished task.
+    session.switching = true;
+    await this.stop(session.chatId);
+  }
+
+  /**
+   * The Claude query's full context occupancy from `getContextUsage()`, or
+   * undefined when it can't say within a few seconds. Bounded because it runs
+   * inside the message loop — a stalled control request must not stall the
+   * stream behind it.
+   */
+  private async liveContextTotal(session: LiveSession): Promise<number | undefined> {
+    const q = session.query;
+    if (!q?.getContextUsage) return undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const u = await Promise.race([
+        q.getContextUsage(),
+        new Promise<undefined>((resolve) => {
+          timer = setTimeout(() => resolve(undefined), 3_000);
+        }),
+      ]);
+      const total = u?.totalTokens;
+      return typeof total === "number" && Number.isFinite(total) && total >= 0 ? total : undefined;
+    } catch {
+      return undefined;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * The meter's denominator for a window the CLI reported: the chat's compact
+   * threshold when one is in force and smaller — see `compactLimit`.
+   */
+  private meterWindow(session: LiveSession, maxTokens: number): number {
+    const limit = session.compactLimit;
+    return limit && limit < maxTokens ? limit : maxTokens;
   }
 
   /**
@@ -4161,7 +4250,7 @@ export class SessionBroker {
     try {
       const u = await q.getContextUsage();
       if (typeof u.maxTokens === "number" && u.maxTokens > 0) {
-        session.contextWindow = u.maxTokens;
+        this.noteContext(session, undefined, this.meterWindow(session, u.maxTokens));
       }
     } catch {
       /* best-effort — keep whatever window we already had */
@@ -5192,7 +5281,8 @@ export class SessionBroker {
         forkAtId: session.forkAtUuid,
         fork: session.fork,
         autoCompact: appSettings?.autoCompact?.enabled ?? true,
-        autoCompactWindow: appSettings?.autoCompact?.window,
+        // Only the Claude adapter reads it; Codex takes `contextTokenLimit`.
+        autoCompactWindow: claudeCompactWindow(contextTokenLimit, appSettings?.autoCompact?.window),
         contextTokenLimit,
         contextWindow: session.contextWindow,
         abortSignal: session.abortController.signal,
@@ -6021,14 +6111,18 @@ export class SessionBroker {
         await this.emit(session, { ...base, kind: "notice", level: "warn", text });
         return;
       }
-      case "compacted":
+      case "compacted": {
+        if (event.postTokens !== undefined) this.noteContext(session, event.postTokens, undefined);
+        const { type: _type, ...detail } = event;
         await this.emit(session, {
           ...base,
           kind: "system",
           subtype: "compact",
-          text: "Context compacted.",
+          text: compactedText(detail),
+          ...(Object.keys(detail).length ? { data: detail } : {}),
         });
         return;
+      }
       case "turn-end":
         // Close the turn before the first await below. A Stop arriving while
         // the result row is being persisted is already too late to interrupt
@@ -6196,6 +6290,33 @@ export class SessionBroker {
           // taken in BOTH places or the menu's built-in half never populates on
           // a stock install.
           void this.snapshotSlashCommands(session);
+        }
+        // The CLI compacted — on its own trigger mid-turn, or the `/compact` the
+        // broker queued. Nothing here used to read this, so a compaction left no
+        // mark in the transcript and the meter held the PRE-compaction reading
+        // (720k on a chat that was really at 15k) until the next request.
+        if (subtype === "compact_boundary") {
+          const meta = (m as { compact_metadata?: Record<string, unknown> }).compact_metadata;
+          const { type: _type, ...compacted } = compactedEvent(meta);
+          // `post_tokens` counts the summary and kept messages only — not the
+          // system prompt and tools — so it read 3k on a chat whose very next
+          // request was 29k. The CLI's own breakdown counts everything.
+          const live = await this.liveContextTotal(session);
+          if (live !== undefined) compacted.postTokens = live;
+          if (compacted.postTokens !== undefined) {
+            this.noteContext(session, compacted.postTokens, undefined);
+          }
+          await this.emit(session, {
+            kind: "system",
+            id: this.genId(),
+            chatId: session.chatId,
+            ts: this.now(),
+            turn: session.turn,
+            sessionId: session.sessionId,
+            subtype: "compact",
+            text: compactedText(compacted),
+            data: compacted,
+          });
         }
         // A backgrounded task (async `Agent` spawn, backgrounded `Bash`) settled.
         // This is the ONLY per-task completion signal in the stream — the task's
@@ -8543,9 +8664,13 @@ export class SessionBroker {
     // can disable it or override the compaction reserve window.
     const appSettings = await this.store.getSettings().catch(() => undefined);
     const ac = appSettings?.autoCompact;
+    // The window is derived from the chat's threshold so the CLI compacts
+    // mid-turn at it — see `claudeCompactWindow`.
+    session.compactLimit = this.compactThreshold(session, appSettings);
+    session.compactWindow = claudeCompactWindow(session.compactLimit, ac?.window);
     options.settings = {
       autoCompactEnabled: ac?.enabled ?? true,
-      ...(ac?.window ? { autoCompactWindow: ac.window } : {}),
+      ...(session.compactWindow ? { autoCompactWindow: session.compactWindow } : {}),
     };
 
     // Config-sourced agents/modes (the `.dispatch/` source of truth) win

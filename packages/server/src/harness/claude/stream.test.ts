@@ -366,6 +366,22 @@ describe("ClaudeStreamDecoder", () => {
     expect(out[0]).toMatchObject({ status: "completed" });
   });
 
+  it("turns a compact_boundary into a compacted event and moves the occupancy", () => {
+    const d = decoder();
+    const out = d.decode(
+      msg({
+        type: "system",
+        subtype: "compact_boundary",
+        compact_metadata: { trigger: "auto", pre_tokens: 99_776, post_tokens: 7_702 },
+      }),
+    );
+    expect(out).toEqual([
+      { type: "compacted", trigger: "auto", preTokens: 99_776, postTokens: 7_702 },
+    ]);
+    // Otherwise turn-end would report the pre-compaction reading.
+    expect(d.contextTokens()).toBe(7_702);
+  });
+
   it("ignores message types it has no meaning for", () => {
     const d = decoder();
     expect(d.decode(msg({ type: "something_new" }))).toEqual([]);
