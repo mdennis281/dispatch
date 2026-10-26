@@ -1,5 +1,6 @@
 /**
- * The workflow picker — a rail at `lg`, a Select above the run list below it.
+ * The workflow picker — a rail beside the run list at `lg`/`md`, the whole
+ * page at `sm`, and a Select above the run list once a run takes the rail's slot.
  *
  * Each workflow carries its latest run's status when the server could see it.
  * `lastRun === undefined` means the server couldn't read recent runs at all,
@@ -69,11 +70,14 @@ export function CiWorkflowRail({
   selected,
   onSelect,
   onRun,
+  fill,
 }: {
   res: Resource<CiWorkflow[]>;
   selected: number | null;
   onSelect: (id: number | null) => void;
   onRun: (id: number) => void;
+  /** Take the whole width — at `sm` the rail is the page, not a sidebar. */
+  fill?: boolean;
 }) {
   const { own, managed } = sortWorkflows(res.data ?? []);
   const now = Date.now();
@@ -105,7 +109,10 @@ export function CiWorkflowRail({
   return (
     <nav
       aria-label="Workflows"
-      className="flex w-[248px] shrink-0 flex-col border-r border-line bg-surface"
+      className={cn(
+        "flex shrink-0 flex-col bg-surface",
+        fill ? "w-full" : "w-[248px] border-r border-line",
+      )}
     >
       <ScrollArea className="min-h-0 flex-1 p-2">
         <RailRow
