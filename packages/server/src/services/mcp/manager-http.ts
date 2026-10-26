@@ -160,7 +160,11 @@ export class ManagerMcpBridge {
   /** Resolve a bearer token, or undefined when it isn't ours. */
   resolve(header: string | undefined): Grant | undefined {
     if (!header) return undefined;
-    const m = /^Bearer\s+(.+)$/i.exec(header.trim());
+    // ONE `\s`, the rest left to `.trim()`. `\s+(.+)$` let both quantifiers
+    // claim a run of spaces, so a header of "Bearer" plus a few thousand spaces
+    // backtracked polynomially — on a path any local process can reach before
+    // it holds a token (CodeQL js/polynomial-redos).
+    const m = /^Bearer\s(.*)$/i.exec(header.trim());
     const token = m?.[1]?.trim();
     return token ? this.grants.get(token) : undefined;
   }

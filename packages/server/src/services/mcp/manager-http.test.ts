@@ -293,3 +293,22 @@ describe("serving the manager tools", () => {
     await expect(connect(`${origin}${INTEGRATION_MCP_PATH}/session`)).rejects.toThrow();
   });
 });
+
+describe("ManagerMcpBridge.resolve", () => {
+  it("reads the token however it is spaced, and only after the Bearer scheme", () => {
+    const bridge = new ManagerMcpBridge();
+    const { token } = bridge.mint("c1", () => ({}) as never);
+    expect(bridge.resolve(`Bearer ${token}`)?.chatId).toBe("c1");
+    expect(bridge.resolve(`bearer    ${token}  `)?.chatId).toBe("c1");
+    expect(bridge.resolve(token)).toBeUndefined();
+    expect(bridge.resolve("Bearer")).toBeUndefined();
+  });
+
+  it("answers a pathological run of spaces at once", () => {
+    // The unauthenticated input a local process controls; `\s+(.+)$` took
+    // polynomial time on exactly this shape.
+    const started = performance.now();
+    expect(new ManagerMcpBridge().resolve(`Bearer ${" ".repeat(50_000)}x`)).toBeUndefined();
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+});
