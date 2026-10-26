@@ -128,6 +128,8 @@ describe("compactedEvent / compactedText", () => {
       "Context auto-compacted · 100k → 8k tokens",
     );
     expect(compactedText({ trigger: "manual" })).toBe("Context compacted.");
+    // Codex reports no sizes; the host supplies only the reading it started from.
+    expect(compactedText({ preTokens: 56_628 })).toBe("Context compacted at 57k tokens");
     expect(compactedText({})).toBe("Context compacted.");
   });
 });

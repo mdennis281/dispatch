@@ -2367,14 +2367,15 @@ interface LiveSession {
   /**
    * The `autoCompactWindow` this Claude query was spawned with, so the next
    * message can tell when a model switch or Settings edit has moved the
-   * threshold out from under it. See `respawnForCompactWindow`.
+   * threshold out from under it. See `refreshContextLimit`.
    */
   compactWindow?: number;
   /**
-   * The threshold `compactWindow` was derived from. Once the CLI holds a
-   * derived window, `getContextUsage().maxTokens` reports THAT (threshold plus
-   * headroom — 133k for a 100k limit), a number nobody typed; the meter shows
-   * this instead, so it reads "99k / 100k" right before the drop.
+   * The threshold this session was spawned to enforce, on every provider.
+   * Compared before each message (`refreshContextLimit`), and the meter's
+   * denominator (`meterWindow`): the runtime reports the model's window (258k
+   * on Codex) or Claude's derived one (133k for a 100k limit), numbers nobody
+   * typed — the meter reads "99k / 100k" right before the drop instead.
    */
   compactLimit?: number;
   /**
@@ -2836,7 +2837,7 @@ export class SessionBroker {
     // A fast Send after selecting a persona must wait for the idle runtime to retire.
     if (session.personaChange) await session.personaChange.catch(() => {});
     // A model switch or Settings edit moved this chat's compact threshold.
-    await this.respawnForCompactWindow(session);
+    await this.refreshContextLimit(session);
     // Before the user row is written, not only in `buildOptions`: the row below
     // is stamped `effort: session.effort`, and on an unpinned chat's FIRST turn
     // of a session that was still `create()`'s placeholder — so the transcript
@@ -3910,7 +3911,10 @@ export class SessionBroker {
       const maxTokens = await session.harnessSession.contextWindow().catch(() => undefined);
       if (maxTokens) session.contextWindow = maxTokens;
       return maxTokens
-        ? ({ totalTokens: session.lastContextTokens ?? 0, maxTokens } as ContextUsage)
+        ? ({
+            totalTokens: session.lastContextTokens ?? 0,
+            maxTokens: this.meterWindow(session, maxTokens),
+          } as ContextUsage)
         : null;
     }
     const q = session?.query;
@@ -3918,9 +3922,9 @@ export class SessionBroker {
     try {
       const u = await q.getContextUsage();
       if (session && typeof u.maxTokens === "number" && u.maxTokens > 0) {
-        const max = this.meterWindow(session, u.maxTokens);
         // Cache the window off this fresh read so idle meters stay correct too.
-        session.contextWindow = max;
+        session.contextWindow = u.maxTokens;
+        const max = this.meterWindow(session, u.maxTokens);
         if (max !== u.maxTokens) {
           return {
             ...u,
@@ -4003,25 +4007,44 @@ export class SessionBroker {
   }
 
   /**
-   * Retire an idle Claude runtime whose auto-compact window no longer matches
-   * the chat's threshold, so the message about to be sent respawns it (resumed,
-   * context intact) with the right one. The window is fixed at spawn:
-   * `applyFlagSettings({ autoCompactWindow })` is accepted by CLI 2.1.293 and
-   * changes nothing — measured, `getContextUsage()` still reported the old
-   * window, and a chat switched from a 100k-limit model to a 150k one kept
-   * compacting at 100k. Same retire-and-resume the persona switch and the idle
-   * sweep already do; it only costs the next message a slower start.
+   * Make the session about to take a message enforce the chat's CURRENT
+   * threshold. Every runtime Dispatch ships fixes it at spawn — Claude accepts
+   * `applyFlagSettings({ autoCompactWindow })` and changes nothing (measured:
+   * a chat switched from a 100k-limit model to a 150k one kept compacting at
+   * 100k), and Codex's `thread/settings/update` has no such field — so after a
+   * model switch or a Settings edit the old limit kept firing. A provider that
+   * implements `setContextTokenLimit` takes it live; otherwise the idle runtime
+   * is retired and the message resumes it with the new one (context intact —
+   * the same retire-and-resume the persona switch and idle sweep do).
    */
-  private async respawnForCompactWindow(session: LiveSession): Promise<void> {
-    if (!session.query || !session.started || session.turnOpen) return;
+  private async refreshContextLimit(session: LiveSession): Promise<void> {
+    if (!session.started || session.turnOpen) return;
+    if (!session.query && !session.harnessSession) return;
     if (!RETIRABLE_STATUS.has(session.status) || session.outbox.length > 0) return;
     const settings = await this.store.getSettings().catch(() => undefined);
-    const next = claudeCompactWindow(
-      this.compactThreshold(session, settings),
-      settings?.autoCompact?.window,
-    );
-    if (next === session.compactWindow) return;
-    // Re-checked after the await: a message may have started the turn meanwhile.
+    const limit = this.compactThreshold(session, settings);
+    if (session.query) {
+      // The legacy loop compares the derived window: two limits below the
+      // CLI's floor clamp to the same one, and respawning for that buys nothing.
+      const window = claudeCompactWindow(limit, settings?.autoCompact?.window);
+      if (window === session.compactWindow) {
+        session.compactLimit = limit;
+        return;
+      }
+    } else {
+      if (limit === session.compactLimit) return;
+      const live = session.harnessSession;
+      if (live?.setContextTokenLimit) {
+        try {
+          await live.setContextTokenLimit(limit);
+          session.compactLimit = limit;
+          return;
+        } catch {
+          /* fall through to the respawn */
+        }
+      }
+    }
+    // Re-checked after the awaits: a message may have started the turn meanwhile.
     if (session.turnOpen || !RETIRABLE_STATUS.has(session.status)) return;
     // Quiet, like the idle sweep: a retired runtime is not a finished task.
     session.switching = true;
@@ -4055,12 +4078,20 @@ export class SessionBroker {
   }
 
   /**
-   * The meter's denominator for a window the CLI reported: the chat's compact
-   * threshold when one is in force and smaller — see `compactLimit`.
+   * The meter's denominator for a window the runtime reported: the chat's
+   * compact threshold when one is in force and smaller — see `compactLimit`.
+   * Display only; `session.contextWindow` keeps the runtime's true window,
+   * because the spec hands it on (goose sizes its model context from it).
    */
   private meterWindow(session: LiveSession, maxTokens: number): number {
     const limit = session.compactLimit;
     return limit && limit < maxTokens ? limit : maxTokens;
+  }
+
+  /** {@link meterWindow} of the session's current window, for a result row. */
+  private displayWindow(session: LiveSession): number | undefined {
+    const w = session.contextWindow;
+    return w === undefined ? undefined : this.meterWindow(session, w);
   }
 
   /**
@@ -4250,7 +4281,7 @@ export class SessionBroker {
     try {
       const u = await q.getContextUsage();
       if (typeof u.maxTokens === "number" && u.maxTokens > 0) {
-        this.noteContext(session, undefined, this.meterWindow(session, u.maxTokens));
+        this.noteContext(session, undefined, u.maxTokens);
       }
     } catch {
       /* best-effort — keep whatever window we already had */
@@ -5251,6 +5282,8 @@ export class SessionBroker {
       const selectedAgent = options.agent ? options.agents?.[options.agent] : undefined;
       const appSettings = await this.store.getSettings().catch(() => undefined);
       const contextTokenLimit = this.compactThreshold(session, appSettings);
+      // What this spawn enforces — see `refreshContextLimit` and `meterWindow`.
+      session.compactLimit = contextTokenLimit;
       const spec: HarnessSessionSpec = {
         cwd: options.cwd,
         permissionMode: options.permissionMode ?? "default",
@@ -5281,8 +5314,8 @@ export class SessionBroker {
         forkAtId: session.forkAtUuid,
         fork: session.fork,
         autoCompact: appSettings?.autoCompact?.enabled ?? true,
-        // Only the Claude adapter reads it; Codex takes `contextTokenLimit`.
-        autoCompactWindow: claudeCompactWindow(contextTokenLimit, appSettings?.autoCompact?.window),
+        // Raw: the Claude adapter combines it with the limit; the rest ignore it.
+        autoCompactWindow: appSettings?.autoCompact?.window,
         contextTokenLimit,
         contextWindow: session.contextWindow,
         abortSignal: session.abortController.signal,
@@ -6112,8 +6145,13 @@ export class SessionBroker {
         return;
       }
       case "compacted": {
-        if (event.postTokens !== undefined) this.noteContext(session, event.postTokens, undefined);
         const { type: _type, ...detail } = event;
+        // Codex reports no sizes at all; the reading the compaction started
+        // from is the host's own last one either way.
+        if (detail.preTokens === undefined && session.lastContextTokens !== undefined) {
+          detail.preTokens = session.lastContextTokens;
+        }
+        if (event.postTokens !== undefined) this.noteContext(session, event.postTokens, undefined);
         await this.emit(session, {
           ...base,
           kind: "system",
@@ -6150,7 +6188,7 @@ export class SessionBroker {
             result: "Dispatch interrupted the provider to enforce a guard and automatically continued the task.",
             usage: event.usage,
             contextTokens: session.lastContextTokens,
-            contextWindow: session.contextWindow,
+            contextWindow: this.displayWindow(session),
             costUsd: event.costUsd,
             turnCostUsd: guardTurnCost,
           });
@@ -6194,7 +6232,7 @@ export class SessionBroker {
           result: stopped ? undefined : event.result,
           usage: event.usage,
           contextTokens: session.lastContextTokens,
-          contextWindow: session.contextWindow,
+          contextWindow: this.displayWindow(session),
           costUsd: event.costUsd,
           turnCostUsd: endTurnCost,
         });
@@ -6604,7 +6642,7 @@ export class SessionBroker {
           result: resultText,
           usage: (m as { usage?: unknown }).usage,
           contextTokens: session.lastContextTokens,
-          contextWindow: session.contextWindow,
+          contextWindow: this.displayWindow(session),
           costUsd: (m as { total_cost_usd?: number }).total_cost_usd,
           turnCostUsd: legacyTurnCost,
         });
@@ -7841,7 +7879,7 @@ export class SessionBroker {
       type: "chat-context",
       chatId: session.chatId,
       contextTokens: nextTokens,
-      contextWindow: nextWindow,
+      contextWindow: nextWindow === undefined ? undefined : this.meterWindow(session, nextWindow),
     });
   }
 

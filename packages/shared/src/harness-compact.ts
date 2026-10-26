@@ -139,6 +139,7 @@ function kTokens(n: number): string {
 /** The transcript line for a compaction: "Context compacted · 720k → 15k". */
 export function compactedText(e: Omit<HarnessCompactedEvent, "type">): string {
   const base = e.trigger === "auto" ? "Context auto-compacted" : "Context compacted";
-  if (e.preTokens === undefined || e.postTokens === undefined) return `${base}.`;
+  if (e.preTokens === undefined) return `${base}.`;
+  if (e.postTokens === undefined) return `${base} at ${kTokens(e.preTokens)} tokens`;
   return `${base} · ${kTokens(e.preTokens)} → ${kTokens(e.postTokens)} tokens`;
 }

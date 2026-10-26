@@ -35,7 +35,7 @@ import type {
   HarnessSession,
   HarnessSessionSpec,
 } from "../types.js";
-import { catchToolGuard, compactCommand } from "@dispatch/shared";
+import { catchToolGuard, claudeCompactWindow, compactCommand } from "@dispatch/shared";
 import { ClaudeStreamDecoder, QUESTION_TOOL } from "./stream.js";
 import { buildQuestionAnswer, neutralQuestions } from "./questions.js";
 import { claudeExecutableOption } from "../../services/runtime.js";
@@ -364,9 +364,13 @@ export class ClaudeSession implements HarnessSession {
     const env = envWithAccount(this.spec.account);
     if (env) options.env = env;
 
+    // The neutral limit becomes the window Claude Code compacts short of, so
+    // its own between-requests trigger lands on the threshold — see
+    // `claudeCompactWindow`.
+    const window = claudeCompactWindow(this.spec.contextTokenLimit, this.spec.autoCompactWindow);
     options.settings = {
       autoCompactEnabled: this.spec.autoCompact ?? true,
-      ...(this.spec.autoCompactWindow ? { autoCompactWindow: this.spec.autoCompactWindow } : {}),
+      ...(window ? { autoCompactWindow: window } : {}),
     };
 
     if (this.spec.resumeSessionId) {

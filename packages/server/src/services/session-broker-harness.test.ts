@@ -1101,6 +1101,92 @@ describe("SessionBroker neutral harness path", () => {
       await broker.waitFor(chat.id, "idle");
       expect(session.compactions).toEqual([]);
     });
+
+    async function thresholds(perModel: Record<string, number>) {
+      await store.saveSettings({
+        ...(await store.getSettings()),
+        autoCompact: { enabled: true, perModel },
+      });
+    }
+
+    it("resumes the thread with the new limit when a model switch moves it", async () => {
+      // Neither shipped runtime can move the limit live, so before this the old
+      // model's threshold kept firing after a switch.
+      await thresholds({ "gpt-test": 400, "gpt-other": 600 });
+      const chat = await codexChat("limit-switch", "gpt-test");
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "hi");
+      await broker.waitFor(chat.id, "idle");
+      expect(specs[0]!.contextTokenLimit).toBe(400);
+
+      await broker.setModel(chat.id, "gpt-other");
+      session = new FakeHarnessSession();
+      await broker.sendMessage(chat.id, "again");
+      await waitUntil(() => specs.length === 2);
+      expect(specs[1]).toMatchObject({ contextTokenLimit: 600, resumeSessionId: "codex-thread-1" });
+    });
+
+    it("hands a moved limit to an adapter that can take it live, without a respawn", async () => {
+      await thresholds({ "gpt-test": 400 });
+      const applied: (number | undefined)[] = [];
+      (session as HarnessSession).setContextTokenLimit = async (limit) => {
+        applied.push(limit);
+      };
+      const chat = await codexChat("limit-live", "gpt-test");
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "hi");
+      await broker.waitFor(chat.id, "idle");
+
+      await thresholds({ "gpt-test": 500 });
+      await broker.sendMessage(chat.id, "again");
+      await waitUntil(async () =>
+        (await store.readMessages(chat.id)).filter((r) => r.kind === "result").length === 2,
+      );
+      expect(applied).toEqual([500]);
+      expect(specs).toHaveLength(1);
+    });
+
+    it("keeps the thread when nothing moved the limit", async () => {
+      await thresholds({ "gpt-test": 400 });
+      const chat = await codexChat("limit-same", "gpt-test");
+      broker.create(chat);
+      for (const text of ["one", "two"]) {
+        await broker.sendMessage(chat.id, text);
+        await broker.waitFor(chat.id, "idle");
+      }
+      expect(specs).toHaveLength(1);
+    });
+
+    it("divides the meter by the limit, not the window the runtime reports", async () => {
+      await thresholds({ "gpt-test": 400 });
+      const published: (number | undefined)[] = [];
+      bus.on("chat-context", (e) => published.push(e.contextWindow));
+      const chat = await codexChat("limit-meter", "gpt-test");
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "hi");
+      await broker.waitFor(chat.id, "idle");
+      // The fake reports a 1,000-token window.
+      expect(published.at(-1)).toBe(400);
+      const result = (await store.readMessages(chat.id)).findLast((r) => r.kind === "result");
+      expect(result).toMatchObject({ contextWindow: 400 });
+      // The spec still carries the real window — goose sizes its context from it.
+      expect(specs[0]!.contextWindow).not.toBe(400);
+    });
+
+    it("fills a compaction's before-size from the last reading when the runtime gives none", async () => {
+      const chat = await codexChat("compact-row", "gpt-test");
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "hi");
+      await broker.waitFor(chat.id, "idle");
+      session.emit({ type: "compacted" });
+      await waitUntil(async () =>
+        (await store.readMessages(chat.id)).some((r) => r.kind === "system" && r.subtype === "compact"),
+      );
+      const row = (await store.readMessages(chat.id)).find(
+        (r) => r.kind === "system" && r.subtype === "compact",
+      );
+      expect(row).toMatchObject({ text: "Context compacted at 42 tokens", data: { preTokens: 42 } });
+    });
   });
 
   it("switches providers without reusing an incompatible native session", async () => {
