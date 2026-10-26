@@ -88,6 +88,15 @@ export interface HarnessCapabilities {
   usageLimits: boolean;
   /** Switch model without restarting the session. */
   liveModelSwitch: boolean;
+  /**
+   * The runtime enforces {@link HarnessSessionSpec.contextTokenLimit} ITSELF,
+   * mid-turn. Only then does a moved limit justify retiring and resuming the
+   * session (see {@link HarnessSession.setContextTokenLimit}); a runtime that
+   * ignores the field gets only the host's turn-end check, which reads Settings
+   * live — restarting goose for a limit it never reads would just cost it its
+   * session where the agent cannot `session/load`. Optional; absent is false.
+   */
+  nativeContextLimit?: boolean;
   /** Switch permission posture without restarting the session. */
   livePermissionSwitch: boolean;
   /**

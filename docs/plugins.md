@@ -530,16 +530,19 @@ else a per-chat limit, and it arrives as `HarnessSessionSpec.contextTokenLimit`
 
 - **Enforce it mid-turn**, by handing it to the runtime's own trigger
   (Codex `model_auto_compact_token_limit`; Claude an `autoCompactWindow` derived
-  from it). The host also compacts at turn end once past it, but a long agentic
-  turn never ends, so that alone is not enough. A runtime with no trigger of its
-  own gets only the turn-end check.
+  from it), and declare `capabilities.nativeContextLimit: true`. The host also
+  compacts at turn end once past it, but a long agentic turn never ends, so
+  that alone is not enough. A runtime with no trigger of its own leaves the flag
+  off and gets only the turn-end check.
 - **Report each compaction once**, when it has finished, as a `compacted` event.
   `preTokens`/`postTokens` are optional: the host fills `preTokens` from its last
   reading and leaves `postTokens` to the next `usage` event.
-- **A limit change** (model switch, Settings edit) goes to
-  `HarnessSession.setContextTokenLimit` if you implement it. If you don't, or it
-  rejects, the host retires the idle session and resumes it with the new spec
-  before the next message. Neither shipped runtime can apply it live.
+- **A limit change** (model switch, Settings edit) on a `nativeContextLimit`
+  runtime goes to `HarnessSession.setContextTokenLimit` if you implement it. If
+  you don't, or it rejects, the host retires the idle session and resumes it
+  with the new spec before the next message. Neither shipped runtime can apply
+  it live. Without the flag nothing restarts; the turn-end check reads the new
+  value anyway.
 - The composer meter's denominator is the limit, not the window you report.
   `spec.contextWindow` stays the model's real window.
 

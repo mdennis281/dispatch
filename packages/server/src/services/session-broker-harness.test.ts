@@ -144,6 +144,7 @@ describe("SessionBroker neutral harness path", () => {
       fork: true,
       usageLimits: true,
       liveModelSwitch: true,
+      nativeContextLimit: true,
       livePermissionSwitch: true,
       efforts: ["low", "medium", "high"],
       preToolGuard: false,
@@ -1144,6 +1145,29 @@ describe("SessionBroker neutral harness path", () => {
       );
       expect(applied).toEqual([500]);
       expect(specs).toHaveLength(1);
+    });
+
+    it("only moves the meter for a runtime that never reads the limit", async () => {
+      // goose: nothing native to re-arm, and a restart can cost it its session
+      // (it resumes only where the agent advertises `loadSession`). The
+      // turn-end check reads Settings live, so the new limit already applies.
+      (caps as { nativeContextLimit?: boolean }).nativeContextLimit = false;
+      await thresholds({ "gpt-test": 400 });
+      const published: (number | undefined)[] = [];
+      bus.on("chat-context", (e) => published.push(e.contextWindow));
+      const chat = await codexChat("limit-goose", "gpt-test");
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "hi");
+      await broker.waitFor(chat.id, "idle");
+
+      await thresholds({ "gpt-test": 500 });
+      await broker.sendMessage(chat.id, "again");
+      await waitUntil(async () =>
+        (await store.readMessages(chat.id)).filter((r) => r.kind === "result").length === 2,
+      );
+      expect(specs).toHaveLength(1);
+      const result = (await store.readMessages(chat.id)).findLast((r) => r.kind === "result");
+      expect(result).toMatchObject({ contextWindow: 500 });
     });
 
     it("keeps the thread when nothing moved the limit", async () => {

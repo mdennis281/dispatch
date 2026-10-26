@@ -4033,6 +4033,13 @@ export class SessionBroker {
       }
     } else {
       if (limit === session.compactLimit) return;
+      // A runtime that never reads the limit is held to it by the turn-end
+      // check alone, which reads Settings live: just move the host's number.
+      const caps = this.harnesses?.resolve(session.harnessKind).harness.capabilities;
+      if (!caps?.nativeContextLimit) {
+        session.compactLimit = limit;
+        return;
+      }
       const live = session.harnessSession;
       if (live?.setContextTokenLimit) {
         try {

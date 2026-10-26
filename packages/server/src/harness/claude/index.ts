@@ -43,6 +43,8 @@ export const CLAUDE_CAPABILITIES: HarnessCapabilities = {
   // No pollable account API on subscription auth — see the module header.
   usageLimits: false,
   liveModelSwitch: true,
+  // Its own trigger reads contextTokenLimit, fixed at spawn.
+  nativeContextLimit: true,
   livePermissionSwitch: true,
   efforts: ["low", "medium", "high", "xhigh", "max"],
   preToolGuard: true,
