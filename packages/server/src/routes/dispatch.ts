@@ -15,7 +15,9 @@ import { nanoid } from "nanoid";
 import { resolve as resolvePath } from "node:path";
 import {
   pinnedPostureFields,
+  providerAvailability,
   providerFor,
+  PROVIDER_UNAVAILABLE,
   prRecordKey,
   composeMessageText,
   resolveChatPosture,
@@ -35,6 +37,7 @@ import { configPathsFor } from "../services/config-location.js";
 import { COPILOT_LOGIN } from "../services/github.js";
 import { resolveReviewer } from "../services/reviewer.js";
 import type { Services } from "../services/container.js";
+import { ProviderUnavailableError } from "../harness/index.js";
 
 /* ----------------------------------------------------------------- helpers */
 
@@ -43,8 +46,9 @@ function emitError(
   message: string,
   detail?: string,
   chatId?: string,
+  code?: string,
 ): void {
-  services.bus.publish({ type: "error", chatId, message, detail });
+  services.bus.publish({ type: "error", chatId, message, detail, ...(code ? { code } : {}) });
 }
 
 function errText(err: unknown): string {
@@ -147,9 +151,10 @@ export async function createChat(
   // is created, the first turn dies on the limit, and the failover path picks it
   // up a turn later — which works, but means every chat started after a limit
   // has an error as its first row. See services/failover.ts.
-  const redirect = await services.failover
-    ?.redirectNewChat(posture.subscription.effective)
-    .catch(() => null);
+  const wantedAccount = posture.subscription.effective;
+  const redirect = wantedAccount
+    ? await services.failover?.redirectNewChat(wantedAccount).catch(() => null)
+    : null;
   if (redirect) {
     posture = resolve({
       ...requested,
@@ -162,6 +167,22 @@ export async function createChat(
     });
   }
   const harness = posture.harness.effective;
+  // Refused rather than created on a guess. With no provider named anywhere
+  // there is nothing to run the chat on, and a provider nothing registered
+  // (a disabled plugin, a typo in a manifest) would make a chat that can never
+  // run. Either used to land on Claude (#426). A registered provider whose CLI
+  // is missing is allowed: the chat shows that, and installing it fixes it.
+  if (!harness) {
+    throw new ProviderUnavailableError({
+      code: PROVIDER_UNAVAILABLE,
+      reason: "unset",
+      message:
+        "No provider is chosen. Pass a provider, or set a default in Settings → Chat (or the project's defaults).",
+    });
+  }
+  if (services.harnesses && !services.harnesses.find(harness)) {
+    throw new ProviderUnavailableError(providerAvailability(harness, [])!);
+  }
   const now = Date.now();
   const chat: Chat = {
     id: nanoid(),
@@ -691,6 +712,14 @@ export async function dispatchClientAction(
       }
     }
   } catch (err) {
-    emitError(services, `action "${action.type}" failed`, errText(err), chatId);
+    // The code rides along so the composer can tell "your provider is gone"
+    // (keep the draft, point at the switch) from any other failed send.
+    emitError(
+      services,
+      `action "${action.type}" failed`,
+      errText(err),
+      chatId,
+      err instanceof ProviderUnavailableError ? err.code : undefined,
+    );
   }
 }

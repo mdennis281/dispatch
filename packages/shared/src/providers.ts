@@ -23,7 +23,6 @@
  */
 import {
   BUILTIN_HARNESS_KINDS,
-  DEFAULT_HARNESS,
   HarnessKindSchema,
   type BuiltinHarnessKind,
   type Effort,
@@ -177,14 +176,17 @@ export function registerProvider(descriptor: ProviderDescriptor): void {
 }
 
 /**
- * Drop a provider registered at runtime — its plugin was switched off. A
- * built-in cannot be dropped: it is the fallback a chat on the dropped
- * provider resolves to.
+ * Drop a provider's descriptor — its plugin was switched off, or (on the
+ * client) the server stopped listing it.
+ *
+ * A built-in may be dropped too. It used to be refused because a built-in was
+ * the fallback every chat on a dropped provider resolved to; there is no
+ * fallback any more (#426), and a client bundle that still had Claude compiled
+ * in kept labelling it installed after the server stopped offering it. The
+ * server's own refusal to unregister a COMPILED-IN harness lives on
+ * `HarnessRegistry`, where it is about the runtime, not the label.
  */
 export function unregisterProvider(id: HarnessKind): void {
-  if ((BUILTIN_HARNESS_KINDS as readonly string[]).includes(id)) {
-    throw new Error(`cannot unregister built-in provider "${id}"`);
-  }
   registry.delete(id);
 }
 
@@ -220,14 +222,120 @@ function unregisteredProvider(id: HarnessKind): ProviderDescriptor {
 }
 
 /**
- * The descriptor for a provider id. An absent id is a legacy row written when
- * Claude was the only provider, so it resolves to the default. An id nothing
- * has registered gets a placeholder named after itself — see
- * {@link unregisteredProvider} for why that is no longer Claude.
+ * The stand-in for NO provider at all — a chat or project nothing ever pointed
+ * at one. Its id is empty, which no real provider can have (`HarnessKindSchema`
+ * refuses it), so it can never be mistaken for, or registered as, a real one.
+ */
+const NO_PROVIDER: ProviderDescriptor = {
+  ...unregisteredProvider(""),
+  label: "No provider",
+  shortLabel: "No provider",
+  blurb: "No provider is chosen.",
+};
+
+/**
+ * The descriptor for a provider id. Never throws and never answers undefined:
+ * an id nothing has registered gets a placeholder named after itself (see
+ * {@link unregisteredProvider} for why that is no longer Claude), and an absent
+ * id gets {@link NO_PROVIDER}.
+ *
+ * An absent id used to mean "a legacy row written when Claude was the only
+ * provider" and answered `registry.get("claude")!` — undefined the moment
+ * Claude stopped being registered, and every sender label on every chat row
+ * crashed with it. Those legacy rows are backfilled to an explicit `"claude"`
+ * by the store now (#426), so absent genuinely means none.
  */
 export function providerFor(id: HarnessKind | undefined | null): ProviderDescriptor {
-  if (!id) return registry.get(DEFAULT_HARNESS)!;
+  if (!id) return NO_PROVIDER;
   return registry.get(id) ?? unregisteredProvider(id);
+}
+
+/* ------------------------------------------------------ provider availability */
+
+/**
+ * The code a refused turn, chat creation or provider switch carries — on an
+ * HTTP error body, on a WS `error` event, and on {@link ProviderUnavailable}.
+ * One literal so a client can recognise the refusal without matching prose.
+ */
+export const PROVIDER_UNAVAILABLE = "provider-unavailable" as const;
+
+/**
+ * Why a chat cannot run on its provider.
+ *
+ *  - `unset`         — nothing names a provider (no chat pin, no project or app
+ *                      default).
+ *  - `unregistered`  — the named provider is not registered: its plugin is
+ *                      disabled, uninstalled, or has not activated.
+ *  - `not-installed` — registered, but its runtime reports itself unavailable
+ *                      (`HarnessRuntimeInfo.available === false`): the CLI it
+ *                      drives is missing.
+ *
+ * Logged-out is not here yet. Login is probed asynchronously and per account
+ * (`Harness.probeLogin`), and moving that probe behind the harness is #425's;
+ * a logged-out provider still fails its first turn with the runtime's own
+ * auth error rather than being switched to anything.
+ */
+export type ProviderUnavailableReason = "unset" | "unregistered" | "not-installed";
+
+/**
+ * A chat's provider is not able to run it. Derived, never stored: it is a fact
+ * about the chat's `harness` and what is registered RIGHT NOW, which is what
+ * makes a chat recover on its own the moment its provider comes back — there
+ * is no flag on the row for anything to remember to clear.
+ */
+export interface ProviderUnavailable {
+  code: typeof PROVIDER_UNAVAILABLE;
+  /** The provider the chat names; absent for `unset`. */
+  provider?: HarnessKind;
+  reason: ProviderUnavailableReason;
+  /** One human sentence, for a notice or a 409 body. */
+  message: string;
+}
+
+/** The minimum of a registered harness this module needs to judge availability. */
+export interface RegisteredRuntime {
+  kind: HarnessKind;
+  runtime: { available: boolean };
+}
+
+/**
+ * Can a chat on `provider` run, given what is registered? `null` means yes.
+ *
+ * The ONE judgement both halves make: the server's `HarnessRegistry.resolve`
+ * passes its live harnesses, the client passes the `/api/harnesses` list. Two
+ * copies of this rule would disagree about exactly one case, and that case
+ * would be a composer that offers Send for a turn the server refuses.
+ */
+export function providerAvailability(
+  provider: HarnessKind | undefined | null,
+  registered: ReadonlyArray<RegisteredRuntime>,
+): ProviderUnavailable | null {
+  if (!provider) {
+    return {
+      code: PROVIDER_UNAVAILABLE,
+      reason: "unset",
+      message: "No provider is chosen for this chat.",
+    };
+  }
+  const found = registered.find((h) => h.kind === provider);
+  const label = providerFor(provider).label;
+  if (!found) {
+    return {
+      code: PROVIDER_UNAVAILABLE,
+      provider,
+      reason: "unregistered",
+      message: `${label} is not available — its provider plugin is disabled or not installed.`,
+    };
+  }
+  if (!found.runtime.available) {
+    return {
+      code: PROVIDER_UNAVAILABLE,
+      provider,
+      reason: "not-installed",
+      message: `${label} is not installed on this machine.`,
+    };
+  }
+  return null;
 }
 
 /** Every provider descriptor, in picker order. */

@@ -20,6 +20,7 @@ import { loadConfig } from "../config.js";
 import { EventBus } from "../bus.js";
 import { Store } from "../store/index.js";
 import { SessionBroker } from "../services/session-broker.js";
+import { seedDefaultProvider } from "../harness/registry.testkit.js";
 
 /** Root holding BOTH the store and the bystander files a traversal would reach. */
 let sandbox: string;
@@ -43,6 +44,7 @@ beforeEach(async () => {
 
   store = new Store(dir);
   await store.init();
+  await seedDefaultProvider(store);
   const bus = new EventBus();
   // The broker never runs a turn in these tests; a query that is never called
   // keeps the app buildable without a scripted SDK.

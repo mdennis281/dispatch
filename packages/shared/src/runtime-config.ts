@@ -7,7 +7,7 @@
  * inventing a slightly different interpretation of "the Codex config".
  */
 import * as z from "zod";
-import { DEFAULT_HARNESS, EffortSchema, HarnessKindSchema, type HarnessKind } from "./common.js";
+import { EffortSchema, HarnessKindSchema, type HarnessKind } from "./common.js";
 
 /**
  * How many chats may hold an execution slot at once when nothing says otherwise.
@@ -72,7 +72,14 @@ export const HarnessContextLimitsSchema = z.object({
 export type HarnessContextLimits = z.infer<typeof HarnessContextLimitsSchema>;
 
 export const HarnessSettingsSchema = z.object({
-  defaultHarness: HarnessKindSchema.default(DEFAULT_HARNESS),
+  /**
+   * The provider a new chat gets when neither the request nor the project names
+   * one. OPTIONAL, with no default: it used to default to Claude, so saving
+   * Settings on a machine without Claude wrote `"claude"` into the file, and a
+   * chat created there landed on a provider that could never run it. Absent
+   * now means "no provider chosen", and chat creation says so (#426).
+   */
+  defaultHarness: HarnessKindSchema.optional(),
   /**
    * Keyed by provider id rather than a field per provider, so registering a
    * provider (see `providers.ts`) is enough for it to have defaults.

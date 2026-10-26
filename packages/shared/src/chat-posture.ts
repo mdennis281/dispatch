@@ -35,7 +35,7 @@
  *   - An ACCOUNT belongs to one provider too, and names it: a request that
  *     pins an account without a harness lands on that account's provider.
  */
-import { DEFAULT_HARNESS, type Effort, type HarnessKind } from "./common.js";
+import { type Effort, type HarnessKind } from "./common.js";
 import { resolveChain, type LayerEntry } from "./layered.js";
 import {
   findSubscription,
@@ -106,9 +106,17 @@ export interface PostureLayers {
 }
 
 export interface ChatPosture {
-  harness: PostureValue<HarnessKind>;
-  /** The resolved account; pin `pinnedIdOf(subscription.effective)` on the row. */
-  subscription: PostureValue<ResolvedSubscription>;
+  /**
+   * `undefined` when no layer names a provider. There is deliberately no floor
+   * here (#426): the floor used to be Claude, so a chat nobody chose a provider
+   * for was silently created on one that might not even be installed.
+   */
+  harness: PostureValue<HarnessKind | undefined>;
+  /**
+   * The resolved account; pin `pinnedIdOf(subscription.effective)` on the row.
+   * `undefined` exactly when `harness` is — an account belongs to a provider.
+   */
+  subscription: PostureValue<ResolvedSubscription | undefined>;
   modeId: PostureValue<string>;
   effort: PostureValue<Effort>;
   /** `undefined` means the provider's own recommendation — a real, valid answer. */
@@ -123,14 +131,15 @@ export const DEFAULT_EFFORT: Effort = "medium";
 
 /**
  * The provider a project's OWN defaults are authored for: its pinned harness,
- * else the app's default. Exported because the project pane's model picker
- * has to list this provider's catalogue, not the app default's.
+ * else the app's default — or undefined when neither names one. Exported
+ * because the project pane's model picker has to list this provider's
+ * catalogue, not the app default's.
  */
 export function projectHarnessOf(
   project: PostureProject | null | undefined,
   settings: PostureSettings | null | undefined,
-): HarnessKind {
-  return project?.harness ?? settings?.harness?.defaultHarness ?? DEFAULT_HARNESS;
+): HarnessKind | undefined {
+  return project?.harness ?? settings?.harness?.defaultHarness;
 }
 
 function field<T>(entries: readonly LayerEntry<PostureSource, T>[], fallback: T): PostureValue<T> {
@@ -153,17 +162,17 @@ export function resolveChatPosture(layers: PostureLayers): ChatPosture {
   // A pinned account names its provider. Only honoured when it exists — a stale
   // id must not throw a chat onto a provider nothing asked for.
   const pinnedAccount = findSubscription(settings, chat?.subscriptionId);
-  const harness = field<HarnessKind>(
+  const harness = field<HarnessKind | undefined>(
     [
       ["chat", chat?.harness ?? pinnedAccount?.provider],
       ["parent", parent?.harness],
       ["project", project?.harness ?? undefined],
       ["app", settings?.harness?.defaultHarness],
     ],
-    DEFAULT_HARNESS,
+    undefined,
   );
   const provider = harness.effective;
-  const appDefaults = providerDefaults(settings?.harness, provider);
+  const appDefaults = provider ? providerDefaults(settings?.harness, provider) : {};
 
   // Account: `subscriptionFor` already walks pin → app default → first for the
   // provider, and ignores a pin on another provider. The chain here only has to
@@ -173,16 +182,18 @@ export function resolveChatPosture(layers: PostureLayers): ChatPosture {
   const parentAccountId =
     parent && parent.harness === provider ? parent.subscriptionId : undefined;
   const wantedAccount = chatAccountId ?? parentAccountId;
-  const subscriptionEffective = subscriptionFor(settings, provider, wantedAccount);
+  const subscriptionEffective = provider
+    ? subscriptionFor(settings, provider, wantedAccount)
+    : undefined;
   const subscriptionSource: PostureSource = chatAccountId
     ? "chat"
     : parentAccountId
       ? "parent"
-      : appDefaults.subscriptionId && subscriptionEffective.id === appDefaults.subscriptionId
+      : appDefaults.subscriptionId && subscriptionEffective?.id === appDefaults.subscriptionId
         ? "app"
         : "default";
-  const subscription: PostureValue<ResolvedSubscription> =
-    subscriptionSource === "chat"
+  const subscription: PostureValue<ResolvedSubscription | undefined> =
+    subscriptionSource === "chat" && provider
       ? {
           effective: subscriptionEffective,
           source: "chat",
@@ -226,8 +237,11 @@ export function resolveChatPosture(layers: PostureLayers): ChatPosture {
   const model = field<string | undefined>(
     [
       ["chat", chat?.model],
-      ["parent", parent && parent.harness === provider ? parent.model : undefined],
-      ["project", project && projectProvider === provider ? (project.model ?? undefined) : undefined],
+      ["parent", provider && parent && parent.harness === provider ? parent.model : undefined],
+      [
+        "project",
+        provider && project && projectProvider === provider ? (project.model ?? undefined) : undefined,
+      ],
       ["app", appDefaults.model],
     ],
     undefined,
@@ -248,20 +262,21 @@ export function resolveChatPosture(layers: PostureLayers): ChatPosture {
  * those layers as they change instead of freezing today's default into it.
  */
 export function pinnedPostureFields(posture: ChatPosture): {
-  harness: HarnessKind;
+  harness?: HarnessKind;
   subscriptionId?: string;
   modeId?: string;
   effort?: Effort;
   model?: string;
 } {
-  const subscriptionId = pinnedIdOf(posture.subscription.effective);
+  const sub = posture.subscription.effective;
+  const subscriptionId = sub ? pinnedIdOf(sub) : undefined;
   const pinned = <T>(v: PostureValue<T>): T | undefined =>
     v.source === "chat" || v.source === "parent" ? v.effective : undefined;
   const modeId = pinned(posture.modeId);
   const effort = pinned(posture.effort);
   const model = pinned(posture.model);
   return {
-    harness: posture.harness.effective,
+    ...(posture.harness.effective ? { harness: posture.harness.effective } : {}),
     ...(subscriptionId ? { subscriptionId } : {}),
     ...(modeId !== undefined ? { modeId } : {}),
     ...(effort !== undefined ? { effort } : {}),

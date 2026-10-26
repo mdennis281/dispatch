@@ -21,6 +21,7 @@
 import type { FastifyInstance } from "fastify";
 import { ChatSchema, type ChatMessage } from "@dispatch/shared";
 import { createChat } from "./dispatch.js";
+import { ProviderUnavailableError, providerUnavailableBody } from "../harness/index.js";
 import { leanRows } from "../services/transcript-lean.js";
 import { chatTotalsByProject, listCappedChats } from "../services/chat-load-cap.js";
 import { deleteChat, reapChatResidual } from "../services/chat-deletion.js";
@@ -85,6 +86,9 @@ export function registerChatRoutes(app: FastifyInstance): void {
       });
       return reply.code(201).send(chat);
     } catch (err) {
+      if (err instanceof ProviderUnavailableError) {
+        return reply.code(409).send(providerUnavailableBody(err));
+      }
       return reply
         .code(400)
         .send({ error: err instanceof Error ? err.message : String(err) });

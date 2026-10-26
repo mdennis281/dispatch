@@ -26,7 +26,7 @@ import { stripTitleMarks, titlePrefixOf, withTitlePrefix } from "@dispatch/share
 import type { Chat, ChatMessage } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
-import type { HarnessRegistry } from "../harness/index.js";
+import { ProviderUnavailableError, type HarnessRegistry } from "../harness/index.js";
 
 /** The default title a chat is born with — the gate for auto-generation. */
 export const DEFAULT_CHAT_TITLE = "New chat";
@@ -180,7 +180,12 @@ export class TitleService {
     if (opts.generateText) this.generateText = opts.generateText;
     else if (opts.harnesses) {
       this.generateText = async (chat, prompt, timeoutMs) => {
-        const { harness } = opts.harnesses!.resolve(chat.harness);
+        // The chat's own provider or nothing. Titling used to run on the
+        // fallback provider, so a Codex chat whose plugin was off still spent
+        // a Claude call naming itself (#426).
+        const resolved = opts.harnesses!.resolve(chat.harness);
+        if (!resolved.ok) throw new ProviderUnavailableError(resolved.unavailable);
+        const { harness } = resolved;
         // Spent on the chat's OWN account: a title for a chat on a second
         // subscription must not draw down the first one's budget.
         const settings = await opts.store.getSettings().catch(() => null);
@@ -308,6 +313,10 @@ export class TitleService {
         this.bus.publish({ type: "chat-update", chat: saved });
         return;
       } catch (err) {
+        // Not a failure worth retrying or announcing: the chat cannot run
+        // either, and already says so. It is titled on a later turn, once its
+        // provider is back.
+        if (err instanceof ProviderUnavailableError) return;
         lastError = err instanceof Error ? err.message : String(err);
       }
     }

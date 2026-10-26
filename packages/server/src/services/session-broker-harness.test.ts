@@ -262,10 +262,9 @@ describe("SessionBroker neutral harness path", () => {
     });
   });
 
-  it("falls back BEFORE building options, so an uninstalled provider's skills land where Claude reads", async () => {
-    // A chat left on a provider nothing registers runs on the default. The
-    // options used to be built first, against the placeholder descriptor, so
-    // the skills went to `.agents/skills` and the Claude session found none.
+  it("refuses a send on a provider nothing registers — no switch to Claude, no row, harness untouched (#426)", async () => {
+    // This used to run the turn on Claude, toast "gemini is unavailable; using
+    // claude", and write `harness: "claude"` onto the row for good.
     const repo = join(dir, "repo");
     await mkdir(repo, { recursive: true });
     await store.saveProject({ id: "p-ghost", name: "Ghost", repoPath: repo, worktreeRoot: join(dir, "trees"), subApps: [], createdAt: 1 });
@@ -289,20 +288,65 @@ describe("SessionBroker neutral harness path", () => {
     try {
       const chat = await store.saveChat({ id: "ghost", projectId: "p-ghost", title: "Ghost", modeId: "plan", effort: "low", harness: "gemini", worktrees: [], prs: [], createdAt: 1 });
       ghostBroker.create(chat);
-      await ghostBroker.sendMessage(chat.id, "hello");
-      await ghostBroker.waitFor(chat.id, "idle");
-      expect(claudeSpecs).toHaveLength(1);
-      expect((await readdir(join(repo, ".claude", "skills"))).length).toBeGreaterThan(0);
-      await expect(readdir(join(repo, ".agents"))).rejects.toThrow();
+      await expect(ghostBroker.sendMessage(chat.id, "hello")).rejects.toMatchObject({
+        code: "provider-unavailable",
+        unavailable: { provider: "gemini", reason: "unregistered" },
+      });
+      expect(claudeSpecs).toHaveLength(0);
+      expect((await store.getChat(chat.id))!.harness).toBe("gemini");
+      // Refused before the user row was written: no unanswered message.
+      expect(await store.readMessages(chat.id)).toEqual([]);
+      await expect(readdir(join(repo, ".claude"))).rejects.toThrow();
     } finally {
       await ghostBroker.dispose();
     }
   });
 
-  it("waits for an installed provider plugin to activate instead of falling back", async () => {
+  it("runs again by itself once the provider is registered — nothing on the chat to clear", async () => {
+    const backSpecs: HarnessSessionSpec[] = [];
+    const back: Harness = {
+      kind: "back",
+      capabilities: caps as unknown as Harness["capabilities"],
+      runtime: () => ({ kind: "back", source: "installed", available: true }),
+      listModels: async () => [],
+      readLimits: async () => null,
+      generateText: async () => "title",
+      createSession: (spec: HarnessSessionSpec) => { backSpecs.push(spec); return new FakeHarnessSession(); },
+    };
+    const registry = new HarnessRegistry({});
+    const backBroker = new SessionBroker({
+      store,
+      bus: new EventBus(),
+      harnesses: registry,
+      authored: new AuthoredConfigService({ globalRoot: join(dir, "global") }),
+      deps: { stopTimeoutMs: 5 },
+    });
+    try {
+      const chat = await store.saveChat({ id: "back-chat", projectId: "p1", title: "Back", modeId: "plan", effort: "low", harness: "back", worktrees: [], prs: [], createdAt: 1 });
+      backBroker.create(chat);
+      await expect(backBroker.sendMessage(chat.id, "hello")).rejects.toMatchObject({ code: "provider-unavailable" });
+      // The plugin is switched back on.
+      registry.register(back, { ...CODEX_PROVIDER, id: "back", label: "Back" });
+      await backBroker.sendMessage(chat.id, "hello again");
+      await backBroker.waitFor(chat.id, "idle");
+      expect(backSpecs).toHaveLength(1);
+      expect((await store.getChat(chat.id))!.harness).toBe("back");
+    } finally {
+      await backBroker.dispose();
+    }
+  });
+
+  it("refuses a switch onto a provider nothing registers, leaving the chat where it was", async () => {
+    const chat = await store.saveChat({ id: "stay", projectId: "p1", title: "Stay", modeId: "plan", effort: "low", harness: "codex", worktrees: [], prs: [], createdAt: 1 });
+    broker.create(chat);
+    await expect(broker.setHarness(chat.id, "gemini")).rejects.toMatchObject({ code: "provider-unavailable" });
+    expect((await store.getChat(chat.id))!.harness).toBe("codex");
+  });
+
+  it("waits for an installed provider plugin to activate instead of refusing", async () => {
     // Installed plugins activate in `warm()`, after listen. A chat on one that
-    // starts in that window used to fall back to Claude and have `harness`
-    // rewritten on its row, so it stayed on Claude once the plugin was up.
+    // is sent to in that window must wait, not be refused as "unregistered"
+    // for a provider that is a moment away from registering.
     const lateSpecs: HarnessSessionSpec[] = [];
     const late: Harness = {
       kind: "late",
@@ -1878,7 +1922,7 @@ describe("SessionBroker neutral harness path", () => {
     });
   });
 
-  describe("context window on a harness that fell back", () => {
+  describe("a registered provider whose CLI is missing", () => {
     /** A harness that answers `contextWindow` but whose runtime is missing. */
     function unavailableLocalHarness(probed: () => void): Harness {
       return {
@@ -1898,13 +1942,13 @@ describe("SessionBroker neutral harness path", () => {
           guardsMcpToolNames: true,
           managerTransport: "http",
         },
-        // The CLI is NOT installed — this is what makes the broker fall back.
+        // The CLI is NOT installed.
         runtime: () => ({ kind: "goose", source: "missing", available: false }),
         listModels: async () => [],
         readLimits: async () => null,
         generateText: async () => "title",
         // Ollama does not care that the goose CLI is absent, so this would
-        // happily answer for a session that is about to run on Claude.
+        // happily answer for a session that can never start.
         contextWindow: async () => {
           probed();
           return 32_768;
@@ -1916,13 +1960,9 @@ describe("SessionBroker neutral harness path", () => {
       };
     }
 
-    it("asks the harness that will RUN, not the one that was configured", async () => {
-      // Regression: this was resolved with `find(session.harnessKind)` before
-      // `startHarnessSession` had a chance to fall back. A chat configured for
-      // goose on a box without the goose CLI runs on Claude — but the goose
-      // probe still succeeded against a reachable Ollama, so a ~200k Claude
-      // session came up with its meter seeded to 32768 and, more persistently,
-      // its browser MCP tools silently gated off as unaffordable.
+    it("refuses the turn — never runs it on Claude, and never probes the absent runtime (#426)", async () => {
+      // This chat used to run on Claude. Before that, the goose probe was asked
+      // for a context window for the Claude session it fell back to.
       let probes = 0;
       const claude: Harness = {
         kind: "claude",
@@ -1973,13 +2013,13 @@ describe("SessionBroker neutral harness path", () => {
         createdAt: 1,
       });
       broker.create(chat);
-      await broker.sendMessage(chat.id, "go");
-      await broker.waitFor(chat.id, "idle");
+      await expect(broker.sendMessage(chat.id, "go")).rejects.toMatchObject({
+        code: "provider-unavailable",
+        unavailable: { provider: "goose", reason: "not-installed" },
+      });
 
-      // Claude implements no `contextWindow`, so the honest answer is "unknown"
-      // — which leaves the meter and the MCP surface exactly as they were.
-      expect(specs[0]!.contextWindow).toBeUndefined();
-      // And the absent runtime was never consulted about a session it is not running.
+      expect(specs).toHaveLength(0);
+      expect((await store.getChat(chat.id))!.harness).toBe("goose");
       expect(probes).toBe(0);
     });
   });

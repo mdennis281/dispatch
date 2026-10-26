@@ -142,7 +142,6 @@ import {
   withAutoAllowed,
   buildGlobalProjectIndex,
   realProjects,
-  DEFAULT_HARNESS,
   DEFAULT_MAX_ACTIVE_SESSIONS,
   composeMessageText,
   parseMcpToolName,
@@ -260,7 +259,12 @@ import type {
   HarnessToolGuard,
 } from "../harness/types.js";
 import { composeToolGuards, guardRecoveryInput } from "@dispatch/shared";
-import type { HarnessRegistry } from "../harness/index.js";
+import {
+  ProviderUnavailableError,
+  type Harness,
+  type HarnessRegistry,
+  type HarnessResolution,
+} from "../harness/index.js";
 import { accountOf, chatSubscription, envWithAccount } from "./subscriptions.js";
 import type { ManagerMcpBridge, ManagerMcpGrant } from "./mcp/manager-http.js";
 import type { ManagerMcpContext } from "./mcp/manager-mcp.js";
@@ -274,6 +278,9 @@ import {
   pinnedIdOf,
   subscriptionFor,
   providerFor,
+  providerAvailability,
+  PROVIDER_UNAVAILABLE,
+  type ProviderUnavailable,
   isManagerServer,
   managerToolQualifiedName,
   resolveChatPosture,
@@ -2142,7 +2149,14 @@ interface LiveSession {
    * (`null` clears one), never by the inherited chain.
    */
   pins: { modeId?: string; effort?: Effort; model?: string };
-  harnessKind: HarnessKind;
+  /**
+   * The chat's provider, exactly as the row names it. Never rewritten to
+   * another provider by anything but an explicit `setHarness`: when this one
+   * cannot run, the turn is refused and the chat says so (#426). Undefined
+   * only for a row that names none, which the store backfill makes a
+   * hand-edited row rather than a legacy one.
+   */
+  harnessKind: HarnessKind | undefined;
   /** The chat's pinned subscription id, as of this session's creation. */
   subscriptionId?: string;
   /**
@@ -2719,7 +2733,7 @@ export class SessionBroker {
           ...(chat.effort !== undefined ? { effort: chat.effort } : {}),
           ...(chat.model !== undefined ? { model: chat.model } : {}),
         },
-        harnessKind: chat.harness ?? DEFAULT_HARNESS,
+        harnessKind: chat.harness,
         subscriptionId: chat.subscriptionId,
         effortByThread: new Map(),
         threadOfTool: new Map(),
@@ -2837,6 +2851,12 @@ export class SessionBroker {
       this.setStatus(session, session.status);
       return;
     }
+    // Refused BEFORE the user row is written. A send that starts a turn on a
+    // provider that cannot run it would otherwise land in the transcript as a
+    // message nobody answered, sit in the outbox, and fail at turn start — and
+    // the composer would already have cleared the draft. A send that steers a
+    // LIVE turn is let through: the provider is evidently running it.
+    if (!this.isTurnLive(session)) await this.assertProviderAvailable(session);
     // A fast Send after selecting a persona must wait for the idle runtime to retire.
     if (session.personaChange) await session.personaChange.catch(() => {});
     // A model switch or Settings edit moved this chat's compact threshold.
@@ -3722,7 +3742,7 @@ export class SessionBroker {
       // message spawn a fresh one — that one reads the new model. Dispatch's
       // transcript is the durable record either way, and the handoff is the
       // path the provider already supports.
-      if (!this.harnesses?.resolve(session.harnessKind).harness.capabilities.liveModelSwitch) {
+      if (!this.harnesses?.find(session.harnessKind)?.capabilities.liveModelSwitch) {
         this.retireNativeSession(session, `switching to ${next}`);
       }
     }
@@ -3752,7 +3772,15 @@ export class SessionBroker {
   async setHarness(chatId: string, harness: HarnessKind, subscriptionId?: string): Promise<void> {
     const chat = await this.store.getChat(chatId);
     if (!chat) throw new Error(`chat "${chatId}" not found`);
-    const previous = chat.harness ?? DEFAULT_HARNESS;
+    // Refused for a provider nothing registered. The switch stops the live
+    // session and drops the native session id, so moving a chat onto a
+    // provider that cannot run it would strand it on that provider with its
+    // old session already gone. A registered-but-not-installed provider is
+    // allowed: the chat then shows that state, and installing the CLI fixes it.
+    if (this.harnesses && !this.harnesses.find(harness)) {
+      throw new ProviderUnavailableError(providerAvailability(harness, [])!);
+    }
+    const previous = chat.harness;
     if (previous === harness) {
       if (subscriptionId) await this.setSubscription(chatId, subscriptionId);
       return;
@@ -3771,7 +3799,9 @@ export class SessionBroker {
     const updated: Chat = {
       ...chat,
       harness,
-      harnessHandoff: { from: previous, to: harness, at: this.now() },
+      // No handoff from a chat that named no provider: there is no runtime to
+      // hand off FROM, and `from` is a provider id.
+      harnessHandoff: previous ? { from: previous, to: harness, at: this.now() } : undefined,
       // Pinned on the new provider exactly as a new chat is: the named account
       // when it belongs to that provider, else that provider's default. The old
       // pin cannot carry over — it names the previous provider's login.
@@ -3799,7 +3829,9 @@ export class SessionBroker {
       type: "notice",
       chatId,
       level: "info",
-      text: `Switched from ${previous} to ${harness}. The next turn will receive a transcript handoff.`,
+      text: previous
+        ? `Switched from ${previous} to ${harness}. The next turn will receive a transcript handoff.`
+        : `Switched to ${harness}.`,
     });
   }
 
@@ -3821,8 +3853,8 @@ export class SessionBroker {
     const settings = await this.store.getSettings().catch(() => undefined);
     const target = findSubscription(settings, subscriptionId);
     if (!target) throw new Error(`subscription "${subscriptionId}" not found`);
-    const provider = chat.harness ?? DEFAULT_HARNESS;
-    if (target.provider !== provider) {
+    const provider = chat.harness;
+    if (!provider || target.provider !== provider) {
       await this.setHarness(chatId, target.provider, target.id);
       return;
     }
@@ -4038,7 +4070,7 @@ export class SessionBroker {
       if (limit === session.compactLimit) return;
       // A runtime that never reads the limit is held to it by the turn-end
       // check alone, which reads Settings live: just move the host's number.
-      const caps = this.harnesses?.resolve(session.harnessKind).harness.capabilities;
+      const caps = this.harnesses?.find(session.harnessKind)?.capabilities;
       if (!caps?.nativeContextLimit) {
         session.compactLimit = limit;
         return;
@@ -5091,8 +5123,18 @@ export class SessionBroker {
 
   private async startQuery(session: LiveSession): Promise<void> {
     if (!(await this.withinOverallContextBudget(session))) return;
+    // Checked for EVERY provider, Claude included. Claude used to skip it
+    // because it was the fallback and so was assumed always present; nothing
+    // is assumed present now. `sendMessage` refused already if the provider
+    // was gone then — this catches a provider that went away while the start
+    // sat in the admission queue.
+    const resolved = await this.resolveHarness(session);
+    if (!resolved.ok) {
+      this.onProviderUnavailable(session, resolved.unavailable);
+      return;
+    }
     if (session.harnessKind !== "claude") {
-      await this.startHarnessSession(session);
+      await this.startHarnessSession(session, resolved.harness);
       return;
     }
     session.input = new InputChannel();
@@ -5185,38 +5227,64 @@ export class SessionBroker {
     }
   }
 
-  /** Start a non-legacy provider through the neutral harness seam. */
-  private async startHarnessSession(session: LiveSession): Promise<void> {
+  /**
+   * Resolve the session's provider, waiting out plugin activation first.
+   *
+   * An INSTALLED provider plugin activates in `warm()`, after listen. A chat on
+   * it that is sent to in that window must wait for it rather than be refused
+   * as "unregistered" for a provider that is a second away from registering.
+   * Built-ins register before the port opens, so they never wait.
+   */
+  private async resolveHarness(session: LiveSession): Promise<HarnessResolution> {
     if (!this.harnesses) {
-      this.onError(session, new Error("Harness registry is not configured."));
-      return;
+      return {
+        ok: false,
+        unavailable: {
+          code: PROVIDER_UNAVAILABLE,
+          provider: session.harnessKind,
+          reason: "unregistered",
+          message: "Harness registry is not configured.",
+        },
+      };
     }
+    if (session.harnessKind && !this.harnesses.find(session.harnessKind)) {
+      await this.plugins?.activationSettled?.();
+    }
+    return this.harnesses.resolve(session.harnessKind);
+  }
+
+  /** Throw {@link ProviderUnavailableError} unless the session's provider can run it. */
+  private async assertProviderAvailable(session: LiveSession): Promise<void> {
+    const resolved = await this.resolveHarness(session);
+    if (!resolved.ok) throw new ProviderUnavailableError(resolved.unavailable);
+  }
+
+  /**
+   * A turn reached its start and the provider cannot run it.
+   *
+   * Settles like `onError` — status `error`, an error notice on the transcript,
+   * the `error` event tagged `provider-unavailable` — because that is what is
+   * PERSISTED and therefore what a reload shows. What it must never do is
+   * touch `chat.harness`: the chat stays on its provider, and the next send
+   * after the provider is back simply works.
+   */
+  private onProviderUnavailable(session: LiveSession, unavailable: ProviderUnavailable): void {
+    session.input = undefined;
+    session.abortController = undefined;
+    // The message that asked for this turn is dropped, not kept for later.
+    // Delivering it whenever the provider happens to return — maybe tomorrow,
+    // into a conversation that has moved on — would be a turn nobody asked for
+    // at that moment. Its row stays in the transcript beside the notice.
+    session.outbox.length = 0;
+    this.onError(session, new ProviderUnavailableError(unavailable));
+  }
+
+  /** Start a non-legacy provider through the neutral harness seam. */
+  private async startHarnessSession(session: LiveSession, harness: Harness): Promise<void> {
     session.abortController = new AbortController();
     session.started = true;
 
     try {
-      // Resolve the fallback BEFORE building options: `buildOptions` reads the
-      // provider descriptor for the skills dir, efforts and account. Built
-      // first, a chat on an uninstalled provider had its skills written to the
-      // placeholder's `.agents/skills` and then ran on Claude, which reads
-      // `.claude/skills` — so the turn started with skills on and none on disk.
-      // An INSTALLED provider plugin activates in `warm()`, after listen. A chat
-      // on it that starts in that window must wait for it rather than fall
-      // back — the fallback rewrites `harness` on the row, so the chat would
-      // stay on Claude after the plugin came up. Built-ins never get here:
-      // they register before the port opens.
-      if (!this.harnesses.find(session.harnessKind)) await this.plugins?.activationSettled?.();
-      const resolved = this.harnesses.resolve(session.harnessKind);
-      if (resolved.fellBack) {
-        this.bus.publish({
-          type: "notice",
-          chatId: session.chatId,
-          level: "warn",
-          text: `${session.harnessKind} is unavailable; using ${resolved.harness.kind}.`,
-        });
-        session.harnessKind = resolved.harness.kind;
-        void this.patchChat(session.chatId, { harness: resolved.harness.kind });
-      }
       // Reuse the policy/config assembly that has years of Claude-specific edge
       // cases, then project only its neutral pieces into the provider adapter.
       const options = await this.buildOptions(session);
@@ -5235,11 +5303,11 @@ export class SessionBroker {
 
       let managerMcp: HarnessSessionSpec["managerMcp"];
       if (
-        resolved.harness.capabilities.managerTransport === "in-process" &&
+        harness.capabilities.managerTransport === "in-process" &&
         Object.keys(managerServers).length
       ) {
         managerMcp = { transport: "in-process", servers: managerServers };
-      } else if (resolved.harness.capabilities.managerTransport === "http") {
+      } else if (harness.capabilities.managerTransport === "http") {
         // One live context per session — the grant is per-chat, not
         // per-category — handed over explicitly by `buildOptions`. Never read
         // off the merged map: a project that declares `dispatch-<category>` by
@@ -5281,7 +5349,7 @@ export class SessionBroker {
         // Only the Claude adapter reads `spec.agent` (harness/claude/session.ts);
         // Codex and ACP take the append alone, so an agent section would be a
         // disclosure of something that never reached the model.
-        if (resolved.harness.kind !== "claude") {
+        if (harness.kind !== "claude") {
           pending.sections = pending.sections.filter((s) => s.id !== "agent");
         }
       }
@@ -5351,7 +5419,7 @@ export class SessionBroker {
       // Either missing and the posture is decoration, so refuse loudly and
       // name the fix rather than run a project-less chat under a rule that
       // isn't holding.
-      const caps = resolved.harness.capabilities;
+      const caps = harness.capabilities;
       if (isProtectedMode(session.modeId) && !(caps.preToolGuard && caps.guardsMcpToolNames)) {
         // Name the runtimes that CAN hold it, from what is actually installed —
         // not "Claude", which may not be installed, logged in or wanted here
@@ -5360,14 +5428,14 @@ export class SessionBroker {
           .list()
           .filter(
             (h) =>
-              h.kind !== resolved.harness.kind &&
+              h.kind !== harness.kind &&
               h.capabilities.preToolGuard &&
               h.capabilities.guardsMcpToolNames &&
               h.runtime().available,
           )
           .map((h) => providerFor(h.kind).label);
         throw new Error(
-          `${session.modeName ?? session.modeId} mode cannot run on ${providerFor(resolved.harness.kind).label}: ` +
+          `${session.modeName ?? session.modeId} mode cannot run on ${providerFor(harness.kind).label}: ` +
             (caps.preToolGuard
               ? "that runtime cannot tell which MCP tool a call is for until after it runs, " +
                 "and almost everything this posture denies is an MCP tool."
@@ -5380,7 +5448,7 @@ export class SessionBroker {
                 "runs and see which MCP tool the call is for."),
         );
       }
-      session.harnessSession = resolved.harness.createSession(spec);
+      session.harnessSession = harness.createSession(spec);
       session.resumeSessionId = undefined;
       session.forkAtUuid = undefined;
       session.fork = false;
@@ -8177,7 +8245,12 @@ export class SessionBroker {
       err instanceof Error ? err.message : String(err),
       session.lastStderrTail ?? "",
     );
-    this.bus.publish({ type: "error", chatId: session.chatId, message });
+    this.bus.publish({
+      type: "error",
+      chatId: session.chatId,
+      message,
+      ...(err instanceof ProviderUnavailableError ? { code: err.code } : {}),
+    });
     void this.emit(session, {
       kind: "notice",
       id: this.genId(),
@@ -8835,12 +8908,16 @@ export class SessionBroker {
     // subprocess environment in the SDK, so the overlay is merged onto ours —
     // and left unset entirely for the default account.
     const accountSettings = await this.store.getSettings().catch(() => undefined);
-    session.account = accountOf(
-      chatSubscription(accountSettings, {
-        harness: session.harnessKind,
-        subscriptionId: session.subscriptionId,
-      }),
-    );
+    // No provider, no account. `startQuery` refuses such a session before it is
+    // built; this keeps a stray build from inventing one.
+    session.account = session.harnessKind
+      ? accountOf(
+          chatSubscription(accountSettings, {
+            harness: session.harnessKind,
+            subscriptionId: session.subscriptionId,
+          }),
+        )
+      : undefined;
     const accountEnv = envWithAccount(session.account);
     if (accountEnv) options.env = accountEnv;
     // A user-chosen model pins the query; unset falls back to the SDK default.
@@ -9112,10 +9189,8 @@ export class SessionBroker {
       app: appSettings?.mcpEnabled,
       project: projectId ? this.projectConfig?.getMcpEnabled?.(projectId) : undefined,
       // And the runtime layers on top — "not on goose", or "not on this model".
-      // `session.harnessKind` is the CONFIGURED kind, which is what the human
-      // picked and therefore what they pinned against; the fallback to Claude
-      // below can change what runs, but a pin written for goose should not
-      // silently start applying to the Claude session that replaced it.
+      // `session.harnessKind` is the kind the human picked, and therefore what
+      // they pinned against.
       ...harnessEnablementLayers(
         appSettings?.mcpEnabledFor,
         session.harnessKind,
@@ -9128,18 +9203,12 @@ export class SessionBroker {
     // servers are ~11k of tool schema, and a goose chat was rejected outright
     // at 36,191 tokens before the model read a word of the task.
     //
-    // `resolve`, NOT `find`: the configured kind is not necessarily the kind
-    // that runs. `startHarnessSession` calls this, THEN resolves the harness
-    // and falls back to Claude when the wanted runtime is missing — so asking
-    // the configured harness here would consult goose for a session about to
-    // be created on Claude. Ollama answers perfectly well (it does not care
-    // that the goose CLI is absent), and a ~200k Claude session would come up
-    // with its meter seeded to 32768 and its browser tools silently gated off.
-    // `resolve` is a pure lookup, so calling it early is free and its answer
-    // is still true after the fallback.
+    // The configured kind IS the kind that runs: there is no fallback provider
+    // any more (#426), and `startQuery` refused the turn before this was built
+    // if that provider could not run it.
     const contextWindow = await (this.harnesses
-      ?.resolve(session.harnessKind)
-      .harness.contextWindow?.({
+      ?.find(session.harnessKind)
+      ?.contextWindow?.({
         model: options.model ?? session.model,
         account: session.account,
       })

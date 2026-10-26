@@ -121,7 +121,8 @@ export function ChatDefaultsSection({
   if (!modeOptions.some((o) => o.value === modeId)) {
     modeOptions.unshift({ value: modeId, label: modeLabel(modes, modeId) });
   }
-  const catalog = catalogs[provider] ?? [];
+  // No provider resolved (none pinned here, none in Settings) has no catalogue.
+  const catalog = (provider && catalogs[provider]) || [];
   const modelOptions: SelectOption<string>[] = [
     // The chip has to say SOMETHING when no model is pinned anywhere; picking
     // this row is the same as the inherit row, so it wears the same hint.
@@ -161,7 +162,7 @@ export function ChatDefaultsSection({
             <Select
               width={220}
               align="end"
-              value={posture.harness.effective}
+              value={posture.harness.effective ?? ""}
               // A model pin belongs to the previous provider's catalogue, so it
               // goes with the provider — the same rule the reviewer pane and the
               // chat's own provider switch apply.

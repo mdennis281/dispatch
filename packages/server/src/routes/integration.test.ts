@@ -20,6 +20,7 @@ import { EventBus } from "../bus.js";
 import { Store } from "../store/index.js";
 import { INTEGRATION_RATE_LIMIT_PER_MINUTE, externalManagerTools } from "@dispatch/shared";
 import { INTEGRATION_MCP_PATH, isManagerBridgePath, isIntegrationBridgePath } from "../services/mcp/manager-http.js";
+import { seedDefaultProvider } from "../harness/registry.testkit.js";
 
 const dirs: string[] = [];
 const sessionHeaders = { "x-dispatch-session": "refresh" } as const;
@@ -36,6 +37,9 @@ async function app() {
     bus: new EventBus(),
     config: { port: 0, host: "127.0.0.1", dataDir: dir, maxActiveSessions: 1, idleSessionMinutes: 30 },
   });
+  // After the build, not before: a second `init()` would turn this fresh
+  // install into an "upgrade" and change what first-run auth offers.
+  await seedDefaultProvider(store);
   return { instance, store, dir };
 }
 

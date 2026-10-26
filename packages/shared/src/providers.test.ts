@@ -1,14 +1,16 @@
 import { describe, it, expect } from "vitest";
-import { BUILTIN_HARNESS_KINDS, DEFAULT_HARNESS, HarnessKindSchema } from "./common.js";
+import { BUILTIN_HARNESS_KINDS, HarnessKindSchema } from "./common.js";
 import {
   BUILTIN_PROVIDERS,
   defaultModelFor,
   fallbackModels,
   isKnownProvider,
   listProviders,
+  providerAvailability,
   providerFor,
   providerIds,
   registerProvider,
+  unregisterProvider,
   type ProviderDescriptor,
 } from "./providers.js";
 import { SubscriptionSchema, resolveSubscriptions } from "./subscriptions.js";
@@ -26,15 +28,51 @@ const opencode: ProviderDescriptor = {
   account: { configDirEnv: "OPENCODE_HOME", defaultConfigDir: ".opencode", loginFile: "auth.json" },
 };
 
+describe("providerAvailability", () => {
+  const live = [{ kind: "claude", runtime: { available: true } }];
+
+  it("is null exactly when the provider is registered and its runtime is present", () => {
+    expect(providerAvailability("claude", live)).toBeNull();
+  });
+
+  it("names why it cannot run: unset, unregistered, not installed", () => {
+    expect(providerAvailability(undefined, live)).toMatchObject({
+      code: "provider-unavailable",
+      reason: "unset",
+    });
+    expect(providerAvailability("codex", live)).toMatchObject({
+      code: "provider-unavailable",
+      provider: "codex",
+      reason: "unregistered",
+    });
+    expect(
+      providerAvailability("claude", [{ kind: "claude", runtime: { available: false } }]),
+    ).toMatchObject({ provider: "claude", reason: "not-installed" });
+  });
+});
+
 describe("provider registry", () => {
   it("starts with exactly the built-ins, each keyed by its own id", () => {
     expect(providerIds().slice(0, BUILTIN_HARNESS_KINDS.length)).toEqual([...BUILTIN_HARNESS_KINDS]);
     for (const id of BUILTIN_HARNESS_KINDS) expect(BUILTIN_PROVIDERS[id].id).toBe(id);
   });
 
-  it("resolves a legacy row to the default provider", () => {
-    // A row written before `harness` existed.
-    expect(providerFor(undefined).id).toBe(DEFAULT_HARNESS);
+  it("answers NO provider with a placeholder, never Claude and never undefined (#426)", () => {
+    // It used to answer `registry.get("claude")!` — undefined, and a crash in
+    // every sender label, the moment Claude was not registered.
+    for (const none of [undefined, null, ""]) {
+      expect(providerFor(none)).toMatchObject({ id: "", label: "No provider", unregistered: true });
+    }
+  });
+
+  it("lets a built-in descriptor be dropped — a client must forget what the server stopped listing", () => {
+    unregisterProvider("claude");
+    try {
+      expect(isKnownProvider("claude")).toBe(false);
+      expect(providerFor("claude")).toMatchObject({ id: "claude", unregistered: true });
+    } finally {
+      registerProvider(BUILTIN_PROVIDERS.claude);
+    }
   });
 
   it("names an unregistered id after itself instead of passing it off as Claude", () => {

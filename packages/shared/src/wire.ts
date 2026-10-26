@@ -564,6 +564,28 @@ export const ErrorEventSchema = z.object({
   chatId: z.string().optional(),
   message: z.string(),
   detail: z.string().optional(),
+  /**
+   * A machine-readable kind, when the error has one a client acts on rather
+   * than just shows. `"provider-unavailable"` (`PROVIDER_UNAVAILABLE`) is a
+   * send refused because the chat's provider cannot run it — the composer
+   * keeps the draft and points at the provider switch instead of a toast.
+   */
+  code: z.string().optional(),
+});
+
+/**
+ * The set of registered providers changed — a provider plugin was enabled or
+ * disabled. A bare signal: the client re-reads `/api/harnesses`, whose answer
+ * carries capabilities and descriptors this event would otherwise have to
+ * duplicate a schema for.
+ *
+ * This is what makes a chat on a disabled provider recover BY ITSELF when the
+ * plugin comes back (#426). Its unavailable state is derived from that list,
+ * so without the nudge an open tab kept showing "provider unavailable" until
+ * the next reconnect.
+ */
+export const ProvidersChangedEventSchema = z.object({
+  type: z.literal("providers-changed"),
 });
 
 /**
@@ -620,6 +642,7 @@ export const WsServerEventSchema = z.discriminatedUnion("type", [
   ServerShutdownEventSchema,
   SchedulerEventSchema,
   PluginEventSchema,
+  ProvidersChangedEventSchema,
 ]);
 export type WsServerEvent = z.infer<typeof WsServerEventSchema>;
 export type WsServerEventType = WsServerEvent["type"];

@@ -21,6 +21,7 @@ import { SessionBroker, type QueryFn } from "../services/session-broker.js";
 import { GitHubService, type ExecaLike } from "../services/github.js";
 import { CiService } from "../services/ci.js";
 import { GLOBAL_PROJECT_ID, providerIds, type WsServerEvent } from "@dispatch/shared";
+import { claudeOnlyRegistry, seedDefaultProvider } from "../harness/registry.testkit.js";
 
 /* --------------------------------------------------------------- scripted SDK */
 
@@ -214,12 +215,14 @@ async function boot(query: QueryFn, overrides: Partial<ServerConfig> = {}): Prom
   dir = await mkdtemp(join(tmpdir(), "cm-routes-"));
   store = new Store(dir);
   await store.init();
+  await seedDefaultProvider(store);
   bus = new EventBus();
   const config = { ...loadConfig(), dataDir: dir, ...overrides };
   // `maxActiveSessions` mirrors container.ts deliberately: it is the value a
   // CLEARED `AppSettings.maxActiveSessions` falls back to, so a fixture that
   // withheld it would test a fallback production never takes.
   const broker = new SessionBroker({
+    harnesses: claudeOnlyRegistry(),
     store,
     bus,
     maxActiveSessions: config.maxActiveSessions,

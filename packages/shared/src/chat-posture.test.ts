@@ -24,14 +24,21 @@ const settings: PostureSettings = {
 };
 
 describe("resolveChatPosture", () => {
-  it("bottoms out at the built-in floor with every layer absent", () => {
+  it("bottoms out at NO provider with every layer absent — there is no default provider (#426)", () => {
     const p = resolveChatPosture({});
-    expect(p.harness).toMatchObject({ effective: "claude", source: "default" });
+    expect(p.harness).toMatchObject({ effective: undefined, source: "default" });
     expect(p.modeId).toMatchObject({ effective: DEFAULT_MODE_ID, source: "default" });
     expect(p.effort).toMatchObject({ effective: DEFAULT_EFFORT, source: "default" });
     expect(p.model).toMatchObject({ effective: undefined, source: "default" });
-    expect(p.subscription.effective.implicit).toBe(true);
-    expect(p.subscription.source).toBe("default");
+    // An account belongs to a provider; with none there is none.
+    expect(p.subscription).toMatchObject({ effective: undefined, source: "default" });
+    expect(pinnedPostureFields(p)).not.toHaveProperty("harness");
+  });
+
+  it("still takes a provider from the app default when nothing above names one", () => {
+    const p = resolveChatPosture({ settings: { harness: { defaultHarness: "claude" } } });
+    expect(p.harness).toMatchObject({ effective: "claude", source: "app" });
+    expect(p.subscription.effective?.implicit).toBe(true);
   });
 
   it("reads the app layer per provider", () => {
@@ -40,7 +47,7 @@ describe("resolveChatPosture", () => {
     expect(p.effort).toMatchObject({ effective: "high", source: "app" });
     expect(p.model).toMatchObject({ effective: "claude-opus-5", source: "app" });
     expect(p.subscription).toMatchObject({ source: "app" });
-    expect(p.subscription.effective.id).toBe("work");
+    expect(p.subscription.effective!.id).toBe("work");
 
     const codex = resolveChatPosture({ settings, chat: { harness: "codex" } });
     expect(codex.effort).toMatchObject({ effective: "xhigh", source: "app" });
@@ -97,21 +104,21 @@ describe("resolveChatPosture", () => {
       const p = resolveChatPosture({ settings, chat: { subscriptionId: "home" } });
       expect(p.harness).toMatchObject({ effective: "claude", source: "chat" });
       expect(p.subscription).toMatchObject({ source: "chat" });
-      expect(p.subscription.effective.id).toBe("home");
-      expect(p.subscription.inherited.id).toBe("work");
+      expect(p.subscription.effective!.id).toBe("home");
+      expect(p.subscription.inherited!.id).toBe("work");
     });
 
     it("an explicit harness beats the account's provider, which then falls to that provider's default", () => {
       const p = resolveChatPosture({ settings, chat: { harness: "codex", subscriptionId: "home" } });
       expect(p.harness.effective).toBe("codex");
-      expect(p.subscription.effective.provider).toBe("codex");
+      expect(p.subscription.effective!.provider).toBe("codex");
       expect(p.subscription.source).toBe("default");
     });
 
     it("a stale account id is ignored rather than throwing the chat onto a provider", () => {
       const p = resolveChatPosture({ settings, chat: { subscriptionId: "gone" } });
       expect(p.harness.source).toBe("app");
-      expect(p.subscription.effective.id).toBe("work");
+      expect(p.subscription.effective!.id).toBe("work");
     });
   });
 
@@ -127,7 +134,7 @@ describe("resolveChatPosture", () => {
     it("sits between the request and the project for every field", () => {
       const p = resolveChatPosture({ settings, parent, project: { mode: "plan", effort: "max" } });
       expect(p.harness).toMatchObject({ effective: "claude", source: "parent" });
-      expect(p.subscription.effective.id).toBe("home");
+      expect(p.subscription.effective!.id).toBe("home");
       expect(p.subscription.source).toBe("parent");
       expect(p.modeId).toMatchObject({ effective: "edit", source: "parent" });
       expect(p.effort).toMatchObject({ effective: "low", source: "parent" });
@@ -143,7 +150,7 @@ describe("resolveChatPosture", () => {
     it("a provider change drops the parent's model and account but keeps effort and mode", () => {
       const p = resolveChatPosture({ settings, parent, chat: { harness: "codex" } });
       expect(p.model).toMatchObject({ effective: "gpt-5.6", source: "app" });
-      expect(p.subscription.effective.provider).toBe("codex");
+      expect(p.subscription.effective!.provider).toBe("codex");
       expect(p.effort).toMatchObject({ effective: "low", source: "parent" });
       expect(p.modeId).toMatchObject({ effective: "edit", source: "parent" });
     });

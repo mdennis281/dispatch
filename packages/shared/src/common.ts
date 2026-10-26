@@ -97,11 +97,22 @@ export type BuiltinHarnessKind = (typeof BUILTIN_HARNESS_KINDS)[number];
 export type HarnessKind = BuiltinHarnessKind | (string & {});
 
 /**
- * The harness a project gets when it has never said otherwise — and the one an
- * unavailable provider falls back to, which is why it must be a built-in: a
- * fallback that can be uninstalled is not one.
+ * What an ABSENT `harness` meant on a row written before #426: Claude was the
+ * only provider then, so a chat, or a settings file, that never named one ran
+ * on it. Only the one-time store backfill (`Store.backfillLegacyHarness`) may
+ * read this — it writes the value onto those rows so nothing else has to
+ * remember the rule.
+ *
+ * It is NOT a default. There is no default provider and no fallback provider:
+ * a chat whose provider is missing shows that and does not run (#422).
  */
-export const DEFAULT_HARNESS: BuiltinHarnessKind = "claude";
+export const LEGACY_HARNESS: BuiltinHarnessKind = "claude";
+
+/**
+ * @deprecated Kept only until the client stops reading it (#426's client half).
+ * Nothing on the server may use it: there is no default provider.
+ */
+export const DEFAULT_HARNESS: BuiltinHarnessKind = LEGACY_HARNESS;
 
 /**
  * WHERE a project's config dir lives — the repo, or the app's own config root.

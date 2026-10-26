@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../store/index.js";
+import { claudeOnlyRegistry } from "../harness/registry.testkit.js";
 import { TokenLedger } from "./metrics-tokens.js";
 import { EventBus } from "../bus.js";
 import type { WsServerEvent, Chat, Project } from "@dispatch/shared";
@@ -111,6 +112,8 @@ function chatFor(id: string, projectId = "p1"): Chat {
   return {
     id,
     projectId,
+    // Explicit: an absent provider means none now, not Claude (#426).
+    harness: "claude",
     title: "Untitled",
     modeId: "auto",
     effort: "medium",
@@ -128,6 +131,7 @@ function makeBroker(
   let idc = 0;
   let clock = 1000;
   const broker = new SessionBroker({
+    harnesses: claudeOnlyRegistry(),
     store,
     bus,
     maxActiveSessions: cap,
@@ -479,6 +483,7 @@ describe("chat status persistence", () => {
     // the clock, and `idleSweepMs: 0` keeps the background interval out of it —
     // the sweep is invoked by hand so nothing races the assertions.
     const broker = new SessionBroker({
+      harnesses: claudeOnlyRegistry(),
       store,
       bus,
       maxActiveSessions: 6,
@@ -522,6 +527,7 @@ describe("chat status persistence", () => {
     let idc = 0;
     const { fn } = makeFakeQuery(() => [assistantText("ok"), resultMsg()]);
     const broker = new SessionBroker({
+      harnesses: claudeOnlyRegistry(),
       store,
       bus,
       maxActiveSessions: 6,
@@ -557,6 +563,7 @@ describe("chat status persistence", () => {
       { ...resultMsg("error"), is_error: true, result: "boom" },
     ]);
     const broker = new SessionBroker({
+      harnesses: claudeOnlyRegistry(),
       store,
       bus,
       maxActiveSessions: 6,
@@ -585,6 +592,7 @@ describe("chat status persistence", () => {
     let idc = 0;
     const { fn } = makeFakeQuery(() => [assistantText("ok"), resultMsg()]);
     const broker = new SessionBroker({
+      harnesses: claudeOnlyRegistry(),
       store,
       bus,
       maxActiveSessions: 6,
@@ -3577,6 +3585,7 @@ describe("SessionBroker — project memory injection", () => {
     let idc = 0;
     let clock = 1000;
     const broker = new SessionBroker({
+      harnesses: claudeOnlyRegistry(),
       store,
       bus,
       memory,
@@ -3933,6 +3942,7 @@ describe("SessionBroker — config-sourced instructions / agents / modes", () =>
     let idc = 0;
     let clock = 1000;
     const broker = new SessionBroker({
+      harnesses: claudeOnlyRegistry(),
       store,
       bus,
       projectConfig,

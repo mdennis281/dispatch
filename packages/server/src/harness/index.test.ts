@@ -35,7 +35,7 @@ describe("HarnessRegistry", () => {
     expect(registry.list().map((h) => h.kind)).toEqual(["claude", "opencode"]);
     expect(isKnownProvider("opencode")).toBe(true);
     expect(providerFor("opencode").label).toBe("opencode label");
-    expect(registry.resolve("opencode")).toMatchObject({ fellBack: false });
+    expect(registry.resolve("opencode")).toMatchObject({ ok: true, harness: { kind: "opencode" } });
   });
 
   it("registers the providers it is constructed with, as a plugin would", () => {
@@ -46,7 +46,7 @@ describe("HarnessRegistry", () => {
     expect(registry.find("ctor-made")).toBeDefined();
   });
 
-  it("unregisters a provider, disposes its runtime, and falls back afterwards", async () => {
+  it("unregisters a provider, disposes its runtime, and is unavailable afterwards", async () => {
     let disposed = 0;
     const registry = builtins();
     registry.register(fakeHarness("dropme", true, () => (disposed += 1)), descriptor("dropme"));
@@ -54,17 +54,19 @@ describe("HarnessRegistry", () => {
     expect(disposed).toBe(1);
     expect(registry.find("dropme")).toBeUndefined();
     expect(isKnownProvider("dropme")).toBe(false);
-    expect(registry.resolve("dropme")).toMatchObject({ fellBack: true });
+    expect(registry.resolve("dropme")).toMatchObject({
+      ok: false,
+      unavailable: { code: "provider-unavailable", provider: "dropme", reason: "unregistered" },
+    });
   });
 
-  it("refuses to unregister the built-in every fallback lands on", async () => {
+  it("refuses to unregister a compiled-in harness", async () => {
     await expect(builtins().unregister("claude")).rejects.toThrow(/built-in/);
   });
 
-  it("refuses to shadow a taken id, so nothing can replace the fallback", () => {
+  it("refuses to shadow a taken id, so a live harness is never swapped underneath its sessions", () => {
     const registry = builtins();
     expect(() => registry.register(fakeHarness("claude"), descriptor("claude"))).toThrow(/already registered/);
-    // The live fallback is untouched.
     expect(providerFor("claude").label).toBe("Claude Code");
   });
 
@@ -72,8 +74,26 @@ describe("HarnessRegistry", () => {
     expect(() => builtins().register(fakeHarness("a"), descriptor("b"))).toThrow(/does not match/);
   });
 
-  it("falls back to the default for an id nothing registered, and says so", () => {
-    expect(builtins().resolve("gemini")).toMatchObject({ fellBack: true });
-    expect(builtins().resolve("gemini").harness.kind).toBe("claude");
+  // #426: there is no fallback provider. Each of these used to answer Claude.
+  it("answers an id nothing registered as unavailable — never as another provider", () => {
+    expect(builtins().resolve("gemini")).toEqual({
+      ok: false,
+      unavailable: expect.objectContaining({ provider: "gemini", reason: "unregistered" }),
+    });
+  });
+
+  it("answers no provider at all as unset", () => {
+    expect(builtins().resolve(undefined)).toEqual({
+      ok: false,
+      unavailable: expect.objectContaining({ code: "provider-unavailable", reason: "unset" }),
+    });
+  });
+
+  it("answers a registered provider whose runtime is missing as not installed — Claude included", () => {
+    const registry = new HarnessRegistry({ harnesses: { claude: fakeHarness("claude", false) } });
+    expect(registry.resolve("claude")).toEqual({
+      ok: false,
+      unavailable: expect.objectContaining({ provider: "claude", reason: "not-installed" }),
+    });
   });
 });

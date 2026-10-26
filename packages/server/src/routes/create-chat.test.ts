@@ -22,6 +22,7 @@ import { Store } from "../store/index.js";
 import { AuthoredConfigService } from "../services/authored-config.js";
 import { createChat } from "./dispatch.js";
 import type { Services } from "../services/container.js";
+import { seedDefaultProvider } from "../harness/registry.testkit.js";
 
 let root: string;
 let bus: EventBus;
@@ -48,6 +49,7 @@ beforeEach(async () => {
   bus = new EventBus();
   store = new Store(join(root, "data"));
   await store.init();
+  await seedDefaultProvider(store);
   await store.saveProject({
     id: "p1",
     name: "P",

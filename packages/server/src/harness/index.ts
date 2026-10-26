@@ -10,25 +10,60 @@
  * (`packages/plugins/`) that register through `ctx.providers` while the server
  * starts, before the port opens — see `PluginService.activateShipped`.
  *
- * `resolve` never throws for an unknown or unavailable kind — it falls back to
- * Claude and says so. A project whose harness was uninstalled must still open,
- * because the alternative is a project the user cannot get into to change the
- * setting.
+ * `resolve` never throws for an unknown or unavailable kind — and never
+ * substitutes another provider either. It answers `{ ok: false, unavailable }`
+ * and the caller shows that state. It used to fall back to Claude, and the
+ * broker then rewrote the chat's `harness` to Claude for good: disabling a
+ * plugin for a minute permanently moved every one of its chats (#426).
  */
 import {
   BUILTIN_HARNESS_KINDS,
-  DEFAULT_HARNESS,
+  providerAvailability,
   registerProvider,
   unregisterProvider,
   type BuiltinHarnessKind,
   type HarnessKind,
   type ProviderDescriptor,
+  type ProviderUnavailable,
 } from "@dispatch/shared";
 import type { Harness, HarnessRuntimeInfo } from "./types.js";
 import { ClaudeHarness } from "./claude/index.js";
 
 export * from "./types.js";
 export { ClaudeHarness, CLAUDE_CAPABILITIES, parseClaudeLimitHit } from "./claude/index.js";
+
+/**
+ * What {@link HarnessRegistry.resolve} answers: the harness to run on, or why
+ * there is none. No third arm — there is no fallback provider.
+ */
+export type HarnessResolution =
+  | { ok: true; harness: Harness }
+  | { ok: false; unavailable: ProviderUnavailable };
+
+/**
+ * A turn, chat or switch refused because the provider cannot run it. Thrown by
+ * the broker and `createChat`; routes answer it 409 with
+ * `{ error, code: "provider-unavailable", provider, reason }`, and the WS
+ * dispatcher publishes it as an `error` event carrying the same `code`.
+ */
+export class ProviderUnavailableError extends Error {
+  readonly code = "provider-unavailable" as const;
+  constructor(readonly unavailable: ProviderUnavailable) {
+    super(unavailable.message);
+    this.name = "ProviderUnavailableError";
+  }
+}
+
+/** The 409 body a route answers a {@link ProviderUnavailableError} with. */
+export function providerUnavailableBody(err: ProviderUnavailableError): {
+  error: string;
+  code: "provider-unavailable";
+  provider?: HarnessKind;
+  reason: ProviderUnavailable["reason"];
+} {
+  const { message, provider, reason } = err.unavailable;
+  return { error: message, code: err.code, ...(provider ? { provider } : {}), reason };
+}
 
 export interface HarnessRegistryOpts {
   /** Injectable built-in harnesses (tests, and the E2E fake SDK). */
@@ -66,8 +101,7 @@ export class HarnessRegistry {
    *
    * Refuses an id that is already taken. Replacing a live harness would leave
    * every running session on the old adapter while new ones start on the new
-   * one, and a plugin that shadowed `claude` would silently take over the
-   * fallback every unavailable provider resolves to.
+   * one.
    */
   register(harness: Harness, descriptor: ProviderDescriptor): void {
     if (harness.kind !== descriptor.id) {
@@ -82,8 +116,9 @@ export class HarnessRegistry {
    * Drop a registered provider and release its runtime — its plugin was
    * switched off. `dispose()` is the harness's to define, and it may end
    * sessions in flight: Codex's tears down its shared app-server, so a Codex
-   * turn running at the moment of the toggle errors. The next start of one of
-   * its chats falls back to Claude.
+   * turn running at the moment of the toggle errors. Its chats then show
+   * "provider unavailable" until the plugin is enabled again — they are never
+   * moved to another provider.
    */
   async unregister(kind: HarnessKind): Promise<void> {
     if ((BUILTIN_HARNESS_KINDS as readonly string[]).includes(kind)) {
@@ -107,17 +142,24 @@ export class HarnessRegistry {
   }
 
   /**
-   * The harness to actually run a chat on.
+   * The harness to actually run a chat on, or why it cannot run.
    *
-   * Falls back to the default rather than throwing, so an uninstalled runtime
-   * degrades to "this chat runs on Claude" instead of an unopenable project.
-   * The caller is told what happened via `fellBack` so the UI can say so.
+   * Registered AND reporting its runtime available, or nothing: the judgement
+   * is `providerAvailability`, shared with the client so the composer never
+   * offers Send for a turn this would refuse. A pure lookup — cheap enough to
+   * call on every turn start, which is what lets a chat recover by itself the
+   * moment its plugin is re-enabled.
    */
-  resolve(kind: HarnessKind | undefined): { harness: Harness; fellBack: boolean } {
+  resolve(kind: HarnessKind | undefined): HarnessResolution {
     const wanted = this.find(kind);
-    if (wanted && wanted.runtime().available) return { harness: wanted, fellBack: false };
-    const fallback = this.map.get(DEFAULT_HARNESS)!;
-    return { harness: fallback, fellBack: Boolean(kind) && kind !== DEFAULT_HARNESS };
+    // Only the wanted harness is probed: `runtime()` can stat a binary, and
+    // the other providers have no bearing on whether THIS chat can run.
+    const unavailable = providerAvailability(
+      kind,
+      wanted ? [{ kind: wanted.kind, runtime: wanted.runtime() }] : [],
+    );
+    if (unavailable || !wanted) return { ok: false, unavailable: unavailable! };
+    return { ok: true, harness: wanted };
   }
 
   /** Runtime resolution for every harness, for the boot log. */
