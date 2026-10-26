@@ -299,7 +299,7 @@ export class AcpSession implements HarnessSession {
    */
   private onAgentRequest(req: AgentRequest): void {
     if (req.method === "session/request_permission") {
-      this.onPermissionRequest(req);
+      void this.onPermissionRequest(req);
       return;
     }
     // `fs/*` and `terminal/*` should never arrive: DISPATCH_CLIENT_CAPABILITIES
@@ -308,7 +308,7 @@ export class AcpSession implements HarnessSession {
     this.conn.respondError(req.id, `dispatch does not implement ${req.method}`);
   }
 
-  private onPermissionRequest(req: AgentRequest): void {
+  private async onPermissionRequest(req: AgentRequest): Promise<void> {
     const toolCall = (req.params.toolCall ?? {}) as Record<string, unknown>;
     const rawOptions = Array.isArray(req.params.options) ? req.params.options : [];
     const options = rawOptions.map((o) => {
@@ -340,8 +340,16 @@ export class AcpSession implements HarnessSession {
     // that is the whole thing defeated by one "Allow".
     //
     // Declined at the protocol level rather than by not showing the card: the
-    // agent is blocked on this RPC and has to be answered either way.
-    const blocked = catchToolGuard(this.spec.toolGuard, toolName, input, "in-place");
+    // agent is blocked on this RPC and has to be answered either way — which
+    // is also why a guard that throws counts as no verdict, not as no answer.
+    // No cwd in the context: goose's permission request does not carry one,
+    // and the chat's starting directory would be a guess dressed as a fact.
+    const blocked = await catchToolGuard(this.spec.toolGuard, toolName, input, "in-place", {
+      toolUseId: typeof toolCall.toolCallId === "string" ? toolCall.toolCallId : undefined,
+    }).catch(() => null);
+    // `dispose` answers every registered ask; one it reached while the guard
+    // deliberated has been answered already and must not be answered twice.
+    if (!this.pendingAsks.has(requestId)) return;
     if (blocked) {
       this.pendingAsks.delete(requestId);
       const rejectId = pickPermissionOption(options, "deny");

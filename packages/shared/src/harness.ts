@@ -260,19 +260,61 @@ export interface HarnessSkillSpec {
 }
 
 /**
- * A host-side veto on a tool call, evaluated BEFORE the call runs.
+ * What the runtime knows about ONE tool call beyond its name and input — the
+ * facts a guard needs that are not the model's to supply.
  *
- * This is how the workflow guard reaches into a runtime without the broker
- * knowing whether that runtime has hooks. Return a string to block with that
- * reason, or null to allow. Adapters wire it to the best mechanism they have
- * (Claude: a PreToolUse hook; Codex: auto-deny at the approval prompt and
- * interrupt on sighting) and advertise the difference via
- * {@link HarnessCapabilities.preToolGuard}.
+ * Kept out of `input` on purpose. The Claude adapter used to splice the hook's
+ * `cwd` into the tool input so the broker could find it, which meant a tool
+ * that genuinely takes a `cwd` argument and the directory the runtime ran it in
+ * were indistinguishable — and the guard-blocked row showed an argument the
+ * model never passed.
+ *
+ * Every field is optional: an adapter fills what its runtime reports and no
+ * more. A guard that needs a missing fact falls back to what the host knew at
+ * session start (the workflow guard) or stands down (the subagent cwd guard).
+ */
+export interface HarnessToolGuardContext {
+  /** The directory the runtime is running THIS call in, when it says. */
+  cwd?: string;
+  /**
+   * The runtime's own id for the subagent that made the call. Absent means the
+   * main loop, which is the one distinction the subagent cwd guard hangs on.
+   */
+  agentId?: string;
+  /**
+   * The tool_use id of the call that spawned that subagent (its run id), when
+   * the adapter can name it. The host can usually recover it from
+   * {@link toolUseId}, but not before it has seen the call's row.
+   */
+  parentToolUseId?: string;
+  /** The runtime's id for this call. */
+  toolUseId?: string;
+}
+
+/**
+ * A host-side veto on a tool call, evaluated BEFORE the call runs where the
+ * runtime allows it.
+ *
+ * This is how every Dispatch guard — the mode's tool policy, the workflow
+ * contract and its exemptions, the background-shell, worktree, issue-create
+ * and subagent-cwd guards — reaches into a runtime without the broker knowing
+ * whether that runtime has hooks. The broker composes them into ONE of these;
+ * adapters only call it. Resolve to a string to block with that reason, or
+ * null to allow. Adapters wire it to the best mechanism they have (Claude: a
+ * PreToolUse hook; Codex: auto-deny at the approval prompt and interrupt on
+ * sighting; goose: decline at the permission request) and advertise the
+ * difference via {@link HarnessCapabilities.preToolGuard}.
+ *
+ * Async because some guards need I/O — the subagent cwd guard walks the disk
+ * for a worktree root, the issue guard asks whose repo `-R` names. It is also
+ * STATEFUL: a call can burn a one-shot exemption, and the cwd guard records
+ * where each thread is. So call it exactly once per tool call.
  */
 export type HarnessToolGuard = (
   toolName: string,
   input: Record<string, unknown>,
-) => string | null;
+  ctx: HarnessToolGuardContext,
+) => Promise<string | null>;
 
 /** Everything needed to open a session, in neutral terms. */
 /**

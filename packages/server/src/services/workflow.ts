@@ -14,12 +14,11 @@
  * Kept deliberately short. This append rides on every turn of every session.
  */
 import { readFile, stat } from "node:fs/promises";
-import { readFileSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import type { HookCallback, HookJSONOutput } from "@anthropic-ai/claude-agent-sdk";
 import {
   classifyWorkflowViolation,
   exemptionCovers,
+  type HarnessToolGuard,
   type ResolvedWorkflow,
   type WorkflowExemption,
   type WorkflowViolation,
@@ -83,9 +82,19 @@ export async function readCurrentBranch(cwd: string): Promise<string | null> {
 export async function inspectCwd(
   cwd: string | undefined,
 ): Promise<{ branch: string | null; linked: boolean }> {
-  if (!cwd) return { branch: null, linked: false };
+  return (cwd ? await inspectCallSite(cwd) : null) ?? { branch: null, linked: false };
+}
+
+/**
+ * {@link inspectCwd}, but null when `cwd` is in no repo at all — so a caller
+ * with a better fallback than "detached, primary checkout" can tell the two
+ * apart. Never throws.
+ */
+export async function inspectCallSite(
+  cwd: string,
+): Promise<{ branch: string | null; linked: boolean } | null> {
   const info = await findGitDir(cwd).catch(() => null);
-  if (!info) return { branch: null, linked: false };
+  if (!info) return null;
   let branch: string | null = null;
   try {
     const head = await readFile(join(info.gitDir, "HEAD"), "utf8");
@@ -94,46 +103,6 @@ export async function inspectCwd(
     /* detached or unreadable */
   }
   return { branch, linked: info.linked };
-}
-
-/**
- * Synchronous call-site inspection for runtimes whose only safety hook fires
- * after a command has started. Codex must decide whether to interrupt before
- * returning to its event loop, so awaiting filesystem I/O would let the command
- * keep running while the guard deliberated. This path is used only for guarded
- * Bash calls; ordinary session setup keeps using {@link inspectCwd}.
- */
-export function inspectCwdSync(
-  cwd: string | undefined,
-): { branch: string | null; linked: boolean } | null {
-  if (!cwd) return null;
-  let dir = resolve(cwd);
-  for (;;) {
-    const dotGit = join(dir, ".git");
-    try {
-      const st = statSync(dotGit);
-      let gitDir: string;
-      let linked: boolean;
-      if (st.isDirectory()) {
-        gitDir = dotGit;
-        linked = false;
-      } else if (st.isFile()) {
-        const target = /^gitdir:\s*(.+)$/m.exec(readFileSync(dotGit, "utf8"))?.[1]?.trim();
-        if (!target) return null;
-        gitDir = isAbsolute(target) ? target : resolve(dir, target);
-        linked = true;
-      } else {
-        return null;
-      }
-      const head = readFileSync(join(gitDir, "HEAD"), "utf8");
-      const branch = /^ref:\s*refs\/heads\/(.+)$/m.exec(head)?.[1]?.trim() ?? null;
-      return { branch, linked };
-    } catch {
-      const parent = dirname(dir);
-      if (parent === dir) return null;
-      dir = parent;
-    }
-  }
 }
 
 /** What the directive needs to know about the session it's being built for. */
@@ -326,6 +295,12 @@ export interface WorkflowGuardContext {
   trunk: string;
   /** True when the session cwd is a linked worktree. */
   inWorktree: boolean;
+  /**
+   * The branch the session's cwd was on when last inspected. Only consulted
+   * when the runtime does not say where a call runs — a call's own cwd always
+   * outranks it, because an agent that ran `git checkout` mid-turn has moved.
+   */
+  branch?: string | null;
 }
 
 export interface WorkflowGuardDeps {
@@ -348,37 +323,45 @@ export interface WorkflowGuardDeps {
   onExempted?: (exemption: WorkflowExemption, violation: WorkflowViolation, command: string) => void;
 }
 
-/** Pass-through result: the hook takes no position on this call. */
-const ALLOW: HookJSONOutput = {};
-
 /**
- * The trunk guard, as a `PreToolUse` hook.
+ * The trunk guard.
  *
  * Deliberately NOT on `canUseTool`: that channel is skipped entirely under
  * `bypassPermissions`, which is exactly the posture a long autonomous run uses —
- * i.e. the guard would be absent precisely when it matters most. A PreToolUse
- * hook fires in every permission mode and its deny takes precedence.
+ * i.e. the guard would be absent precisely when it matters most. Claude runs it
+ * as a PreToolUse hook, which fires in every permission mode.
  *
- * It reads the branch fresh from the hook's own `cwd` rather than trusting what
+ * It reads the branch fresh from the call's own `cwd` rather than trusting what
  * the session knew at turn start, because an agent that ran `git checkout` mid-turn
- * has moved since.
+ * has moved since. The same goes for whether that directory is a worktree: a
+ * Codex agent that `cd`s into the primary checkout to merge is not "in a
+ * worktree" because its chat started in one.
+ *
+ * Exemptions are honoured HERE, for every provider. They used to live only in
+ * the Claude hook; Codex and goose ran a second, hand-copied version of this
+ * guard that never read `session.exemptions`, so a grant the human approved
+ * mid-chat changed nothing for them and the agent stayed stuck.
  */
-export function createWorkflowGuardHook(deps: WorkflowGuardDeps): HookCallback {
-  return async (input): Promise<HookJSONOutput> => {
-    if (input.hook_event_name !== "PreToolUse") return ALLOW;
-    if (input.tool_name !== "Bash") return ALLOW;
+export function createWorkflowGuard(deps: WorkflowGuardDeps): HarnessToolGuard {
+  return async (toolName, input, call) => {
+    if (toolName !== "Bash") return null;
 
     const ctx = deps.context();
-    if (!ctx || ctx.workflow.guard === "off") return ALLOW;
+    if (!ctx || ctx.workflow.guard === "off") return null;
 
-    const command = (input.tool_input as { command?: unknown } | null)?.command;
-    if (typeof command !== "string" || !command.trim()) return ALLOW;
+    const command = input.command;
+    if (typeof command !== "string" || !command.trim()) return null;
 
-    const { branch } = await inspectCwd(input.cwd).catch(() => ({ branch: null }));
+    // An unreadable or non-repo cwd is not evidence of anything: fall back to
+    // what the session knew, rather than to "no branch" (which reads as safe).
+    const where = (call.cwd ? await inspectCallSite(call.cwd) : null) ?? {
+      branch: ctx.branch ?? null,
+      linked: ctx.inWorktree,
+    };
     const violation = classifyWorkflowViolation(command, {
       defaultBranch: ctx.trunk,
-      currentBranch: branch,
-      inWorktree: ctx.inWorktree,
+      currentBranch: where.branch,
+      inWorktree: where.linked,
       // A session that CAN land its PR still can't do it with `gh pr merge` —
       // this only redirects the refusal to `approve_pr` instead of "wait".
       autoMerge: ctx.workflow.autoMerge === "on-green",
@@ -388,7 +371,7 @@ export function createWorkflowGuardHook(deps: WorkflowGuardDeps): HookCallback {
       // this guard was extended to catch.
       requirePr: ctx.workflow.requirePr,
     });
-    if (!violation) return ALLOW;
+    if (!violation) return null;
 
     const blocked = ctx.workflow.guard === "deny";
 
@@ -403,32 +386,27 @@ export function createWorkflowGuardHook(deps: WorkflowGuardDeps): HookCallback {
         // "Blocked: …", and an exempted command was not blocked. The broker's
         // own notice says what the grant just bought instead.
         deps.onExempted?.(exemption, violation, command);
-        return ALLOW;
+        return null;
       }
     }
 
     deps.onViolation?.(violation, blocked);
-    if (!blocked) return ALLOW;
+    if (!blocked) return null;
 
-    return {
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "deny",
-        permissionDecisionReason:
-          `${violation.reason} (blocked by the \`${ctx.workflow.profile}\` workflow profile)` +
+    return (
+      `${violation.reason} (blocked by the \`${ctx.workflow.profile}\` workflow profile)` +
           // Discoverability where it actually matters. The 2026-08-17 incident's
           // agent was stuck between a broken sanctioned tool and this refusal
           // with no third option it knew about — and this sentence is the only
           // text it is guaranteed to read at that moment. Naming `violation.kind`
           // means it can ask for exactly the guard it just tripped rather than
           // guessing, or reaching for `all`.
-          (deps.exemptions
-            ? `\n\nIf the sanctioned path is genuinely BROKEN — not merely inconvenient — you ` +
-              `can ask the human to lift this one guard for THIS CHAT: ` +
-              `mcp__dispatch-confirm__request_exemption({ guard: "${violation.kind}", command: "…", ` +
-              `reason: "…" }). They decide, not you, and a denial is final.`
-            : ""),
-      },
-    };
+      (deps.exemptions
+        ? `\n\nIf the sanctioned path is genuinely BROKEN — not merely inconvenient — you ` +
+          `can ask the human to lift this one guard for THIS CHAT: ` +
+          `mcp__dispatch-confirm__request_exemption({ guard: "${violation.kind}", command: "…", ` +
+          `reason: "…" }). They decide, not you, and a denial is final.`
+        : "")
+    );
   };
 }

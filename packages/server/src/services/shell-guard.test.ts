@@ -1,45 +1,42 @@
 import { describe, it, expect } from "vitest";
-import type {
-  PreToolUseHookSpecificOutput,
-  SyncHookJSONOutput,
-} from "@anthropic-ai/claude-agent-sdk";
+import type { HarnessToolGuard } from "@dispatch/shared";
 import {
-  createBackgroundShellGuardHook,
-  createWorktreeGuardHook,
-  createModePolicyHook,
-  createIssueCreateGuardHook,
+  createBackgroundShellGuard,
+  createWorktreeGuard,
+  createModePolicyGuard,
+  createIssueCreateGuard,
   looksLikeGhIssueCreate,
   ghIssueCreateRepo,
 } from "./shell-guard.js";
 
-/** A PreToolUse hook's real return shape (`HookJSONOutput` unions them all). */
-type PreOut = Omit<SyncHookJSONOutput, "hookSpecificOutput"> & {
-  hookSpecificOutput?: PreToolUseHookSpecificOutput;
-};
+/**
+ * A guard's verdict in the shape a PreToolUse deny takes. The guards are plain
+ * functions now; this keeps every assertion below reading as "was it denied,
+ * and with what reason", whichever runtime ends up carrying the refusal.
+ */
+interface PreOut {
+  hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string };
+}
 
-/** A PreToolUse hook input, with only the fields the guard reads. */
-function pre(tool: string, input: Record<string, unknown>) {
-  return {
-    hook_event_name: "PreToolUse",
-    tool_name: tool,
-    tool_input: input,
-    cwd: "C:\\repo",
-    session_id: "s1",
-    transcript_path: "",
-    permission_mode: "bypassPermissions",
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  } as any;
+/** Run one guard on one call, as an adapter would. */
+async function verdict(
+  guard: HarnessToolGuard,
+  tool: string,
+  input: Record<string, unknown>,
+): Promise<PreOut> {
+  const reason = await guard(tool, input, { cwd: "C:\\repo" });
+  return reason
+    ? { hookSpecificOutput: { permissionDecision: "deny", permissionDecisionReason: reason } }
+    : {};
 }
 
 const guard = (over: { enabled?: boolean; onBlocked?: (c: string) => void } = {}) => {
-  const hook = createBackgroundShellGuardHook({
+  const hook = createBackgroundShellGuard({
     enabled: () => over.enabled ?? true,
     onBlocked: over.onBlocked,
   });
   return async (tool: string, input: Record<string, unknown>): Promise<PreOut> =>
-    (await hook(pre(tool, input), "t1", {
-      signal: new AbortController().signal,
-    })) as PreOut;
+    verdict(hook, tool, input);
 };
 
 describe("background shell guard", () => {
@@ -94,14 +91,12 @@ describe("background shell guard", () => {
 
 describe("worktree guard", () => {
   const wtGuard = (over: { enabled?: boolean; onBlocked?: (c: string) => void } = {}) => {
-    const hook = createWorktreeGuardHook({
+    const hook = createWorktreeGuard({
       enabled: () => over.enabled ?? true,
       onBlocked: over.onBlocked,
     });
     return async (tool: string, input: Record<string, unknown>): Promise<PreOut> =>
-      (await hook(pre(tool, input), "t1", {
-        signal: new AbortController().signal,
-      })) as PreOut;
+      verdict(hook, tool, input);
   };
 
   it("denies `git worktree add` and names the recording tool", async () => {
@@ -180,19 +175,11 @@ describe("worktree guard", () => {
   });
 });
 
-/**
- * The mode tool policy, as the DIRECT Claude path gets it.
- *
- * That path never builds `HarnessSessionSpec.toolGuard` — `startQuery` hands
- * `buildOptions`' options straight to the SDK — so this hook is the only
- * unconditional veto a stock Claude chat has. It must enforce exactly what
- * the neutral harness path's guard does.
- */
 describe("issue create guard", () => {
   const issueGuard = (enabled = true, own = "acme/api") => {
-    const hook = createIssueCreateGuardHook({ applies: async (repo) => enabled && (!repo || repo === own) });
+    const hook = createIssueCreateGuard({ applies: async (repo) => enabled && (!repo || repo === own) });
     return async (tool: string, input: Record<string, unknown>): Promise<PreOut> =>
-      (await hook(pre(tool, input), "t1", { signal: new AbortController().signal })) as PreOut;
+      verdict(hook, tool, input);
   };
 
   it("recognises gh issue create in the shapes agents actually write", () => {
@@ -230,16 +217,19 @@ describe("issue create guard", () => {
   });
 });
 
+/**
+ * The mode tool policy — the only unconditional veto there is, on every
+ * provider. The SDK's own `disallowedTools` is advisory and does not filter
+ * MCP tools, so this is what actually holds a posture.
+ */
 describe("mode tool policy guard", () => {
   const policyGuard = (
     policy: { allowedTools?: string[]; disallowedTools?: string[] },
     mode = { name: "Global", id: "global" },
   ) => {
-    const hook = createModePolicyHook({ policy: () => policy, mode: () => mode });
+    const hook = createModePolicyGuard({ policy: () => policy, mode: () => mode });
     return async (tool: string): Promise<PreOut> =>
-      (await hook(pre(tool, {}), "t1", {
-        signal: new AbortController().signal,
-      })) as PreOut;
+      verdict(hook, tool, {});
   };
 
   it("denies an MCP tool on the denylist — the case the SDK option does not cover", async () => {

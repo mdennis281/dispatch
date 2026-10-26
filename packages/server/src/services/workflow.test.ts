@@ -10,17 +10,12 @@ import {
   type WorkflowExemptionScope,
   type WorkflowViolation,
 } from "@dispatch/shared";
-import type {
-  PreToolUseHookInput,
-  PreToolUseHookSpecificOutput,
-  SyncHookJSONOutput,
-} from "@anthropic-ai/claude-agent-sdk";
 import {
   buildWorkflowDirective,
-  createWorkflowGuardHook,
+  createWorkflowGuard,
   findGitDir,
+  inspectCallSite,
   inspectCwd,
-  inspectCwdSync,
   readCurrentBranch,
 } from "./workflow.js";
 
@@ -63,7 +58,7 @@ describe("git dir inspection", () => {
   it("recognizes a linked worktree and reads its branch", async () => {
     // `.git` is a FILE here — this is how the guard tells a worktree from the checkout.
     expect(await inspectCwd(worktree)).toEqual({ branch: "feat/x", linked: true });
-    expect(inspectCwdSync(worktree)).toEqual({ branch: "feat/x", linked: true });
+    expect(await inspectCallSite(worktree)).toEqual({ branch: "feat/x", linked: true });
   });
 
   it("walks up from a subdirectory", async () => {
@@ -75,7 +70,9 @@ describe("git dir inspection", () => {
   it("returns nothing outside a repo", async () => {
     expect(await inspectCwd(root)).toEqual({ branch: null, linked: false });
     expect(await inspectCwd(undefined)).toEqual({ branch: null, linked: false });
-    expect(inspectCwdSync(root)).toBeNull();
+    // Distinguishable from a detached primary checkout, so the guard can fall
+    // back to what the session knew instead of reading "no branch" as safe.
+    expect(await inspectCallSite(root)).toBeNull();
   });
 });
 
@@ -195,17 +192,6 @@ describe("buildWorkflowDirective", () => {
 
 /* ------------------------------------------------------------------- the guard */
 
-function preToolUse(command: string, cwd: string): PreToolUseHookInput {
-  return {
-    hook_event_name: "PreToolUse",
-    tool_name: "Bash",
-    tool_input: { command },
-    tool_use_id: "t1",
-    session_id: "s1",
-    transcript_path: "",
-    cwd,
-  };
-}
 
 /** A grant as the broker would have recorded it after the human said yes. */
 function grant(
@@ -225,7 +211,7 @@ function guardFor(
   return {
     seen,
     used,
-    hook: createWorkflowGuardHook({
+    hook: createWorkflowGuard({
       context: () => ({ workflow, trunk: "main", inWorktree }),
       onViolation: (v) => seen.push(v),
       exemptions: () => exemptions,
@@ -235,23 +221,33 @@ function guardFor(
 }
 
 /**
- * Run the hook, narrowed to the shape a PreToolUse hook can actually return
- * (`HookJSONOutput` unions in every other hook's output shape).
+ * Run the guard on a Bash call made in `cwd`, and report its verdict in the
+ * shape a PreToolUse deny takes — so each assertion reads as "denied, and why".
  */
 const run = async (
-  hook: ReturnType<typeof createWorkflowGuardHook>,
+  hook: ReturnType<typeof createWorkflowGuard>,
   cmd: string,
-  cwd: string,
-): Promise<Omit<SyncHookJSONOutput, "hookSpecificOutput"> & {
-  hookSpecificOutput?: PreToolUseHookSpecificOutput;
-}> =>
-  (await hook(preToolUse(cmd, cwd), "t1", {
-    signal: new AbortController().signal,
-  })) as Omit<SyncHookJSONOutput, "hookSpecificOutput"> & {
-    hookSpecificOutput?: PreToolUseHookSpecificOutput;
+  cwd: string | undefined,
+): Promise<{
+  hookSpecificOutput?: {
+    hookEventName: string;
+    permissionDecision: string;
+    permissionDecisionReason: string;
   };
+}> => {
+  const reason = await hook("Bash", { command: cmd }, { cwd });
+  return reason
+    ? {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: reason,
+        },
+      }
+    : {};
+};
 
-describe("createWorkflowGuardHook", () => {
+describe("createWorkflowGuard", () => {
   const review = resolveWorkflow({ workflow: { profile: "review" } });
 
   it("still denies `gh pr merge` under auto-merge, redirecting to approve_pr", async () => {
@@ -311,6 +307,21 @@ describe("createWorkflowGuardHook", () => {
     expect(seen).toEqual([]);
   });
 
+  it("falls back to what the session knew when the runtime gives no cwd", async () => {
+    // goose's permission requests carry no directory. Reading that as "no
+    // branch" would wave a trunk commit through as if it were safe.
+    const hook = createWorkflowGuard({
+      context: () => ({ workflow: review, trunk: "main", inWorktree: false, branch: "main" }),
+    });
+    expect((await run(hook, "git commit -m 'x'", undefined)).hookSpecificOutput?.permissionDecision).toBe(
+      "deny",
+    );
+    const onTask = createWorkflowGuard({
+      context: () => ({ workflow: review, trunk: "main", inWorktree: true, branch: "feat/x" }),
+    });
+    expect(await run(onTask, "git commit -m 'x'", undefined)).toEqual({});
+  });
+
   it("reads the branch fresh from the hook's cwd, not from turn start", async () => {
     // Same guard object, two cwds: the worktree commit is fine, the checkout one isn't.
     const { hook } = guardFor(review, true);
@@ -335,8 +346,7 @@ describe("createWorkflowGuardHook", () => {
 
   it("ignores non-Bash tools and empty commands", async () => {
     const { hook } = guardFor(review, true);
-    const readInput = { ...preToolUse("", worktree), tool_name: "Read" };
-    expect(await hook(readInput, "t1", { signal: new AbortController().signal })).toEqual({});
+    expect(await hook("Read", { command: "git push origin main" }, { cwd: worktree })).toBeNull();
     expect(await run(hook, "   ", repo)).toEqual({});
   });
 
@@ -352,7 +362,7 @@ describe("createWorkflowGuardHook", () => {
   });
 
   it("omits the exemption offer when no exemption surface is wired in", async () => {
-    const hook = createWorkflowGuardHook({
+    const hook = createWorkflowGuard({
       context: () => ({ workflow: review, trunk: "main", inWorktree: true }),
     });
     const reason = (await run(hook, "gh pr create --fill", worktree)).hookSpecificOutput
@@ -361,7 +371,7 @@ describe("createWorkflowGuardHook", () => {
   });
 });
 
-describe("createWorkflowGuardHook — human-approved exemptions", () => {
+describe("createWorkflowGuard — human-approved exemptions", () => {
   const review = resolveWorkflow({ workflow: { profile: "review" } });
 
   it("lets the exempted command through and reports the grant that did it", async () => {
@@ -402,7 +412,7 @@ describe("createWorkflowGuardHook — human-approved exemptions", () => {
   it("reads the list fresh, so a grant that lands mid-turn applies immediately", async () => {
     // The agent asks the instant it is refused and retries in the SAME turn.
     const live: WorkflowExemption[] = [];
-    const hook = createWorkflowGuardHook({
+    const hook = createWorkflowGuard({
       context: () => ({ workflow: review, trunk: "main", inWorktree: true }),
       exemptions: () => live,
     });

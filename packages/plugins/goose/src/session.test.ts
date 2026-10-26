@@ -292,7 +292,7 @@ describe("AcpSession", () => {
     // "Allow". The agent is blocked on this RPC, so it is declined rather
     // than silently not shown.
     const { agent, session, events, drain } = build({
-      toolGuard: (name) => (name === "Bash" ? "not available in Global mode" : null),
+      toolGuard: async (name) => (name === "Bash" ? "not available in Global mode" : null),
     });
     agent.onRequest = (method, _p, id) => {
       if (method !== "session/prompt") return undefined;
