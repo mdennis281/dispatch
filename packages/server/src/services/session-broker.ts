@@ -3778,7 +3778,11 @@ export class SessionBroker {
     // old session already gone. A registered-but-not-installed provider is
     // allowed: the chat then shows that state, and installing the CLI fixes it.
     if (this.harnesses && !this.harnesses.find(harness)) {
-      throw new ProviderUnavailableError(providerAvailability(harness, [])!);
+      // Same post-listen activation window as `resolveHarness`.
+      await this.plugins?.activationSettled?.();
+      if (!this.harnesses.find(harness)) {
+        throw new ProviderUnavailableError(providerAvailability(harness, [])!);
+      }
     }
     const previous = chat.harness;
     if (previous === harness) {

@@ -153,6 +153,13 @@ describe("TitleService.maybeGenerateInitialTitle", () => {
     expect(resolve).toHaveBeenCalledTimes(1);
     expect(saves).toHaveLength(0);
     expect(notices).toEqual([]);
+
+    // A Regenerate somebody clicked is told why nothing happened.
+    await svc.regenerate("c1");
+    expect(saves).toHaveLength(0);
+    expect(notices).toEqual([
+      expect.objectContaining({ level: "warn", text: "Can't regenerate the title: gone" }),
+    ]);
   });
 });
 

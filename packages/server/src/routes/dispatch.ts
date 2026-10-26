@@ -181,7 +181,14 @@ export async function createChat(
     });
   }
   if (services.harnesses && !services.harnesses.find(harness)) {
-    throw new ProviderUnavailableError(providerAvailability(harness, [])!);
+    // An installed provider plugin activates in `warm()`, AFTER the port opens.
+    // A create that lands in that window (a spawn right after boot) would be
+    // refused for a provider a moment away from registering — wait it out, as
+    // the broker does before it calls a provider unregistered.
+    await services.plugins?.activationSettled?.();
+    if (!services.harnesses.find(harness)) {
+      throw new ProviderUnavailableError(providerAvailability(harness, [])!);
+    }
   }
   const now = Date.now();
   const chat: Chat = {

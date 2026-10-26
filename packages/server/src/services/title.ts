@@ -265,6 +265,7 @@ export class TitleService {
     }
     const run = this.runGeneration(chatId, prompt, opts.prefix ?? null, {
       requireDefaultTitle: opts.requireDefaultTitle === true,
+      userInitiated: opts.userInitiated === true,
     });
     this.inFlight.set(chatId, run);
     try {
@@ -281,7 +282,7 @@ export class TitleService {
     chatId: string,
     prompt: string,
     prefix: string | null,
-    guard: { requireDefaultTitle: boolean },
+    guard: { requireDefaultTitle: boolean; userInitiated: boolean },
   ): Promise<void> {
     let lastError = "";
     for (let attempt = 0; attempt < TITLE_ATTEMPTS; attempt++) {
@@ -313,10 +314,22 @@ export class TitleService {
         this.bus.publish({ type: "chat-update", chat: saved });
         return;
       } catch (err) {
-        // Not a failure worth retrying or announcing: the chat cannot run
-        // either, and already says so. It is titled on a later turn, once its
-        // provider is back.
-        if (err instanceof ProviderUnavailableError) return;
+        // Not worth retrying: nothing changes in the next few seconds. The
+        // automatic path stays quiet — the chat already shows its provider is
+        // unavailable, and it is titled on a later turn once that is back. A
+        // Regenerate somebody clicked is owed an answer, though; a click that
+        // silently does nothing reads as a broken button.
+        if (err instanceof ProviderUnavailableError) {
+          if (guard.userInitiated) {
+            this.bus.publish({
+              type: "notice",
+              chatId,
+              level: "warn",
+              text: `Can't regenerate the title: ${err.message}`,
+            });
+          }
+          return;
+        }
         lastError = err instanceof Error ? err.message : String(err);
       }
     }
