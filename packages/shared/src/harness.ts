@@ -201,6 +201,14 @@ export interface HarnessLimits {
   tracked?: Array<HarnessLimitWindow & { id: string; title: string }>;
   /** Backend-granted reset credits still available (Codex). */
   resetCredits?: number;
+  /**
+   * The last read FAILED and these are the last good windows (or none), kept so
+   * a meter doesn't blank on a transient blip. Only ever set on a non-`fresh`
+   * read — a fresh one throws instead.
+   */
+  stale?: boolean;
+  /** Why the last read failed: "rate_limited" | "unauthenticated" | "unavailable" | message. */
+  error?: string;
 }
 
 /**
@@ -415,8 +423,17 @@ export interface HarnessInput {
  */
 export interface HarnessTextRequest {
   prompt: string;
-  /** Lets an adapter choose a purpose-appropriate model and runtime posture. */
-  purpose: "title";
+  /**
+   * Lets an adapter choose a purpose-appropriate model and runtime posture.
+   * Both are small, tool-less completions an economical model handles; a
+   * commit message reads a staged diff, so it wants a little more output room.
+   */
+  purpose: "title" | "commit-message";
+  /**
+   * A soft cap on the answer's length in tokens, for an adapter whose runtime
+   * takes one. A hint, not a contract: adapters may ignore it.
+   */
+  maxOutput?: number;
   /** Wall-clock budget for the complete native request. */
   timeoutMs?: number;
   /** The login account to spend it on; absent means the provider's default. */
@@ -761,9 +778,9 @@ export interface Harness {
    * Is the runtime logged in, for the setup card. `exe` is the resolved
    * executable and `env` already carries the default account's overlay.
    *
-   * Optional, and absent means "not checked" for anything but Claude, whose
-   * probe the host owns. The host used to switch on the provider id here, so
-   * every provider it did not know fell through to `claude auth status`.
+   * Optional, and absent means "not checked" — for every provider, Claude
+   * included. The host used to switch on the provider id here, so every
+   * provider it did not know fell through to `claude auth status`.
    * Never throws: an unrunnable binary is `checked: false`.
    */
   probeLogin?(exe: string, env: Readonly<Record<string, string | undefined>>): Promise<RuntimeLoginStatus>;
@@ -797,7 +814,15 @@ export interface Harness {
     account?: HarnessAccount;
     refresh?: boolean;
   }): Promise<Record<string, number>>;
-  /** Account usage state, or null when this harness can't report it. */
+  /**
+   * Account usage state, or null when this harness can't report it. Only
+   * consulted when `capabilities.usageLimits` is true — a provider without it
+   * gets no meter, never another provider's.
+   *
+   * A `fresh` read that fails throws; an error carrying a numeric `retryAt`
+   * (epoch ms) tells the host's sampler not to ask again before then — how a
+   * rate-limited endpoint's cooldown survives a scheduler that doesn't know it.
+   */
   readLimits(account?: HarnessAccount, opts?: HarnessLimitReadOpts): Promise<HarnessLimits | null>;
   /**
    * Limits the runtime volunteers without being asked (Codex pushes

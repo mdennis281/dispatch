@@ -1,27 +1,38 @@
 /**
  * CommitMessageService — one-shot AI commit messages for the Source Control UI.
  *
- * Same shape as TitleService (and for the same reasons): a single
- * `query()` on the cheapest model with `settingSources: []` + `maxTurns: 1`, so
- * it never loads repo settings/MCP and never becomes a real agent loop. The
- * seed is the STAGED diff — what is actually about to be committed — plus the
- * repo's recent subjects so the generated message matches the house style
- * (conventional-commit or not) instead of imposing one.
+ * Same seam as TitleService: a stateless `Harness.generateText` request, so the
+ * provider picks its own economical model and its own no-tools, no-history
+ * posture. The seed is the STAGED diff — what is actually about to be
+ * committed — plus the repo's recent subjects so the generated message matches
+ * the house style (conventional-commit or not) instead of imposing one.
+ *
+ * WHICH provider: the app's default, on its default account. A commit message
+ * belongs to no chat, so there is no chat provider to inherit. This used to be
+ * a direct Agent SDK `query()` hard-wired to `claude-haiku-4-5`, which meant a
+ * Codex-only or goose-only install could not draft one at all, and every
+ * install spent Claude on it whatever its default was (#425).
+ *
+ * NO FALLBACK provider. When the default is unset, unregistered or not
+ * installed, {@link CommitMessageService.availability} says so and the button
+ * is disabled with that reason. Quietly drafting on some other provider would
+ * spend a subscription the user did not pick.
  *
  * Unlike a chat title this is user-initiated and lands in an editable box, so a
  * failure is surfaced to the caller rather than swallowed: the button should
  * say why nothing came back.
- *
- * The `query` fn is injectable so tests (and `DISPATCH_FAKE_SDK=1`) run without a
- * `claude` subprocess or the network.
  */
-import { query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
-import type { Options, Query, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import {
+  providerFor,
+  subscriptionFor,
+  type CommitMessageAvailability,
+  type HarnessKind,
+  type HarnessTextRequest,
+  type SubscriptionSettings,
+} from "@dispatch/shared";
+import type { HarnessRegistry } from "../harness/index.js";
 import type { GitService } from "./git.js";
-import { claudeExecutableOption } from "./runtime.js";
-
-/** Cheapest model — a commit message never justifies Opus/Sonnet spend. */
-export const COMMIT_MESSAGE_MODEL = "claude-haiku-4-5";
+import { accountOf } from "./subscriptions.js";
 
 /** Max wall-clock for one generation before we give up. */
 const TIMEOUT_MS = 45_000;
@@ -29,39 +40,68 @@ const TIMEOUT_MS = 45_000;
 /** How much staged patch to show the model. */
 const MAX_DIFF_CHARS = 18_000;
 
-/** The subset of the SDK `query` signature this service calls (single-shot). */
-export type CommitQueryFn = (params: {
-  prompt: string;
-  options?: Options;
-}) => Query;
+/** A subject and a short body; the hint lets a provider size its answer. */
+const MAX_OUTPUT_TOKENS = 400;
+
+/** What the commit-message seam needs to know about the settings. */
+export type CommitSettings = SubscriptionSettings & {
+  /** Possibly absent: there may be no app default provider at all. */
+  harness?: SubscriptionSettings["harness"] & { defaultHarness?: HarnessKind | null };
+};
+
+/** Thrown by {@link CommitMessageService.generate} when no provider can draft. */
+export class NoCommitProviderError extends Error {
+  readonly code = "no_provider";
+  constructor(reason: string) {
+    super(reason);
+    this.name = "NoCommitProviderError";
+  }
+}
+
+/**
+ * Stand-in for the provider's own `generateText`, called AFTER the provider is
+ * resolved — so the E2E fake still exercises the real "is there a provider"
+ * gate rather than bypassing it.
+ */
+export type CommitGenerateFn = (request: HarnessTextRequest, provider: HarnessKind) => Promise<string>;
 
 export interface CommitMessageServiceOptions {
   git: GitService;
-  query?: CommitQueryFn;
+  harnesses: Pick<HarnessRegistry, "find">;
+  settings: () => Promise<CommitSettings | null>;
+  generateText?: CommitGenerateFn;
 }
 
 export class CommitMessageService {
   private readonly git: GitService;
-  private readonly query: CommitQueryFn;
+  private readonly harnesses: Pick<HarnessRegistry, "find">;
+  private readonly settings: () => Promise<CommitSettings | null>;
+  private readonly generateText?: CommitGenerateFn;
 
   constructor(opts: CommitMessageServiceOptions) {
     this.git = opts.git;
-    this.query =
-      opts.query ??
-      (process.env.DISPATCH_FAKE_SDK === "1"
-        ? makeFakeCommitQuery()
-        : (sdkQuery as unknown as CommitQueryFn));
+    this.harnesses = opts.harnesses;
+    this.settings = opts.settings;
+    this.generateText = opts.generateText;
+  }
+
+  /** Whether the button can work, with the reason it can't. Never throws. */
+  async availability(): Promise<CommitMessageAvailability> {
+    return (await this.resolve()).availability;
   }
 
   /**
    * Generate a commit message from what's currently staged. Throws when nothing
    * is staged (the UI disables the button, but a race shouldn't produce a
-   * message describing an empty change).
+   * message describing an empty change), and {@link NoCommitProviderError}
+   * when there is no provider to ask.
    */
   async generate(
     repoPath: string,
     opts: { hint?: string } = {},
   ): Promise<string> {
+    const { availability, settings } = await this.resolve();
+    if (!availability.available) throw new NoCommitProviderError(availability.reason);
     const diff = await this.git.stagedDiff(repoPath, MAX_DIFF_CHARS);
     if (!diff.trim()) {
       throw new Error("nothing staged — stage some changes first");
@@ -73,32 +113,47 @@ export class CommitMessageService {
       .then((c) => c.map((x) => x.subject).filter(Boolean))
       .catch(() => [] as string[]);
 
-    const raw = await this.runQuery(commitPrompt(diff, recent, opts.hint));
+    const provider = availability.provider;
+    const request: HarnessTextRequest = {
+      prompt: commitPrompt(diff, recent, opts.hint),
+      purpose: "commit-message",
+      timeoutMs: TIMEOUT_MS,
+      maxOutput: MAX_OUTPUT_TOKENS,
+      // Spent on the provider's DEFAULT account, the one the user set for it.
+      account: accountOf(subscriptionFor(settings, provider)),
+    };
+    const raw = this.generateText
+      ? await this.generateText(request, provider)
+      : await this.harnesses.find(provider)!.generateText(request);
     const message = sanitizeMessage(raw);
     if (!message) throw new Error("the model returned an empty message");
     return message;
   }
 
-  private async runQuery(prompt: string): Promise<string> {
-    const abort = new AbortController();
-    const timer = setTimeout(() => abort.abort(), TIMEOUT_MS);
-    const acc = { text: "", result: "" };
-    try {
-      const q = this.query({
-        prompt,
-        options: {
-          model: COMMIT_MESSAGE_MODEL,
-          settingSources: [],
-          maxTurns: 1,
-          abortController: abort,
-          ...claudeExecutableOption(),
-        },
-      });
-      for await (const msg of q) collectText(msg, acc);
-    } finally {
-      clearTimeout(timer);
+  private async resolve(): Promise<{ availability: CommitMessageAvailability; settings: CommitSettings | null }> {
+    const settings = await this.settings().catch(() => null);
+    const kind = settings?.harness?.defaultHarness ?? undefined;
+    if (!kind) {
+      return {
+        settings,
+        availability: { available: false, reason: "No default provider is set. Choose one in Settings → Chat." },
+      };
     }
-    return acc.text.trim() || acc.result.trim();
+    const harness = this.harnesses.find(kind);
+    const label = providerFor(kind).label;
+    if (!harness) {
+      return {
+        settings,
+        availability: { available: false, reason: `The default provider (${label}) isn't installed or enabled.` },
+      };
+    }
+    if (!harness.runtime().available) {
+      return {
+        settings,
+        availability: { available: false, reason: `The default provider (${label}) isn't available on this machine.` },
+      };
+    }
+    return { settings, availability: { available: true, provider: kind, label } };
   }
 }
 
@@ -155,44 +210,14 @@ export function sanitizeMessage(raw: string): string {
     .trim();
 }
 
-/** Pull the assistant/result text out of a one-shot query stream. */
-function collectText(msg: SDKMessage, acc: { text: string; result: string }): void {
-  const m = msg as unknown as Record<string, unknown> & { type?: string };
-  if (m.type === "assistant") {
-    const content = (m.message as { content?: unknown } | undefined)?.content;
-    if (Array.isArray(content)) {
-      for (const b of content) {
-        if (b && typeof b === "object" && (b as { type?: string }).type === "text") {
-          acc.text += String((b as { text?: unknown }).text ?? "");
-        }
-      }
-    }
-  } else if (m.type === "result" && typeof (m as { result?: unknown }).result === "string") {
-    acc.result = (m as { result: string }).result;
-  }
-}
-
 /**
  * Deterministic in-process stand-in gated by `DISPATCH_FAKE_SDK=1` (mirrors
- * `makeFakeTitleGenerator`) so E2E never spawns a `claude` subprocess for a commit
- * message. Derives a subject from the first changed path in the diff.
+ * `makeFakeTitleGenerator`) so E2E never spawns a runtime for a commit message.
+ * Derives a subject from the first changed path in the diff.
  */
-export function makeFakeCommitQuery(): CommitQueryFn {
-  return ({ prompt }) => {
+export function makeFakeCommitGenerator(): CommitGenerateFn {
+  return async ({ prompt }) => {
     const file = /^\+\+\+ b\/(.+)$/m.exec(prompt)?.[1];
-    const text = file ? `chore: update ${file}` : "chore: update staged changes";
-    async function* gen(): AsyncGenerator<unknown, void> {
-      yield {
-        type: "assistant",
-        message: { role: "assistant", content: [{ type: "text", text }] },
-      };
-      yield { type: "result", subtype: "success", is_error: false, result: text };
-    }
-    const g = gen() as unknown as Record<string, unknown>;
-    g.interrupt = async () => {};
-    g.setModel = async () => {};
-    g.setPermissionMode = async () => {};
-    g.setMaxThinkingTokens = async () => {};
-    return g as unknown as Query;
+    return file ? `chore: update ${file}` : "chore: update staged changes";
   };
 }

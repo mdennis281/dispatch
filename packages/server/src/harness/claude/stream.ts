@@ -19,7 +19,8 @@
  */
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { compactedEvent, figuresOfModelUsage, figuresOfUsage, type Effort } from "@dispatch/shared";
-import type { HarnessEvent } from "../types.js";
+import type { HarnessEvent } from "@dispatch/shared";
+import { parseClaudeLimitHit } from "./limit-hit.js";
 
 /** Tool whose call is rendered as a question card, not a generic tool row. */
 export const QUESTION_TOOL = "AskUserQuestion";
@@ -342,6 +343,11 @@ export class ClaudeStreamDecoder {
       typeof (m as { result?: unknown }).result === "string"
         ? ((m as { result?: string }).result as string)
         : undefined;
+    // Structured here rather than left for the broker to regex out of `result`:
+    // Codex hands the turn-end an exact reset time, and a provider-neutral
+    // resume scheduler can only arm on what the event carries. Errors only — a
+    // successful answer that merely QUOTES a limit sentence is not a limit.
+    const limit = isError ? parseClaudeLimitHit(result, Date.now()) : undefined;
     return [
       {
         type: "turn-end",
@@ -357,6 +363,7 @@ export class ClaudeStreamDecoder {
         modelUsage: figuresOfModelUsage((m as { modelUsage?: unknown }).modelUsage),
         contextTokens: this.lastContextTokens,
         contextWindow: this.contextWindow,
+        ...(limit ? { limit } : {}),
       },
     ];
   }

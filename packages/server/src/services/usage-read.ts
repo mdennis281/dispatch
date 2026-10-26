@@ -1,25 +1,34 @@
 /**
  * READING ONE ACCOUNT'S REMAINING BUDGET.
  *
- * Two providers answer the question "how much of this login is left" in two
- * different ways: a runtime that reports its own limits (Codex) is asked
- * directly, while Claude on subscription auth is read by the OAuth usage poller,
- * which keeps a 5-minute poll and a 429 cooldown no ad-hoc call could honour.
+ * Every provider answers through `Harness.readLimits`, and only a provider that
+ * declares `capabilities.usageLimits` is asked. One that doesn't gets an honest
+ * "no meter" — never another provider's numbers. It used to get Claude's: any
+ * provider without `usageLimits` was routed to the Claude OAuth poller, and a
+ * goose default account (empty env overlay) was handed the DEFAULT Claude
+ * login's poller, stamped with goose's subscription id. Its usage row and the
+ * failover check both read Claude's windows (#425).
  *
  * Extracted out of `routes/usage.ts` because the failover picker needs the same
  * answer the usage card shows. Two readers would eventually disagree about what
  * "exhausted" means, and the one that decides whether to move a chat onto
  * another subscription is the one it would matter on.
  */
-import { usageWindowsOf, type ResolvedSubscription, type UsageSnapshot } from "@dispatch/shared";
+import {
+  usageWindowsOf,
+  type HarnessLimits,
+  type ResolvedSubscription,
+  type UsageSnapshot,
+} from "@dispatch/shared";
 import type { HarnessRegistry } from "../harness/index.js";
-import type { UsageRegistry } from "./usage.js";
 import { accountOf } from "./subscriptions.js";
 
 export interface UsageReadDeps {
-  harnesses: HarnessRegistry;
-  accountUsage: UsageRegistry;
+  harnesses: Pick<HarnessRegistry, "find">;
 }
+
+/** The snapshot `error` for a provider that reports no usage at all. */
+export const NO_METER = "no_meter";
 
 /**
  * A rate-limit window's length as a person would say it. Codex reports its
@@ -45,23 +54,12 @@ export interface AccountUsage {
   reached?: boolean;
 }
 
-/** Read an account's usage. `refresh` forces a fetch instead of the cache. */
-export async function readAccountUsage(
-  deps: UsageReadDeps,
+/** A provider's limits as the snapshot the meter and the card draw. */
+export function snapshotOfLimits(
   sub: ResolvedSubscription,
-  refresh = false,
-): Promise<AccountUsage> {
-  const account = accountOf(sub);
-  const harness = deps.harnesses.find(sub.provider);
-  if (!harness?.capabilities.usageLimits) {
-    const poller = deps.accountUsage.for(account);
-    // Stamped here as well as by the poller: the default account's service polls
-    // at boot, before anything has told it which subscription it is serving, so
-    // its cached snapshot can predate the id.
-    const snapshot = await (refresh ? poller.refresh() : poller.get());
-    return { snapshot: { ...snapshot, subscriptionId: sub.id } };
-  }
-  const limits = await harness.readLimits(account);
+  limits: HarnessLimits | null,
+  now = Date.now(),
+): UsageSnapshot {
   const win = (value: { usedPercent?: number; resetsAt?: number } | null | undefined) =>
     value && typeof value.usedPercent === "number"
       ? { percent: value.usedPercent, resetsAt: value.resetsAt ?? null }
@@ -71,20 +69,50 @@ export async function readAccountUsage(
     return shown ? [{ ...shown, title: w.title }] : [];
   });
   return {
-    reached: limits?.reached,
-    snapshot: {
-      fiveHour: win(limits?.primary),
-      sevenDay: win(limits?.secondary),
-      fetchedAt: Date.now(),
-      provider: sub.provider,
-      subscriptionId: sub.id,
-      primaryLabel: windowLabel(limits?.primary?.windowMinutes, "Primary window"),
-      secondaryLabel: windowLabel(limits?.secondary?.windowMinutes, "Secondary window"),
-      planType: limits?.planType,
-      ...(windows ? { windows } : {}),
-      ...(limits ? {} : { stale: true, error: "unavailable" }),
-    },
+    fiveHour: win(limits?.primary),
+    sevenDay: win(limits?.secondary),
+    fetchedAt: now,
+    provider: sub.provider,
+    subscriptionId: sub.id,
+    primaryLabel: windowLabel(limits?.primary?.windowMinutes, "Primary window"),
+    secondaryLabel: windowLabel(limits?.secondary?.windowMinutes, "Secondary window"),
+    ...(limits?.planType ? { planType: limits.planType } : {}),
+    ...(windows ? { windows } : {}),
+    ...(!limits
+      ? { stale: true, error: "unavailable" }
+      : limits.stale
+        ? { stale: true, error: limits.error ?? "unavailable" }
+        : {}),
   };
+}
+
+/** Read an account's usage. `refresh` asks the provider past its cache. */
+export async function readAccountUsage(
+  deps: UsageReadDeps,
+  sub: ResolvedSubscription,
+  refresh = false,
+): Promise<AccountUsage> {
+  const harness = deps.harnesses.find(sub.provider);
+  if (!harness?.capabilities.usageLimits) {
+    // Not stale and not a failure: there is nothing to read, and saying so is
+    // the honest meter. `usageExhausted` reads the error as "has budget".
+    return {
+      snapshot: {
+        fiveHour: null,
+        sevenDay: null,
+        fetchedAt: Date.now(),
+        provider: sub.provider,
+        subscriptionId: sub.id,
+        error: NO_METER,
+      },
+    };
+  }
+  const account = accountOf(sub);
+  // A refresh that fails falls back to the cache, which carries the failure as
+  // `stale` — the card shows the last good numbers and why they're old.
+  const fresh = refresh ? await harness.readLimits(account, { fresh: true }).catch(() => null) : null;
+  const limits = fresh ?? (await harness.readLimits(account));
+  return { reached: limits?.reached, snapshot: snapshotOfLimits(sub, limits) };
 }
 
 /**

@@ -1,6 +1,6 @@
 /**
  * Integration tests for `/api/git/*` — a real Fastify app over a real temporary
- * git repo, with only the AI commit-message query scripted. This is the seam
+ * git repo, with only the AI commit-message provider scripted. This is the seam
  * where the guards live (bad repoPath, crafted rev, destructive discard), so it
  * exercises the HTTP contract rather than the service internals (see
  * services/git.test.ts for those).
@@ -18,14 +18,36 @@ import { Store } from "../store/index.js";
 import { GitService } from "../services/git.js";
 import {
   CommitMessageService,
-  makeFakeCommitQuery,
   sanitizeMessage,
   commitPrompt,
+  type CommitSettings,
 } from "../services/commit-message.js";
+import { registerProvider, type HarnessTextRequest } from "@dispatch/shared";
+import { CODEX_PROVIDER } from "@dispatch/plugin-codex/descriptor";
+import type { Harness } from "../harness/types.js";
+
+// Codex is a plugin; outside a running host nothing registers it. The draft
+// runs on it here on purpose — "commit messages work on Codex" is the point.
+registerProvider(CODEX_PROVIDER);
 
 let dataDir: string;
 let repo: string;
 let app: FastifyInstance;
+/** The app settings the commit-message service reads; tests flip the default. */
+let settings: CommitSettings;
+/** Every text request the scripted provider received. */
+let asked: HarnessTextRequest[];
+
+/** A Codex harness whose `generateText` answers like the old fake query did. */
+const codex = {
+  kind: "codex",
+  runtime: () => ({ kind: "codex", source: "installed", available: true }),
+  generateText: async (req: HarnessTextRequest) => {
+    asked.push(req);
+    const file = /^\+\+\+ b\/(.+)$/m.exec(req.prompt)?.[1];
+    return file ? `chore: update ${file}` : "chore: update staged changes";
+  },
+} as unknown as Harness;
 
 /** Skip the suite when `git` isn't on PATH. */
 async function hasGit(): Promise<boolean> {
@@ -57,9 +79,12 @@ beforeEach(async () => {
   await store.init();
   const bus = new EventBus();
   const git = new GitService();
+  settings = { harness: { defaultHarness: "codex" } };
+  asked = [];
   const commitMessage = new CommitMessageService({
     git,
-    query: makeFakeCommitQuery(),
+    harnesses: { find: (kind) => (kind === "codex" ? codex : undefined) },
+    settings: async () => settings,
   });
   app = await buildApp({
     config: { ...loadConfig(), dataDir },
@@ -307,7 +332,7 @@ describe("POST /api/git/* — staging and committing", () => {
 });
 
 describe("POST /api/git/commit-message — AI draft", () => {
-  it("drafts from the staged diff", async () => {
+  it("drafts from the staged diff on the app's default provider", async () => {
     if (!available) return;
     await writeFile(join(repo, "a.txt"), "changed\n");
     await post("/api/git/stage", { repoPath: repo, paths: ["a.txt"] });
@@ -315,6 +340,36 @@ describe("POST /api/git/commit-message — AI draft", () => {
     const res = await post("/api/git/commit-message", { repoPath: repo });
     expect(res.statusCode).toBe(200);
     expect(res.json().message).toBe("chore: update a.txt");
+    // Through the provider seam, not a hard-wired Claude query.
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toMatchObject({ purpose: "commit-message", account: { subscriptionId: "codex" } });
+  });
+
+  it("reports which provider will draft, for the button", async () => {
+    if (!available) return;
+    const res = await app.inject({ method: "GET", url: "/api/git/commit-message" });
+    expect(res.json()).toEqual({ available: true, provider: "codex", label: "Codex" });
+  });
+
+  it("409s with the reason when there is no default provider — and falls back to none", async () => {
+    if (!available) return;
+    await writeFile(join(repo, "a.txt"), "changed\n");
+    await post("/api/git/stage", { repoPath: repo, paths: ["a.txt"] });
+    settings = { harness: { defaultHarness: null } };
+
+    const status = await app.inject({ method: "GET", url: "/api/git/commit-message" });
+    expect(status.json()).toMatchObject({ available: false, reason: expect.stringMatching(/No default provider/) });
+    const res = await post("/api/git/commit-message", { repoPath: repo });
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toMatchObject({ code: "no_provider" });
+    expect(asked).toHaveLength(0);
+  });
+
+  it("409s when the default provider is not installed", async () => {
+    if (!available) return;
+    settings = { harness: { defaultHarness: "goose" } };
+    const status = await app.inject({ method: "GET", url: "/api/git/commit-message" });
+    expect(status.json()).toMatchObject({ available: false, reason: expect.stringMatching(/isn't installed/) });
   });
 
   it("502s with a readable reason when nothing is staged", async () => {

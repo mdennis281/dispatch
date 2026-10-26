@@ -5,32 +5,41 @@
  * model catalogue, so this mostly declares capabilities and hands sessions to
  * {@link ClaudeSession}.
  *
- * `readLimits` returns null on purpose. Claude Code has no account-usage API we
- * can reach on subscription auth — the ONLY signal is an English sentence at
- * the moment a turn fails, which is parsed per-turn by
- * {@link parseClaudeLimitHit} rather than polled. That asymmetry with Codex is
- * declared via `capabilities.usageLimits: false` so the UI shows a "paused
- * until…" card for Claude and a live meter for Codex, instead of an empty meter
- * for both.
+ * SELF-CONTAINED on purpose: nothing in this directory imports the host
+ * (`services/`, `config`, the broker). It is on its way out into a provider
+ * plugin (#422), and a plugin can only reach `@dispatch/shared`. Everything
+ * Claude-specific the host used to do by name — the OAuth usage poll, the
+ * `claude auth status` probe, the runtime and model catalogue — lives here and
+ * is reached through the `Harness` interface.
+ *
+ * Limits come two ways: polled from the OAuth usage endpoint
+ * ({@link ClaudeUsage}, behind `readLimits`), and the English sentence a turn
+ * fails with, parsed onto the turn-end by the stream decoder
+ * ({@link parseClaudeLimitHit}).
  */
 import { query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
-import { listAvailableModels, listContextWindows } from "../../services/models.js";
-import { claudeExecutableOption, claudeRuntime } from "../../services/runtime.js";
-import { envWithAccount, transferClaudeSession } from "../../services/subscriptions.js";
-import { parseSessionLimit, type ModelOption } from "@dispatch/shared";
 import type {
   HarnessAccount,
   Harness,
   HarnessCapabilities,
-  HarnessLimitHit,
+  HarnessLimitReadOpts,
   HarnessLimits,
   HarnessRuntimeInfo,
   HarnessSession,
   HarnessSessionSpec,
   HarnessTextRequest,
-} from "../types.js";
+  ModelOption,
+  RuntimeLoginStatus,
+} from "@dispatch/shared";
+import { listAvailableModels, listContextWindows } from "./models.js";
+import { claudeExecutable, claudeExecutableOption, claudeRuntime } from "./runtime.js";
+import { envWithAccount, transferClaudeSession } from "./account.js";
+import { probeClaudeLogin, type RunLoginProbe } from "./login.js";
+import { ClaudeUsage } from "./usage.js";
 import { ClaudeSession, type QueryFn } from "./session.js";
+
+export { parseClaudeLimitHit } from "./limit-hit.js";
 
 /** Claude Code's capability profile. */
 export const CLAUDE_CAPABILITIES: HarnessCapabilities = {
@@ -40,8 +49,8 @@ export const CLAUDE_CAPABILITIES: HarnessCapabilities = {
   skills: true,
   compaction: true,
   fork: true,
-  // No pollable account API on subscription auth — see the module header.
-  usageLimits: false,
+  // The OAuth usage endpoint, polled through `readLimits` (see `usage.ts`).
+  usageLimits: true,
   liveModelSwitch: true,
   // Its own trigger reads contextTokenLimit, fixed at spawn.
   nativeContextLimit: true,
@@ -57,10 +66,14 @@ export interface ClaudeHarnessOpts {
   /** Injectable SDK `query` (tests, and the E2E fake). */
   query?: QueryFn;
   genId?: () => string;
+  /** Injectable usage pollers (tests; the E2E instance must not reach Anthropic). */
+  usage?: ClaudeUsage;
+  /** Injectable `claude auth status` runner (tests). */
+  runLoginProbe?: RunLoginProbe;
 }
 
-/** Titles never justify spending a full-size Claude model. */
-const CLAUDE_TITLE_MODEL = "claude-haiku-4-5";
+/** Titles and commit messages never justify spending a full-size Claude model. */
+const CLAUDE_TEXT_MODEL = "claude-haiku-4-5";
 
 export class ClaudeHarness implements Harness {
   readonly kind = "claude" as const;
@@ -68,22 +81,31 @@ export class ClaudeHarness implements Harness {
 
   private readonly opts: ClaudeHarnessOpts;
   private readonly genId: () => string;
+  private readonly usage: ClaudeUsage;
 
   constructor(opts: ClaudeHarnessOpts = {}) {
     this.opts = opts;
     this.genId = opts.genId ?? (() => Math.random().toString(36).slice(2, 11));
+    this.usage = opts.usage ?? new ClaudeUsage();
   }
 
   runtime(): HarnessRuntimeInfo {
-    const rt = claudeRuntime;
+    const rt = claudeRuntime();
     return {
       kind: "claude",
-      path: rt.path,
+      // The file a spawn runs, the SDK's bundled binary included — so the login
+      // probe asks the binary every chat will use without the host having to
+      // know where the SDK keeps it.
+      path: claudeExecutable(),
       version: rt.version,
       source: rt.source,
       // The SDK ships its own runtime, so Claude is always runnable.
       available: true,
     };
+  }
+
+  probeLogin(exe: string, env: Readonly<Record<string, string | undefined>>): Promise<RuntimeLoginStatus> {
+    return probeClaudeLogin(exe, env, this.opts.runLoginProbe);
   }
 
   listModels(opts: { refresh?: boolean; account?: HarnessAccount } = {}): Promise<ModelOption[]> {
@@ -98,8 +120,9 @@ export class ClaudeHarness implements Harness {
     return transferClaudeSession(sessionId, from.configDir, to.configDir);
   }
 
-  async readLimits(): Promise<HarnessLimits | null> {
-    return null;
+  async readLimits(account?: HarnessAccount, opts: HarnessLimitReadOpts = {}): Promise<HarnessLimits | null> {
+    const poller = this.usage.for(account);
+    return opts.fresh ? poller.fresh() : poller.cached();
   }
 
   async generateText(request: HarnessTextRequest): Promise<string> {
@@ -112,7 +135,7 @@ export class ClaudeHarness implements Harness {
       const stream = query({
         prompt: request.prompt,
         options: {
-          model: CLAUDE_TITLE_MODEL,
+          model: CLAUDE_TEXT_MODEL,
           settingSources: [],
           maxTurns: 1,
           abortController: abort,
@@ -151,22 +174,4 @@ export class ClaudeHarness implements Harness {
   createSession(spec: HarnessSessionSpec): HarnessSession {
     return new ClaudeSession({ spec, query: this.opts.query, genId: this.genId });
   }
-}
-
-/**
- * Did this turn fail because the subscription window ran out, and when does it
- * reopen?
- *
- * The counterpart of Codex's `usageLimitExceeded` error code — except the only
- * evidence is prose, so it goes through the shared sentence parser. Returns
- * undefined for an ordinary error, which is the signal to render the row as a
- * plain failure rather than a scheduled pause.
- */
-export function parseClaudeLimitHit(
-  text: string | undefined,
-  now: number,
-): HarnessLimitHit | undefined {
-  const limit = parseSessionLimit(text, now);
-  if (!limit) return undefined;
-  return { resetsAt: limit.resetsAt, reason: text ?? "Usage limit reached." };
 }

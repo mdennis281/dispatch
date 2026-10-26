@@ -8,6 +8,7 @@
  * its git output into these schemas, the client imports the inferred types.
  */
 import * as z from "zod";
+import type { HarnessKind } from "./common.js";
 
 /* ------------------------------------------------------------------ status */
 
@@ -167,3 +168,12 @@ export const GitResetSummarySchema = z.object({
   kept: z.number().int(),
 });
 export type GitResetSummary = z.infer<typeof GitResetSummarySchema>;
+
+/**
+ * `GET /api/git/commit-message` — can the AI draft button work, and on what.
+ * Drafts run on the app's default provider; with none usable the button is
+ * disabled and shows `reason`, rather than failing on every click.
+ */
+export type CommitMessageAvailability =
+  | { available: true; provider: HarnessKind; label: string }
+  | { available: false; reason: string };

@@ -57,8 +57,17 @@ function WindowLine({ win, now }: { win: TitledUsageWindow; now: number }) {
   );
 }
 
+/**
+ * The server's word for a provider that reports no usage at all (goose, a
+ * local model). Not a problem to flag in warning colours: there is simply no
+ * meter, and saying so beats showing another provider's numbers — which a goose
+ * row used to.
+ */
+const NO_METER = "no_meter";
+
 /** Why a row has no fresh numbers, in a few words. */
 function rowProblem(row: SubscriptionUsage): string | null {
+  if (row.error === NO_METER) return null;
   if (row.error === "rate_limited") return "rate-limited";
   if (row.error === "unauthenticated") return "sign-in needed";
   if (row.error) return "unavailable";
@@ -97,7 +106,9 @@ function AccountBlock({
       {row.windows.length ? (
         row.windows.map((win) => <WindowLine key={win.title} win={win} now={now} />)
       ) : (
-        <div className="py-[3px] text-2xs text-faint">No usage reported.</div>
+        <div className="py-[3px] text-2xs text-faint">
+          {row.error === NO_METER ? "This provider has no usage meter." : "No usage reported."}
+        </div>
       )}
     </div>
   );

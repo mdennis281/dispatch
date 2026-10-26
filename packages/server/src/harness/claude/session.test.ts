@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { HarnessEvent, HarnessSessionSpec } from "../types.js";
+import type { HarnessEvent, HarnessSessionSpec } from "@dispatch/shared";
 import { ClaudeSession } from "./session.js";
 
 const SPEC: HarnessSessionSpec = {

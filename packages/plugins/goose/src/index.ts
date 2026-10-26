@@ -390,9 +390,11 @@ export class AcpHarness implements Harness {
           model,
           prompt: request.prompt,
           stream: false,
-          // A title is a completion, not a chat: no history, no tools, and a
-          // hard cap so a chatty local model can't run long.
-          options: { num_predict: 64 },
+          // A completion, not a chat: no history, no tools, and a hard cap so
+          // a chatty local model can't run long. The caller's `maxOutput` wins
+          // — 64 was sized for a title, and cut a commit-message body off
+          // mid-sentence.
+          options: { num_predict: request.maxOutput ?? 64 },
         }),
         signal: controller.signal,
       });

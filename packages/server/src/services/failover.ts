@@ -40,7 +40,6 @@ import {
 import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
 import type { HarnessRegistry } from "../harness/index.js";
-import type { UsageRegistry } from "./usage.js";
 import { chatSubscription, subscriptionStatuses } from "./subscriptions.js";
 import { readAccountUsage, usageExhausted, type AccountUsage, type UsageReadDeps } from "./usage-read.js";
 
@@ -74,7 +73,6 @@ export interface FailoverServiceOpts {
   store: Store;
   bus: EventBus;
   harnesses: HarnessRegistry;
-  accountUsage: UsageRegistry;
   /**
    * Move the chat. Injected rather than taking the broker, because the broker
    * constructs this service's caller — and because the whole contract here is
@@ -88,7 +86,7 @@ export class FailoverService {
   private readonly store: Store;
   private readonly bus: EventBus;
   private readonly harnesses: HarnessRegistry;
-  /** The two registries as `readAccountUsage` wants them, built once. */
+  /** The registry as `readAccountUsage` wants it, built once. */
   private readonly usageDeps: UsageReadDeps;
   private readonly switchTo: (chatId: string, subscriptionId: string) => Promise<void>;
   private readonly now: () => number;
@@ -101,7 +99,7 @@ export class FailoverService {
     this.store = opts.store;
     this.bus = opts.bus;
     this.harnesses = opts.harnesses;
-    this.usageDeps = { harnesses: opts.harnesses, accountUsage: opts.accountUsage };
+    this.usageDeps = { harnesses: opts.harnesses };
     this.switchTo = opts.switchTo;
     this.now = opts.now ?? (() => Date.now());
   }

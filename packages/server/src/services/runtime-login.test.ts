@@ -1,198 +1,96 @@
 import { describe, expect, it } from "vitest";
 import type { Harness } from "../harness/types.js";
-import {
-  probeClaudeLogin,
-  probeRuntimeLogins,
-  type RunProbe,
-} from "./runtime-login.js";
+import { probeRuntimeLogins } from "./runtime-login.js";
 
 /**
- * The runtime step used to read `available` alone, which for Claude is always
- * true. Every case here is about the second fact — logged in — and about the
- * probe never turning a machine's honest answer into a thrown error.
+ * The host no longer runs any probe itself — each provider brings one through
+ * `Harness.probeLogin`. What is left to test here is the dispatch around it:
+ * who gets asked, with which executable and env, and that nothing throws.
  */
 
-function ran(over: Partial<Awaited<ReturnType<RunProbe>>>): RunProbe {
-  return async () => ({ code: 0, stdout: "", stderr: "", ...over });
-}
-
-describe("probeClaudeLogin", () => {
-  it("reads the method, plan and account out of `claude auth status`", async () => {
-    const run = ran({
-      stdout: JSON.stringify({
-        loggedIn: true,
-        authMethod: "claude.ai",
-        apiProvider: "firstParty",
-        email: "ada@example.com",
-        subscriptionType: "max",
-      }),
-    });
-    expect(await probeClaudeLogin("/x/claude", {}, run)).toEqual({
-      checked: true,
-      loggedIn: true,
-      method: "claude.ai",
-      subscription: "max",
-      account: "ada@example.com",
-    });
-  });
-
-  it("treats a logged-out exit 1 as an ANSWER, not a probe failure", async () => {
-    // `auth status` exits 1 when logged out but still prints the JSON.
-    const run = ran({ code: 1, stdout: '{"loggedIn": false, "authMethod": "none"}\n' });
-    const status = await probeClaudeLogin("/x/claude", {}, run);
-    expect(status.checked).toBe(true);
-    expect(status.loggedIn).toBe(false);
-    expect(status.error).toContain("/login");
-    expect(status.method).toBeUndefined();
-  });
-
-  it("reports an unrunnable binary as unchecked", async () => {
-    const run = ran({ code: null, spawnError: "spawn /x/claude ENOENT" });
-    expect(await probeClaudeLogin("/x/claude", {}, run)).toEqual({
-      checked: false,
-      loggedIn: false,
-      error: "spawn /x/claude ENOENT",
-    });
-  });
-
-  it("reports a runtime too old to know `auth status` as unchecked, with its complaint", async () => {
-    const run = ran({ code: 1, stderr: "error: unknown command 'auth'" });
-    const status = await probeClaudeLogin("/x/claude", {}, run);
-    expect(status.checked).toBe(false);
-    expect(status.error).toContain("unknown command");
-  });
-
-  it("passes the account env through to the spawn", async () => {
-    let seen: NodeJS.ProcessEnv | undefined;
-    const run: RunProbe = async (_exe, _args, env) => {
-      seen = env;
-      return { code: 0, stdout: '{"loggedIn": true}', stderr: "" };
-    };
-    await probeClaudeLogin("/x/claude", { CLAUDE_CONFIG_DIR: "/home/ada/.claude-work" }, run);
-    expect(seen?.CLAUDE_CONFIG_DIR).toBe("/home/ada/.claude-work");
-  });
-});
+type Env = Readonly<Record<string, string | undefined>>;
 
 describe("probeRuntimeLogins", () => {
   const harness = (
     kind: string,
     runtime: Partial<ReturnType<Harness["runtime"]>>,
+    probeLogin?: (exe: string, env: Env) => Promise<unknown>,
   ) =>
-    ({ kind, runtime: () => ({ kind, source: "installed", available: true, ...runtime }) }) as unknown as Harness;
+    ({
+      kind,
+      runtime: () => ({ kind, source: "installed", available: true, ...runtime }),
+      ...(probeLogin ? { probeLogin } : {}),
+    }) as unknown as Harness;
 
-  it("asks a provider's own probe instead of switching on its id", async () => {
-    // Regression: the dispatcher was `kind === "codex" ? codex : claude`, so a
-    // third provider fell through to `claude auth status` — goose's CLI usage
-    // error landed on the setup card. Providers bring their probe now.
-    let ranAnything = false;
-    const run: RunProbe = async () => {
-      ranAnything = true;
-      return { code: 1, stdout: "", stderr: "error: unrecognized subcommand 'auth'" };
-    };
+  it("asks a provider's own probe, with the resolved executable and env", async () => {
     const asked: Array<[string, string | undefined]> = [];
-    const own = {
-      ...harness("goose", { path: "/x/goose", version: "1.51.0" }),
-      probeLogin: async (exe: string, env: Readonly<Record<string, string | undefined>>) => {
-        asked.push([exe, env.MARKER]);
-        return { checked: true, loggedIn: true, notRequired: true };
-      },
-    } as unknown as Harness;
-    const [status] = await probeRuntimeLogins([own], null, { run, env: { MARKER: "base" } });
-    expect(ranAnything).toBe(false);
+    const own = harness("goose", { path: "/x/goose", version: "1.51.0" }, async (exe, env) => {
+      asked.push([exe, env.MARKER]);
+      return { checked: true, loggedIn: true, notRequired: true };
+    });
+    const [status] = await probeRuntimeLogins([own], null, { env: { MARKER: "base" } });
     expect(asked).toEqual([["/x/goose", "base"]]);
     expect(status!.login).toMatchObject({ checked: true, notRequired: true });
   });
 
   it("reports a provider probe that throws as unchecked, not as a failed boot", async () => {
-    const throwing = {
-      ...harness("codex", { path: "/x/codex" }),
-      probeLogin: async () => {
-        throw new Error("app-server exploded");
-      },
-    } as unknown as Harness;
+    const throwing = harness("codex", { path: "/x/codex" }, async () => {
+      throw new Error("app-server exploded");
+    });
     const [status] = await probeRuntimeLogins([throwing], null, { env: {} });
     expect(status!.login).toMatchObject({ checked: false, loggedIn: false, error: "app-server exploded" });
   });
 
-  it("does not probe a runtime-registered provider as if it were Claude", async () => {
-    // Same fall-through as the goose case, one provider later: the switch's
-    // default used to be the Claude probe.
-    let ranAnything = false;
-    const run: RunProbe = async () => {
-      ranAnything = true;
-      return { code: 0, stdout: "{}", stderr: "" };
-    };
-    const [status] = await probeRuntimeLogins([harness("opencode", { path: "/x/opencode" })], null, {
-      run,
-      env: {},
-    });
-    expect(ranAnything).toBe(false);
-    expect(status!.login).toMatchObject({ checked: false, loggedIn: false });
+  it("reports a provider with no probe as unchecked — never as if it were Claude", async () => {
+    // Regression: the dispatcher's default used to be `claude auth status`, so
+    // goose's CLI usage error landed on the setup card. Claude is not special
+    // here any more; its probe is `ClaudeHarness.probeLogin`.
+    for (const kind of ["opencode", "claude"]) {
+      const [status] = await probeRuntimeLogins([harness(kind, { path: `/x/${kind}` })], null, { env: {} });
+      expect(status!.login).toMatchObject({ checked: false, loggedIn: false, error: `no login probe for ${kind}` });
+    }
   });
 
-  it("probes the bundled Claude binary when nothing newer is installed", async () => {
-    const asked: string[] = [];
-    const run: RunProbe = async (exe) => {
-      asked.push(exe);
-      return { code: 0, stdout: '{"loggedIn": true, "authMethod": "claude.ai"}', stderr: "" };
-    };
+  it("downgrades `available` when the runtime resolved no executable", async () => {
+    // `available: true` with nothing to spawn is a bundled runtime whose
+    // platform package is absent — a chat would fail exactly the same way.
+    let asked = false;
     const [status] = await probeRuntimeLogins(
-      [harness("claude", { source: "bundled", version: "2.1.222" })],
+      [harness("claude", { source: "bundled" }, async () => ((asked = true), { checked: true, loggedIn: true }))],
       null,
-      { run, bundled: () => "/sdk/claude-agent-sdk-linux-x64/claude", env: {} },
+      { env: {} },
     );
-    expect(asked).toEqual(["/sdk/claude-agent-sdk-linux-x64/claude"]);
-    expect(status).toMatchObject({
-      kind: "claude",
-      available: true,
-      source: "bundled",
-      version: "2.1.222",
-      path: "/sdk/claude-agent-sdk-linux-x64/claude",
-      login: { checked: true, loggedIn: true, method: "claude.ai" },
-    });
-  });
-
-  it("downgrades `available` when the bundled platform binary is missing", async () => {
-    // `available: true` with nothing to spawn is the SDK's optional platform
-    // package being absent — a chat would fail exactly the same way.
-    const [status] = await probeRuntimeLogins(
-      [harness("claude", { source: "bundled" })],
-      null,
-      { run: ran({}), bundled: () => undefined, env: {} },
-    );
-    expect(status.available).toBe(false);
-    expect(status.source).toBe("missing");
-    expect(status.login.checked).toBe(false);
+    expect(asked).toBe(false);
+    expect(status!.available).toBe(false);
+    expect(status!.source).toBe("missing");
+    expect(status!.login.checked).toBe(false);
   });
 
   it("does not probe a runtime that is not installed", async () => {
     let calls = 0;
-    const run: RunProbe = async () => {
-      calls++;
-      return { code: 0, stdout: "", stderr: "" };
-    };
     const [status] = await probeRuntimeLogins(
-      [harness("codex", { source: "missing", available: false })],
+      [harness("codex", { source: "missing", available: false }, async () => (calls++, { checked: true, loggedIn: true }))],
       null,
-      { run, bundled: () => undefined, env: {} },
+      { env: {} },
     );
     expect(calls).toBe(0);
     expect(status).toMatchObject({ kind: "codex", available: false, login: { checked: false, loggedIn: false } });
   });
 
   it("probes under the default account's config dir when one is configured", async () => {
-    let seen: NodeJS.ProcessEnv | undefined;
-    const run: RunProbe = async (_exe, _args, env) => {
-      seen = env;
-      return { code: 0, stdout: '{"loggedIn": true}', stderr: "" };
-    };
+    let seen: Env | undefined;
     await probeRuntimeLogins(
-      [harness("claude", { path: "/usr/local/bin/claude" })],
+      [
+        harness("claude", { path: "/usr/local/bin/claude" }, async (_exe, env) => {
+          seen = env;
+          return { checked: true, loggedIn: true };
+        }),
+      ],
       {
         subscriptions: [{ id: "work", name: "Work", provider: "claude", configDir: "/home/ada/.claude-work" }],
         harness: { defaults: { claude: { subscriptionId: "work" } } },
       },
-      { run, bundled: () => undefined, env: {} },
+      { env: {} },
     );
     expect(seen?.CLAUDE_CONFIG_DIR).toMatch(/\.claude-work$/);
   });

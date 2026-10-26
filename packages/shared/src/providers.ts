@@ -119,7 +119,7 @@ export const DEFAULT_MODEL = "default";
 
 /**
  * Static Claude model list used only when the live list can't be read from the
- * runtime (see server `services/models.ts`), and as the client's pre-fetch seed
+ * runtime (see server `harness/claude/models.ts`), and as the client's pre-fetch seed
  * so the picker never renders empty. Deliberately ALIASES, not dated wire ids:
  * aliases keep resolving to the current model as new ones ship, so a stale
  * fallback degrades to "slightly wrong labels" instead of "unselectable dead ids".

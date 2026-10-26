@@ -9,10 +9,9 @@
  *
  * Nothing in this file reads a credential. `loggedIn` is `existsSync` on the
  * provider's login file; the one reader of token contents in the app is still
- * `usage.ts`, and it only ever sends the token back to the provider it came from.
+ * `harness/claude/usage.ts`, and it only ever sends the token back to the provider it came from.
  */
 import { existsSync } from "node:fs";
-import { cp, mkdir, readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import {
@@ -176,52 +175,6 @@ export function subscriptionStatuses(
 }
 
 /* ----------------------------------------------------------- session transfer */
-
-/**
- * Copy a Claude Code session from one config dir to another so `resume` finds it.
- *
- * Claude keeps a session at `<configDir>/projects/<cwd-slug>/<sessionId>.jsonl`,
- * with subagent transcripts beside it under `<sessionId>/`. The slug is found by
- * SEARCHING rather than recomputed from the cwd: Claude's slugging has changed
- * shape before (long paths get truncated and hashed), and a copy that lands in
- * the wrong slug dir is a resume that silently starts a blank session. Whatever
- * directory the file really is in, the copy goes to the same name.
- *
- * OVERWRITES the target's copy. A chat runs on one account at a time and a
- * resume keeps appending to the same session id, so the SOURCE is always the
- * newest copy — a switch back to an account the chat ran on before must replace
- * that account's stale file, or the resume there silently loses every turn taken
- * since it left.
- */
-export async function transferClaudeSession(
-  sessionId: string,
-  fromDir: string,
-  toDir: string,
-): Promise<boolean> {
-  if (!/^[A-Za-z0-9-]+$/.test(sessionId)) return false;
-  const fromProjects = join(fromDir, "projects");
-  let slugs: string[];
-  try {
-    slugs = await readdir(fromProjects);
-  } catch {
-    return false;
-  }
-  const file = `${sessionId}.jsonl`;
-  const slug = slugs.find((s) => existsSync(join(fromProjects, s, file)));
-  if (!slug) return false;
-  const target = join(toDir, "projects", slug);
-  try {
-    await mkdir(target, { recursive: true });
-    await cp(join(fromProjects, slug, file), join(target, file), { force: true });
-    const sidecar = join(fromProjects, slug, sessionId);
-    if (existsSync(sidecar)) {
-      await cp(sidecar, join(target, sessionId), { recursive: true, force: true });
-    }
-    return existsSync(join(target, file));
-  } catch {
-    return false;
-  }
-}
 
 /** Merge an account's env overlay onto the server's env for a spawn. */
 export function envWithAccount(

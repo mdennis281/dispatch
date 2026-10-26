@@ -10,13 +10,12 @@ import { LimitLedger } from "./limit-ledger.js";
 import {
   HarnessLimitSource,
   LimitSampler,
+  limitSourceFor,
   readingsOfLimits,
   type LimitRead,
   type LimitSource,
 } from "./limit-sampler.js";
 import type { Harness } from "../harness/types.js";
-import type { UsageRegistry } from "./usage.js";
-import { limitReadingsOf } from "./usage.js";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -58,7 +57,6 @@ function sampler(source: FakeSource, accounts = [sub("claude1"), sub("claude2")]
   return new LimitSampler({
     ledger,
     harnesses: { list: () => [], find: () => undefined } as unknown as HarnessRegistry,
-    usage: {} as UsageRegistry,
     settings: async () => null,
     now: () => now,
     random: () => 0.5,
@@ -158,7 +156,6 @@ describe("HarnessLimitSource", () => {
     const s = new LimitSampler({
       ledger,
       harnesses: { list: () => [], find: () => undefined } as unknown as HarnessRegistry,
-      usage: {} as UsageRegistry,
       settings: async () => null,
       now: () => now,
       random: () => 0.5,
@@ -170,24 +167,43 @@ describe("HarnessLimitSource", () => {
     expect(s.status()[0]).toMatchObject({ error: "timed out", lastOkAt: null });
     expect(ledger.stats().rows).toBe(0);
   });
+
+  it("holds the next read until the retryAt a failed read names (a 429 cooldown)", async () => {
+    const harness = {
+      readLimits: async () => {
+        throw Object.assign(new Error("rate_limited"), { retryAt: T0 + 30 * MIN });
+      },
+    } as unknown as Harness;
+    const read = await new HarnessLimitSource(harness).read(sub("claude1"));
+    expect(read).toEqual({ ok: false, error: "rate_limited", retryAt: T0 + 30 * MIN });
+  });
+
+  it("reports each good read to onRead — the header meter's feed", async () => {
+    const seen: Array<[string, number | undefined]> = [];
+    const harness = { readLimits: async () => ({ primary: { usedPercent: 12 } }) } as unknown as Harness;
+    await new HarnessLimitSource(harness, (s, l) => seen.push([s.id, l.primary?.usedPercent])).read(sub("claude1"));
+    expect(seen).toEqual([["claude1", 12]]);
+  });
+});
+
+describe("limitSourceFor", () => {
+  const registry = (h: Partial<Harness> | undefined) => ({ find: () => h as Harness | undefined });
+
+  it("reads any provider that declares usageLimits — no provider names", () => {
+    const claude = { kind: "claude", capabilities: { usageLimits: true } } as unknown as Harness;
+    expect(limitSourceFor("claude", registry(claude))).toBeInstanceOf(HarnessLimitSource);
+  });
+
+  it("gives a provider without usageLimits no source at all", () => {
+    // Regression (#425): goose's usage row used to show the Claude account's
+    // numbers, because "no usageLimits" routed to the Claude OAuth poller.
+    const goose = { kind: "goose", capabilities: { usageLimits: false } } as unknown as Harness;
+    expect(limitSourceFor("goose", registry(goose))).toBeUndefined();
+    expect(limitSourceFor("claude", registry(undefined))).toBeUndefined();
+  });
 });
 
 describe("provider readings", () => {
-  it("Claude: every window in the response, nulls skipped", () => {
-    const r = limitReadingsOf({
-      five_hour: { utilization: 12, resets_at: "2026-10-22T15:00:00Z" },
-      seven_day: { utilization: 40, resets_at: "2026-10-25T00:00:00Z" },
-      seven_day_opus: { utilization: 0, resets_at: null },
-      seven_day_oauth_apps: null,
-      extra_usage: { is_enabled: false },
-    });
-    expect(r.map((x) => [x.windowId, x.title, x.windowMinutes, x.percent])).toEqual([
-      ["five_hour", "5-hour session", 300, 12],
-      ["seven_day", "Weekly", 10080, 40],
-      ["seven_day_opus", "Weekly · Opus", 10080, 0],
-    ]);
-  });
-
   it("Codex: every bucket, keyed by length rather than slot, plus reset credits", () => {
     const limits = toHarnessLimits(
       { limitId: "codex", primary: { usedPercent: 53, windowDurationMins: 10080, resetsAt: 1793129113 } },

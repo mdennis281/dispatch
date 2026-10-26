@@ -13,7 +13,8 @@
  *   POST   /api/git/unstage      {repoPath, paths?|all}
  *   POST   /api/git/discard      {repoPath, paths?|all}   (destructive)
  *   POST   /api/git/commit       {repoPath, message, amend?}
- *   POST   /api/git/commit-message {repoPath, hint?}      → AI-drafted message
+ *   GET    /api/git/commit-message                    → can a draft be made, and on what
+ *   POST   /api/git/commit-message {repoPath, hint?}      → AI-drafted message (409: no provider)
  *   POST   /api/git/checkout     {repoPath, branch, create?, from?}
  *   DELETE /api/git/branch       {repoPath, branch, force?}
  *   POST   /api/git/stash        {repoPath, message?, includeUntracked?}
@@ -28,6 +29,7 @@
  * upstream", "please commit your changes before switching").
  */
 import type { FastifyInstance } from "fastify";
+import { NoCommitProviderError } from "../services/commit-message.js";
 import { identifyMedia } from "../services/media-sniff.js";
 import { mediaKind, mediaTypeFromName } from "../services/media-types.js";
 
@@ -265,6 +267,11 @@ export function registerGitRoutes(app: FastifyInstance): void {
     }
   });
 
+  // Whether the draft button can work at all — read when the view opens, so a
+  // machine with no usable default provider shows the button disabled with the
+  // reason, instead of a button that fails on every click.
+  app.get("/api/git/commit-message", async () => commitMessage.availability());
+
   app.post("/api/git/commit-message", async (req, reply) => {
     const body = (req.body ?? {}) as { repoPath?: string; hint?: string };
     const cwd = await repo(body.repoPath, reply);
@@ -272,6 +279,10 @@ export function registerGitRoutes(app: FastifyInstance): void {
     try {
       return { message: await commitMessage.generate(cwd, { hint: body.hint }) };
     } catch (err) {
+      if (err instanceof NoCommitProviderError) {
+        // 409, not 502: nothing upstream failed — there is nothing to ask.
+        return reply.code(409).send({ error: err.message, code: err.code });
+      }
       // A generation failure is the user's problem to see (nothing staged, no
       // auth, model timeout) — surface the reason rather than a blank box.
       return reply

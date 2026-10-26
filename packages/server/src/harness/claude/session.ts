@@ -35,12 +35,12 @@ import type {
   HarnessQuestionAnswer,
   HarnessSession,
   HarnessSessionSpec,
-} from "../types.js";
+} from "@dispatch/shared";
 import { catchToolGuard, claudeCompactWindow, compactCommand } from "@dispatch/shared";
 import { ClaudeStreamDecoder, QUESTION_TOOL } from "./stream.js";
 import { buildQuestionAnswer, neutralQuestions } from "./questions.js";
-import { claudeExecutableOption } from "../../services/runtime.js";
-import { envWithAccount } from "../../services/subscriptions.js";
+import { claudeExecutableOption } from "./runtime.js";
+import { envWithAccount } from "./account.js";
 import { spawnWithPid } from "./spawn.js";
 import { claudeSdkMcpServers } from "./manager-servers.js";
 

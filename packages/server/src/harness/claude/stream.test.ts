@@ -331,6 +331,19 @@ describe("ClaudeStreamDecoder", () => {
       msg({ type: "result", subtype: "error_during_execution", is_error: true, result: "nope" }),
     );
     expect(out[0]).toMatchObject({ type: "turn-end", ok: false, subtype: "error_during_execution" });
+    expect(out[0]).not.toHaveProperty("limit");
+  });
+
+  it("carries a usage-limit failure as a structured limit, not just prose", () => {
+    // `parseClaudeLimitHit` existed and nothing called it, so a Claude turn-end
+    // never told the resume scheduler when the window reopened.
+    const reason = "You've hit your session limit · resets 4:50pm (America/Chicago)";
+    const out = decoder().decode(msg({ type: "result", subtype: "success", is_error: true, result: reason }));
+    expect(out[0]).toMatchObject({ type: "turn-end", ok: false, limit: { reason } });
+    expect((out[0] as { limit?: { resetsAt?: number } }).limit?.resetsAt).toBeGreaterThan(Date.now());
+    // A successful answer that merely quotes the sentence is not a limit.
+    const quoted = decoder().decode(msg({ type: "result", subtype: "success", is_error: false, result: reason }));
+    expect(quoted[0]).not.toHaveProperty("limit");
   });
 
   it("emits a task-notification row for a settled background task", () => {

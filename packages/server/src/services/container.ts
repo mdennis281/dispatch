@@ -64,7 +64,7 @@ import { RetentionService } from "./retention.js";
 import { deleteChat, reapChatResidual } from "./chat-deletion.js";
 import { GitService } from "./git.js";
 import { GrowthService } from "./growth.js";
-import { CommitMessageService } from "./commit-message.js";
+import { CommitMessageService, makeFakeCommitGenerator } from "./commit-message.js";
 import { RunnerService } from "./runner.js";
 import { ProcessService, defaultProcTable } from "./processes.js";
 import { ChatProcessService } from "./chat-processes.js";
@@ -79,7 +79,7 @@ import { WebhookService } from "./webhooks.js";
 import { PushService } from "./push.js";
 import { AttentionQueue } from "./attention.js";
 import { HomeService } from "./home.js";
-import { UsageRegistry, UsageService } from "./usage.js";
+import { snapshotOfLimits } from "./usage-read.js";
 import { chatSubscription } from "./subscriptions.js";
 import { ReleaseService } from "./release.js";
 import { ResumeScheduler } from "./resume-scheduler.js";
@@ -152,7 +152,6 @@ export interface ServiceOverrides {
   push?: PushService;
   attention?: AttentionQueue;
   home?: HomeService;
-  usage?: UsageService;
   release?: ReleaseService;
   resume?: ResumeScheduler;
   failover?: FailoverService;
@@ -237,9 +236,6 @@ export interface Services extends ServiceBase {
   attention: AttentionQueue;
   /** The cross-project overview behind the homepage. */
   home: HomeService;
-  usage: UsageService;
-  /** Per-account Claude usage pollers; `usage` is its default-account member. */
-  accountUsage: UsageRegistry;
   /** Knows whether a newer Dispatch release exists, and can launch the installer. */
   release: ReleaseService;
   /** Schedules a chat to continue itself once a usage limit lifts. */
@@ -501,7 +497,13 @@ export function createServices(
   const git = overrides.git ?? new GitService();
   const growth = overrides.growth ?? new GrowthService();
   const commitMessage =
-    overrides.commitMessage ?? new CommitMessageService({ git });
+    overrides.commitMessage ??
+    new CommitMessageService({
+      git,
+      harnesses,
+      settings: () => store.getSettings(),
+      generateText: process.env.DISPATCH_FAKE_SDK === "1" ? makeFakeCommitGenerator() : undefined,
+    });
   const runner =
     overrides.runner ??
     new RunnerService({
@@ -687,30 +689,18 @@ export function createServices(
   // records; spawns nothing. See `home.ts` for why it is cached rather than
   // computed per request.
   const home = overrides.home ?? new HomeService({ store, metrics, attention });
-  // Subscription usage (5h + weekly) for the header meter. Polls the account
-  // OAuth usage endpoint once (server-side) and fans snapshots to every client.
-  const usage = overrides.usage ?? new UsageService({ bus });
-  const accountUsage = new UsageRegistry(
-    usage,
-    (account) =>
-      new UsageService({
-        bus,
-        configDir: account.configDir,
-        subscriptionId: account.subscriptionId,
-      }),
-    // The limit sampler below is the one schedule for every account; a poller
-    // with its own timer as well would spend the same token's bucket twice.
-    false,
-  );
-  // Limit history. Reading every account on one adaptive schedule also keeps
-  // the header meter's snapshots fresh — each Claude read still publishes
-  // `usage-update` — so the base poller no longer runs a timer of its own.
+  // Limit history, and the header meter's live feed. Every provider that
+  // declares `usageLimits` is read on one adaptive schedule through
+  // `Harness.readLimits`, and each good read fans out to every tab as
+  // `usage-update` — one read per account, however many tabs are open. There
+  // is no Claude poller here any more: it is the Claude harness's own, so an
+  // install that never uses Claude never calls Anthropic (#425).
   const limits = new LimitLedger(store.stateDb);
   const limitSampler = new LimitSampler({
     ledger: limits,
     harnesses,
-    usage: accountUsage,
     settings: () => store.getSettings(),
+    onRead: (sub, read) => bus.publish({ type: "usage-update", usage: snapshotOfLimits(sub, read) }),
   });
   // A turn that just spent from an account is the best reason to look at that
   // account's windows again; the sampler's floor keeps it to one read per
@@ -758,7 +748,6 @@ export function createServices(
       store,
       bus,
       harnesses,
-      accountUsage,
       switchTo: (chatId, subscriptionId) => broker.setSubscription(chatId, subscriptionId),
     });
   const resume =
@@ -1480,8 +1469,6 @@ export function createServices(
     push,
     attention,
     home,
-    usage,
-    accountUsage,
     release,
     resume,
     failover,
@@ -1801,8 +1788,6 @@ export function createServices(
       issueWatcher.dispose();
       await issueWatcher.drain().catch(() => {});
       limitSampler.stop();
-      usage.stop();
-      accountUsage.stop();
       release.stop();
       // Disarm first so nothing new fires, then let an in-flight resume land
       // before the broker goes away under it.
