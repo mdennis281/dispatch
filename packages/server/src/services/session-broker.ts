@@ -5428,8 +5428,7 @@ export class SessionBroker {
         // Name the runtimes that CAN hold it, from what is actually installed —
         // not "Claude", which may not be installed, logged in or wanted here
         // (#422: Dispatch has to be usable with no Claude at all).
-        const able = this.harnesses
-          .list()
+        const able = (this.harnesses?.list() ?? [])
           .filter(
             (h) =>
               h.kind !== harness.kind &&
