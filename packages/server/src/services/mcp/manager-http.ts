@@ -5,9 +5,9 @@
  * context_usage, compact_context, watch_pr, approve_pr, terminal, remember /
  * recall / forget, run_subapp, and the MCP config editors. Every one of them
  * closes over live server objects (the TerminalService, the GitHubService, the
- * SessionBroker itself), so they were built as an IN-PROCESS MCP server: the
- * Agent SDK accepts `{ type: "sdk", instance }` and calls straight into it with
- * no transport at all.
+ * SessionBroker itself), so they are built as IN-PROCESS MCP servers: the
+ * Claude Agent SDK accepts `{ type: "sdk", instance }` and calls straight into
+ * it with no transport at all.
  *
  * Codex cannot do that. It only speaks to MCP servers over stdio or streamable
  * HTTP. The naive fix — a separate `manager-mcp` binary — would mean every tool
@@ -15,7 +15,7 @@
  * drifts from the first.
  *
  * So instead we keep ONE implementation and give it a second front door. The
- * same `createManagerMcpServer` factory produces an MCP `Server`; here we bolt a
+ * same factory produces a plain MCP-SDK `McpServer`; here we bolt a
  * `StreamableHTTPServerTransport` onto it and expose it on the Fastify server
  * Dispatch already runs. Claude keeps calling in-process; Codex dials
  * `http://127.0.0.1:<port>/api/mcp/manager/<category>` with a bearer token. Neither knows
@@ -36,7 +36,7 @@
 import { randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import type { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createManagerCategoryServer, type ManagerMcpContext } from "./manager-mcp.js";
 import type { IntegrationIdentity } from "../integration-tokens.js";
 import {
@@ -259,9 +259,8 @@ export class ManagerMcpBridge {
     req: IncomingMessage,
     res: ServerResponse,
     body: unknown,
-    server: NonNullable<ReturnType<typeof createManagerCategoryServer>>,
+    instance: McpServer,
   ): Promise<void> {
-    const { instance } = server as unknown as { instance: McpServer };
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     // Closing the transport must also close the server, or the pair leaks for
     // the lifetime of the process.

@@ -270,7 +270,9 @@ import { guardRecoveryInput } from "@dispatch/shared";
 import type { HarnessRegistry } from "../harness/index.js";
 import { accountOf, chatSubscription, envWithAccount } from "./subscriptions.js";
 import type { ManagerMcpBridge, ManagerMcpGrant } from "./mcp/manager-http.js";
-import { managerMcpContextOf } from "./mcp/manager-mcp.js";
+import type { ManagerMcpContext } from "./mcp/manager-mcp.js";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { claudeSdkMcpServers } from "../harness/claude/manager-servers.js";
 import {
   DEFAULT_EFFORT,
   DEFAULT_MODE_ID,
@@ -2263,6 +2265,14 @@ interface LiveSession {
   query?: Query;
   harnessSession?: HarnessSession;
   managerGrant?: ManagerMcpGrant;
+  /**
+   * Dispatch's own tool servers as the last `buildOptions` built them, and the
+   * live context they close over. Kept here, typed, for the harness path: an
+   * in-process adapter mounts `servers`, an HTTP one needs `context` for its
+   * grant. Both used to be fished back off Claude-SDK config objects through a
+   * hidden symbol, which tied every provider to the Claude SDK (#423).
+   */
+  managerMcp?: { context: ManagerMcpContext; servers: Record<string, McpServer> };
   abortController?: AbortController;
   runLoop?: Promise<void>;
   outbox: OutboxItem[];
@@ -5222,9 +5232,10 @@ export class SessionBroker {
       // Dispatch's own servers travel to the harness in their own field, so the
       // adapter can attach them the way its runtime wants (in-process object vs
       // HTTP URL) without having to recognise them by name in the merged map.
-      const managerServers = Object.fromEntries(
-        Object.entries(allMcp).filter(([name]) => isManagerServer(name)),
-      );
+      // `buildOptions` has already put them in `allMcp` for the direct Claude
+      // path, wrapped in Claude's config shape; the adapter gets the neutral
+      // servers it recorded instead, and wraps them itself if it needs to.
+      const managerServers = session.managerMcp?.servers ?? {};
       const mcpServers = Object.fromEntries(
         Object.entries(allMcp).filter(([name]) => !isManagerServer(name)),
       ) as Record<string, McpServerConfig>;
@@ -5236,16 +5247,12 @@ export class SessionBroker {
       ) {
         managerMcp = { transport: "in-process", servers: managerServers };
       } else if (resolved.harness.capabilities.managerTransport === "http") {
-        // The first entry that actually YIELDS a context, not simply the first
-        // entry. `managerServers` is filtered out of `allMcp` by name, and
-        // `allMcp` puts externals first — so a project that declares
-        // `dispatch-<category>` by hand keeps that earlier key position, and its
-        // plain `{url}` config sits there whenever this session doesn't build
-        // that category. Taking `[0]` blind meant `managerMcpContextOf` returned
-        // undefined and the Codex session came up with NO Dispatch tools at all,
-        // silently. Every real category server carries the same live context, so
-        // any one of them will do — the grant is per-chat, not per-category.
-        const context = Object.values(managerServers).map(managerMcpContextOf).find(Boolean);
+        // One live context per session — the grant is per-chat, not
+        // per-category — handed over explicitly by `buildOptions`. Never read
+        // off the merged map: a project that declares `dispatch-<category>` by
+        // hand puts a plain `{url}` there, which once left a Codex session
+        // with NO Dispatch tools at all, silently.
+        const context = session.managerMcp?.context;
         if (context && this.managerMcp) {
           session.managerGrant?.revoke();
           const grant = this.managerMcp.mint(session.chatId, () => context);
@@ -8619,6 +8626,21 @@ export class SessionBroker {
     }
   }
 
+  /**
+   * Build Dispatch's tool servers from an explicit context, record both on the
+   * session for {@link startHarnessSession}, and return them in the shape the
+   * direct Claude path's `Options.mcpServers` takes. Only that return value is
+   * Claude's: the servers are plain MCP-SDK `McpServer`s every provider shares.
+   */
+  private mountManagerMcp(
+    session: LiveSession,
+    context: ManagerMcpContext,
+  ): Record<string, SdkMcpServerConfig> {
+    const servers = createManagerMcpServers(context);
+    session.managerMcp = { context, servers };
+    return claudeSdkMcpServers(servers);
+  }
+
   private async buildOptions(session: LiveSession): Promise<Options> {
     await this.refreshInheritedPosture(session);
     const permissionMode = await this.resolvePermissionMode(session.modeId);
@@ -9262,7 +9284,7 @@ export class SessionBroker {
       // every category makes that collision vanishingly unlikely rather than
       // merely survivable: bare `github` would have silently shadowed the GitHub
       // MCP server a project had every right to configure.
-      ...createManagerMcpServers({
+      ...this.mountManagerMcp(session, {
         chatId: session.chatId,
         bus: this.bus,
         broker: this,

@@ -74,8 +74,7 @@ afterEach(async () => {
 const registeredNames = (servers: Record<string, unknown>): string[] =>
   Object.values(servers).flatMap((server) =>
     Object.keys(
-      (server as { instance: { _registeredTools?: Record<string, unknown> } }).instance
-        ._registeredTools ?? {},
+      (server as { _registeredTools?: Record<string, unknown> })._registeredTools ?? {},
     ),
   );
 

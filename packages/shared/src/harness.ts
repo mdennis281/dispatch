@@ -334,7 +334,14 @@ export interface HarnessSessionSpec {
    * them (a probe session, or a harness that couldn't be granted).
    */
   managerMcp?:
-    /** Server name (`dispatch-github`, …) → the SDK server object. */
+    /**
+     * Server name (`dispatch-github`, …) → a live `McpServer` from
+     * `@modelcontextprotocol/sdk`, not yet connected. Provider-neutral on
+     * purpose: the adapter mounts it in whatever shape its runtime takes (the
+     * Claude adapter wraps it as `{ type: "sdk", name, instance }`). Typed
+     * `unknown` only because shared ships to the browser and cannot import
+     * the MCP SDK.
+     */
     | { transport: "in-process"; servers: Record<string, unknown> }
     /**
      * One bearer token for the whole session, and one endpoint per category —
