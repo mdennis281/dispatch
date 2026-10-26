@@ -6259,3 +6259,122 @@ describe("SessionBroker — prompt-free tools", () => {
     expect(prompted).toBe(true);
   });
 });
+
+describe("SessionBroker — compact threshold on the Claude loop", () => {
+  function compactBoundary(pre: number, post: number) {
+    return {
+      type: "system",
+      subtype: "compact_boundary",
+      session_id: "sess-1",
+      uuid: "cb-uuid",
+      compact_metadata: { trigger: "auto", pre_tokens: pre, post_tokens: post },
+    };
+  }
+
+  async function withThresholds(perModel: Record<string, number>) {
+    await store.saveSettings({
+      ...(await store.getSettings()),
+      autoCompact: { enabled: true, perModel },
+    });
+  }
+
+  it("hands the CLI a window that puts its OWN trigger at the threshold", async () => {
+    // The turn-end check alone let one agentic turn run from 100k to 720k: the
+    // turn never ended, so nothing ever checked. The CLI's trigger runs between
+    // requests, and it fires `CLAUDE_COMPACT_HEADROOM` short of its window.
+    await withThresholds({ sonnet: 100_000 });
+    let opts: Record<string, unknown> | undefined;
+    const { fn } = makeFakeQuery(() => [assistantText("ok"), resultMsg()]);
+    const broker = makeBroker((params) => {
+      opts = params.options as Record<string, unknown>;
+      return fn(params);
+    });
+    const chat = { ...chatFor("c1"), model: "sonnet" };
+    await store.saveChat(chat);
+    broker.create(chat);
+    const idle = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "hello");
+    await idle;
+
+    expect(opts?.settings).toMatchObject({ autoCompactEnabled: true, autoCompactWindow: 133_000 });
+  });
+
+  it("records a compact_boundary and moves the meter to the CLI's live total", async () => {
+    await withThresholds({ sonnet: 100_000 });
+    const { fn } = makeFakeQuery(() => [
+      compactBoundary(99_776, 7_702),
+      assistantText("ok"),
+      resultMsg(),
+    ]);
+    const broker = makeBroker((params) => {
+      const q = fn(params) as unknown as Record<string, unknown>;
+      // post_tokens leaves out the system prompt and tools; the breakdown doesn't.
+      q.getContextUsage = async () => ({ totalTokens: 27_575, maxTokens: 133_000 });
+      return q as unknown as ReturnType<QueryFn>;
+    });
+    const chat = { ...chatFor("c1"), model: "sonnet" };
+    await store.saveChat(chat);
+    broker.create(chat);
+    const idle = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "hello");
+    await idle;
+
+    const rows = await store.readMessages("c1");
+    const compact = rows.find((r) => r.kind === "system" && r.subtype === "compact");
+    expect(compact).toMatchObject({
+      text: "Context auto-compacted · 100k → 28k tokens",
+      data: { trigger: "auto", preTokens: 99_776, postTokens: 27_575 },
+    });
+    // The meter's denominator is the threshold the user set, not the 133k
+    // window it was translated into.
+    const result = rows.findLast((r) => r.kind === "result");
+    expect(result).toMatchObject({ contextTokens: 27_575, contextWindow: 100_000 });
+  });
+
+  it("respawns an idle runtime, resumed, when a model switch moves its threshold", async () => {
+    // `applyFlagSettings({ autoCompactWindow })` is accepted by the CLI and
+    // changes nothing, so the window a query was spawned with is the one it keeps.
+    await withThresholds({ sonnet: 100_000, haiku: 150_000 });
+    const spawned: Record<string, unknown>[] = [];
+    const { fn } = makeFakeQuery(() => [assistantText("ok"), resultMsg()]);
+    const broker = makeBroker((params) => {
+      spawned.push(params.options as Record<string, unknown>);
+      return fn(params);
+    });
+    const chat = { ...chatFor("c1"), model: "sonnet" };
+    await store.saveChat(chat);
+    broker.create(chat);
+    const idle = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "hello");
+    await idle;
+
+    await broker.setModel("c1", "haiku");
+    await broker.sendMessage("c1", "again");
+    // Not `waitFor(idle)`: retiring the old runtime settles it to idle first.
+    await until(() => spawned.length === 2);
+    await until(async () => (await store.readMessages("c1")).filter((r) => r.kind === "result").length === 2);
+
+    expect(spawned).toHaveLength(2);
+    expect(spawned[1]?.settings).toMatchObject({ autoCompactWindow: 183_000 });
+    expect(spawned[1]?.resume).toBeTruthy();
+  });
+
+  it("keeps the runtime when nothing moved the threshold", async () => {
+    await withThresholds({ sonnet: 100_000 });
+    const spawned: unknown[] = [];
+    const { fn } = makeFakeQuery(() => [assistantText("ok"), resultMsg()]);
+    const broker = makeBroker((params) => {
+      spawned.push(params.options);
+      return fn(params);
+    });
+    const chat = { ...chatFor("c1"), model: "sonnet" };
+    await store.saveChat(chat);
+    broker.create(chat);
+    for (const text of ["one", "two", "three"]) {
+      const idle = broker.waitFor("c1", "idle");
+      await broker.sendMessage("c1", text);
+      await idle;
+    }
+    expect(spawned).toHaveLength(1);
+  });
+});
