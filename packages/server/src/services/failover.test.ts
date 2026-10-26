@@ -9,9 +9,9 @@ import { FailoverService, nextReset } from "./failover.js";
 import { usageExhausted, type AccountUsage } from "./usage-read.js";
 
 /**
- * The usage registry and harness registry are both faked structurally: what is
- * under test is which account gets picked, and the real ones would need a live
- * Anthropic endpoint and an installed runtime to answer at all.
+ * The harness registry is faked structurally: what is under test is which
+ * account gets picked, and the real one would need a live Anthropic endpoint
+ * and an installed runtime to answer at all.
  */
 const FULL: UsageSnapshot = { fiveHour: { percent: 100, resetsAt: null }, sevenDay: null, fetchedAt: 0 };
 const FREE: UsageSnapshot = { fiveHour: { percent: 12, resetsAt: null }, sevenDay: null, fetchedAt: 0 };
@@ -117,32 +117,35 @@ describe("FailoverService", () => {
 
   function makeService(opts: { installed?: string[] } = {}) {
     const installed = opts.installed ?? ["claude", "codex"];
-    const harnesses = {
-      list: () =>
-        ["claude", "codex"].map((kind) => ({
-          kind,
-          runtime: () => ({ available: installed.includes(kind) }),
-        })),
-      find: () => undefined,
+    // Every provider here meters itself; the snapshot fixtures are turned back
+    // into the limits a runtime would have answered.
+    const readLimits = async (account: { subscriptionId: string }) => {
+      reads.push(account.subscriptionId);
+      const u = usage[account.subscriptionId] ?? { snapshot: FREE };
+      const slot = (w: UsageSnapshot["fiveHour"]) =>
+        w ? { usedPercent: w.percent, ...(w.resetsAt !== null ? { resetsAt: w.resetsAt } : {}) } : undefined;
+      return {
+        primary: slot(u.snapshot.fiveHour),
+        secondary: slot(u.snapshot.sevenDay),
+        ...(u.reached ? { reached: true } : {}),
+        ...(u.snapshot.stale ? { stale: true, error: u.snapshot.error } : {}),
+      };
     };
-    const accountUsage = {
-      for: (account: { subscriptionId: string }) => ({
-        get: async () => {
-          reads.push(account.subscriptionId);
-          return (usage[account.subscriptionId] ?? { snapshot: FREE }).snapshot;
-        },
-        refresh: async () => {
-          reads.push(account.subscriptionId);
-          return (usage[account.subscriptionId] ?? { snapshot: FREE }).snapshot;
-        },
-      }),
+    const harness = (kind: string) => ({
+      kind,
+      capabilities: { usageLimits: true },
+      runtime: () => ({ available: installed.includes(kind) }),
+      readLimits,
+    });
+    const harnesses = {
+      list: () => ["claude", "codex"].map(harness),
+      find: (kind: string) => harness(kind),
     };
     return new FailoverService({
       store,
       bus,
       // Structural fakes: see the note at the top of the file.
       harnesses: harnesses as never,
-      accountUsage: accountUsage as never,
       switchTo: async (chatId, subscriptionId) => {
         if (switchFails) throw new Error(switchFails);
         switched.push({ chatId, subscriptionId });

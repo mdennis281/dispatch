@@ -52,7 +52,7 @@ describe("createServices().start() resilience", () => {
     const bus = new EventBus();
     const maybeGenerateInitialTitle = vi.fn(async () => {});
 
-    // usage.start() blows up — the failure must NOT abort boot and skip the
+    // attention.start() blows up — the failure must NOT abort boot and skip the
     // title-trigger wiring that runs after it.
     const overrides: ServiceOverrides = {
       broker: stub(),
@@ -72,15 +72,14 @@ describe("createServices().start() resilience", () => {
       // from `config`, and this test's config is a bare `{ maxActiveSessions }`.
       push: stub(),
       secrets: stub(),
-      attention: stub(),
-      usage: stub({
+      attention: stub({
         start: () => {
-          throw new Error("usage boom");
+          throw new Error("attention boom");
         },
       }),
     };
 
-    // Silence the expected "usage.start() failed" console.error the guard logs.
+    // Silence the expected "attention.start() failed" console.error the guard logs.
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     const services = createServices(
@@ -137,7 +136,6 @@ describe("createServices().start() resilience", () => {
         push: stub(),
         secrets: stub(),
         attention: stub(),
-        usage: stub(),
       },
     );
 
@@ -192,7 +190,6 @@ describe("createServices().start() resilience", () => {
         push: stub(),
         secrets: stub(),
         attention: stub(),
-        usage: stub(),
       },
     );
 
@@ -241,7 +238,6 @@ describe("the boot split: start() vs warm()", () => {
       push: stub(),
       secrets: stub(),
       attention: stub(),
-      usage: stub(),
       // The five that scale with the size of the install.
       worktreeDetector: stub({ start: async () => void order.push("worktreeDetector.start") }),
       resume: stub({ restore: async () => void order.push("resume.restore") }),
@@ -455,7 +451,6 @@ describe("broker.spawnChat attribution", () => {
         push: stub(),
         secrets: stub(),
         attention: stub(),
-        usage: stub(),
       },
     );
     await services.broker.spawnChat!({

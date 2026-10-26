@@ -8,11 +8,12 @@
  * nobody has to remember to trigger; one scheduler is also the only way to
  * guarantee two timers never spend the same token's rate-limit bucket.
  *
- * WHERE A READING COMES FROM is a {@link LimitSource}, one per provider: Claude
- * through its OAuth usage endpoint (the existing {@link UsageService}, which
- * keeps the 429 cooldown), a runtime that reports its own limits (Codex)
- * through `Harness.readLimits`. A new provider is a new source, not a new
- * branch in the scheduler.
+ * WHERE A READING COMES FROM is a {@link LimitSource}: any provider that
+ * declares `capabilities.usageLimits` is read through `Harness.readLimits` —
+ * Claude's OAuth usage endpoint and Codex's `account/rateLimits/read` alike.
+ * There is no provider name in here. There used to be (`provider === "claude"`
+ * went to a host-owned Claude poller), which is how an install without Claude
+ * still reached Anthropic and how a provider with no meter got Claude's.
  *
  * CADENCE IS ADAPTIVE, never faster than the source's floor:
  *   - every `activeMs` while the figures are moving or a turn just ran;
@@ -20,7 +21,8 @@
  *   - one extra read just after a window's announced reset, so a scheduled
  *     reset is seen within a minute even on an idle account — and an early
  *     one is not mistaken for it;
- *   - after a failure, exponential backoff; after a 429, the source's cooldown.
+ *   - after a failure, exponential backoff; after a 429, the `retryAt` the
+ *     provider's error carries (Claude's 30-minute cooldown).
  * Reads are jittered so two accounts never ask in the same instant.
  */
 import {
@@ -35,7 +37,6 @@ import type { HarnessRegistry } from "../harness/index.js";
 import type { Harness, HarnessLimits } from "../harness/types.js";
 import type { LimitLedger } from "./limit-ledger.js";
 import { accountOf, subscriptionStatuses } from "./subscriptions.js";
-import type { UsageRegistry } from "./usage.js";
 
 /** One read's answer. */
 export type LimitRead =
@@ -55,29 +56,6 @@ export interface LimitCadence {
 export interface LimitSource {
   cadence: LimitCadence;
   read(sub: ResolvedSubscription): Promise<LimitRead>;
-}
-
-/**
- * Claude, through the OAuth usage endpoint. Five minutes is the poll the header
- * meter always ran at without trouble; the endpoint punishes anything much
- * faster with a 429 that lasts long after the burst.
- */
-export class ClaudeLimitSource implements LimitSource {
-  readonly cadence: LimitCadence = { floorMs: 5 * 60_000, activeMs: 5 * 60_000, idleMs: 15 * 60_000 };
-
-  constructor(private readonly usage: UsageRegistry) {}
-
-  async read(sub: ResolvedSubscription): Promise<LimitRead> {
-    const poller = this.usage.for(accountOf(sub));
-    const snap = await poller.sample();
-    if (snap.error === "rate_limited") return { ok: false, error: "rate_limited", retryAt: poller.cooldownEndsAt };
-    if (snap.stale || snap.error) return { ok: false, error: snap.error ?? "unavailable" };
-    return {
-      ok: true,
-      readings: snap.limits ?? [],
-      ...(snap.planType ? { planType: snap.planType } : {}),
-    };
-  }
 }
 
 /** HarnessLimits → readings: the tracked list when given, else the two slots. */
@@ -104,21 +82,39 @@ export function readingsOfLimits(limits: HarnessLimits): LimitReading[] {
 }
 
 /**
- * A runtime that reports its own limits (Codex's `account/rateLimits/read`).
- * The read rides the runtime's existing connection rather than a public HTTP
+ * A provider that reports its own limits through `Harness.readLimits`.
+ *
+ * Five minutes is the poll Claude's OAuth usage endpoint always ran at without
+ * trouble — it punishes anything much faster with a 429 that lasts long after
+ * the burst. Codex's read rides its app-server connection rather than a public
  * endpoint, but it still reaches the vendor's backend, so it keeps the same
- * five-minute floor rather than inventing a faster one nobody has tested.
+ * floor rather than inventing a faster one nobody has tested.
  */
 export class HarnessLimitSource implements LimitSource {
   readonly cadence: LimitCadence = { floorMs: 5 * 60_000, activeMs: 5 * 60_000, idleMs: 15 * 60_000 };
 
-  constructor(private readonly harness: Harness) {}
+  constructor(
+    private readonly harness: Harness,
+    /** Told about every successful read — the header meter's live feed. */
+    private readonly onRead?: (sub: ResolvedSubscription, limits: HarnessLimits) => void,
+  ) {}
 
   async read(sub: ResolvedSubscription): Promise<LimitRead> {
     // Fresh only: a throw lands in the sampler's failure/backoff branch, where
     // a cached fallback would be booked as a successful read.
-    const limits = await this.harness.readLimits(accountOf(sub), { fresh: true });
+    let limits: HarnessLimits | null;
+    try {
+      limits = await this.harness.readLimits(accountOf(sub), { fresh: true });
+    } catch (err) {
+      const retryAt = (err as { retryAt?: unknown } | null)?.retryAt;
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+        ...(typeof retryAt === "number" ? { retryAt } : {}),
+      };
+    }
     if (!limits) return { ok: false, error: "unavailable" };
+    this.onRead?.(sub, limits);
     return {
       ok: true,
       readings: readingsOfLimits(limits),
@@ -129,19 +125,17 @@ export class HarnessLimitSource implements LimitSource {
 }
 
 /**
- * The source for a provider, or none. Claude is named outright rather than
- * "anything without `usageLimits`": an endpoint provider (goose, a local
- * model) has no limits at all, and routing it at the Claude poller would read
- * a `.credentials.json` that was never going to exist.
+ * The source for a provider, or none: a harness that declares `usageLimits`
+ * is read, anything else has no meter. An endpoint provider (goose, a local
+ * model) has no limits at all, and the honest answer for it is nothing.
  */
 export function limitSourceFor(
   provider: HarnessKind,
-  harnesses: HarnessRegistry,
-  claude: LimitSource,
+  harnesses: Pick<HarnessRegistry, "find">,
+  onRead?: (sub: ResolvedSubscription, limits: HarnessLimits) => void,
 ): LimitSource | undefined {
-  if (provider === "claude") return claude;
   const harness = harnesses.find(provider);
-  return harness?.capabilities.usageLimits ? new HarnessLimitSource(harness) : undefined;
+  return harness?.capabilities.usageLimits ? new HarnessLimitSource(harness, onRead) : undefined;
 }
 
 /** Unchanged reads in a row before an account counts as idle. */
@@ -172,7 +166,12 @@ interface AccountSchedule {
 export interface LimitSamplerDeps {
   ledger: LimitLedger;
   harnesses: HarnessRegistry;
-  usage: UsageRegistry;
+  /**
+   * Every successful poll, as the provider answered it. The container turns
+   * these into `usage-update` events, so every tab's header meter stays live
+   * off the one schedule instead of each polling for itself.
+   */
+  onRead?: (sub: ResolvedSubscription, limits: HarnessLimits) => void;
   /** The current settings — accounts come and go while the server runs. */
   settings: () => Promise<SubscriptionSettings | null>;
   now?: () => number;
@@ -201,8 +200,7 @@ export class LimitSampler {
     this.ledger = deps.ledger;
     this.now = deps.now ?? Date.now;
     this.random = deps.random ?? Math.random;
-    const claude = new ClaudeLimitSource(deps.usage);
-    this.sourceFor = deps.sourceFor ?? ((p) => limitSourceFor(p, deps.harnesses, claude));
+    this.sourceFor = deps.sourceFor ?? ((p) => limitSourceFor(p, deps.harnesses, deps.onRead));
     this.installed =
       deps.installed ??
       (() =>
