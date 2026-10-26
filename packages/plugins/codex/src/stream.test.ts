@@ -427,10 +427,55 @@ describe("CodexStreamDecoder — usage, turns and errors", () => {
     });
   });
 
-  it("reports compaction", () => {
+  it("reports compaction from an app-server that only sends the old notification", () => {
     const d = decoder();
     expect(d.decode(note("thread/compacted", { threadId: "t", turnId: "t1" }))).toEqual([
       { type: "compacted" },
+    ]);
+  });
+
+  it("reports a compaction item ONCE, with the peak before and the reading after", () => {
+    const d = decoder();
+    const usage = (n: number) =>
+      d.decode(
+        note("thread/tokenUsage/updated", {
+          threadId: "t",
+          turnId: "t1",
+          tokenUsage: { last: { totalTokens: n }, modelContextWindow: 258400 },
+        }),
+      );
+    const item = { type: "contextCompaction", id: "c1" };
+    usage(51_583);
+    usage(56_628);
+    // The post-compaction usage lands BEFORE the item starts — measured on a
+    // live app-server; "the last reading" at completion is the after figure.
+    usage(25_507);
+    expect(d.decode(note("item/started", { threadId: "t", turnId: "t1", item }))).toEqual([]);
+    expect(d.decode(note("thread/compacted", { threadId: "t", turnId: "t1" }))).toEqual([]);
+    expect(d.decode(note("item/completed", { threadId: "t", turnId: "t1", item }))).toEqual([
+      { type: "compacted", preTokens: 56_628, postTokens: 25_507 },
+    ]);
+    // The next compaction measures from its own peak, not the old one.
+    usage(30_000);
+    usage(57_000);
+    usage(24_000);
+    expect(d.decode(note("item/completed", { threadId: "t", turnId: "t1", item }))).toEqual([
+      { type: "compacted", preTokens: 57_000, postTokens: 24_000 },
+    ]);
+  });
+
+  it("leaves the after figure to the next usage event when none has landed", () => {
+    const d = decoder();
+    d.decode(
+      note("thread/tokenUsage/updated", {
+        threadId: "t",
+        turnId: "t1",
+        tokenUsage: { last: { totalTokens: 56_000 }, modelContextWindow: 258400 },
+      }),
+    );
+    const item = { type: "contextCompaction", id: "c1" };
+    expect(d.decode(note("item/completed", { threadId: "t", turnId: "t1", item }))).toEqual([
+      { type: "compacted", preTokens: 56_000 },
     ]);
   });
 

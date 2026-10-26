@@ -187,6 +187,10 @@ export class CodexStreamDecoder {
   private readonly startedTools = new Set<string>();
   /** Whether this runtime exposes structured collaboration items. */
   private sawStructuredCollaboration = false;
+  /** A `contextCompaction` item arrived, so `thread/compacted` is a duplicate. */
+  private sawCompactionItem = false;
+  /** Highest `lastContextTokens` since the last compaction — its "before". */
+  private peakSinceCompaction: number | undefined;
 
   constructor(opts: CodexStreamDecoderOpts) {
     this.genId = opts.genId;
@@ -235,8 +239,10 @@ export class CodexStreamDecoder {
       case "turn/completed":
         return this.onTurnCompleted(p);
 
+      // Deprecated in favour of the `contextCompaction` item; honoured only
+      // from an app-server that never sends the item, or it is a second row.
       case "thread/compacted":
-        return [{ type: "compacted" }];
+        return this.sawCompactionItem ? [] : [{ type: "compacted" }];
 
       case "error":
         return this.onError(p);
@@ -316,8 +322,11 @@ export class CodexStreamDecoder {
           ];
         }
         return [];
+      // One row per compaction, on completion: emitting here too put two
+      // "Context compacted" rows ~4s apart in the transcript for every one.
       case "contextCompaction":
-        return [{ type: "compacted" }];
+        this.sawCompactionItem = true;
+        return [];
       default:
         return [];
     }
@@ -375,8 +384,26 @@ export class CodexStreamDecoder {
         });
         return out;
       }
-      case "contextCompaction":
-        return [{ type: "compacted" }];
+      case "contextCompaction": {
+        this.sawCompactionItem = true;
+        // The app-server reports the post-compaction usage BEFORE the item even
+        // starts, so "the last reading" is already the after figure (a 56k
+        // compaction read "at 25k"). The peak since the previous one is the
+        // before: context only grows between compactions.
+        const pre = this.peakSinceCompaction;
+        // No smaller reading yet (a manual compact at turn end) means no after
+        // figure; the next usage event supplies it, and starts the next peak.
+        const last = this.lastContextTokens;
+        const post = pre !== undefined && last !== undefined && last < pre ? last : undefined;
+        this.peakSinceCompaction = post;
+        return [
+          {
+            type: "compacted",
+            ...(pre !== undefined ? { preTokens: pre } : {}),
+            ...(post !== undefined ? { postTokens: post } : {}),
+          },
+        ];
+      }
       default:
         return [];
     }
@@ -497,7 +524,10 @@ export class CodexStreamDecoder {
     // `total` is cumulative across every request in the thread and can grow to
     // millions; only `last` describes the request currently occupying context.
     const tokens = last?.totalTokens;
-    if (typeof tokens === "number") this.lastContextTokens = tokens;
+    if (typeof tokens === "number") {
+      this.lastContextTokens = tokens;
+      this.peakSinceCompaction = Math.max(this.peakSinceCompaction ?? 0, tokens);
+    }
     // Summed per request rather than diffed off `total`: `total` belongs to the
     // THREAD, which a resumed adapter rejoins mid-count, so the first turn after
     // a restart would be booked the whole thread's history.

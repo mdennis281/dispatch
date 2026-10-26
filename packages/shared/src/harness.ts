@@ -88,6 +88,15 @@ export interface HarnessCapabilities {
   usageLimits: boolean;
   /** Switch model without restarting the session. */
   liveModelSwitch: boolean;
+  /**
+   * The runtime enforces {@link HarnessSessionSpec.contextTokenLimit} ITSELF,
+   * mid-turn. Only then does a moved limit justify retiring and resuming the
+   * session (see {@link HarnessSession.setContextTokenLimit}); a runtime that
+   * ignores the field gets only the host's turn-end check, which reads Settings
+   * live — restarting goose for a limit it never reads would just cost it its
+   * session where the agent cannot `session/load`. Optional; absent is false.
+   */
+  nativeContextLimit?: boolean;
   /** Switch permission posture without restarting the session. */
   livePermissionSwitch: boolean;
   /**
@@ -350,9 +359,28 @@ export interface HarnessSessionSpec {
   toolGuard?: HarnessToolGuard;
   /** Auto-compact when the window fills (default true). */
   autoCompact?: boolean;
-  /** Compaction reserve window, when the host pins one. */
+  /**
+   * CLAUDE ONLY: the raw "Claude compaction window" from Settings — Claude
+   * Code's `autoCompactWindow` (a window size, 100k–1M), not a reserve. The
+   * Claude adapter combines it with {@link contextTokenLimit}; every other
+   * runtime ignores it.
+   */
   autoCompactWindow?: number;
-  /** App-level ceiling for model context retained by one chat. */
+  /**
+   * Compact once the context passes this many tokens — the user's per-model
+   * threshold, else the per-chat limit; absent means the model's own maximum.
+   *
+   * Hand it to the runtime's OWN trigger wherever there is one (Codex:
+   * `model_auto_compact_token_limit`; Claude: an `autoCompactWindow` derived
+   * from it). That trigger runs between requests inside a turn. The host also
+   * compacts at turn end past the limit, but on its own that is not enough: a
+   * long agentic turn never ends, and one ran from 100k to 720k without a
+   * single check.
+   *
+   * Fixed for the session's life unless the session implements
+   * {@link HarnessSession.setContextTokenLimit}; otherwise the host retires and
+   * resumes the session when the limit moves.
+   */
   contextTokenLimit?: number;
   /** Aborts the session. */
   abortSignal?: HostAbortSignal;
@@ -535,12 +563,19 @@ export interface HarnessGuardBlockedEvent {
   continuation: "in-place" | "restart-turn";
 }
 
-/** The session compacted its own context and continued. */
+/**
+ * The session compacted its own context and continued. Emit it ONCE per
+ * compaction, when it has finished — it becomes a transcript row.
+ */
 export interface HarnessCompactedEvent {
   type: "compacted";
-  /** "auto" for the runtime's own trigger, "manual" for a `/compact`. */
+  /** "auto" for the runtime's own trigger, "manual" for a host-requested one. */
   trigger?: "auto" | "manual";
-  /** Context occupancy just before / after, when the runtime reports them. */
+  /**
+   * Context occupancy just before / after, when the runtime reports them. The
+   * host falls back to its last reading for `preTokens`; a missing `postTokens`
+   * is left to the next `usage` event rather than guessed.
+   */
   preTokens?: number;
   postTokens?: number;
 }
@@ -655,6 +690,15 @@ export interface HarnessSession {
    * and the change applies from the chat's next session instead.
    */
   updateMcpServers?(servers: Record<string, McpServerConfig>): Promise<void>;
+  /**
+   * Move {@link HarnessSessionSpec.contextTokenLimit} on a live session — a
+   * model switch or a Settings edit changed the threshold. Optional, and
+   * neither runtime Dispatch ships can do it (Codex's `thread/settings/update`
+   * has no such field; Claude accepts `applyFlagSettings({ autoCompactWindow })`
+   * and changes nothing). Absent or rejecting, the host retires the idle
+   * session and resumes it with the new limit before the next message.
+   */
+  setContextTokenLimit?(limit: number | undefined): Promise<void>;
   /** Answer a pending permission request. */
   resolvePermission(requestId: string, resolution: HarnessPermissionResolution): void;
   /** Answer a pending question. */

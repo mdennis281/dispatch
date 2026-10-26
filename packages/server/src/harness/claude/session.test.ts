@@ -50,3 +50,22 @@ describe("ClaudeSession workflow guard", () => {
     await session.dispose();
   });
 });
+
+describe("ClaudeSession compaction window", () => {
+  const settingsFor = (spec: Partial<HarnessSessionSpec>) =>
+    (
+      new ClaudeSession({ spec: { ...SPEC, ...spec }, genId: () => "id" }) as unknown as {
+        buildOptions(): { settings?: Record<string, unknown> };
+      }
+    ).buildOptions().settings;
+
+  it("derives the CLI's window from the neutral limit so its own trigger lands on it", () => {
+    expect(settingsFor({ contextTokenLimit: 100_000 })).toMatchObject({ autoCompactWindow: 133_000 });
+  });
+
+  it("leaves the window to the CLI with no limit, and ignores a value it would drop", () => {
+    expect(settingsFor({})?.autoCompactWindow).toBeUndefined();
+    expect(settingsFor({ autoCompactWindow: 20_000 })?.autoCompactWindow).toBeUndefined();
+    expect(settingsFor({ autoCompactWindow: 400_000 })).toMatchObject({ autoCompactWindow: 400_000 });
+  });
+});

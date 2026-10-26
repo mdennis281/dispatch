@@ -524,6 +524,28 @@ ctx.providers.register(harness, descriptor);
   Codex off tears down its shared app-server, so a Codex turn running at that
   moment errors rather than finishing.
 
+**Context limits.** Settings → Context sets a compact threshold per model,
+else a per-chat limit, and it arrives as `HarnessSessionSpec.contextTokenLimit`
+(absent = the model's own maximum). The contract:
+
+- **Enforce it mid-turn**, by handing it to the runtime's own trigger
+  (Codex `model_auto_compact_token_limit`; Claude an `autoCompactWindow` derived
+  from it), and declare `capabilities.nativeContextLimit: true`. The host also
+  compacts at turn end once past it, but a long agentic turn never ends, so
+  that alone is not enough. A runtime with no trigger of its own leaves the flag
+  off and gets only the turn-end check.
+- **Report each compaction once**, when it has finished, as a `compacted` event.
+  `preTokens`/`postTokens` are optional: the host fills `preTokens` from its last
+  reading and leaves `postTokens` to the next `usage` event.
+- **A limit change** (model switch, Settings edit) on a `nativeContextLimit`
+  runtime goes to `HarnessSession.setContextTokenLimit` if you implement it. If
+  you don't, or it rejects, the host retires the idle session and resumes it
+  with the new spec before the next message. Neither shipped runtime can apply
+  it live. Without the flag nothing restarts; the turn-end check reads the new
+  value anyway.
+- The composer meter's denominator is the limit, not the window you report.
+  `spec.contextWindow` stays the model's real window.
+
 **Built-in plugins** load from `packages/plugins/` in the app payload, found
 by `findShippedPluginsRoot()` (`server/src/plugins/shipped.ts`), never from
 `<configDir>/plugins/`. Three things differ from an installed plugin:

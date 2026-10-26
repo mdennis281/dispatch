@@ -54,6 +54,8 @@ export const CODEX_CAPABILITIES: HarnessCapabilities = {
   fork: true,
   usageLimits: true,
   liveModelSwitch: true,
+  // Its own trigger reads contextTokenLimit, fixed at spawn.
+  nativeContextLimit: true,
   livePermissionSwitch: true,
   efforts: ["low", "medium", "high", "xhigh", "max"],
   // No host-side pre-tool callback; see CodexSession's module header for what
