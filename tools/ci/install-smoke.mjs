@@ -82,7 +82,7 @@ function parseArgs(argv) {
      * The workflow installs the Claude Code and Codex CLIs with npm first, so
      * the runtime probe has a real "installed" answer to find. Not asserted on
      * Windows: npm leaves `.cmd` shims there, which neither runtime resolver
-     * spawns on purpose (see `fromPath` in services/runtime.ts), so the
+     * spawns on purpose (see `fromPath` in server harness/claude/runtime.ts), so the
      * bundled binary correctly stays in charge and Codex correctly stays absent.
      */
     expectInstalledClis: process.env.SMOKE_EXPECT_INSTALLED_CLIS === "1",

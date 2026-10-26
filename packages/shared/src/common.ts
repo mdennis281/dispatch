@@ -341,7 +341,7 @@ export type PermissionDecision = z.infer<typeof PermissionDecisionSchema>;
 
 /**
  * A selectable session model for the composer picker — a projection of the
- * runtime's own `ModelInfo` (see server `services/models.ts`), which is why
+ * runtime's own `ModelInfo` (see server `harness/claude/models.ts`), which is why
  * `value` is whatever the runtime offers rather than always a dated wire id.
  */
 export const ModelOptionSchema = z.object({

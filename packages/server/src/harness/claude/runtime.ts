@@ -20,14 +20,17 @@
  *   3. `undefined` — let the SDK spawn its own bundled binary.
  *
  * Resolved once per process (the answer can't change under us) and exposed via
- * {@link claudeRuntime} so the boot log can say which binary won.
+ * {@link claudeRuntime} so the boot log can say which binary won — but on FIRST
+ * USE, not at import. Resolving at import ran `claude --version` (up to twice)
+ * the moment anything imported this module, which on a Codex-only or goose-only
+ * install is a Claude process spawned at boot for a provider nobody uses.
  */
 import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, delimiter } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { envVar } from "../config.js";
+import { envVar } from "@dispatch/shared";
 
 const IS_WIN = process.platform === "win32";
 /** Basename of a directly-spawnable Claude Code binary on this platform. */
@@ -161,8 +164,25 @@ export function resolveClaudeRuntime(env: NodeJS.ProcessEnv = process.env): Clau
   return { version: bundledVersion(), source: "bundled" };
 }
 
-/** The resolved runtime for this process. */
-export const claudeRuntime: ClaudeRuntime = resolveClaudeRuntime();
+let resolved: ClaudeRuntime | undefined;
+let bundledExe: { path: string | undefined } | undefined;
+
+/** The resolved runtime for this process, resolved on first call. */
+export function claudeRuntime(): ClaudeRuntime {
+  return (resolved ??= resolveClaudeRuntime());
+}
+
+/**
+ * The file a Claude spawn will actually run: the resolved override/installed
+ * binary, else the SDK's bundled one. What the login probe asks, so the setup
+ * card answers for the same binary every chat will use. Memoized because
+ * `runtime()` is read on every chat spawn and every sampler tick.
+ */
+export function claudeExecutable(): string | undefined {
+  const rt = claudeRuntime();
+  if (rt.path) return rt.path;
+  return (bundledExe ??= { path: bundledExecutable() }).path;
+}
 
 /**
  * Spread into an SDK `Options` object to pin the runtime:
@@ -170,5 +190,6 @@ export const claudeRuntime: ClaudeRuntime = resolveClaudeRuntime();
  * wins, so the SDK keeps its own default resolution.
  */
 export function claudeExecutableOption(): { pathToClaudeCodeExecutable?: string } {
-  return claudeRuntime.path ? { pathToClaudeCodeExecutable: claudeRuntime.path } : {};
+  const rt = claudeRuntime();
+  return rt.path ? { pathToClaudeCodeExecutable: rt.path } : {};
 }

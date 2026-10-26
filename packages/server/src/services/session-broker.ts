@@ -255,7 +255,7 @@ import {
   createIssueCreateGuardHook,
 } from "./shell-guard.js";
 import { AgentCwdTracker } from "./agent-cwd.js";
-import { claudeExecutableOption } from "./runtime.js";
+import { claudeExecutableOption } from "../harness/claude/runtime.js";
 import type {
   HarnessAccount,
   HarnessEvent,
@@ -8701,7 +8701,7 @@ export class SessionBroker {
       includePartialMessages: true,
       abortController: session.abortController,
       // Run on the user's installed Claude Code when it's newer than the one
-      // bundled with the SDK. MUST match what services/models.ts probes for the
+      // bundled with the SDK. MUST match what harness/claude/models.ts probes for the
       // picker: the runtime decides which model ids resolve, so a picker fed by
       // a newer binary than the session would offer models the session can't run.
       ...claudeExecutableOption(),

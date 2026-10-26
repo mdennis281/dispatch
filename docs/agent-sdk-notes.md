@@ -8,7 +8,7 @@ The SDK spawns the Claude Code runtime as a **subprocess** (bundled per-platform
 optionalDependencies, e.g. `@anthropic-ai/claude-agent-sdk-win32-x64`). Budget one
 process per live session.
 
-## WHICH runtime we spawn (`services/runtime.ts`)
+## WHICH runtime we spawn (`harness/claude/runtime.ts`)
 
 **The SDK version pins the runtime: `0.3.N` bundles Claude Code `2.1.N`.** That binary decides
 which models exist, which slash commands load, and which agents resolve — so a stale dep
@@ -147,7 +147,7 @@ This is the only workable source for us: `GET /v1/models` requires an `ANTHROPIC
 which we deliberately never set, so it always failed shut. The runtime list also carries what
 the raw Models API has no concept of: the `default` alias, 1M-context variants (`opus[1m]`),
 `resolvedModel` (alias → wire id), and per-model `supportsEffort` / `supportedEffortLevels`.
-Reading it costs a `claude` subprocess (~3–7s), so `services/models.ts` opens a query whose
+Reading it costs a `claude` subprocess (~3–7s), so `harness/claude/models.ts` opens a query whose
 input channel **never yields** (no prompt, no tokens), reads the list, aborts, and caches 5min.
 Same shape applies to `supportedCommands()` / `supportedAgents()`.
 

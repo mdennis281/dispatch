@@ -14,7 +14,7 @@
  * was written against, the bundled plugin binary was 0.147 while the VS Code
  * extension's was 0.146. Since the app-server protocol only grows, we probe
  * every candidate and take the NEWEST, mirroring the "prefer the newer runtime"
- * rule the Claude side uses (see services/runtime.ts).
+ * rule the Claude side uses (see server harness/claude/runtime.ts).
  *
  * Resolution order:
  *   1. `DISPATCH_CODEX_PATH` — explicit override, used verbatim, no checks.

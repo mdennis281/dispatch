@@ -18,7 +18,7 @@
  * it silently tells the model nobody answered, which is exactly the kind of
  * quiet failure worth isolating in one tested file.
  */
-import type { HarnessQuestion, HarnessQuestionAnswer } from "../types.js";
+import type { HarnessQuestion, HarnessQuestionAnswer } from "@dispatch/shared";
 
 function pickStr(v: unknown): string | undefined {
   return typeof v === "string" && v.trim() ? v.trim() : undefined;

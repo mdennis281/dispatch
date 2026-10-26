@@ -22,9 +22,9 @@
 import { query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 import type { ModelInfo, Options, Query, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { FALLBACK_MODELS, type ModelOption } from "@dispatch/shared";
+import type { HarnessAccount } from "@dispatch/shared";
 import { claudeExecutableOption } from "./runtime.js";
-import type { HarnessAccount } from "../harness/types.js";
-import { envWithAccount } from "./subscriptions.js";
+import { envWithAccount } from "./account.js";
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
 /** Cap on the probe subprocess — a hung runtime must not hang the HTTP route. */
