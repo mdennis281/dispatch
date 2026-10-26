@@ -709,6 +709,69 @@ describe("CodexSession approvals", () => {
     expect(fake.calls.some((c) => c.method === "turn/interrupt")).toBe(false);
   });
 
+  it("shares one verdict when the item is sighted BEFORE its approval prompt", async () => {
+    // The other order. Keyed one way only, the sighting spent the grant and
+    // the approval prompt then refused the call the human had granted.
+    let asked = 0;
+    const { session, fake } = makeSession({
+      toolGuard: async () => (++asked === 1 ? null : "the one-shot is spent"),
+    });
+    const events: HarnessEvent[] = [];
+    void (async () => {
+      for await (const e of session.events) events.push(e);
+    })();
+    session.send({ text: "go" });
+    await fake.tick();
+    fake.push("turn/started", { threadId: "thread-1", turn: { id: "turn-1" } });
+    fake.push("item/started", {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: { type: "commandExecution", id: "c1", command: "git push origin main" },
+    });
+    // Separate deliveries, as from the app-server: the sighting is decided
+    // before the request arrives.
+    await fake.tick();
+    fake.request({
+      id: 22,
+      method: "item/commandExecution/requestApproval",
+      params: { threadId: "thread-1", itemId: "c1", command: "git push origin main" },
+    });
+    await fake.tick();
+
+    expect(asked).toBe(1);
+    expect(events.some((e) => e.type === "guard-blocked")).toBe(false);
+    expect(events.some((e) => e.type === "permission-request")).toBe(true);
+    expect(fake.responses.some((r) => r.id === 22)).toBe(false);
+  });
+
+  it("reports a refusal once when the sighting and the approval prompt both meet it", async () => {
+    const { session, fake } = makeSession({ toolGuard: async () => "not allowed here" });
+    const events: HarnessEvent[] = [];
+    void (async () => {
+      for await (const e of session.events) events.push(e);
+    })();
+    session.send({ text: "go" });
+    await fake.tick();
+    fake.push("turn/started", { threadId: "thread-1", turn: { id: "turn-1" } });
+    fake.push("item/started", {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: { type: "commandExecution", id: "c1", command: "git push origin main" },
+    });
+    // Separate deliveries, as from the app-server: the sighting is decided
+    // before the request arrives.
+    await fake.tick();
+    fake.request({
+      id: 23,
+      method: "item/commandExecution/requestApproval",
+      params: { threadId: "thread-1", itemId: "c1", command: "git push origin main" },
+    });
+    await fake.tick();
+
+    expect(events.filter((e) => e.type === "guard-blocked")).toHaveLength(1);
+    expect(fake.responses).toContainEqual({ id: 23, result: { decision: "decline" } });
+  });
+
   it("never lets a turn end overtake a guard verdict still being reached", async () => {
     // One stdout chunk can carry item/started, item/completed and
     // turn/completed, dispatched back to back. An async refusal that landed

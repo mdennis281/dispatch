@@ -156,11 +156,17 @@ export class CodexSession implements HarnessSession {
    */
   private guardBarrier: Promise<void> | null = null;
   /**
-   * Item ids the guard already passed at their approval prompt. The guard is
-   * stateful — a pass can spend a one-shot exemption — so asking it again when
-   * the same item is sighted would refuse the very call the grant was for.
+   * ONE guard verdict per root item, shared by its approval prompt and its
+   * sighting — whichever of the two reaches the guard first asks, the other
+   * reuses the answer.
+   *
+   * The guard is stateful: a pass can spend a one-shot exemption. Asked twice
+   * for one item, the second ask refuses the very call the grant was for — and
+   * Codex can deliver the two in EITHER order (`item/started` before its
+   * `requestApproval`, or the request first), so a dedupe keyed one way only
+   * still refused a granted call on the other. Cleared at turn end.
    */
-  private readonly guardedItems = new Set<string>();
+  private readonly itemVerdicts = new Map<string, Promise<HarnessGuardBlockedEvent | null>>();
 
   /** Effort currently pinned for the thread. */
   private effort: Effort;
@@ -348,7 +354,7 @@ export class CodexSession implements HarnessSession {
     }
     if (frame.method === "turn/completed") {
       this.turnId = undefined;
-      this.guardedItems.clear();
+      this.itemVerdicts.clear();
     }
 
     // The guard's second, weaker enforcement point — see the module header.
@@ -356,8 +362,9 @@ export class CodexSession implements HarnessSession {
       this.afterGuard(() => this.deliver(events));
       return;
     }
-    // Chained, not just awaited: verdicts are reached one at a time, so two
-    // calls sighted together cannot both spend the same one-shot exemption.
+    // Chained, not just awaited: verdicts are reached one at a time (approval
+    // prompts queue here too), so two calls cannot both spend the same
+    // one-shot exemption.
     this.queueBehindGuard(async () => {
       const blocked = await this.guardStartedItem(frame);
       if (blocked) {
@@ -375,12 +382,43 @@ export class CodexSession implements HarnessSession {
   }
 
   private queueBehindGuard(step: () => Promise<void>): void {
+    void this.serializeGuard(step);
+  }
+
+  /** Run `step` after every guard step already queued, and hand back its result. */
+  private serializeGuard<T>(step: () => Promise<T>): Promise<T> {
+    const run = (this.guardBarrier ?? Promise.resolve()).then(step);
     // A step that throws must not wedge every notification queued after it.
-    const barrier = (this.guardBarrier ?? Promise.resolve()).then(step).catch(() => {});
+    const barrier = run.then(
+      () => {},
+      () => {},
+    );
     this.guardBarrier = barrier;
     void barrier.finally(() => {
       if (this.guardBarrier === barrier) this.guardBarrier = null;
     });
+    return run;
+  }
+
+  /**
+   * The guard's verdict on one call, asked at most once per root item — see
+   * {@link itemVerdicts}. Resolves null for a refusal some earlier path has
+   * already reported, so the same refusal is never shown (or recovered) twice.
+   * Only ever called from inside a {@link serializeGuard} step, which is what
+   * makes "first to ask" well defined.
+   */
+  private async itemVerdict(
+    itemId: string | undefined,
+    ask: () => Promise<HarnessGuardBlockedEvent | null>,
+  ): Promise<{ blocked: HarnessGuardBlockedEvent | null; fresh: boolean }> {
+    if (!itemId) return { blocked: await ask().catch(() => null), fresh: true };
+    let verdict = this.itemVerdicts.get(itemId);
+    const fresh = !verdict;
+    if (!verdict) {
+      verdict = ask().catch(() => null);
+      this.itemVerdicts.set(itemId, verdict);
+    }
+    return { blocked: await verdict, fresh };
   }
 
   /** Hand one root frame's decoded events to the host. */
@@ -548,7 +586,6 @@ export class CodexSession implements HarnessSession {
     const item = (frame.params as { item?: Record<string, unknown> } | undefined)?.item;
     if (!item) return null;
     const itemId = typeof item.id === "string" ? item.id : undefined;
-    if (itemId && this.guardedItems.delete(itemId)) return null;
     // EVERY mapped item type, through the same mapper the stream decoder uses
     // to label the row. Hand-rolling the name here is what left `fileChange`,
     // `dynamicToolCall`, `collabAgentToolCall` and `webSearch` unguarded while
@@ -557,10 +594,17 @@ export class CodexSession implements HarnessSession {
     // missing workflow warning.
     const call = codexToolCall(item);
     if (!call) return null;
-    return catchToolGuard(this.spec.toolGuard, call.name, call.input, "restart-turn", {
-      cwd: typeof call.input.cwd === "string" ? call.input.cwd : undefined,
-      toolUseId: itemId,
-    }).catch(() => null);
+    const { blocked, fresh } = await this.itemVerdict(itemId, () =>
+      catchToolGuard(this.spec.toolGuard, call.name, call.input, "restart-turn", {
+        cwd: typeof call.input.cwd === "string" ? call.input.cwd : undefined,
+        toolUseId: itemId,
+      }),
+    );
+    // Its approval prompt already refused (and reported) this item. A refused
+    // item should never start; if Codex starts it anyway, still stop the turn
+    // — but do not report the same refusal a second time.
+    if (blocked && !fresh) void this.interrupt();
+    return fresh ? blocked : null;
   }
 
   /* -------------------------------------------------- inbound requests */
@@ -607,13 +651,19 @@ export class CodexSession implements HarnessSession {
     parentToolUseId?: string,
   ): Promise<void> {
     const itemId = typeof req.params.itemId === "string" ? req.params.itemId : undefined;
-    // The guard's first (and reliable) enforcement point. A guard that throws
-    // must still answer the request — Codex blocks on it forever otherwise.
-    const blocked = await catchToolGuard(this.spec.toolGuard, toolName, input, "in-place", {
-      cwd: typeof input.cwd === "string" ? input.cwd : undefined,
-      parentToolUseId,
-      toolUseId: itemId,
-    }).catch(() => null);
+    // The guard's first (and reliable) enforcement point. Only a ROOT item
+    // shares its verdict with a sighting; a child's sighting is never guarded.
+    // A guard that throws counts as no verdict — the request must still be
+    // answered, or Codex blocks on it forever.
+    const { blocked, fresh } = await this.serializeGuard(() =>
+      this.itemVerdict(parentToolUseId ? undefined : itemId, () =>
+        catchToolGuard(this.spec.toolGuard, toolName, input, "in-place", {
+          cwd: typeof input.cwd === "string" ? input.cwd : undefined,
+          parentToolUseId,
+          toolUseId: itemId,
+        }),
+      ),
+    );
     // Disposed while the guard deliberated: `dispose` has already declined
     // everything it knew about, and this request was not yet among them.
     if (this.disposed || blocked) {
@@ -622,11 +672,11 @@ export class CodexSession implements HarnessSession {
       } catch {
         /* connection already gone */
       }
-      if (blocked && !this.disposed) this.emit(blocked);
+      // A refusal the sighting already reported (and is recovering from) is
+      // declined quietly.
+      if (blocked && fresh && !this.disposed) this.emit(blocked);
       return;
     }
-    // Only a ROOT item is guarded again on sighting; a child's never is.
-    if (itemId && !parentToolUseId) this.guardedItems.add(itemId);
 
     const requestId = this.genId();
     this.pendingAsks.set(requestId, {
