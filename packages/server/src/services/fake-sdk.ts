@@ -41,7 +41,13 @@ function userText(msg: unknown): string {
 export function makeFakeQuery(): QueryFn {
   return ({ prompt }) => {
     const sessionId = `fake-session-${++sessionSeq}`;
-    const input = prompt as AsyncIterable<unknown>;
+    // Living behind `ClaudeHarness` means a one-shot string prompt can reach
+    // this too (`generateText`), and `for await` over a string walks it by
+    // CHARACTER — one "Echo: " per char. Treat it as the single message it is.
+    const input: AsyncIterable<unknown> | Iterable<unknown> =
+      typeof prompt === "string"
+        ? [{ type: "user", message: { role: "user", content: prompt } }]
+        : (prompt as AsyncIterable<unknown>);
     let release: (() => void) | undefined;
 
     async function* stream(): AsyncGenerator<unknown> {
