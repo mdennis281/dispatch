@@ -43,12 +43,27 @@ export interface PluginUpdateWatcherOptions {
   now?: () => number;
 }
 
+/**
+ * Bounds on a non-zero interval. The top one is not taste: `setInterval` takes
+ * at most 2^31-1 ms (~596 h), and past it Node clamps the delay to 1 ms — a
+ * "monthly" 720 would `ls-remote` and fetch tarballs from every plugin's
+ * remote in a loop. The bottom one keeps a typo like 0.0001 from doing the same.
+ */
+export const MIN_PLUGIN_UPDATE_HOURS = 0.25;
+export const MAX_PLUGIN_UPDATE_HOURS = 24 * 21;
+
+/** 0 stays 0 (off); anything else is clamped into range. */
+export function clampPluginUpdateHours(hours: number): number {
+  if (hours <= 0) return 0;
+  return Math.min(MAX_PLUGIN_UPDATE_HOURS, Math.max(MIN_PLUGIN_UPDATE_HOURS, hours));
+}
+
 /** `DISPATCH_PLUGIN_UPDATE_HOURS`, defaulting to 6; anything unparseable is the default, not "off". */
 export function pluginUpdateHours(env: NodeJS.ProcessEnv = process.env): number {
   const raw = env.DISPATCH_PLUGIN_UPDATE_HOURS;
   if (raw === undefined || raw.trim() === "") return 6;
   const n = Number(raw);
-  return Number.isFinite(n) && n >= 0 ? n : 6;
+  return Number.isFinite(n) && n >= 0 ? clampPluginUpdateHours(n) : 6;
 }
 
 /** Would `auto` install this? Nothing new asked for, the same plugin, and installable. */
@@ -76,8 +91,11 @@ export class PluginUpdateWatcher {
   private announced = new Set<string>();
   private readonly now: () => number;
 
-  constructor(private readonly opts: PluginUpdateWatcherOptions) {
+  constructor(private opts: PluginUpdateWatcherOptions) {
     this.now = opts.now ?? Date.now;
+    // Clamped here too, not only when read from the environment: a caller
+    // passing hours directly must not be able to arm a 1 ms interval either.
+    this.opts = { ...opts, intervalHours: clampPluginUpdateHours(opts.intervalHours) };
   }
 
   start(): void {

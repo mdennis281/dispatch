@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from "vitest";
 import type { PluginAutoUpdate, PluginInfo, PluginUpdateCheck, PluginUpdateResult } from "@dispatch/shared";
-import { PluginUpdateWatcher, autoApplicable, pluginUpdateHours } from "./watcher.js";
+import { MAX_PLUGIN_UPDATE_HOURS, PluginUpdateWatcher, autoApplicable, pluginUpdateHours } from "./watcher.js";
 
 const SHA_A = "a".repeat(40);
 const SHA_B = "b".repeat(40);
@@ -64,6 +64,14 @@ describe("pluginUpdateHours", () => {
     expect(pluginUpdateHours({ DISPATCH_PLUGIN_UPDATE_HOURS: "1.5" })).toBe(1.5);
     expect(pluginUpdateHours({ DISPATCH_PLUGIN_UPDATE_HOURS: "soon" })).toBe(6);
     expect(pluginUpdateHours({ DISPATCH_PLUGIN_UPDATE_HOURS: "-2" })).toBe(6);
+  });
+
+  it("clamps into what setInterval can hold, so a huge value never becomes a 1 ms loop", () => {
+    expect(pluginUpdateHours({ DISPATCH_PLUGIN_UPDATE_HOURS: "720" })).toBe(MAX_PLUGIN_UPDATE_HOURS);
+    expect(MAX_PLUGIN_UPDATE_HOURS * 3_600_000).toBeLessThan(2 ** 31 - 1);
+    expect(pluginUpdateHours({ DISPATCH_PLUGIN_UPDATE_HOURS: "0.0000001" })).toBe(0.25);
+    const w = new PluginUpdateWatcher({ intervalHours: 1e9, list: () => [], notice: () => {}, inspector: { checkUpdate: async () => { throw new Error(); }, update: async () => { throw new Error(); } } });
+    expect(w.status().intervalHours).toBe(MAX_PLUGIN_UPDATE_HOURS);
   });
 });
 
