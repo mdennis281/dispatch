@@ -496,11 +496,18 @@ Reference: `examples/plugins/contributions` (no code; one of each).
 
 ## Providers
 
-An agent runtime — what a chat actually runs on — is a plugin contribution.
-Claude is the only one compiled into the host: it is the fallback every
-unavailable provider resolves to, and it drives the background jobs (titles,
-commit messages). **Codex and goose are built-in plugins** in
-`packages/plugins/codex` and `packages/plugins/goose`.
+An agent runtime — what a chat actually runs on — is a plugin contribution,
+and **no runtime is compiled into the host**. Claude, Codex and goose are all
+built-in plugins: `packages/plugins/claude`, `packages/plugins/codex` and
+`packages/plugins/goose`. The Claude Agent SDK is a dependency of the Claude
+plugin and of nothing else, so an install with that plugin switched off spawns
+no `claude` process and sends nothing to Anthropic (#422, #428).
+
+There is **no fallback provider and no default one**. A chat whose provider is
+disabled, uninstalled or not installed shows "provider unavailable" and does
+not run; it is never moved to another provider. Titles and commit messages run
+on the app's default provider through `Harness.generateText`, and are skipped
+(or the button says why) when there is none.
 
 A provider plugin declares the `providers` capability and calls, from
 `activate`:
@@ -518,11 +525,13 @@ ctx.providers.register(harness, descriptor);
   selected). Its `id` must equal `harness.kind` and match
   `^[a-z][a-z0-9-]{0,39}$`; it is what chats, projects and subscriptions store.
 - Registering an id that is already taken throws, so nothing can shadow
-  `claude` or another plugin's provider. Deactivation (the toggle) unregisters
-  it and calls `harness.dispose()`; a chat pinned to it then falls back to
-  Claude and is told so. `dispose()` may end sessions in flight — switching
-  Codex off tears down its shared app-server, so a Codex turn running at that
-  moment errors rather than finishing.
+  another plugin's provider. Deactivation (the toggle) unregisters it and calls
+  `harness.dispose()`; a chat pinned to it then shows "provider unavailable"
+  and recovers by itself when the plugin comes back. `dispose()` may end
+  sessions in flight — switching Codex off tears down its shared app-server, so
+  a Codex turn running at that moment errors rather than finishing.
+- Chats written before provider selection existed were backfilled once to
+  `"claude"`, which is why the Claude plugin's id must stay `claude`.
 
 **Context limits.** Settings → Context sets a compact threshold per model,
 else a per-chat limit, and it arrives as `HarnessSessionSpec.contextTokenLimit`
@@ -552,7 +561,7 @@ by `findShippedPluginsRoot()` (`server/src/plugins/shipped.ts`), never from
 
 - They activate in `start()`, **before the port opens** (`activateShipped`).
   Left to `warm()`, a chat resumed in the gap would find its provider unknown
-  and fall back to Claude. One that declares managed processes still waits for
+  and refuse to run. One that declares managed processes still waits for
   `warm()`, behind the runner reconcile.
 - They own their ids. An installed plugin with a built-in's id is ignored (and
   logged), and Settings → Plugins → Inspect refuses to install one.
@@ -563,6 +572,17 @@ by `findShippedPluginsRoot()` (`server/src/plugins/shipped.ts`), never from
   it hot-reloads with the server instead of running a stale build.
 
 The Settings row shows a `built-in` chip; the toggle works as for any plugin.
+
+**A few surfaces are Claude's alone** and follow the Claude plugin rather than
+living in it: the Claude Code auto-memory editor (Memory → Claude, and
+`/api/projects/:id/claude-memory`), the "Claude compaction window" setting, and
+the boot warning about stale tool names in `.claude/settings*.json`. Each is
+hidden or skipped while Claude is not registered. Server suites that need a
+Claude turn use `claudeOnlyRegistry(query)` (`server/src/harness/registry.testkit.ts`),
+which puts a scripted SDK `query` behind the plugin's real adapter — build the
+plugins first, since `@dispatch/plugin-claude/harness` resolves to the built
+`server/` output. `DISPATCH_FAKE_SDK=1` puts an echo behind the same adapter
+(`createClaudeHarness` in the plugin's `main.ts`) for E2E and screenshots.
 
 ## Terminal backends
 

@@ -317,11 +317,19 @@ export async function buildApp(
   //
   // Never fatal — the worst case if it is skipped is that same prompt, which is
   // strictly better than a server that will not boot.
+  //
+  // The Claude settings scan follows the Claude plugin's switch, read off the
+  // settings rather than the registry: plugins activate in `services.start()`,
+  // below, so at this point the registry is still empty either way.
+  const claudeOn = (await store.getSettings().catch(() => null))?.plugins?.claude?.enabled !== false;
   await migrateManagerToolNames(
     store,
     realProjects(await store.listProjects().catch(() => []))
       .map((p) => p.repoPath)
       .filter(Boolean),
+    undefined,
+    undefined,
+    claudeOn,
   ).catch(() => undefined);
   try {
     const moved = services.metrics.migrateLegacyManagerDetail();

@@ -16,6 +16,7 @@ import { SegmentedControl } from "../ui/SegmentedControl.js";
 import { MemoryForm, TYPE_META } from "./MemoryForm.js";
 import { MemoryListRow } from "./MemoryListRow.js";
 import { ClaudeMemoryPanel } from "./ClaudeMemoryPanel.js";
+import { useProviderRegistered } from "../../lib/providerAvailability.js";
 
 /* ------------------------------------------------------------------ relevance */
 
@@ -157,11 +158,17 @@ const SECTIONS = [
 
 /** The top-level, chat-independent Memory browser, in two sections that share
  *  one list/detail layout: Dispatch's project memory and Claude Code's own
- *  auto-memory for the repo. Scoped to the active project. */
+ *  auto-memory for the repo. Scoped to the active project.
+ *
+ *  The Claude section exists only while the Claude provider is registered:
+ *  Claude is a plugin (#428), and with it off that directory is read by
+ *  nothing — the server refuses the routes too. */
 export function MemoryView() {
   const project = useActiveProject();
   const projectId = project?.id ?? null;
-  const [section, setSection] = useState<MemorySection>("project");
+  const claude = useProviderRegistered("claude");
+  const [picked, setSection] = useState<MemorySection>("project");
+  const section: MemorySection = claude ? picked : "project";
 
   if (!projectId) {
     return (
@@ -173,7 +180,7 @@ export function MemoryView() {
     );
   }
 
-  const tabs = (
+  const tabs = claude ? (
     <div className="px-2 pt-2">
       <SegmentedControl
         segments={SECTIONS}
@@ -182,7 +189,7 @@ export function MemoryView() {
         className="flex w-full [&>button]:flex-1 [&>button]:justify-center"
       />
     </div>
-  );
+  ) : null;
 
   if (section === "claude") {
     return <ClaudeMemoryPanel projectId={projectId} header={<SectionHeader title="Claude memory">{tabs}</SectionHeader>} />;

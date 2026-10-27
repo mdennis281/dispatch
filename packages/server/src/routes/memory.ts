@@ -35,7 +35,7 @@ const MemoryBodySchema = z.object({
 
 export function registerMemoryRoutes(app: FastifyInstance): void {
   const { store } = app.cm;
-  const { memory, houseRules, claudeMemory } = app.services;
+  const { memory, houseRules, claudeMemory, harnesses } = app.services;
 
   /** 404 unless the project entity exists (also guards a stray projectId). */
   async function ensureProject(projectId: string): Promise<boolean> {
@@ -181,9 +181,19 @@ export function registerMemoryRoutes(app: FastifyInstance): void {
     return project?.repoPath ?? null;
   }
 
+  // Claude Code's auto-memory is Claude's alone, and Claude is a plugin now
+  // (#428). With it switched off nothing reads that directory, so editing it
+  // would be curating a file for no one — the routes answer as absent, the
+  // same way the client stops offering the section.
+  function claudeOff(): boolean {
+    return !harnesses.find("claude");
+  }
+  const CLAUDE_OFF = { error: "the Claude provider is not enabled" };
+
   app.get<{ Params: { projectId: string } }>(
     "/api/projects/:projectId/claude-memory",
     async (req, reply) => {
+      if (claudeOff()) return reply.code(404).send(CLAUDE_OFF);
       const repoPath = await repoPathOf(req.params.projectId);
       if (!repoPath) return reply.code(404).send({ error: "project not found" });
       return claudeMemory.list(repoPath);
@@ -193,6 +203,7 @@ export function registerMemoryRoutes(app: FastifyInstance): void {
   app.put<{ Params: { projectId: string; file: string } }>(
     "/api/projects/:projectId/claude-memory/:file",
     async (req, reply) => {
+      if (claudeOff()) return reply.code(404).send(CLAUDE_OFF);
       const repoPath = await repoPathOf(req.params.projectId);
       if (!repoPath) return reply.code(404).send({ error: "project not found" });
       const body = z.object({ content: z.string() }).safeParse(req.body ?? {});
@@ -211,6 +222,7 @@ export function registerMemoryRoutes(app: FastifyInstance): void {
   app.delete<{ Params: { projectId: string; file: string } }>(
     "/api/projects/:projectId/claude-memory/:file",
     async (req, reply) => {
+      if (claudeOff()) return reply.code(404).send(CLAUDE_OFF);
       const repoPath = await repoPathOf(req.params.projectId);
       if (!repoPath) return reply.code(404).send({ error: "project not found" });
       try {

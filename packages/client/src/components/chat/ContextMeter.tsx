@@ -12,17 +12,17 @@ import { TextArea } from "../sidebar/Modal.js";
 import { Button } from "../ui/Button.js";
 
 /**
- * Fallback context windows by model id, used ONLY until a turn reports the SDK's
- * authoritative window (`result.contextWindow`). Keyed by the composer's model
- * ids; the `[1m]` variant is the 1M-context Opus. Anything unknown assumes 200k.
+ * The window to draw before the session reports its real one — every adapter
+ * reports it as a `usage` event once it is live, Claude's straight after init.
+ *
+ * This used to be a table of Claude model ids, which had gone stale (it
+ * topped out at Opus 4.8) and meant nothing to any other provider (#428). An
+ * id carrying a `[1m]` window suffix is the one thing worth reading off the id
+ * itself; everything else assumes 200k for the moment it takes to learn.
  */
-const MODEL_WINDOW_FALLBACK: Record<string, number> = {
-  "claude-opus-4-8": 200_000,
-  "claude-opus-4-8[1m]": 1_000_000,
-  "claude-sonnet-4-6": 200_000,
-  "claude-haiku-4-5": 200_000,
-};
 const DEFAULT_WINDOW = 200_000;
+const fallbackWindow = (model: string | undefined): number =>
+  model && /\[1m\]$/i.test(model) ? 1_000_000 : DEFAULT_WINDOW;
 
 /** Escalating tone by utilization — mirrors the header UsageMeter thresholds. */
 function tone(pct: number): { text: string; bar: string } {
@@ -130,7 +130,7 @@ function useContextUsage(chatId: string, model?: string) {
   const tokens = useContextTokens(chatId);
   const reportedWindow = useContextWindow(chatId);
   const window =
-    reportedWindow ?? (model ? MODEL_WINDOW_FALLBACK[model] : undefined) ?? DEFAULT_WINDOW;
+    reportedWindow ?? fallbackWindow(model);
   return { tokens, window, pct: tokens === null ? 0 : (tokens / window) * 100 };
 }
 

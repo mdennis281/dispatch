@@ -9,6 +9,7 @@ import { Field, TextArea, TextInput } from "../../sidebar/Modal.js";
 import { Switch } from "../../ui/Switch.js";
 import { positiveTokenLimit } from "../../../lib/harness.js";
 import { api } from "../../../lib/api.js";
+import { useProviderRegistered } from "../../../lib/providerAvailability.js";
 import { compactTokens } from "../../../lib/format.js";
 import { cn } from "../../../lib/cn.js";
 import type { AppPaneProps } from "./types.js";
@@ -107,6 +108,7 @@ function useContextWindows(): Partial<Record<string, Record<string, number>>> {
 /** How many chats run at once, and what happens as their context windows fill. */
 export function ContextSection({ draft, patch, serverDefaults, catalogs }: AppPaneProps) {
   const windows = useContextWindows();
+  const claude = useProviderRegistered("claude");
   const ac = draft.autoCompact ?? {};
   const perModel = ac.perModel ?? {};
   const patchPerModel = (id: string, tokens: number | undefined) => {
@@ -226,7 +228,10 @@ export function ContextSection({ draft, patch, serverDefaults, catalogs }: AppPa
       <div className={cn("transition-opacity", !enabled && "pointer-events-none opacity-45")}>
         {/* This is Claude Code's `autoCompactWindow` — the window SIZE it
             compacts ~33k short of, 100k–1M — not a reserve. It used to be
-            labelled one with a 20000 placeholder, a value the CLI drops. */}
+            labelled one with a 20000 placeholder, a value the CLI drops.
+            Shown only while the Claude provider is registered (#428): no
+            other runtime reads it. A value already saved is kept either way. */}
+        {claude && (
         <Field label="Claude compaction window" hint="tokens, 100k–1M; blank = from thresholds">
           <TextInput
             mono
@@ -238,6 +243,7 @@ export function ContextSection({ draft, patch, serverDefaults, catalogs }: AppPa
             placeholder="e.g. 400000"
           />
         </Field>
+        )}
       </div>
 
       <div

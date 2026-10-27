@@ -55,8 +55,10 @@ import { cn } from "../../lib/cn.js";
  * than by reading five rows that all start with the same glyph.
  *
  * Models are matched on their LABEL, not a fixed table: the list comes live off
- * the Claude Code runtime, so tomorrow's model arrives without a code change and
- * simply falls back to the generic chip.
+ * whichever provider the task runs on, so tomorrow's model — or another
+ * provider's — arrives without a code change and simply gets the generic chip.
+ * The names below happen to be Claude's family names; nothing here requires
+ * Claude to be installed.
  */
 function modelIcon(label: string): LucideIcon {
   const l = label.toLowerCase();

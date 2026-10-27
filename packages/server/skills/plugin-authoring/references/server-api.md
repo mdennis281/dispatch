@@ -135,9 +135,14 @@ Gotchas for a terminal backend:
 - Test with `createTestContext`: `t.terminals.spawn("box", { chatId })`, `t.terminals.chatIdle(...)`,
   `t.terminals.chatDeleted(...)`, and `t.terminalPorts`.
 
-Working examples of `providers`: the built-in Codex and goose plugins,
-`packages/plugins/codex` and `packages/plugins/goose` (`src/main.ts` is the
-whole entry; `src/descriptor.ts` is the descriptor).
+Working examples of `providers`: the built-in Claude, Codex and goose plugins,
+`packages/plugins/{claude,codex,goose}` (`src/main.ts` is the whole entry;
+`src/descriptor.ts` is the descriptor). No provider is compiled into the host
+and there is no fallback: a chat whose provider is off shows "provider
+unavailable" and does not run. A provider that wants Dispatch's own MCP tools
+in-process declares `capabilities.managerTransport: "in-process"` and gets
+plain `McpServer`s in `spec.managerMcp.servers` (Claude wraps them for the
+Agent SDK in `manager-servers.ts`); any other transport gets an HTTP grant.
 
 ### Routes
 

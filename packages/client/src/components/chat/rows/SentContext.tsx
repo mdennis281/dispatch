@@ -623,8 +623,8 @@ export function SentContextModal({
       title="Sent context — session start"
       description={
         sent.sameAs
-          ? "Unchanged from an earlier session start in this chat. Claude Code's own base prompt and CLAUDE.md files come on top — see Token breakdown."
-          : "Everything Dispatch handed the agent when this session was built. Claude Code's own base prompt and CLAUDE.md files come on top — see Token breakdown."
+          ? "Unchanged from an earlier session start in this chat. The runtime's own base prompt and the repo's instruction files (CLAUDE.md, AGENTS.md) come on top — see Token breakdown."
+          : "Everything Dispatch handed the agent when this session was built. The runtime's own base prompt and the repo's instruction files (CLAUDE.md, AGENTS.md) come on top — see Token breakdown."
       }
       items={items}
       initialKey={initialKey}
