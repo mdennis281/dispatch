@@ -148,6 +148,25 @@ describe("warning about config we do not own", () => {
     }
   });
 
+  it("warns about no Claude settings file while the Claude plugin is off (#428)", async () => {
+    // Every file it does not own is Claude Code's; with Claude switched off
+    // nothing reads them, so telling the human to hand-edit one is noise.
+    dir = await mkdtemp(join(tmpdir(), "cm-mig-off-"));
+    try {
+      await mkdir(join(dir, ".claude"), { recursive: true });
+      await writeFile(
+        join(dir, ".claude", "settings.json"),
+        JSON.stringify({ permissions: { allow: [legacy("terminal")] } }),
+      );
+      const on = await migrateManagerToolNames(fakeStore([]), [dir], () => {}, dir);
+      const off = await migrateManagerToolNames(fakeStore([]), [dir], () => {}, dir, false);
+      expect(on.warnings.length).toBeGreaterThan(0);
+      expect(off.warnings).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("scans the USER-scope settings file, the likeliest place of all", async () => {
     // Sessions launch with settingSources ["user","project","local"], so the SDK
     // reads ~/.claude/settings.json — and a permission a human granted months ago

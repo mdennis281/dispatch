@@ -157,6 +157,13 @@ export async function migrateManagerToolNames(
   repoPaths: readonly string[],
   log: (message: string) => void = (m) => console.warn(m), // eslint-disable-line no-console
   home?: string,
+  /**
+   * Scan the files we do NOT own. Every one of them is Claude Code's
+   * `.claude/settings*.json`, and Claude is a plugin now (#428): on an install
+   * with it switched off nothing reads them, and a boot warning telling the
+   * human to hand-edit them would be noise about a provider they don't run.
+   */
+  scanForeign = true,
 ): Promise<ManagerToolMigrationResult> {
   const result: ManagerToolMigrationResult = { rewritten: [], stranded: [], warnings: [] };
   try {
@@ -167,7 +174,7 @@ export async function migrateManagerToolNames(
     log(`[dispatch] agent tool-name migration skipped: ${String(err)}`);
   }
   try {
-    result.warnings = await findForeignStaleToolNames(repoPaths, home);
+    if (scanForeign) result.warnings = await findForeignStaleToolNames(repoPaths, home);
   } catch {
     /* a scan that cannot read is a scan with no findings */
   }

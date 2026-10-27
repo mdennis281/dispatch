@@ -55,6 +55,20 @@ export function useProviderAvailability(
   );
 }
 
+/**
+ * Is `provider` registered right now? For the few surfaces that only mean
+ * anything on ONE provider — Claude Code's auto-memory editor, its
+ * `autoCompactWindow` setting. Claude is a plugin (#428), and on an install
+ * with it switched off those surfaces would edit files nothing reads.
+ *
+ * False until the list has loaded: a Claude-only control flashing in and then
+ * out is worse than one that appears a beat late.
+ */
+export function useProviderRegistered(provider: HarnessKind): boolean {
+  const { harnesses, loaded } = useRegisteredProviders();
+  return loaded && harnesses.some((h) => h.kind === provider);
+}
+
 /** The providers a chat could be switched to right now: registered and installed. */
 export function useAvailableProviders(): HarnessInfo[] {
   const { harnesses } = useRegisteredProviders();

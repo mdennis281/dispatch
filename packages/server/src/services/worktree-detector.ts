@@ -765,6 +765,9 @@ export class WorktreeDetector {
     // Resolve every `EnterWorktree` claim to a canonical path now that we have a
     // repoPath: chatId → (canonical path → earliest claim ts). The `name` form
     // lands in `<repo>/.claude/worktrees/<name>`, which is where the harness cuts it.
+    // Claude-only, and inert without Claude (#428): a claim is recorded only
+    // when a Claude chat calls its `EnterWorktree` tool, so on an install with
+    // the plugin off this map is empty and the directory is never looked at.
     // A name may legally contain `/` (the harness allows nested segments), so we
     // don't reject separators — we resolve and require the result to stay UNDER
     // the worktrees dir, which drops a `..` that would escape it and claim an
