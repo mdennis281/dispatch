@@ -143,7 +143,7 @@ function networkCheck(input: DiagnosisInput): Check {
   if (input.reach === "loopback") {
     // The server is this machine. A dead uplink cannot be the cause, and saying
     // so sends someone to check their wifi over a process that isn't running.
-    return { id: "network", label: "Network", state: "skip", value: "not needed for localhost" };
+    return { id: "network", label: "Network", state: "skip", value: "not needed" };
   }
   return input.online
     ? { id: "network", label: "Network", state: "ok", value: "online" }
@@ -160,20 +160,20 @@ function serverCheck(input: DiagnosisInput): Check {
     case "ok":
       return { id: "server", label: "Server", state: "ok", value: "responding" };
     case "degraded":
-      return { id: "server", label: "Server", state: "fail", value: "running but unhealthy" };
+      return { id: "server", label: "Server", state: "fail", value: "unhealthy" };
     case "gateway":
-      return { id: "server", label: "Server", state: "fail", value: `proxy error ${probe.status ?? ""}`.trim() };
+      return { id: "server", label: "Server", state: "fail", value: `proxy ${probe.status ?? "error"}` };
     case "unauthorized":
       return { id: "server", label: "Server", state: "fail", value: `blocked ${probe.status ?? ""}`.trim() };
     case "not-json":
-      return { id: "server", label: "Server", state: "fail", value: "unexpected response" };
+      return { id: "server", label: "Server", state: "fail", value: "wrong service" };
     case "unreachable":
       return { id: "server", label: "Server", state: "fail", value: "no response" };
   }
 }
 
 function socketCheck(input: DiagnosisInput, serverOk: boolean): Check {
-  const label = "Live updates";
+  const label = "Live";
   // Nothing downstream of a dead server is diagnostic — the socket would fail
   // whatever its own state, so reporting it as a second failure is noise.
   if (!serverOk) return { id: "socket", label, state: "skip", value: "—" };
@@ -183,7 +183,7 @@ function socketCheck(input: DiagnosisInput, serverOk: boolean): Check {
   if (input.state === "open") {
     // Open, yet this screen is up — which means `hello` never landed. See the
     // store's `downSince`, which only a handshake clears.
-    return { id: "socket", label, state: "warn", value: "open, awaiting handshake" };
+    return { id: "socket", label, state: "warn", value: "awaiting hello" };
   }
   if (input.state === "connecting" || input.state === "reconnecting") {
     return { id: "socket", label, state: "pending", value: "connecting…" };
@@ -380,4 +380,73 @@ export function diagnose(input: DiagnosisInput): Diagnosis {
     detail: `HTTP requests to ${input.host} are working, but the WebSocket ${describeClose(input.lastClose)}.`,
     hint: upgradeHint(input.reach) ?? "The server is answering but refusing the socket — its log will say why.",
   });
+}
+
+/**
+ * The four colours the stage rail speaks. Deliberately fewer than `CheckState`:
+ * `warn` and `pending` are both "this link is still being worked on" from where
+ * the user sits, and `skip` is just "not reached".
+ */
+export type StageTone = "ok" | "active" | "fail" | "idle";
+
+export interface Stage {
+  id: Check["id"];
+  label: string;
+  value: string;
+  tone: StageTone;
+  /**
+   * Skipped because it can't matter, not because something upstream broke —
+   * only the network link on loopback. It must not gate the stages after it, or
+   * a healthy localhost server would be drawn grey behind an internet check it
+   * never needed.
+   */
+  bypassed: boolean;
+}
+
+export interface Pipeline {
+  stages: Stage[];
+  /** The stage the status caption points at: the first one not yet green. */
+  active: number;
+  /**
+   * How many leading links are lit — a segment is lit when the stage on its
+   * left has passed. Rising means progress, falling means a regression; the
+   * rail draws its lines in the matching direction.
+   */
+  reach: number;
+}
+
+const STAGE_TONE: Record<CheckState, StageTone> = {
+  ok: "ok",
+  pending: "active",
+  warn: "active",
+  fail: "fail",
+  skip: "idle",
+};
+
+/**
+ * Lay the checks out as a chain where nothing is coloured past the first link
+ * that isn't green.
+ *
+ * `diagnose` already skips most downstream checks, but not all: an open socket
+ * still awaiting `hello` leaves protocol reading "agreed", and a stale bundle
+ * behind a dead server reads protocol "fail". In a list those were tolerable;
+ * on a rail, a green or red dot sitting past a blue one claims a result for a
+ * step that was never reached. So the gate lives here, once, rather than in
+ * each check.
+ */
+export function pipeline(checks: Check[]): Pipeline {
+  let blocked = false;
+  let active = -1;
+  const stages = checks.map((check, i): Stage => {
+    const bypassed = !blocked && check.state === "skip";
+    const tone: StageTone = blocked ? "idle" : STAGE_TONE[check.state];
+    if (!blocked && (tone === "active" || tone === "fail")) {
+      blocked = true;
+      active = i;
+    }
+    return { id: check.id, label: check.label, value: check.value, tone, bypassed };
+  });
+  let reach = 0;
+  while (reach < stages.length - 1 && (stages[reach]!.tone === "ok" || stages[reach]!.bypassed)) reach++;
+  return { stages, active: active === -1 ? stages.length - 1 : active, reach };
 }
