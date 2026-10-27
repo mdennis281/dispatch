@@ -247,7 +247,7 @@ describe("diagnose — protocol", () => {
     const over = diagnose(
       input({ state: "open", badFrames: STALE_FRAME_LIMIT, badFrameTypes: ["chat-status"] }),
     );
-    expect(over.headline).toContain("protocol this build doesn't know");
+    expect(over.headline).toBe("Protocol mismatch");
     expect(over.detail).toContain("chat-status");
     expect(over.action).toBe("reload");
     expect(over.retry).toBe(false);

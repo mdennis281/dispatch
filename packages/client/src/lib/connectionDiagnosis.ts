@@ -343,7 +343,7 @@ export function diagnose(input: DiagnosisInput): Diagnosis {
   if (input.badFrames >= STALE_FRAME_LIMIT) {
     const types = input.badFrameTypes.filter(Boolean);
     return withChecks({
-      headline: "The server is speaking a protocol this build doesn't know",
+      headline: "Protocol mismatch",
       detail: `${input.badFrames} frames were rejected${types.length ? ` (${types.join(", ")})` : ""}. They're being dropped, which is why the app can look connected while it has stopped updating.`,
       hint: "Reload to pick up a matching build.",
       action: "reload",
@@ -362,7 +362,7 @@ export function diagnose(input: DiagnosisInput): Diagnosis {
 
   if (input.lastClose?.code === 1011) {
     return withChecks({
-      headline: "The server hit an error on this connection",
+      headline: "Server error on the live connection",
       detail: describeClose(input.lastClose),
       hint: "It'll be retried automatically. If it keeps happening, the server log has the detail.",
     });

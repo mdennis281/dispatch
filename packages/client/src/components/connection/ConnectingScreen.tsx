@@ -223,20 +223,23 @@ export function ConnectingScreen() {
       className="fixed inset-0 flex flex-col items-center justify-center bg-app/95 px-5 backdrop-blur-sm dp-safe-pad"
     >
       <HeadIcon diagnosis={diagnosis} />
-      <p className="text-center text-lg font-medium text-primary">{diagnosis.headline}</p>
-      <p className="mt-1 max-w-[440px] text-center text-sm leading-relaxed text-muted">
-        {diagnosis.detail}
+      {/*
+        The headline alone. The rail below already says which link broke and
+        how, so the paragraph of detail and the paragraph of advice under it
+        were the same diagnosis told three times. They stay reachable on hover
+        — the proxy advice is the one thing here a reverse-proxy user can't
+        work out from the rail — but they no longer sit on the page.
+      */}
+      <p
+        className="text-center text-lg font-medium text-primary"
+        title={[diagnosis.detail, diagnosis.hint].filter(Boolean).join("\n\n")}
+      >
+        {diagnosis.headline}
       </p>
 
-      <div className="mt-5 mb-1 flex w-full justify-center">
+      <div className="mt-6 mb-2 flex w-full justify-center">
         <ConnectionPipeline checks={diagnosis.checks} />
       </div>
-
-      {diagnosis.hint && (
-        <p className="mt-3.5 max-w-[440px] text-center text-xs leading-relaxed text-secondary">
-          {diagnosis.hint}
-        </p>
-      )}
 
       {/*
         Only the buttons that can change the outcome. When `retry` is false the
