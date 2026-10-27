@@ -108,11 +108,6 @@ export type HarnessKind = BuiltinHarnessKind | (string & {});
  */
 export const LEGACY_HARNESS: BuiltinHarnessKind = "claude";
 
-/**
- * @deprecated Kept only until the client stops reading it (#426's client half).
- * Nothing on the server may use it: there is no default provider.
- */
-export const DEFAULT_HARNESS: BuiltinHarnessKind = LEGACY_HARNESS;
 
 /**
  * WHERE a project's config dir lives — the repo, or the app's own config root.

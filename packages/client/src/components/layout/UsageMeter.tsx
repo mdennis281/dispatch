@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { RotateCw, Gauge as GaugeIcon } from "lucide-react";
 import {
-  DEFAULT_HARNESS,
   chatAccountOf,
   providerFor,
   type SubscriptionUsage,
@@ -178,10 +177,9 @@ export function UsageMeter({ layout }: { layout: GaugeLayout }) {
   // The ACCOUNT the active chat runs under, not just its provider: two Claude
   // logins have two unrelated 5-hour windows, and the gauge beside a chat has
   // to be the one that chat is spending.
-  const activeHarness = activeChat?.harness ?? (activeChat ? DEFAULT_HARNESS : undefined);
-  const activeAccount = activeChat
-    ? chatAccountOf(accounts, activeChat, activeHarness!)?.id
-    : undefined;
+  const activeHarness = activeChat?.harness;
+  const activeAccount =
+    activeChat && activeHarness ? chatAccountOf(accounts, activeChat, activeHarness)?.id : undefined;
 
   const [open, setOpen] = useState(false);
   const [now, setNow] = useState(() => Date.now());
@@ -194,7 +192,7 @@ export function UsageMeter({ layout }: { layout: GaugeLayout }) {
   // The gauge's own account came back with no reading (rate-limited, say): read
   // the rest ONCE, so the meter can still appear for the accounts that do have
   // numbers. Only after that first read has landed empty — never on first paint.
-  const targetUsage = bySubscription[usageKey(target)];
+  const targetUsage = target ? bySubscription[usageKey(target)] : undefined;
   useEffect(() => {
     if (targetUsage && !hasWindows(targetUsage) && !overview && !overviewLoading) {
       void loadOverview();
@@ -212,7 +210,7 @@ export function UsageMeter({ layout }: { layout: GaugeLayout }) {
     return () => clearInterval(tick);
   }, [open, loadOverview]);
 
-  const usage = bySubscription[usageKey(target)];
+  const usage = target ? bySubscription[usageKey(target)] : undefined;
   // Hidden only when NO account has a reading. An account that is merely
   // rate-limited used to hide the whole meter — and with it the card holding
   // every OTHER account's good numbers. "Some account has windows" is the test,
@@ -230,7 +228,7 @@ export function UsageMeter({ layout }: { layout: GaugeLayout }) {
     usage && !usage.fiveHour && usage.sevenDay
       ? windowTag(usage.secondaryLabel, "secondary")
       : windowTag(usage?.primaryLabel, "primary");
-  const currentId = usage?.subscriptionId ?? target.subscriptionId;
+  const currentId = usage?.subscriptionId ?? target?.subscriptionId;
   const rows = overview?.subscriptions ?? [];
   // The oldest row's read is the honest "updated": a shared line naming the
   // newest would claim freshness for a row that is minutes behind it.

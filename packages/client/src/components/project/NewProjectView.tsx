@@ -73,6 +73,7 @@ import {
   type NewProjectDraft,
   type SubAppDraft,
 } from "./newProjectDraft.js";
+import { useRegisteredProviders } from "../../lib/providerAvailability.js";
 
 /* ------------------------------------------------------------------ pieces */
 
@@ -308,6 +309,10 @@ export function NewProjectView({ setup = false, onBack, onDone }: NewProjectView
   // previous path, and a button that disables itself on a stale answer is worse
   // than one that lets the server say no.
   const blocked = !probing && verdict.tone === "warn";
+  // "Finish with AI" opens a chat, and a chat needs a provider that can run.
+  // Only judged once the list has loaded — an unasked list is not an empty one.
+  const providers = useRegisteredProviders();
+  const noProvider = providers.loaded && !providers.harnesses.some((h) => h.runtime.available);
   const VerdictIcon = TONE_ICON[verdict.tone];
 
   /**
@@ -721,7 +726,9 @@ export function NewProjectView({ setup = false, onBack, onDone }: NewProjectView
                   ? "Give the project a name and a directory to enable this."
                   : blocked
                     ? verdict.text
-                    : undefined
+                    : noProvider
+                      ? "No agent runtime is available, so there's nothing to finish it with. Enable a provider plugin in Settings → Plugins, or create the project without AI."
+                      : undefined
               }
               secondary={
                 <Button

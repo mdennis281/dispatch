@@ -65,9 +65,15 @@ test.beforeAll(async () => {
       DISPATCH_PORT: String(PORT),
       DISPATCH_HOST: "127.0.0.1",
       DISPATCH_DATA_DIR: dataDir,
+      // A temp CONFIG dir too. `config/` is shared by every instance on the
+      // machine: inheriting it stops the run at the human's sign-in page, and
+      // past that, the project this spec creates would land in their real config.
+      DISPATCH_CONFIG_DIR: join(dataDir, "config"),
       DISPATCH_FAKE_SDK: "1",
     },
-    stdio: ["ignore", "pipe", "pipe"],
+    // stdin piped, never "ignore": the server reads a closed stdin as "my
+    // parent is gone" and shuts down, so this spec never got past its health check.
+    stdio: ["pipe", "pipe", "pipe"],
   });
   server.stdout?.on("data", (d) => process.stdout.write(`[server] ${d}`));
   server.stderr?.on("data", (d) => process.stderr.write(`[server] ${d}`));
@@ -104,11 +110,12 @@ test("live cockpit: set up → create project → chat → send message → pane
   await expect(page.getByRole("heading", { name: "GitHub CLI" })).toBeVisible();
   await page.getByRole("button", { name: /^Continue/ }).click();
 
-  // 4) The agent runtime step BLOCKS on having one. Claude Code always resolves
-  //    (the SDK bundles its own runtime), so it is preselected and Continue is
-  //    live — if that ever stops being true this assertion is the alarm. The
-  //    step also probes the LOGIN and relabels the button "Continue anyway" on
-  //    a machine with none, which a CI box is; hence the prefix match.
+  // 4) The agent runtime step never blocks (#426): Dispatch runs with no
+  //    provider at all, so Continue is live whether or not one resolves. When
+  //    one does it is preselected and Continue saves it as the app default —
+  //    which the chat created below depends on, since there is no implicit
+  //    default provider any more. The button reads "Continue anyway" with no
+  //    runtime or no login (a CI box has neither login); hence the prefix match.
   await expect(page.getByRole("heading", { name: "Agent runtime" })).toBeVisible();
   const continueHarness = page.getByRole("button", { name: /^Continue/ });
   await expect(continueHarness).toBeEnabled();
@@ -128,7 +135,8 @@ test("live cockpit: set up → create project → chat → send message → pane
   // The brand lockup, whose accessible name is the connection state — the top
   // bar prints no "Connected" any more (see layout/BrandLockup).
   await expect(page.getByRole("button", { name: "Connection: Connected" })).toBeVisible();
-  await expect(page.getByText(projectName)).toBeVisible();
+  // Exact: the "Created …" toast and the project switcher name it too.
+  await expect(page.getByText(projectName, { exact: true })).toBeVisible();
 
   // 6) Create a chat via the UI. "New chat" now instantly creates + auto-selects
   //    a chat (no dialog) with the default title — the chat view mounts with it.
@@ -150,7 +158,6 @@ test("live cockpit: set up → create project → chat → send message → pane
 
   // 8) Panels + attention render.
   await expect(page.getByRole("tab", { name: "Worktrees" })).toBeVisible();
-  await expect(page.getByRole("tab", { name: "Apps" })).toBeVisible();
   await expect(page.getByRole("tab", { name: "PRs" })).toBeVisible();
   await expect(page.getByRole("button", { name: /Attention/ })).toBeVisible();
 

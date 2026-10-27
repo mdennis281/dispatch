@@ -15,10 +15,10 @@ import type {
   WorkflowRun,
   AttentionItem,
 } from "@dispatch/shared";
-import { DEFAULT_HARNESS } from "@dispatch/shared";
 
 import { api, ApiError } from "../lib/api.js";
 import { publishServerEvent } from "../lib/eventTap.js";
+import { refreshHarnesses } from "../lib/providerAvailability.js";
 import { planStaleReload, runStaleReload } from "../lib/staleReload.js";
 import {
   notifyAttention,
@@ -334,10 +334,7 @@ function reduceServerEvent(evt: WsServerEvent): void {
     // "provider unavailable" state is derived from it, so this is what lets a
     // chat on a re-enabled plugin recover without a reload (#426).
     case "providers-changed":
-      void api.harnesses
-        .list()
-        .then((h) => useHarnesses.getState().setHarnesses(h))
-        .catch(() => {});
+      void refreshHarnesses();
       return;
 
     case "checkpoint":
@@ -539,10 +536,6 @@ export async function hydrateFromServer(): Promise<boolean> {
     .totals()
     .then(({ totals, limit }) => useChats.getState().noteTotals(totals, limit))
     .catch(() => {});
-  void api.models
-    .list(DEFAULT_HARNESS)
-    .then((m) => useModels.getState().setModels(m, DEFAULT_HARNESS))
-    .catch(() => {});
   void api.harnesses
     .list()
     .then((h) => useHarnesses.getState().setHarnesses(h))
@@ -562,7 +555,10 @@ export async function hydrateFromServer(): Promise<boolean> {
       // hydrated before this request landed — so the badge is re-stamped off the
       // newly filtered list rather than the unfiltered one it was set from.
       void setAttentionBadge(useAttention.getState().visible.length);
-      const harness = s.harness?.defaultHarness ?? DEFAULT_HARNESS;
+      // The app default's catalogue, when there is a default — no provider
+      // named means no catalogue, not Claude's (#426).
+      const harness = s.harness?.defaultHarness;
+      if (!harness) return;
       return api.models
         .list(harness)
         .then((models) => useModels.getState().setModels(models, harness));

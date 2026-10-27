@@ -51,6 +51,7 @@ import type {
   AuthSessionResponse,
   GhCliStatus,
   HarnessKind,
+  PluginInfo,
   RuntimeLoginStatus,
   RuntimeSetupStatus,
 } from "@dispatch/shared";
@@ -528,6 +529,10 @@ function LoginLine({ kind, login }: { kind: HarnessKind; login: RuntimeLoginStat
 function HarnessStep({ onBack, onDone }: { onBack: () => void; onDone: () => void }) {
   const [runtimes, setRuntimes] = useState<RuntimeSetupStatus[] | null>(null);
   const [picked, setPicked] = useState<HarnessKind | null>(null);
+  // The provider plugins on this install, for when nothing can run: the way to
+  // get a runtime is to enable one of these (and install its CLI), so they are
+  // what this step names — not a hard-coded "install Claude Code".
+  const [providerPlugins, setProviderPlugins] = useState<PluginInfo[]>([]);
   const [checking, setChecking] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -536,13 +541,16 @@ function HarnessStep({ onBack, onDone }: { onBack: () => void; onDone: () => voi
     setChecking(true);
     setError(null);
     try {
-      const [list, settings] = await Promise.all([
+      const [list, settings, plugins] = await Promise.all([
         api.setup.runtimes(),
         // Only for the preselection below, and allowed to fail: not knowing the
         // saved default is a worse first guess, not a broken step.
         api.settings.get().catch(() => null),
+        // Only for the "nothing can run" hint, and allowed to fail the same way.
+        api.plugins.list().catch(() => [] as PluginInfo[]),
       ]);
       setRuntimes(list);
+      setProviderPlugins(plugins.filter((p) => p.capabilities.includes("providers")));
       // Preselect: the default already saved, else the first runtime that can
       // actually run — so the common case (exactly one installed) is a single
       // click on Continue.
@@ -576,7 +584,13 @@ function HarnessStep({ onBack, onDone }: { onBack: () => void; onDone: () => voi
   const loggedOut = !!chosen && chosen.login.checked && !chosen.login.loggedIn;
 
   async function save() {
-    if (!picked) return;
+    // Nothing to pick is not a reason to stop. Dispatch runs without a provider
+    // — chats just can't, and each one says so — so setup finishes and writes
+    // no default rather than inventing one (#426).
+    if (!picked) {
+      onDone();
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
@@ -620,10 +634,12 @@ function HarnessStep({ onBack, onDone }: { onBack: () => void; onDone: () => voi
             size="md"
             variant="primary"
             rightIcon={saving ? <Spinner size={12} /> : <ArrowRight />}
-            disabled={!picked || saving || checking}
+            // Blocked only while a pick is still owed: with runtimes to choose
+            // from you choose one; with none, Continue finishes without one.
+            disabled={(available.length > 0 && !picked) || saving || checking}
             onClick={() => void save()}
           >
-            {loggedOut ? "Continue anyway" : "Continue"}
+            {loggedOut || available.length === 0 ? "Continue anyway" : "Continue"}
           </Button>
         </>
       }
@@ -631,10 +647,29 @@ function HarnessStep({ onBack, onDone }: { onBack: () => void; onDone: () => voi
       {checking && !runtimes ? (
         <StatusLine tone="info">Looking for installed agent runtimes…</StatusLine>
       ) : available.length === 0 ? (
-        <StatusLine tone="bad">
-          No agent runtime found. Dispatch cannot run a chat without one — install Claude Code, then
-          press Re-check.
-          <Cmd>npm install -g @anthropic-ai/claude-code</Cmd>
+        <StatusLine tone="warn">
+          No agent runtime is available yet. You can finish setup without one — chats just won't
+          run until a provider is. Enable a provider plugin in Settings → Plugins and install its
+          CLI, then press Re-check.
+          {providerPlugins.length > 0 && (
+            <ul className="mt-1.5 space-y-0.5 text-xs text-secondary" aria-label="Provider plugins">
+              {providerPlugins.map((p) => (
+                <li key={p.id} className="flex items-center gap-1.5">
+                  <Cpu className="!mt-0 !size-3 text-faint" />
+                  <span className="font-medium text-primary">{p.name}</span>
+                  <span className="text-faint">
+                    {!p.enabled
+                      ? "disabled"
+                      : p.needsRestart
+                        ? "enabled — restart to apply"
+                        : p.status === "active"
+                          ? "enabled — its CLI is not installed"
+                          : p.status}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
         </StatusLine>
       ) : loggedOut && chosen ? (
         // Not blocking, deliberately: the fix is a login in another window, and

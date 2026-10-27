@@ -52,7 +52,6 @@ import type {
   McpToolInfo,
   ModelOption,
 } from "@dispatch/shared";
-import { DEFAULT_HARNESS } from "@dispatch/shared";
 import { api } from "../../lib/api.js";
 import { useHarnesses } from "../../stores/harnesses.js";
 import { Modal, InlineError } from "../sidebar/Modal.js";
@@ -510,7 +509,12 @@ export function McpCatalogView() {
   // scope is selected, so switching to "Provider" and back does not lose the
   // model you picked.
   const harnesses = useHarnesses((s) => s.harnesses);
-  const [harness, setHarness] = useState<string>(DEFAULT_HARNESS);
+  // The first registered provider once the list lands; there is no default
+  // provider to start on (#426).
+  const [harness, setHarness] = useState<string>("");
+  useEffect(() => {
+    if (!harness && harnesses[0]) setHarness(harnesses[0].kind);
+  }, [harness, harnesses]);
   const [model, setModel] = useState<string>("");
   const [harnessModels, setHarnessModels] = useState<ModelOption[]>([]);
 
@@ -655,10 +659,7 @@ export function McpCatalogView() {
                     onChange={setHarness}
                     label="Provider"
                     className="w-full"
-                    options={(harnesses.length
-                      ? harnesses.map((h) => h.kind)
-                      : [DEFAULT_HARNESS]
-                    ).map((k) => ({ value: k, label: k }))}
+                    options={harnesses.map((h) => ({ value: h.kind, label: h.kind }))}
                   />
                   {scope === "model" && (
                     <Select

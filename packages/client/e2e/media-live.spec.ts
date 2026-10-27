@@ -157,6 +157,9 @@ async function seed(dir: string): Promise<{ chatId: string }> {
   const chat = await post("/api/chats", {
     projectId: project.id,
     title: CHAT_TITLE,
+    // Named outright: a fresh install has no default provider (#426), and this
+    // spec skips the wizard step that would have set one.
+    harness: "claude",
   });
   const chatId = String(chat.id);
 
@@ -719,7 +722,9 @@ test("the top bar is a two-line title bar with the overlay, and one short row wi
   // trigger — which used to arm the close grace and take the card away ~140ms
   // later, with the refresh it had just started still in flight. See
   // `blurLeavesCard`.
-  await page.getByRole("button", { name: /usage$/ }).hover();
+  // Exactly "Usage": the trigger was "<account> usage" until #229, and a
+  // `/usage$/` left over from then has matched nothing since.
+  await page.getByRole("button", { name: "Usage", exact: true }).hover();
   const refresh = page.getByRole("button", { name: "Refresh" });
   await refresh.click();
   await page.waitForTimeout(400);
