@@ -131,11 +131,11 @@ function makeBroker(
   let idc = 0;
   let clock = 1000;
   const broker = new SessionBroker({
-    harnesses: claudeOnlyRegistry(),
+    harnesses: claudeOnlyRegistry(fn),
     store,
     bus,
     maxActiveSessions: cap,
-    deps: { query: fn, genId: () => `id-${++idc}`, now: () => ++clock },
+    deps: { genId: () => `id-${++idc}`, now: () => ++clock },
     ...extra,
   });
   brokers.push(broker);
@@ -483,13 +483,13 @@ describe("chat status persistence", () => {
     // the clock, and `idleSweepMs: 0` keeps the background interval out of it —
     // the sweep is invoked by hand so nothing races the assertions.
     const broker = new SessionBroker({
-      harnesses: claudeOnlyRegistry(),
+      harnesses: claudeOnlyRegistry(fn),
       store,
       bus,
       maxActiveSessions: 6,
       idleSessionMinutes: 30,
       idleSweepMs: 0,
-      deps: { query: fn, genId: () => `id-${++idc}`, now: () => clock },
+      deps: { genId: () => `id-${++idc}`, now: () => clock },
     });
     brokers.push(broker);
     await store.saveChat(chatFor("c1"));
@@ -527,13 +527,13 @@ describe("chat status persistence", () => {
     let idc = 0;
     const { fn } = makeFakeQuery(() => [assistantText("ok"), resultMsg()]);
     const broker = new SessionBroker({
-      harnesses: claudeOnlyRegistry(),
+      harnesses: claudeOnlyRegistry(fn),
       store,
       bus,
       maxActiveSessions: 6,
       idleSessionMinutes: 30,
       idleSweepMs: 0,
-      deps: { query: fn, genId: () => `id-${++idc}`, now: () => clock },
+      deps: { genId: () => `id-${++idc}`, now: () => clock },
     });
     brokers.push(broker);
     await store.saveChat(chatFor("c1"));
@@ -563,13 +563,13 @@ describe("chat status persistence", () => {
       { ...resultMsg("error"), is_error: true, result: "boom" },
     ]);
     const broker = new SessionBroker({
-      harnesses: claudeOnlyRegistry(),
+      harnesses: claudeOnlyRegistry(fn),
       store,
       bus,
       maxActiveSessions: 6,
       idleSessionMinutes: 30,
       idleSweepMs: 0,
-      deps: { query: fn, genId: () => `id-${++idc}`, now: () => clock },
+      deps: { genId: () => `id-${++idc}`, now: () => clock },
     });
     brokers.push(broker);
     await store.saveChat(chatFor("c1"));
@@ -592,7 +592,7 @@ describe("chat status persistence", () => {
     let idc = 0;
     const { fn } = makeFakeQuery(() => [assistantText("ok"), resultMsg()]);
     const broker = new SessionBroker({
-      harnesses: claudeOnlyRegistry(),
+      harnesses: claudeOnlyRegistry(fn),
       store,
       bus,
       maxActiveSessions: 6,
@@ -600,7 +600,7 @@ describe("chat status persistence", () => {
       // sweep is switched off, so it has to survive the `?? default` chain.
       idleSessionMinutes: 0,
       idleSweepMs: 0,
-      deps: { query: fn, genId: () => `id-${++idc}`, now: () => clock },
+      deps: { genId: () => `id-${++idc}`, now: () => clock },
     });
     brokers.push(broker);
     await store.saveChat(chatFor("c1"));
@@ -1684,7 +1684,24 @@ describe("SessionBroker — permissions", () => {
         e.type === "permission-request" && e.request.id === reqId,
     );
     expect(req?.request.toolName).toBe("AskUserQuestion");
-    expect(req?.request.input).toEqual(input);
+    // The card gets the NEUTRAL questionnaire every provider's question
+    // arrives as (positional ids, options keyed by label) rather than Claude's
+    // raw tool input, so one card renders all of them.
+    expect(req?.request.input).toEqual({
+      questions: [
+        {
+          id: "0",
+          header: "Language",
+          question: "Which language do you prefer?",
+          multiSelect: false,
+          allowOther: true,
+          options: [
+            { id: "TypeScript", label: "TypeScript", description: "Typed superset of JS." },
+            { id: "JavaScript", label: "JavaScript", description: "Dynamic scripting language." },
+          ],
+        },
+      ],
+    });
     expect(
       events.some(
         (e) =>
@@ -2242,7 +2259,10 @@ describe("SessionBroker — steering & concurrency", () => {
       await new Promise(() => {});
       return [];
     });
-    const broker = makeBroker(fn, 6, { deps: { query: fn, stopTimeoutMs: 50 } });
+    const broker = makeBroker(fn, 6, {
+      harnesses: claudeOnlyRegistry(fn),
+      deps: { stopTimeoutMs: 50 },
+    });
     await store.saveChat(chatFor("c1"));
     broker.create(chatFor("c1"));
     await broker.sendMessage("c1", "go");
@@ -3585,11 +3605,11 @@ describe("SessionBroker — project memory injection", () => {
     let idc = 0;
     let clock = 1000;
     const broker = new SessionBroker({
-      harnesses: claudeOnlyRegistry(),
+      harnesses: claudeOnlyRegistry(fn),
       store,
       bus,
       memory,
-      deps: { query: fn, genId: () => `id-${++idc}`, now: () => ++clock },
+      deps: { genId: () => `id-${++idc}`, now: () => ++clock },
     });
     brokers.push(broker);
     return broker;
@@ -3942,11 +3962,11 @@ describe("SessionBroker — config-sourced instructions / agents / modes", () =>
     let idc = 0;
     let clock = 1000;
     const broker = new SessionBroker({
-      harnesses: claudeOnlyRegistry(),
+      harnesses: claudeOnlyRegistry(fn),
       store,
       bus,
       projectConfig,
-      deps: { query: fn, genId: () => `id-${++idc}`, now: () => ++clock },
+      deps: { genId: () => `id-${++idc}`, now: () => ++clock },
     });
     brokers.push(broker);
     return broker;
@@ -4558,12 +4578,14 @@ describe("SessionBroker — the wrong-worktree guard", () => {
     expect(out?.permissionDecision).toBe("deny");
     expect(out?.permissionDecisionReason).toContain(home);
     expect(out?.permissionDecisionReason).toContain(other);
-    // …and the human is told, not just the model.
-    expect(
+    // …and the human is told, not just the model — as the adapter's
+    // `guard-blocked`, which the broker turns into a persisted warning once it
+    // reaches that event, so it lands just after the hook answers.
+    await until(() =>
       events.some(
         (e) => e.type === "notice" && e.text.includes("different worktree") && e.level === "warn",
       ),
-    ).toBe(true);
+    );
   });
 
   it("lets the MAIN loop move between worktrees — that is its job", async () => {
@@ -5235,6 +5257,31 @@ describe("SessionBroker — the usage ledger", () => {
       skill: "code-review",
       subagent: "Explore",
     });
+  });
+
+  it("counts an AskUserQuestion once, though its tool_use row is suppressed", async () => {
+    // The decoder drops the question's tool_use (the card is the one surface),
+    // so the ledger row has to come from the question itself — and only once,
+    // not again for the tool_use the SDK also sends.
+    const input = {
+      questions: [{ question: "Which?", header: "Pick", options: [{ label: "A" }], multiSelect: false }],
+    };
+    const { fn } = makeFakeQuery(async (_text, ctl) => {
+      await ctl.canUseTool!("AskUserQuestion", input, {});
+      return [initMsg("sess-1"), toolUseMsg("AskUserQuestion", input, "aq-1"), resultMsg()];
+    });
+    const { metrics, broker } = meteredBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+    const reqP = nextPermissionId();
+    const idle = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "ask");
+    broker.answerQuestion(await reqP, { optionId: "A", answer: "A" });
+    await idle;
+
+    const asked = metrics.recent().filter((r) => r.identifier === "AskUserQuestion");
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toMatchObject({ chatId: "c1", harness: "claude" });
   });
 
   it("attributes a subagent's own tool call to that subagent", async () => {

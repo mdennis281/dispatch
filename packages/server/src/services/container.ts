@@ -97,7 +97,7 @@ import { TokenBackfill } from "./metrics-tokens-backfill.js";
 import { LimitLedger } from "./limit-ledger.js";
 import { LimitSampler } from "./limit-sampler.js";
 import { FsExplorerService } from "./fs-explorer.js";
-import { HarnessRegistry } from "../harness/index.js";
+import { ClaudeHarness, HarnessRegistry } from "../harness/index.js";
 import { ManagerMcpBridge } from "./mcp/manager-http.js";
 import { PluginService } from "../plugins/service.js";
 import { findShippedPluginsRoot } from "../plugins/shipped.js";
@@ -313,15 +313,19 @@ export function createServices(
   overrides: ServiceOverrides = {},
 ): Services {
   const { config, store, bus } = base;
-  const harnesses = overrides.harnesses ?? new HarnessRegistry();
+  // `DISPATCH_FAKE_SDK=1` (E2E only) puts a deterministic in-process echo
+  // behind the Claude adapter — no `claude` subprocess, no auth, no network.
+  // At the adapter, not the broker: Claude chats run through `ClaudeHarness`
+  // like every other provider (#427), so that is where the SDK `query` lives.
+  const harnesses =
+    overrides.harnesses ??
+    new HarnessRegistry(
+      process.env.DISPATCH_FAKE_SDK === "1"
+        ? { harnesses: { claude: new ClaudeHarness({ query: makeFakeQuery() }) } }
+        : {},
+    );
   const managerMcp =
     overrides.managerMcp ?? new ManagerMcpBridge(`http://127.0.0.1:${config.port}`);
-
-  // `DISPATCH_FAKE_SDK=1` swaps the real Agent-SDK `query()` for a deterministic
-  // in-process echo (E2E only) — no `claude` subprocess, no auth/network. Prod
-  // and unit tests (which inject their own broker) are untouched.
-  const brokerDeps =
-    process.env.DISPATCH_FAKE_SDK === "1" ? { query: makeFakeQuery() } : undefined;
   /** Retention sweep handle, armed in `start()` and cleared in `dispose()`. */
   let terminalSweep: ReturnType<typeof setInterval> | undefined;
   // How often the terminal retention sweep runs. Hourly: the window it enforces
@@ -548,7 +552,6 @@ export function createServices(
       inspect,
       metrics,
       tokens,
-      deps: brokerDeps,
     });
   // ONE process-table read, shared by everything below that needs one. The
   // sidebar's count poll and the resource snapshot run on different cadences

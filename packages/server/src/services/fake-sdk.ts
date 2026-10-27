@@ -15,7 +15,7 @@
  * one shape the instant echo cannot produce, and the one the global-pause E2E
  * and screenshots need: a chat that is visibly running when Pause is pressed.
  */
-import type { QueryFn } from "./session-broker.js";
+import type { QueryFn } from "../harness/claude/session.js";
 
 let sessionSeq = 0;
 /** Ids for `[hold]` rows. A counter, not `Math.random()` — they only need to be unique. */
@@ -41,7 +41,13 @@ function userText(msg: unknown): string {
 export function makeFakeQuery(): QueryFn {
   return ({ prompt }) => {
     const sessionId = `fake-session-${++sessionSeq}`;
-    const input = prompt as AsyncIterable<unknown>;
+    // Living behind `ClaudeHarness` means a one-shot string prompt can reach
+    // this too (`generateText`), and `for await` over a string walks it by
+    // CHARACTER — one "Echo: " per char. Treat it as the single message it is.
+    const input: AsyncIterable<unknown> | Iterable<unknown> =
+      typeof prompt === "string"
+        ? [{ type: "user", message: { role: "user", content: prompt } }]
+        : (prompt as AsyncIterable<unknown>);
     let release: (() => void) | undefined;
 
     async function* stream(): AsyncGenerator<unknown> {

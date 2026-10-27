@@ -5194,33 +5194,11 @@ export class SessionBroker {
       this.onProviderUnavailable(session, resolved.unavailable);
       return;
     }
-    if (session.harnessKind !== "claude") {
-      await this.startHarnessSession(session, resolved.harness);
-      return;
-    }
-    session.input = new InputChannel();
-    session.abortController = new AbortController();
-    session.started = true;
-    let options: Options;
-    try {
-      options = await this.buildOptions(session);
-    } catch (err) {
-      this.onError(session, err);
-      return;
-    }
-    // Consume one-shot resume/fork config.
-    session.resumeSessionId = undefined;
-    session.forkAtUuid = undefined;
-    session.fork = false;
-
-    try {
-      session.query = this.query({ prompt: session.input, options });
-    } catch (err) {
-      this.onError(session, err);
-      return;
-    }
-    this.flushOutbox(session);
-    session.runLoop = this.consume(session);
+    // Every provider, Claude included, runs through its harness adapter (#427).
+    // Claude used to short-circuit into the broker's own direct SDK loop, which
+    // is why `ClaudeHarness` only ever ran as the fallback. That loop is dead
+    // from here and goes in the next change.
+    await this.startHarnessSession(session, resolved.harness);
   }
 
   private flushOutbox(session: LiveSession): void {
@@ -6258,6 +6236,12 @@ export class SessionBroker {
             options: q.options.map((o) => ({ id: o.label, ...o })),
           })),
         };
+        // Counted here because no `tool-use` ever arrives for it: the Claude
+        // decoder drops the AskUserQuestion block so the transcript shows one
+        // question surface, not a card plus an orphan "running" row. The direct
+        // loop counted it before that same skip; without this, every question a
+        // Claude chat asked vanished from the ledger when it moved to the seam.
+        this.recordUse(session, { ...classifyTool("AskUserQuestion", input) });
         this.registerHarnessPermission(
           session,
           event.requestId,
