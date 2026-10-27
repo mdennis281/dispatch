@@ -215,6 +215,12 @@ export const PluginInstallRequestSchema = z.object({
   url: z.string().min(1).max(2048),
   /** The commit the owner was shown. Install fetches THIS, not whatever the ref points at now. */
   sha: z.string().regex(/^[0-9a-f]{40}$/, "sha must be a full 40-character commit hash"),
+  /**
+   * Repository-relative directory of the plugin to install, when `url` names
+   * a COLLECTION (see plugin-collection.ts). Must sit inside the directory the
+   * URL names; omitted, the URL's own directory is the plugin.
+   */
+  subdir: z.string().max(512).optional(),
 });
 
 /** What `POST /api/plugins/install` answers. */
