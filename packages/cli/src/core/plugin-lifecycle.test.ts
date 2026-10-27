@@ -104,6 +104,24 @@ describe("update", () => {
     expect((await readPluginEntries(configDir)).hello).toMatchObject({ enabled: false, source: { sha: next, ref: "main" } });
   });
 
+  it("treats a commit that changed nothing in the plugin as up to date, and fast-forwards on update", async () => {
+    const old = await installV1();
+    expect((await readPluginEntries(configDir)).hello?.source).toMatchObject({ contentHash: expect.stringMatching(/^[0-9a-f]{64}$/) });
+    git(work, "commit", "-q", "--allow-empty", "-m", "a sibling changed");
+    git(work, "push", "-q", "origin", "HEAD:main");
+    const next = git(work, "rev-parse", "HEAD");
+
+    const [check] = await checkPluginUpdates(configDir);
+    expect(check).toMatchObject({ status: "up-to-date", message: expect.stringMatching(/nothing in this plugin changed/) });
+    // --check is read-only.
+    expect((await readPluginEntries(configDir)).hello?.source).toMatchObject({ sha: old });
+
+    const [res] = await updatePlugins(configDir);
+    expect(res).toMatchObject({ status: "up-to-date" });
+    expect(res!.updated).toBeUndefined();
+    expect((await readPluginEntries(configDir)).hello?.source).toMatchObject({ sha: next, ref: "main" });
+  });
+
   it("says why there is nothing to check for a local or unknown source", async () => {
     await writeFile(join(work, "plugin.yaml"), V1);
     await addPlugin(configDir, work);

@@ -46,6 +46,8 @@ import {
   type PluginModule,
   type PluginOrigin,
   type PluginSource,
+  type PluginAutoUpdate,
+  DEFAULT_PLUGIN_AUTO_UPDATE,
   type PluginStatus,
   type PluginUninstallPreview,
   type PluginUninstallResult,
@@ -115,6 +117,8 @@ interface PluginRecord extends DiscoveredPlugin {
   settings: Record<string, unknown>;
   /** `AppSettings.plugins[id].source` — what install recorded; absent for hand-installed plugins. */
   source?: PluginSource;
+  /** `AppSettings.plugins[id].autoUpdate`, as stored (unset = the default). */
+  autoUpdate?: PluginAutoUpdate;
   module?: PluginModule;
   owned?: OwnedResources;
   /** Snapshot of the plugin's static contributions, read once at `load()`. */
@@ -277,6 +281,7 @@ export class PluginService implements PluginContributionSource {
         needsRestart: false,
         settings: entry?.settings ?? {},
         ...(entry?.source ? { source: entry.source } : {}),
+        ...(entry?.autoUpdate ? { autoUpdate: entry.autoUpdate } : {}),
         contributions,
       });
       if (contributions.processes.length) {
@@ -563,6 +568,7 @@ export class PluginService implements PluginContributionSource {
                 : rec.source,
           }
         : {}),
+      ...(this.originOf(rec) === "url" ? { autoUpdate: rec.autoUpdate ?? DEFAULT_PLUGIN_AUTO_UPDATE } : {}),
     };
   }
 
@@ -700,6 +706,18 @@ export class PluginService implements PluginContributionSource {
     return this.info(rec);
   }
 
+  /** What the background update check does with it — see `PluginAutoUpdateSchema`. */
+  async setAutoUpdate(id: string, policy: PluginAutoUpdate): Promise<PluginInfo> {
+    const rec = this.records.get(id);
+    if (!rec) throw new PluginNotFound(id);
+    await this.store.updateSettings((current) => ({
+      ...current,
+      plugins: { ...current.plugins, [id]: { ...current.plugins?.[id], autoUpdate: policy } },
+    }));
+    rec.autoUpdate = policy;
+    return this.info(rec);
+  }
+
   /** Replace the plugin's settings and tell its `onChange` listeners. */
   async setSettings(id: string, settings: Record<string, unknown>): Promise<PluginInfo> {
     const rec = this.records.get(id);
@@ -754,6 +772,7 @@ export class PluginService implements PluginContributionSource {
       needsRestart: true,
       settings: entry?.settings ?? {},
       ...(entry?.source ? { source: entry.source } : {}),
+      ...(entry?.autoUpdate ? { autoUpdate: entry.autoUpdate } : {}),
       contributions: EMPTY_CONTRIBUTIONS,
     };
     this.records.set(id, rec);

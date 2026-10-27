@@ -85,6 +85,14 @@ latest commit, a **tag** URL to the newest higher semver tag *with the same pref
 already on a prerelease. So: bump `version:` in `plugin.yaml` with every release, and
 tag releases if you want users on a tag to see them.
 
+Dispatch also checks in the background (every 6 hours by default). Per plugin
+the owner picks **Notify** (the default: an announcement, nothing installed),
+**Auto-update** (installs an update that asks for nothing new; it loads on their
+next restart) or **Off**. So: an update that adds a capability, secret, OAuth
+client or scope, MCP server or process will never auto-install — expect your
+users to read and click for those. In a repository of several plugins, a push
+that does not touch your plugin's directory is not an update to it.
+
 Before updating, the owner sees what the new version asks for that the installed
 one did not — new capabilities, secrets, OAuth clients or scopes, MCP servers,
 processes, undeclared uses. Keep those changes rare and say why in your README;

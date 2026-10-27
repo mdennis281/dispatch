@@ -31,6 +31,7 @@ import {
 import { CmError } from "./manifest.js";
 import {
   addPlugin,
+  hashPluginTree,
   discoverPlugins,
   readPluginDir,
   readPluginEntries,
@@ -176,7 +177,12 @@ async function checkOne(
   origin: PluginOrigin,
   deps: GitDeps,
   keep: boolean,
-): Promise<{ check: CliUpdateCheck; staged?: Staged }> {
+): Promise<{
+  check: CliUpdateCheck;
+  staged?: Staged;
+  /** The ref moved but this plugin's files did not — what to fast-forward the record to. */
+  unchanged?: Pick<PluginGitSource, "ref" | "sha" | "contentHash">;
+}> {
   const id = plugin.id;
   if (!source) return { check: { id, origin, status: "unsupported", message: UNSUPPORTED[origin] } };
   const current = {
@@ -216,6 +222,22 @@ async function checkOne(
         : next.incompatible
           ? `the plugin at ${clone.sha.slice(0, 7)} is incompatible: ${next.error}`
           : undefined;
+    // The ref moved, but did THIS plugin? In a repository of several plugins
+    // most pushes are to a sibling; same files means nothing to install.
+    if (!refusal) {
+      const fetched = await hashPluginTree(dir);
+      if (fetched === (source.contentHash ?? (await hashPluginTree(plugin.dir)))) {
+        await rm(scratch, { recursive: true, force: true }).catch(() => {});
+        return {
+          check: {
+            ...base,
+            status: "up-to-date",
+            message: `${target.ref} moved to ${clone.sha.slice(0, 7)}, but nothing in this plugin changed`,
+          },
+          unchanged: { ref: target.ref, sha: clone.sha, contentHash: fetched },
+        };
+      }
+    }
     const check: CliUpdateCheck = {
       ...base,
       status: "available",
@@ -278,7 +300,11 @@ export async function updatePlugins(
 ): Promise<CliUpdateOutcome[]> {
   const out: CliUpdateOutcome[] = [];
   for (const t of await targets(configDir, opts.id)) {
-    const { check, staged } = await checkOne(configDir, t.plugin, t.source, t.origin, opts.deps ?? realGitDeps, true);
+    const { check, staged, unchanged } = await checkOne(configDir, t.plugin, t.source, t.origin, opts.deps ?? realGitDeps, true);
+    if (unchanged) {
+      // Fast-forward the record so the next check is one ls-remote, not another clone.
+      await setPluginSource(configDir, t.plugin.id, { ...t.source!, ...unchanged });
+    }
     if (!staged) {
       out.push(check);
       continue;
@@ -288,7 +314,7 @@ export async function updatePlugins(
         out.push({ ...check, message: "asks for more than the installed version — re-run with --yes to accept" });
         continue;
       }
-      await addPlugin(configDir, staged.dir, { force: true });
+      const result = await addPlugin(configDir, staged.dir, { force: true });
       // addPlugin saw a local directory (the clone); what is recorded is the
       // git source, advanced to the commit that was installed.
       await setPluginSource(configDir, t.plugin.id, {
@@ -296,6 +322,7 @@ export async function updatePlugins(
         ref: check.target!.ref,
         sha: check.target!.sha,
         installedAt: Date.now(),
+        contentHash: await hashPluginTree(result.dir),
       });
       out.push({ ...check, updated: true });
     } finally {

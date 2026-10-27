@@ -339,8 +339,31 @@ export const PluginGitSourceSchema = z.object({
   sha: z.string().regex(/^[0-9a-f]{40}$/),
   /** Epoch ms. */
   installedAt: z.number(),
+  /**
+   * sha256 over the installed files (`hashPluginTree`), recorded at install.
+   * What lets Check for updates tell "the branch moved" from "THIS plugin
+   * changed": in a repository holding several plugins, every push to any of
+   * them moves the commit, and without this each sibling's push read as an
+   * update to all the others. Absent on installs that predate it — the check
+   * then hashes the installed directory instead.
+   */
+  contentHash: z.string().regex(/^[0-9a-f]{64}$/).optional(),
 });
 export type PluginGitSource = z.infer<typeof PluginGitSourceSchema>;
+
+/**
+ * What the background update check does with a git-installed plugin:
+ *
+ *   off     — never checked in the background (Check for updates still works)
+ *   notify  — checked; an available update is announced, nothing installed (the default)
+ *   auto    — checked; an update that asks for NOTHING new is installed and
+ *             waits for the next restart. One that adds a capability, a
+ *             secret, an OAuth client or scope, an MCP server or a process is
+ *             only announced: consent is not something an update gets to skip.
+ */
+export const PluginAutoUpdateSchema = z.enum(["off", "notify", "auto"]);
+export type PluginAutoUpdate = z.infer<typeof PluginAutoUpdateSchema>;
+export const DEFAULT_PLUGIN_AUTO_UPDATE: PluginAutoUpdate = "notify";
 
 /** Copied from a directory or tarball (`dispatch plugin add ./x`) — nothing to check for updates against. */
 export const PluginLocalSourceSchema = z.object({
@@ -444,6 +467,8 @@ export const PluginInfoSchema = z.object({
   origin: PluginOriginSchema,
   /** The recorded install source, when there is one (`url` and `local` origins). */
   source: PluginSourceSchema.optional(),
+  /** The background update policy — `url` origins only, defaulted. */
+  autoUpdate: PluginAutoUpdateSchema.optional(),
 });
 export type PluginInfo = z.infer<typeof PluginInfoSchema>;
 
@@ -453,5 +478,7 @@ export const PluginSettingsEntrySchema = z.object({
   settings: z.record(z.string(), z.unknown()).optional(),
   /** Written by install and update only — see {@link PluginSourceSchema}. */
   source: PluginSourceSchema.optional(),
+  /** Unset means {@link DEFAULT_PLUGIN_AUTO_UPDATE}. */
+  autoUpdate: PluginAutoUpdateSchema.optional(),
 });
 export type PluginSettingsEntry = z.infer<typeof PluginSettingsEntrySchema>;

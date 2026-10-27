@@ -102,6 +102,7 @@ import { ManagerMcpBridge } from "./mcp/manager-http.js";
 import { PluginService } from "../plugins/service.js";
 import { findShippedPluginsRoot } from "../plugins/shipped.js";
 import { PluginInspector } from "../plugins/inspect/index.js";
+import { PluginUpdateWatcher, pluginUpdateHours } from "../plugins/inspect/watcher.js";
 import { PluginOAuthService } from "../plugins/oauth.js";
 
 /** The shared base every service hangs off. */
@@ -169,6 +170,7 @@ export interface ServiceOverrides {
   chatCompletionNotices?: ChatCompletionNotices;
   plugins?: PluginService;
   pluginInspector?: PluginInspector;
+  pluginUpdates?: PluginUpdateWatcher;
   pluginOAuth?: PluginOAuthService;
 }
 
@@ -255,6 +257,8 @@ export interface Services extends ServiceBase {
   plugins: PluginService;
   /** Settings → Plugins → Inspect from URL: read a plugin at a git URL without running it, and install that exact sha. */
   pluginInspector: PluginInspector;
+  /** Background update checks for git-installed plugins, and the `auto` policy. */
+  pluginUpdates: PluginUpdateWatcher;
   /** The host-run OAuth client flow behind `ctx.oauth` and the plugin pane's Connect button. */
   pluginOAuth: PluginOAuthService;
   fileIndex: FileIndexService;
@@ -1184,6 +1188,14 @@ export function createServices(
       noteInstalled: (id) => plugins.noteInstalled(id),
       recordSource: (id, source) => plugins.recordSource(id, source),
     });
+  const pluginUpdates: PluginUpdateWatcher =
+    overrides.pluginUpdates ??
+    new PluginUpdateWatcher({
+      inspector: pluginInspector,
+      list: () => plugins.list(),
+      notice: (level, text) => bus.publish({ type: "notice", level, text }),
+      intervalHours: pluginUpdateHours(),
+    });
   // "The chat you spawned is done" — armed by `broker.spawnChat` below, delivered
   // over the messenger above. Constructed here because it needs both, and
   // disposed in `dispose()` so a pending notice is not a reason the process
@@ -1503,6 +1515,7 @@ export function createServices(
     chatCompletionNotices,
     plugins,
     pluginInspector,
+    pluginUpdates,
     pluginOAuth,
     fileIndex,
     fsExplorer,
@@ -1649,6 +1662,8 @@ export function createServices(
       // loaded would ask the stable endpoint on behalf of an unstable install.
       await release.hydrate().catch(() => {});
       safeStart("release", () => release.start());
+      // Same shape as release polling: deferred first pass, unref'd interval.
+      safeStart("pluginUpdates", () => pluginUpdates.start());
       // AI title: generate one from the first user message IFF the chat is still
       // on its default "New chat" title. We fire as soon as the user's prompt
       // lands (`user` row) so a new chat is named right after the first send
@@ -1816,6 +1831,9 @@ export function createServices(
       await issueWatcher.drain().catch(() => {});
       limitSampler.stop();
       release.stop();
+      // An auto-update mid-copy finishes rather than leaving a half-renamed slot.
+      pluginUpdates.stop();
+      await pluginUpdates.drain().catch(() => {});
       // Disarm first so nothing new fires, then let an in-flight resume land
       // before the broker goes away under it.
       resume.dispose();
