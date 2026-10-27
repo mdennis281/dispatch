@@ -827,6 +827,11 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
         ?.getText({ blockSeparator: "\n", textSerializers: { hardBreak: () => "\n" } })
         .trim() ?? "";
     if ((!text && attachments.length === 0) || uploading > 0) return;
+    // Here, not just on the button: Send is only aria-disabled (it stays
+    // clickable) and Ctrl/⌘↵ lands here too. Past this line the editor, draft
+    // and attachments are cleared, so a turn the server is about to refuse
+    // would cost the draft the banner promises to keep.
+    if (unavailable) return;
 
     actions.sendMessage(chat.id, {
       text: text || undefined,
