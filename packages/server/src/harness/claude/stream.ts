@@ -112,6 +112,16 @@ export class ClaudeStreamDecoder {
   }
 
   /**
+   * Replace the occupancy with a better reading than the stream carried — the
+   * session's `getContextUsage()` after a compaction, whose `post_tokens`
+   * counts only the summary and kept messages. Without this the next turn-end
+   * would put the stream's 3k back over a real 29k.
+   */
+  setContextTokens(tokens: number): void {
+    this.lastContextTokens = tokens;
+  }
+
+  /**
    * Translate one SDK message into zero or more neutral events.
    *
    * Synchronous and allocation-light: the broker still owns the async work

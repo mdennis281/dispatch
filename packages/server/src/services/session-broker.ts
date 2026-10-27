@@ -236,7 +236,11 @@ import { configPathsFor } from "./config-location.js";
 import type { AuthoredConfigService } from "./authored-config.js";
 import type { HouseRulesService } from "./house-rules.js";
 import type { SlashCommandService } from "./slash-commands.js";
-import { materializeSkills, cleanupMaterializedSkills } from "./skill-materializer.js";
+import {
+  materializeSkills,
+  cleanupMaterializedSkills,
+  skillsTargetDir,
+} from "./skill-materializer.js";
 import { bundledSkills } from "./bundled-skills.js";
 import { buildWorkflowDirective, createWorkflowGuard, inspectCwd } from "./workflow.js";
 import {
@@ -247,6 +251,7 @@ import {
 } from "./shell-guard.js";
 import { AgentCwdTracker } from "./agent-cwd.js";
 import { claudeExecutableOption } from "../harness/claude/runtime.js";
+import { EFFORT_THINKING_TOKENS } from "../harness/claude/session.js";
 import type {
   HarnessAccount,
   HarnessEvent,
@@ -256,6 +261,7 @@ import type {
   HarnessQuestionAnswer,
   HarnessSession,
   HarnessSessionSpec,
+  HarnessSkillSpec,
   HarnessToolGuard,
 } from "../harness/types.js";
 import { composeToolGuards, guardRecoveryInput } from "@dispatch/shared";
@@ -1507,27 +1513,11 @@ export const BUILTIN_MODE_PERMISSION: Record<string, PermissionMode> = {
 };
 
 /**
- * LEGACY effort lever — a fixed thinking-token budget per level.
- *
- * Superseded by the SDK's first-class `effort` (see {@link buildOptions} and
- * {@link SessionBroker.pushEffort}): a budget pins one number for every model and
- * fights adaptive thinking, whereas `effort` is interpreted per model and is what
- * subagents/agent definitions also speak. Kept ONLY as the fallback for a runtime
- * whose `applyFlagSettings` control is missing or rejects the level, so a live
- * effort change still does something rather than silently no-op.
+ * The legacy thinking-budget fallback for a live effort change, shared with the
+ * Claude adapter so the two loops cannot disagree about what "high" costs —
+ * they did, 16k here against 20k there. See the adapter for why it survives.
  */
-export const EFFORT_THINKING_TOKENS: Record<Effort, number> = {
-  low: 2_000,
-  medium: 8_000,
-  high: 16_000,
-  xhigh: 32_000,
-  max: 60_000,
-};
-
-/** Effort → SDK ThinkingConfig (legacy fallback only — see above). */
-export function effortToThinking(effort: Effort): Options["thinking"] {
-  return { type: "enabled", budgetTokens: EFFORT_THINKING_TOKENS[effort] };
-}
+export { EFFORT_THINKING_TOKENS };
 
 /** Thread key for the MAIN loop in the per-thread effort maps (subagents key by run id). */
 const MAIN_THREAD = "__main__";
@@ -1922,6 +1912,12 @@ interface OutboxItem {
    * whole feature exists to preserve.
    */
   control?: boolean;
+  /**
+   * Which control a `control` item is, for a harness that takes it as a call
+   * rather than as text (`compact()` / `clear()` under `controlTurns`). `text`
+   * still carries the slash command, for the loop that types it.
+   */
+  command?: { kind: "compact"; focus?: string } | { kind: "clear" };
   priority: MessagePriority;
 }
 
@@ -2396,6 +2392,13 @@ interface LiveSession {
    */
   compactLimit?: number;
   /**
+   * The raw Settings compaction window a HARNESS session was spawned with
+   * (`HarnessSessionSpec.autoCompactWindow`), compared beside `compactLimit`:
+   * on a window-triggered runtime, editing it moves the trigger as surely as
+   * a new limit does.
+   */
+  compactWindowHint?: number;
+  /**
    * The model's context-window size (tokens) for this session, learned from the
    * SDK's `getContextUsage()` control (`maxTokens`) at init and after a model
    * switch. Stamped onto each `result` row so the composer meter divides by the
@@ -2462,6 +2465,14 @@ interface LiveSession {
   /** Skill dirs materialized into `<cwd>/.claude/skills/` for this query (the
    *  ones WE created), removed on teardown so a repo-owned skill is never touched. */
   materializedSkillDirs?: string[];
+  /**
+   * Every skill this session exposes, wherever its directory came from — ours
+   * or the repo's own copy of the same name. Kept apart from
+   * `materializedSkillDirs`, which is only what WE must clean up: a session
+   * whose skills the repo already ships has nothing to clean and still has
+   * skills to enable.
+   */
+  exposedSkills?: HarnessSkillSpec[];
   /**
    * Names of project memories already auto-surfaced into this session, so a
    * relevant memory is injected once (not re-pushed every matching turn). Reset
@@ -3432,16 +3443,24 @@ export class SessionBroker {
         // the per-question answers — keyed exactly as the non-harness path keys
         // them, by question text, so the card looks them up the same way.
         const byQuestion: Record<string, string> = {};
+        // The one-line summary the card and the attention list show, built the
+        // way the direct Claude loop built it: each value with its notes, and
+        // the question's header in front only when there were several. The
+        // bare `answer.answer` this used to record is empty for a multi-question
+        // answer and drops the notes on a single one.
+        const summary: string[] = [];
         for (const a of answers) {
           const q = pending.questions?.find((x) => x.id === a.questionId);
-          if (q?.question) byQuestion[q.question] = withNotes(a.selected.join(", "), a.notes);
+          const value = withNotes(a.selected.join(", "), a.notes);
+          if (q?.question) byQuestion[q.question] = value;
+          summary.push(q?.header && answers.length > 1 ? `${q.header}: ${value}` : value);
         }
         this.recordResolvedPermission(
           session,
           requestId,
           pending,
           "allow",
-          answer.answer,
+          summary.length ? summary.join(" · ") : answer.answer,
           Object.keys(byQuestion).length ? byQuestion : undefined,
         );
         return true;
@@ -3645,16 +3664,6 @@ export class SessionBroker {
       next = effort;
     }
     this.applyEffort(session, next);
-    if (session.harnessSession) {
-      void session.harnessSession.setEffort(next).catch((err) => {
-        this.bus.publish({
-          type: "error",
-          chatId,
-          message: "setEffort failed",
-          detail: err instanceof Error ? err.message : String(err),
-        });
-      });
-    }
     void this.patchChat(chatId, { effort: effort ?? undefined });
   }
 
@@ -3946,6 +3955,19 @@ export class SessionBroker {
    */
   async getContextUsage(chatId: string): Promise<ContextUsage | null> {
     const session = this.sessions.get(chatId);
+    if (session?.harnessSession?.contextUsage) {
+      // The runtime's own breakdown, where it has one — the dropup's category
+      // detail. Undefined (no live process yet, a CLI too old to answer) falls
+      // through to the two totals the host tracks itself.
+      const u = await session.harnessSession.contextUsage().catch(() => undefined);
+      if (u && u.maxTokens > 0) {
+        session.contextWindow = u.maxTokens;
+        const max = this.meterWindow(session, u.maxTokens);
+        return max === u.maxTokens
+          ? u
+          : { ...u, maxTokens: max, percentage: Math.round((u.totalTokens / max) * 1000) / 10 };
+      }
+    }
     if (session?.harnessSession) {
       const maxTokens = await session.harnessSession.contextWindow().catch(() => undefined);
       if (maxTokens) session.contextWindow = maxTokens;
@@ -4006,16 +4028,22 @@ export class SessionBroker {
       // adapter.
       text: resolved ? `Compacting context — keep: ${oneLineFocus(resolved)}` : "Compacting context…",
     });
-    if (session.harnessSession) void session.harnessSession.compact(resolved);
-    else {
-      session.outbox.push({
-        id: this.genId(),
-        text: compactCommand(resolved),
-        control: true,
-        priority: "next",
-      });
-      this.schedule(session);
+    // A runtime whose compaction is a turn gets it queued like one: behind the
+    // running turn, opening its own, and STARTING the session if it is not
+    // live — handed to the adapter on the side, it was dropped by a session
+    // that had not started and never showed the chat as busy.
+    if (session.harnessSession && !this.controlTurns(session)) {
+      void session.harnessSession.compact(resolved);
+      return;
     }
+    session.outbox.push({
+      id: this.genId(),
+      text: compactCommand(resolved),
+      control: true,
+      command: { kind: "compact", focus: resolved },
+      priority: "next",
+    });
+    this.schedule(session);
   }
 
   /** The standing compaction focus from settings, or undefined when none is set. */
@@ -4071,19 +4099,33 @@ export class SessionBroker {
         return;
       }
     } else {
-      if (limit === session.compactLimit) return;
+      // The window hint moves the trigger as surely as the limit does — but only
+      // on a runtime that reads it, and the one sign of that is a session that
+      // takes both live. Codex declares `nativeContextLimit` and ignores the
+      // hint, so counting it there retired an idle Codex chat over a Claude-only
+      // setting it never reads.
+      const windowHint = settings?.autoCompact?.window;
+      const live = session.harnessSession;
+      const hintMoved = Boolean(live?.setContextTokenLimit) && windowHint !== session.compactWindowHint;
+      if (limit === session.compactLimit && !hintMoved) {
+        session.compactWindowHint = windowHint;
+        return;
+      }
       // A runtime that never reads the limit is held to it by the turn-end
       // check alone, which reads Settings live: just move the host's number.
       const caps = this.harnesses?.find(session.harnessKind)?.capabilities;
       if (!caps?.nativeContextLimit) {
         session.compactLimit = limit;
+        session.compactWindowHint = windowHint;
         return;
       }
-      const live = session.harnessSession;
       if (live?.setContextTokenLimit) {
         try {
-          await live.setContextTokenLimit(limit);
+          // The adapter accepts a move its runtime would not notice (Claude:
+          // two limits that clamp to one window) and refuses one it would.
+          await live.setContextTokenLimit(limit, windowHint);
           session.compactLimit = limit;
+          session.compactWindowHint = windowHint;
           return;
         } catch {
           /* fall through to the respawn */
@@ -4156,14 +4198,17 @@ export class SessionBroker {
     if (session.autoCompactedAt === session.lastContextTokens) return;
     session.autoCompactedAt = session.lastContextTokens;
     const focus = normalizeCompactFocus(settings?.autoCompact?.instructions);
-    if (session.harnessSession) {
+    if (session.harnessSession && !this.controlTurns(session)) {
       void session.harnessSession.compact(focus);
       return;
     }
+    // Flushed now rather than scheduled: the caller is the turn end, which next
+    // sees the runtime holding input and keeps the chat running for it.
     session.outbox.push({
       id: this.genId(),
       text: compactCommand(focus),
       control: true,
+      command: { kind: "compact", focus },
       priority: "next",
     });
     this.flushOutbox(session);
@@ -4244,20 +4289,23 @@ export class SessionBroker {
       level: "info",
       text: "Cleared the model's context (transcript kept).",
     });
-    if (session.harnessSession) {
+    if (session.harnessSession && !this.controlTurns(session)) {
       // Codex has native compaction but no in-thread `/clear`: retire the native
       // thread and let the next user message create a fresh one. Dispatch's
       // transcript remains the durable conversation record.
       this.retireNativeSession(session);
-    } else {
-      session.outbox.push({
-        id: this.genId(),
-        text: "/clear",
-        control: true,
-        priority: "next",
-      });
-      this.schedule(session);
+      return;
     }
+    // In-band where the runtime has it: the CLI keeps its process and every
+    // MCP server it holds, where a retire-and-respawn would rebuild them all.
+    session.outbox.push({
+      id: this.genId(),
+      text: "/clear",
+      control: true,
+      command: { kind: "clear" },
+      priority: "next",
+    });
+    this.schedule(session);
   }
 
   /**
@@ -4294,6 +4342,8 @@ export class SessionBroker {
     session.managerGrant?.revoke();
     session.managerGrant = undefined;
     void live.dispose();
+    // The retired runtime's in-flight manager waits go with it, as on `stop`.
+    session.abortController?.abort();
     void this.patchChat(session.chatId, {
       sessionId: undefined,
       costBaselineUsd: undefined,
@@ -4374,6 +4424,11 @@ export class SessionBroker {
         live.dispose(),
         session.runLoop ?? Promise.resolve(),
       ]).then(() => undefined);
+      // After dispose has begun, so the adapter reads it as the stop it is and
+      // not as its runtime dying. This is the signal Dispatch's own tools hang
+      // off: without it a `wait` or `wait_for_chat` the agent was blocked in
+      // outlived the session that called it.
+      session.abortController?.abort();
       // The ONE grace window bounds disposal itself as well as the iterator it
       // should close. A provider that stops answering during dispose cannot hold
       // this route (and a fresh manager grant) forever.
@@ -4425,6 +4480,8 @@ export class SessionBroker {
         live.dispose(),
         session.runLoop ?? Promise.resolve(),
       ]).then(() => undefined);
+      // Same as `stop`: the manager tools' waits hang off this signal.
+      session.abortController?.abort();
       await this.awaitLoop(teardown, this.stopTimeoutMs);
       session.managerGrant?.revoke();
       session.managerGrant = undefined;
@@ -5168,7 +5225,29 @@ export class SessionBroker {
 
   private flushOutbox(session: LiveSession): void {
     if (session.harnessSession) {
+      const live = session.harnessSession;
+      const asCalls = this.controlTurns(session);
       for (const item of session.outbox) {
+        // A queued `/compact` or `/clear` reaches the runtime the way it wants
+        // it. Only under `controlTurns`: elsewhere it stays the text it was, the
+        // shape a not-yet-started Codex chat has always been handed.
+        if (item.command && asCalls) {
+          const run =
+            item.command.kind === "compact"
+              ? live.compact(item.command.focus)
+              : live.clear
+                ? live.clear()
+                : Promise.resolve(live.send({ text: item.text, priority: item.priority }));
+          void run.catch((err: unknown) =>
+            this.bus.publish({
+              type: "error",
+              chatId: session.chatId,
+              message: `${item.command!.kind} failed`,
+              detail: err instanceof Error ? err.message : String(err),
+            }),
+          );
+          continue;
+        }
         session.harnessSession.send({
           text: outboxText(item),
           images: this.resolveHarnessImages(session.chatId, item.images),
@@ -5182,6 +5261,16 @@ export class SessionBroker {
     if (!session.input) return;
     for (const item of session.outbox) session.input.push(this.toSdkUserMessage(item));
     session.outbox = [];
+  }
+
+  /**
+   * Does this chat's runtime take `/compact` and `/clear` as turns of their own
+   * (see `HarnessCapabilities.controlTurns`)? Asked of the CONFIGURED kind, so
+   * it holds before a session exists — a compaction asked of a chat that has
+   * not started yet is exactly the case that has to queue.
+   */
+  private controlTurns(session: LiveSession): boolean {
+    return Boolean(this.harnesses?.find(session.harnessKind)?.capabilities.controlTurns);
   }
 
   /**
@@ -5350,10 +5439,11 @@ export class SessionBroker {
                 ? [{ ...s, transport: "http" }]
                 : [s],
         );
-        // Only the Claude adapter reads `spec.agent` (harness/claude/session.ts);
-        // Codex and ACP take the append alone, so an agent section would be a
-        // disclosure of something that never reached the model.
-        if (harness.kind !== "claude") {
+        // Only a runtime with named agents reads `spec.agent`; Codex and ACP
+        // take the append alone, so an agent section there would disclose
+        // something that never reached the model. The same capability decides
+        // whether `setHarness` keeps a chat's agent pin at all.
+        if (!harness.capabilities.subagents) {
           pending.sections = pending.sections.filter((s) => s.id !== "agent");
         }
       }
@@ -5363,6 +5453,7 @@ export class SessionBroker {
       const contextTokenLimit = this.compactThreshold(session, appSettings);
       // What this spawn enforces — see `refreshContextLimit` and `meterWindow`.
       session.compactLimit = contextTokenLimit;
+      session.compactWindowHint = appSettings?.autoCompact?.window;
       const spec: HarnessSessionSpec = {
         cwd: options.cwd,
         permissionMode: options.permissionMode ?? "default",
@@ -5385,16 +5476,17 @@ export class SessionBroker {
         managerMcp,
         allowedTools: session.allowedTools,
         disallowedTools: session.deniedTools,
-        skills: (session.materializedSkillDirs ?? []).map((dir) => ({
-          dir,
-          name: dir.split(/[\\/]/).pop() ?? dir,
-        })),
+        // Every skill exposed, not only the ones materialized this time: a
+        // repo that ships its own copy of each left that list empty, and the
+        // Claude adapter enables skills off this one.
+        skills: session.exposedSkills ?? [],
         resumeSessionId: session.resumeSessionId,
         forkAtId: session.forkAtUuid,
         fork: session.fork,
         autoCompact: appSettings?.autoCompact?.enabled ?? true,
-        // Raw: the Claude adapter combines it with the limit; the rest ignore it.
-        autoCompactWindow: appSettings?.autoCompact?.window,
+        // Raw: a window-triggered runtime (Claude) combines it with the limit;
+        // the rest ignore it.
+        autoCompactWindow: session.compactWindowHint,
         contextTokenLimit,
         contextWindow: session.contextWindow,
         abortSignal: session.abortController.signal,
@@ -6043,7 +6135,11 @@ export class SessionBroker {
           uuid: event.uuid,
           parentToolUseId: event.parentToolUseId,
           subagentType: event.subagentType,
-          effort: event.effort ?? session.effort,
+          // What the runtime reported, else what was configured for this
+          // thread — which for the main loop is a pinned agent's own effort,
+          // not the chat's. `session.effort` alone showed the chat's level on
+          // every row of a chat running as an agent that pinned another.
+          effort: event.effort ?? this.threadEffort(session, event.parentToolUseId ?? null),
         });
         return;
       case "tool-use": {
@@ -6090,7 +6186,7 @@ export class SessionBroker {
           server: event.server ?? parseMcpServer(event.name),
           parentToolUseId: event.parentToolUseId,
           subagentType: event.subagentType,
-          effort: event.effort ?? session.effort,
+          effort: event.effort ?? this.threadEffort(session, event.parentToolUseId ?? null),
           uuid: event.uuid,
         });
         return;
@@ -6142,7 +6238,11 @@ export class SessionBroker {
           event.requestId,
           event.toolName,
           event.input,
-          { description: event.reason },
+          {
+            title: event.title,
+            displayName: event.displayName,
+            description: event.description ?? event.reason,
+          },
           undefined,
           event.parentToolUseId ?? MAIN_ACTOR,
         );
@@ -8326,8 +8426,15 @@ export class SessionBroker {
     // Everything observed so far described the OLD level; drop it so the next
     // hook re-reports (and any downgrade for this level is learned fresh).
     session.effortByThread.clear();
-    if (!session.query) return;
-    void this.pushEffort(session.query, effort).catch((err: unknown) => {
+    // Both live shapes, from this one place: a per-message effort on a harness
+    // session used to stop at `session.effort` here, so it only reached the
+    // runtime when the session was next rebuilt.
+    const push = session.harnessSession
+      ? session.harnessSession.setEffort(effort)
+      : session.query
+        ? this.pushEffort(session.query, effort)
+        : undefined;
+    void push?.catch((err: unknown) => {
       this.bus.publish({
         type: "error",
         chatId: session.chatId,
@@ -9813,6 +9920,7 @@ export class SessionBroker {
     // dir that already exists, a project or repo skill of the same name silently
     // overrides the bundled one rather than fighting it.
     const sentSkills: SentContextSkill[] = [];
+    session.exposedSkills = undefined;
     if (cwd) {
       const projectSkills =
         this.projectConfig && projectId ? this.projectConfig.getSkills(projectId) : [];
@@ -9836,10 +9944,13 @@ export class SessionBroker {
         options.skills = "all";
         // First of a name wins, exactly as materialization decides it above.
         const seen = new Set<string>();
+        const base = skillsTargetDir(cwd, providerFor(session.harnessKind).skillsDir);
+        session.exposedSkills = [];
         for (const s of skills) {
           if (seen.has(s.name)) continue;
           seen.add(s.name);
           sentSkills.push({ name: s.name, description: s.description });
+          session.exposedSkills.push({ name: s.name, dir: join(base, s.dir) });
         }
       }
     }

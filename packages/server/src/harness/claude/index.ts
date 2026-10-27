@@ -32,7 +32,7 @@ import type {
   ModelOption,
   RuntimeLoginStatus,
 } from "@dispatch/shared";
-import { listAvailableModels, listContextWindows } from "./models.js";
+import { cachedContextWindow, listAvailableModels, listContextWindows } from "./models.js";
 import { claudeExecutable, claudeExecutableOption, claudeRuntime } from "./runtime.js";
 import { envWithAccount, transferClaudeSession } from "./account.js";
 import { probeClaudeLogin, type RunLoginProbe } from "./login.js";
@@ -48,6 +48,8 @@ export const CLAUDE_CAPABILITIES: HarnessCapabilities = {
   subagents: true,
   skills: true,
   compaction: true,
+  // `/compact` and `/clear` are slash commands the CLI answers like a message.
+  controlTurns: true,
   fork: true,
   // The OAuth usage endpoint, polled through `readLimits` (see `usage.ts`).
   usageLimits: true,
@@ -114,6 +116,16 @@ export class ClaudeHarness implements Harness {
 
   contextWindows(opts: { refresh?: boolean; account?: HarnessAccount } = {}): Promise<Record<string, number>> {
     return listContextWindows({ refresh: opts.refresh, account: opts.account });
+  }
+
+  /**
+   * The window from the per-model probe's CACHE only, never a fresh probe: the
+   * broker awaits this at session start, and a cold probe is a step per model
+   * (tens of seconds). A miss is fine — the session reads the real window from
+   * the CLI the moment it is live and reports it as a `usage` event.
+   */
+  async contextWindow(opts: { model?: string; account?: HarnessAccount } = {}): Promise<number | undefined> {
+    return opts.model ? cachedContextWindow(opts.model, opts.account) : undefined;
   }
 
   transferSession(sessionId: string, from: HarnessAccount, to: HarnessAccount): Promise<boolean> {

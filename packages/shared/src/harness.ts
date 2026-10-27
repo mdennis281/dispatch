@@ -48,6 +48,7 @@ import type {
   SlashCommandInfo,
   TokenFigures,
   RuntimeLoginStatus,
+  ContextUsage,
 } from "./index.js";
 
 /**
@@ -82,6 +83,21 @@ export interface HarnessCapabilities {
   skills: boolean;
   /** In-band context compaction the host can trigger. */
   compaction: boolean;
+  /**
+   * {@link HarnessSession.compact} and {@link HarnessSession.clear} are
+   * ordinary TURNS on the runtime's input — Claude's `/compact` and `/clear`
+   * are slash commands the CLI answers with a result like any message — and
+   * each ends with its own `turn-end`.
+   *
+   * The host then queues them in its outbox behind a running turn and opens a
+   * turn for each, exactly as for a message. Calling them on the side instead
+   * dropped a compaction asked of a session that had not started yet, and left
+   * the chat reading idle while the runtime was busy summarising.
+   *
+   * Absent (Codex), `compact()` is a control call the host fires and forgets,
+   * and a `/clear` retires the native session. Optional; absent is false.
+   */
+  controlTurns?: boolean;
   /** Fork a session at a chosen point into a new one. */
   fork: boolean;
   /** Account-level rate-limit reporting (see {@link Harness.readLimits}). */
@@ -417,10 +433,11 @@ export interface HarnessSessionSpec {
   /** Auto-compact when the window fills (default true). */
   autoCompact?: boolean;
   /**
-   * CLAUDE ONLY: the raw "Claude compaction window" from Settings — Claude
-   * Code's `autoCompactWindow` (a window size, 100k–1M), not a reserve. The
-   * Claude adapter combines it with {@link contextTokenLimit}; every other
-   * runtime ignores it.
+   * A hint for a runtime whose own compaction trigger is a WINDOW size rather
+   * than a token threshold: the user's "compaction window" from Settings, raw
+   * (100k–1M), not a reserve. Claude Code's `autoCompactWindow` is such a
+   * trigger, and its adapter combines this with {@link contextTokenLimit}; a
+   * runtime with only a token threshold ignores it.
    */
   autoCompactWindow?: number;
   /**
@@ -563,6 +580,16 @@ export interface HarnessPermissionEvent {
   reason?: string;
   /** Human-readable target ("src/app.ts", "git push"), when derivable. */
   target?: string;
+  /**
+   * The runtime's own wording for the card, when it supplies one — Claude's
+   * bridge renders a full sentence ("Claude wants to read foo.txt"), a short
+   * action ("Read file") and a subtitle. Better than anything the host can
+   * rebuild from a tool name and its input, so the card uses them as given.
+   */
+  title?: string;
+  displayName?: string;
+  description?: string;
+  /** The subagent run asking, or null/absent for the main loop. */
   parentToolUseId?: string | null;
 }
 
@@ -719,7 +746,17 @@ export interface HarnessQuestionAnswer {
  * cheap and a queued chat costs nothing.
  */
 export interface HarnessSession {
-  /** The neutral event stream. Ends when the session is done or disposed. */
+  /**
+   * The neutral event stream. Ends when the session is done or disposed.
+   *
+   * THROWS when the RUNTIME died — the process exited, the transport broke,
+   * it would not start — as opposed to a turn failing inside a live runtime.
+   * The two are different states for the human: a failed turn leaves a chat
+   * that can take the next message, a dead runtime leaves one in `error` with
+   * the runtime's own last words. Reporting a crash as `turn-end{ok:false}`
+   * and then ending the stream settled it as a failed turn followed by a
+   * clean "Session ended", which hid the stderr tail that said why.
+   */
   events: AsyncIterable<HarnessEvent>;
   /** Queue a message. Starts the runtime on first call. */
   send(input: HarnessInput): void;
@@ -749,6 +786,14 @@ export interface HarnessSession {
    */
   compact(focus?: string): Promise<void>;
   /**
+   * Clear the model's context IN PLACE, keeping the session — Claude's
+   * `/clear`. Optional: without it the host retires the native session and the
+   * next message starts a fresh one, which is the same outcome for a runtime
+   * that has no in-band clear and a needless respawn for one that does.
+   * Under {@link HarnessCapabilities.controlTurns} it runs as a turn.
+   */
+  clear?(): Promise<void>;
+  /**
    * Replace some of the session's EXTERNAL MCP server definitions in place —
    * the ones whose `${secret:…}` changed — without restarting the chat. Merged
    * over the servers the session started with; Dispatch's own servers are kept.
@@ -757,20 +802,35 @@ export interface HarnessSession {
    */
   updateMcpServers?(servers: Record<string, McpServerConfig>): Promise<void>;
   /**
-   * Move {@link HarnessSessionSpec.contextTokenLimit} on a live session — a
-   * model switch or a Settings edit changed the threshold. Optional, and
-   * neither runtime Dispatch ships can do it (Codex's `thread/settings/update`
-   * has no such field; Claude accepts `applyFlagSettings({ autoCompactWindow })`
-   * and changes nothing). Absent or rejecting, the host retires the idle
-   * session and resumes it with the new limit before the next message.
+   * Move {@link HarnessSessionSpec.contextTokenLimit} (and the
+   * {@link HarnessSessionSpec.autoCompactWindow} hint) on a live session — a
+   * model switch or a Settings edit changed the threshold. Optional.
+   *
+   * No runtime Dispatch ships can move its trigger live (Codex's
+   * `thread/settings/update` has no such field; Claude accepts
+   * `applyFlagSettings({ autoCompactWindow })` and changes nothing). What an
+   * adapter CAN do is resolve when the move changes nothing its runtime would
+   * notice — two limits Claude clamps to the same window — so the host does not
+   * respawn for it. Absent or rejecting, the host retires the idle session and
+   * resumes it with the new values before the next message.
    */
-  setContextTokenLimit?(limit: number | undefined): Promise<void>;
+  setContextTokenLimit?(limit: number | undefined, autoCompactWindow?: number): Promise<void>;
   /** Answer a pending permission request. */
   resolvePermission(requestId: string, resolution: HarnessPermissionResolution): void;
   /** Answer a pending question. */
   resolveQuestion(requestId: string, answers: HarnessQuestionAnswer[]): void;
   /** The context window of the model currently running, when knowable. */
   contextWindow(): Promise<number | undefined>;
+  /**
+   * The runtime's own account of what fills the window right now — total,
+   * window and a per-category breakdown — for the meter's detail view.
+   *
+   * Optional: absent, the host shows the two totals it tracks itself. An
+   * adapter that has it should also keep the meter's denominator current on its
+   * own (a `usage` event carrying `contextWindow`) after the session starts and
+   * after a model switch, since only it can ask.
+   */
+  contextUsage?(): Promise<ContextUsage | undefined>;
   /**
    * Every `/` command this runtime accepts — built-ins, plugin commands and the
    * skills it discovered — for the composer's command menu.
@@ -793,7 +853,18 @@ export interface HarnessSession {
    * one shared tree to whichever chat asked last.
    */
   pid?(): number | undefined;
-  /** Tear the runtime down and end the event stream. */
+  /**
+   * Tear the runtime down and end the event stream.
+   *
+   * Must: settle every pending ask with a denial (a runtime blocked on one
+   * never exits), end this session's process — or release its share of a
+   * shared one — and end `events` without throwing.
+   *
+   * Need not: cancel Dispatch's own tool calls in flight. The host owns
+   * {@link HarnessSessionSpec.abortSignal} and aborts it itself on stop, fork
+   * and retirement, which is what ends a `wait` or `wait_for_chat` blocked
+   * inside the manager MCP.
+   */
   dispose(): Promise<void>;
 }
 
