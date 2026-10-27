@@ -179,8 +179,16 @@ export class CodexConnection {
       if (!p) return;
       this.pending.delete(frame.id);
       p.cancel?.();
-      if (frame.error) p.reject(new Error(frame.error.message ?? "codex rpc error"));
-      else p.resolve(frame.result);
+      // `code`/`data` ride along: a caller that must tell one refusal from
+      // another (a non-steerable turn) shouldn't have to parse prose alone.
+      if (frame.error) {
+        p.reject(
+          Object.assign(new Error(frame.error.message ?? "codex rpc error"), {
+            code: frame.error.code,
+            data: frame.error.data,
+          }),
+        );
+      } else p.resolve(frame.result);
       return;
     }
 
