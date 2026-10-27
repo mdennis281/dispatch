@@ -70,19 +70,35 @@ async function cmdAdd(args: ParsedArgs): Promise<void> {
       : [undefined];
   if (!picks.length) throw new CmError(`no plugins found in ${source}`);
   const results = [];
+  const failed: Array<{ plugin: string; error: string }> = [];
   for (const plugin of picks) {
-    const result = await addPlugin(configDir, source, { force: has(args, "force"), ...(plugin !== undefined ? { plugin } : {}) });
-    // Where it came from, in host-owned config — what `update` follows later.
-    if (result.source) await setPluginSource(configDir, result.plugin.manifest!.id, result.source);
-    results.push(result);
+    try {
+      const result = await addPlugin(configDir, source, { force: has(args, "force"), ...(plugin !== undefined ? { plugin } : {}) });
+      // Where it came from, in host-owned config — what `update` follows later.
+      if (result.source) await setPluginSource(configDir, result.plugin.manifest!.id, result.source);
+      results.push(result);
+    } catch (err) {
+      // One pick, one refusal: a single add keeps its exact error, but in a
+      // batch the ones already on disk must still be reported, or `--plugin a
+      // --plugin broken` leaves `a` installed with nothing having said so.
+      if (picks.length === 1 || !(err instanceof CmError)) throw err;
+      failed.push({ plugin: plugin!, error: err.message });
+    }
   }
-  if (emitJson(args, results.length === 1 ? results[0] : results)) return;
+  const failure = failed.length
+    ? new CmError(`${failed.length} of ${picks.length} not installed:\n${failed.map((f) => `  ${f.plugin}: ${f.error}`).join("\n")}`)
+    : undefined;
+  if (emitJson(args, picks.length === 1 ? results[0] : { installed: results, failed })) {
+    if (failure) process.exitCode = 1;
+    return;
+  }
   for (const result of results) {
     const m = result.plugin.manifest!;
     process.stdout.write(`${result.outcome === "replaced" ? "Replaced" : "Installed"} ${m.id} → ${result.dir}\n`);
     for (const line of consentLines(m)) process.stdout.write(`${line}\n`);
   }
-  process.stdout.write(RESTART_NOTE);
+  if (results.length) process.stdout.write(RESTART_NOTE);
+  if (failure) throw failure;
 }
 
 async function cmdLink(args: ParsedArgs): Promise<void> {

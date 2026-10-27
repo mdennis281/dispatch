@@ -95,6 +95,8 @@ describe("listCollection", () => {
     expect(normaliseCollectionPath("./a/b/")).toEqual({ path: "a/b" });
     expect(normaliseCollectionPath(".")).toEqual({ path: "" });
     for (const bad of ["/etc", "C:/x", "a\\b", "a/../b", "a//b"]) expect(normaliseCollectionPath(bad)).toHaveProperty("error");
+    // CodeQL js/polynomial-redos: a long run of slashes must stay linear.
+    expect(normaliseCollectionPath(`a${"/".repeat(100_000)}`)).toEqual({ path: "a" });
   });
 });
 
@@ -181,6 +183,21 @@ describe("inspect a collection", () => {
     expect(fetched).toHaveLength(2);
     expect(r.plugins.map((p) => p.report?.id)).toEqual(["a", "b"]);
     expect(r.plugins[0]!.report!.readme?.excerpt).toMatch(/The a plugin/);
+  });
+
+  it("turns one member's oversized file into that member's error, not the whole collection's", async () => {
+    const ins = await inspector(
+      deps([
+        { name: `${PREFIX}/plugins/a/plugin.yaml`, body: manifest("a") },
+        { name: `${PREFIX}/plugins/b/plugin.yaml`, body: manifest("b") },
+        { name: `${PREFIX}/plugins/b/huge.bin`, body: "x".repeat(600) },
+        { name: `${PREFIX}/plugins/c/plugin.yaml`, body: manifest("c") },
+      ]),
+      [],
+      { ...DEFAULT_FETCH_LIMITS, maxFileBytes: 500 },
+    );
+    const r = asCollection(await ins.inspect("https://github.com/o/r"));
+    expect(r.plugins.map((p) => p.report?.id ?? p.error)).toEqual(["a", expect.stringMatching(/huge\.bin .* per-file limit/), "c"]);
   });
 
   it("refuses a single plugin that overflowed, with the cap it crossed", async () => {

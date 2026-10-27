@@ -43,6 +43,7 @@ import {
   type FetchLimits,
   type FetchedPlugin,
 } from "./fetch.js";
+import type { TarExtractResult } from "./tar.js";
 import { inspectPluginDir, type InstalledLookup } from "./inspect.js";
 import { PluginInspectError, browseUrl, parsePluginUrl } from "./url.js";
 
@@ -175,19 +176,46 @@ export class PluginInspector {
   ): Promise<PluginCollectionInspection> {
     const listing = listCollection(manifest?.value, below);
     const manifestErrors = [...(manifest?.error ? [manifest.error] : []), ...listing.manifestErrors];
-    let root = f.dir;
-    let extract = f.extract;
-    if (f.extract.overflow) {
-      const wanted = listing.members.filter((m) => below.includes(m));
-      ({ dir: root, extract } = await refetchMembers(f, wanted, { limits: this.opts.limits, deps: this.opts.fetchDeps }));
+    // Where each member's files are. Normally the first pass already holds
+    // them all; after an overflow, one strict refetch of just the members —
+    // and if THAT trips a cap (one member shipping a 9 MB file is enough: the
+    // per-file cap does not scale), one refetch per member, so the culprit
+    // becomes its own error row instead of hiding the whole collection.
+    const fetched = new Map<string, { root: string; extract: TarExtractResult } | { error: string }>();
+    const wanted = listing.members.filter((m) => below.includes(m));
+    const refetch = (members: string[]) => refetchMembers(f, members, { limits: this.opts.limits, deps: this.opts.fetchDeps });
+    if (!f.extract.overflow) {
+      for (const m of wanted) fetched.set(m, { root: f.dir, extract: f.extract });
+    } else {
+      try {
+        const all = await refetch(wanted);
+        for (const m of wanted) fetched.set(m, { root: all.dir, extract: all.extract });
+      } catch (err) {
+        if (!(err instanceof PluginInspectError) || err.status !== 413 || wanted.length < 2) throw err;
+        for (const m of wanted) {
+          try {
+            const one = await refetch([m]);
+            fetched.set(m, { root: one.dir, extract: one.extract });
+          } catch (e) {
+            if (!(e instanceof PluginInspectError) || e.status !== 413) throw e;
+            fetched.set(m, { error: e.message });
+          }
+        }
+      }
     }
     const plugins: PluginCollectionEntry[] = [];
     for (const m of listing.members) {
       const subdir = [f.subdir, m].filter(Boolean).join("/");
-      if (!below.includes(m)) {
+      const got = fetched.get(m);
+      if (!got) {
         plugins.push({ subdir, error: `no plugin.yaml in ${m || "the collection root"}` });
         continue;
       }
+      if ("error" in got) {
+        plugins.push({ subdir, error: got.error });
+        continue;
+      }
+      const { root, extract } = got;
       const dir = m ? join(root, ...m.split("/")) : root;
       const counted = await countFiles(dir);
       const skipped = m

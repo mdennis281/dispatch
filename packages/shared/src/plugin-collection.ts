@@ -38,12 +38,28 @@ export const PluginCollectionManifestSchema = z.object({
 export type PluginCollectionManifest = z.infer<typeof PluginCollectionManifestSchema>;
 
 /**
+ * `s` without leading and trailing `/`. A loop, not `/^\/+|\/+$/`: these paths
+ * come from a stranger's manifest, and that regex backtracks polynomially on a
+ * long run of slashes (CodeQL js/polynomial-redos).
+ */
+export function trimSlashes(s: string): string {
+  let a = 0;
+  let b = s.length;
+  while (a < b && s.charCodeAt(a) === 47) a++;
+  while (b > a && s.charCodeAt(b - 1) === 47) b--;
+  return s.slice(a, b);
+}
+
+/**
  * A manifest path → a clean relative path (`""` for the collection root), or
  * the reason it is refused. It names a directory inside a stranger's archive,
  * so nothing that could step outside the collection gets through.
  */
 export function normaliseCollectionPath(raw: string): { path: string } | { error: string } {
-  const s = raw.trim().replace(/^\.\/+/, "").replace(/\/+$/, "");
+  let s = raw.trim();
+  while (s.startsWith("./")) s = s.slice(2);
+  // An absolute path keeps its leading slash, so the check below names it.
+  if (!s.startsWith("/")) s = trimSlashes(s);
   if (s === "" || s === ".") return { path: "" };
   if (s.startsWith("/") || /^[A-Za-z]:/.test(s)) return { error: `"${raw}" is absolute — paths are relative to the collection root` };
   if (s.includes("\\")) return { error: `"${raw}" uses a backslash — use / between directories` };

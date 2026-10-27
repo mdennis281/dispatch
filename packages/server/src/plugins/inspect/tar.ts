@@ -24,6 +24,7 @@
  */
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve, sep } from "node:path";
+import { trimSlashes } from "@dispatch/shared";
 import { PluginInspectError } from "./url.js";
 
 export interface TarCaps {
@@ -150,7 +151,7 @@ export async function extractTar(input: AsyncIterable<Buffer | Uint8Array>, opts
   const destRoot = resolve(opts.dest);
   await mkdir(destRoot, { recursive: true });
   const subdir = opts.subdir.replace(/^\/+|\/+$/g, "");
-  const include = opts.include?.map((p) => p.replace(/^\/+|\/+$/g, ""));
+  const include = opts.include?.map(trimSlashes);
   let markers = 0;
   const result: TarExtractResult = { files: 0, bytes: 0, skipped: [], manifestDirs: [] };
 

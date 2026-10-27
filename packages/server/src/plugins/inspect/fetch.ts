@@ -336,6 +336,8 @@ export async function fetchPlugin(
  * still one plugin, so the per-file cap does not scale. Lands in
  * `<f.scratch>/members`, which the caller's cleanup of `f.scratch` removes.
  */
+let refetches = 0;
+
 export async function refetchMembers(
   f: FetchedPlugin,
   members: string[],
@@ -344,7 +346,7 @@ export async function refetchMembers(
   const base = opts.limits ?? DEFAULT_FETCH_LIMITS;
   const n = Math.max(1, Math.min(members.length, 10));
   const limits: FetchLimits = { ...base, maxFiles: base.maxFiles * n, maxBytes: base.maxBytes * n };
-  const dir = join(f.scratch, "members");
+  const dir = join(f.scratch, `members-${refetches++}`);
   const signal = AbortSignal.timeout(limits.timeoutMs);
   const extract = await extractCommit(
     f.parsed,
