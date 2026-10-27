@@ -9,7 +9,7 @@
  * The stores read `Notification.permission` at module-eval time, so every global
  * has to be in place before the import — hence the dynamic import in `load()`.
  */
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
 import type { AttentionItem } from "@dispatch/shared";
 
 interface FakeNotification {
@@ -83,6 +83,15 @@ function attn(over: Partial<AttentionItem> = {}): AttentionItem {
 
 describe("in-page attention notifications", () => {
   let env: ReturnType<typeof stubEnvironment>;
+  // The first `load()` transforms browserNotify and the whole store graph
+  // behind it. On the loaded self-hosted CI runner that alone blew the 5s
+  // per-test timeout, failing whichever test happened to run first (on main
+  // too). Pay it once here, under a budget sized for it; the transform cache
+  // survives `vi.resetModules()`, so each test's own import stays cheap.
+  beforeAll(async () => {
+    stubEnvironment();
+    await load();
+  }, 60_000);
   beforeEach(() => {
     env = stubEnvironment();
   });
