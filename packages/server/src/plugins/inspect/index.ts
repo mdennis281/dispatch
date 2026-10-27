@@ -12,12 +12,18 @@
  * the owner read the report. Update is that same path again, pinned to the
  * commit Check showed.
  */
-import { lstat, rm } from "node:fs/promises";
+import { lstat, readFile, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { parse as parseYaml } from "yaml";
 import {
+  PLUGIN_COLLECTION_FILE,
   PLUGIN_ID_PATTERN,
   diffPluginSurfaces,
+  listCollection,
   resolveUpdateTarget,
+  type PluginCollectionEntry,
+  type PluginCollectionInspection,
+  type PluginInspectResult,
   type PluginGitSource,
   type PluginInfo,
   type PluginInspection,
@@ -32,12 +38,14 @@ import {
   fetchPlugin,
   listRefs,
   realFetchDeps,
+  refetchMembers,
   type FetchDeps,
   type FetchLimits,
   type FetchedPlugin,
 } from "./fetch.js";
+import type { TarExtractResult } from "./tar.js";
 import { inspectPluginDir, type InstalledLookup } from "./inspect.js";
-import { PluginInspectError, parsePluginUrl } from "./url.js";
+import { PluginInspectError, browseUrl, parsePluginUrl } from "./url.js";
 
 export { PluginInspectError } from "./url.js";
 export { DEFAULT_FETCH_LIMITS, type FetchDeps, type FetchLimits } from "./fetch.js";
@@ -111,13 +119,139 @@ export class PluginInspector {
     });
   }
 
-  async inspect(url: string): Promise<PluginInspection> {
-    const f = await fetchPlugin(url, { limits: this.opts.limits, deps: this.opts.fetchDeps });
+  /**
+   * One plugin, or a COLLECTION of them (plugin-collection.ts). Which one is
+   * decided by what the URL's directory holds at the commit:
+   *
+   *   plugin.yaml                  → one plugin, exactly as before collections
+   *   dispatch-plugins.yaml        → a collection, listing what it names
+   *   plugin.yaml files below only → a collection, listing every one
+   *
+   * A plugin.yaml at the directory wins even over a collection file beside
+   * it: that URL has always meant "this plugin", and `addPlugin` — handed the
+   * extracted directory — reads it the same way.
+   *
+   * The fetch is soft so a monorepo too big for the caps can still be listed;
+   * a single plugin that overflowed is refused with the cap it crossed, as a
+   * strict fetch would have.
+   */
+  async inspect(url: string): Promise<PluginInspectResult> {
+    const f = await fetchPlugin(url, { soft: true, limits: this.opts.limits, deps: this.opts.fetchDeps });
     try {
-      return await this.report(f, url);
+      const below = f.extract.manifestDirs.flatMap((d) => {
+        if (!f.subdir) return [d];
+        if (d === f.subdir) return [""];
+        return d.startsWith(`${f.subdir}/`) ? [d.slice(f.subdir.length + 1)] : [];
+      });
+      const manifest = await readCollectionManifest(f.dir);
+      if (below.includes("")) {
+        if (f.extract.overflow) throw new PluginInspectError(f.extract.overflow, 413);
+        return await this.report(f, url);
+      }
+      if (!manifest && !below.length) {
+        const where = f.subdir ? `in ${f.subdir}/` : "at the repository root";
+        const others = f.extract.manifestDirs.slice(0, 8);
+        throw new PluginInspectError(
+          `no plugin.yaml ${where} of ${f.parsed.repo}@${f.sha.slice(0, 7)}, and no plugins below it` +
+            (others.length ? ` — found one in: ${others.map((d) => d || "(root)").join(", ")}` : ""),
+          404,
+        );
+      }
+      return await this.collection(f, url, manifest, below);
     } finally {
       await rm(f.scratch, { recursive: true, force: true }).catch(() => {});
     }
+  }
+
+  /**
+   * Every member gets the FULL single-plugin report — the same one its own
+   * URL would produce — so picking several at once is not a way around
+   * reading what each asks for.
+   */
+  private async collection(
+    f: FetchedPlugin,
+    url: string,
+    manifest: CollectionManifestRead | undefined,
+    below: string[],
+  ): Promise<PluginCollectionInspection> {
+    const listing = listCollection(manifest?.value, below);
+    const manifestErrors = [...(manifest?.error ? [manifest.error] : []), ...listing.manifestErrors];
+    // Where each member's files are. Normally the first pass already holds
+    // them all; after an overflow, one strict refetch of just the members —
+    // and if THAT trips a cap (one member shipping a 9 MB file is enough: the
+    // per-file cap does not scale), one refetch per member, so the culprit
+    // becomes its own error row instead of hiding the whole collection.
+    const fetched = new Map<string, { root: string; extract: TarExtractResult } | { error: string }>();
+    const wanted = listing.members.filter((m) => below.includes(m));
+    const refetch = (members: string[]) => refetchMembers(f, members, { limits: this.opts.limits, deps: this.opts.fetchDeps });
+    if (!f.extract.overflow) {
+      for (const m of wanted) fetched.set(m, { root: f.dir, extract: f.extract });
+    } else {
+      try {
+        const all = await refetch(wanted);
+        for (const m of wanted) fetched.set(m, { root: all.dir, extract: all.extract });
+      } catch (err) {
+        if (!(err instanceof PluginInspectError) || err.status !== 413 || wanted.length < 2) throw err;
+        for (const m of wanted) {
+          try {
+            const one = await refetch([m]);
+            fetched.set(m, { root: one.dir, extract: one.extract });
+          } catch (e) {
+            if (!(e instanceof PluginInspectError) || e.status !== 413) throw e;
+            fetched.set(m, { error: e.message });
+          }
+        }
+      }
+    }
+    const plugins: PluginCollectionEntry[] = [];
+    for (const m of listing.members) {
+      const subdir = [f.subdir, m].filter(Boolean).join("/");
+      const got = fetched.get(m);
+      if (!got) {
+        plugins.push({ subdir, error: `no plugin.yaml in ${m || "the collection root"}` });
+        continue;
+      }
+      if ("error" in got) {
+        plugins.push({ subdir, error: got.error });
+        continue;
+      }
+      const { root, extract } = got;
+      const dir = m ? join(root, ...m.split("/")) : root;
+      const counted = await countFiles(dir);
+      const skipped = m
+        ? extract.skipped.filter((e) => e.startsWith(`${m}/`)).map((e) => e.slice(m.length + 1))
+        : extract.skipped;
+      const member: FetchedPlugin = {
+        ...f,
+        subdir,
+        dir,
+        browseUrl: browseUrl(f.parsed, f.sha, subdir),
+        extract: { ...extract, ...counted, skipped },
+      };
+      try {
+        plugins.push({ subdir, report: await this.report(member, url) });
+      } catch (err) {
+        plugins.push({ subdir, error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+    return {
+      kind: "collection",
+      source: {
+        url,
+        host: f.parsed.host,
+        repo: f.parsed.repo,
+        cloneUrl: f.parsed.cloneUrl,
+        ref: f.ref,
+        sha: f.sha,
+        subdir: f.subdir,
+        ...(f.browseUrl ? { browseUrl: f.browseUrl } : {}),
+      },
+      ...(listing.name ? { name: listing.name } : {}),
+      ...(listing.description ? { description: listing.description } : {}),
+      listedBy: listing.listedBy,
+      manifestErrors,
+      plugins,
+    };
   }
 
   /**
@@ -127,8 +261,13 @@ export class PluginInspector {
    * posts a sha it never inspected gets exactly the checks an inspect would
    * have shown it.
    */
-  async install(url: string, sha: string, replace: boolean): Promise<PluginInstallOutcome> {
-    const f = await fetchPlugin(url, { pinSha: sha, limits: this.opts.limits, deps: this.opts.fetchDeps });
+  async install(url: string, sha: string, replace: boolean, subdir?: string): Promise<PluginInstallOutcome> {
+    const f = await fetchPlugin(url, {
+      pinSha: sha,
+      ...(subdir !== undefined ? { member: subdir } : {}),
+      limits: this.opts.limits,
+      deps: this.opts.fetchDeps,
+    });
     try {
       return await this.installFetched(f, url, { replace });
     } finally {
@@ -351,4 +490,43 @@ export class PluginInspector {
       await rm(f.scratch, { recursive: true, force: true }).catch(() => {});
     }
   }
+}
+
+interface CollectionManifestRead {
+  /** The parsed YAML; undefined when it did not parse. */
+  value?: unknown;
+  error?: string;
+}
+
+/** `dispatch-plugins.yaml` at the collection root, when there is one. */
+async function readCollectionManifest(dir: string): Promise<CollectionManifestRead | undefined> {
+  let text: string;
+  try {
+    text = await readFile(join(dir, PLUGIN_COLLECTION_FILE), "utf8");
+  } catch {
+    return undefined;
+  }
+  try {
+    return { value: parseYaml(text) ?? {} };
+  } catch (err) {
+    return { error: `${PLUGIN_COLLECTION_FILE}: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}` };
+  }
+}
+
+/** Files and bytes under one member — the extract's totals are the whole collection's. */
+async function countFiles(dir: string): Promise<{ files: number; bytes: number }> {
+  let files = 0;
+  let bytes = 0;
+  const walk = async (d: string): Promise<void> => {
+    for (const e of await readdir(d, { withFileTypes: true }).catch(() => [])) {
+      const p = join(d, e.name);
+      if (e.isDirectory()) await walk(p);
+      else if (e.isFile()) {
+        files += 1;
+        bytes += (await lstat(p)).size;
+      }
+    }
+  };
+  await walk(dir);
+  return { files, bytes };
 }

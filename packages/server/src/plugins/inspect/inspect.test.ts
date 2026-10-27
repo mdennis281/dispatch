@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { FastifyInstance } from "fastify";
-import type { PluginInfo, PluginInspection } from "@dispatch/shared";
+import { isPluginCollection, type PluginInfo, type PluginInspection } from "@dispatch/shared";
 import { buildApp } from "../../app.js";
 import { EventBus } from "../../bus.js";
 import { Store } from "../../store/index.js";
@@ -89,7 +89,9 @@ async function inspectExample(name: string): Promise<PluginInspection> {
     recordSource: async () => {},
     fetchDeps: fakeDeps(exampleRepoTar),
   });
-  return inspector.inspect(`https://github.com/mdennis281/dispatch/tree/main/examples/plugins/${name}`);
+  const r = await inspector.inspect(`https://github.com/mdennis281/dispatch/tree/main/examples/plugins/${name}`);
+  if (isPluginCollection(r)) throw new Error(`${name} inspected as a collection`);
+  return r;
 }
 
 const labels = (r: PluginInspection, kind?: string) => r.hooks.filter((h) => !kind || h.kind === kind).map((h) => h.label);

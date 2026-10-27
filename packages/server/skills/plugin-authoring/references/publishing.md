@@ -52,6 +52,29 @@ install from a URL:
 - Keep `ctx` / `host` (or `activate`'s parameter) as the name you call through; an
   alias the scan does not follow shows as "nothing uses it".
 
+## Several plugins in one repository
+
+Put each plugin in its own directory and users can paste the **repository** URL
+instead of one `/tree/<ref>/<dir>` link per plugin: Inspect lists every plugin
+in it to tick, and `dispatch plugin add <url> --plugin <path|id>` / `--all` does
+the same from the CLI. Don't put a `plugin.yaml` at the repository root — a
+directory with its own manifest is always one plugin.
+
+Add `dispatch-plugins.yaml` at the root to choose and order what is listed
+(otherwise every directory holding a `plugin.yaml` is):
+
+```yaml
+name: Home lab
+description: Plugins for the boxes in the closet
+plugins:
+  - plugins/hass
+  - plugins/proxmox
+```
+
+Paths only — names, versions and capabilities come from each `plugin.yaml`.
+Each plugin installs and updates on its own; tag releases per plugin
+(`hass-v1.2.0`) so tag-following users only see their plugin's releases.
+
 ## How your users get updates
 
 A URL install records where it came from (in the host's config, not your plugin

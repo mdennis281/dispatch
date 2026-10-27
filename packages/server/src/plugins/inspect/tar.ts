@@ -24,6 +24,7 @@
  */
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve, sep } from "node:path";
+import { trimSlashes } from "@dispatch/shared";
 import { PluginInspectError } from "./url.js";
 
 export interface TarCaps {
@@ -45,6 +46,20 @@ export interface TarExtractOptions {
    * at `dest`; `""` takes everything. Entries outside it are read past, not kept.
    */
   subdir: string;
+  /**
+   * Narrow further to these directories (relative to `subdir`, `""` = all of
+   * it) — a collection's plugins, without the rest of a monorepo around them.
+   */
+  include?: string[];
+  /**
+   * Don't throw when a cap is crossed: stop WRITING, note why in `overflow`,
+   * and keep reading so `manifestDirs` is still complete. Collection discovery
+   * needs this — a big monorepo blows the caps long before its last
+   * `plugin.yaml` streams past, and the caller re-extracts only the plugins.
+   * Manifests (`plugin.yaml`, the collection file) are written regardless,
+   * bounded by {@link MAX_MARKER_BYTES} each.
+   */
+  soft?: boolean;
   caps: TarCaps;
 }
 
@@ -57,6 +72,8 @@ export interface TarExtractResult {
   manifestDirs: string[];
   /** The pax global `comment` — GitHub writes the commit sha there. */
   globalComment?: string;
+  /** `soft` mode: the first cap crossed. What was written is incomplete. */
+  overflow?: string;
 }
 
 const BLOCK = 512;
@@ -64,6 +81,10 @@ const BLOCK = 512;
 const MAX_META_BYTES = 1024 * 1024;
 const WINDOWS_DEVICE = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?$/i;
 const SKIP_DIRS = new Set(["node_modules", ".git"]);
+/** A manifest kept past an overflow is YAML for a human to read; anything bigger is not one. */
+const MAX_MARKER_BYTES = 256 * 1024;
+const MAX_MARKERS = 64;
+const COLLECTION_FILE = "dispatch-plugins.yaml";
 
 /** Why `name` is unsafe to write, or null when it is fine. */
 export function unsafeEntryName(name: string): string | null {
@@ -130,6 +151,8 @@ export async function extractTar(input: AsyncIterable<Buffer | Uint8Array>, opts
   const destRoot = resolve(opts.dest);
   await mkdir(destRoot, { recursive: true });
   const subdir = opts.subdir.replace(/^\/+|\/+$/g, "");
+  const include = opts.include?.map(trimSlashes);
+  let markers = 0;
   const result: TarExtractResult = { files: 0, bytes: 0, skipped: [], manifestDirs: [] };
 
   let buf: Buffer = Buffer.alloc(0);
@@ -160,7 +183,7 @@ export async function extractTar(input: AsyncIterable<Buffer | Uint8Array>, opts
 
     const rel = name.split("/").filter(Boolean).slice(opts.strip).join("/");
     if (!rel) return skip();
-    if ((rel === "plugin.yaml" || rel.endsWith("/plugin.yaml")) && result.manifestDirs.length < 50) {
+    if ((rel === "plugin.yaml" || rel.endsWith("/plugin.yaml")) && result.manifestDirs.length < 200) {
       result.manifestDirs.push(rel === "plugin.yaml" ? "" : rel.slice(0, -"/plugin.yaml".length));
     }
     let inner: string;
@@ -168,6 +191,8 @@ export async function extractTar(input: AsyncIterable<Buffer | Uint8Array>, opts
     else if (rel.startsWith(`${subdir}/`)) inner = rel.slice(subdir.length + 1);
     else return skip();
     if (inner.split("/").some((s) => SKIP_DIRS.has(s))) return skip();
+    const marker = inner === COLLECTION_FILE || inner === "plugin.yaml" || inner.endsWith("/plugin.yaml");
+    if (include && !marker && !include.some((p) => p === "" || inner === p || inner.startsWith(`${p}/`))) return skip();
 
     const isFile = type === "0" || type === "7";
     const isDir = type === "5";
@@ -192,17 +217,32 @@ export async function extractTar(input: AsyncIterable<Buffer | Uint8Array>, opts
       await mkdir(target, { recursive: true });
       return skip();
     }
+    if (result.overflow) {
+      // Past a soft cap only manifests are still worth having — they are what
+      // says which directories to fetch again, strictly, on the second pass.
+      if (!marker || size > MAX_MARKER_BYTES || markers >= MAX_MARKERS) return skip();
+      markers += 1;
+      return { kind: "file", inner, target, size, padded };
+    }
+    const over = (message: string): Pending => {
+      if (!opts.soft) throw new PluginInspectError(message, 413);
+      result.overflow = message;
+      if (!marker || size > MAX_MARKER_BYTES) return skip();
+      markers += 1;
+      return { kind: "file", inner, target, size, padded };
+    };
     if (size > opts.caps.maxFileBytes) {
-      throw new PluginInspectError(`${inner} is ${size} bytes — over the ${opts.caps.maxFileBytes}-byte per-file limit`, 413);
+      return over(`${inner} is ${size} bytes — over the ${opts.caps.maxFileBytes}-byte per-file limit`);
+    }
+    if (result.files + 1 > opts.caps.maxFiles) {
+      return over(`the plugin directory has more than ${opts.caps.maxFiles} files`);
+    }
+    if (result.bytes + size > opts.caps.maxBytes) {
+      return over(`the plugin directory is larger than ${opts.caps.maxBytes} bytes`);
     }
     result.files += 1;
     result.bytes += size;
-    if (result.files > opts.caps.maxFiles) {
-      throw new PluginInspectError(`the plugin directory has more than ${opts.caps.maxFiles} files`, 413);
-    }
-    if (result.bytes > opts.caps.maxBytes) {
-      throw new PluginInspectError(`the plugin directory is larger than ${opts.caps.maxBytes} bytes`, 413);
-    }
+    if (marker) markers += 1;
     return { kind: "file", inner, target, size, padded };
   };
 

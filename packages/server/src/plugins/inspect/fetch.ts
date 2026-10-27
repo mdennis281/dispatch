@@ -33,7 +33,8 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { createGunzip } from "node:zlib";
-import { extractTar, type TarCaps, type TarExtractResult } from "./tar.js";
+import { normaliseCollectionPath } from "@dispatch/shared";
+import { extractTar, unsafeEntryName, type TarCaps, type TarExtractResult } from "./tar.js";
 import {
   PluginInspectError,
   browseUrl,
@@ -192,9 +193,80 @@ async function* bounded(src: AsyncIterable<Uint8Array>, max: number, what: strin
 }
 
 /**
+ * Pull `subdir` of the repository at `sha` into `dest`, through the confined
+ * tar reader. Every pass (plugin, collection, collection refetch) on either
+ * host comes through here, so none of them can skip the sha check below.
+ */
+async function extractCommit(
+  parsed: ParsedPluginUrl,
+  sha: string,
+  scratch: string,
+  dest: string,
+  pick: { subdir: string; include?: string[]; soft?: boolean },
+  limits: FetchLimits,
+  deps: FetchDeps,
+  signal: AbortSignal,
+): Promise<TarExtractResult> {
+  let tar: AsyncIterable<Buffer>;
+  let strip: number;
+  if (parsed.host === "github") {
+    const gz = await deps.githubTarball(parsed.owner!, parsed.name!, sha, signal);
+    const gunzip = createGunzip();
+    // `pipeline`, not `pipe`: a download error (the byte cap included) must
+    // reach the reader through `gunzip`, and a cap tripping downstream must
+    // tear the download down rather than leave it paused on backpressure
+    // until the timeout fires. The rejection itself is observed by the
+    // reader; this promise only must not be left unhandled.
+    pipeline(Readable.from(bounded(gz, limits.maxDownloadBytes, "the download")), gunzip).catch(() => {});
+    tar = bounded(gunzip, limits.maxArchiveBytes, "the unpacked archive");
+    // `<owner>-<repo>-<short sha>/` wraps every entry.
+    strip = 1;
+  } else {
+    tar = bounded(await deps.gitArchive(parsed.cloneUrl, sha, scratch, signal), limits.maxArchiveBytes, "the archive");
+    strip = 0;
+  }
+  let extract: TarExtractResult;
+  try {
+    extract = await extractTar(tar, { dest, strip, ...pick, caps: limits });
+  } catch (err) {
+    if (signal.aborted) throw new PluginInspectError(`gave up after ${limits.timeoutMs / 1000}s fetching ${parsed.repo}`, 504);
+    if (err instanceof PluginInspectError) throw err;
+    throw new PluginInspectError(`could not read the archive: ${err instanceof Error ? err.message : String(err)}`, 502);
+  }
+  // GitHub stamps the commit into the pax global header. When it disagrees
+  // with the sha asked for, something between here and GitHub is lying —
+  // refuse rather than report on, or install, the wrong bytes.
+  if (parsed.host === "github" && extract.globalComment && extract.globalComment !== sha) {
+    throw new PluginInspectError(`GitHub served commit ${extract.globalComment.slice(0, 7)} for ${sha.slice(0, 7)}`, 502);
+  }
+  return extract;
+}
+
+/**
+ * A collection member's repository-relative directory, checked: it must sit
+ * at or under `root` (the directory the URL names). The install route takes
+ * it from the request body, so without this a client could install any
+ * directory of the repository while the owner was shown another.
+ */
+export function memberSubdir(root: string, member: string): string {
+  const n = normaliseCollectionPath(member);
+  if ("error" in n) throw new PluginInspectError(`subdir ${n.error}`, 400);
+  if (n.path.split("/").some((seg) => seg && unsafeEntryName(seg))) throw new PluginInspectError(`unsafe subdir: ${member}`, 400);
+  if (root && n.path !== root && !n.path.startsWith(`${root}/`)) {
+    throw new PluginInspectError(`${n.path || "(root)"} is not inside ${root}/, the directory the URL names`, 400);
+  }
+  return n.path;
+}
+
+/**
  * Resolve `url` and pull the plugin's directory at the resolved (or pinned)
  * commit into a fresh scratch dir. On ANY failure the scratch dir is removed
  * before the error propagates; on success the caller owns it.
+ *
+ * `soft` is collection discovery: caps stop the writing instead of the fetch
+ * (`extract.overflow` says so), and a missing `plugin.yaml` at the URL's
+ * directory is not an error — the caller decides whether what IS there makes
+ * a collection.
  */
 export async function fetchPlugin(
   url: string,
@@ -206,6 +278,9 @@ export async function fetchPlugin(
      * names, and the old one may since have been deleted). Skips `ls-remote`.
      */
     target?: ResolvedRef;
+    /** A collection member's repository-relative directory, inside the URL's (see {@link memberSubdir}). */
+    member?: string;
+    soft?: boolean;
     limits?: FetchLimits;
     deps?: FetchDeps;
   } = {},
@@ -220,45 +295,15 @@ export async function fetchPlugin(
   // it is what says where the ref ends and the subdir begins — but its tip is
   // ignored: a push between Inspect and Install must not change what lands.
   const sha = opts.pinSha ?? resolved.sha;
+  const subdir = opts.member !== undefined ? memberSubdir(resolved.subdir, opts.member) : resolved.subdir;
 
   const scratch = await mkdtemp(join(tmpdir(), "dispatch-inspect-"));
   try {
     const dir = join(scratch, "plugin");
-    let tar: AsyncIterable<Buffer>;
-    let strip: number;
-    if (parsed.host === "github") {
-      const gz = await deps.githubTarball(parsed.owner!, parsed.name!, sha, signal);
-      const gunzip = createGunzip();
-      // `pipeline`, not `pipe`: a download error (the byte cap included) must
-      // reach the reader through `gunzip`, and a cap tripping downstream must
-      // tear the download down rather than leave it paused on backpressure
-      // until the timeout fires. The rejection itself is observed by the
-      // reader; this promise only must not be left unhandled.
-      pipeline(Readable.from(bounded(gz, limits.maxDownloadBytes, "the download")), gunzip).catch(() => {});
-      tar = bounded(gunzip, limits.maxArchiveBytes, "the unpacked archive");
-      // `<owner>-<repo>-<short sha>/` wraps every entry.
-      strip = 1;
-    } else {
-      tar = bounded(await deps.gitArchive(parsed.cloneUrl, sha, scratch, signal), limits.maxArchiveBytes, "the archive");
-      strip = 0;
-    }
-    let extract: TarExtractResult;
-    try {
-      extract = await extractTar(tar, { dest: dir, strip, subdir: resolved.subdir, caps: limits });
-    } catch (err) {
-      if (signal.aborted) throw new PluginInspectError(`gave up after ${limits.timeoutMs / 1000}s fetching ${parsed.repo}`, 504);
-      if (err instanceof PluginInspectError) throw err;
-      throw new PluginInspectError(`could not read the archive: ${err instanceof Error ? err.message : String(err)}`, 502);
-    }
-    // GitHub stamps the commit into the pax global header. When it disagrees
-    // with the sha asked for, something between here and GitHub is lying —
-    // refuse rather than report on, or install, the wrong bytes.
-    if (parsed.host === "github" && extract.globalComment && extract.globalComment !== sha) {
-      throw new PluginInspectError(`GitHub served commit ${extract.globalComment.slice(0, 7)} for ${sha.slice(0, 7)}`, 502);
-    }
-    if (!extract.manifestDirs.includes(resolved.subdir)) {
-      const where = resolved.subdir ? `in ${resolved.subdir}/` : "at the repository root";
-      const others = extract.manifestDirs.filter((d) => d !== resolved.subdir).slice(0, 8);
+    const extract = await extractCommit(parsed, sha, scratch, dir, { subdir, soft: opts.soft }, limits, deps, signal);
+    if (!opts.soft && !extract.manifestDirs.includes(subdir)) {
+      const where = subdir ? `in ${subdir}/` : "at the repository root";
+      const others = extract.manifestDirs.filter((d) => d !== subdir).slice(0, 8);
       throw new PluginInspectError(
         `no plugin.yaml ${where} of ${parsed.repo}@${sha.slice(0, 7)}` +
           (others.length ? ` — found one in: ${others.map((d) => d || "(root)").join(", ")}` : ""),
@@ -272,8 +317,8 @@ export async function fetchPlugin(
       // follows the branch: Install pins what lands, not what is followed.
       refKind: resolved.refKind,
       sha,
-      subdir: resolved.subdir,
-      browseUrl: browseUrl(parsed, sha, resolved.subdir),
+      subdir,
+      browseUrl: browseUrl(parsed, sha, subdir),
       scratch,
       dir,
       extract,
@@ -282,4 +327,36 @@ export async function fetchPlugin(
     await rm(scratch, { recursive: true, force: true }).catch(() => {});
     throw err;
   }
+}
+
+/**
+ * The second pass of a collection whose first, soft pass overflowed: the same
+ * commit again, keeping ONLY the members' directories (relative to
+ * `f.subdir`), with strict caps sized for that many plugins — each member is
+ * still one plugin, so the per-file cap does not scale. Lands in
+ * `<f.scratch>/members`, which the caller's cleanup of `f.scratch` removes.
+ */
+let refetches = 0;
+
+export async function refetchMembers(
+  f: FetchedPlugin,
+  members: string[],
+  opts: { limits?: FetchLimits; deps?: FetchDeps } = {},
+): Promise<{ dir: string; extract: TarExtractResult }> {
+  const base = opts.limits ?? DEFAULT_FETCH_LIMITS;
+  const n = Math.max(1, Math.min(members.length, 10));
+  const limits: FetchLimits = { ...base, maxFiles: base.maxFiles * n, maxBytes: base.maxBytes * n };
+  const dir = join(f.scratch, `members-${refetches++}`);
+  const signal = AbortSignal.timeout(limits.timeoutMs);
+  const extract = await extractCommit(
+    f.parsed,
+    f.sha,
+    f.scratch,
+    dir,
+    { subdir: f.subdir, include: members },
+    limits,
+    opts.deps ?? realFetchDeps,
+    signal,
+  );
+  return { dir, extract };
 }

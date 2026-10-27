@@ -43,6 +43,8 @@ const VALUE_FLAGS = new Set([
   "data-dir",
   // `dispatch plugin init` — where the SDK to link lives.
   "sdk",
+  // `dispatch plugin add <collection>` — which member(s).
+  "plugin",
 ]);
 
 /** Short aliases, expanded before dispatch. */

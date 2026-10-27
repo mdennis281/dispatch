@@ -69,6 +69,7 @@ export * from "./plugin-manifest.js";
 export * from "./terminal-backend.js";
 export * from "./plugin-api.js";
 export * from "./plugin-inspection.js";
+export * from "./plugin-collection.js";
 export * from "./plugin-lifecycle.js";
 export * from "./webhooks.js";
 export * from "./plugin-client-api.js";

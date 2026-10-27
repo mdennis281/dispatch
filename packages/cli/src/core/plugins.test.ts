@@ -5,9 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   addPlugin,
+  collectionIn,
   consentLines,
   discoverPlugins,
   linkPlugin,
+  listCollectionMembers,
   looksLikeGitUrl,
   readPluginToggles,
   removePlugin,
@@ -200,5 +202,33 @@ describe("looksLikeGitUrl", () => {
     expect(looksLikeGitUrl("git@github.com:x/y.git")).toBe(true);
     expect(looksLikeGitUrl("../plugins/voice")).toBe(false);
     expect(looksLikeGitUrl("C:\\plugins\\voice")).toBe(false);
+  });
+});
+
+describe("collections", () => {
+  it("refuses to guess, listing the members, when a directory holds several plugins", async () => {
+    await source("alpha");
+    await source("beta");
+    const err = await addPlugin(configDir, join(root, "src")).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CmError);
+    expect((err as Error).message).toMatch(/holds 2 plugins — pick with --plugin/);
+    expect((err as Error).message).toMatch(/alpha {2}\(alpha v1\.2\.3\)/);
+    expect(existsSync(join(configDir, "plugins"))).toBe(false);
+  });
+
+  it("installs the member picked by path or by id", async () => {
+    await source("alpha");
+    await source("beta");
+    expect((await addPlugin(configDir, join(root, "src"), { plugin: "beta" })).plugin.manifest?.id).toBe("beta");
+    expect((await addPlugin(configDir, join(root, "src"), { plugin: "./alpha/" })).plugin.manifest?.id).toBe("alpha");
+    await expect(addPlugin(configDir, join(root, "src"), { plugin: "gamma" })).rejects.toThrow(/no plugin "gamma" in .* — it holds/);
+  });
+
+  it("lists by dispatch-plugins.yaml when there is one", async () => {
+    await source("alpha");
+    await source("beta");
+    await writeFile(join(root, "src", "dispatch-plugins.yaml"), "plugins:\n  - beta\n");
+    expect(await listCollectionMembers(join(root, "src"))).toEqual([{ path: "beta", id: "beta", name: "beta", version: "1.2.3" }]);
+    expect((await collectionIn(join(root, "src"))).errors).toEqual([]);
   });
 });

@@ -4,8 +4,8 @@
  *   PUT  /api/plugins/:id/enabled      → { enabled }  — targeted patch, not a settings-draft write
  *   PUT  /api/plugins/:id/settings     → { settings } — same
  *   POST /api/plugins/:id/reveal       → open the plugin directory on the HOST machine
- *   POST /api/plugins/inspect          → { url } → PluginInspection, read without running anything (owner only)
- *   POST /api/plugins/install          → { url, sha, replace? } → install exactly that sha (owner only)
+ *   POST /api/plugins/inspect          → { url } → PluginInspection, or a PluginCollectionInspection when the URL holds several (owner only)
+ *   POST /api/plugins/install          → { url, sha, replace?, subdir? } → install exactly that sha; subdir picks a collection member (owner only)
  *   POST /api/plugins/:id/check-update → PluginUpdateCheck — resolve the recorded source, diff the target (owner only)
  *   POST /api/plugins/:id/update       → { sha } → install the checked target (owner only)
  *   GET  /api/plugins/:id/uninstall    → PluginUninstallPreview — what Uninstall would remove (owner only)
@@ -138,8 +138,8 @@ export function registerPluginRoutes(app: FastifyInstance): void {
       return reply.code(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
     }
     try {
-      const { url, sha, replace } = parsed.data;
-      return await app.services.pluginInspector.install(url, sha, !!replace);
+      const { url, sha, replace, subdir } = parsed.data;
+      return await app.services.pluginInspector.install(url, sha, !!replace, subdir);
     } catch (err) {
       return inspectFailure(reply, err);
     }
