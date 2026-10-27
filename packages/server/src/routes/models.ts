@@ -67,6 +67,9 @@ export function registerModelRoutes(app: FastifyInstance): void {
       // The client's labels, pickers and account pane read the descriptor, and
       // only the server knows the ones a plugin registered.
       descriptor: providerFor(harness.kind),
+      // The DEFAULT account's cached login, so the composer can show
+      // "not logged in" before a send is refused. Absent until probed.
+      ...(app.services.logins?.peek(harness.kind) ? { login: app.services.logins.peek(harness.kind) } : {}),
     })),
   );
 

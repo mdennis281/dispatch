@@ -60,6 +60,37 @@ describe("providerAvailability", () => {
   });
 });
 
+describe("providerAvailability — logged out (#428)", () => {
+  const withLogin = (login: { checked: boolean; loggedIn: boolean; notRequired?: boolean }) => [
+    { kind: "claude", runtime: { available: true }, login },
+  ];
+
+  it("refuses only a probe that ran and said no, naming the login command", () => {
+    registerProvider({ ...claude, account: { ...claude.account, loginCommand: "claude auth login" } });
+    expect(providerAvailability("claude", withLogin({ checked: true, loggedIn: false }))).toMatchObject({
+      provider: "claude",
+      reason: "logged-out",
+      message: expect.stringContaining("claude auth login"),
+    });
+    unregisterProvider("claude");
+  });
+
+  it("never refuses on a probe that could not run, nothing to log into, or no probe yet", () => {
+    expect(providerAvailability("claude", withLogin({ checked: false, loggedIn: false }))).toBeNull();
+    expect(providerAvailability("claude", withLogin({ checked: true, loggedIn: false, notRequired: true }))).toBeNull();
+    expect(providerAvailability("claude", [{ kind: "claude", runtime: { available: true } }])).toBeNull();
+    expect(providerAvailability("claude", withLogin({ checked: true, loggedIn: true }))).toBeNull();
+  });
+
+  it("reports not-installed ahead of logged-out — installing comes first", () => {
+    expect(
+      providerAvailability("claude", [
+        { kind: "claude", runtime: { available: false }, login: { checked: true, loggedIn: false } },
+      ]),
+    ).toMatchObject({ reason: "not-installed" });
+  });
+});
+
 describe("provider registry", () => {
   // #428: Claude's descriptor was compiled in here, so every picker of an
   // install without Claude still offered "Claude Code".

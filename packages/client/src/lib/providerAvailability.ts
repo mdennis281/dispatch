@@ -69,8 +69,12 @@ export function useProviderRegistered(provider: HarnessKind): boolean {
   return loaded && harnesses.some((h) => h.kind === provider);
 }
 
-/** The providers a chat could be switched to right now: registered and installed. */
+/**
+ * The providers a chat could be switched to right now: registered, installed
+ * and not known to be logged out — the same rule the banner applies, so it
+ * never offers "Switch to X" for an X that would show the banner itself.
+ */
 export function useAvailableProviders(): HarnessInfo[] {
   const { harnesses } = useRegisteredProviders();
-  return useMemo(() => harnesses.filter((h) => h.runtime.available), [harnesses]);
+  return useMemo(() => harnesses.filter((h) => providerAvailability(h.kind, [h]) === null), [harnesses]);
 }

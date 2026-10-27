@@ -97,6 +97,7 @@ import { LimitLedger } from "./limit-ledger.js";
 import { LimitSampler } from "./limit-sampler.js";
 import { FsExplorerService } from "./fs-explorer.js";
 import { HarnessRegistry } from "../harness/index.js";
+import { ProviderLogins } from "./provider-logins.js";
 import { ManagerMcpBridge } from "./mcp/manager-http.js";
 import { PluginService } from "../plugins/service.js";
 import { findShippedPluginsRoot } from "../plugins/shipped.js";
@@ -115,6 +116,7 @@ export interface ServiceOverrides {
   secrets?: SecretsService;
   issues?: IssueService;
   harnesses?: HarnessRegistry;
+  logins?: ProviderLogins;
   managerMcp?: ManagerMcpBridge;
   broker?: SessionBroker;
   terminals?: TerminalService;
@@ -174,6 +176,8 @@ export interface ServiceOverrides {
 export interface Services extends ServiceBase {
   /** Installed agent runtimes and their capability/model catalogues. */
   harnesses: HarnessRegistry;
+  /** Cached login state per provider account — what `logged-out` is judged by. */
+  logins: ProviderLogins;
   /** HTTP front door used by runtimes that cannot consume in-process MCP. */
   managerMcp: ManagerMcpBridge;
   broker: SessionBroker;
@@ -316,6 +320,16 @@ export function createServices(
   // `DISPATCH_FAKE_SDK=1` echo the E2E runs on lives in the Claude plugin
   // itself (`createClaudeHarness`), the one place a `ClaudeHarness` is built.
   const harnesses = overrides.harnesses ?? new HarnessRegistry();
+  // Login state per provider account, cached so a turn never waits on a probe.
+  // A flip in whether a chat may run is announced like a plugin toggle, so an
+  // open composer's "not logged in" banner appears or clears by itself.
+  const logins =
+    overrides.logins ??
+    new ProviderLogins({
+      harnesses,
+      settings: () => store.getSettings(),
+      onChange: () => bus.publish({ type: "providers-changed" }),
+    });
   const managerMcp =
     overrides.managerMcp ?? new ManagerMcpBridge(`http://127.0.0.1:${config.port}`);
   /** Retention sweep handle, armed in `start()` and cleared in `dispose()`. */
@@ -519,6 +533,7 @@ export function createServices(
     new SessionBroker({
       store,
       bus,
+      logins,
       maxActiveSessions: config.maxActiveSessions,
       idleSessionMinutes: config.idleSessionMinutes,
       terminals,
@@ -1137,9 +1152,14 @@ export function createServices(
           register: (harness, descriptor) => {
             harnesses.register(harness, descriptor);
             bus.publish({ type: "providers-changed" });
+            // Learn its login in the background, before anyone sends: a probe
+            // only for a provider that is registered, so a disabled plugin's
+            // CLI is never spawned (#422).
+            void logins.refresh(harness.kind).catch(() => {});
           },
           unregister: async (kind) => {
             await harnesses.unregister(kind);
+            logins.forget(kind);
             bus.publish({ type: "providers-changed" });
           },
         },
@@ -1437,6 +1457,7 @@ export function createServices(
     store,
     bus,
     harnesses,
+    logins,
     managerMcp,
     broker,
     secrets,

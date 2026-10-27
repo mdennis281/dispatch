@@ -27,12 +27,16 @@ export function registerSetupRoutes(app: FastifyInstance): void {
 
   app.get("/api/setup/github", async () => app.services.github.cliStatus());
 
-  app.get("/api/setup/runtimes", async () =>
-    probeRuntimeLogins(
+  app.get("/api/setup/runtimes", async () => {
+    const statuses = await probeRuntimeLogins(
       app.services.harnesses.list(),
       await store.getSettings().catch(() => null),
-    ),
-  );
+    );
+    // A Re-check that just saw a login must clear a "not logged in" banner now,
+    // not when the cached probe next expires.
+    for (const s of statuses) await app.services.logins?.recordDefault(s.kind, s.login).catch(() => {});
+    return statuses;
+  });
 
   app.post("/api/setup/complete", async () => completeSetup(store));
 }

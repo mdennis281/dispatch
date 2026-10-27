@@ -517,9 +517,14 @@ ctx.providers.register(harness, descriptor);
 ```
 
 - `harness` implements `Harness` (`@dispatch/shared` → `harness.ts`): the
-  session factory, the model list, limits, and optionally `probeLogin(exe, env)`
-  for the setup card. A harness without `probeLogin` is shown as "login not
-  checked" — the host no longer guesses by provider id.
+  session factory, the model list, limits, and optionally `probeLogin(exe, env)`.
+  A harness without `probeLogin` is shown as "login not checked" — the host no
+  longer guesses by provider id. With one, the host probes each registered
+  provider's login in the background (cached per account for five minutes,
+  `services/provider-logins.ts`), and a chat whose account last probed
+  `checked: true, loggedIn: false` shows "provider unavailable" with reason
+  `logged-out` instead of failing mid-turn. A probe that could not run
+  (`checked: false`) or reports `notRequired` never refuses a turn.
 - `descriptor` is the `ProviderDescriptor` every surface labels, picks and
   accounts it by (label, seed models, efforts, skills dir, how an account is
   selected). Its `id` must equal `harness.kind` and match

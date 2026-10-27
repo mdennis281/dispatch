@@ -22,6 +22,7 @@ import { Store } from "../store/index.js";
 import { EventBus } from "../bus.js";
 import { AuthoredConfigService } from "./authored-config.js";
 import { SessionBroker } from "./session-broker.js";
+import { ProviderLogins } from "./provider-logins.js";
 import { ManagerMcpBridge } from "./mcp/manager-http.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { GLOBAL_MODE_ID, GLOBAL_PROJECT_ID, resolveWorkflow } from "@dispatch/shared";
@@ -316,6 +317,58 @@ describe("SessionBroker neutral harness path", () => {
       await expect(readdir(join(repo, ".claude"))).rejects.toThrow();
     } finally {
       await ghostBroker.dispose();
+    }
+  });
+
+  it("refuses a send while its account is logged out, then runs once a probe sees the login (#428)", async () => {
+    // Without the reason, a chat on a provider with no login started its turn
+    // and failed mid-way on the runtime's own auth error.
+    const loginSpecs: HarnessSessionSpec[] = [];
+    let login = { checked: true, loggedIn: false };
+    let probes = 0;
+    const lonely: Harness = {
+      kind: "claude",
+      capabilities: caps as unknown as Harness["capabilities"],
+      runtime: () => ({ kind: "claude", source: "installed", available: true, path: process.execPath }),
+      listModels: async () => [],
+      readLimits: async () => null,
+      generateText: async () => "title",
+      probeLogin: async () => {
+        probes += 1;
+        return login;
+      },
+      createSession: (spec: HarnessSessionSpec) => { loginSpecs.push(spec); return new FakeHarnessSession(); },
+    };
+    const registry = new HarnessRegistry({ providers: [{ harness: lonely, descriptor: CLAUDE_PROVIDER }] });
+    const logins = new ProviderLogins({ harnesses: registry, settings: () => store.getSettings() });
+    const loginBroker = new SessionBroker({
+      store,
+      bus: new EventBus(),
+      harnesses: registry,
+      logins,
+      authored: new AuthoredConfigService({ globalRoot: join(dir, "global") }),
+      deps: { stopTimeoutMs: 5 },
+    });
+    try {
+      await logins.refresh("claude");
+      const chat = await store.saveChat({ id: "logged-out", projectId: "p1", title: "L", modeId: "plan", effort: "low", harness: "claude", worktrees: [], prs: [], createdAt: 1 });
+      loginBroker.create(chat);
+      await expect(loginBroker.sendMessage(chat.id, "hello")).rejects.toMatchObject({
+        code: "provider-unavailable",
+        unavailable: { provider: "claude", reason: "logged-out" },
+      });
+      expect(loginSpecs).toHaveLength(0);
+      expect(await store.readMessages(chat.id)).toEqual([]);
+      // The send read the cache; it did not probe again.
+      expect(probes).toBe(1);
+
+      login = { checked: true, loggedIn: true };
+      await logins.refresh("claude");
+      await loginBroker.sendMessage(chat.id, "hello again");
+      await loginBroker.waitFor(chat.id, "idle");
+      expect(loginSpecs).toHaveLength(1);
+    } finally {
+      await loginBroker.dispose();
     }
   });
 

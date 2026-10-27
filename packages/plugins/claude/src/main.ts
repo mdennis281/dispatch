@@ -21,13 +21,16 @@ const plugin: PluginModule = {
  * deterministic in-process echo behind the adapter: no `claude` subprocess, no
  * auth, no network. It lived in the server's container while Claude was
  * compiled in; the host cannot construct a `ClaudeHarness` any more, so the
- * switch moved to the one place that does. Usage is never polled under it —
- * the E2E instance must not reach Anthropic.
+ * switch moved to the one place that does. Usage and login are never probed
+ * under it — the E2E instance must not reach Anthropic or spawn `claude`.
  */
 export function createClaudeHarness(env: Readonly<Record<string, string | undefined>> = process.env): ClaudeHarness {
   if (env.DISPATCH_FAKE_SDK !== "1") return new ClaudeHarness();
   const harness = new ClaudeHarness({ query: makeFakeQuery() });
   harness.readLimits = async () => null;
+  // No `claude auth status` either: the echo needs no login, and the host
+  // probes every registered provider's login in the background.
+  harness.probeLogin = async () => ({ checked: true, loggedIn: true, method: "fake SDK" });
   return harness;
 }
 
