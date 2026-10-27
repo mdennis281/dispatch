@@ -37,6 +37,7 @@ function setup(login: RuntimeLoginStatus = { checked: true, loggedIn: false }) {
     onChange: (kind) => changed.push(kind),
     now: () => now,
     ttlMs: 1000,
+    negativeTtlMs: 100,
   });
   return { state, harnesses, logins, changed, tick: (ms: number) => (now += ms) };
 }
@@ -64,6 +65,34 @@ describe("ProviderLogins", () => {
     await settle();
     await settle();
     expect(state.probes).toHaveLength(2);
+  });
+
+  it("holds a logged-out answer only briefly, so logging in elsewhere is noticed (#440 review)", async () => {
+    const { logins, state, tick, changed } = setup();
+    await logins.refresh("codex");
+    state.login = { checked: true, loggedIn: true };
+    tick(101);
+    // Well inside the positive TTL, past the negative one: the read re-probes.
+    expect(logins.peek("codex")).toMatchObject({ loggedIn: false });
+    await settle();
+    await settle();
+    expect(state.probes).toHaveLength(2);
+    expect(logins.peek("codex")).toMatchObject({ loggedIn: true });
+    expect(changed).toEqual(["codex", "codex"]);
+  });
+
+  it("re-probes a cached logged-out before a turn is refused on it, and only then", async () => {
+    const { logins, state } = setup({ checked: true, loggedIn: true });
+    await logins.refresh("codex");
+    expect(await logins.current("codex")).toMatchObject({ loggedIn: true });
+    expect(state.probes).toHaveLength(1);
+
+    state.login = { checked: true, loggedIn: false };
+    await logins.refresh("codex");
+    // The user has just logged in; the cache still says otherwise.
+    state.login = { checked: true, loggedIn: true };
+    expect(await logins.current("codex")).toMatchObject({ loggedIn: true });
+    expect(state.probes).toHaveLength(3);
   });
 
   it("judges each account by its own directory", async () => {

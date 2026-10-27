@@ -4998,7 +4998,7 @@ export class SessionBroker {
       chatSubscription(settings, { harness: session.harnessKind, subscriptionId: session.subscriptionId }),
     );
     return this.harnesses.resolve(session.harnessKind, {
-      login: this.logins.peek(session.harnessKind, account),
+      login: await this.logins.current(session.harnessKind, account),
     });
   }
 

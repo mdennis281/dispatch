@@ -335,6 +335,9 @@ function reduceServerEvent(evt: WsServerEvent): void {
     // chat on a re-enabled plugin recover without a reload (#426).
     case "providers-changed":
       void refreshHarnesses();
+      // Each account's login rides on the account list, and a login flip is
+      // one of the things this event announces (#428).
+      if (useSubscriptions.getState().loaded) void useSubscriptions.getState().load();
       return;
 
     case "checkpoint":

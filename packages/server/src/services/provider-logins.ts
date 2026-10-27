@@ -37,6 +37,13 @@ import { accountOf } from "./subscriptions.js";
  */
 const TTL_MS = 5 * 60_000;
 
+/**
+ * How long a LOGGED-OUT answer stands. Much shorter, because the banner tells
+ * the user to go and log in, and a negative held for five minutes kept that
+ * banner (and the refusal) up long after they had.
+ */
+const NEGATIVE_TTL_MS = 15_000;
+
 interface Entry {
   status: RuntimeLoginStatus;
   at: number;
@@ -50,6 +57,7 @@ export interface ProviderLoginsOpts {
   env?: NodeJS.ProcessEnv;
   now?: () => number;
   ttlMs?: number;
+  negativeTtlMs?: number;
 }
 
 const keyOf = (kind: HarnessKind, configDir: string): string =>
@@ -62,10 +70,12 @@ export class ProviderLogins {
   private readonly defaultDirs = new Map<HarnessKind, string>();
   private readonly now: () => number;
   private readonly ttl: number;
+  private readonly negativeTtl: number;
 
   constructor(private readonly opts: ProviderLoginsOpts) {
     this.now = opts.now ?? Date.now;
     this.ttl = opts.ttlMs ?? TTL_MS;
+    this.negativeTtl = Math.min(opts.negativeTtlMs ?? NEGATIVE_TTL_MS, this.ttl);
   }
 
   /**
@@ -76,8 +86,22 @@ export class ProviderLogins {
   peek(kind: HarnessKind, account?: HarnessAccount): RuntimeLoginStatus | undefined {
     const dir = account?.configDir ?? this.defaultDirs.get(kind);
     const entry = dir !== undefined ? this.entries.get(keyOf(kind, dir)) : undefined;
-    if (!entry || this.now() - entry.at > this.ttl) void this.refresh(kind, account).catch(() => {});
+    const ttl = entry && isLoggedOut(entry.status) ? this.negativeTtl : this.ttl;
+    if (!entry || this.now() - entry.at > ttl) void this.refresh(kind, account).catch(() => {});
     return entry?.status;
+  }
+
+  /**
+   * What a turn start judges by: the cached answer, except that a cached
+   * "logged out" is re-probed before it refuses anything. A negative must never
+   * be sticky — the refusal says "log in, then send again", and that has to
+   * work the moment they have. Costs a probe only while an account is logged
+   * out (deduplicated), never on the ordinary logged-in send.
+   */
+  async current(kind: HarnessKind, account?: HarnessAccount): Promise<RuntimeLoginStatus | undefined> {
+    const cached = this.peek(kind, account);
+    if (!isLoggedOut(cached)) return cached;
+    return (await this.refresh(kind, account).catch(() => undefined)) ?? cached;
   }
 
   /**

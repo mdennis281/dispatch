@@ -446,6 +446,29 @@ describe("routes — REST CRUD", () => {
     expect(bad.statusCode).toBe(400);
   });
 
+  it("GET /api/subscriptions carries each account's OWN cached login (#428)", async () => {
+    // The composer judges a chat by its account's login, the way the broker
+    // does; the provider-wide one on /api/harnesses is the default account's.
+    const put = await app.inject({
+      method: "PUT",
+      url: "/api/subscriptions",
+      payload: {
+        subscriptions: [
+          { id: "claude1", name: "Main", provider: "claude" },
+          { id: "claude2", name: "Second", provider: "claude", configDir: "/nowhere/.claude2" },
+        ],
+      },
+    });
+    const second = put.json().find((s: { id: string }) => s.id === "claude2");
+    app.services.logins.record("claude", second.resolvedConfigDir, { checked: true, loggedIn: false });
+    const listed = (await app.inject({ method: "GET", url: "/api/subscriptions" })).json();
+    expect(listed.find((s: { id: string }) => s.id === "claude2").login).toEqual({
+      checked: true,
+      loggedIn: false,
+    });
+    expect(listed.find((s: { id: string }) => s.id === "claude1").login?.loggedIn).not.toBe(false);
+  });
+
   it("GET /api/usage/subscriptions lists only logged-in accounts, each with a window list", async () => {
     // A directory with no login must not become a row of "unavailable" — the
     // card lists accounts you can actually spend.

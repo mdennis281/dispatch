@@ -359,14 +359,22 @@ describe("SessionBroker neutral harness path", () => {
       });
       expect(loginSpecs).toHaveLength(0);
       expect(await store.readMessages(chat.id)).toEqual([]);
-      // The send read the cache; it did not probe again.
-      expect(probes).toBe(1);
+      // A cached negative is confirmed before it refuses anything.
+      expect(probes).toBe(2);
 
+      // The user logs in elsewhere. Nothing calls refresh: the next send alone
+      // must notice, or "log in, then send again" would be a lie for as long
+      // as the cache holds (#440 review).
       login = { checked: true, loggedIn: true };
-      await logins.refresh("claude");
       await loginBroker.sendMessage(chat.id, "hello again");
       await loginBroker.waitFor(chat.id, "idle");
       expect(loginSpecs).toHaveLength(1);
+      expect(probes).toBe(3);
+
+      // Logged in, a send reads the cache and never probes.
+      await loginBroker.sendMessage(chat.id, "and again");
+      await loginBroker.waitFor(chat.id, "idle");
+      expect(probes).toBe(3);
     } finally {
       await loginBroker.dispose();
     }
