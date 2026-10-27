@@ -19,6 +19,7 @@ import {
 } from "@dispatch/shared";
 import { InlineError, TextInput } from "../../sidebar/Modal.js";
 import { Button } from "../../ui/Button.js";
+import { IconButton } from "../../ui/IconButton.js";
 import { Chip } from "../../ui/Chip.js";
 import { Spinner } from "../../ui/Spinner.js";
 import { StatusDot } from "../../ui/StatusDot.js";
@@ -648,9 +649,14 @@ function CollectionRow({
         />
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-            <button type="button" className="text-xs font-semibold text-primary hover:underline" onClick={onOpen} aria-expanded={open}>
+            <Button
+              variant="link"
+              className="!h-auto !px-0 text-xs font-semibold !text-primary hover:underline"
+              onClick={onOpen}
+              aria-expanded={open}
+            >
               {r.name ?? r.id ?? rel}
-            </button>
+            </Button>
             {r.version && <Chip mono>v{r.version}</Chip>}
             <span className="inline-flex items-center gap-1 text-2xs text-secondary">
               <StatusDot tone={v.tone} />
@@ -688,14 +694,9 @@ function CollectionRow({
           )}
           {state?.phase === "failed" && <p className="mt-1 text-2xs text-danger">{state.message}</p>}
         </div>
-        <button
-          type="button"
-          className="shrink-0 text-2xs text-muted hover:text-primary [&_svg]:size-3.5"
-          onClick={onOpen}
-          aria-label={open ? "Hide report" : "Show report"}
-        >
+        <IconButton className="shrink-0" onClick={onOpen} tip={open ? "Hide report" : "Show report"} aria-expanded={open}>
           {open ? <ChevronDown /> : <ChevronRight />}
-        </button>
+        </IconButton>
       </div>
       {open && (
         <div className="mt-1.5 pl-6">
