@@ -14,14 +14,13 @@ import { EXEMPTION_ANSWERS, type ManagerMcpContext } from "./mcp/manager-mcp.js"
 import {
   buildManagerToolsDirective,
   SessionBroker,
-  EFFORT_THINKING_TOKENS,
   makeDirResolver,
   makePrCreateBinding,
   makeRepoResolver,
   statusForTool,
-  type QueryFn,
   type SessionDirs,
 } from "./session-broker.js";
+import { EFFORT_THINKING_TOKENS, type QueryFn } from "../harness/claude/session.js";
 import { GitHubService } from "./github.js";
 import { MemoryService } from "./memory.js";
 import { MetricsService } from "./metrics.js";
@@ -4487,12 +4486,12 @@ describe("SessionBroker — the wrong-worktree guard", () => {
     resultMsg(),
   ];
 
-  it("installs the mode tool policy on the DIRECT Claude path", async () => {
-    // `startQuery` hands these options straight to the SDK — it never builds
-    // `HarnessSessionSpec.toolGuard`, so this hook is the only unconditional
-    // veto a stock Claude chat has for a denied tool. An unmatched entry that
-    // denies a tool the mode forbids has to be here, or the posture is only
-    // the SDK's advisory `disallowedTools`.
+  it("hands a Claude chat the mode tool policy as an unconditional PreToolUse veto", async () => {
+    // The spec's `toolGuard` reaches the SDK as a PreToolUse hook the Claude
+    // adapter installs, and that hook is the only unconditional veto a Claude
+    // chat has for a denied tool. An unmatched entry that denies a tool the
+    // mode forbids has to be there, or the posture is only the SDK's advisory
+    // `disallowedTools`.
     const { fn, controllers } = makeFakeQuery(spawnScript);
     const broker = makeBroker(fn);
     await store.saveChat(chatFor("c1"));

@@ -59,20 +59,6 @@ export type QueryFn = (params: {
   options?: Options;
 }) => Query;
 
-/** Built-in mode-id → SDK permissionMode. */
-export const BUILTIN_MODE_PERMISSION: Record<string, PermissionMode> = {
-  default: "default",
-  ask: "default",
-  plan: "plan",
-  edit: "acceptEdits",
-  acceptEdits: "acceptEdits",
-  auto: "auto",
-  yolo: "bypassPermissions",
-  bypass: "bypassPermissions",
-  bypassPermissions: "bypassPermissions",
-  dontAsk: "dontAsk",
-};
-
 /**
  * LEGACY effort lever — a fixed thinking-token budget per level.
  *
