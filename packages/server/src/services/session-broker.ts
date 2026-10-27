@@ -1,31 +1,31 @@
 /**
  * SessionBroker — the CORE of Dispatch.
  *
- * Owns `Map<chatId, LiveSession>`. Each LiveSession wraps a single Agent SDK
- * `query()` in STREAMING INPUT mode (the InputChannel push/close pattern proven
- * in `spikes/streaming-input.ts`), so N chats run out-of-process and Node stays
- * responsive. Per chat we run a small state machine:
+ * Owns `Map<chatId, LiveSession>`. Each LiveSession drives one provider
+ * runtime through its {@link HarnessSession} adapter — Claude Code, Codex,
+ * goose, whatever a plugin registers — so N chats run out-of-process and Node
+ * stays responsive. Per chat we run a small state machine:
  *
  *     idle → running → awaiting-input → running → done/error
  *              ↑___________(next turn)___________|
  *
  * Responsibilities:
  *  - Feed + steer a live session (per-chat FIFO input queue, mid-run injection).
- *  - Route SDK `canUseTool` prompts to the host as `permission-request` events +
- *    a global AttentionItem, and block the tool until `resolvePermission(...)`.
- *  - Forward stream messages (assistant text/thinking, tool_use, tool_result,
- *    result) as WsServerEvents AND persist them to the Store JSONL transcript.
- *  - Map UI mode/effort → SDK permissionMode / reasoning effort.
+ *  - Route the runtime's permission prompts to the host as `permission-request`
+ *    events + a global AttentionItem, and hold the tool until
+ *    `resolvePermission(...)`.
+ *  - Forward the runtime's events (assistant text/thinking, tool_use,
+ *    tool_result, turn end) as WsServerEvents AND persist them to the Store
+ *    JSONL transcript.
+ *  - Map UI mode/effort → the runtime's permission mode / reasoning effort.
  *  - Enforce a configurable cap on concurrently-ACTIVE sessions (Settings →
  *    Context, falling back to `DISPATCH_MAX_ACTIVE_SESSIONS`, then 6); over the
  *    cap, new turns park in a visible `queued` state and drain in FIFO order.
  *  - Emit AttentionItems when a turn completes (idle) or the session ends (done).
  *
- * The SDK `query` function, id generator, and clock are injectable so tests can
- * script an async iterator + capture the canUseTool callback without the real
- * subprocess or network.
+ * The harness registry, id generator, and clock are injectable so tests can
+ * script a runtime without the real subprocess or network.
  */
-import { query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 import { basename, extname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { McpPortLeaseService, resolveMcpServers } from "./mcp-session.js";
@@ -35,8 +35,6 @@ import {
   selectPluginMcpServers,
   type PluginMcpDeclaration,
 } from "../plugins/contributions.js";
-import { spawnWithPid } from "../harness/claude/spawn.js";
-import { withStderrTail } from "../harness/claude/session.js";
 import { McpPrewarmService } from "./mcp-prewarm.js";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
@@ -64,33 +62,14 @@ import type {
   SentContextSkill,
 } from "@dispatch/shared";
 import { DISPATCH_INPUT_SUBTYPE, withRuntimeMcpReport } from "@dispatch/shared";
+import { tokenTotal, type TokenFigures } from "@dispatch/shared";
 import {
-  figuresOfModelUsage,
-  figuresOfUsage,
-  tokenTotal,
-  type TokenFigures,
-} from "@dispatch/shared";
-import {
-  claudeCompactWindow,
   compactCommand,
-  compactedEvent,
   compactedText,
   normalizeCompactFocus,
   oneLineFocus,
   perModelThreshold,
 } from "@dispatch/shared";
-import type {
-  Options,
-  Query,
-  SDKMessage,
-  SDKUserMessage,
-  PermissionResult,
-  AgentDefinition,
-  HookCallback,
-  HookInput,
-  HookJSONOutput,
-  McpServerConfig as SdkMcpServerConfig,
-} from "@anthropic-ai/claude-agent-sdk";
 import { nanoid } from "nanoid";
 import type {
   Chat,
@@ -146,7 +125,6 @@ import {
   composeMessageText,
   parseMcpToolName,
   DEFAULT_IDLE_SESSION_MINUTES,
-  EffortSchema,
   applyMcpEnablement,
   harnessEnablementLayers,
   describeExemptionScope,
@@ -250,8 +228,6 @@ import {
   createIssueCreateGuard,
 } from "./shell-guard.js";
 import { AgentCwdTracker } from "./agent-cwd.js";
-import { claudeExecutableOption } from "../harness/claude/runtime.js";
-import { EFFORT_THINKING_TOKENS } from "../harness/claude/session.js";
 import type {
   HarnessAccount,
   HarnessEvent,
@@ -260,6 +236,7 @@ import type {
   HarnessQuestion,
   HarnessQuestionAnswer,
   HarnessSession,
+  HarnessAgentSpec,
   HarnessSessionSpec,
   HarnessSkillSpec,
   HarnessToolGuard,
@@ -271,11 +248,10 @@ import {
   type HarnessRegistry,
   type HarnessResolution,
 } from "../harness/index.js";
-import { accountOf, chatSubscription, envWithAccount } from "./subscriptions.js";
+import { accountOf, chatSubscription } from "./subscriptions.js";
 import type { ManagerMcpBridge, ManagerMcpGrant } from "./mcp/manager-http.js";
 import type { ManagerMcpContext } from "./mcp/manager-mcp.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { claudeSdkMcpServers } from "../harness/claude/manager-servers.js";
 import {
   DEFAULT_EFFORT,
   DEFAULT_MODE_ID,
@@ -1202,14 +1178,8 @@ function makePrApprovalBinding(
 /* ------------------------------------------------------------------ deps */
 
 /** The subset of the SDK `query` signature the broker calls. */
-export type QueryFn = (params: {
-  prompt: AsyncIterable<SDKUserMessage> | string;
-  options?: Options;
-}) => Query;
-
 /** Injectable seams (all default to the real implementations). */
 export interface SessionBrokerDeps {
-  query?: QueryFn;
   genId?: () => string;
   now?: () => number;
   /** Teardown grace period. Production uses 5s; tests can exercise forced retirement quickly. */
@@ -1240,7 +1210,7 @@ export interface BrokerProjectConfig {
    *  ledger. Optional so older fakes stay valid — absent just means uncounted. */
   listInstructions?(projectId: string): string[];
   /** A project's config-sourced external MCP servers (name → config), or `{}`.
-   *  Merged into the session's `Options.mcpServers` alongside `manager`. */
+   *  Handed to the runtime alongside Dispatch's own servers. */
   getMcpServers(projectId: string): Record<string, McpServerConfig>;
   /** A project's config-sourced skills (from `.dispatch/skills/`), or `[]`.
    *  Materialized into the session cwd's `.claude/skills/` so the SDK finds them. */
@@ -1355,7 +1325,7 @@ export interface SessionBrokerOptions {
   /** Self-contained `.dispatch/` config: source of truth for authored
    *  agents/modes/instructions (config wins over `.data` on id collision). */
   projectConfig?: BrokerProjectConfig;
-  /** Provider registry used by chats whose harness is not the legacy Claude path. */
+  /** The providers chats run on — every chat, Claude's included. */
   harnesses?: HarnessRegistry;
   /** HTTP front door for Dispatch's manager MCP tools (required by Codex). */
   managerMcp?: ManagerMcpBridge;
@@ -1383,7 +1353,7 @@ export interface SessionBrokerOptions {
   deps?: SessionBrokerDeps;
 }
 
-/** Steering priority forwarded to `SDKUserMessage.priority`. */
+/** Steering priority, forwarded to the runtime as `HarnessInput.priority`. */
 export type MessagePriority = "now" | "next" | "later";
 
 /** Options for a single user/steering message. */
@@ -1512,13 +1482,6 @@ export const BUILTIN_MODE_PERMISSION: Record<string, PermissionMode> = {
   [GLOBAL_MODE_ID]: GLOBAL_MODE.permissionMode,
 };
 
-/**
- * The legacy thinking-budget fallback for a live effort change, shared with the
- * Claude adapter so the two loops cannot disagree about what "high" costs —
- * they did, 16k here against 20k there. See the adapter for why it survives.
- */
-export { EFFORT_THINKING_TOKENS };
-
 /** Thread key for the MAIN loop in the per-thread effort maps (subagents key by run id). */
 const MAIN_THREAD = "__main__";
 
@@ -1578,27 +1541,6 @@ function safeHandoffJson(value: unknown): string {
   }
 }
 
-/**
- * Tokens a single request occupies in the context window: its whole input side
- * (fresh + cache-read + cache-creation) plus the generated output. Reads one
- * assistant message's OWN `usage` (per-request, not the session-cumulative usage
- * on the result). Returns null when usage is absent/empty.
- */
-function contextTokensOf(usage: unknown): number | null {
-  if (!usage || typeof usage !== "object") return null;
-  const u = usage as {
-    input_tokens?: number;
-    output_tokens?: number;
-    cache_read_input_tokens?: number;
-    cache_creation_input_tokens?: number;
-  };
-  const sum =
-    (u.input_tokens ?? 0) +
-    (u.cache_read_input_tokens ?? 0) +
-    (u.cache_creation_input_tokens ?? 0) +
-    (u.output_tokens ?? 0);
-  return sum > 0 ? sum : null;
-}
 
 /** Best-effort "what is the tool acting on" for the working-state label. */
 function deriveTarget(input: Record<string, unknown>): string | undefined {
@@ -1802,59 +1744,6 @@ function buildQuestionAnswer(
   };
 }
 
-/** Pull display text out of an SDKUserMessage (string content or text blocks). */
-function extractUserText(msg: SDKUserMessage): string {
-  const content = (msg as { message?: { content?: unknown } }).message?.content;
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .filter((b): b is { type: string; text: string } =>
-        !!b && typeof b === "object" && (b as { type?: string }).type === "text",
-      )
-      .map((b) => b.text)
-      .join("");
-  }
-  return "";
-}
-
-/**
- * An async-iterable input channel we push user messages into over time and
- * close when the session ends. Exactly the shape the SDK consumes as `prompt`.
- */
-class InputChannel implements AsyncIterable<SDKUserMessage> {
-  private queued: SDKUserMessage[] = [];
-  private waiting: ((r: IteratorResult<SDKUserMessage>) => void)[] = [];
-  private closed = false;
-
-  push(msg: SDKUserMessage): void {
-    const w = this.waiting.shift();
-    if (w) w({ value: msg, done: false });
-    else this.queued.push(msg);
-  }
-
-  /** Buffered-but-not-yet-consumed count (used to detect chained turns). */
-  pending(): number {
-    return this.queued.length;
-  }
-
-  close(): void {
-    this.closed = true;
-    let w: ((r: IteratorResult<SDKUserMessage>) => void) | undefined;
-    while ((w = this.waiting.shift())) w({ value: undefined as never, done: true });
-  }
-
-  [Symbol.asyncIterator](): AsyncIterator<SDKUserMessage> {
-    return {
-      next: () => {
-        const m = this.queued.shift();
-        if (m) return Promise.resolve({ value: m, done: false });
-        if (this.closed) return Promise.resolve({ value: undefined as never, done: true });
-        return new Promise<IteratorResult<SDKUserMessage>>((res) => this.waiting.push(res));
-      },
-    };
-  }
-}
-
 /**
  * What a memory lookup surfaced for one turn: the `<system-reminder>` block for
  * the model, plus which memories went in whole vs. as one-liners (that split is
@@ -1868,8 +1757,6 @@ interface OutboxItem {
   text: string;
   /** Original refs (persisted on the transcript row, kept small). */
   images?: ImageRef[];
-  /** Pre-resolved SDK image sources (local asset files inlined as base64). */
-  imageSources?: Record<string, unknown>[];
   /**
    * Auto-surfaced project-memory context (a `<system-reminder>` block) prepended
    * to the SDK message ONLY — never emitted on the visible transcript row. Set
@@ -1959,6 +1846,22 @@ export function splitAttachments(refs: ImageRef[] | undefined): {
  * in-process server carries an `instance` and no `type` the wire would mean
  * anything by; a config with neither `type` nor `url` is the stdio default.
  */
+/**
+ * The neutral half of a session's setup — what {@link SessionBroker.buildOptions}
+ * assembles from the chat, its project and its mode, and every provider's
+ * {@link HarnessSessionSpec} is built from.
+ */
+interface SessionSetup {
+  cwd?: string;
+  permissionMode: PermissionMode;
+  /** Every Dispatch-authored block for the system prompt, in order, joined. */
+  append: string;
+  /** The custom agent the main thread runs as, when the chat selected one. */
+  agent?: HarnessAgentSpec;
+  /** Declared MCP servers. Dispatch's own are on `session.managerMcp`. */
+  mcpServers: Record<string, McpServerConfig>;
+}
+
 export function mcpTransportOf(cfg: unknown): string {
   const c = (cfg ?? {}) as { type?: unknown; instance?: unknown; url?: unknown };
   if (c.type === "sdk" || c.instance) return "in-process";
@@ -2069,6 +1972,15 @@ function prNumberOfKey(key: string): number | undefined {
   return m ? Number(m[1]) : undefined;
 }
 
+/**
+ * How a prompt the BROKER holds is answered — a manager `ask_user` card, a
+ * self-gated tool. A runtime's own prompts settle through
+ * `HarnessSession.resolvePermission` instead and never see this.
+ */
+type PermissionResult =
+  | { behavior: "allow"; updatedInput?: Record<string, unknown> }
+  | { behavior: "deny"; message: string };
+
 interface PendingPermission {
   resolve?: (r: PermissionResult) => void;
   /** Neutral adapter that owns this ask (Codex); absent for the Claude SDK. */
@@ -2167,14 +2079,6 @@ interface LiveSession {
    */
   agentEffort?: Effort;
   /**
-   * OBSERVED effort per thread — `MAIN_THREAD` for the main loop, a subagent's
-   * spawning Task tool_use id for a run. Reported by the PreToolUse observer hook
-   * (see `observeEffortHook`), so it is the level the runtime actually applied,
-   * after any silent downgrade for the model and after any effort an agent
-   * definition pinned for itself. Absent until that thread runs its first tool.
-   */
-  effortByThread: Map<string, Effort>;
-  /**
    * tool_use id → the thread that issued it (`MAIN_THREAD` or the spawning Task's
    * id). The hook only knows the tool call it is gating, so this is the thread
    * back from that to the run whose effort it just reported.
@@ -2264,8 +2168,6 @@ interface LiveSession {
    */
   prWatchSettled?: boolean;
   started: boolean;
-  input?: InputChannel;
-  query?: Query;
   harnessSession?: HarnessSession;
   managerGrant?: ManagerMcpGrant;
   /**
@@ -2437,17 +2339,6 @@ interface LiveSession {
    * chat could be kept resident by a metadata write nobody would call activity.
    */
   idleSince?: number;
-  /**
-   * Pid of this session's Claude Code subprocess, for the chats the broker runs
-   * through the SDK DIRECTLY.
-   *
-   * Two live shapes, two places the pid can come from — see `sessionPids`. This
-   * is the one that covers the DEFAULT: `startQuery` short-circuits for
-   * `harnessKind === "claude"` and never builds a `HarnessSession` at all.
-   */
-  livePid?: number;
-  /** Last stderr of the dead subprocess on that same path. See `withStderrTail`. */
-  lastStderrTail?: string;
   stopping: boolean;
   /** Teardown is a provider migration; settle quietly instead of as session done. */
   switching?: boolean;
@@ -2624,7 +2515,6 @@ export class SessionBroker {
    * exist yet when the broker is constructed. Absent → no plugin contributes.
    */
   plugins?: BrokerPluginContributions;
-  private readonly query: QueryFn;
   private readonly genId: () => string;
   private readonly now: () => number;
   private readonly stopTimeoutMs: number;
@@ -2701,7 +2591,6 @@ export class SessionBroker {
     this.metrics = opts.metrics;
     this.tokens = opts.tokens;
     this.onTurnError = opts.onTurnError;
-    this.query = opts.deps?.query ?? (sdkQuery as unknown as QueryFn);
     this.genId = opts.deps?.genId ?? (() => nanoid());
     this.now = opts.deps?.now ?? (() => Date.now());
     this.stopTimeoutMs = opts.deps?.stopTimeoutMs ?? STOP_TIMEOUT_MS;
@@ -2746,7 +2635,6 @@ export class SessionBroker {
         },
         harnessKind: chat.harness,
         subscriptionId: chat.subscriptionId,
-        effortByThread: new Map(),
         threadOfTool: new Map(),
         toolTurn: new Map(),
         cardCalls: new Map(),
@@ -2961,13 +2849,6 @@ export class SessionBroker {
       ...(parts ? { parts } : {}),
     });
 
-    // Resolve any local asset images to inline SDK sources before queueing (the
-    // transcript row above keeps the small relative refs; the SDK gets bytes).
-    // No images → no extra await, so the text-only fast path is unchanged.
-    const imageSources = pictures.length
-      ? await this.resolveImageSources(chatId, pictures)
-      : undefined;
-
     // A persona change can begin during memory, transcript, or image preparation.
     // Wait again at the last async boundary: queueing into a retiring input loses
     // the message even though its user row has already been persisted.
@@ -2977,7 +2858,6 @@ export class SessionBroker {
       id,
       text,
       images: pictures.length ? pictures : undefined,
-      imageSources,
       fileContext,
       memoryContext: memory?.block,
       peerContext,
@@ -3217,43 +3097,6 @@ export class SessionBroker {
   }
 
   /**
-   * Turn each ImageRef into an SDK image source. `data:`/`http(s)` refs pass
-   * straight through; a relative/local path is read from the chat's assets dir
-   * and inlined as base64 (so an uploaded sprite is usable in send-message).
-   */
-  private async resolveImageSources(
-    chatId: string,
-    images?: ImageRef[],
-  ): Promise<Record<string, unknown>[]> {
-    if (!images?.length) return [];
-    const out: Record<string, unknown>[] = [];
-    for (const img of images) {
-      const direct = this.imageSource(img);
-      if (direct) {
-        out.push(direct);
-        continue;
-      }
-      try {
-        const name = img.path.split(/[\\/]/).pop() ?? img.path;
-        const buf = await this.store.readChatAsset(chatId, name);
-        if (buf) {
-          out.push({
-            type: "base64",
-            // These become `image` blocks in the request, so an unrecognized
-            // extension must still guess an IMAGE type — the shared default
-            // (application/octet-stream) would be rejected by the API.
-            media_type: img.mimeType ?? mediaTypeFromName(name, "image/png"),
-            data: buf.toString("base64"),
-          });
-        }
-      } catch {
-        /* unreadable asset → skip; the text still sends */
-      }
-    }
-    return out;
-  }
-
-  /**
    * The note that tells the model where each uploaded file is. Absolute paths,
    * because the agent's cwd is a worktree and the assets dir is not under it.
    * Size is stat'd rather than trusted from the client, so a file whose upload
@@ -3443,8 +3286,8 @@ export class SessionBroker {
         // the per-question answers — keyed exactly as the non-harness path keys
         // them, by question text, so the card looks them up the same way.
         const byQuestion: Record<string, string> = {};
-        // The one-line summary the card and the attention list show, built the
-        // way the direct Claude loop built it: each value with its notes, and
+        // The one-line summary the card and the attention list show: each
+        // value with its notes, and
         // the question's header in front only when there were several. The
         // bare `answer.answer` this used to record is empty for a multi-question
         // answer and drops the notes on a single one.
@@ -3522,13 +3365,13 @@ export class SessionBroker {
   /** Interrupt the running turn (streaming-input only). */
   async interrupt(chatId: string): Promise<boolean> {
     const session = this.sessions.get(chatId);
-    if ((!session?.query && !session?.harnessSession) || !session.turnOpen) return false;
+    if (!session?.harnessSession || !session.turnOpen) return false;
     // A late Codex guard and the Composer's Stop button both end as
     // `subtype: "interrupted"`. Remember the user's intent before awaiting the
     // provider so a queued guard event cannot turn Stop into an automatic resume.
     session.explicitInterruptPending = true;
     try {
-      await (session.harnessSession?.interrupt() ?? session.query!.interrupt());
+      await session.harnessSession.interrupt();
       // Interrupting abandons any tool blocked on a permission answer; clear the
       // pending prompts (+ their cards / attention items) so they don't strand.
       this.drainPendingPermissions(session, "Interrupted.");
@@ -3631,18 +3474,6 @@ export class SessionBroker {
         });
       });
     }
-    if (session.query) {
-      try {
-        await session.query.setPermissionMode(mode);
-      } catch (err) {
-        this.bus.publish({
-          type: "error",
-          chatId,
-          message: "setMode failed",
-          detail: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
     // `undefined` is how the store drops a key — `patchChat` spreads the patch
     // over the row and JSON serialisation omits it — so this really unpins.
     void this.patchChat(chatId, { modeId: modeId ?? undefined });
@@ -3709,8 +3540,8 @@ export class SessionBroker {
   }
 
   /**
-   * Switch the model backing the chat. Applies live via `Query.setModel` when a
-   * turn is running, pins new/resumed queries via `options.model`, and persists
+   * Switch the model backing the chat. Applies live via the session's
+   * `setModel` when one is running, pins new/resumed sessions, and persists
    * `chat.model` (emitting `chat-update`). `null` or an empty string clears the
    * PIN — the session then runs whatever model the project / app chain names,
    * or the runtime's own default when neither does.
@@ -3755,22 +3586,7 @@ export class SessionBroker {
         this.retireNativeSession(session, `switching to ${next}`);
       }
     }
-    if (session.query) {
-      try {
-        await session.query.setModel(next);
-      } catch (err) {
-        this.bus.publish({
-          type: "error",
-          chatId,
-          message: "setModel failed",
-          detail: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
     void this.patchChat(chatId, { model: pin });
-    // A model switch can change the context window (e.g. 200k ↔ 1M variant);
-    // relearn it so the meter's denominator follows the new model.
-    if (session.query) void this.refreshContextWindow(session);
   }
 
   /**
@@ -3947,11 +3763,11 @@ export class SessionBroker {
   }
 
   /**
-   * The live context-window breakdown for a chat — the SDK's `getContextUsage()`
-   * control: total/max tokens, percentage, model, and per-category token counts
+   * The live context-window breakdown for a chat: total/max tokens, percentage,
+   * model, and — where the runtime reports one — per-category token counts
    * (system prompt, tools, MCP tools, memory files, messages…). Powers the meter
-   * dropup's detail view. Returns null when the session isn't live (never started
-   * this process, or torn down) or the SDK build predates the control.
+   * dropup's detail view. Returns null when the session isn't live (never
+   * started this process, or torn down).
    */
   async getContextUsage(chatId: string): Promise<ContextUsage | null> {
     const session = this.sessions.get(chatId);
@@ -3978,32 +3794,7 @@ export class SessionBroker {
           } as ContextUsage)
         : null;
     }
-    const q = session?.query;
-    if (!q?.getContextUsage) return null;
-    try {
-      const u = await q.getContextUsage();
-      if (session && typeof u.maxTokens === "number" && u.maxTokens > 0) {
-        // Cache the window off this fresh read so idle meters stay correct too.
-        session.contextWindow = u.maxTokens;
-        const max = this.meterWindow(session, u.maxTokens);
-        if (max !== u.maxTokens) {
-          return {
-            ...u,
-            maxTokens: max,
-            percentage: Math.round((u.totalTokens / max) * 1000) / 10,
-          } as ContextUsage;
-        }
-      }
-      return u as ContextUsage;
-    } catch (err) {
-      this.bus.publish({
-        type: "error",
-        chatId,
-        message: "context usage query failed",
-        detail: err instanceof Error ? err.message : String(err),
-      });
-      return null;
-    }
+    return null;
   }
 
   /**
@@ -4086,50 +3877,40 @@ export class SessionBroker {
    */
   private async refreshContextLimit(session: LiveSession): Promise<void> {
     if (!session.started || session.turnOpen) return;
-    if (!session.query && !session.harnessSession) return;
+    if (!session.harnessSession) return;
     if (!RETIRABLE_STATUS.has(session.status) || session.outbox.length > 0) return;
     const settings = await this.store.getSettings().catch(() => undefined);
     const limit = this.compactThreshold(session, settings);
-    if (session.query) {
-      // The legacy loop compares the derived window: two limits below the
-      // CLI's floor clamp to the same one, and respawning for that buys nothing.
-      const window = claudeCompactWindow(limit, settings?.autoCompact?.window);
-      if (window === session.compactWindow) {
+    // The window hint moves the trigger as surely as the limit does — but only
+    // on a runtime that reads it, and the one sign of that is a session that
+    // takes both live. Codex declares `nativeContextLimit` and ignores the
+    // hint, so counting it there retired an idle Codex chat over a Claude-only
+    // setting it never reads.
+    const windowHint = settings?.autoCompact?.window;
+    const live = session.harnessSession;
+    const hintMoved = Boolean(live?.setContextTokenLimit) && windowHint !== session.compactWindowHint;
+    if (limit === session.compactLimit && !hintMoved) {
+      session.compactWindowHint = windowHint;
+      return;
+    }
+    // A runtime that never reads the limit is held to it by the turn-end
+    // check alone, which reads Settings live: just move the host's number.
+    const caps = this.harnesses?.find(session.harnessKind)?.capabilities;
+    if (!caps?.nativeContextLimit) {
+      session.compactLimit = limit;
+      session.compactWindowHint = windowHint;
+      return;
+    }
+    if (live?.setContextTokenLimit) {
+      try {
+        // The adapter accepts a move its runtime would not notice (Claude:
+        // two limits that clamp to one window) and refuses one it would.
+        await live.setContextTokenLimit(limit, windowHint);
         session.compactLimit = limit;
-        return;
-      }
-    } else {
-      // The window hint moves the trigger as surely as the limit does — but only
-      // on a runtime that reads it, and the one sign of that is a session that
-      // takes both live. Codex declares `nativeContextLimit` and ignores the
-      // hint, so counting it there retired an idle Codex chat over a Claude-only
-      // setting it never reads.
-      const windowHint = settings?.autoCompact?.window;
-      const live = session.harnessSession;
-      const hintMoved = Boolean(live?.setContextTokenLimit) && windowHint !== session.compactWindowHint;
-      if (limit === session.compactLimit && !hintMoved) {
         session.compactWindowHint = windowHint;
         return;
-      }
-      // A runtime that never reads the limit is held to it by the turn-end
-      // check alone, which reads Settings live: just move the host's number.
-      const caps = this.harnesses?.find(session.harnessKind)?.capabilities;
-      if (!caps?.nativeContextLimit) {
-        session.compactLimit = limit;
-        session.compactWindowHint = windowHint;
-        return;
-      }
-      if (live?.setContextTokenLimit) {
-        try {
-          // The adapter accepts a move its runtime would not notice (Claude:
-          // two limits that clamp to one window) and refuses one it would.
-          await live.setContextTokenLimit(limit, windowHint);
-          session.compactLimit = limit;
-          session.compactWindowHint = windowHint;
-          return;
-        } catch {
-          /* fall through to the respawn */
-        }
+      } catch {
+        /* fall through to the respawn */
       }
     }
     // Re-checked after the awaits: a message may have started the turn meanwhile.
@@ -4137,32 +3918,6 @@ export class SessionBroker {
     // Quiet, like the idle sweep: a retired runtime is not a finished task.
     session.switching = true;
     await this.stop(session.chatId);
-  }
-
-  /**
-   * The Claude query's full context occupancy from `getContextUsage()`, or
-   * undefined when it can't say within a few seconds. Bounded because it runs
-   * inside the message loop — a stalled control request must not stall the
-   * stream behind it.
-   */
-  private async liveContextTotal(session: LiveSession): Promise<number | undefined> {
-    const q = session.query;
-    if (!q?.getContextUsage) return undefined;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      const u = await Promise.race([
-        q.getContextUsage(),
-        new Promise<undefined>((resolve) => {
-          timer = setTimeout(() => resolve(undefined), 3_000);
-        }),
-      ]);
-      const total = u?.totalTokens;
-      return typeof total === "number" && Number.isFinite(total) && total >= 0 ? total : undefined;
-    } catch {
-      return undefined;
-    } finally {
-      clearTimeout(timer);
-    }
   }
 
   /**
@@ -4365,25 +4120,6 @@ export class SessionBroker {
     this.onTurnEnd(session);
   }
 
-  /**
-   * Learn the model's context-window size from the SDK and cache it on the
-   * session so subsequent `result` rows carry the right denominator. Fire-and-
-   * forget: any failure (no live query, older SDK, transport hiccup) leaves the
-   * last known window in place and never disrupts a turn.
-   */
-  private async refreshContextWindow(session: LiveSession): Promise<void> {
-    const q = session.query;
-    if (!q?.getContextUsage) return;
-    try {
-      const u = await q.getContextUsage();
-      if (typeof u.maxTokens === "number" && u.maxTokens > 0) {
-        this.noteContext(session, undefined, u.maxTokens);
-      }
-    } catch {
-      /* best-effort — keep whatever window we already had */
-    }
-  }
-
   /** Stop the live subprocess (tree-kill via abort) but keep the chat record. */
   async stop(chatId: string): Promise<void> {
     const session = this.sessions.get(chatId);
@@ -4439,24 +4175,6 @@ export class SessionBroker {
       if (session.harnessSession === live) this.onDone(session);
       session.managerGrant?.revoke();
       session.managerGrant = undefined;
-    } else if (session.started && session.input) {
-      const query = session.query;
-      session.stopping = true;
-      try {
-        session.input.close();
-      } catch {
-        /* ignore */
-      }
-      try {
-        session.abortController?.abort();
-      } catch {
-        /* ignore */
-      }
-      // Wait for the consume loop to unwind so onDone fires (status/attention
-      // events settle) BEFORE we return — dispose() then never clears the map
-      // while a subprocess is still emitting against a removed session.
-      await this.awaitLoop(session.runLoop, this.stopTimeoutMs);
-      if (session.query === query) this.onDone(session);
     } else {
       this.onDone(session);
     }
@@ -4485,26 +4203,12 @@ export class SessionBroker {
       await this.awaitLoop(teardown, this.stopTimeoutMs);
       session.managerGrant?.revoke();
       session.managerGrant = undefined;
-    } else if (session.started && session.input) {
-      session.stopping = true;
-      try {
-        session.input.close();
-      } catch {
-        /* ignore */
-      }
-      try {
-        session.abortController?.abort();
-      } catch {
-        /* ignore */
-      }
     }
     // A timed-out provider is detached below, so its consumer can no longer
     // reach onDone(). Clear the teardown marker here before the replacement
     // provider starts; otherwise its real error is misread as this old abort.
     session.stopping = false;
     session.started = false;
-    session.query = undefined;
-    session.input = undefined;
     session.harnessSession = undefined;
     session.toolTurn.clear();
     session.guardRecoveries.length = 0;
@@ -4589,12 +4293,7 @@ export class SessionBroker {
   sessionPids(): Map<string, number> {
     const out = new Map<string, number>();
     for (const [chatId, session] of this.sessions) {
-      // BOTH shapes. `startQuery` short-circuits at `harnessKind !== "claude"`,
-      // so an ordinary chat — the default harness — runs through the SDK here in
-      // the broker and never has a `HarnessSession`; reading only the adapter's
-      // pid reported an empty map for every normal chat, which took the session
-      // count and the reap button with it.
-      const pid = session.livePid ?? session.harnessSession?.pid?.();
+      const pid = session.harnessSession?.pid?.();
       if (typeof pid === "number") out.set(chatId, pid);
     }
     return out;
@@ -4965,11 +4664,6 @@ export class SessionBroker {
     if (this.idleMs <= 0) return;
     const cutoff = this.now() - this.idleMs;
     for (const [chatId, session] of this.sessions) {
-      // `started`, not `harnessSession`: the broker has TWO live shapes — a
-      // harness-backed session and the direct-SDK query path — and `started` is
-      // the flag both set, which is exactly why `stop()` branches on it too.
-      // Keying off `harnessSession` alone would silently skip every session on
-      // the other path.
       if (!RETIRABLE_STATUS.has(session.status) || !session.started) continue;
       if (session.idleSince === undefined || session.idleSince > cutoff) continue;
       // `switching` is what makes `onDone` settle back to idle QUIETLY instead
@@ -5194,10 +4888,6 @@ export class SessionBroker {
       this.onProviderUnavailable(session, resolved.unavailable);
       return;
     }
-    // Every provider, Claude included, runs through its harness adapter (#427).
-    // Claude used to short-circuit into the broker's own direct SDK loop, which
-    // is why `ClaudeHarness` only ever ran as the fallback. That loop is dead
-    // from here and goes in the next change.
     await this.startHarnessSession(session, resolved.harness);
   }
 
@@ -5234,11 +4924,7 @@ export class SessionBroker {
         });
       }
       session.outbox = [];
-      return;
     }
-    if (!session.input) return;
-    for (const item of session.outbox) session.input.push(this.toSdkUserMessage(item));
-    session.outbox = [];
   }
 
   /**
@@ -5252,19 +4938,10 @@ export class SessionBroker {
   }
 
   /**
-   * Hand the `/`-menu catalog this session's own command list.
-   *
-   * Two live shapes, same as `sessionPids`: a Claude chat holds the SDK `Query`
-   * directly (the broker short-circuits the harness seam for it), while every
-   * other provider goes through a `HarnessSession`. Both are tried; whichever
-   * exists answers.
-   *
-   * CALLED FROM BOTH INIT PATHS for that reason — `handleHarnessEvent` for a
-   * neutral-seam provider and `handleMessage` for the legacy Claude loop. Wiring
-   * only the seam left the `session.query` branch below unreachable, so on a
-   * stock install (every chat `harnessKind: "claude"`) the menu's built-in half
-   * never populated and the UI's "built-in commands appear once this chat has
-   * run a turn" was a promise nothing could keep.
+   * Hand the `/`-menu catalog this session's own command list, from the
+   * runtime's `init`. Without it the menu's built-in half never populates and
+   * the UI's "built-in commands appear once this chat has run a turn" is a
+   * promise nothing keeps.
    *
    * Never throws and never blocks — a menu one entry short is not worth failing
    * a turn over.
@@ -5272,27 +4949,10 @@ export class SessionBroker {
   private async snapshotSlashCommands(session: LiveSession): Promise<void> {
     if (!this.slashCommands) return;
     try {
-      const fromHarness = await session.harnessSession?.slashCommands?.();
-      if (fromHarness?.length) {
-        this.slashCommands.recordRuntimeCommands(fromHarness, session.projectId);
-        return;
-      }
-      const raw = await session.query?.supportedCommands?.();
-      if (!Array.isArray(raw)) return;
-      this.slashCommands.recordRuntimeCommands(
-        raw
-          .map((c) => ({
-            name: String(c?.name ?? ""),
-            description: c?.description ? String(c.description) : undefined,
-            argumentHint: c?.argumentHint ? String(c.argumentHint) : undefined,
-            source: "builtin" as const,
-            aliases: Array.isArray(c?.aliases) ? c.aliases.map(String) : [],
-          }))
-          .filter((c) => c.name),
-        // Keyed by project: the list includes the skills this session
-        // discovered, which are this project's — see `slash-commands.ts`.
-        session.projectId,
-      );
+      const commands = await session.harnessSession?.slashCommands?.();
+      // Keyed by project: the list includes the skills this session
+      // discovered, which are this project's — see `slash-commands.ts`.
+      if (commands?.length) this.slashCommands.recordRuntimeCommands(commands, session.projectId);
     } catch {
       /* the menu falls back to what Dispatch can derive from disk */
     }
@@ -5340,7 +5000,6 @@ export class SessionBroker {
    * after the provider is back simply works.
    */
   private onProviderUnavailable(session: LiveSession, unavailable: ProviderUnavailable): void {
-    session.input = undefined;
     session.abortController = undefined;
     // The message that asked for this turn is dropped, not kept for later.
     // Delivering it whenever the provider happens to return — maybe tomorrow,
@@ -5350,27 +5009,23 @@ export class SessionBroker {
     this.onError(session, new ProviderUnavailableError(unavailable));
   }
 
-  /** Start a non-legacy provider through the neutral harness seam. */
+  /** Start a chat's runtime through its provider's harness adapter. */
   private async startHarnessSession(session: LiveSession, harness: Harness): Promise<void> {
     session.abortController = new AbortController();
     session.started = true;
 
     try {
-      // Reuse the policy/config assembly that has years of Claude-specific edge
-      // cases, then project only its neutral pieces into the provider adapter.
-      const options = await this.buildOptions(session);
+      const setup = await this.buildOptions(session);
 
-      const allMcp = (options.mcpServers ?? {}) as Record<string, unknown>;
       // Dispatch's own servers travel to the harness in their own field, so the
       // adapter can attach them the way its runtime wants (in-process object vs
-      // HTTP URL) without having to recognise them by name in the merged map.
-      // `buildOptions` has already put them in `allMcp` for the direct Claude
-      // path, wrapped in Claude's config shape; the adapter gets the neutral
-      // servers it recorded instead, and wraps them itself if it needs to.
+      // HTTP URL) without having to recognise them by name in a merged map.
       const managerServers = session.managerMcp?.servers ?? {};
+      // A project that declares `dispatch-<category>` by hand must not shadow
+      // or duplicate the real one.
       const mcpServers = Object.fromEntries(
-        Object.entries(allMcp).filter(([name]) => !isManagerServer(name)),
-      ) as Record<string, McpServerConfig>;
+        Object.entries(setup.mcpServers).filter(([name]) => !isManagerServer(name)),
+      );
 
       let managerMcp: HarnessSessionSpec["managerMcp"];
       if (
@@ -5403,9 +5058,9 @@ export class SessionBroker {
         }
       }
 
-      // `buildOptions` described Dispatch's servers as the SDK gets them —
-      // in-process. This runtime gets them over HTTP, or (no grant minted) not
-      // at all; the disclosure must say what was actually attached.
+      // `buildOptions` described Dispatch's servers as built — in-process. This
+      // runtime may get them over HTTP, or (no grant minted) not at all; the
+      // disclosure must say what was actually attached.
       if (session.pendingSentContext) {
         const pending = session.pendingSentContext;
         pending.mcpServers = pending.mcpServers.flatMap((s) =>
@@ -5425,31 +5080,18 @@ export class SessionBroker {
           pending.sections = pending.sections.filter((s) => s.id !== "agent");
         }
       }
-      const prompt = options.systemPrompt as { append?: string } | undefined;
-      const selectedAgent = options.agent ? options.agents?.[options.agent] : undefined;
       const appSettings = await this.store.getSettings().catch(() => undefined);
       const contextTokenLimit = this.compactThreshold(session, appSettings);
       // What this spawn enforces — see `refreshContextLimit` and `meterWindow`.
       session.compactLimit = contextTokenLimit;
       session.compactWindowHint = appSettings?.autoCompact?.window;
       const spec: HarnessSessionSpec = {
-        cwd: options.cwd,
-        permissionMode: options.permissionMode ?? "default",
+        cwd: setup.cwd,
+        permissionMode: setup.permissionMode,
         effort: session.effort,
         model: session.modelOverride,
-        systemPromptAppends: prompt?.append ? [prompt.append] : [],
-        agent: selectedAgent
-          ? {
-              id: options.agent!,
-              description: selectedAgent.description,
-              prompt: selectedAgent.prompt,
-              tools: selectedAgent.tools,
-              disallowedTools: selectedAgent.disallowedTools,
-              model: selectedAgent.model,
-              permissionMode: selectedAgent.permissionMode,
-              effort: selectedAgent.effort as Effort | undefined,
-            }
-          : undefined,
+        systemPromptAppends: setup.append ? [setup.append] : [],
+        agent: setup.agent,
         mcpServers,
         managerMcp,
         allowedTools: session.allowedTools,
@@ -5469,11 +5111,10 @@ export class SessionBroker {
         contextWindow: session.contextWindow,
         abortSignal: session.abortController.signal,
         account: session.account,
-        // The same composed guard the direct Claude path installs as a hook.
-        // Refusals are NOT noticed from inside it here: the adapter reports
-        // each one as `guard-blocked`, which already becomes a persisted
-        // "Blocked: …" notice and drives restart-turn recovery.
-        toolGuard: this.buildToolGuard(session, { reportsBlocks: true }),
+        // Every Dispatch guard, composed — see `buildToolGuard`. Its refusals
+        // come back from the adapter as `guard-blocked`, which becomes the
+        // persisted "Blocked: …" notice and drives restart-turn recovery.
+        toolGuard: this.buildToolGuard(session),
       };
 
       // A posture whose entire point is its denylist needs TWO things from a
@@ -6198,15 +5839,14 @@ export class SessionBroker {
       }
       case "permission-request":
         // A self-gated tool asks the human itself, with its own card; a generic
-        // card in front of it asks "may the agent ask you?" first. The direct
-        // Claude path has always stepped aside for these at `handlePermission`
-        // — this path did not, so goose showed two cards for one `ask_user`.
+        // card in front of it asks "may the agent ask you?" first — goose once
+        // showed two cards for one `ask_user` before this stepped aside.
         if (session.harnessSession && SELF_GATED_TOOLS.has(event.toolName)) {
           session.harnessSession.resolvePermission(event.requestId, { decision: "allow" });
           return;
         }
-        // The same prompt-free list a Claude chat gets at `canUseTool`, so the
-        // list means one thing whichever provider a chat runs on.
+        // The prompt-free list ("always allow"), the same whichever provider a
+        // chat runs on.
         if (session.harnessSession && (await this.autoAllows(session, event.toolName))) {
           session.harnessSession.resolvePermission(event.requestId, { decision: "allow" });
           return;
@@ -6405,442 +6045,6 @@ export class SessionBroker {
         if (holdForPause) this.parkForPause(session);
         return;
     }
-  }
-
-  private async consume(session: LiveSession): Promise<void> {
-    const q = session.query;
-    if (!q) return;
-    try {
-      for await (const msg of q) {
-        if (session.query !== q) break;
-        await this.handleMessage(session, msg);
-      }
-      if (session.query === q) this.onDone(session);
-    } catch (err) {
-      if (session.query === q) this.onError(session, err);
-    }
-  }
-
-  private async handleMessage(session: LiveSession, raw: SDKMessage): Promise<void> {
-    // The SDK message union is vast; access fields pragmatically (spike pattern).
-    const m = raw as unknown as Record<string, unknown> & { type: string };
-    switch (m.type) {
-      case "system": {
-        const subtype = String((m as { subtype?: unknown }).subtype ?? "system");
-        if (subtype === "init") {
-          const sid = (m as { session_id?: string }).session_id;
-          if (sid && sid !== session.sessionId) {
-            session.sessionId = sid;
-            // A different native session means the old cost baseline measured a
-            // thread that no longer exists — see the harness path's init for why
-            // this is the one place worth checking.
-            session.lastCostUsd = undefined;
-            session.costBaselineUnknown = false;
-            session.lastModelUsage = undefined;
-            session.tokenBaselineUnknown = false;
-            void this.patchChat(session.chatId, {
-              sessionId: sid,
-              costBaselineUsd: undefined,
-              tokenBaseline: undefined,
-              harnessHandoff: undefined,
-            });
-          }
-          session.model = (m as { model?: string }).model;
-          const initId = this.genId();
-          await this.emit(session, {
-            kind: "system",
-            id: initId,
-            chatId: session.chatId,
-            ts: this.now(),
-            sessionId: session.sessionId,
-            subtype: "init",
-            data: {
-              model: (m as { model?: unknown }).model,
-              permissionMode: (m as { permissionMode?: unknown }).permissionMode,
-              tools: (m as { tools?: unknown }).tools,
-              mcpServers: (m as { mcp_servers?: unknown }).mcp_servers,
-              ...this.takeSentContext(
-                session,
-                initId,
-                (m as { tools?: unknown }).tools,
-                (m as { mcp_servers?: unknown }).mcp_servers,
-              ),
-            },
-          });
-          // Learn this model's context window now that the subprocess is live, so
-          // the very next result row carries the correct meter denominator.
-          void this.refreshContextWindow(session);
-          // …and its `/` command list. This branch, not the neutral-seam one, is
-          // where a CLAUDE chat's init lands — `startQuery` short-circuits the
-          // harness seam for the default runtime — so the snapshot has to be
-          // taken in BOTH places or the menu's built-in half never populates on
-          // a stock install.
-          void this.snapshotSlashCommands(session);
-        }
-        // The CLI compacted — on its own trigger mid-turn, or the `/compact` the
-        // broker queued. Nothing here used to read this, so a compaction left no
-        // mark in the transcript and the meter held the PRE-compaction reading
-        // (720k on a chat that was really at 15k) until the next request.
-        if (subtype === "compact_boundary") {
-          const meta = (m as { compact_metadata?: Record<string, unknown> }).compact_metadata;
-          const { type: _type, ...compacted } = compactedEvent(meta);
-          // `post_tokens` counts the summary and kept messages only — not the
-          // system prompt and tools — so it read 3k on a chat whose very next
-          // request was 29k. The CLI's own breakdown counts everything.
-          const live = await this.liveContextTotal(session);
-          if (live !== undefined) compacted.postTokens = live;
-          if (compacted.postTokens !== undefined) {
-            this.noteContext(session, compacted.postTokens, undefined);
-          }
-          await this.emit(session, {
-            kind: "system",
-            id: this.genId(),
-            chatId: session.chatId,
-            ts: this.now(),
-            turn: session.turn,
-            sessionId: session.sessionId,
-            subtype: "compact",
-            text: compactedText(compacted),
-            data: compacted,
-          });
-        }
-        // A backgrounded task (async `Agent` spawn, backgrounded `Bash`) settled.
-        // This is the ONLY per-task completion signal in the stream — the task's
-        // tool call answered with a launch ack long ago — so persist it as a row
-        // keyed to the launching tool_use. Without it the client can only ask
-        // "is the parent turn still running", which gives every background task
-        // the same status (see shared TaskStatusRowSchema).
-        if (subtype === "task_notification") {
-          const usage = (m as { usage?: Record<string, unknown> }).usage;
-          const raw = String((m as { status?: unknown }).status ?? "completed");
-          const num = (v: unknown): number | undefined =>
-            typeof v === "number" && Number.isFinite(v) ? Math.round(v) : undefined;
-          await this.emit(session, {
-            kind: "task_status",
-            id: this.genId(),
-            chatId: session.chatId,
-            ts: this.now(),
-            turn: session.turn,
-            sessionId: session.sessionId,
-            taskId: String((m as { task_id?: unknown }).task_id ?? ""),
-            toolUseId:
-              typeof (m as { tool_use_id?: unknown }).tool_use_id === "string"
-                ? ((m as { tool_use_id?: string }).tool_use_id as string)
-                : undefined,
-            status: raw === "failed" || raw === "stopped" ? raw : "completed",
-            summary:
-              typeof (m as { summary?: unknown }).summary === "string"
-                ? ((m as { summary?: string }).summary as string)
-                : undefined,
-            totalTokens: num(usage?.total_tokens),
-            toolUses: num(usage?.tool_uses),
-            durationMs: num(usage?.duration_ms),
-          });
-        }
-        return;
-      }
-      case "assistant": {
-        // A subagent (spawned via the Task tool) tags every message it emits with
-        // the spawning tool_use id + its own type. Capture both so the finalized
-        // rows carry the nesting key the client groups on.
-        const parentToolUseId =
-          (m as { parent_tool_use_id?: string | null }).parent_tool_use_id ?? null;
-        const subagentType = (m as { subagent_type?: string }).subagent_type;
-        // Track the main-loop context occupancy from this request's OWN usage
-        // (subagent messages have their own separate context, so ignore them).
-        if (parentToolUseId === null) {
-          const ctx = contextTokensOf((m as { message?: { usage?: unknown } }).message?.usage);
-          if (ctx !== null) this.noteContext(session, ctx, undefined);
-        }
-        const blocks = this.contentBlocks(m);
-        let text = "";
-        let thinking = "";
-        const toolBlocks: Record<string, unknown>[] = [];
-        for (const b of blocks) {
-          const t = b.type;
-          if (t === "text") text += String(b.text ?? "");
-          else if (t === "thinking") thinking += String(b.thinking ?? "");
-          else if (t === "tool_use") toolBlocks.push(b);
-        }
-        // Correlate this finalized row with the buffer its chunks streamed into.
-        // Only the MAIN loop streams (subagent partials are skipped — see the
-        // stream_event handler), so a main-loop row reuses the exact id its chunks
-        // published under (`streamAssistantId`) — that's what lets the client swap
-        // the live buffer for the persisted row in place. A subagent row NEVER
-        // reads or clears that slot: doing so would let it adopt the main loop's
-        // live buffer id and orphan it (a stuck ●●● StreamingRow + duplicate text).
-        const apiMessageId = (m as { message?: { id?: string } }).message?.id;
-        const isMainLoop = parentToolUseId === null;
-        const assistantId = isMainLoop
-          ? session.streamAssistantId ?? apiMessageId ?? this.genId()
-          : apiMessageId ?? this.genId();
-        // The main loop is sequential — at most one message streams at a time — so
-        // consuming its slot on finalize is unconditional (no-op when nothing
-        // streamed, e.g. a tool-only message).
-        if (isMainLoop) session.streamAssistantId = undefined;
-        if (text || thinking) {
-          this.setStatus(session, "running", { state: "responding", label: "responding" });
-          await this.emit(session, {
-            kind: "assistant",
-            id: assistantId,
-            chatId: session.chatId,
-            ts: this.now(),
-            turn: session.turn,
-            sessionId: session.sessionId,
-            text,
-            thinking: thinking || undefined,
-            model: session.model,
-            uuid: (m as { uuid?: string }).uuid,
-            subagentType,
-            effort: this.threadEffort(session, parentToolUseId),
-            parentToolUseId,
-          });
-        }
-        for (const tb of toolBlocks) {
-          const name = String(tb.name ?? "");
-          const input = (tb.input ?? {}) as Record<string, unknown>;
-          // Resolved ONCE, above both consumers. The ledger keys its dedup on
-          // this id and the transcript is what a later backfill re-reads, so if
-          // they disagreed — which they did while the ledger read `tb.id` and
-          // the row below fell back to a generated one — an import would insert
-          // a second row for a call already counted.
-          const toolUseId = String(tb.id ?? this.genId());
-          // The ledger row. Recorded HERE as well as in `handleHarnessEvent`
-          // because these are two independent tool_use paths — this one is the
-          // legacy in-broker Claude loop that the default runtime still takes,
-          // and instrumenting only the harness adapter left the app's most-used
-          // runtime silently uncounted.
-          //
-          // Counted BEFORE the AskUserQuestion skip below: that skip exists so
-          // the TRANSCRIPT shows one canonical question surface, which is a
-          // rendering decision. The agent did call the tool, and the ledger's
-          // job is to say what was reached for.
-          this.recordUse(session, {
-            ...classifyTool(name, input),
-            subagent: subagentType,
-            toolUseId,
-          });
-          // The runtime span for the same call, on the same two paths and for
-          // the same reason: instrumenting only `handleHarnessEvent` left the
-          // app's default runtime silently untimed.
-          session.activity.toolStart(
-            parentToolUseId ?? MAIN_ACTOR,
-            toolUseId,
-            name,
-            input,
-            subagentType,
-            this.now(),
-          );
-          // AskUserQuestion is surfaced as an interactive QuestionCard via the
-          // `canUseTool` → permission-request path; suppress the redundant
-          // generic tool_use row so the transcript shows one canonical question
-          // surface (and no orphan "running AskUserQuestion" tool card).
-          if (name === "AskUserQuestion") continue;
-          const toolStatus = statusForTool(name, input);
-          this.setStatus(session, toolStatus, {
-            state: "tool",
-            label: `${toolStatus === "waiting" ? "waiting on" : "running"} ${name}`,
-            toolName: name,
-            target: deriveTarget(input),
-          });
-          // Stamped BEFORE the row goes out: the PreToolUse hook for this call is
-          // what reports the thread's effort, and it can only name the call.
-          this.noteToolThread(session, toolUseId, parentToolUseId);
-          await this.emit(session, {
-            kind: "tool_use",
-            id: this.genId(),
-            chatId: session.chatId,
-            ts: this.now(),
-            turn: session.turn,
-            sessionId: session.sessionId,
-            toolUseId,
-            name,
-            input,
-            server: parseMcpServer(name),
-            parentToolUseId,
-            subagentType,
-            effort: this.threadEffort(session, parentToolUseId),
-            uuid: (m as { uuid?: string }).uuid,
-          });
-        }
-        return;
-      }
-      case "user": {
-        // A subagent's tool_result rides a `user` message tagged with the spawning
-        // Task tool_use id — carry that (and the subagent type) onto the row so it
-        // nests under the same Task card as the subagent's assistant/tool_use rows.
-        const parentToolUseId =
-          (m as { parent_tool_use_id?: string | null }).parent_tool_use_id ?? null;
-        const subagentType = (m as { subagent_type?: string }).subagent_type;
-        // Surface tool_result blocks; ignore plain echoes of our own input.
-        for (const b of this.contentBlocks(m)) {
-          if (b.type !== "tool_result") continue;
-          session.activity.toolEnd(String(b.tool_use_id ?? ""), this.now(), { ok: !b.is_error });
-          // Persist any image content the tool returned (e.g. a Claude-in-Chrome
-          // screenshot) to the chat's assets dir and hand the client small
-          // ImageRefs; the enriched `tool_result` row IS the render event (fanned
-          // out as `chat-message`, drawn inline in the ToolCallCard).
-          const { images, content } = await this.persistContentImages(session, b.content);
-          await this.emit(session, {
-            kind: "tool_result",
-            id: this.genId(),
-            chatId: session.chatId,
-            ts: this.now(),
-            turn: session.turn,
-            sessionId: session.sessionId,
-            toolUseId: String(b.tool_use_id ?? ""),
-            ok: !b.is_error,
-            isError: b.is_error ? true : undefined,
-            content,
-            images: images.length ? images : undefined,
-            parentToolUseId,
-            subagentType,
-          });
-        }
-        return;
-      }
-      case "stream_event": {
-        // Token-level partials (only with includePartialMessages). Forward text /
-        // thinking deltas as `message-chunk` so the client types out the reply,
-        // then supersedes the buffer with the finalized `assistant` row (same id).
-        //
-        // Only the MAIN loop streams live. Subagents run concurrently (with the
-        // main loop and each other) and their partials interleave; honoring them
-        // would let a subagent `message_start` clobber the single streamAssistantId
-        // slot and orphan the main loop's buffer as a stuck ●●● StreamingRow. A
-        // subagent's text still renders from its finalized (nested) `assistant` row.
-        const parentToolUseId =
-          (m as { parent_tool_use_id?: string | null }).parent_tool_use_id ?? null;
-        if (parentToolUseId !== null) return;
-        const event = (m as { event?: Record<string, unknown> }).event;
-        if (!event || typeof event !== "object") return;
-        const et = String((event as { type?: unknown }).type ?? "");
-        if (et === "message_start") {
-          // A new assistant message begins its token stream → adopt the SDK message
-          // id its chunks and finalized row will share (so the two correlate even
-          // when a subagent message finalizes in between). Fall back to a fresh id
-          // only if the SDK omits it.
-          const startId = (event as { message?: { id?: string } }).message?.id;
-          session.streamAssistantId = startId ?? this.genId();
-          return;
-        }
-        if (et !== "content_block_delta") return;
-        const delta = (event as { delta?: Record<string, unknown> }).delta;
-        const dt = String((delta as { type?: unknown } | undefined)?.type ?? "");
-        let channel: "text" | "thinking" | undefined;
-        let piece = "";
-        if (dt === "text_delta") {
-          channel = "text";
-          piece = String((delta as { text?: unknown }).text ?? "");
-        } else if (dt === "thinking_delta") {
-          channel = "thinking";
-          piece = String((delta as { thinking?: unknown }).thinking ?? "");
-        }
-        if (!channel || !piece) return;
-        // Defensive: if `message_start` was missed, allocate on the first delta so
-        // the id still correlates with the finalized row.
-        if (!session.streamAssistantId) session.streamAssistantId = this.genId();
-        this.bus.publish({
-          type: "message-chunk",
-          chatId: session.chatId,
-          messageId: session.streamAssistantId,
-          delta: piece,
-          channel,
-        });
-        return;
-      }
-      case "result": {
-        // The provider has already ended this turn; close it synchronously so
-        // a one-frame-late Stop cannot become intent for the following turn.
-        session.turnOpen = false;
-        const legacyExplicitInterrupt = session.explicitInterruptPending;
-        session.explicitInterruptPending = false;
-        // No `limit` on this path — the legacy loop only learns about a usage
-        // limit by parsing the error text downstream (see onTurnError), so a
-        // pause span is the harness path's to open.
-        session.activity.turnEnd({}, this.now());
-        // Stop is not a failure — see the matching branch in the harness seam's
-        // `turn-end`. This loop is the one the DEFAULT harness runs on, so it is
-        // the common case, not the fallback: `interrupt()` sets the flag for
-        // both loops and this handler used to clear it without ever reading it.
-        const providerErrored = Boolean((m as { is_error?: unknown }).is_error);
-        const stopped = legacyExplicitInterrupt && providerErrored;
-        const isError = providerErrored && !stopped;
-        const resultText = stopped
-          ? undefined
-          : typeof (m as { result?: unknown }).result === "string"
-            ? ((m as { result?: string }).result as string)
-            : undefined;
-        const legacyTurnCost = this.turnCost(
-          session,
-          (m as { total_cost_usd?: number }).total_cost_usd,
-        );
-        const legacyRow = { id: this.genId(), ts: this.now(), turn: session.turn };
-        await this.emit(session, {
-          kind: "result",
-          id: legacyRow.id,
-          chatId: session.chatId,
-          ts: legacyRow.ts,
-          turn: legacyRow.turn,
-          sessionId: session.sessionId,
-          subtype: stopped ? "interrupted" : String((m as { subtype?: unknown }).subtype ?? "success"),
-          isError,
-          numTurns: (m as { num_turns?: number }).num_turns,
-          durationMs: (m as { duration_ms?: number }).duration_ms,
-          result: resultText,
-          usage: (m as { usage?: unknown }).usage,
-          contextTokens: session.lastContextTokens,
-          contextWindow: this.displayWindow(session),
-          costUsd: (m as { total_cost_usd?: number }).total_cost_usd,
-          turnCostUsd: legacyTurnCost,
-        });
-        this.bookTokens(
-          session,
-          legacyRow,
-          {
-            turnTokens: figuresOfUsage((m as { usage?: unknown }).usage),
-            modelUsage: figuresOfModelUsage((m as { modelUsage?: unknown }).modelUsage),
-            durationMs: (m as { duration_ms?: number }).duration_ms,
-          },
-          legacyTurnCost,
-        );
-        session.turn += 1;
-        // A turn that ended in error may have hit a usage limit — hand the
-        // message off so the chat can schedule itself to continue.
-        if (isError) this.onTurnError?.(session.chatId, resultText);
-        // Relearn the window off-loop for the next turn's row (cheap; the model
-        // — hence window — can shift mid-session on a switch or fallback).
-        void this.refreshContextWindow(session);
-        // `providerErrored`, not `isError`: a stopped turn settles as idle, but
-        // Stop must not be what kicks off a compaction turn.
-        await this.compactIfPastThreshold(session, !providerErrored);
-        const holdForPause = this.holdsForPause(session, session.input?.pending() ?? 0);
-        // Chained turn buffered? Stay running; otherwise the turn is complete.
-        if (session.input && session.input.pending() > 0) {
-          session.turnOpen = true;
-          this.setStatus(session, "running", { state: "thinking" });
-        } else if (isError) {
-          this.onTurnFailed(session);
-        } else {
-          this.onTurnEnd(session, { stopped });
-        }
-        // This loop never parked before, so a message held behind the pause
-        // during an open turn was left in the outbox of a chat reading `idle`
-        // — and the default harness runs HERE, not on the seam above.
-        if (holdForPause) this.parkForPause(session);
-        return;
-      }
-      default:
-        return;
-    }
-  }
-
-  private contentBlocks(m: Record<string, unknown>): Record<string, unknown>[] {
-    const content = (m.message as { content?: unknown } | undefined)?.content;
-    if (!Array.isArray(content)) return [];
-    return content.filter(
-      (b): b is Record<string, unknown> => !!b && typeof b === "object",
-    );
   }
 
   /**
@@ -7109,10 +6313,10 @@ export class SessionBroker {
     runId: string = MAIN_ACTOR,
   ): void {
     // The waiting_human span opens HERE, beside the pending entry it belongs to,
-    // rather than at the two call sites — because there is a third registration
-    // path (`handlePermission`, the legacy `canUseTool` gate the default runtime
-    // still takes) and pairing the span with the registration is the only shape
-    // in which a future fourth one can't quietly go untimed.
+    // rather than at the call sites — because there is another registration
+    // path (`handlePermission`, for the cards the broker holds itself) and
+    // pairing the span with the registration is the only shape in which a
+    // future one can't quietly go untimed.
     session.activity.blocked(runId, requestId, "waiting_human", toolName, this.now());
     const request: PermissionRequest = {
       id: requestId,
@@ -8175,12 +7379,9 @@ export class SessionBroker {
     });
   }
 
-  /** Steering messages submitted but not yet consumed by the SDK (outbox + input). */
+  /** Steering messages submitted but not yet consumed by the runtime (outbox + its input). */
   private queuedCount(session: LiveSession): number {
-    return (
-      session.outbox.length +
-      (session.harnessSession?.pending() ?? session.input?.pending() ?? 0)
-    );
+    return session.outbox.length + (session.harnessSession?.pending() ?? 0);
   }
 
   private onTurnEnd(session: LiveSession, opts: { stopped?: boolean } = {}): void {
@@ -8259,10 +7460,8 @@ export class SessionBroker {
 
   private onDone(session: LiveSession): void {
     // Idempotent: a session that already settled must not emit a second "done".
-    if (!session.started && !session.query && !session.harnessSession && !session.stopping) return;
+    if (!session.started && !session.harnessSession && !session.stopping) return;
     session.started = false;
-    session.query = undefined;
-    session.input = undefined;
     session.harnessSession = undefined;
     session.toolTurn.clear();
     session.guardRecoveries.length = 0;
@@ -8302,8 +7501,6 @@ export class SessionBroker {
 
   private onError(session: LiveSession, err: unknown): void {
     session.started = false;
-    session.query = undefined;
-    session.input = undefined;
     session.harnessSession = undefined;
     session.toolTurn.clear();
     session.guardRecoveries.length = 0;
@@ -8325,13 +7522,9 @@ export class SessionBroker {
     }
     this.cleanupSkills(session);
     this.setStatus(session, "error");
-    // Same reason as the harness adapter's `fail()`: taking the spawn over is
-    // what stops the SDK putting the child's stderr into "process exited with
-    // code N", so it has to be put back — and only onto that shape of message.
-    const message = withStderrTail(
-      err instanceof Error ? err.message : String(err),
-      session.lastStderrTail ?? "",
-    );
+    // The adapter has already stapled its runtime's stderr onto a crash (see
+    // the Claude adapter's `fail()`), so the message is the whole account.
+    const message = err instanceof Error ? err.message : String(err);
     this.bus.publish({
       type: "error",
       chatId: session.chatId,
@@ -8407,18 +7600,10 @@ export class SessionBroker {
 
   private applyEffort(session: LiveSession, effort: Effort): void {
     session.effort = effort;
-    // Everything observed so far described the OLD level; drop it so the next
-    // hook re-reports (and any downgrade for this level is learned fresh).
-    session.effortByThread.clear();
-    // Both live shapes, from this one place: a per-message effort on a harness
-    // session used to stop at `session.effort` here, so it only reached the
-    // runtime when the session was next rebuilt.
-    const push = session.harnessSession
-      ? session.harnessSession.setEffort(effort)
-      : session.query
-        ? this.pushEffort(session.query, effort)
-        : undefined;
-    void push?.catch((err: unknown) => {
+    // Pushed from this one place: a per-message effort used to stop at
+    // `session.effort` here, so it only reached the runtime when the session
+    // was next rebuilt.
+    void session.harnessSession?.setEffort(effort).catch((err: unknown) => {
       this.bus.publish({
         type: "error",
         chatId: session.chatId,
@@ -8426,60 +7611,6 @@ export class SessionBroker {
         detail: err instanceof Error ? err.message : String(err),
       });
     });
-  }
-
-  /**
-   * Push an effort change into a RUNNING query.
-   *
-   * `effort` is a start-of-query option, so the live twin is the flag-settings
-   * layer: `applyFlagSettings({ effortLevel })` merges over user/project settings
-   * and takes effect on the next request — subagents spawned after it included.
-   * Falls back to the legacy thinking-token budget when the running CLI predates
-   * the control (or rejects the level), so the lever is never a silent no-op.
-   */
-  private async pushEffort(q: Query, effort: Effort): Promise<void> {
-    const apply = (q as Partial<Query>).applyFlagSettings;
-    if (typeof apply === "function") {
-      try {
-        // `Settings.effortLevel` is typed low..xhigh while the query option
-        // accepts "max" too; the CLI takes the same strings for both, so pass it
-        // through rather than silently clamping a chat that asked for max.
-        await apply.call(q, { effortLevel: effort as "low" | "medium" | "high" | "xhigh" });
-        return;
-      } catch {
-        /* fall through to the thinking-budget fallback below */
-      }
-    }
-    await q.setMaxThinkingTokens(EFFORT_THINKING_TOKENS[effort]);
-  }
-
-  /**
-   * PreToolUse observer: record the effort the runtime applied to the thread this
-   * tool call came from. Read-only — it always returns an empty verdict, so it can
-   * never block or alter a call (the workflow guard is the hook that decides).
-   *
-   * A subagent's call carries `agent_id`; the run it belongs to is recovered from
-   * the tool_use id, which `noteToolThread` stamped when the call was emitted.
-   * An unattributable call (a hook that beat its own row, an id we trimmed) is
-   * simply skipped — the row then shows the configured level instead.
-   */
-  private observeEffortHook(session: LiveSession): HookCallback {
-    return async (input: HookInput): Promise<HookJSONOutput> => {
-      const i = input as {
-        effort?: { level?: unknown };
-        agent_id?: string;
-        tool_use_id?: string;
-      };
-      const level = EffortSchema.safeParse(i.effort?.level);
-      if (!level.success) return {}; // model without effort support
-      const thread = i.agent_id
-        ? i.tool_use_id
-          ? session.threadOfTool.get(i.tool_use_id)
-          : undefined
-        : MAIN_THREAD;
-      if (thread) session.effortByThread.set(thread, level.data);
-      return {};
-    };
   }
 
   /**
@@ -8503,21 +7634,13 @@ export class SessionBroker {
    * Everything is read through closures so a live `setMode`, a workflow edit
    * or a grant that lands mid-turn applies to the very next call.
    *
-   * `reportsBlocks`: whether the CALLER turns a refusal into a notice. A harness
-   * adapter does (it emits `guard-blocked`, which the broker persists as
-   * "Blocked: …"), so the per-guard notices are skipped there or every refusal
-   * would be shown twice. The direct Claude hook does not, so they stay.
-   * Warnings — a `warn`-rung violation, an exemption spent, a subagent that has
-   * drifted — are not refusals and are published either way.
+   * A refusal is NOT noticed from in here: the adapter reports each one as
+   * `guard-blocked`, which the broker persists as "Blocked: …" — noticing it
+   * here as well showed every refusal twice. Warnings — a `warn`-rung
+   * violation, an exemption spent, a subagent that has drifted — are not
+   * refusals, and are published here.
    */
-  private buildToolGuard(
-    session: LiveSession,
-    opts: { reportsBlocks: boolean },
-  ): HarnessToolGuard {
-    const blocked = (text: string, level: "info" | "warn" = "info"): void => {
-      if (opts.reportsBlocks) return;
-      this.bus.publish({ type: "notice", chatId: session.chatId, level, text });
-    };
+  private buildToolGuard(session: LiveSession): HarnessToolGuard {
     const modeName = () => session.modeName ?? session.modeId;
     return composeToolGuards(
       [
@@ -8527,28 +7650,17 @@ export class SessionBroker {
             disallowedTools: session.deniedTools,
           }),
           mode: () => ({ name: modeName(), id: session.modeId }),
-          onBlocked: (tool) => blocked(`${modeName()} mode refused ${tool}.`),
         }),
-        this.agentCwdGuard(session, blocked),
+        this.agentCwdGuard(session),
         // Only where there IS somewhere to redirect to: no TerminalService, no
         // tracked alternative, no guard. See services/shell-guard.ts.
         createBackgroundShellGuard({
           enabled: () => Boolean(this.terminals),
-          onBlocked: () =>
-            blocked(
-              "Blocked a background shell — redirected to " +
-                "mcp__dispatch-workspace__terminal({ background: true }), which is tracked.",
-            ),
         }),
         // Gated on the same service the `worktree` tool is bound from, so the
         // refusal always has a tool to name.
         createWorktreeGuard({
           enabled: () => Boolean(this.worktrees),
-          onBlocked: () =>
-            blocked(
-              "Blocked a shell-created worktree — redirected to " +
-                "mcp__dispatch-workspace__worktree, which records the owning chat.",
-            ),
         }),
         // Gated on the same service `issue_create` is bound from, for the same
         // reason.
@@ -8565,11 +7677,6 @@ export class SessionBroker {
             // rather than strand an upstream report with nowhere to go.
             return own?.source.repo.toLowerCase() === repo;
           },
-          onBlocked: () =>
-            blocked(
-              "Blocked `gh issue create` — the issue watcher would have taken it. " +
-                "Redirected to issue_create, which files it as dispatch:manual.",
-            ),
         }),
         createWorkflowGuard({
           context: () =>
@@ -8582,10 +7689,7 @@ export class SessionBroker {
                 }
               : null,
           onViolation: (violation, isBlock) => {
-            if (isBlock) {
-              blocked(`Blocked: ${violation.reason}`, "warn");
-              return;
-            }
+            if (isBlock) return;
             this.bus.publish({
               type: "notice",
               chatId: session.chatId,
@@ -8607,43 +7711,6 @@ export class SessionBroker {
   }
 
   /**
-   * {@link buildToolGuard} as a Claude PreToolUse hook — the direct Claude
-   * path's way in, and the only thing on that path that still speaks the
-   * SDK's hook shape. It goes when #427 routes Claude chats through
-   * `ClaudeHarness`, whose adapter makes the same translation.
-   *
-   * A hook rather than `canUseTool` because a hook still fires under
-   * `bypassPermissions` and for subagent calls; no matcher, because the mode
-   * policy and the cwd guard have to see every tool, not just `Bash`.
-   */
-  private toolGuardHook(session: LiveSession): HookCallback {
-    const guard = this.buildToolGuard(session, { reportsBlocks: false });
-    return async (input: HookInput): Promise<HookJSONOutput> => {
-      const i = input as {
-        cwd?: unknown;
-        agent_id?: unknown;
-        tool_use_id?: unknown;
-        tool_name?: unknown;
-        tool_input?: unknown;
-      };
-      if (typeof i.tool_name !== "string" || !i.tool_name) return {};
-      const reason = await guard(i.tool_name, (i.tool_input ?? {}) as Record<string, unknown>, {
-        cwd: typeof i.cwd === "string" ? i.cwd : undefined,
-        agentId: typeof i.agent_id === "string" && i.agent_id ? i.agent_id : undefined,
-        toolUseId: typeof i.tool_use_id === "string" ? i.tool_use_id : undefined,
-      });
-      if (!reason) return {};
-      return {
-        hookSpecificOutput: {
-          hookEventName: "PreToolUse",
-          permissionDecision: "deny",
-          permissionDecisionReason: reason,
-        },
-      } as unknown as HookJSONOutput;
-    };
-  }
-
-  /**
    * Keep a subagent writing in the worktree it started in.
    *
    * WHY (2026-08-07). Five background subagents shared one session; the main
@@ -8657,10 +7724,7 @@ export class SessionBroker {
    * permission requests) is simply not tracked rather than tracked wrongly
    * from the chat's starting directory.
    */
-  private agentCwdGuard(
-    session: LiveSession,
-    blocked: (text: string, level?: "info" | "warn") => void,
-  ): HarnessToolGuard {
+  private agentCwdGuard(session: LiveSession): HarnessToolGuard {
     const tracker = this.ensureCwdTracker(session);
     return async (toolName, input, ctx) => {
       if (!ctx.cwd) return null;
@@ -8677,13 +7741,7 @@ export class SessionBroker {
           `agent:${sub}`
         : MAIN_THREAD;
       const refusal = await tracker.observe({ thread, toolName, cwd: ctx.cwd, input });
-      if (!refusal) return null;
-      blocked(
-        `Blocked: a subagent tried to write into ${refusal.attempted}, which is a ` +
-          `different worktree from the ${refusal.pinned} it started in.`,
-        "warn",
-      );
-      return refusal.reason;
+      return refusal?.reason ?? null;
     };
   }
 
@@ -8726,13 +7784,12 @@ export class SessionBroker {
   }
 
   /**
-   * The effort to stamp on a row from this thread: what a hook observed, else
-   * what we configured for it — the agent's own pin for the main loop, the chat's
-   * level for a subagent (which inherits it unless its definition says otherwise).
+   * The effort to stamp on a row from this thread when the runtime reported
+   * none: what we configured for it — the agent's own pin for the main loop,
+   * the chat's level for a subagent (which inherits it unless its definition
+   * says otherwise). What the runtime actually applied rides on the event.
    */
   private threadEffort(session: LiveSession, parentToolUseId: string | null): Effort {
-    const observed = session.effortByThread.get(parentToolUseId ?? MAIN_THREAD);
-    if (observed) return observed;
     return parentToolUseId === null ? session.agentEffort ?? session.effort : session.effort;
   }
 
@@ -8879,31 +7936,6 @@ export class SessionBroker {
     });
   }
 
-  /**
-   * The SDK's `canUseTool`, with the prompt-free list in front of the card.
-   *
-   * Only THIS entry point consults the list, and that is load-bearing:
-   * `handlePermission` is also how `ask_user`, the spawn consent and the review
-   * card put a question in front of the human, and an auto-"allow" on one of
-   * those would answer the human's question for them.
-   */
-  private async canUseTool(
-    session: LiveSession,
-    toolName: string,
-    input: Record<string, unknown>,
-    opts: {
-      title?: string;
-      displayName?: string;
-      description?: string;
-      signal?: AbortSignal;
-    },
-  ): Promise<PermissionResult> {
-    if (await this.autoAllows(session, toolName)) {
-      return { behavior: "allow", updatedInput: input };
-    }
-    return this.handlePermission(session, toolName, input, opts);
-  }
-
   /** "Always allow" — append to the app list. Best-effort: the call already ran. */
   private async rememberAutoAllow(toolName: string): Promise<void> {
     try {
@@ -8917,21 +7949,16 @@ export class SessionBroker {
   }
 
   /**
-   * Build Dispatch's tool servers from an explicit context, record both on the
-   * session for {@link startHarnessSession}, and return them in the shape the
-   * direct Claude path's `Options.mcpServers` takes. Only that return value is
-   * Claude's: the servers are plain MCP-SDK `McpServer`s every provider shares.
+   * Build Dispatch's tool servers from an explicit context and record both on
+   * the session for {@link startHarnessSession}. They are plain MCP-SDK
+   * `McpServer`s every provider shares; an adapter that needs another shape
+   * (Claude's in-process config, an HTTP URL) wraps them itself.
    */
-  private mountManagerMcp(
-    session: LiveSession,
-    context: ManagerMcpContext,
-  ): Record<string, SdkMcpServerConfig> {
-    const servers = createManagerMcpServers(context);
-    session.managerMcp = { context, servers };
-    return claudeSdkMcpServers(servers);
+  private mountManagerMcp(session: LiveSession, context: ManagerMcpContext): void {
+    session.managerMcp = { context, servers: createManagerMcpServers(context) };
   }
 
-  private async buildOptions(session: LiveSession): Promise<Options> {
+  private async buildOptions(session: LiveSession): Promise<SessionSetup> {
     await this.refreshInheritedPosture(session);
     const permissionMode = await this.resolvePermissionMode(session.modeId);
     const project =
@@ -8971,36 +7998,8 @@ export class SessionBroker {
       },
     };
 
-    const options: Options = {
-      permissionMode,
-      // Launch every session with the skip-permissions capability so the "Bypass"
-      // posture is switchable mid-session. The SDK rejects
-      // setPermissionMode("bypassPermissions") unless the session launched with this
-      // flag. It only ENABLES bypass to be selected (user-controlled); canUseTool
-      // still gates every other mode.
-      allowDangerouslySkipPermissions: true,
-      canUseTool: (name, input, o) => this.canUseTool(session, name, input, o),
-      // The FIRST-CLASS effort lever: one level the runtime interprets per model
-      // (and guides adaptive thinking with), inherited by every subagent this
-      // session spawns unless its own definition pins one. Deliberately NOT a
-      // `thinking` budget — that pins the same token count for every model and
-      // overrides adaptive thinking; it survives only as the fallback in
-      // `pushEffort` for a runtime without the live control.
-      effort: session.effort,
-      settingSources: ["user", "project", "local"],
-      includePartialMessages: true,
-      abortController: session.abortController,
-      // Run on the user's installed Claude Code when it's newer than the one
-      // bundled with the SDK. MUST match what harness/claude/models.ts probes for the
-      // picker: the runtime decides which model ids resolve, so a picker fed by
-      // a newer binary than the session would offer models the session can't run.
-      ...claudeExecutableOption(),
-    };
-    if (cwd) options.cwd = cwd;
     // The login account. Resolved per build, not snapshotted at creation, so an
-    // edited config dir applies from the next session start. `env` REPLACES the
-    // subprocess environment in the SDK, so the overlay is merged onto ours —
-    // and left unset entirely for the default account.
+    // edited config dir applies from the next session start.
     const accountSettings = await this.store.getSettings().catch(() => undefined);
     // No provider, no account. `startQuery` refuses such a session before it is
     // built; this keeps a stray build from inventing one.
@@ -9012,42 +8011,22 @@ export class SessionBroker {
           }),
         )
       : undefined;
-    const accountEnv = envWithAccount(session.account);
-    if (accountEnv) options.env = accountEnv;
-    // A user-chosen model pins the query; unset falls back to the SDK default.
-    // (Kept separate from `session.model`, which mirrors the model the SDK
-    // *reports* at init and would otherwise feed the "[1m]" display id back in.)
-    if (session.modelOverride) options.model = session.modelOverride;
+    // The model the human pinned, else the one the runtime last reported. The
+    // pin is kept apart from `session.model`, which mirrors what the runtime
+    // REPORTS and would feed a "[1m]" display id back in as a request.
+    const model = session.modelOverride ?? session.model;
 
-    // Native auto-compaction (SDK `Settings` layer): keep it ON by default so a
-    // session summarizes itself and continues when the window fills, instead of
-    // erroring — this is the "auto-clean at the limit" behavior. A global setting
-    // can disable it or override the compaction reserve window.
     const appSettings = await this.store.getSettings().catch(() => undefined);
     const ac = appSettings?.autoCompact;
-    // The window is derived from the chat's threshold so the CLI compacts
-    // mid-turn at it — see `claudeCompactWindow`.
-    session.compactLimit = this.compactThreshold(session, appSettings);
-    session.compactWindow = claudeCompactWindow(session.compactLimit, ac?.window);
-    options.settings = {
-      autoCompactEnabled: ac?.enabled ?? true,
-      ...(session.compactWindow ? { autoCompactWindow: session.compactWindow } : {}),
-    };
 
     // Config-sourced agents/modes (the `.dispatch/` source of truth) win
     // over `.data`-defined ones on id collision.
     const mode = await this.resolveMode(session.modeId);
     const agent = session.agentId ? await this.resolveAgent(session.agentId) : null;
 
-    // The mode's tool gating, applied two ways — see `LiveSession.deniedTools`.
-    // Handing it to the SDK thins the catalogue where the SDK honours it
-    // (built-ins reliably, MCP tools not); the guard below is the enforcement.
+    // The mode's tool gating, applied two ways — see `LiveSession.deniedTools`:
+    // handed to the runtime to thin its catalogue, and enforced by the guard.
     this.stampModeGate(session, mode);
-    // `!== undefined`, never `.length`: a DEFINED but empty allowlist permits
-    // nothing, and collapsing it to "absent" would turn the strictest policy
-    // expressible into the loosest one.
-    if (session.allowedTools !== undefined) options.allowedTools = session.allowedTools;
-    if (session.deniedTools !== undefined) options.disallowedTools = session.deniedTools;
 
     // The workflow contract — how change ships in THIS project. Resolved BEFORE
     // the tools directive because it decides one of the session's capabilities:
@@ -9127,31 +8106,6 @@ export class SessionBroker {
       );
     }
 
-    // Learn the effort the runtime is REALLY running each thread at. Hook inputs
-    // are the only place that number surfaces (the message stream never carries
-    // it), they fire for subagents too (tagged with `agent_id`), and they report
-    // the level after any silent downgrade for the model — so this is what the
-    // run cards get to show instead of re-stating the chat's pick. No matcher =
-    // every tool; the callback only reads and returns.
-    options.hooks = {
-      ...options.hooks,
-      PreToolUse: [
-        ...(options.hooks?.PreToolUse ?? []),
-        { hooks: [this.observeEffortHook(session)] },
-      ],
-    };
-
-    // …and every Dispatch guard, as ONE hook: the same composed guard every
-    // other provider is handed as `HarnessSessionSpec.toolGuard`. See
-    // `buildToolGuard` for what is in it and why the order matters.
-    options.hooks = {
-      ...options.hooks,
-      PreToolUse: [
-        ...(options.hooks?.PreToolUse ?? []),
-        { hooks: [this.toolGuardHook(session)] },
-      ],
-    };
-
     if (mode?.instructions) {
       append("mode", `Mode — ${mode.name || session.modeId}`, mode.instructions);
     }
@@ -9230,19 +8184,18 @@ export class SessionBroker {
     // on the session too, because it is the main loop's DECLARED effort until a
     // hook reports what the runtime actually applied.
     session.agentEffort = agent?.effort;
-    if (agent) {
-      const def: AgentDefinition = {
-        description: agent.name || "Custom agent",
-        prompt: agent.instructions,
-        tools: agent.allowedTools,
-        disallowedTools: agent.disallowedTools,
-        model: agent.model,
-        permissionMode: agent.permissionMode,
-        effort: agent.effort ?? session.effort,
-      };
-      options.agents = { [agent.id]: def };
-      options.agent = agent.id;
-    }
+    const agentSpec: HarnessAgentSpec | undefined = agent
+      ? {
+          id: agent.id,
+          description: agent.name || "Custom agent",
+          prompt: agent.instructions,
+          tools: agent.allowedTools,
+          disallowedTools: agent.disallowedTools,
+          model: agent.model,
+          permissionMode: agent.permissionMode,
+          effort: agent.effort ?? session.effort,
+        }
+      : undefined;
     // Register Dispatch's own in-process MCP servers on EVERY session so the
     // agent can self-pace (mcp__dispatch-session__wait,
     // mcp__dispatch-chat__wait_for_chat) and drive persistent named shells
@@ -9288,7 +8241,7 @@ export class SessionBroker {
       ...harnessEnablementLayers(
         appSettings?.mcpEnabledFor,
         session.harnessKind,
-        options.model ?? session.model,
+        model,
       ),
     };
     // What this model will actually be served, when the provider can find out
@@ -9303,7 +8256,7 @@ export class SessionBroker {
     const contextWindow = await (this.harnesses
       ?.find(session.harnessKind)
       ?.contextWindow?.({
-        model: options.model ?? session.model,
+        model,
         account: session.account,
       })
       .catch(() => undefined) ?? Promise.resolve(undefined));
@@ -9390,464 +8343,462 @@ export class SessionBroker {
         `## Selected persona: ${persona.name}\n\n${persona.instructions}`,
       );
     }
-    options.mcpServers = {
-      ...(externalMcp as unknown as Record<string, SdkMcpServerConfig>),
-      // Spread LAST so Dispatch's own servers are never clobbered — including by
-      // a config server that happens to share a name. The `dispatch-` prefix on
-      // every category makes that collision vanishingly unlikely rather than
-      // merely survivable: bare `github` would have silently shadowed the GitHub
-      // MCP server a project had every right to configure.
-      ...this.mountManagerMcp(session, {
-        chatId: session.chatId,
-        bus: this.bus,
-        broker: this,
-        // Don't just refuse what the mode denies — don't HAND IT OVER. For
-        // Dispatch's own tools absence beats a veto: a veto needs the runtime
-        // to report the call under a name the policy recognises, which is a
-        // capability ACP cannot provide, and absence needs nothing. The guard
-        // stays for the harness-native tools nothing here can unregister.
-        toolPolicy: { allowedTools: session.allowedTools, disallowedTools: session.deniedTools },
-        // So `run_subapp` can name the tool that opens the URL it returns.
-        browserServers: Object.keys(browserMcp),
-        // Bind the terminal runner to this session's chat + default cwd (its
-        // worktree, else the repo root), so the agent just picks a name.
-        terminals: terminals
-          ? {
-              run: async (a) => {
-                const res = await terminals.run({
-                  chatId: session.chatId,
-                  projectId: session.projectId,
-                  origin: "agent",
-                  cwd,
-                  ...a,
-                });
-                return { ...res, ...this.forwardedPorts(session.chatId) };
-              },
-              tail: async (a) => ({
-                ...(await terminals.tail(session.chatId, a.name, a.lines, {
-                  q: a.q,
-                  since: a.since,
-                  stream: a.stream,
-                })),
-                ...this.forwardedPorts(session.chatId),
+    // Dispatch's own servers travel apart from the declared ones, in
+    // `session.managerMcp`, so a config server that happens to share a name
+    // can never clobber them. The `dispatch-` prefix on every category makes
+    // that collision vanishingly unlikely rather than merely survivable: bare
+    // `github` would have silently shadowed the GitHub MCP server a project
+    // had every right to configure.
+    this.mountManagerMcp(session, {
+      chatId: session.chatId,
+      bus: this.bus,
+      broker: this,
+      // Don't just refuse what the mode denies — don't HAND IT OVER. For
+      // Dispatch's own tools absence beats a veto: a veto needs the runtime
+      // to report the call under a name the policy recognises, which is a
+      // capability ACP cannot provide, and absence needs nothing. The guard
+      // stays for the harness-native tools nothing here can unregister.
+      toolPolicy: { allowedTools: session.allowedTools, disallowedTools: session.deniedTools },
+      // So `run_subapp` can name the tool that opens the URL it returns.
+      browserServers: Object.keys(browserMcp),
+      // Bind the terminal runner to this session's chat + default cwd (its
+      // worktree, else the repo root), so the agent just picks a name.
+      terminals: terminals
+        ? {
+            run: async (a) => {
+              const res = await terminals.run({
+                chatId: session.chatId,
+                projectId: session.projectId,
+                origin: "agent",
+                cwd,
+                ...a,
+              });
+              return { ...res, ...this.forwardedPorts(session.chatId) };
+            },
+            tail: async (a) => ({
+              ...(await terminals.tail(session.chatId, a.name, a.lines, {
+                q: a.q,
+                since: a.since,
+                stream: a.stream,
+              })),
+              ...this.forwardedPorts(session.chatId),
+            }),
+            list: (a) =>
+              terminals.catalog({
+                scope: a.scope ?? "chat",
+                chatId: session.chatId,
+                projectId: session.projectId,
+                q: a.q,
               }),
-              list: (a) =>
-                terminals.catalog({
-                  scope: a.scope ?? "chat",
+          }
+        : undefined,
+      // Bind the worktree catalog to this session's chat + project. `create`
+      // records THIS chat as the owner, which is the whole reason the tool
+      // exists; `list` defaults to this chat and widens on request.
+      worktrees:
+        worktrees && project
+          ? {
+              create: (a) =>
+                worktrees.create(project, a.branch, {
                   chatId: session.chatId,
-                  projectId: session.projectId,
+                  base: a.base,
+                  label: a.label,
+                  origin: "tool",
+                }),
+              list: async (a) => {
+                const scope = a.scope ?? "chat";
+                const projects =
+                  scope === "all" ? await this.store.listProjects() : [project];
+                return worktrees.listAll(projects, {
+                  scope,
+                  projectId: project.id,
+                  chatId: session.chatId,
                   q: a.q,
+                });
+              },
+              remove: (a) =>
+                worktrees.remove(a.path, {
+                  force: a.force,
+                  chatId: session.chatId,
                 }),
             }
           : undefined,
-        // Bind the worktree catalog to this session's chat + project. `create`
-        // records THIS chat as the owner, which is the whole reason the tool
-        // exists; `list` defaults to this chat and widens on request.
-        worktrees:
-          worktrees && project
-            ? {
-                create: (a) =>
-                  worktrees.create(project, a.branch, {
-                    chatId: session.chatId,
-                    base: a.base,
-                    label: a.label,
-                    origin: "tool",
-                  }),
-                list: async (a) => {
-                  const scope = a.scope ?? "chat";
-                  const projects =
-                    scope === "all" ? await this.store.listProjects() : [project];
-                  return worktrees.listAll(projects, {
-                    scope,
-                    projectId: project.id,
-                    chatId: session.chatId,
-                    q: a.q,
-                  });
-                },
-                remove: (a) =>
-                  worktrees.remove(a.path, {
-                    force: a.force,
-                    chatId: session.chatId,
-                  }),
-              }
-            : undefined,
-        // Bind the memory runner to this session's project, so remember/recall/
-        // forget just name the fact (scoped to the chat's project).
-        issues:
-          this.issues && projectId
-            ? { tracker: () => this.issues!.forProject(projectId) }
-            : undefined,
-        secrets: this.secrets
+      // Bind the memory runner to this session's project, so remember/recall/
+      // forget just name the fact (scoped to the chat's project).
+      issues:
+        this.issues && projectId
+          ? { tracker: () => this.issues!.forProject(projectId) }
+          : undefined,
+      secrets: this.secrets
+        ? {
+            request: (input, signal) => this.requestSecret(session.chatId, input, signal),
+            list: () => this.listSecrets(session.chatId),
+            remove: (input) => this.deleteSecret(session.chatId, input),
+          }
+        : undefined,
+      memory:
+        memory && projectId
           ? {
-              request: (input, signal) => this.requestSecret(session.chatId, input, signal),
-              list: () => this.listSecrets(session.chatId),
-              remove: (input) => this.deleteSecret(session.chatId, input),
+              remember: (input) => memory.write(projectId, input),
+              // Wrapped rather than passed straight through: the tool call
+              // itself is already counted as a `manager` row, but that only
+              // says "someone searched". What the page is asked is WHICH facts
+              // keep coming back, which is only knowable from the result.
+              recall: async (query, opts) => {
+                const result = await memory.recall(projectId, query, opts);
+                for (const m of result.matches) {
+                  this.recordUse(session, {
+                    category: "memory",
+                    identifier: m.name,
+                    detail: "recalled",
+                  });
+                }
+                return result;
+              },
+              forget: (name) => memory.delete(projectId, name),
+              findSimilar: (candidate, opts) =>
+                memory.findSimilar(projectId, candidate, opts),
+              // The curation half: inventory, exact search, and commit history.
+              // Bound the same way — the agent names the fact, never the project.
+              inventory: (opts) => memory.inventory(projectId, opts),
+              grep: (opts) => memory.grep(projectId, opts),
+              read: (name) => memory.read(projectId, name),
+              history: memoryHistory
+                ? (opts) => memoryHistory.forProject(projectId, opts)
+                : undefined,
             }
           : undefined,
-        memory:
-          memory && projectId
-            ? {
-                remember: (input) => memory.write(projectId, input),
-                // Wrapped rather than passed straight through: the tool call
-                // itself is already counted as a `manager` row, but that only
-                // says "someone searched". What the page is asked is WHICH facts
-                // keep coming back, which is only knowable from the result.
-                recall: async (query, opts) => {
-                  const result = await memory.recall(projectId, query, opts);
-                  for (const m of result.matches) {
-                    this.recordUse(session, {
-                      category: "memory",
-                      identifier: m.name,
-                      detail: "recalled",
-                    });
-                  }
-                  return result;
-                },
-                forget: (name) => memory.delete(projectId, name),
-                findSimilar: (candidate, opts) =>
-                  memory.findSimilar(projectId, candidate, opts),
-                // The curation half: inventory, exact search, and commit history.
-                // Bound the same way — the agent names the fact, never the project.
-                inventory: (opts) => memory.inventory(projectId, opts),
-                grep: (opts) => memory.grep(projectId, opts),
-                read: (name) => memory.read(projectId, name),
-                history: memoryHistory
-                  ? (opts) => memoryHistory.forProject(projectId, opts)
-                  : undefined,
-              }
-            : undefined,
-        // Bind the PR watcher to this session's default cwd. The poll is one
-        // GraphQL call and needs an explicit owner/name, so resolve it from cwd
-        // ONCE (cached, and never cached as a failure — see makeRepoResolver).
-        // The agent may still pass an explicit repo override on any call. The
-        // project's reviewer list rides along so `request_review` has a default —
-        // the same list `create_pr` asks on the first round.
-        // The PR catalog, so every PR tool can freeze a card into its result.
-        prRegistry:
-          github && this.prRegistry
-            ? makePrRegistryBinding(
-                this.prRegistry,
-                github,
-                dirs,
-                session.chatId,
-                reviewer?.policy.login,
-                reviewer?.policy,
-              )
-            : undefined,
-        github: github
-          ? makeGithubBinding(
+      // Bind the PR watcher to this session's default cwd. The poll is one
+      // GraphQL call and needs an explicit owner/name, so resolve it from cwd
+      // ONCE (cached, and never cached as a failure — see makeRepoResolver).
+      // The agent may still pass an explicit repo override on any call. The
+      // project's reviewer list rides along so `request_review` has a default —
+      // the same list `create_pr` asks on the first round.
+      // The PR catalog, so every PR tool can freeze a card into its result.
+      prRegistry:
+        github && this.prRegistry
+          ? makePrRegistryBinding(
+              this.prRegistry,
               github,
               dirs,
               session.chatId,
-              workflow.pr.reviewers,
-              this.onPrSnapshot,
-              reviewer?.policy.enabled
-                ? {
-                    post: true,
-                    token: reviewer.token,
-                    login: reviewer.policy.login,
-                    // Only self-review records a LOCAL request. A dedicated
-                    // account sits in GitHub's own reviewer queue, and a second
-                    // request here would give the sweep two ways to trigger one
-                    // review.
-                    requestLocal:
-                      reviewer.policy.identity === "self" && this.prRegistry
-                        ? async (repo, n) => {
-                            // The cap, recomputed from the diff THIS request is
-                            // about. Under a `dynamic` policy the row's copy is
-                            // only as fresh as the last sweep, and the order a
-                            // growing PR arrives in — push, then request — is
-                            // exactly the one that lands inside that window, so
-                            // this confirms a spent cap against GitHub before
-                            // letting it refuse.
-                            const registry = this.prRegistry;
-                            const state = registry
-                              ? await registry.reviewAgent(repo, n).catch(() => null)
-                              : null;
-                            // The REASON, not truthiness of the result: the
-                            // registry answers with an object on every path now,
-                            // so `Boolean(result)` called a spent cap a success —
-                            // and a bare `.armed` would call an already-queued
-                            // request a failure. Only the reason tells them apart.
-                            return (
-                              (await registry?.requestReviewAgent(repo, n, session.chatId, {
-                                maxRounds: registry
-                                  ? await freshReviewRoundCap(
-                                      registry,
-                                      repo,
-                                      n,
-                                      reviewer.policy,
-                                      (state?.rounds ?? 0) - (state?.extraRounds ?? 0),
-                                      // This one ARMS a round. Worth a poll
-                                      // every time, in both directions.
-                                      { force: true },
-                                    )
-                                  : undefined,
-                              })) ?? { armed: false, reason: "unknown-pr" }
-                            );
-                          }
-                        : undefined,
-                  }
+              reviewer?.policy.login,
+              reviewer?.policy,
+            )
+          : undefined,
+      github: github
+        ? makeGithubBinding(
+            github,
+            dirs,
+            session.chatId,
+            workflow.pr.reviewers,
+            this.onPrSnapshot,
+            reviewer?.policy.enabled
+              ? {
+                  post: true,
+                  token: reviewer.token,
+                  login: reviewer.policy.login,
+                  // Only self-review records a LOCAL request. A dedicated
+                  // account sits in GitHub's own reviewer queue, and a second
+                  // request here would give the sweep two ways to trigger one
+                  // review.
+                  requestLocal:
+                    reviewer.policy.identity === "self" && this.prRegistry
+                      ? async (repo, n) => {
+                          // The cap, recomputed from the diff THIS request is
+                          // about. Under a `dynamic` policy the row's copy is
+                          // only as fresh as the last sweep, and the order a
+                          // growing PR arrives in — push, then request — is
+                          // exactly the one that lands inside that window, so
+                          // this confirms a spent cap against GitHub before
+                          // letting it refuse.
+                          const registry = this.prRegistry;
+                          const state = registry
+                            ? await registry.reviewAgent(repo, n).catch(() => null)
+                            : null;
+                          // The REASON, not truthiness of the result: the
+                          // registry answers with an object on every path now,
+                          // so `Boolean(result)` called a spent cap a success —
+                          // and a bare `.armed` would call an already-queued
+                          // request a failure. Only the reason tells them apart.
+                          return (
+                            (await registry?.requestReviewAgent(repo, n, session.chatId, {
+                              maxRounds: registry
+                                ? await freshReviewRoundCap(
+                                    registry,
+                                    repo,
+                                    n,
+                                    reviewer.policy,
+                                    (state?.rounds ?? 0) - (state?.extraRounds ?? 0),
+                                    // This one ARMS a round. Worth a poll
+                                    // every time, in both directions.
+                                    { force: true },
+                                  )
+                                : undefined,
+                            })) ?? { armed: false, reason: "unknown-pr" }
+                          );
+                        }
+                      : undefined,
+                }
+              : undefined,
+          )
+        : undefined,
+      // The PR-landing surface — bound ONLY when this project's workflow opted
+      // into auto-merge, which is what makes `approve_pr` absent (not merely
+      // discouraged) everywhere else.
+      prApproval:
+        github && canApprovePr
+          ? makePrApprovalBinding(
+              github,
+              dirs,
+              session.chatId,
+              workflow.mergeMethod,
+              {
+                // The project's declared bar, resolved once and handed over — so
+                // what the human authored is exactly what gets enforced.
+                requireChecks: workflow.pr.requireChecks,
+                requireReview: workflow.pr.requireReview,
+                reviewers: workflow.pr.reviewers,
+              },
+              // An `allowNoReview`/`allowNoChecks` that actually suppresses a
+              // blocker goes to the HUMAN on the ordinary permission channel.
+              // Deliberately NOT routed through SELF_GATED_TOOLS: this gate is
+              // conditional (almost every merge never reaches it), so the
+              // generic canUseTool prompt for approve_pr must stay in place.
+              (input) =>
+                this.requestApproval(session.chatId, {
+                  toolName: "approve_pr_override",
+                  ...overrideConsentPrompt(input, input.blockers),
+                  input: {
+                    number: input.number,
+                    title: input.title,
+                    url: input.url,
+                    overriding: input.blockers.map((b) => b.code),
+                  },
+                }),
+              this.prRegistry
+                ? (repo, n) => this.prRegistry!.reviewAgent(repo, n)
                 : undefined,
             )
           : undefined,
-        // The PR-landing surface — bound ONLY when this project's workflow opted
-        // into auto-merge, which is what makes `approve_pr` absent (not merely
-        // discouraged) everywhere else.
-        prApproval:
-          github && canApprovePr
-            ? makePrApprovalBinding(
-                github,
-                dirs,
-                session.chatId,
-                workflow.mergeMethod,
-                {
-                  // The project's declared bar, resolved once and handed over — so
-                  // what the human authored is exactly what gets enforced.
-                  requireChecks: workflow.pr.requireChecks,
-                  requireReview: workflow.pr.requireReview,
-                  reviewers: workflow.pr.reviewers,
-                },
-                // An `allowNoReview`/`allowNoChecks` that actually suppresses a
-                // blocker goes to the HUMAN on the ordinary permission channel.
-                // Deliberately NOT routed through SELF_GATED_TOOLS: this gate is
-                // conditional (almost every merge never reaches it), so the
-                // generic canUseTool prompt for approve_pr must stay in place.
-                (input) =>
-                  this.requestApproval(session.chatId, {
-                    toolName: "approve_pr_override",
-                    ...overrideConsentPrompt(input, input.blockers),
-                    input: {
-                      number: input.number,
-                      title: input.title,
-                      url: input.url,
-                      overriding: input.blockers.map((b) => b.code),
-                    },
-                  }),
-                this.prRegistry
-                  ? (repo, n) => this.prRegistry!.reviewAgent(repo, n)
-                  : undefined,
-              )
-            : undefined,
-        // The PR-CREATION surface — bound wherever change ships through a PR, so
-        // the guard's refusal of a raw `gh pr create` always has a path to name.
-        prCreate:
-          github && canCreatePr
-            ? makePrCreateBinding(github, dirs, session.chatId, {
-                trunk: session.trunk ?? "main",
-                reviewers: workflow.pr.reviewers,
-                draft: workflow.pr.draft,
-                arm: this.armPrWatch,
-              })
-            : undefined,
-        // Bind the subApp launcher to this session's project so `run_subapp` can
-        // list/start/stop apps and resolve (or create) a worktree per branch.
-        // Re-warm this chat's OWN checkout — the same servers, resolved against
-        // the same cwd and leased ports the session's MCPs use, so what it boots
-        // is what they then adopt.
-        prewarm:
-          this.mcpPrewarm && projectId && cwd
-            ? {
-                run: async () => {
-                  const proj = await this.projectForChat(session.chatId);
-                  return proj ? this.mcpPrewarm!.prewarm(proj, cwd) : [];
-                },
-              }
-            : undefined,
-        runner:
-          runner && worktrees
-            ? {
-                overview: async (chatId) => {
-                  const proj = await this.projectForChat(chatId);
-                  if (!proj) return { subApps: [], running: [], branches: [] };
-                  const all = await runner.list();
-                  const running = all
-                    .filter((r) => r.projectId === proj.id)
-                    .map((r) => ({
-                      subAppId: r.subAppId,
-                      status: r.status,
-                      url: r.url,
-                      branch: r.branch,
-                      port: r.port,
-                    }));
-                  const branches = (await worktrees.listBranches(proj)).map((b) => ({
-                    name: b.name,
-                    current: !!b.isCurrent,
-                    hasWorktree: !!b.worktreePath,
+      // The PR-CREATION surface — bound wherever change ships through a PR, so
+      // the guard's refusal of a raw `gh pr create` always has a path to name.
+      prCreate:
+        github && canCreatePr
+          ? makePrCreateBinding(github, dirs, session.chatId, {
+              trunk: session.trunk ?? "main",
+              reviewers: workflow.pr.reviewers,
+              draft: workflow.pr.draft,
+              arm: this.armPrWatch,
+            })
+          : undefined,
+      // Bind the subApp launcher to this session's project so `run_subapp` can
+      // list/start/stop apps and resolve (or create) a worktree per branch.
+      // Re-warm this chat's OWN checkout — the same servers, resolved against
+      // the same cwd and leased ports the session's MCPs use, so what it boots
+      // is what they then adopt.
+      prewarm:
+        this.mcpPrewarm && projectId && cwd
+          ? {
+              run: async () => {
+                const proj = await this.projectForChat(session.chatId);
+                return proj ? this.mcpPrewarm!.prewarm(proj, cwd) : [];
+              },
+            }
+          : undefined,
+      runner:
+        runner && worktrees
+          ? {
+              overview: async (chatId) => {
+                const proj = await this.projectForChat(chatId);
+                if (!proj) return { subApps: [], running: [], branches: [] };
+                const all = await runner.list();
+                const running = all
+                  .filter((r) => r.projectId === proj.id)
+                  .map((r) => ({
+                    subAppId: r.subAppId,
+                    status: r.status,
+                    url: r.url,
+                    branch: r.branch,
+                    port: r.port,
                   }));
-                  return {
-                    subApps: (proj.subApps ?? []).map((s) => ({
-                      id: s.id,
-                      name: s.name,
-                      ports: s.ports,
-                    })),
-                    running,
-                    branches,
-                  };
-                },
-                launch: async ({ chatId, subAppId, branch }) => {
-                  const proj = await this.projectForChat(chatId);
-                  if (!proj) throw new Error("no project for this chat");
-                  const subApp = (proj.subApps ?? []).find((s) => s.id === subAppId);
-                  if (!subApp) throw new Error(`subApp "${subAppId}" not found`);
-                  const b = branch || proj.defaultBranch || "main";
-                  const path = await worktrees.resolveLaunchPath(proj, b);
-                  const inst = await runner.start(path, subApp, {
-                    projectId: proj.id,
-                    chatId,
-                    branch: b,
-                  });
-                  return {
-                    subAppId: inst.subAppId,
-                    status: inst.status,
-                    url: inst.url,
-                    branch: inst.branch,
-                    port: inst.port,
-                  };
-                },
-                stop: async ({ chatId, subAppId, branch }) => {
-                  const proj = await this.projectForChat(chatId);
-                  if (!proj) return false;
-                  const all = await runner.list();
-                  const match = all.find(
-                    (r) =>
-                      r.projectId === proj.id &&
-                      r.subAppId === subAppId &&
-                      (!branch || r.branch === branch) &&
-                      (r.status === "starting" || r.status === "running"),
-                  );
-                  if (!match) return false;
-                  await runner.stop(match.id);
-                  return true;
-                },
-              }
-            : undefined,
-        // Spawning a sibling chat: resolve the target project, ASK THE HUMAN,
-        // then create it. Bound only when the container wired `spawnChat` in.
-        chats: this.spawnChat
-          ? {
-              resolveProject: async (id) => {
-                const target = id || projectId;
-                if (!target) return null;
-                const proj = await this.store.getProject(target).catch(() => null);
-                return proj ? { id: proj.id, name: proj.name } : null;
+                const branches = (await worktrees.listBranches(proj)).map((b) => ({
+                  name: b.name,
+                  current: !!b.isCurrent,
+                  hasWorktree: !!b.worktreePath,
+                }));
+                return {
+                  subApps: (proj.subApps ?? []).map((s) => ({
+                    id: s.id,
+                    name: s.name,
+                    ports: s.ports,
+                  })),
+                  running,
+                  branches,
+                };
               },
-              nesting: async ({ request, project: target }) =>
-                this.checkSpawnNesting(session.chatId, request, target),
-              consent: async ({ request, project: target }) =>
-                this.consentToSpawn(session.chatId, request, target),
-              spawn: async ({ request, project: target }) => {
-                if (!this.spawnChat) throw new Error("chat spawning is not wired in");
-                return this.spawnChat({
-                  request,
-                  project: target,
-                  parentChatId: session.chatId,
+              launch: async ({ chatId, subAppId, branch }) => {
+                const proj = await this.projectForChat(chatId);
+                if (!proj) throw new Error("no project for this chat");
+                const subApp = (proj.subApps ?? []).find((s) => s.id === subAppId);
+                if (!subApp) throw new Error(`subApp "${subAppId}" not found`);
+                const b = branch || proj.defaultBranch || "main";
+                const path = await worktrees.resolveLaunchPath(proj, b);
+                const inst = await runner.start(path, subApp, {
+                  projectId: proj.id,
+                  chatId,
+                  branch: b,
                 });
+                return {
+                  subAppId: inst.subAppId,
+                  status: inst.status,
+                  url: inst.url,
+                  branch: inst.branch,
+                  port: inst.port,
+                };
+              },
+              stop: async ({ chatId, subAppId, branch }) => {
+                const proj = await this.projectForChat(chatId);
+                if (!proj) return false;
+                const all = await runner.list();
+                const match = all.find(
+                  (r) =>
+                    r.projectId === proj.id &&
+                    r.subAppId === subAppId &&
+                    (!branch || r.branch === branch) &&
+                    (r.status === "starting" || r.status === "running"),
+                );
+                if (!match) return false;
+                await runner.stop(match.id);
+                return true;
               },
             }
           : undefined,
-        // Bind the MCP-config editor to the project's RESOLVED config dir, NOT
-        // this session's cwd: config a server is added to must land where the
-        // project actually keeps it, or it vanishes with the throwaway worktree.
-        // `configPathsFor` returns null when there is nowhere safe to write, and
-        // an unbound editor is the right answer to that — the agent is told the
-        // tool is unavailable instead of writing under the server's own cwd.
-        mcpConfig: projectConfigPaths ? createMcpConfigEditor(projectConfigPaths) : undefined,
-        // Authoring is offered even without a project: the `global` scope is a
-        // machine-wide dir that exists regardless, and a projectless session
-        // still benefits from reading what's shipped. `hasProject` is what
-        // decides the default scope and refuses a project-scoped write.
-        authoring: this.authored
-          ? createAuthoringEditor({
-              authored: this.authored,
-              configPaths: projectConfigPaths,
-              getConfig: () =>
-                projectId && this.projectConfig?.getConfig
-                  ? (this.projectConfig.getConfig(projectId) ?? null)
-                  : null,
-            })
-          : undefined,
-        // Modes, bound alongside the prose: a `.dispatch/modes/` file for the
-        // project scope, the `.data` store for global — the same store the
-        // Settings UI and `GET /api/modes` read, so a mode written here is one
-        // the composer's picker can see. The built-in table rides along so
-        // `mode_list` can name the ids the broker falls back to.
-        modes: this.authored
-          ? createModeEditor({
-              store: this.store,
-              configPaths: projectConfigPaths,
-              builtin: BUILTIN_MODE_PERMISSION,
-              // The fourth home: listed read-only, so `mode_list` names what the
-              // picker offers and `mode_write` cannot be talked into "editing" one.
-              pluginModes: () => this.plugins?.modes() ?? [],
-            })
-          : undefined,
-        // The escape hatch for a guard that has stranded this chat. Bound ONLY
-        // where the guard actually refuses things (`guard: "deny"`) — on `warn`
-        // or `off` nothing is blocked, so a tool for un-blocking it would be an
-        // invitation to ask for permission nobody needed to give.
-        exemptions:
-          workflow.guard === "deny"
-            ? {
-                request: (input) => this.requestExemption(session.chatId, input),
-                list: () => session.exemptions,
-              }
-            : undefined,
-        // Read-only inspection of the whole store. Deliberately NOT scoped to
-        // this chat's project — the point is to reach work that happened
-        // somewhere else. Only `project_info`'s default is bound to the caller,
-        // so omitting `project` means "mine" rather than "all of them".
-        inspect: this.inspect
+      // Spawning a sibling chat: resolve the target project, ASK THE HUMAN,
+      // then create it. Bound only when the container wired `spawnChat` in.
+      chats: this.spawnChat
+        ? {
+            resolveProject: async (id) => {
+              const target = id || projectId;
+              if (!target) return null;
+              const proj = await this.store.getProject(target).catch(() => null);
+              return proj ? { id: proj.id, name: proj.name } : null;
+            },
+            nesting: async ({ request, project: target }) =>
+              this.checkSpawnNesting(session.chatId, request, target),
+            consent: async ({ request, project: target }) =>
+              this.consentToSpawn(session.chatId, request, target),
+            spawn: async ({ request, project: target }) => {
+              if (!this.spawnChat) throw new Error("chat spawning is not wired in");
+              return this.spawnChat({
+                request,
+                project: target,
+                parentChatId: session.chatId,
+              });
+            },
+          }
+        : undefined,
+      // Bind the MCP-config editor to the project's RESOLVED config dir, NOT
+      // this session's cwd: config a server is added to must land where the
+      // project actually keeps it, or it vanishes with the throwaway worktree.
+      // `configPathsFor` returns null when there is nowhere safe to write, and
+      // an unbound editor is the right answer to that — the agent is told the
+      // tool is unavailable instead of writing under the server's own cwd.
+      mcpConfig: projectConfigPaths ? createMcpConfigEditor(projectConfigPaths) : undefined,
+      // Authoring is offered even without a project: the `global` scope is a
+      // machine-wide dir that exists regardless, and a projectless session
+      // still benefits from reading what's shipped. `hasProject` is what
+      // decides the default scope and refuses a project-scoped write.
+      authoring: this.authored
+        ? createAuthoringEditor({
+            authored: this.authored,
+            configPaths: projectConfigPaths,
+            getConfig: () =>
+              projectId && this.projectConfig?.getConfig
+                ? (this.projectConfig.getConfig(projectId) ?? null)
+                : null,
+          })
+        : undefined,
+      // Modes, bound alongside the prose: a `.dispatch/modes/` file for the
+      // project scope, the `.data` store for global — the same store the
+      // Settings UI and `GET /api/modes` read, so a mode written here is one
+      // the composer's picker can see. The built-in table rides along so
+      // `mode_list` can name the ids the broker falls back to.
+      modes: this.authored
+        ? createModeEditor({
+            store: this.store,
+            configPaths: projectConfigPaths,
+            builtin: BUILTIN_MODE_PERMISSION,
+            // The fourth home: listed read-only, so `mode_list` names what the
+            // picker offers and `mode_write` cannot be talked into "editing" one.
+            pluginModes: () => this.plugins?.modes() ?? [],
+          })
+        : undefined,
+      // The escape hatch for a guard that has stranded this chat. Bound ONLY
+      // where the guard actually refuses things (`guard: "deny"`) — on `warn`
+      // or `off` nothing is blocked, so a tool for un-blocking it would be an
+      // invitation to ask for permission nobody needed to give.
+      exemptions:
+        workflow.guard === "deny"
           ? {
-              findChats: (q) => this.inspect!.findChats(q),
-              readChat: (q) => this.inspect!.readChat(q),
-              projectInfo: (q) => this.inspect!.projectInfo(q, projectId),
-              projectList: (instance) => this.inspect!.projectList(instance),
+              request: (input) => this.requestExemption(session.chatId, input),
+              list: () => session.exemptions,
             }
           : undefined,
-        // Cross-chat messaging. `from` is CLOSED OVER rather than passed as an
-        // argument, so there is no way for a tool call to send under another
-        // chat's name — attribution is the thing that makes this write path safe
-        // without a consent card, and an argument would make it forgeable.
-        messaging: this.messenger
-          ? {
-              send: ({ to, message, delivery }) =>
-                this.messenger!.send({ from: session.chatId, to, message, delivery }),
-              ask: ({ to, question, timeoutMs, signals, onWaiting }) =>
-                this.messenger!.ask({
-                  from: session.chatId,
-                  to,
-                  question,
-                  timeoutMs,
-                  signals,
-                  onWaiting,
-                }),
-              reply: ({ askId, answer }) =>
-                this.messenger!.reply({ from: session.chatId, askId, answer }),
-              state: (chatId) => this.messenger!.state(chatId),
-              // The posture writes go straight to the broker rather than through
-              // the messenger: nothing lands in the target's transcript, so there
-              // is no row to attribute and no send to rate-limit. What they share
-              // with messaging is the reach — a session touching a chat that
-              // isn't its own — which is why they are gated together.
-              setMode: async (chatId, modeId) => {
-                await this.ensureRegistered(chatId);
-                return { permissionMode: await this.setMode(chatId, modeId) };
-              },
-              setPersona: async (chatId, personaId) => {
-                await this.ensureRegistered(chatId);
-                await this.setPersona(chatId, personaId);
-              },
-            }
-          : undefined,
-        signal: session.abortController?.signal,
-        onSteer: (listener) => {
-          session.steerListeners.add(listener);
-          return () => session.steerListeners.delete(listener);
-        },
-        now: this.now,
-      }),
-    };
+      // Read-only inspection of the whole store. Deliberately NOT scoped to
+      // this chat's project — the point is to reach work that happened
+      // somewhere else. Only `project_info`'s default is bound to the caller,
+      // so omitting `project` means "mine" rather than "all of them".
+      inspect: this.inspect
+        ? {
+            findChats: (q) => this.inspect!.findChats(q),
+            readChat: (q) => this.inspect!.readChat(q),
+            projectInfo: (q) => this.inspect!.projectInfo(q, projectId),
+            projectList: (instance) => this.inspect!.projectList(instance),
+          }
+        : undefined,
+      // Cross-chat messaging. `from` is CLOSED OVER rather than passed as an
+      // argument, so there is no way for a tool call to send under another
+      // chat's name — attribution is the thing that makes this write path safe
+      // without a consent card, and an argument would make it forgeable.
+      messaging: this.messenger
+        ? {
+            send: ({ to, message, delivery }) =>
+              this.messenger!.send({ from: session.chatId, to, message, delivery }),
+            ask: ({ to, question, timeoutMs, signals, onWaiting }) =>
+              this.messenger!.ask({
+                from: session.chatId,
+                to,
+                question,
+                timeoutMs,
+                signals,
+                onWaiting,
+              }),
+            reply: ({ askId, answer }) =>
+              this.messenger!.reply({ from: session.chatId, askId, answer }),
+            state: (chatId) => this.messenger!.state(chatId),
+            // The posture writes go straight to the broker rather than through
+            // the messenger: nothing lands in the target's transcript, so there
+            // is no row to attribute and no send to rate-limit. What they share
+            // with messaging is the reach — a session touching a chat that
+            // isn't its own — which is why they are gated together.
+            setMode: async (chatId, modeId) => {
+              await this.ensureRegistered(chatId);
+              return { permissionMode: await this.setMode(chatId, modeId) };
+            },
+            setPersona: async (chatId, personaId) => {
+              await this.ensureRegistered(chatId);
+              await this.setPersona(chatId, personaId);
+            },
+          }
+        : undefined,
+      signal: session.abortController?.signal,
+      onSteer: (listener) => {
+        session.steerListeners.add(listener);
+        return () => session.steerListeners.delete(listener);
+      },
+      now: this.now,
+    });
     // Lead with a compact inventory of EVERY MCP server this session actually
     // receives. Tool search owns exact names/schemas; the standing prompt only
     // needs enough of a map to route the agent to the right server family.
@@ -9885,11 +8836,6 @@ export class SessionBroker {
     if (standingFocus) {
       append("compact", "Compact instructions", `# Compact Instructions\n\n${standingFocus}`);
     }
-    options.systemPrompt = {
-      type: "preset",
-      preset: "claude_code",
-      append: appends.join("\n\n"),
-    };
     // Skills: the managed repo's `.dispatch/skills/` is the SOURCE OF TRUTH,
     // but the SDK only DISCOVERS `<cwd>/.claude/skills/` (there's no option to
     // point it elsewhere). So materialize the config skills into the session cwd's
@@ -9925,7 +8871,6 @@ export class SessionBroker {
         } catch {
           /* best-effort: a copy failure must never block a turn from starting */
         }
-        options.skills = "all";
         // First of a name wins, exactly as materialization decides it above.
         const seen = new Set<string>();
         const base = skillsTargetDir(cwd, providerFor(session.harnessKind).skillsDir);
@@ -9950,48 +8895,31 @@ export class SessionBroker {
     }
     session.pendingSentContext = {
       sections,
-      mcpServers: Object.entries(options.mcpServers ?? {}).map(
-        ([name, cfg]): SentContextMcpServer => ({
-          name,
-          origin: isManagerServer(name)
-            ? "dispatch"
-            : name in browserMcp && !configuredNames.has(name)
-              ? "bundled"
-              : "project",
-          // The transport only. Command lines, URLs and headers carry expanded
-          // secrets by this point, and the row is persisted and broadcast.
-          transport: mcpTransportOf(cfg),
-        }),
-      ),
+      mcpServers: [
+        ...Object.entries(externalMcp).map(
+          ([name, cfg]): SentContextMcpServer => ({
+            name,
+            origin: name in browserMcp && !configuredNames.has(name) ? "bundled" : "project",
+            // The transport only. Command lines, URLs and headers carry expanded
+            // secrets by this point, and the row is persisted and broadcast.
+            transport: mcpTransportOf(cfg),
+          }),
+        ),
+        // In-process as built; `startHarnessSession` rewrites these to what the
+        // runtime was actually handed (HTTP, or nothing without a grant).
+        ...Object.keys(session.managerMcp?.servers ?? {}).map(
+          (name): SentContextMcpServer => ({ name, origin: "dispatch", transport: "in-process" }),
+        ),
+      ],
       skills: sentSkills,
     };
-    if (session.fork) {
-      if (session.resumeSessionId) options.resume = session.resumeSessionId;
-      if (session.forkAtUuid) options.resumeSessionAt = session.forkAtUuid;
-      options.forkSession = true;
-    } else if (session.resumeSessionId) {
-      options.resume = session.resumeSessionId;
-    }
-
-    // The pid seam, on the path `startQuery` actually takes for a Claude chat.
-    // Everything else here configures the SDK; this is the one option whose
-    // purpose is to hand something BACK — see harness/claude/spawn.ts. Providing
-    // it also stops the SDK collecting its own stderr tail, so the tail returns
-    // through the sink and `withStderrTail` staples it onto the exit error.
-    options.spawnClaudeCodeProcess = spawnWithPid({
-      onSpawn: (pid) => {
-        session.livePid = pid;
-      },
-      onExit: (pid, stderrTail) => {
-        // Guarded: a dispose → immediate restart can land the new pid before the
-        // old child's exit fires, and clearing unconditionally would blank the
-        // pid of the session that is actually running.
-        if (session.livePid === pid) session.livePid = undefined;
-        if (stderrTail) session.lastStderrTail = stderrTail;
-      },
-    }) as unknown as Options["spawnClaudeCodeProcess"];
-
-    return options;
+    return {
+      cwd,
+      permissionMode,
+      append: appends.join("\n\n"),
+      agent: agentSpec,
+      mcpServers: externalMcp as Record<string, McpServerConfig>,
+    };
   }
 
   /** Build the portable context used when a chat changes native runtimes. */
@@ -10093,45 +9021,6 @@ export class SessionBroker {
   }
 
   /* ---------------------------------------------------------- helpers */
-
-  private toSdkUserMessage(item: OutboxItem): SDKUserMessage {
-    // Auto-surfaced memory rides in front of the user's text (SDK-only; the
-    // transcript row keeps just item.text) so the agent sees the fact in context.
-    const prefixes = outboxPrefixes(item);
-    let content: unknown = outboxText(item);
-    const sources =
-      item.imageSources && item.imageSources.length > 0
-        ? item.imageSources
-        : (item.images ?? [])
-            .map((img) => this.imageSource(img))
-            .filter((s): s is Record<string, unknown> => !!s);
-    if (sources.length > 0) {
-      const blocks: unknown[] = [];
-      for (const p of prefixes) blocks.push({ type: "text", text: p });
-      if (item.text) blocks.push({ type: "text", text: item.text });
-      if (item.fileContext) blocks.push({ type: "text", text: item.fileContext });
-      for (const source of sources) blocks.push({ type: "image", source });
-      content = blocks;
-    }
-    return {
-      type: "user",
-      parent_tool_use_id: null,
-      message: { role: "user", content },
-      priority: item.priority,
-    } as unknown as SDKUserMessage;
-  }
-
-  private imageSource(img: ImageRef): Record<string, unknown> | undefined {
-    if (img.path.startsWith("http://") || img.path.startsWith("https://")) {
-      return { type: "url", url: img.path };
-    }
-    const dataMatch = /^data:([^;]+);base64,(.*)$/.exec(img.path);
-    if (dataMatch) {
-      return { type: "base64", media_type: dataMatch[1], data: dataMatch[2] };
-    }
-    // Local file paths are inlined by a higher layer; skip best-effort here.
-    return undefined;
-  }
 
   private mustGet(chatId: string): LiveSession {
     const session = this.sessions.get(chatId);
