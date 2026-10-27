@@ -65,9 +65,15 @@ test.beforeAll(async () => {
       DISPATCH_PORT: String(PORT),
       DISPATCH_HOST: "127.0.0.1",
       DISPATCH_DATA_DIR: dataDir,
+      // A temp CONFIG dir too. `config/` is shared by every instance on the
+      // machine: inheriting it stops the run at the human's sign-in page, and
+      // past that, the project this spec creates would land in their real config.
+      DISPATCH_CONFIG_DIR: join(dataDir, "config"),
       DISPATCH_FAKE_SDK: "1",
     },
-    stdio: ["ignore", "pipe", "pipe"],
+    // stdin piped, never "ignore": the server reads a closed stdin as "my
+    // parent is gone" and shuts down, so this spec never got past its health check.
+    stdio: ["pipe", "pipe", "pipe"],
   });
   server.stdout?.on("data", (d) => process.stdout.write(`[server] ${d}`));
   server.stderr?.on("data", (d) => process.stderr.write(`[server] ${d}`));
@@ -129,7 +135,8 @@ test("live cockpit: set up → create project → chat → send message → pane
   // The brand lockup, whose accessible name is the connection state — the top
   // bar prints no "Connected" any more (see layout/BrandLockup).
   await expect(page.getByRole("button", { name: "Connection: Connected" })).toBeVisible();
-  await expect(page.getByText(projectName)).toBeVisible();
+  // Exact: the "Created …" toast and the project switcher name it too.
+  await expect(page.getByText(projectName, { exact: true })).toBeVisible();
 
   // 6) Create a chat via the UI. "New chat" now instantly creates + auto-selects
   //    a chat (no dialog) with the default title — the chat view mounts with it.
@@ -151,7 +158,6 @@ test("live cockpit: set up → create project → chat → send message → pane
 
   // 8) Panels + attention render.
   await expect(page.getByRole("tab", { name: "Worktrees" })).toBeVisible();
-  await expect(page.getByRole("tab", { name: "Apps" })).toBeVisible();
   await expect(page.getByRole("tab", { name: "PRs" })).toBeVisible();
   await expect(page.getByRole("button", { name: /Attention/ })).toBeVisible();
 

@@ -174,7 +174,16 @@ export const useUsage = create<UsageStore>((set, get) => {
       // read hid it for good, with the previous account's windows still live and
       // now unreachable. An account that can't be read leaves the gauge where it
       // was; the card still shows that account as unavailable.
-      if (seq === loadSeq && hasWindows(get().bySubscription[usageKey(target)])) set({ target });
+      //
+      // Unless it is nowhere yet. With no target there is no gauge to protect,
+      // and waiting for windows meant a rate-limited first account kept the
+      // target null for good — so the meter never reached its "read the other
+      // accounts" fallback and hid Codex's live numbers too (#426: the start is
+      // null now, where it used to be a Claude target that tripped it).
+      const current = get().target;
+      if (seq === loadSeq && (!current || hasWindows(get().bySubscription[usageKey(target)]))) {
+        set({ target });
+      }
     },
 
     loadTarget: async (target) => {

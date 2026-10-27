@@ -166,6 +166,23 @@ describe("usage store", () => {
     expect(useUsage.getState().target).toEqual(CLAUDE1);
   });
 
+  it("from no target, takes the first account even when it has nothing to show", async () => {
+    // Waiting for windows here kept a rate-limited first account's target null
+    // forever, so the meter never got to read the OTHER accounts and hid them.
+    useUsage.setState({ target: null });
+    usageGet.mockResolvedValueOnce({ ...snap(CLAUDE1, 0), fiveHour: null, error: "rate_limited" });
+    await useUsage.getState().load(CLAUDE1);
+    expect(useUsage.getState().target).toEqual(CLAUDE1);
+  });
+
+  it("with no chat provider and no app default, reads nothing and stays empty", async () => {
+    useUsage.setState({ target: null });
+    settingsGet.mockResolvedValue({ harness: {} } as never);
+    await useUsage.getState().load();
+    expect(usageGet).not.toHaveBeenCalled();
+    expect(useUsage.getState().target).toBeNull();
+  });
+
   it("a failed first read settles into a stale snapshot, not an endless load", async () => {
     usageGet.mockRejectedValue(new Error("502"));
     await useUsage.getState().loadTarget(CODEX);
