@@ -1,6 +1,22 @@
 import { useState, type FormEvent, type ReactNode } from "react";
-import { AlertTriangle, CheckCircle2, Download, ExternalLink, GitCommitHorizontal, ScanSearch } from "lucide-react";
-import type { PluginHook, PluginInspection } from "@dispatch/shared";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  Download,
+  ExternalLink,
+  GitCommitHorizontal,
+  ScanSearch,
+} from "lucide-react";
+import {
+  isPluginCollection,
+  type PluginCollectionEntry,
+  type PluginCollectionInspection,
+  type PluginHook,
+  type PluginInspectResult,
+  type PluginInspection,
+} from "@dispatch/shared";
 import { InlineError, TextInput } from "../../sidebar/Modal.js";
 import { Button } from "../../ui/Button.js";
 import { Chip } from "../../ui/Chip.js";
@@ -21,12 +37,16 @@ import { fieldsFromSchema } from "./pluginSettingsForm.js";
  *
  * Nothing here is generated: every line is a field of `PluginInspection`,
  * which the server built from the manifest, the README and a token scan.
+ *
+ * A URL holding several plugins (a repository with `dispatch-plugins.yaml`, or
+ * a directory of plugin directories) answers with a collection instead, and
+ * renders as a pick list over those same reports — see CollectionReport.
  */
 export function PluginInspectPanel({ onInstalled }: { onInstalled: () => void }) {
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [report, setReport] = useState<PluginInspection | null>(null);
+  const [report, setReport] = useState<PluginInspectResult | null>(null);
 
   const inspect = async (e?: FormEvent) => {
     e?.preventDefault();
@@ -51,8 +71,9 @@ export function PluginInspectPanel({ onInstalled }: { onInstalled: () => void })
           Inspect from URL
         </div>
         <p className="mt-0.5 text-xs leading-relaxed text-muted">
-          Paste a GitHub or https git URL. Dispatch reads the plugin&apos;s files at one commit and reports what it
-          is and what it hooks into — nothing is run, built or installed until you press Install.
+          Paste a GitHub or https git URL — of one plugin, or of a repository holding several to pick from.
+          Dispatch reads the files at one commit and reports what each plugin is and what it hooks into — nothing
+          is run, built or installed until you press Install.
         </p>
       </div>
       <form className="flex flex-wrap items-center gap-1.5" onSubmit={(e) => void inspect(e)}>
@@ -78,7 +99,12 @@ export function PluginInspectPanel({ onInstalled }: { onInstalled: () => void })
         </Button>
       </form>
       <InlineError message={error} />
-      {report && <InspectionReport report={report} onInstalled={onInstalled} />}
+      {report &&
+        (isPluginCollection(report) ? (
+          <CollectionReport key={report.source.sha + report.source.url} report={report} onInstalled={onInstalled} />
+        ) : (
+          <InspectionReport report={report} onInstalled={onInstalled} />
+        ))}
     </div>
   );
 }
@@ -354,7 +380,9 @@ function InstallBar({ report: r, onInstalled }: { report: PluginInspection; onIn
     setBusy(true);
     setError(null);
     try {
-      const res = await api.plugins.install(r.source.url, r.source.sha, replace);
+      // `subdir` always: for a collection member the URL names the collection,
+      // and only this says which of its plugins was being read.
+      const res = await api.plugins.install(r.source.url, r.source.sha, replace, r.source.subdir);
       setDone(`${res.outcome === "replaced" ? "Updated" : "Installed"} ${res.id} at ${short}. Restart Dispatch to load it — plugins are not hot-reloaded.`);
       onInstalled();
     } catch (err) {
@@ -420,5 +448,269 @@ function InstallBar({ report: r, onInstalled }: { report: PluginInspection; onIn
         </p>
       )}
     </div>
+  );
+}
+
+/* ------------------------------------------------------------ collection */
+
+type RowState = { phase: "installing" } | { phase: "done"; message: string } | { phase: "failed"; message: string };
+
+/**
+ * A URL holding several plugins: one row per plugin to tick, each row's FULL
+ * report a click away. The rows carry what matters for the decision — the
+ * verdict, the capabilities, the warning count — so a quick read of the list
+ * is enough, and nothing is selected for you: installing code you never
+ * ticked is not something this card does.
+ *
+ * Install selected runs the single-plugin install once per row, one after
+ * another, so each re-runs the server's checks on its own and one failure
+ * leaves the others' outcomes standing.
+ */
+function CollectionReport({ report: c, onInstalled }: { report: PluginCollectionInspection; onInstalled: () => void }) {
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [open, setOpen] = useState<string | null>(null);
+  const [rows, setRows] = useState<Record<string, RowState>>({});
+  const [busy, setBusy] = useState(false);
+  const short = c.source.sha.slice(0, 7);
+  const where = c.source.subdir ? `${c.source.repo}/${c.source.subdir}` : c.source.repo;
+
+  const selectable = (e: PluginCollectionEntry) => !!e.report?.installable && !e.report.installed && rows[e.subdir]?.phase !== "done";
+  const chosen = c.plugins.filter((e) => picked.has(e.subdir) && selectable(e));
+  const grants = [...new Set(chosen.flatMap((e) => e.report!.capabilities.map((cap) => cap.name)))].sort();
+
+  const toggle = (subdir: string) =>
+    setPicked((prev) => {
+      const next = new Set(prev);
+      if (next.has(subdir)) next.delete(subdir);
+      else next.add(subdir);
+      return next;
+    });
+
+  const installSelected = async () => {
+    setBusy(true);
+    let any = false;
+    for (const e of chosen) {
+      setRows((r) => ({ ...r, [e.subdir]: { phase: "installing" } }));
+      try {
+        const res = await api.plugins.install(c.source.url, c.source.sha, false, e.subdir);
+        any = true;
+        setRows((r) => ({ ...r, [e.subdir]: { phase: "done", message: `Installed ${res.id}` } }));
+      } catch (err) {
+        setRows((r) => ({ ...r, [e.subdir]: { phase: "failed", message: err instanceof Error ? err.message : String(err) } }));
+      }
+    }
+    setPicked(new Set());
+    setBusy(false);
+    if (any) onInstalled();
+  };
+
+  const installedCount = Object.values(rows).filter((r) => r.phase === "done").length;
+
+  return (
+    <div className="space-y-2 rounded-md bg-inset/40 px-2.5 py-2" data-testid="plugin-collection">
+      <div>
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span className="text-sm font-semibold text-primary">{c.name ?? where}</span>
+          <Chip tone="muted">
+            {c.plugins.length} plugin{c.plugins.length === 1 ? "" : "s"}
+          </Chip>
+        </div>
+        <div className="mt-1 flex flex-wrap items-center gap-1">
+          <Chip mono tone="info" title={`ref ${c.source.ref}`}>
+            {c.source.ref.length === 40 ? c.source.ref.slice(0, 7) : c.source.ref}
+          </Chip>
+          <Chip mono tone="info" icon={<GitCommitHorizontal />} title={c.source.sha}>
+            {short}
+          </Chip>
+          <span className="min-w-0 truncate cm-mono text-2xs text-faint" title={where}>
+            {where}
+          </span>
+          {c.source.browseUrl && (
+            <a
+              href={c.source.browseUrl}
+              target="_blank"
+              rel="noreferrer noopener"
+              className="inline-flex items-center gap-0.5 text-2xs text-muted hover:text-primary [&_svg]:size-3"
+            >
+              view at this commit <ExternalLink />
+            </a>
+          )}
+        </div>
+        {c.description && <p className="mt-1.5 text-xs leading-relaxed text-secondary">{c.description}</p>}
+        <p className="mt-1 text-2xs leading-relaxed text-faint">
+          {c.listedBy === "manifest"
+            ? "Listed by the repository's dispatch-plugins.yaml."
+            : "Every directory below this URL that holds a plugin.yaml."}{" "}
+          Each one installs on its own and updates from {c.source.ref} on its own.
+        </p>
+        {c.manifestErrors.map((e) => (
+          <div key={e} className="mt-1 flex items-start gap-1.5 text-2xs leading-relaxed text-warn [&_svg]:mt-0.5 [&_svg]:size-3 [&_svg]:shrink-0">
+            <AlertTriangle />
+            <span className="min-w-0">{e}</span>
+          </div>
+        ))}
+      </div>
+
+      <ul className="divide-y divide-line-soft border-y border-line-soft">
+        {c.plugins.map((e) => (
+          <CollectionRow
+            key={e.subdir}
+            entry={e}
+            selectable={selectable(e) && !busy}
+            picked={picked.has(e.subdir)}
+            onToggle={() => toggle(e.subdir)}
+            open={open === e.subdir}
+            onOpen={() => setOpen((o) => (o === e.subdir ? null : e.subdir))}
+            state={rows[e.subdir]}
+            onInstalled={onInstalled}
+          />
+        ))}
+      </ul>
+
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="min-w-0 flex-1 basis-48 text-2xs leading-relaxed text-muted">
+          {chosen.length
+            ? grants.length
+              ? `Grants ${grants.join(", ")} across ${chosen.length} plugin${chosen.length === 1 ? "" : "s"} — open a row to read what each asks for.`
+              : `${chosen.length} plugin${chosen.length === 1 ? "" : "s"}, declaring no capabilities.`
+            : installedCount
+              ? `Installed ${installedCount}. Restart Dispatch to load ${installedCount === 1 ? "it" : "them"} — plugins are not hot-reloaded.`
+              : `Tick the plugins to install. Each installs exactly commit ${short}.`}
+        </p>
+        <Button
+          variant="primary"
+          size="sm"
+          leftIcon={busy ? <Spinner size={12} /> : <Download />}
+          disabled={busy || !chosen.length}
+          onClick={() => void installSelected()}
+        >
+          {busy ? "Installing…" : chosen.length ? `Install ${chosen.length}` : "Install"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function CollectionRow({
+  entry: e,
+  selectable,
+  picked,
+  onToggle,
+  open,
+  onOpen,
+  state,
+  onInstalled,
+}: {
+  entry: PluginCollectionEntry;
+  selectable: boolean;
+  picked: boolean;
+  onToggle: () => void;
+  open: boolean;
+  onOpen: () => void;
+  state?: RowState;
+  onInstalled: () => void;
+}) {
+  const r = e.report;
+  const rel = e.subdir.split("/").pop() || "(root)";
+  if (!r) {
+    return (
+      <li className="flex flex-wrap items-baseline gap-x-2 py-1.5 pl-6 text-xs">
+        <span className="cm-mono !text-2xs text-secondary">{e.subdir || "(root)"}</span>
+        <span className="min-w-0 text-2xs text-danger">{e.error}</span>
+      </li>
+    );
+  }
+  const v = verdict(r);
+  const problems = r.mismatches.undeclared.length + r.mismatches.unused.length + r.warnings.length;
+  const status =
+    state?.phase === "installing"
+      ? "Installing…"
+      : state?.phase === "done"
+        ? state.message
+        : r.installed
+          ? r.installed.comparison === "newer"
+            ? `Installed v${r.installed.version ?? "?"} — open to update`
+            : `Installed v${r.installed.version ?? "?"}`
+          : !r.installable
+            ? r.refusal
+            : undefined;
+
+  return (
+    <li className="py-1.5" data-testid="plugin-collection-row">
+      <div className="flex items-start gap-2">
+        <input
+          type="checkbox"
+          className="mt-0.5 shrink-0"
+          checked={picked && selectable}
+          disabled={!selectable}
+          onChange={onToggle}
+          aria-label={`Select ${r.name ?? r.id ?? rel}`}
+        />
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+            <button type="button" className="text-xs font-semibold text-primary hover:underline" onClick={onOpen} aria-expanded={open}>
+              {r.name ?? r.id ?? rel}
+            </button>
+            {r.version && <Chip mono>v{r.version}</Chip>}
+            <span className="inline-flex items-center gap-1 text-2xs text-secondary">
+              <StatusDot tone={v.tone} />
+              {v.label}
+            </span>
+            {problems > 0 && (
+              <span className="inline-flex items-center gap-0.5 text-2xs text-warn [&_svg]:size-3">
+                <AlertTriangle /> {problems}
+              </span>
+            )}
+          </div>
+          {r.description && <p className="mt-0.5 line-clamp-2 text-2xs leading-relaxed text-muted">{r.description}</p>}
+          <div className="mt-1 flex flex-wrap items-center gap-1">
+            {r.capabilities.map((cap) => (
+              <Chip key={cap.name} tone="accent" title={cap.line}>
+                {cap.name}
+              </Chip>
+            ))}
+            {r.secrets.length > 0 && <Chip tone="warn">{r.secrets.length} secret{r.secrets.length === 1 ? "" : "s"}</Chip>}
+            <span className="cm-mono !text-2xs text-faint">{e.subdir || "(root)"}</span>
+          </div>
+          {status && (
+            <p
+              className={
+                state?.phase === "failed"
+                  ? "mt-1 text-2xs text-danger"
+                  : state?.phase === "done" || r.installed
+                    ? "mt-1 inline-flex items-center gap-1 text-2xs text-success [&_svg]:size-3"
+                    : "mt-1 text-2xs text-muted"
+              }
+            >
+              {(state?.phase === "done" || (r.installed && !state)) && <CheckCircle2 />}
+              {status}
+            </p>
+          )}
+          {state?.phase === "failed" && <p className="mt-1 text-2xs text-danger">{state.message}</p>}
+        </div>
+        <button
+          type="button"
+          className="shrink-0 text-2xs text-muted hover:text-primary [&_svg]:size-3.5"
+          onClick={onOpen}
+          aria-label={open ? "Hide report" : "Show report"}
+        >
+          {open ? <ChevronDown /> : <ChevronRight />}
+        </button>
+      </div>
+      {open && (
+        <div className="mt-1.5 pl-6">
+          {/* The report predates the batch install; without this its own bar
+              would still offer Install, which the server then 409s. */}
+          <InspectionReport
+            report={
+              state?.phase === "done"
+                ? { ...r, installed: { ...(r.version ? { version: r.version } : {}), comparison: "same", needsRestart: true } }
+                : r
+            }
+            onInstalled={onInstalled}
+          />
+        </div>
+      )}
+    </li>
   );
 }

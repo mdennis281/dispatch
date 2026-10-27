@@ -122,9 +122,13 @@ export class PluginInspector {
    * One plugin, or a COLLECTION of them (plugin-collection.ts). Which one is
    * decided by what the URL's directory holds at the commit:
    *
-   *   dispatch-plugins.yaml        → a collection, listing what it names
    *   plugin.yaml                  → one plugin, exactly as before collections
+   *   dispatch-plugins.yaml        → a collection, listing what it names
    *   plugin.yaml files below only → a collection, listing every one
+   *
+   * A plugin.yaml at the directory wins even over a collection file beside
+   * it: that URL has always meant "this plugin", and `addPlugin` — handed the
+   * extracted directory — reads it the same way.
    *
    * The fetch is soft so a monorepo too big for the caps can still be listed;
    * a single plugin that overflowed is refused with the cap it crossed, as a
@@ -139,7 +143,7 @@ export class PluginInspector {
         return d.startsWith(`${f.subdir}/`) ? [d.slice(f.subdir.length + 1)] : [];
       });
       const manifest = await readCollectionManifest(f.dir);
-      if (!manifest && below.includes("")) {
+      if (below.includes("")) {
         if (f.extract.overflow) throw new PluginInspectError(f.extract.overflow, 413);
         return await this.report(f, url);
       }

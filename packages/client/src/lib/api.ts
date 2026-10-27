@@ -8,7 +8,7 @@ import type {
   CommitMessageAvailability,
   Persona,
   PluginInfo,
-  PluginInspection,
+  PluginInspectResult,
   PluginInstallResult,
   PluginOAuthConnectResult,
   PluginSource,
@@ -1554,10 +1554,19 @@ export const api = {
     oauthDisconnect: (id: string, name: string) =>
       del<PluginInfo>(`/api/plugins/${encodeURIComponent(id)}/oauth/${encodeURIComponent(name)}`),
     /** Read a plugin at a git URL — manifest, README, static scan — without running any of it. Owner only. */
-    inspect: (url: string) => post<PluginInspection>("/api/plugins/inspect", { url }),
-    /** Install exactly the inspected `sha`. `replace` confirms overwriting an installed copy. Owner only. */
-    install: (url: string, sha: string, replace = false) =>
-      post<PluginInstallResult & { plugin?: PluginInfo }>("/api/plugins/install", { url, sha, replace }),
+    /** Or, when the URL holds several plugins, a collection report with one full report per plugin. */
+    inspect: (url: string) => post<PluginInspectResult>("/api/plugins/inspect", { url }),
+    /**
+     * Install exactly the inspected `sha`. `replace` confirms overwriting an installed copy; `subdir`
+     * picks one plugin of a collection (its report's `source.subdir`). Owner only.
+     */
+    install: (url: string, sha: string, replace = false, subdir?: string) =>
+      post<PluginInstallResult & { plugin?: PluginInfo }>("/api/plugins/install", {
+        url,
+        sha,
+        replace,
+        ...(subdir !== undefined ? { subdir } : {}),
+      }),
     /** Resolve the recorded source against its remote; when newer, the target's report and its diff. Owner only. */
     checkUpdate: (id: string) => post<PluginUpdateCheck>(`/api/plugins/${encodeURIComponent(id)}/check-update`),
     /** Install the target `checkUpdate` showed. Refused (409) if the ref moved since. Owner only. */

@@ -8,7 +8,8 @@
  * install path, same recorded source (the collection URL plus that plugin's
  * `subdir`) — so updates and uninstall need nothing collection-specific.
  *
- * `dispatch-plugins.yaml` at the collection root is OPTIONAL. Without it every
+ * A directory with its own `plugin.yaml` is always ONE plugin; a collection
+ * is a directory without one. `dispatch-plugins.yaml` at its root is OPTIONAL. Without it every
  * directory holding a `plugin.yaml` is listed (outermost wins); with it, only
  * and exactly the paths it names, in its order. It deliberately carries no
  * per-plugin metadata: name, version and capabilities live in each

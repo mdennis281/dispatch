@@ -19,9 +19,12 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
   PLUGIN_API_VERSION,
+  PLUGIN_COLLECTION_FILE,
   PLUGIN_MANIFEST_FILE,
   PLUGINS_DIR_NAME,
   PluginManifestSchema,
+  listCollection,
+  normaliseCollectionPath,
   pluginRangeAccepts,
   type PluginManifest,
   type PluginSettingsEntry,
@@ -270,24 +273,112 @@ async function manifestDirIn(root: string): Promise<string | null> {
   return null;
 }
 
+/** One plugin of a collection, as `dispatch plugin add` lists it. */
+export interface CollectionMember {
+  /** Relative to the collection root — what `--plugin` takes. */
+  path: string;
+  id?: string;
+  version?: string;
+  name?: string;
+}
+
 /**
- * Materialise `source` — a directory, a `.tgz`/`.tar.gz`, or a git URL — into
- * a scratch dir and return the plugin directory inside it. The caller owns
- * cleanup of `scratch`.
+ * The plugins in `root` by the same rules the server's Inspect uses
+ * (`listCollection` in @dispatch/shared): `dispatch-plugins.yaml` when there
+ * is one, else every directory holding a `plugin.yaml`, outermost first.
  */
-async function materialise(source: string): Promise<{ pluginDir: string; scratch?: string; source: PluginSource }> {
+export async function collectionIn(root: string): Promise<{ members: CollectionMember[]; errors: string[] }> {
+  let manifest: unknown;
+  const errors: string[] = [];
+  try {
+    manifest = parseYaml(await readFile(join(root, PLUGIN_COLLECTION_FILE), "utf8")) ?? {};
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") errors.push(`${PLUGIN_COLLECTION_FILE}: ${describe(err)}`);
+  }
+  const found: string[] = [];
+  // Depth-bounded: a collection is a directory of plugin directories, not a
+  // whole monorepo to crawl.
+  const walk = async (dir: string, rel: string, depth: number): Promise<void> => {
+    if (existsSync(join(dir, PLUGIN_MANIFEST_FILE))) found.push(rel);
+    if (depth >= 4) return;
+    for (const e of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
+      if (!e.isDirectory() || e.name.startsWith(".") || e.name === "node_modules") continue;
+      await walk(join(dir, e.name), rel ? `${rel}/${e.name}` : e.name, depth + 1);
+    }
+  };
+  await walk(root, "", 0);
+  const listing = listCollection(manifest, found);
+  const members: CollectionMember[] = [];
+  for (const path of listing.members) {
+    const m: CollectionMember = { path };
+    try {
+      const y = parseYaml(await readFile(join(root, ...path.split("/").filter(Boolean), PLUGIN_MANIFEST_FILE), "utf8")) as Record<string, unknown>;
+      if (typeof y?.id === "string") m.id = y.id;
+      if (typeof y?.version === "string") m.version = y.version;
+      if (typeof y?.name === "string") m.name = y.name;
+    } catch {
+      /* listed, but no readable plugin.yaml — the install of it will say why */
+    }
+    members.push(m);
+  }
+  return { members, errors: [...errors, ...listing.manifestErrors] };
+}
+
+function memberLines(members: CollectionMember[]): string {
+  return members
+    .map((m) => `  ${m.path || "."}${m.id ? `  (${m.id}${m.version ? ` v${m.version}` : ""})` : ""}`)
+    .join("\n");
+}
+
+/**
+ * The plugin directory to install out of a materialised `root`. Without
+ * `member` that is the root's own plugin; a root with none but plugins below
+ * it is a COLLECTION, refused with its members listed, because picking one
+ * for the owner would install code they never named. `member` is a path relative to the
+ * root, or a member's plugin id.
+ */
+async function pickPluginDir(root: string, member: string | undefined, what: string): Promise<string | null> {
+  if (member === undefined) {
+    const dir = await manifestDirIn(root);
+    if (dir) return dir;
+    const { members } = await collectionIn(root);
+    if (!members.length) return null;
+    throw new CmError(
+      `${what} holds ${members.length} plugin${members.length === 1 ? "" : "s"} — pick with --plugin <path|id> (repeatable) or --all:\n${memberLines(members)}`,
+    );
+  }
+  const n = normaliseCollectionPath(member);
+  if (!("error" in n)) {
+    const dir = join(root, ...n.path.split("/").filter(Boolean));
+    if (existsSync(join(dir, PLUGIN_MANIFEST_FILE))) return dir;
+  }
+  const { members } = await collectionIn(root);
+  const byId = members.find((m) => m.id === member);
+  if (byId) return join(root, ...byId.path.split("/").filter(Boolean));
+  throw new CmError(
+    `no plugin "${member}" in ${what}` + (members.length ? ` — it holds:\n${memberLines(members)}` : ""),
+  );
+}
+
+/**
+ * Bring `source` — a directory, a `.tgz`/`.tar.gz`, or a git URL — onto disk
+ * and say where its root is, plus how to record a plugin taken from inside it.
+ * The caller owns cleanup of `scratch`.
+ */
+async function sourceRoot(
+  source: string,
+): Promise<{ root: string; scratch?: string; what: string; record: (pluginDir: string) => PluginSource }> {
   const installedAt = Date.now();
   if (looksLikeGitUrl(source)) {
     const scratch = await mkdtemp(join(tmpdir(), "cm-plugin-"));
     try {
       const clone = await shallowClone(source, scratch);
-      const dir = await manifestDirIn(clone.root);
-      if (!dir) throw new CmError(`no ${PLUGIN_MANIFEST_FILE} at the root of ${source}`);
       return {
-        pluginDir: dir,
+        root: clone.root,
         scratch,
+        what: source,
         // The default branch, followed: `dispatch plugin update` checks its tip.
-        source: {
+        record: (dir) => ({
           type: "git",
           // Never a token: the record is served by `GET /api/plugins` and shown
           // on the row. A private repo then authenticates through the owner's
@@ -299,7 +390,7 @@ async function materialise(source: string): Promise<{ pluginDir: string; scratch
           subdir: relative(clone.root, dir).split(sep).join("/"),
           sha: clone.sha,
           installedAt,
-        },
+        }),
       };
     } catch (err) {
       await rm(scratch, { recursive: true, force: true }).catch(() => {});
@@ -314,20 +405,54 @@ async function materialise(source: string): Promise<{ pluginDir: string; scratch
     throw new CmError(`no such file or directory: ${abs}`);
   }
   if (st.isDirectory()) {
-    const dir = await manifestDirIn(abs);
-    if (!dir) throw new CmError(`no ${PLUGIN_MANIFEST_FILE} in ${abs}`);
-    return { pluginDir: dir, source: { type: "local", path: abs, installedAt } };
+    return { root: abs, what: abs, record: () => ({ type: "local", path: abs, installedAt }) };
   }
   if (/\.(tgz|tar\.gz|tar)$/i.test(abs)) {
     const scratch = await mkdtemp(join(tmpdir(), "cm-plugin-"));
     // `tar` ships with Windows 10+, macOS and every Linux; it is the one
     // archive tool that needs no dependency here.
     await run("tar", ["-xf", abs, "-C", scratch]);
-    const dir = await manifestDirIn(scratch);
-    if (!dir) throw new CmError(`no ${PLUGIN_MANIFEST_FILE} inside ${basename(abs)}`);
-    return { pluginDir: dir, scratch, source: { type: "local", path: abs, installedAt } };
+    return { root: scratch, scratch, what: basename(abs), record: () => ({ type: "local", path: abs, installedAt }) };
   }
   throw new CmError(`${abs} is neither a directory, a .tgz/.tar.gz, nor a git URL`);
+}
+
+/**
+ * Materialise `source` into a scratch dir and return the plugin directory
+ * inside it — `member` picks one out of a collection. The caller owns cleanup
+ * of `scratch`.
+ */
+async function materialise(
+  source: string,
+  member?: string,
+): Promise<{ pluginDir: string; scratch?: string; source: PluginSource }> {
+  const got = await sourceRoot(source);
+  try {
+    const dir = await pickPluginDir(got.root, member, got.what);
+    if (!dir) {
+      throw new CmError(
+        looksLikeGitUrl(source)
+          ? `no ${PLUGIN_MANIFEST_FILE} at the root of ${source}`
+          : got.scratch
+            ? `no ${PLUGIN_MANIFEST_FILE} inside ${got.what}`
+            : `no ${PLUGIN_MANIFEST_FILE} in ${got.what}`,
+      );
+    }
+    return { pluginDir: dir, ...(got.scratch ? { scratch: got.scratch } : {}), source: got.record(dir) };
+  } catch (err) {
+    if (got.scratch) await rm(got.scratch, { recursive: true, force: true }).catch(() => {});
+    throw err;
+  }
+}
+
+/** `dispatch plugin add <collection> --all`: every member of the collection at `source`. */
+export async function listCollectionMembers(source: string): Promise<CollectionMember[]> {
+  const got = await sourceRoot(source);
+  try {
+    return (await collectionIn(got.root)).members;
+  } finally {
+    if (got.scratch) await rm(got.scratch, { recursive: true, force: true }).catch(() => {});
+  }
 }
 
 /** Validate a candidate or throw a {@link CmError} naming what is wrong. */
@@ -380,9 +505,9 @@ async function removeEntry(target: string): Promise<void> {
 export async function addPlugin(
   configDir: string,
   source: string,
-  opts: { force?: boolean } = {},
+  opts: { force?: boolean; /** One plugin of a collection: its path in it, or its id. */ plugin?: string } = {},
 ): Promise<InstallResult> {
-  const { pluginDir, scratch, source: recorded } = await materialise(source);
+  const { pluginDir, scratch, source: recorded } = await materialise(source, opts.plugin);
   try {
     const found = await validated(pluginDir);
     const root = pluginsRoot(configDir);

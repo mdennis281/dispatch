@@ -18,6 +18,7 @@ import {
   consentLines,
   discoverPlugins,
   linkPlugin,
+  listCollectionMembers,
   pluginsRoot,
   readPluginToggles,
   removePlugin,
@@ -27,7 +28,7 @@ import {
 import { checkPluginUpdates, purgePluginData, updatePlugins, type CliUpdateCheck } from "../core/plugin-lifecycle.js";
 import { initPlugin, type PluginScaffoldKind } from "../core/plugin-init.js";
 import { CmError } from "../core/manifest.js";
-import { flag, has, parseArgs, type ParsedArgs } from "../core/args.js";
+import { all, flag, has, parseArgs, type ParsedArgs } from "../core/args.js";
 
 function configDirOf(args: ParsedArgs): string {
   const env = process.env;
@@ -56,15 +57,31 @@ const RESTART_NOTE = "  Restart Dispatch to apply (plugins are read at boot; not
 
 async function cmdAdd(args: ParsedArgs): Promise<void> {
   const [source] = args.positionals;
-  if (!source) throw new CmError("Usage: dispatch plugin add <path | git-url | tarball> [--force]");
+  if (!source) {
+    throw new CmError("Usage: dispatch plugin add <path | git-url | tarball> [--plugin <path|id>]... [--all] [--force]");
+  }
   const configDir = configDirOf(args);
-  const result = await addPlugin(configDir, source, { force: has(args, "force") });
-  // Where it came from, in host-owned config — what `update` follows later.
-  if (result.source) await setPluginSource(configDir, result.plugin.manifest!.id, result.source);
-  if (emitJson(args, result)) return;
-  const m = result.plugin.manifest!;
-  process.stdout.write(`${result.outcome === "replaced" ? "Replaced" : "Installed"} ${m.id} → ${result.dir}\n`);
-  for (const line of consentLines(m)) process.stdout.write(`${line}\n`);
+  // A collection: each pick is its own add — its own clone, validation and
+  // recorded source — so one bad member cannot half-install the others.
+  const picks: Array<string | undefined> = has(args, "all")
+    ? (await listCollectionMembers(source)).map((m) => m.path)
+    : all(args, "plugin").length
+      ? all(args, "plugin")
+      : [undefined];
+  if (!picks.length) throw new CmError(`no plugins found in ${source}`);
+  const results = [];
+  for (const plugin of picks) {
+    const result = await addPlugin(configDir, source, { force: has(args, "force"), ...(plugin !== undefined ? { plugin } : {}) });
+    // Where it came from, in host-owned config — what `update` follows later.
+    if (result.source) await setPluginSource(configDir, result.plugin.manifest!.id, result.source);
+    results.push(result);
+  }
+  if (emitJson(args, results.length === 1 ? results[0] : results)) return;
+  for (const result of results) {
+    const m = result.plugin.manifest!;
+    process.stdout.write(`${result.outcome === "replaced" ? "Replaced" : "Installed"} ${m.id} → ${result.dir}\n`);
+    for (const line of consentLines(m)) process.stdout.write(`${line}\n`);
+  }
   process.stdout.write(RESTART_NOTE);
 }
 
@@ -231,6 +248,7 @@ Usage:
   dispatch plugin init <id> [--server|--client|--both]   Scaffold a plugin against @dispatch/plugin-sdk (default: both)
                      [--name <n>] [--dir <parent>] [--sdk <path>]
   dispatch plugin add <path | git-url | tarball>   Copy a plugin in, validate it, print what it asks for
+                     [--plugin <path|id>]... [--all]   …or pick from a collection (several plugins in one repo)
   dispatch plugin link <path>                      Junction/symlink a working directory (development)
   dispatch plugin list                             List installed plugins and their state
   dispatch plugin enable <id>                      Turn a plugin on (takes effect after a restart)
@@ -241,6 +259,8 @@ Usage:
 Options:
       --config-dir <dir>   Dispatch's config root (default: $DISPATCH_CONFIG_DIR, then $DISPATCH_DATA_DIR)
   -f, --force              Replace a plugin that is already installed
+      --plugin <path|id>   add: one plugin of a collection, by its path in it or its id (repeatable)
+      --all                add: every plugin the collection lists
       --check              update: report what would change, install nothing
       --yes                update: install even when the new version asks for more
                            (capabilities, secrets, OAuth clients, MCP servers, processes)

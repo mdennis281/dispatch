@@ -195,6 +195,7 @@ shows and copies the path).
 ```
 dispatch plugin init <id> [--server|--client|--both] [--name <n>] [--dir <parent>] [--sdk <path>]
 dispatch plugin add <path | git-url | tarball>   validate in the source, copy into plugins/<id>, print the consent summary
+        [--plugin <path|id>]... [--all]          pick from a collection (see "Several plugins in one repository")
 dispatch plugin link <path>                      junction/symlink a working directory (development)
 dispatch plugin list | enable <id> | disable <id>
 dispatch plugin update [<id>] [--check] [--yes]  follow the recorded source; --yes accepts an update that asks for more
@@ -262,6 +263,58 @@ existing (enabled) one, with `needsRestart`. An active plugin whose files were
 replaced keeps its loaded server code but stops serving its client bundle until
 the restart, so a new client never talks to the old server half. Both routes are owner-only (403 for a non-owner
 session or an integration token; auth off means the single local user).
+
+### Several plugins in one repository
+
+A **collection** is a directory without its own `plugin.yaml` that holds plugin
+directories below it — a repository of plugins, or `examples/plugins` in this
+one. Pasting its URL answers with a `PluginCollectionInspection`
+(`packages/shared/src/plugin-collection.ts`) instead: the collection's identity
+and, per member, the **full** single-plugin report its own URL would give. The
+pane renders that as a pick list (verdict, capability chips, warning count per
+row; the whole report one click away), and **Install N** posts
+`POST /api/plugins/install { url, sha, subdir }` once per ticked row.
+
+Membership is `dispatch-plugins.yaml` at the collection root when there is one,
+otherwise every directory with a `plugin.yaml`, outermost first (a plugin that
+vendors an example plugin is one plugin):
+
+```yaml
+# dispatch-plugins.yaml — optional
+name: Home lab
+description: Plugins for the boxes in the closet
+plugins:
+  - plugins/hass
+  - path: plugins/proxmox
+```
+
+It lists paths and nothing else on purpose: name, version and capabilities live
+in each `plugin.yaml`, and a second copy would drift from the one the host reads.
+A broken manifest does not hide the collection — the listing falls back to the
+scan and says why. A `plugin.yaml` at the URL's own directory always wins: that
+URL has always meant "this plugin".
+
+Rules that keep it as safe as one plugin:
+
+- **`subdir` is checked server-side** (`memberSubdir`): normalised, no `..` or
+  reserved names, and at or under the directory the URL names. A client cannot
+  install a directory the owner was not shown.
+- **Nothing is pre-selected**, and each install is the ordinary single-plugin
+  path — re-fetch the sha, re-run the report, refuse unless installable — so a
+  batch is N independent installs, and one failure leaves the others standing.
+- **The first fetch is soft.** A monorepo blows the caps long before its last
+  `plugin.yaml` streams past, so collection discovery stops *writing* at a cap
+  (`extract.overflow`) and keeps reading, still keeping every manifest (256 KB
+  each, 64 at most). If it overflowed, a second, strict fetch of the same commit
+  keeps only the members' directories, with the file and byte caps scaled by the
+  member count (up to ×10). A single plugin that overflowed is refused with the
+  cap it crossed, exactly as before.
+- **The recorded source is the collection URL plus the member's `subdir`.**
+  Update already follows `source.subdir`, so a member updates on its own and
+  nothing in the update path knows collections exist.
+
+`dispatch plugin add <collection>` refuses to guess and lists the members; pick
+with `--plugin <path|id>` (repeatable) or `--all`. Each pick is its own add.
 
 Settings → Plugins is the same list with the enable toggle, status, error text,
 capability and secret chips, warnings, a generic settings form rendered from the
