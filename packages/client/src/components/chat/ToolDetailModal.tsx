@@ -91,11 +91,15 @@ export function ToolDetailModal({
             <span className="ml-auto"><CopyAction text={request} /></span>
           </div>
           {requestBody ? (
-            <div className="cm-scroll max-h-64 overflow-auto rounded-md border border-line bg-inset px-3 py-2.5">
+            // As tall as the response pane: a structured body is usually a
+            // document (a memory, a brief), and 16rem cut it off mid-paragraph.
+            <div className="cm-scroll max-h-[42vh] overflow-auto rounded-md border border-line bg-inset px-3 py-2.5">
               {requestBody}
             </div>
           ) : language ? (
-            <CodeBlock code={request} language={language} className="!my-0" />
+            <div className="cm-scroll max-h-64 overflow-auto rounded-md">
+              <CodeBlock code={request} language={language} className="!my-0" />
+            </div>
           ) : (
             <pre className="cm-scroll max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md border border-line bg-inset px-3 py-2.5 cm-mono !text-xs text-secondary">{request}</pre>
           )}

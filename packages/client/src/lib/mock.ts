@@ -719,6 +719,69 @@ export const MOCK_MESSAGES: Record<string, ChatMessage[]> = {
         askId: "ask_7f3a",
       },
     },
+    // A memory round trip: a `remember` whose body is a markdown document, and
+    // the `recall` that reads it back. The inspector should show both as
+    // markdown in their own sections, not as a JSON string full of `\n`.
+    {
+      kind: "tool_use",
+      id: "stm1",
+      chatId: CHAT_STEAM,
+      ts: ago(0.95),
+      turn: 1,
+      toolUseId: "t_remember",
+      name: "mcp__dispatch-memory__remember",
+      input: {
+        name: "save-format-v3",
+        description: "Cloud saves are length-prefixed since v3 — never read a slot without the header",
+        type: "project",
+        body:
+          "Save slots are **length-prefixed** from format v3 on.\n\n" +
+          "- read the 4-byte header first\n- `SaveSlots.max` is the slot count, not 3\n\n" +
+          "**Why:** v2 readers silently truncated slots over 64KB.\n\nSee [[steam-cloud-quota]].",
+      },
+    },
+    {
+      kind: "tool_result",
+      id: "stm2",
+      chatId: CHAT_STEAM,
+      ts: ago(0.95),
+      turn: 1,
+      toolUseId: "t_remember",
+      name: "mcp__dispatch-memory__remember",
+      ok: true,
+      durationMs: 42,
+      content:
+        `Remembered "save-format-v3" (project). It's saved to project memory and will be injected into future sessions. Use recall to read it back.`,
+    },
+    {
+      kind: "tool_use",
+      id: "stm3",
+      chatId: CHAT_STEAM,
+      ts: ago(0.94),
+      turn: 1,
+      toolUseId: "t_recall",
+      name: "mcp__dispatch-memory__recall",
+      input: { query: "save format" },
+    },
+    {
+      kind: "tool_result",
+      id: "stm4",
+      chatId: CHAT_STEAM,
+      ts: ago(0.94),
+      turn: 1,
+      toolUseId: "t_recall",
+      name: "mcp__dispatch-memory__recall",
+      ok: true,
+      durationMs: 31,
+      content:
+        `2 match(es) for "save format":\n\n` +
+        "### save-format-v3 (project)\nCloud saves are length-prefixed since v3 — never read a slot without the header\n\n" +
+        "Save slots are **length-prefixed** from format v3 on.\n\n- read the 4-byte header first\n- `SaveSlots.max` is the slot count, not 3\n\n" +
+        "**Why:** v2 readers silently truncated slots over 64KB.\n\nSee [[steam-cloud-quota]]." +
+        "\n\n---\n\n" +
+        "### steam-cloud-quota (reference) — linked\nSteam Cloud gives each app 100MB across all slots\n\n" +
+        "Quota is per app, not per slot. Docs: https://partner.steamgames.com/doc/features/cloud",
+    },
     // The other direction: this chat talking TO its peers. One of each shape
     // the card has to resolve — a spawn whose chat id is only in the RESULT, a
     // send and an ask that name theirs in the arguments, and a wait still in

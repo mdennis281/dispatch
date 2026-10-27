@@ -19,6 +19,7 @@ import { RowShell } from "./RowShell.js";
 import { PeerChatPanel, PeerChatRef, plainTitle, usePeerChat } from "./PeerChatRef.js";
 import { ToolDetailModal, type ToolDetailState } from "../ToolDetailModal.js";
 import { Markdown } from "../Markdown.js";
+import { MemoryArguments, RecallResultView, parseRecallResult } from "./MemoryDetail.js";
 import { Button } from "../../ui/Button.js";
 import { Chip } from "../../ui/Chip.js";
 import { OverflowTooltip } from "../../ui/OverflowTooltip.js";
@@ -317,6 +318,8 @@ export const DispatchToolCard = memo(function DispatchToolCard({
         : presentation.subject
           ? `${presentation.activity} · ${presentation.subject}`
           : `${presentation.activity}${patience}`;
+  const isMemory = presentation.tool === "remember" || presentation.tool === "recall";
+  const recalled = presentation.tool === "recall" && state === "ok" ? parseRecallResult(response) : null;
   const prose = PEER_PROSE[presentation.tool];
   const proseText = prose ? textInput(use, prose.key) : undefined;
   const request = proseText ?? safeJson(use.input);
@@ -489,11 +492,23 @@ export const DispatchToolCard = memo(function DispatchToolCard({
         lead={peerChatId ? <PeerChatPanel chatId={peerChatId} /> : undefined}
         request={request}
         requestLabel={proseText ? prose!.label : "Arguments"}
-        requestBody={isPeer ? <PeerArguments use={use} proseKey={prose?.key} text={proseText} /> : undefined}
+        requestBody={
+          isPeer ? (
+            <PeerArguments use={use} proseKey={prose?.key} text={proseText} />
+          ) : isMemory ? (
+            <MemoryArguments use={use} tool={presentation.tool} />
+          ) : undefined
+        }
+        // Everything else's arguments ARE the JSON — highlighted, not a grey wall.
+        language={proseText ? undefined : "json"}
         response={sleepText ?? response}
         responseLabel="Response"
         responseBody={
-          <Markdown className="!text-sm !text-secondary">{sleepText ?? response}</Markdown>
+          recalled ? (
+            <RecallResultView result={recalled} />
+          ) : (
+            <Markdown className="!text-sm !text-secondary">{sleepText ?? response}</Markdown>
+          )
         }
       />
     </RowShell>
