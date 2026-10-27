@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { CodexSession, MANAGER_TOOL_TIMEOUT_SEC } from "./session.js";
+import { CodexSession, MANAGER_TOOL_TIMEOUT_SEC, isNotSteerable } from "./session.js";
 import {
   ASK_USER_TIMEOUT_CAP_SECONDS,
   WAIT_CAP_SECONDS,
@@ -19,10 +19,13 @@ function fakeConn() {
   const notifications = new Map<string, (f: RpcFrame) => void>();
   const requests = new Map<string, (r: ServerRequest) => void>();
   const replies = new Map<string, unknown>();
+  const refusals = new Map<string, unknown[]>();
 
   const conn = {
     call: async (method: string, params: unknown) => {
       calls.push({ method, params: (params ?? {}) as Record<string, unknown> });
+      const refusal = refusals.get(method)?.shift();
+      if (refusal) throw refusal;
       const canned = replies.get(method);
       if (canned) return canned;
       if (method === "thread/start" || method === "thread/resume" || method === "thread/fork") {
@@ -48,6 +51,8 @@ function fakeConn() {
     calls,
     responses,
     reply: (method: string, value: unknown) => replies.set(method, value),
+    /** Make the next call to `method` reject with `err` (queued, one per call). */
+    refuse: (method: string, err: unknown) => refusals.set(method, [...(refusals.get(method) ?? []), err]),
     push: (method: string, params: Record<string, unknown>) => {
       const id = typeof params.threadId === "string" ? params.threadId : "thread-1";
       notifications.get(id)?.({ method, params });
@@ -496,6 +501,189 @@ describe("CodexSession lifecycle", () => {
         sandboxPolicy: { type: "dangerFullAccess" },
       },
     });
+  });
+});
+
+/** What app-server 0.164 actually rejects input with during a compaction. */
+const NOT_STEERABLE = Object.assign(
+  new Error("failed to submit turn input: ActiveTurnNotSteerable { turn_kind: Compact }"),
+  { code: -32600 },
+);
+
+const texts = (call: { params: Record<string, unknown> } | undefined) =>
+  ((call?.params.input ?? []) as { text?: string }[]).map((b) => b.text);
+
+describe("CodexSession during a compaction turn", () => {
+  /** A live thread with turn `turn-1` running. */
+  async function running() {
+    const s = makeSession();
+    s.session.send({ text: "first" });
+    await s.fake.tick();
+    s.fake.push("turn/started", { threadId: "thread-1", turn: { id: "turn-1" } });
+    return { ...s, events: s.session.events[Symbol.asyncIterator]() };
+  }
+
+  /** Read events up to and including the next turn end. */
+  async function untilTurnEnd(events: AsyncIterator<HarnessEvent>) {
+    for (;;) {
+      const { value } = await events.next();
+      if (value.type === "turn-end") return value;
+    }
+  }
+
+  const completed = (id: string) => ({
+    threadId: "thread-1",
+    turn: { id, status: "completed", items: [] },
+  });
+
+  it("holds a message Codex refused mid-compaction and sends it as a new turn after", async () => {
+    const { session, fake, events } = await running();
+    fake.refuse("turn/steer", NOT_STEERABLE);
+
+    session.send({ text: "hello" });
+    await fake.tick();
+    // Refused, but neither failed nor dropped.
+    expect(fake.calls.at(-1)).toMatchObject({ method: "turn/steer", params: { expectedTurnId: "turn-1" } });
+    expect(session.pending()).toBe(1);
+
+    // Nothing more goes out while the compaction runs, not even another steer.
+    const before = fake.calls.length;
+    session.send({ text: "still there?" });
+    await fake.tick();
+    expect(fake.calls.length).toBe(before);
+    expect(session.pending()).toBe(2);
+
+    fake.push("turn/completed", completed("turn-1"));
+    expect(await untilTurnEnd(events)).toMatchObject({ type: "turn-end", ok: true });
+    // The broker reads this at that turn end to keep the chat running, so the
+    // held input must still be counted, and not sent yet.
+    expect(session.pending()).toBe(2);
+    expect(fake.calls.length).toBe(before);
+
+    // The host asking for the next event is what releases it.
+    void events.next();
+    await fake.tick();
+    expect(fake.calls.at(-1)?.method).toBe("turn/start");
+    expect(texts(fake.calls.at(-1))).toEqual(["hello", "still there?"]);
+    expect(session.pending()).toBe(0);
+  });
+
+  it("holds input from the moment a compaction item starts, without a refused call", async () => {
+    const { session, fake, events } = await running();
+    fake.push("turn/completed", completed("turn-1"));
+    await untilTurnEnd(events);
+    // Pulled now, as the broker would; it resolves with the next event.
+    const afterIdle = events.next();
+
+    // Our own compaction, which Codex runs as a turn of its own.
+    await session.compact();
+    fake.push("turn/started", { threadId: "thread-1", turn: { id: "compact-1" } });
+    fake.push("item/started", { threadId: "thread-1", item: { type: "contextCompaction", id: "c-1" } });
+    const before = fake.calls.length;
+    session.send({ text: "one" });
+    session.send({ text: "two" });
+    await fake.tick();
+    expect(fake.calls.length).toBe(before);
+    expect(session.pending()).toBe(2);
+
+    // The item ends before its turn does. The retry is refused (it is still a
+    // Compact turn) and the order survives the round trip.
+    fake.refuse("turn/steer", NOT_STEERABLE);
+    fake.push("item/completed", { threadId: "thread-1", item: { type: "contextCompaction", id: "c-1" } });
+    await fake.tick();
+    expect(fake.calls.at(-1)).toMatchObject({ method: "turn/steer", params: { expectedTurnId: "compact-1" } });
+    expect(session.pending()).toBe(2);
+
+    fake.push("turn/completed", completed("compact-1"));
+    const seen: string[] = [(await afterIdle).value.type];
+    for (;;) {
+      const { value } = await events.next();
+      seen.push(value.type);
+      if (value.type === "turn-end") break;
+    }
+    expect(seen).toContain("compacted");
+    expect(session.pending()).toBe(2);
+
+    void events.next();
+    await fake.tick();
+    expect(fake.calls.at(-1)?.method).toBe("turn/start");
+    expect(texts(fake.calls.at(-1))).toEqual(["one", "two"]);
+
+    // A proper turn of its own: it runs, and the host sees it end.
+    fake.push("turn/started", { threadId: "thread-1", turn: { id: "turn-2" } });
+    fake.push("turn/completed", completed("turn-2"));
+    expect(await untilTurnEnd(events)).toMatchObject({ type: "turn-end", ok: true });
+    expect(session.pending()).toBe(0);
+  });
+
+  it("keeps a refused batch ahead of anything sent while it was out", async () => {
+    const { session, fake, events } = await running();
+    fake.refuse("turn/steer", NOT_STEERABLE);
+    session.send({ text: "one" });
+    // Sent while "one" is still on the wire: it waits behind it.
+    session.send({ text: "two" });
+    await fake.tick();
+    expect(fake.calls.filter((c) => c.method === "turn/steer")).toHaveLength(1);
+    expect(session.pending()).toBe(2);
+
+    fake.push("turn/completed", completed("turn-1"));
+    await untilTurnEnd(events);
+    void events.next();
+    await fake.tick();
+    expect(fake.calls.at(-1)?.method).toBe("turn/start");
+    expect(texts(fake.calls.at(-1))).toEqual(["one", "two"]);
+  });
+
+  it("holds a refused turn/start too, for a compaction it hadn't seen begin", async () => {
+    const { session, fake, events } = await running();
+    fake.push("turn/completed", completed("turn-1"));
+    await untilTurnEnd(events);
+    void events.next();
+    await fake.tick();
+
+    fake.refuse("turn/start", NOT_STEERABLE);
+    session.send({ text: "hello" });
+    await fake.tick();
+    expect(session.pending()).toBe(1);
+
+    fake.push("turn/started", { threadId: "thread-1", turn: { id: "compact-1" } });
+    fake.push("turn/completed", completed("compact-1"));
+    await untilTurnEnd(events);
+    void events.next();
+    await fake.tick();
+    expect(fake.calls.at(-1)?.method).toBe("turn/start");
+    expect(texts(fake.calls.at(-1))).toEqual(["hello"]);
+  });
+
+  it("still opens a new turn when the steered turn simply ended in between", async () => {
+    const { session, fake } = await running();
+    fake.refuse("turn/steer", new Error("expected active turn id turn-1 but found none"));
+    session.send({ text: "late" });
+    await fake.tick();
+    expect(fake.calls.slice(-2).map((c) => c.method)).toEqual(["turn/steer", "turn/start"]);
+    expect(texts(fake.calls.at(-1))).toEqual(["late"]);
+    expect(session.pending()).toBe(0);
+  });
+
+  it("still fails the turn on any other refusal", async () => {
+    const { session, fake, events } = await running();
+    fake.refuse("turn/steer", new Error("gone"));
+    fake.refuse("turn/start", new Error("thread not found"));
+    session.send({ text: "x" });
+    await fake.tick();
+    expect(await untilTurnEnd(events)).toMatchObject({ ok: false, result: "thread not found" });
+  });
+
+  it("recognises the refusal from structured error info as well as the message", () => {
+    expect(isNotSteerable(NOT_STEERABLE)).toBe(true);
+    expect(
+      isNotSteerable(
+        Object.assign(new Error("bad request"), {
+          data: { codexErrorInfo: { activeTurnNotSteerable: { turnKind: "compact" } } },
+        }),
+      ),
+    ).toBe(true);
+    expect(isNotSteerable(new Error("no active turn"))).toBe(false);
   });
 });
 

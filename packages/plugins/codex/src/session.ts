@@ -57,6 +57,20 @@ interface PendingAsk {
   answerQuestions?: (answers: HarnessQuestionAnswer[]) => void;
 }
 
+/**
+ * Codex refused input because the active turn is one it will not steer — a
+ * compaction or a review (`NonSteerableTurnKind`). Read from the structured
+ * error info when the app-server sends it, else from the message, which on
+ * 0.164 is Rust debug text: `failed to submit turn input:
+ * ActiveTurnNotSteerable { turn_kind: Compact }`.
+ */
+export function isNotSteerable(err: unknown): boolean {
+  const data = (err as { data?: unknown } | null)?.data;
+  if (data && JSON.stringify(data).includes("activeTurnNotSteerable")) return true;
+  const message = err instanceof Error ? err.message : String(err);
+  return /ActiveTurnNotSteerable|activeTurnNotSteerable/.test(message);
+}
+
 /** A dead app-server must not make session disposal wait forever. */
 const DISPOSE_RPC_TIMEOUT_MS = 250;
 
@@ -139,8 +153,26 @@ export class CodexSession implements HarnessSession {
   private turnId?: string;
   private started = false;
   private disposed = false;
-  /** Messages queued before the thread exists / while one is being opened. */
+  /**
+   * Messages not yet handed to Codex: queued before the thread exists, or held
+   * back while the active turn can't take them (see {@link nonSteerable}).
+   */
   private outbox: HarnessInput[] = [];
+  /** Messages in a `turn/steer` / `turn/start` call that hasn't answered yet. */
+  private inflight = 0;
+  /**
+   * The active (or just-requested) turn is a compaction, which Codex will
+   * neither steer nor start a turn beside. Both RPCs refuse it with
+   * `ActiveTurnNotSteerable { turn_kind: Compact }`, and before this flag every
+   * message sent mid-compaction (a peer's `chat_send`, a plain "hello") became
+   * a red failed row and was lost. While it is set, input waits in the outbox
+   * and goes out once that turn completes.
+   */
+  private nonSteerable = false;
+  /** `turn/completed` frames seen, to tell whether a turn ended mid-call. */
+  private turnsCompleted = 0;
+  /** The event last handed to the host was a turn end it is still handling. */
+  private handedTurnEnd = false;
   private unsubscribes: (() => void)[] = [];
   private readonly pendingAsks = new Map<string, PendingAsk>();
   /**
@@ -195,9 +227,17 @@ export class CodexSession implements HarnessSession {
     return {
       [Symbol.asyncIterator]: (): AsyncIterator<HarnessEvent> => ({
         next: async (): Promise<IteratorResult<HarnessEvent>> => {
+          // Asking again means the host is done with the event it took last.
+          if (this.handedTurnEnd) {
+            this.handedTurnEnd = false;
+            this.releaseHeld();
+          }
           for (;;) {
             const next = this.queue.shift();
-            if (next) return { value: next, done: false };
+            if (next) {
+              if (next.type === "turn-end") this.handedTurnEnd = true;
+              return { value: next, done: false };
+            }
             if (this.ended) return { value: undefined as never, done: true };
             await new Promise<void>((resolve) => (this.waiter = resolve));
           }
@@ -234,7 +274,10 @@ export class CodexSession implements HarnessSession {
   }
 
   pending(): number {
-    return this.outbox.length;
+    // In-flight counts: a call racing a turn end may come back refused and be
+    // held, and the broker reads this at that turn end to decide whether the
+    // chat is still running.
+    return this.outbox.length + this.inflight;
   }
 
   /** Open (or resume/fork) the thread, then drain whatever is queued. */
@@ -288,7 +331,10 @@ export class CodexSession implements HarnessSession {
 
   /** Send everything queued: start a turn, or steer the running one. */
   private async flush(): Promise<void> {
-    if (!this.threadId || this.disposed) return;
+    // One call at a time. Two calls racing into a compaction are both refused,
+    // and re-queued in the order they came back they could swap. Whatever is
+    // sent meanwhile waits here and goes next.
+    if (!this.threadId || this.disposed || this.nonSteerable || this.inflight) return;
     const batch = this.outbox;
     if (!batch.length) return;
     this.outbox = [];
@@ -296,6 +342,26 @@ export class CodexSession implements HarnessSession {
     const input = batch.flatMap((m) => this.toUserInput(m));
     if (!input.length) return;
 
+    const endsBefore = this.turnsCompleted;
+    this.inflight = batch.length;
+    let sent: boolean;
+    try {
+      sent = await this.submit(input);
+    } catch (err) {
+      this.inflight = 0;
+      this.releaseHeld();
+      throw err;
+    }
+    this.inflight = 0;
+    if (sent) this.releaseHeld();
+    else this.hold(batch, endsBefore);
+  }
+
+  /**
+   * Steer the running turn, or start one. False when Codex refused because
+   * the active turn isn't steerable.
+   */
+  private async submit(input: Record<string, unknown>[]): Promise<boolean> {
     if (this.turnId) {
       try {
         await this.conn.call("turn/steer", {
@@ -303,25 +369,72 @@ export class CodexSession implements HarnessSession {
           input,
           expectedTurnId: this.turnId,
         });
-        return;
-      } catch {
-        // The turn ended between our check and the call — fall through and open
-        // a new one rather than dropping the user's message.
+        return true;
+      } catch (err) {
+        // Keep `turnId`: that turn is still running, and interrupt needs it.
+        if (isNotSteerable(err)) return false;
+        // The turn ended between our check and the call — fall through and
+        // open a new one rather than dropping the user's message.
         this.turnId = undefined;
       }
     }
 
     const supported = this.opts.supportedEfforts?.(this.model) ?? [];
     const posture = toCodexPosture(this.spec.permissionMode);
-    const res = await this.conn.call<{ turn?: { id?: string } }>("turn/start", {
-      threadId: this.threadId,
-      input,
-      effort: clampEffort(this.effort, supported),
-      model: this.model,
-      approvalPolicy: posture.approvalPolicy,
-      sandboxPolicy: sandboxPolicy(posture.sandbox),
-    });
+    let res: { turn?: { id?: string } };
+    try {
+      res = await this.conn.call<{ turn?: { id?: string } }>("turn/start", {
+        threadId: this.threadId,
+        input,
+        effort: clampEffort(this.effort, supported),
+        model: this.model,
+        approvalPolicy: posture.approvalPolicy,
+        sandboxPolicy: sandboxPolicy(posture.sandbox),
+      });
+    } catch (err) {
+      // A compaction whose start we haven't seen yet. Codex refuses `turn/start`
+      // against it the same way it refuses a steer.
+      if (isNotSteerable(err)) return false;
+      throw err;
+    }
     this.turnId = res.turn?.id;
+    return true;
+  }
+
+  /**
+   * Codex refused `batch` because the active turn is a compaction. Put it back
+   * at the FRONT of the outbox, in order — anything sent meanwhile is newer —
+   * and send it once that turn is over.
+   */
+  private hold(batch: HarnessInput[], endsBefore: number): void {
+    this.outbox.unshift(...batch);
+    if (this.turnsCompleted === endsBefore) {
+      // Still running. Its turn end releases the batch (see `releaseHeld`).
+      this.nonSteerable = true;
+      return;
+    }
+    // It completed while we were asking. Its turn end hasn't reached the host
+    // yet, or is being handled: the host's next pull releases the batch. Else
+    // nothing else will, so go now.
+    if (this.handedTurnEnd || this.guardBarrier || this.queue.some((e) => e.type === "turn-end")) {
+      return;
+    }
+    this.releaseHeld();
+  }
+
+  /**
+   * Send whatever is waiting in the outbox.
+   *
+   * Input a compaction held back is released once the host has FINISHED
+   * handling that turn's end, not on `turn/completed`. The broker reads
+   * `pending()` in its turn-end handler to decide whether the chat is still
+   * running. Flushed any earlier, the outbox would already be empty there, so
+   * the chat would settle idle and the new turn would run in a chat that shows
+   * nothing running.
+   */
+  private releaseHeld(): void {
+    if (!this.outbox.length) return;
+    void this.flush().catch((err) => this.fail(err));
   }
 
   /** A Dispatch message → Codex `UserInput` blocks. */
@@ -354,8 +467,11 @@ export class CodexSession implements HarnessSession {
     }
     if (frame.method === "turn/completed") {
       this.turnId = undefined;
+      this.nonSteerable = false;
+      this.turnsCompleted++;
       this.itemVerdicts.clear();
     }
+    this.observeCompaction(frame);
 
     // The guard's second, weaker enforcement point — see the module header.
     if (frame.method !== "item/started") {
@@ -373,6 +489,24 @@ export class CodexSession implements HarnessSession {
       }
       this.deliver(events);
     });
+  }
+
+  /**
+   * Hold input from the moment a compaction item starts, rather than learning
+   * it from a refused steer. Both kinds show this item: our `compact()` and
+   * native auto-compaction. `turn/started` carries no turn kind to read
+   * instead. A compaction inside a regular turn ends with its item, so steer
+   * again then; if the whole turn is a compaction, that steer is refused and
+   * held until `turn/completed`.
+   */
+  private observeCompaction(frame: RpcFrame): void {
+    const item = (frame.params as { item?: { type?: unknown } } | undefined)?.item;
+    if (item?.type !== "contextCompaction") return;
+    if (frame.method === "item/started") this.nonSteerable = true;
+    if (frame.method === "item/completed" && this.nonSteerable) {
+      this.nonSteerable = false;
+      this.releaseHeld();
+    }
   }
 
   /** Run `step` now, or after the guard verdicts already pending. */
