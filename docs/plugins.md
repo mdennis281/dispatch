@@ -327,7 +327,7 @@ updates and Uninstall.
 **The recorded source.** Every URL install — the pane's Install, and `dispatch
 plugin add <git-url>` — records `AppSettings.plugins[id].source` =
 `{ type: "git", url, cloneUrl, ref, refKind: branch | tag | sha, subdir, sha,
-installedAt }` in `config.json`; `add <path | tarball>` records `{ type: "local",
+installedAt, contentHash }` in `config.json`; `add <path | tarball>` records `{ type: "local",
 path }`. It lives in host-owned config and **never** in the plugin directory:
 everything in there came from the plugin's author, and a source a plugin could
 write is one it could re-point, so Update would install whatever the plugin said
@@ -339,8 +339,8 @@ its URL records one. `origin` is derived: `builtin` (shipped in the app
 payload — `DiscoveredPlugin.builtin`) wins, then `linked` (a junction), then the
 record's type.
 
-**Check for updates** (`POST /api/plugins/:id/check-update`, per row and "Check all
-for updates"; manual only, nothing polls) resolves the record against one `git
+**Check for updates** (`POST /api/plugins/:id/check-update`, per row, "Check all
+for updates", and the background pass below) resolves the record against one `git
 ls-remote` with the shared `resolveUpdateTarget`
 (`packages/shared/src/plugin-lifecycle.ts`): a **branch** follows its tip (a deleted
 branch is an error, not "up to date"); a **tag** looks for the newest semver-greater
@@ -353,6 +353,43 @@ or scopes, new or re-pointed MCP servers and processes, newly undeclared uses, a
 server or browser half where there was none, a new instruction file — then the
 other changes (what it dropped, contributions, then "hooks used" with `io` first).
 A network failure is a row result (`status: "error"`), so Check all keeps going.
+
+**A moved ref is not an update until the plugin's own files change.**
+`contentHash` is a sha256 over the installed files (`hashPluginTree` in
+`packages/cli/src/core/plugins.ts`: sorted relative paths and each file's sha256,
+`.git`/`node_modules` skipped, no links followed), recorded by every install and
+update. When the ref points somewhere new, the fetched directory is hashed. If it
+matches, the check answers `up-to-date` ("main moved to abc1234, but nothing in
+plugins/x changed") and **fast-forwards the record** to the new commit, so the
+next check is one `ls-remote` again rather than another tarball. In a repository
+of several plugins (see "Several plugins in one repository") most pushes are to a
+sibling, and without this every one of them read as an update to all the others.
+A record from before `contentHash` falls back to hashing the installed directory
+and fills it in. `dispatch plugin update` does the same; `--check` stays read-only.
+
+**Background checks** (`PluginUpdateWatcher`, `packages/server/src/plugins/inspect/watcher.ts`)
+run that same `checkUpdate` for every `url` plugin two minutes after boot and then
+every `DISPATCH_PLUGIN_UPDATE_HOURS` (default 6; `0` turns them off), on unref'd
+timers like the release poller. What a pass does with an answer is the plugin's
+`AppSettings.plugins[id].autoUpdate` (`PUT /api/plugins/:id/auto-update`, the
+row's **Updates** picker):
+
+- `notify` (the default) — an available update becomes a `notice` toast, **once
+  per commit** (not once per pass), and shows on the row the next time the pane
+  opens.
+- `auto` — an update that asks for **nothing new** (no escalation in the diff),
+  is installable, and keeps its id, is installed through the same `update` path.
+  It is files on disk plus `needsRestart`, **never a restart**: stopping the
+  server tree-kills every subApp and cuts every running chat, and when that
+  happens is the owner's call. An update that escalates, or one `update` refuses
+  (the ref moved mid-pass), is announced like `notify`.
+- `off` — skipped; the row's Check for updates still works.
+
+`GET /api/plugins/updates` returns the latest answers and what was auto-installed
+since boot (memory only — a restart is exactly when an applied update stops being
+news). The pane seeds each row's check from it, but only while the answer was
+computed against the commit still installed, so an update that already happened
+is never offered again.
 
 **Update** (`POST /api/plugins/:id/update { sha }`) re-resolves the ref and refuses
 (409) if it no longer points at the sha the owner was shown — they consented to a
@@ -379,7 +416,9 @@ until they reload.
 
 **Built-in plugins** get none of this: no Update ("Built-in, updates with
 Dispatch"), no Uninstall, and Install refuses their ids. The enable toggle stays.
-All four routes are owner-only, like inspect and install.
+All six routes (check, update, uninstall preview and uninstall, auto-update,
+updates) are owner-only, like inspect and install: the policy decides whether code
+gets installed unattended.
 
 ## Server API
 

@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { Copy, FolderOpen, Link2, RefreshCw, RotateCw, Save, Trash2, Unlink2 } from "lucide-react";
-import type { PluginInfo, PluginOAuthStatus, PluginStatus, PluginUninstallResult } from "@dispatch/shared";
+import type {
+  PluginAutoUpdate,
+  PluginInfo,
+  PluginOAuthStatus,
+  PluginStatus,
+  PluginUninstallResult,
+  PluginUpdateStatus,
+} from "@dispatch/shared";
 import { Field, InlineError, TextArea, TextInput } from "../../sidebar/Modal.js";
 import { Button } from "../../ui/Button.js";
 import { IconButton } from "../../ui/IconButton.js";
@@ -30,8 +37,10 @@ export function PluginsSection() {
   const [plugins, setPlugins] = useState<PluginInfo[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Held here, not per card, so "Check all" and a row's own button share one
-  // answer. Manual only — nothing here polls (#409).
+  // answer. The pane itself never polls; the server's background pass does,
+  // and its answers seed this map on load (see `seed` below).
   const [checks, setChecks] = useState<Record<string, CheckState>>({});
+  const [background, setBackground] = useState<PluginUpdateStatus | null>(null);
   const pushToast = useNotices((s) => s.push);
 
   const load = useCallback(() => {
@@ -40,8 +49,30 @@ export function PluginsSection() {
       .list()
       .then(setPlugins)
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
+    // Owner-only; anyone else simply gets no background answers to show.
+    api.plugins
+      .updates()
+      .then(setBackground)
+      .catch(() => setBackground(null));
   }, []);
   useEffect(load, [load]);
+
+  // A background answer is shown only while it still describes what is
+  // installed: one checked against an older commit (updated or reinstalled
+  // since) would offer an update that already happened. A row's own Check
+  // always wins over it.
+  useEffect(() => {
+    if (!background || !plugins) return;
+    setChecks((c) => {
+      const next = { ...c };
+      for (const p of plugins) {
+        const b = background.checks[p.id];
+        if (!b || next[p.id] || b.status !== "available") continue;
+        if (p.source?.type === "git" && b.current?.sha === p.source.sha) next[p.id] = b;
+      }
+      return next;
+    });
+  }, [background, plugins]);
 
   const replace = (next: PluginInfo) =>
     setPlugins((rows) => rows?.map((p) => (p.id === next.id ? next : p)) ?? rows);
@@ -112,7 +143,12 @@ export function PluginsSection() {
           />
         ))
       )}
-      <div className="flex flex-wrap justify-end gap-1">
+      <div className="flex flex-wrap items-center justify-end gap-1">
+        {checkable.length > 0 && background && (
+          <span className="mr-auto text-2xs text-faint" data-testid="plugin-background-check">
+            {backgroundLine(background)}
+          </span>
+        )}
         {checkable.length > 0 && (
           <Button
             variant="ghost"
@@ -132,6 +168,24 @@ export function PluginsSection() {
     </div>
   );
 }
+
+/** "Checked in the background every 6 h · last 2:14 PM" — or why it is not. */
+function backgroundLine(s: PluginUpdateStatus): string {
+  if (s.intervalHours <= 0) return "Background update checks are off (DISPATCH_PLUGIN_UPDATE_HOURS=0).";
+  const at = (t: number) => new Date(t).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const every = `Checked in the background every ${s.intervalHours} h`;
+  if (s.running) return `${every} · checking now…`;
+  if (s.lastRunAt) return `${every} · last ${at(s.lastRunAt)}`;
+  return s.nextRunAt ? `${every} · first check at ${at(s.nextRunAt)}` : every;
+}
+
+// Hints are the Select's short right-hand tag, not a sentence — a long one
+// pushes the label out of the row. The full meaning is the card's tooltip.
+const AUTO_UPDATE_OPTIONS: Array<{ value: PluginAutoUpdate; label: string; hint: string }> = [
+  { value: "notify", label: "Notify", hint: "install nothing" },
+  { value: "auto", label: "Auto-update", hint: "safe ones only" },
+  { value: "off", label: "Off", hint: "manual checks" },
+];
 
 /* ------------------------------------------------------------------ card */
 
@@ -181,6 +235,15 @@ function PluginCard({
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const setAutoUpdate = async (policy: PluginAutoUpdate) => {
+    setError(null);
+    try {
+      onChange(await api.plugins.setAutoUpdate(plugin.id, policy));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -250,7 +313,26 @@ function PluginCard({
         )}
       </div>
 
-      <PluginSourceLine plugin={plugin} />
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <div className="min-w-0 flex-1">
+          <PluginSourceLine plugin={plugin} />
+        </div>
+        {plugin.origin === "url" && plugin.autoUpdate && (
+          <span
+            className="contents"
+            title="Background checks: Notify tells you about an update and installs nothing. Auto-update installs one that asks for nothing new (it loads on the next restart) and tells you about the rest. Off leaves it to Check for updates."
+          >
+          <Select
+            label="Updates"
+            options={AUTO_UPDATE_OPTIONS}
+            value={plugin.autoUpdate}
+            onChange={(v) => void setAutoUpdate(v)}
+            align="end"
+            width={220}
+          />
+          </span>
+        )}
+      </div>
       {check && <PluginUpdatePanel plugin={plugin} check={check} onUpdated={(row) => row && onChange(row)} />}
 
       {plugin.settingsSchema !== undefined && plugin.status !== "invalid" && (

@@ -380,7 +380,8 @@ export class PluginInspector {
   }
 
   /**
-   * Manual only — nothing polls. Resolves the recorded ref against the remote
+   * The row's button, Check all, and `PluginUpdateWatcher`'s background pass
+   * all come through here. Resolves the recorded ref against the remote
    * and, when it points somewhere new, fetches and reports on THAT commit and
    * diffs it against the installed copy (scanned in place, so "hooks used"
    * compares like with like). A network failure is a row result (`error`),

@@ -9,6 +9,8 @@ import type {
   Persona,
   PluginInfo,
   PluginInspectResult,
+  PluginAutoUpdate,
+  PluginUpdateStatus,
   PluginInstallResult,
   PluginOAuthConnectResult,
   PluginSource,
@@ -1571,6 +1573,11 @@ export const api = {
     checkUpdate: (id: string) => post<PluginUpdateCheck>(`/api/plugins/${encodeURIComponent(id)}/check-update`),
     /** Install the target `checkUpdate` showed. Refused (409) if the ref moved since. Owner only. */
     update: (id: string, sha: string) => post<PluginUpdateResult>(`/api/plugins/${encodeURIComponent(id)}/update`, { sha }),
+    /** What the background update check does with this plugin: off, notify, or auto (safe updates only). Owner only. */
+    setAutoUpdate: (id: string, policy: PluginAutoUpdate) =>
+      put<PluginInfo>(`/api/plugins/${encodeURIComponent(id)}/auto-update`, { policy }),
+    /** The background check's latest answers and what it auto-installed since boot. Owner only. */
+    updates: () => get<PluginUpdateStatus>("/api/plugins/updates"),
     /** Exactly what Uninstall would remove — for the confirm dialog. Owner only. */
     uninstallPreview: (id: string) => get<PluginUninstallPreview>(`/api/plugins/${encodeURIComponent(id)}/uninstall`),
     /** Remove it; `purge` also deletes its settings, kv, secrets and OAuth tokens. Owner only. */
