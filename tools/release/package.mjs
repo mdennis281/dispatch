@@ -68,9 +68,13 @@ const files = [
   "packages/plugin-sdk/package.json",
   "packages/plugin-sdk/README.md",
   "packages/plugin-sdk/dist",
-  // The BUILT-IN plugins — Codex and goose are not compiled into the server
-  // any more, so a payload without these runs every chat on Claude. Loaded
-  // from here by `findShippedPluginsRoot()` (server plugins/shipped.ts).
+  // The BUILT-IN plugins. No provider is compiled into the server, so a
+  // payload missing one simply has no such provider — its chats show
+  // "provider unavailable" (#428). Loaded from here by
+  // `findShippedPluginsRoot()` (server plugins/shipped.ts).
+  "packages/plugins/claude/package.json",
+  "packages/plugins/claude/plugin.yaml",
+  "packages/plugins/claude/server",
   "packages/plugins/codex/package.json",
   "packages/plugins/codex/plugin.yaml",
   "packages/plugins/codex/server",
@@ -98,12 +102,14 @@ for (const relative of files) {
 // The prebuilt client is static data; excluding its package avoids installing
 // React/Monaco when the browser bundle already contains them.
 // The built-in plugins are workspaces too: the install is what links each one's
-// `@dispatch/shared` to the host's own copy.
+// `@dispatch/shared` to the host's own copy — and, for Claude, what installs the
+// Agent SDK and its native binary, which no other workspace depends on now.
 const releaseWorkspaces = [
   "packages/server",
   "packages/shared",
   "packages/cli",
   "packages/plugin-sdk",
+  "packages/plugins/claude",
   "packages/plugins/codex",
   "packages/plugins/goose",
 ];

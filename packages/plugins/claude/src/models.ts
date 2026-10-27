@@ -21,7 +21,8 @@
  */
 import { query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 import type { ModelInfo, Options, Query, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
-import { FALLBACK_MODELS, type ModelOption } from "@dispatch/shared";
+import type { ModelOption } from "@dispatch/shared";
+import { FALLBACK_MODELS } from "./descriptor.js";
 import type { HarnessAccount } from "@dispatch/shared";
 import { claudeExecutableOption } from "./runtime.js";
 import { envWithAccount } from "./account.js";

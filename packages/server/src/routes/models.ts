@@ -9,7 +9,7 @@
  *   PUT /api/subscriptions                   → replace the stored account list
  *
  * Models are live from each runtime's own list, which works on subscription auth
- * with no API key. See harness/claude/models.ts.
+ * with no API key. See packages/plugins/claude/src/models.ts.
  */
 import type { FastifyInstance } from "fastify";
 import {

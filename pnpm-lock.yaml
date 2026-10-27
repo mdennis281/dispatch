@@ -219,6 +219,34 @@ importers:
         specifier: ^5.0.2
         version: 5.0.14(@types/react@18.3.31)(immer@11.1.17)(react@18.3.1)(use-sync-external-store@1.6.0(react@18.3.1))
 
+  packages/plugins/claude:
+    dependencies:
+      '@anthropic-ai/claude-agent-sdk':
+        specifier: 0.3.222
+        version: 0.3.222(@anthropic-ai/sdk@0.109.1(zod@4.4.3))(@modelcontextprotocol/sdk@1.32.1(zod@4.4.3))(zod@4.4.3)
+      '@anthropic-ai/sdk':
+        specifier: ^0.109.1
+        version: 0.109.1(zod@4.4.3)
+      '@dispatch/shared':
+        specifier: workspace:*
+        version: link:../../shared
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.32.1
+        version: 1.32.1(zod@4.4.3)
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+    devDependencies:
+      '@types/node':
+        specifier: ^26.1.0
+        version: 26.1.0
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: ^4.1.11
+        version: 4.1.11(@types/node@26.1.0)(vite@6.4.3(@types/node@26.1.0)(jiti@2.7.0)(lightningcss@1.32.0)(tsx@4.22.4)(yaml@2.9.0))
+
   packages/plugins/codex:
     dependencies:
       '@dispatch/shared':
@@ -253,12 +281,6 @@ importers:
 
   packages/server:
     dependencies:
-      '@anthropic-ai/claude-agent-sdk':
-        specifier: 0.3.222
-        version: 0.3.222(@anthropic-ai/sdk@0.109.1(zod@4.4.3))(@modelcontextprotocol/sdk@1.32.1(zod@4.4.3))(zod@4.4.3)
-      '@anthropic-ai/sdk':
-        specifier: ^0.109.1
-        version: 0.109.1(zod@4.4.3)
       '@dispatch/cli':
         specifier: workspace:*
         version: link:../cli
@@ -317,6 +339,9 @@ importers:
         specifier: ^4.4.3
         version: 4.4.3
     devDependencies:
+      '@dispatch/plugin-claude':
+        specifier: workspace:*
+        version: link:../plugins/claude
       '@dispatch/plugin-codex':
         specifier: workspace:*
         version: link:../plugins/codex

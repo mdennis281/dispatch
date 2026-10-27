@@ -9,7 +9,7 @@
  *
  * Nothing in this file reads a credential. `loggedIn` is `existsSync` on the
  * provider's login file; the one reader of token contents in the app is still
- * `harness/claude/usage.ts`, and it only ever sends the token back to the provider it came from.
+ * `packages/plugins/claude/src/usage.ts`, and it only ever sends the token back to the provider it came from.
  */
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";

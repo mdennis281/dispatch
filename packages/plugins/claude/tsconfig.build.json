@@ -1,0 +1,12 @@
+{
+  // Emits into `server/`, the directory plugin.yaml's `server:` points at.
+  // Tests are excluded so the shipped module tree is only what runs.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "./server",
+    "declaration": false,
+    "declarationMap": false
+  },
+  "exclude": ["src/**/*.test.ts"]
+}

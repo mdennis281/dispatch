@@ -82,7 +82,7 @@ function parseArgs(argv) {
      * The workflow installs the Claude Code and Codex CLIs with npm first, so
      * the runtime probe has a real "installed" answer to find. Not asserted on
      * Windows: npm leaves `.cmd` shims there, which neither runtime resolver
-     * spawns on purpose (see `fromPath` in server harness/claude/runtime.ts), so the
+     * spawns on purpose (see `fromPath` in packages/plugins/claude/src/runtime.ts), so the
      * bundled binary correctly stays in charge and Codex correctly stays absent.
      */
     expectInstalledClis: process.env.SMOKE_EXPECT_INSTALLED_CLIS === "1",
@@ -590,6 +590,9 @@ async function main() {
       "packages/server/skills", "packages/server/personas",
       "tools/app/launch.py", "tools/app/autostart.mjs", "tools/app/paths.mjs", "tools/app/create-shortcut.mjs",
       "tools/install.mjs", "install.sh", "install.ps1",
+      // No provider is compiled into the server (#428): a payload missing one
+      // of these has no such provider at all.
+      ...SHIPPED_PROVIDERS.flatMap((id) => [`packages/plugins/${id}/plugin.yaml`, `packages/plugins/${id}/server/main.js`]),
     ];
     const missing = required.filter((p) => !existsSync(join(app, p)));
     assert(missing.length === 0, `missing: ${missing.join(", ")}`);
@@ -603,6 +606,16 @@ async function main() {
     const entries = existsSync(pnpmDir) ? readdirSync(pnpmDir) : [];
     const sdk = entries.find((e) => e.startsWith(`@anthropic-ai+claude-agent-sdk-${platform()}-${process.arch}`));
     assert(sdk, `no @anthropic-ai/claude-agent-sdk-${platform()}-${process.arch} under node_modules/.pnpm`);
+    // The Agent SDK is the Claude PLUGIN's dependency and nobody else's: the
+    // server resolving it would mean a Claude-free install still carried it.
+    const resolveSdk = (dir) =>
+      runQuiet(process.execPath, ["-e", "import.meta.resolve('@anthropic-ai/claude-agent-sdk')", "--input-type=module"], { cwd: join(app, dir) });
+    const fromPlugin = resolveSdk("packages/plugins/claude");
+    assert(fromPlugin.code === 0, `the Claude plugin cannot resolve the Agent SDK: ${fromPlugin.out.slice(0, 300)}`);
+    if (existsSync(join(app, "packages/plugins/claude"))) {
+      const fromServer = resolveSdk("packages/server");
+      assert(fromServer.code !== 0, "packages/server resolves @anthropic-ai/claude-agent-sdk — the server must not depend on it");
+    }
     const argon = runQuiet(process.execPath, ["-e", "require('@node-rs/argon2')"], { cwd: join(app, "packages", "server") });
     assert(argon.code === 0, `@node-rs/argon2 failed to load: ${argon.out.slice(0, 300)}`);
     return sdk;
@@ -690,6 +703,15 @@ async function main() {
       assert(codex.login.checked === true && codex.login.loggedIn === false, `codex login: ${JSON.stringify(codex.login)}`);
     }
     return `claude ${claude.version} (${claude.source}) login=${claude.login.loggedIn}; codex available=${codex?.available}`;
+  });
+  await check("provider plugins as shipped: built in, enabled, active", async () => {
+    const list = (await get("/api/plugins", { expect: 200 })).json;
+    const rows = Array.isArray(list) ? list : list.plugins ?? [];
+    const bad = SHIPPED_PROVIDERS.map((id) => [id, rows.find((p) => p.id === id)]).filter(
+      ([, p]) => !p || !p.builtin || p.enabled === false || (p.status && p.status !== "active"),
+    );
+    assert(bad.length === 0, `not shipped as built-ins: ${JSON.stringify(bad)}`);
+    return SHIPPED_PROVIDERS.join(", ");
   });
   await check("harness list and default-harness save", async () => {
     const list = (await get("/api/harnesses", { expect: 200 })).json;
@@ -819,6 +841,21 @@ async function main() {
     assert(r.code === 0, r.out.slice(0, 300));
   });
 
+  // No Claude (#422): switching the Claude plugin off removes the provider
+  // live, and its chats show "provider unavailable" — they are refused, never
+  // moved to another provider. It stays off across the restart below, and the
+  // reinstall at the end is the restart that brings it back.
+  await check("Claude plugin off: no Claude provider, and its chat is refused rather than moved", async () => {
+    await put("/api/plugins/claude/enabled", { enabled: false }, { expect: 200 });
+    const list = (await get("/api/harnesses", { expect: 200 })).json;
+    assert(!list.some((h) => h.kind === "claude"), `claude still listed: ${list.map((h) => h.kind).join(", ")}`);
+    const refused = await post("/api/chats", { projectId, harness: "claude" });
+    assert(refused.status === 409 && refused.json?.code === "provider-unavailable", `${refused.status}: ${refused.text.slice(0, 200)}`);
+    const chat = (await get(`/api/chats/${chatId}`, { expect: 200 })).json;
+    assert(chat.harness === "claude", `the chat was moved to ${chat.harness}`);
+    return list.map((h) => h.kind).join(", ") || "no providers";
+  });
+
   /* ---- 7. stop and start, state intact ---- */
 
   await check("launch.py --stop shuts the instance down", async () => {
@@ -841,6 +878,12 @@ async function main() {
     assert(s.completed === true, JSON.stringify(s));
     assert(projects.length === 1 && projects[0].id === projectId, `projects: ${projects.length}`);
     assert(chats.some((c) => c.id === chatId), "the chat is gone");
+  });
+  await check("a restart with the Claude plugin off still has no Claude", async () => {
+    const list = (await get("/api/harnesses", { expect: 200 })).json;
+    assert(!list.some((h) => h.kind === "claude"), `claude came back: ${list.map((h) => h.kind).join(", ")}`);
+    // Re-enabling takes a restart; the reinstall below is that restart.
+    await put("/api/plugins/claude/enabled", { enabled: true }, { expect: 200 });
   });
 
   /* ---- 8. same-version reinstall ---- */
@@ -872,6 +915,8 @@ async function main() {
     const h = await waitForHealth();
     const projects = await realProjects();
     assert(projects.length === 1, `projects: ${projects.length}`);
+    const list = (await get("/api/harnesses", { expect: 200 })).json;
+    assert(list.some((h) => h.kind === "claude"), "the re-enabled Claude plugin did not come back after a restart");
     return `pid ${h.pid}`;
   });
 

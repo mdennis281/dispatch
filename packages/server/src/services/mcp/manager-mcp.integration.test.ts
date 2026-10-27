@@ -30,7 +30,7 @@ import type { Chat, WsServerEvent } from "@dispatch/shared";
 import { EventBus } from "../../bus.js";
 import { Store } from "../../store/index.js";
 import { SessionBroker } from "../session-broker.js";
-import type { QueryFn } from "../../harness/claude/session.js";
+import type { QueryFn } from "@dispatch/plugin-claude/harness";
 import { TerminalService, type ShellProcess, type SpawnShell } from "../terminal.js";
 import { MemoryService } from "../memory.js";
 import { GitHubService, type ExecResult } from "../github.js";

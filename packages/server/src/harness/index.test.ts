@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { isKnownProvider, providerFor, type ProviderDescriptor } from "@dispatch/shared";
+import { CLAUDE_PROVIDER } from "@dispatch/plugin-claude/descriptor";
 import { HarnessRegistry } from "./index.js";
 import type { Harness } from "./types.js";
 
@@ -14,18 +15,26 @@ function fakeHarness(kind: string, available = true, onDispose?: () => void): Ha
   } as unknown as Harness;
 }
 
-const builtins = () => new HarnessRegistry({ harnesses: { claude: fakeHarness("claude") } });
+/** A registry holding Claude the way its built-in plugin registers it. */
+const builtins = () =>
+  new HarnessRegistry({ providers: [{ harness: fakeHarness("claude"), descriptor: CLAUDE_PROVIDER }] });
 
 const descriptor = (id: string): ProviderDescriptor => ({
-  ...providerFor("claude"),
+  ...CLAUDE_PROVIDER,
   id,
   label: `${id} label`,
   shortLabel: id,
 });
 
 describe("HarnessRegistry", () => {
-  it("compiles in only Claude — every other provider arrives through register()", () => {
-    expect(builtins().list().map((h) => h.kind)).toEqual(["claude"]);
+  // #428: nothing is compiled in, Claude included. A host with every provider
+  // plugin switched off has no provider — not a hidden Claude.
+  it("compiles in no provider — every one arrives through register()", () => {
+    expect(new HarnessRegistry().list()).toEqual([]);
+    expect(new HarnessRegistry().resolve("claude")).toMatchObject({
+      ok: false,
+      unavailable: { provider: "claude", reason: "unregistered" },
+    });
   });
 
   it("adds a runtime provider to the registry AND the shared descriptor catalogue", () => {
@@ -40,7 +49,6 @@ describe("HarnessRegistry", () => {
 
   it("registers the providers it is constructed with, as a plugin would", () => {
     const registry = new HarnessRegistry({
-      harnesses: { claude: fakeHarness("claude") },
       providers: [{ harness: fakeHarness("ctor-made"), descriptor: descriptor("ctor-made") }],
     });
     expect(registry.find("ctor-made")).toBeDefined();
@@ -60,8 +68,11 @@ describe("HarnessRegistry", () => {
     });
   });
 
-  it("refuses to unregister a compiled-in harness", async () => {
-    await expect(builtins().unregister("claude")).rejects.toThrow(/built-in/);
+  it("unregisters Claude like any other provider — it is a plugin, not the floor", async () => {
+    const registry = builtins();
+    await registry.unregister("claude");
+    expect(registry.list()).toEqual([]);
+    expect(isKnownProvider("claude")).toBe(false);
   });
 
   it("refuses to shadow a taken id, so a live harness is never swapped underneath its sessions", () => {
@@ -90,7 +101,9 @@ describe("HarnessRegistry", () => {
   });
 
   it("answers a registered provider whose runtime is missing as not installed — Claude included", () => {
-    const registry = new HarnessRegistry({ harnesses: { claude: fakeHarness("claude", false) } });
+    const registry = new HarnessRegistry({
+      providers: [{ harness: fakeHarness("claude", false), descriptor: CLAUDE_PROVIDER }],
+    });
     expect(registry.resolve("claude")).toEqual({
       ok: false,
       unavailable: expect.objectContaining({ provider: "claude", reason: "not-installed" }),

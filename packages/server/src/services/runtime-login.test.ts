@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { Harness } from "../harness/types.js";
 import { probeRuntimeLogins } from "./runtime-login.js";
+import { registerProvider } from "@dispatch/shared";
+import { CLAUDE_PROVIDER } from "@dispatch/plugin-claude/descriptor";
+
+// Claude is a plugin now (#428); outside a running host nothing registers it.
+// These cases are about Claude accounts, so they register its real descriptor.
+registerProvider(CLAUDE_PROVIDER);
 
 /**
  * The host no longer runs any probe itself — each provider brings one through

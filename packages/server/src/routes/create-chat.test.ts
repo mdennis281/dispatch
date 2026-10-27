@@ -25,7 +25,7 @@ import { createChat } from "./dispatch.js";
 import type { Services } from "../services/container.js";
 import { claudeOnlyRegistry, seedDefaultProvider } from "../harness/registry.testkit.js";
 import { ProviderUnavailableError, type Harness } from "../harness/index.js";
-import { providerFor } from "@dispatch/shared";
+import { CLAUDE_PROVIDER } from "@dispatch/plugin-claude/descriptor";
 
 let root: string;
 let bus: EventBus;
@@ -210,7 +210,7 @@ describe("createChat provider refusals", () => {
     capabilities: {},
     runtime: () => ({ kind: "late", source: "installed", available: true }),
   } as unknown as Harness;
-  const lateDescriptor = { ...providerFor("claude"), id: "late", label: "Late", shortLabel: "Late" };
+  const lateDescriptor = { ...CLAUDE_PROVIDER, id: "late", label: "Late", shortLabel: "Late" };
 
   function withRegistry(activationSettled?: () => Promise<void>): {
     svc: Services;

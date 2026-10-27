@@ -6,9 +6,11 @@
  * process. Handing out a fresh instance per chat would spawn a second app
  * server and re-probe the catalogue on every send.
  *
- * Only Claude is compiled in. Codex and goose are built-in PLUGINS
+ * NOTHING is compiled in. Claude, Codex and goose are all built-in PLUGINS
  * (`packages/plugins/`) that register through `ctx.providers` while the server
- * starts, before the port opens — see `PluginService.activateShipped`.
+ * starts, before the port opens — see `PluginService.activateShipped`. Claude
+ * was the last to leave (#428); until then it was constructed here, which put
+ * the Agent SDK in every install whether or not anyone used Claude.
  *
  * `resolve` never throws for an unknown or unavailable kind — and never
  * substitutes another provider either. It answers `{ ok: false, unavailable }`
@@ -17,20 +19,16 @@
  * plugin for a minute permanently moved every one of its chats (#426).
  */
 import {
-  BUILTIN_HARNESS_KINDS,
   providerAvailability,
   registerProvider,
   unregisterProvider,
-  type BuiltinHarnessKind,
   type HarnessKind,
   type ProviderDescriptor,
   type ProviderUnavailable,
 } from "@dispatch/shared";
 import type { Harness, HarnessRuntimeInfo } from "./types.js";
-import { ClaudeHarness } from "./claude/index.js";
 
 export * from "./types.js";
-export { ClaudeHarness, CLAUDE_CAPABILITIES, parseClaudeLimitHit } from "./claude/index.js";
 
 /**
  * What {@link HarnessRegistry.resolve} answers: the harness to run on, or why
@@ -66,38 +64,23 @@ export function providerUnavailableBody(err: ProviderUnavailableError): {
 }
 
 export interface HarnessRegistryOpts {
-  /** Injectable built-in harnesses (tests, and the E2E fake SDK). */
-  harnesses?: Partial<Record<BuiltinHarnessKind, Harness>>;
   /**
    * Providers to register up front, as a plugin would — for tests that drive a
-   * fake Codex or goose without loading the plugin host.
+   * provider without loading the plugin host. A fresh registry is EMPTY: an
+   * install whose provider plugins are all off has no provider at all.
    */
   providers?: Array<{ harness: Harness; descriptor: ProviderDescriptor }>;
 }
-
-/**
- * How to build each BUILT-IN provider's runtime adapter — the server half of
- * registering one (the shared half is `BUILTIN_PROVIDERS`). Typed as a full
- * record so a new built-in fails to compile until it has an adapter here. Any
- * other provider goes through {@link HarnessRegistry.register}.
- */
-const HARNESS_FACTORIES: Record<BuiltinHarnessKind, () => Harness> = {
-  claude: () => new ClaudeHarness(),
-};
 
 export class HarnessRegistry {
   private readonly map = new Map<HarnessKind, Harness>();
 
   constructor(opts: HarnessRegistryOpts = {}) {
-    for (const kind of BUILTIN_HARNESS_KINDS) {
-      this.map.set(kind, opts.harnesses?.[kind] ?? HARNESS_FACTORIES[kind]());
-    }
     for (const { harness, descriptor } of opts.providers ?? []) this.register(harness, descriptor);
   }
 
   /**
-   * Add a provider that is not compiled into the host, with the descriptor the
-   * rest of the app labels it by.
+   * Add a provider, with the descriptor the rest of the app labels it by.
    *
    * Refuses an id that is already taken. Replacing a live harness would leave
    * every running session on the old adapter while new ones start on the new
@@ -121,9 +104,6 @@ export class HarnessRegistry {
    * moved to another provider.
    */
   async unregister(kind: HarnessKind): Promise<void> {
-    if ((BUILTIN_HARNESS_KINDS as readonly string[]).includes(kind)) {
-      throw new Error(`cannot unregister built-in provider "${kind}"`);
-    }
     const harness = this.map.get(kind);
     if (!harness) return;
     this.map.delete(kind);

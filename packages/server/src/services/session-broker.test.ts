@@ -20,7 +20,7 @@ import {
   statusForTool,
   type SessionDirs,
 } from "./session-broker.js";
-import { EFFORT_THINKING_TOKENS, type QueryFn } from "../harness/claude/session.js";
+import { EFFORT_THINKING_TOKENS, type QueryFn } from "@dispatch/plugin-claude/harness";
 import { GitHubService } from "./github.js";
 import { MemoryService } from "./memory.js";
 import { MetricsService } from "./metrics.js";

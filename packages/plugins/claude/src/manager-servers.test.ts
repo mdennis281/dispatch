@@ -1,17 +1,21 @@
 import { describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { EventBus } from "../../bus.js";
-import { createManagerMcpServers, type ManagerMcpBroker } from "../../services/mcp/manager-mcp.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { claudeSdkMcpServers } from "./manager-servers.js";
 
 describe("claudeSdkMcpServers", () => {
-  const servers = () =>
-    createManagerMcpServers({
-      chatId: "c1",
-      bus: new EventBus(),
-      broker: { has: () => false, getStatus: () => undefined } as unknown as ManagerMcpBroker,
-    });
+  // Plain MCP-SDK servers, the shape the host's `createManagerMcpServers`
+  // builds. Built here rather than imported: a plugin cannot reach the host,
+  // and the wrap only ever depends on the `McpServer` contract.
+  const servers = (): Record<string, McpServer> => {
+    const session = new McpServer({ name: "dispatch-session", version: "1.0.0" });
+    session.registerTool("wait", { description: "Wait." }, async () => ({ content: [] }));
+    return {
+      "dispatch-session": session,
+      "dispatch-github": new McpServer({ name: "dispatch-github", version: "1.0.0" }),
+    };
+  };
 
   it("wraps each neutral server in the shape the Agent SDK mounts in-process", () => {
     const neutral = servers();

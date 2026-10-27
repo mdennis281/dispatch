@@ -147,7 +147,8 @@ jobs:
 
       # A real "installed" answer for the wizard's runtime probe. On Linux and
       # macOS npm links a spawnable `claude` and `codex` onto PATH and the
-      # smoke asserts both resolve; on Windows npm leaves `.cmd` shims the
+      # smoke asserts both resolve — through their built-in provider PLUGINS,
+      # since no runtime is compiled into the server (#428); on Windows npm leaves `.cmd` shims the
       # runtime resolvers refuse by design, so the install still happens (the
       # probe must cope with it being there) but nothing is asserted.
       - name: Install the Claude Code and Codex CLIs
@@ -164,11 +165,14 @@ jobs:
         if: github.event_name == 'pull_request'
         shell: bash
         run: |
-          # Nothing outstanding. When a PR fixes something the smoke checks,
-          # add a line here, e.g.:
+          # When a PR fixes something the smoke checks, add its check here, e.g.:
           #   echo 'SMOKE_EXPECT_UNRELEASED=--expect-unreleased "<check name>"' >> "$GITHUB_ENV"
           # and delete it once the fix is in the channel head (the run says so).
-          echo 'SMOKE_EXPECT_UNRELEASED=' >> "$GITHUB_ENV"
+          #
+          # #428 — Claude ships as a built-in plugin, not compiled into the
+          # server. A payload from before it has no packages/plugins/claude and
+          # no plugin to switch off.
+          echo 'SMOKE_EXPECT_UNRELEASED=--expect-unreleased "payload carries everything the launcher and installer run" --expect-unreleased "native dependencies resolved for this OS/arch" --expect-unreleased "provider plugins as shipped: built in, enabled, active" --expect-unreleased "Claude plugin off: no Claude provider, and its chat is refused rather than moved" --expect-unreleased "a restart with the Claude plugin off still has no Claude"' >> "$GITHUB_ENV"
 
       - name: Install, set up, exercise, update, restart, reinstall, stop
         shell: bash

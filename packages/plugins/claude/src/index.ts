@@ -5,12 +5,12 @@
  * model catalogue, so this mostly declares capabilities and hands sessions to
  * {@link ClaudeSession}.
  *
- * SELF-CONTAINED on purpose: nothing in this directory imports the host
- * (`services/`, `config`, the broker). It is on its way out into a provider
- * plugin (#422), and a plugin can only reach `@dispatch/shared`. Everything
- * Claude-specific the host used to do by name — the OAuth usage poll, the
- * `claude auth status` probe, the runtime and model catalogue — lives here and
- * is reached through the `Harness` interface.
+ * A built-in PLUGIN (#428), so it can reach `@dispatch/shared` and nothing of
+ * the host's. Everything Claude-specific the host used to do by name — the
+ * OAuth usage poll, the `claude auth status` probe, the runtime and model
+ * catalogue — lives here and is reached through the `Harness` interface; the
+ * Agent SDK is this package's dependency and no other's, which is what lets an
+ * install with the plugin off run with no Claude at all.
  *
  * Limits come two ways: polled from the OAuth usage endpoint
  * ({@link ClaudeUsage}, behind `readLimits`), and the English sentence a turn
@@ -187,3 +187,9 @@ export class ClaudeHarness implements Harness {
     return new ClaudeSession({ spec, query: this.opts.query, genId: this.genId });
   }
 }
+
+// For the host's own test suites, which drive a scripted SDK `query` through
+// the real adapter (`claudeOnlyRegistry` in the server's registry testkit).
+export { EFFORT_THINKING_TOKENS, type QueryFn } from "./session.js";
+export { claudeSdkMcpServers } from "./manager-servers.js";
+export { makeFakeQuery } from "./fake-sdk.js";

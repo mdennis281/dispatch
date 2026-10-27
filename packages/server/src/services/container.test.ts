@@ -13,7 +13,8 @@ import {
   type ServiceOverrides,
 } from "./container.js";
 import { HarnessRegistry, type Harness } from "../harness/index.js";
-import { providerFor } from "@dispatch/shared";
+import { CLAUDE_PROVIDER } from "@dispatch/plugin-claude/descriptor";
+import { claudeTestHarness } from "../harness/registry.testkit.js";
 
 /**
  * A stub whose every accessed member is an async no-op function, EXCEPT the
@@ -439,17 +440,19 @@ describe("broker.spawnChat attribution", () => {
         // `has: true` so `ensureSession` short-circuits instead of trying to
         // start a real subprocess.
         broker: stub({ has: () => true, sendMessage }),
-        // Codex registered, as its plugin would: a spawn onto a provider
-        // nothing registered is refused now rather than created dead.
+        // Claude (the app default here) and Codex registered, as their plugins
+        // would: a spawn onto a provider nothing registered waits for plugin
+        // activation and is then refused, rather than created dead.
         harnesses: new HarnessRegistry({
           providers: [
+            { harness: claudeTestHarness(), descriptor: CLAUDE_PROVIDER },
             {
               harness: {
                 kind: "codex",
                 capabilities: {},
                 runtime: () => ({ kind: "codex", source: "installed", available: true }),
               } as unknown as Harness,
-              descriptor: { ...providerFor("claude"), id: "codex", label: "Codex", shortLabel: "Codex" },
+              descriptor: { ...CLAUDE_PROVIDER, id: "codex", label: "Codex", shortLabel: "Codex" },
             },
           ],
         }),

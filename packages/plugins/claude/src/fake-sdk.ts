@@ -1,7 +1,7 @@
 /**
  * A deterministic, in-process stand-in for the Agent SDK `query()`.
  *
- * Gated behind `DISPATCH_FAKE_SDK=1` (see container.ts) so it NEVER touches production
+ * Gated behind `DISPATCH_FAKE_SDK=1` (see `createClaudeHarness` in main.ts) so it NEVER touches production
  * — it exists purely so the Playwright E2E can drive the full stream→store→UI
  * pipeline (user row → session init → assistant reply → result) without spawning
  * the real `claude` subprocess or depending on subscription auth / the network.
@@ -15,7 +15,7 @@
  * one shape the instant echo cannot produce, and the one the global-pause E2E
  * and screenshots need: a chat that is visibly running when Pause is pressed.
  */
-import type { QueryFn } from "../harness/claude/session.js";
+import type { QueryFn } from "./session.js";
 
 let sessionSeq = 0;
 /** Ids for `[hold]` rows. A counter, not `Math.random()` — they only need to be unique. */

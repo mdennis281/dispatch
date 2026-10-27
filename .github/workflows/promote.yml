@@ -226,8 +226,12 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
-      - name: Build (shared + cli)
-        run: pnpm --filter @dispatch/shared --filter @dispatch/cli build
+      # The built-in plugins too: server suites that run a Claude turn import
+      # `@dispatch/plugin-claude/harness`, which resolves to the plugin's BUILT
+      # `server/` output (#428). On a tag cut before a plugin existed the filter
+      # matches nothing and builds nothing.
+      - name: Build (shared + cli + built-in plugins)
+        run: pnpm --filter @dispatch/shared --filter @dispatch/cli --filter "./packages/plugins/**" build
 
       - name: Test (windows-sensitive files)
         run: >
@@ -253,6 +257,15 @@ jobs:
         run: >
           pnpm --filter @dispatch/plugin-goose exec vitest run
           src/index.test.ts
+
+      # Claude left the server for a built-in plugin the same way (#428). Its
+      # runtime resolver and spawn wrapper are the Windows-sensitive part:
+      # `claude.exe` vs a `.cmd` shim, and `~/.local/bin` under %USERPROFILE%.
+      - name: Test Claude plugin (windows-sensitive)
+        run: >
+          pnpm --filter @dispatch/plugin-claude exec vitest run
+          src/runtime.test.ts
+          src/spawn.test.ts
 
       - name: Test release installer (Windows)
         run: node --test tools/install.test.mjs

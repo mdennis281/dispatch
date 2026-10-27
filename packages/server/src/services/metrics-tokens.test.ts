@@ -3,11 +3,16 @@ import { appendFile, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Chat } from "@dispatch/shared";
-import { figuresOfUsage } from "@dispatch/shared";
+import { figuresOfUsage, registerProvider } from "@dispatch/shared";
 import { Store } from "../store/index.js";
 import { MetricsService } from "./metrics.js";
 import { TokenLedger, tokenLabeller, type TokenLine } from "./metrics-tokens.js";
 import { TokenBackfill } from "./metrics-tokens-backfill.js";
+import { CLAUDE_PROVIDER } from "@dispatch/plugin-claude/descriptor";
+
+// Claude is a plugin now (#428); outside a running host nothing registers it.
+// These cases are about Claude accounts, so they register its real descriptor.
+registerProvider(CLAUDE_PROVIDER);
 
 let dir: string;
 let store: Store;

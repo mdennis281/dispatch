@@ -12,8 +12,10 @@ import type {
   HarnessSessionSpec,
 } from "../harness/types.js";
 import { HarnessRegistry } from "../harness/index.js";
+import { claudeTestHarness } from "../harness/registry.testkit.js";
 // The real descriptors, because these suites assert on what a Codex or goose
 // chat gets — its efforts, skills dir and account env all come from them.
+import { CLAUDE_PROVIDER } from "@dispatch/plugin-claude/descriptor";
 import { CODEX_PROVIDER } from "@dispatch/plugin-codex/descriptor";
 import { GOOSE_PROVIDER } from "@dispatch/plugin-goose/descriptor";
 import { Store } from "../store/index.js";
@@ -183,7 +185,15 @@ describe("SessionBroker neutral harness path", () => {
     broker = new SessionBroker({
       store,
       bus: (bus = new EventBus()),
-      harnesses: new HarnessRegistry({ providers: [{ harness: codex, descriptor: CODEX_PROVIDER }] }),
+      // Claude beside Codex, as the shipped plugins register them: every
+      // provider switch below needs a registered target, and Claude stopped
+      // being one for free when it left the server (#428).
+      harnesses: new HarnessRegistry({
+        providers: [
+          { harness: codex, descriptor: CODEX_PROVIDER },
+          { harness: claudeTestHarness(), descriptor: CLAUDE_PROVIDER },
+        ],
+      }),
       authored: new AuthoredConfigService({ globalRoot: join(dir, "global") }),
       deps: { stopTimeoutMs: 5 },
     });
@@ -288,7 +298,7 @@ describe("SessionBroker neutral harness path", () => {
     const ghostBroker = new SessionBroker({
       store,
       bus: new EventBus(),
-      harnesses: new HarnessRegistry({ harnesses: { claude } }),
+      harnesses: new HarnessRegistry({ providers: [{ harness: claude, descriptor: CLAUDE_PROVIDER }] }),
       authored: new AuthoredConfigService({ globalRoot: join(dir, "global") }),
       deps: { stopTimeoutMs: 5 },
     });
@@ -2187,8 +2197,10 @@ describe("SessionBroker neutral harness path", () => {
         store,
         bus: (bus = new EventBus()),
         harnesses: new HarnessRegistry({
-          harnesses: { claude },
-          providers: [{ harness: unavailableLocalHarness(() => (probes += 1)), descriptor: GOOSE_PROVIDER }],
+          providers: [
+            { harness: claude, descriptor: CLAUDE_PROVIDER },
+            { harness: unavailableLocalHarness(() => (probes += 1)), descriptor: GOOSE_PROVIDER },
+          ],
         }),
         authored: new AuthoredConfigService({ globalRoot: join(dir, "global") }),
         deps: { stopTimeoutMs: 5 },
