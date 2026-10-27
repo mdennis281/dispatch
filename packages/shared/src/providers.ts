@@ -300,7 +300,8 @@ export function providerAvailability(
       provider,
       reason: "logged-out",
       message: command
-        ? `${label} is not logged in — run \`${command}\`, then send again.`
+        ? // Plain text, no markdown: the composer banner renders it verbatim.
+          `${label} is not logged in — run "${command}", then send again.`
         : `${label} is not logged in.`,
     };
   }
