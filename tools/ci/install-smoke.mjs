@@ -60,6 +60,11 @@ const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "../..");
 const IS_WIN = platform() === "win32";
 const DEFAULT_REPO = "mdennis281/dispatch";
+/**
+ * The provider plugins every payload ships. No runtime is compiled into the
+ * server (#428), so a payload missing one of these has no such provider at all.
+ */
+const SHIPPED_PROVIDERS = ["claude", "codex", "goose"];
 
 /* ------------------------------------------------------------------ args */
 
@@ -797,7 +802,9 @@ async function main() {
   });
 
   await check("GET /api/models answers", async () => {
-    const m = (await get("/api/models", { expect: 200 })).json;
+    // Named: there is no default provider (#426), so a bare `/api/models`
+    // rightly answers [] — which failed this check on every unstable payload.
+    const m = (await get("/api/models?harness=claude", { expect: 200 })).json;
     assert(Array.isArray(m) && m.length > 0, JSON.stringify(m)?.slice(0, 200));
     return `${m.length} models`;
   });
