@@ -42,6 +42,7 @@ export {
   discoverPlugins,
   discoverPluginsAt,
   addPlugin,
+  hashPluginTree,
   linkPlugin,
   removePlugin,
   setPluginEnabled,

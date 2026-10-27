@@ -11,7 +11,13 @@
  */
 import * as z from "zod";
 import { PLUGIN_CAPABILITY_LINES, PluginInspectionSchema, type PluginInspection } from "./plugin-inspection.js";
-import { PluginInfoSchema, PluginOriginSchema, PluginRefKindSchema, type PluginGitSource } from "./plugin-manifest.js";
+import {
+  PluginAutoUpdateSchema,
+  PluginInfoSchema,
+  PluginOriginSchema,
+  PluginRefKindSchema,
+  type PluginGitSource,
+} from "./plugin-manifest.js";
 
 /* ------------------------------------------------------------ remote refs */
 
@@ -374,6 +380,38 @@ export const PluginUpdateCheckSchema = z.object({
   checkedAt: z.number(),
 });
 export type PluginUpdateCheck = z.infer<typeof PluginUpdateCheckSchema>;
+
+/** `PUT /api/plugins/:id/auto-update`. */
+export const PluginAutoUpdateRequestSchema = z.object({ policy: PluginAutoUpdateSchema });
+
+/** One update the background check installed by itself (`autoUpdate: auto`). */
+export const PluginAutoAppliedSchema = z.object({
+  fromSha: z.string(),
+  sha: z.string(),
+  ref: z.string(),
+  fromVersion: z.string().optional(),
+  version: z.string().optional(),
+  at: z.number(),
+});
+export type PluginAutoApplied = z.infer<typeof PluginAutoAppliedSchema>;
+
+/**
+ * `GET /api/plugins/updates`, and the `plugin-updates` event after every
+ * background pass: the latest answer per plugin, and what was auto-installed
+ * since boot. Kept in memory only — a restart is exactly when an applied
+ * update stops being news, and the next pass re-derives the rest.
+ */
+export const PluginUpdateStatusSchema = z.object({
+  /** 0 when background checks are switched off (`DISPATCH_PLUGIN_UPDATE_HOURS=0`). */
+  intervalHours: z.number(),
+  running: z.boolean(),
+  lastRunAt: z.number().optional(),
+  nextRunAt: z.number().optional(),
+  /** Keyed by plugin id; only plugins the last pass checked. */
+  checks: z.record(z.string(), PluginUpdateCheckSchema),
+  applied: z.record(z.string(), PluginAutoAppliedSchema),
+});
+export type PluginUpdateStatus = z.infer<typeof PluginUpdateStatusSchema>;
 
 /** `POST /api/plugins/:id/update` — the target the owner was shown. Refused if the ref has moved on since. */
 export const PluginUpdateRequestSchema = z.object({

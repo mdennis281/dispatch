@@ -21,6 +21,7 @@ import {
   parseLsRemote,
   parseTagVersion,
   resolveUpdateTarget,
+  type PluginGitSource,
   type PluginInfo,
   type PluginUninstallPreview,
   type PluginUpdateCheck,
@@ -487,5 +488,63 @@ describe("built-in plugins", () => {
     expect((await json("POST", "/api/plugins/install", { url: URL_MAIN, sha: SHA_OLD, replace: true })).status).toBe(409);
     expect(existsSync(join(configDir, "plugins", "hello", "plugin.yaml"))).toBe(true);
     expect((await json<PluginInfo>("PUT", "/api/plugins/hello/enabled", { enabled: false })).body).toMatchObject({ enabled: false, origin: "builtin" });
+  });
+});
+
+/* --------------------------------------------- folder-level change detection */
+
+describe("an unchanged plugin in a moved repository", () => {
+  /** Both commits hold the same plugin files — a sibling plugin changed, this one did not. */
+  const sameFiles = (seen: string[]): FetchDeps => ({
+    lsRemote: async () => LS_REMOTE,
+    githubTarball: async (_o, _r, sha) => {
+      seen.push(sha);
+      return chunked(gzip(repoTar(V1, sha)));
+    },
+    gitArchive: async (_u, sha) => chunked(repoTar(V1, sha)),
+  });
+
+  it("is up to date, and the record fast-forwards so the next check fetches nothing", async () => {
+    const seen: string[] = [];
+    const { json, config } = await app(sameFiles(seen));
+    await json("POST", "/api/plugins/install", { url: URL_MAIN, sha: SHA_OLD });
+    const recorded = (await config()).plugins!.hello!.source as { contentHash?: string; sha: string };
+    expect(recorded.contentHash).toMatch(/^[0-9a-f]{64}$/);
+
+    const first = await json<PluginUpdateCheck>("POST", "/api/plugins/hello/check-update");
+    expect(first.body).toMatchObject({ status: "up-to-date", current: { sha: SHA_NEW } });
+    expect(first.body.message).toMatch(/main moved to 2222222, but nothing in this plugin changed/);
+    expect(((await config()).plugins!.hello!.source as { sha: string }).sha).toBe(SHA_NEW);
+
+    const fetched = seen.length;
+    const second = await json<PluginUpdateCheck>("POST", "/api/plugins/hello/check-update");
+    expect(second.body.status).toBe("up-to-date");
+    expect(seen.length).toBe(fetched);
+  });
+
+  it("hashes the installed directory when the install predates contentHash", async () => {
+    const { json, plugins } = await app(sameFiles([]));
+    await json("POST", "/api/plugins/install", { url: URL_MAIN, sha: SHA_OLD });
+    const { contentHash: _legacy, ...source } = plugins.get("hello")!.source as PluginGitSource;
+    await plugins.recordSource("hello", source);
+    const { body } = await json<PluginUpdateCheck>("POST", "/api/plugins/hello/check-update");
+    expect(body.status).toBe("up-to-date");
+    expect((plugins.get("hello")!.source as PluginGitSource).contentHash).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+describe("PUT /api/plugins/:id/auto-update + GET /api/plugins/updates", () => {
+  it("defaults a URL install to notify, stores the policy, and refuses nonsense", async () => {
+    const { json, config } = await app(deps());
+    await json("POST", "/api/plugins/install", { url: URL_MAIN, sha: SHA_OLD });
+    expect((await json<PluginInfo[]>("GET", "/api/plugins")).body.find((p) => p.id === "hello")?.autoUpdate).toBe("notify");
+    const set = await json<PluginInfo>("PUT", "/api/plugins/hello/auto-update", { policy: "auto" });
+    expect(set.body.autoUpdate).toBe("auto");
+    expect((await config()).plugins!.hello).toMatchObject({ autoUpdate: "auto", source: { sha: SHA_OLD } });
+    expect((await json("PUT", "/api/plugins/hello/auto-update", { policy: "always" })).status).toBe(400);
+    expect((await json("PUT", "/api/plugins/nope/auto-update", { policy: "off" })).status).toBe(404);
+    const status = await json<{ intervalHours: number; checks: object; applied: object }>("GET", "/api/plugins/updates");
+    expect(status.status).toBe(200);
+    expect(status.body).toMatchObject({ checks: {}, applied: {} });
   });
 });

@@ -13,6 +13,7 @@
  */
 import { cp, lstat, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
@@ -455,6 +456,35 @@ export async function listCollectionMembers(source: string): Promise<CollectionM
   }
 }
 
+/**
+ * sha256 over a plugin directory's files: sorted relative paths, each with
+ * the sha256 of its bytes. Skips exactly what an install leaves behind
+ * (`.git`, `node_modules`, at any depth) and follows no links, so the
+ * extracted source, the installed copy and a later fetch of an unchanged
+ * directory all hash the same. Recorded as `PluginGitSource.contentHash`.
+ */
+export async function hashPluginTree(dir: string): Promise<string> {
+  const files: string[] = [];
+  const walk = async (abs: string, rel: string): Promise<void> => {
+    for (const e of await readdir(abs, { withFileTypes: true })) {
+      if (e.name === ".git" || e.name === "node_modules") continue;
+      const childRel = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) await walk(join(abs, e.name), childRel);
+      else if (e.isFile()) files.push(childRel);
+    }
+  };
+  await walk(dir, "");
+  // Code-unit order, not localeCompare: the hash must not depend on the
+  // machine's locale.
+  files.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const outer = createHash("sha256");
+  for (const rel of files) {
+    const inner = createHash("sha256").update(await readFile(join(dir, ...rel.split("/")))).digest("hex");
+    outer.update(`${rel}\0${inner}\n`);
+  }
+  return outer.digest("hex");
+}
+
 /** Validate a candidate or throw a {@link CmError} naming what is wrong. */
 async function validated(pluginDir: string): Promise<DiscoveredPlugin> {
   const found = await readPluginDir(pluginDir);
@@ -538,7 +568,11 @@ export async function addPlugin(
     });
     await rename(tmp, target);
     const plugin = await readPluginDir(target, id);
-    return { plugin, outcome: replaced ? "replaced" : "copied", dir: target, source: recorded };
+    // Hashed from the INSTALLED copy: that is what a later check compares a
+    // fetched commit against, whatever the source looked like.
+    const source: PluginSource =
+      recorded.type === "git" ? { ...recorded, contentHash: await hashPluginTree(target) } : recorded;
+    return { plugin, outcome: replaced ? "replaced" : "copied", dir: target, source };
   } finally {
     if (scratch) await rm(scratch, { recursive: true, force: true }).catch(() => {});
   }

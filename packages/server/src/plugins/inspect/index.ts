@@ -31,7 +31,7 @@ import {
   type PluginUpdateResult,
   type UpdateTarget,
 } from "@dispatch/shared";
-import { CmError, addPlugin } from "@dispatch/cli/core";
+import { CmError, addPlugin, hashPluginTree } from "@dispatch/cli/core";
 import { pluginsRoot, readPluginDir } from "../manifest.js";
 import {
   DEFAULT_FETCH_LIMITS,
@@ -325,6 +325,7 @@ export class PluginInspector {
         subdir: f.subdir,
         sha: f.sha,
         installedAt: Date.now(),
+        contentHash: await hashPluginTree(result.dir),
       });
       const plugin = await this.opts.noteInstalled(id);
       return {
@@ -419,6 +420,21 @@ export class PluginInspector {
       throw err;
     }
     try {
+      // The ref moved — but in a repository of several plugins, most pushes
+      // are to a sibling. Same files: not an update. The record is advanced to
+      // the new commit so the next check is one ls-remote again, not another
+      // tarball, and the row stops claiming a commit two pushes behind.
+      const fetched = await hashPluginTree(f.dir);
+      const installedHash = source.contentHash ?? (await hashPluginTree(info.dir).catch(() => undefined));
+      if (fetched === installedHash) {
+        await this.opts.recordSource(id, { ...source, ref: t.ref, sha: t.sha, contentHash: fetched });
+        return {
+          ...base,
+          current: { ...current, ref: t.ref, sha: t.sha },
+          status: "up-to-date",
+          message: `${t.ref} moved to ${t.sha.slice(0, 7)}, but nothing in ${source.subdir || "this plugin"} changed.`,
+        };
+      }
       const inspection = await this.report(f, source.url);
       const installed = await inspectPluginDir(info.dir, {
         source: {

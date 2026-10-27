@@ -8,6 +8,8 @@
  *   POST /api/plugins/install          → { url, sha, replace?, subdir? } → install exactly that sha; subdir picks a collection member (owner only)
  *   POST /api/plugins/:id/check-update → PluginUpdateCheck — resolve the recorded source, diff the target (owner only)
  *   POST /api/plugins/:id/update       → { sha } → install the checked target (owner only)
+ *   PUT  /api/plugins/:id/auto-update  → { policy } → off | notify | auto for the background check (owner only)
+ *   GET  /api/plugins/updates          → PluginUpdateStatus — the background check's latest answers (owner only)
  *   GET  /api/plugins/:id/uninstall    → PluginUninstallPreview — what Uninstall would remove (owner only)
  *   POST /api/plugins/:id/uninstall    → { purge? } → PluginUninstallResult (owner only)
  *   *    /api/plugins/:id/*            → the plugin's own route table
@@ -27,6 +29,7 @@ import { spawn } from "node:child_process";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import * as z from "zod";
 import {
+  PluginAutoUpdateRequestSchema,
   PluginInspectRequestSchema,
   PluginInstallRequestSchema,
   PluginUninstallRequestSchema,
@@ -109,6 +112,25 @@ export function registerPluginRoutes(app: FastifyInstance): void {
       if (err instanceof PluginNotFound) return reply.code(404).send({ error: err.message });
       throw err;
     }
+  });
+
+  // Owner-only: the policy decides whether code gets installed unattended.
+  app.put<{ Params: { id: string } }>("/api/plugins/:id/auto-update", async (req, reply) => {
+    const refused = refuseNonOwner(req, reply);
+    if (refused) return refused;
+    const parsed = PluginAutoUpdateRequestSchema.safeParse(req.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: "policy must be off, notify or auto" });
+    try {
+      return await plugins.setAutoUpdate(req.params.id, parsed.data.policy);
+    } catch (err) {
+      return inspectFailure(reply, err);
+    }
+  });
+
+  app.get("/api/plugins/updates", async (req, reply) => {
+    const refused = refuseNonOwner(req, reply);
+    if (refused) return refused;
+    return app.services.pluginUpdates.status();
   });
 
   app.post<{ Params: { id: string } }>("/api/plugins/:id/reveal", async (req, reply) => {
