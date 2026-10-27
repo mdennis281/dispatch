@@ -4,6 +4,7 @@ import {
   describeClose,
   diagnose,
   isStaleBundle,
+  pipeline,
   STALE_FRAME_LIMIT,
   type Check,
   type DiagnosisInput,
@@ -246,7 +247,7 @@ describe("diagnose — protocol", () => {
     const over = diagnose(
       input({ state: "open", badFrames: STALE_FRAME_LIMIT, badFrameTypes: ["chat-status"] }),
     );
-    expect(over.headline).toContain("protocol this build doesn't know");
+    expect(over.headline).toBe("Protocol mismatch");
     expect(over.detail).toContain("chat-status");
     expect(over.action).toBe("reload");
     expect(over.retry).toBe(false);
@@ -264,5 +265,63 @@ describe("diagnose — in-flight states", () => {
     const d = diagnose(input({ state: "reconnecting" }));
     expect(d.headline).toBe("Reconnecting");
     expect(d.checks.some((c) => c.state === "fail")).toBe(false);
+  });
+});
+
+describe("pipeline", () => {
+  const tones = (d: ReturnType<typeof diagnose>) => pipeline(d.checks).stages.map((s) => s.tone);
+
+  it("greys everything past the first link that isn't green", () => {
+    const d = diagnose(input({ online: false }));
+    expect(tones(d)).toEqual(["fail", "idle", "idle", "idle"]);
+    expect(pipeline(d.checks)).toMatchObject({ active: 0, reach: 0 });
+  });
+
+  it("does not let a downstream check claim a result past an unfinished one", () => {
+    // diagnose() leaves protocol at "agreed" while the socket awaits hello. On
+    // the rail that would be a green dot beyond a blue one.
+    const d = diagnose(input({ state: "open" }));
+    expect(check(d.checks, "protocol").state).toBe("ok");
+    expect(tones(d)).toEqual(["ok", "ok", "active", "idle"]);
+    expect(pipeline(d.checks)).toMatchObject({ active: 2, reach: 2 });
+  });
+
+  it("walks past the network link on loopback instead of being gated by it", () => {
+    const d = diagnose(input({ reach: "loopback", host: "localhost", state: "reconnecting" }));
+    const p = pipeline(d.checks);
+    expect(p.stages[0]).toMatchObject({ tone: "idle", bypassed: true });
+    expect(p.stages.slice(1).map((s) => s.tone)).toEqual(["ok", "active", "idle"]);
+    expect(p).toMatchObject({ active: 2, reach: 2 });
+  });
+
+  it("points at the last stage when every link is green", () => {
+    const d = diagnose(input({ state: "open", handshaken: true }));
+    expect(tones(d)).toEqual(["ok", "ok", "ok", "ok"]);
+    expect(pipeline(d.checks)).toMatchObject({ active: 3, reach: 3 });
+  });
+
+  it("keeps a stale bundle red while the socket is still reconnecting", () => {
+    // The headline says reload. A rail showing only a pulsing blue "connecting…"
+    // beside it would contradict the one instruction on the screen.
+    const d = diagnose(input({ state: "reconnecting", serverVersion: "2026.08.21.00002" }));
+    expect(d.headline).toBe("This tab is running an old build");
+    const p = pipeline(d.checks);
+    expect(p.stages.map((s) => s.tone)).toEqual(["ok", "ok", "active", "fail"]);
+    expect(p.active).toBe(3);
+    // The line into Protocol stays dark — that link was never walked.
+    expect(p.reach).toBe(2);
+  });
+
+  it("still names a stale bundle behind a dead server", () => {
+    const d = diagnose(input({ probe: { kind: "unreachable", at: 0 }, serverVersion: "2026.08.21.00002" }));
+    const p = pipeline(d.checks);
+    expect(p.stages.map((s) => s.tone)).toEqual(["ok", "fail", "idle", "fail"]);
+    expect(p.active).toBe(3);
+  });
+
+  it("reports the failing link once a protocol break is the cause", () => {
+    const d = diagnose(input({ state: "open", handshaken: true, serverVersion: "2026.08.21.00002" }));
+    expect(tones(d)).toEqual(["ok", "ok", "ok", "fail"]);
+    expect(pipeline(d.checks).active).toBe(3);
   });
 });

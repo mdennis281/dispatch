@@ -33,7 +33,7 @@ import { useEffect, useState } from "react";
 import { RotateCw, ShieldAlert } from "lucide-react";
 import { BootMark } from "../brand/BootMark.js";
 import { Button } from "../ui/Button.js";
-import { StatusDot, type DotTone } from "../ui/StatusDot.js";
+import { ConnectionPipeline } from "./ConnectionPipeline.js";
 import { useConnection } from "../../stores/connection.js";
 import { useUpdate } from "../../stores/update.js";
 import { initializeAuth, useAuth } from "../../stores/auth.js";
@@ -45,8 +45,6 @@ import {
   diagnose,
   isStaleBundle,
   STALE_FRAME_LIMIT,
-  type Check,
-  type CheckState,
   type Diagnosis,
 } from "../../lib/connectionDiagnosis.js";
 
@@ -63,32 +61,13 @@ const GRACE_MS = 2_000;
 /** Re-probe cadence while the screen is up. Two stats and a small JSON read. */
 const POLL_MS = 4_000;
 
-const TONE: Record<CheckState, DotTone> = {
-  ok: "success",
-  fail: "danger",
-  warn: "warn",
-  pending: "info",
-  skip: "muted",
-};
-
-function CheckRow({ check }: { check: Check }) {
-  const dim = check.state === "skip";
-  return (
-    <li className="flex items-center gap-2.5 py-1.5">
-      <StatusDot tone={TONE[check.state]} pulse={check.state === "pending"} />
-      <span className={dim ? "text-xs text-faint" : "text-xs text-secondary"}>{check.label}</span>
-      <span className="ml-auto text-right text-xs text-muted">{check.value}</span>
-    </li>
-  );
-}
-
 /**
  * The boot mark, because this screen is WAITING and the mark is what waiting
  * looks like here.
  *
  * It replaced a set of five diagnostic glyphs (WifiOff, ServerCrash, Unplug…),
- * and that is a deliberate trade rather than an oversight: the checklist below
- * already names the failing check, in words, with a coloured dot beside it —
+ * and that is a deliberate trade rather than an oversight: the stage rail below
+ * already names the failing check, in words, on a coloured stage of the rail —
  * the glyph was a second, coarser rendering of the same fact. What it was not
  * showing, and what the mark does, is that the page is still retrying. A static
  * fault icon over a screen that re-probes every four seconds reads as stopped.
@@ -244,22 +223,23 @@ export function ConnectingScreen() {
       className="fixed inset-0 flex flex-col items-center justify-center bg-app/95 px-5 backdrop-blur-sm dp-safe-pad"
     >
       <HeadIcon diagnosis={diagnosis} />
-      <p className="text-center text-lg font-medium text-primary">{diagnosis.headline}</p>
-      <p className="mt-1 max-w-[440px] text-center text-sm leading-relaxed text-muted">
-        {diagnosis.detail}
+      {/*
+        The headline alone. The rail below already says which link broke and
+        how, so the paragraph of detail and the paragraph of advice under it
+        were the same diagnosis told three times. They stay reachable on hover
+        — the proxy advice is the one thing here a reverse-proxy user can't
+        work out from the rail — but they no longer sit on the page.
+      */}
+      <p
+        className="text-center text-lg font-medium text-primary"
+        title={[diagnosis.detail, diagnosis.hint].filter(Boolean).join("\n\n")}
+      >
+        {diagnosis.headline}
       </p>
 
-      <ul className="mt-4 w-full max-w-[340px] divide-y divide-line rounded-lg border border-line bg-inset px-3 py-1">
-        {diagnosis.checks.map((check) => (
-          <CheckRow key={check.id} check={check} />
-        ))}
-      </ul>
-
-      {diagnosis.hint && (
-        <p className="mt-3.5 max-w-[440px] text-center text-xs leading-relaxed text-secondary">
-          {diagnosis.hint}
-        </p>
-      )}
+      <div className="mt-6 mb-2 flex w-full justify-center">
+        <ConnectionPipeline checks={diagnosis.checks} />
+      </div>
 
       {/*
         Only the buttons that can change the outcome. When `retry` is false the
