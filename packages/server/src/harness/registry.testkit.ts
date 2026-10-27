@@ -10,17 +10,23 @@
  * Either way `runtime()` is pinned to "installed" and usage is never read, so
  * nothing in a test probes for a `claude` binary or calls Anthropic.
  *
+ * Claude is a built-in PLUGIN now (#428), so this imports the plugin's BUILT
+ * output (`@dispatch/plugin-claude/harness` resolves to `server/`) — build the
+ * plugins before running the server suites, as for Codex and goose. It
+ * registers the way the plugin does, descriptor and all, which is also what
+ * makes `providerFor("claude")` answer "Claude Code" in these suites.
+ *
  * A plain module, not an export from a test file — see `store/db.testkit.ts`
  * for why importing one test file from another double-runs it.
  */
-import { CLAUDE_CAPABILITIES, ClaudeHarness } from "./claude/index.js";
-import type { QueryFn } from "./claude/session.js";
+import { CLAUDE_CAPABILITIES, ClaudeHarness, type QueryFn } from "@dispatch/plugin-claude/harness";
+import { CLAUDE_PROVIDER } from "@dispatch/plugin-claude/descriptor";
 import { HarnessRegistry } from "./index.js";
 import type { Harness } from "./types.js";
 import type { Store } from "../store/index.js";
 
 export function claudeOnlyRegistry(query?: QueryFn): HarnessRegistry {
-  return new HarnessRegistry({ harnesses: { claude: claudeTestHarness(query) } });
+  return new HarnessRegistry({ providers: [{ harness: claudeTestHarness(query), descriptor: CLAUDE_PROVIDER }] });
 }
 
 /** The Claude {@link claudeOnlyRegistry} holds. */

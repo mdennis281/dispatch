@@ -45,7 +45,8 @@ import type {
   HarnessSession,
   HarnessSessionSpec,
 } from "@dispatch/shared";
-import { catchToolGuard, claudeCompactWindow, compactCommand } from "@dispatch/shared";
+import { catchToolGuard, compactCommand } from "@dispatch/shared";
+import { claudeCompactWindow } from "./compact.js";
 import { ClaudeStreamDecoder, QUESTION_TOOL } from "./stream.js";
 import { buildQuestionAnswer, neutralQuestions } from "./questions.js";
 import { claudeExecutableOption } from "./runtime.js";

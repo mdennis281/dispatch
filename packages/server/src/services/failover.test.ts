@@ -7,6 +7,12 @@ import { Store } from "../store/index.js";
 import { EventBus } from "../bus.js";
 import { FailoverService, nextReset } from "./failover.js";
 import { usageExhausted, type AccountUsage } from "./usage-read.js";
+import { registerProvider } from "@dispatch/shared";
+import { CLAUDE_PROVIDER } from "@dispatch/plugin-claude/descriptor";
+
+// Claude is a plugin now (#428); outside a running host nothing registers it.
+// These cases are about Claude accounts, so they register its real descriptor.
+registerProvider(CLAUDE_PROVIDER);
 
 /**
  * The harness registry is faked structurally: what is under test is which

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { ModelInfo, Query } from "@anthropic-ai/claude-agent-sdk";
-import { FALLBACK_MODELS } from "@dispatch/shared";
+import { FALLBACK_MODELS } from "./descriptor.js";
 import {
   listAvailableModels,
   listContextWindows,

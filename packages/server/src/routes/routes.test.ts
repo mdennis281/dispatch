@@ -18,7 +18,7 @@ import { loadConfig, type ServerConfig } from "../config.js";
 import { EventBus } from "../bus.js";
 import { Store } from "../store/index.js";
 import { SessionBroker } from "../services/session-broker.js";
-import type { QueryFn } from "../harness/claude/session.js";
+import type { QueryFn } from "@dispatch/plugin-claude/harness";
 import { GitHubService, type ExecaLike } from "../services/github.js";
 import { CiService } from "../services/ci.js";
 import { GLOBAL_PROJECT_ID, providerIds, type WsServerEvent } from "@dispatch/shared";

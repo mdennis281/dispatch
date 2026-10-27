@@ -7,32 +7,43 @@ import {
   subscriptionFor,
   SubscriptionListSchema,
 } from "./subscriptions.js";
-import { BUILTIN_PROVIDERS, providerIds, registerProvider } from "./providers.js";
+import { providerIds, registerProvider, type ProviderDescriptor } from "./providers.js";
 
-// Codex and goose are plugins now, so nothing registers them in shared's own
-// tests. These suites are about the multi-provider MECHANISM — implicit
-// accounts, a directory-based login beside an endpoint-based one — so they
-// register stand-ins with the two account shapes that matter.
-registerProvider({
-  ...BUILTIN_PROVIDERS.claude,
-  id: "codex",
-  label: "Codex",
-  shortLabel: "Codex",
-  account: { configDirEnv: "CODEX_HOME", defaultConfigDir: ".codex", loginFile: "auth.json" },
+// Every provider is a plugin now, Claude included (#428), so nothing registers
+// one in shared's own tests. These suites are about the multi-provider
+// MECHANISM — implicit accounts, a directory-based login beside an
+// endpoint-based one — so they register stand-ins with the account shapes that
+// matter, under the ids the assertions name.
+const stub = (id: string, label: string, account: ProviderDescriptor["account"]): ProviderDescriptor => ({
+  id,
+  label,
+  shortLabel: label,
+  blurb: "A test stand-in.",
+  fallbackModels: [],
+  efforts: ["low", "medium", "high"],
+  subagents: true,
+  skillsDir: ".agents",
+  account,
 });
-registerProvider({
-  ...BUILTIN_PROVIDERS.claude,
-  id: "goose",
-  label: "goose",
-  shortLabel: "goose",
-  account: {
+registerProvider(
+  stub("claude", "Claude Code", {
+    configDirEnv: "CLAUDE_CONFIG_DIR",
+    defaultConfigDir: ".claude",
+    loginFile: ".credentials.json",
+  }),
+);
+registerProvider(
+  stub("codex", "Codex", { configDirEnv: "CODEX_HOME", defaultConfigDir: ".codex", loginFile: "auth.json" }),
+);
+registerProvider(
+  stub("goose", "goose", {
     configDirEnv: "GOOSE_CONFIG_DIR",
     defaultConfigDir: ".config/goose",
     loginFile: "config.yaml",
     endpointEnv: "OLLAMA_HOST",
     defaultEndpoint: "http://127.0.0.1:11434",
-  },
-});
+  }),
+);
 
 describe("resolveSubscriptions", () => {
   it("gives an install with no list one implicit account per provider", () => {

@@ -4690,7 +4690,7 @@ describe("manager-mcp — server factory", () => {
     // than registered empty.
     expect(Object.keys(servers).sort()).toEqual(["dispatch-chat", "dispatch-confirm", "dispatch-session"]);
     // Provider-neutral: no Claude `{ type: "sdk" }` wrapper — the Claude
-    // adapter adds that at its own boundary (harness/claude/manager-servers.ts).
+    // adapter adds that at its own boundary (packages/plugins/claude/src/manager-servers.ts).
     for (const [name, server] of Object.entries(servers)) {
       expect(server).toBeInstanceOf(McpServer);
       expect((server.server as unknown as { _serverInfo: { name: string } })._serverInfo.name).toBe(name);

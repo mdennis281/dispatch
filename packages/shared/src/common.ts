@@ -74,27 +74,24 @@ export const HarnessKindSchema = z
   .regex(/^[a-z][a-z0-9-]{0,39}$/, "a provider id is lowercase letters, digits and dashes");
 
 /**
- * The providers compiled into the host. Only Claude: it is the fallback every
- * unavailable provider resolves to and it drives the background jobs (titles,
- * commit messages), so it cannot be something a toggle switches off. Codex and
- * goose ship too, but as built-in PLUGINS under `packages/plugins/`, which
- * register at boot (see `registerProvider`) — which is why {@link HarnessKind}
- * is open.
+ * There are no providers compiled into the host. Claude, Codex and goose all
+ * ship as built-in PLUGINS under `packages/plugins/` and register at boot (see
+ * `registerProvider`), which is why {@link HarnessKind} is open. Claude was
+ * the last one in: it was compiled in as the fallback every unavailable
+ * provider resolved to, and there is no fallback any more (#422, #428).
  *
- * It was a closed `z.enum` of exactly these three, and that enum was also the
- * PERSISTENCE schema for chats, projects, subscriptions and settings — so a row
- * naming any other provider failed to parse and took its whole file down with
- * it. That made a provider that can be uninstalled impossible by construction:
- * removing it would brick every chat that ever ran on it.
+ * The id was a closed `z.enum` once, and that enum was also the PERSISTENCE
+ * schema for chats, projects, subscriptions and settings — so a row naming any
+ * other provider failed to parse and took its whole file down with it. That
+ * made a provider that can be uninstalled impossible by construction: removing
+ * it would brick every chat that ever ran on it.
  */
-export const BUILTIN_HARNESS_KINDS = ["claude"] as const;
-export type BuiltinHarnessKind = (typeof BUILTIN_HARNESS_KINDS)[number];
 
 /**
- * A provider id. Open — the `(string & {})` arm keeps editor completion for the
- * built-ins without pretending they are the only values a row can hold.
+ * A provider id: whatever a registered plugin calls itself. The `(string & {})`
+ * spelling keeps it from collapsing into `string` in hovers and errors.
  */
-export type HarnessKind = BuiltinHarnessKind | (string & {});
+export type HarnessKind = string & {};
 
 /**
  * What an ABSENT `harness` meant on a row written before #426: Claude was the
@@ -106,7 +103,7 @@ export type HarnessKind = BuiltinHarnessKind | (string & {});
  * It is NOT a default. There is no default provider and no fallback provider:
  * a chat whose provider is missing shows that and does not run (#422).
  */
-export const LEGACY_HARNESS: BuiltinHarnessKind = "claude";
+export const LEGACY_HARNESS: HarnessKind = "claude";
 
 
 /**
@@ -347,7 +344,7 @@ export type PermissionDecision = z.infer<typeof PermissionDecisionSchema>;
 
 /**
  * A selectable session model for the composer picker — a projection of the
- * runtime's own `ModelInfo` (see server `harness/claude/models.ts`), which is why
+ * runtime's own `ModelInfo` (see `packages/plugins/claude/src/models.ts`), which is why
  * `value` is whatever the runtime offers rather than always a dated wire id.
  */
 export const ModelOptionSchema = z.object({

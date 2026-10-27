@@ -9,12 +9,11 @@
  * for two providers and silently wrong for a third — a new runtime would have
  * rendered as "Claude" in every label that tested `=== "codex"`.
  *
- * The `satisfies Record<BuiltinHarnessKind, …>` below is what makes adding a
- * BUILT-IN provider one registration: put its id in `BUILTIN_HARNESS_KINDS`,
- * and the compiler refuses to build until it has a row here (and a `Harness` in
- * the server registry). Any other provider arrives at runtime through
- * {@link registerProvider} — the server registers it beside its `Harness`, and
- * the client learns it from `/api/harnesses`.
+ * It starts EMPTY. Every provider arrives at runtime through
+ * {@link registerProvider}: the server registers a plugin's descriptor beside
+ * its `Harness`, and the client learns it from `/api/harnesses`. Claude's
+ * descriptor lived here, compiled in, until it became a plugin (#428) — which
+ * kept "Claude Code" in every picker of an install that had no Claude.
  *
  * Only facts that are true of the runtime WITHOUT asking it belong here. What a
  * live runtime reports (installed version, the live model catalogue, the
@@ -22,9 +21,7 @@
  * remains the authority the UI reads once `/api/harnesses` has answered.
  */
 import {
-  BUILTIN_HARNESS_KINDS,
   HarnessKindSchema,
-  type BuiltinHarnessKind,
   type Effort,
   type HarnessKind,
   type ModelOption,
@@ -109,64 +106,19 @@ export interface ProviderDescriptor {
 }
 
 /**
- * The app's default session model when a Claude chat hasn't pinned one.
- * "default" is a real runtime alias meaning "whatever Claude Code recommends
- * today", so an unpinned chat tracks the recommendation instead of freezing on
- * the model that happened to be best when this line was written.
- */
-export const DEFAULT_MODEL = "default";
-
-/**
- * Static Claude model list used only when the live list can't be read from the
- * runtime (see server `harness/claude/models.ts`), and as the client's pre-fetch seed
- * so the picker never renders empty. Deliberately ALIASES, not dated wire ids:
- * aliases keep resolving to the current model as new ones ship, so a stale
- * fallback degrades to "slightly wrong labels" instead of "unselectable dead ids".
- */
-export const FALLBACK_MODELS: ModelOption[] = [
-  { value: "default", label: "Default", hint: "recommended" },
-  { value: "opus", label: "Opus", hint: "deepest" },
-  { value: "sonnet", label: "Sonnet", hint: "balanced" },
-  { value: "haiku", label: "Haiku", hint: "fast" },
-];
-
-export const BUILTIN_PROVIDERS = {
-  claude: {
-    id: "claude",
-    label: "Claude Code",
-    shortLabel: "Claude",
-    blurb: "Anthropic's agent CLI. Subagents, skills and the full MCP tool surface.",
-    defaultModel: DEFAULT_MODEL,
-    fallbackModels: FALLBACK_MODELS,
-    efforts: ["low", "medium", "high", "xhigh", "max"],
-    subagents: true,
-    skillsDir: ".claude",
-    account: {
-      configDirEnv: "CLAUDE_CONFIG_DIR",
-      defaultConfigDir: ".claude",
-      loginFile: ".credentials.json",
-      loginCommand: "claude auth login",
-    },
-  },
-} as const satisfies Record<BuiltinHarnessKind, ProviderDescriptor>;
-
-/**
- * Every provider this process knows about, in picker order: the built-ins,
- * then whatever was registered at runtime. Module state on purpose — the server
+ * Every provider this process knows about, in registration order. Module state on purpose — the server
  * and the client each hold exactly one catalogue, and threading a registry
  * object through every label call would touch a hundred call sites to buy
  * nothing.
  */
-const registry = new Map<HarnessKind, ProviderDescriptor>(
-  BUILTIN_HARNESS_KINDS.map((id) => [id, BUILTIN_PROVIDERS[id]]),
-);
+const registry = new Map<HarnessKind, ProviderDescriptor>();
 
 /**
  * Add (or refresh) a provider's descriptor.
  *
  * Idempotent on purpose: the client re-registers everything every time
  * `/api/harnesses` answers, and the server's copy of a descriptor is the
- * authority over the static one compiled into the bundle.
+ * authority over anything a client cached.
  */
 export function registerProvider(descriptor: ProviderDescriptor): void {
   const parsed = HarnessKindSchema.safeParse(descriptor.id);
@@ -179,18 +131,15 @@ export function registerProvider(descriptor: ProviderDescriptor): void {
  * Drop a provider's descriptor — its plugin was switched off, or (on the
  * client) the server stopped listing it.
  *
- * A built-in may be dropped too. It used to be refused because a built-in was
- * the fallback every chat on a dropped provider resolved to; there is no
- * fallback any more (#426), and a client bundle that still had Claude compiled
- * in kept labelling it installed after the server stopped offering it. The
- * server's own refusal to unregister a COMPILED-IN harness lives on
- * `HarnessRegistry`, where it is about the runtime, not the label.
+ * Any provider may be dropped, Claude included. It used to be refused for
+ * Claude, the fallback every chat on a dropped provider resolved to; there is
+ * no fallback any more (#426) and nothing compiled in (#428).
  */
 export function unregisterProvider(id: HarnessKind): void {
   registry.delete(id);
 }
 
-/** True when something has registered this id (built-ins always have). */
+/** True when something has registered this id. */
 export function isKnownProvider(id: string | undefined | null): id is HarnessKind {
   return Boolean(id) && registry.has(id!);
 }

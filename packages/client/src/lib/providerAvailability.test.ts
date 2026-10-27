@@ -6,21 +6,34 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  BUILTIN_PROVIDERS,
   isKnownProvider,
   providerAvailability,
   registerProvider,
+  type ProviderDescriptor,
 } from "@dispatch/shared";
 import { refreshHarnesses } from "./providerAvailability.js";
 import { useHarnesses } from "../stores/harnesses.js";
 import { useModels } from "../stores/models.js";
 import type { HarnessInfo } from "./api.js";
 
+/** Claude as its plugin describes it; the bundle has no compiled-in copy (#428). */
+const claudeDescriptor: ProviderDescriptor = {
+  id: "claude",
+  label: "Claude Code",
+  shortLabel: "Claude",
+  blurb: "Anthropic's agent CLI.",
+  fallbackModels: [],
+  efforts: [],
+  subagents: true,
+  skillsDir: ".claude",
+  account: { configDirEnv: "CLAUDE_CONFIG_DIR", defaultConfigDir: ".claude", loginFile: ".credentials.json" },
+};
+
 const codex: HarnessInfo = {
   kind: "codex",
   runtime: { source: "installed", available: true },
   capabilities: {} as HarnessInfo["capabilities"],
-  descriptor: { ...BUILTIN_PROVIDERS.claude, id: "codex", label: "Codex", shortLabel: "Codex" },
+  descriptor: { ...claudeDescriptor, id: "codex", label: "Codex", shortLabel: "Codex" },
 };
 
 function serve(list: HarnessInfo[]) {
@@ -35,8 +48,6 @@ beforeEach(() => {
 });
 afterEach(() => {
   vi.unstubAllGlobals();
-  // Module-level catalogue: put back what other suites expect to find.
-  registerProvider(BUILTIN_PROVIDERS.claude);
 });
 
 describe("refreshHarnesses", () => {
@@ -47,11 +58,12 @@ describe("refreshHarnesses", () => {
     expect(useHarnesses.getState()).toMatchObject({ harnesses: [], loaded: true });
   });
 
-  it("forgets a descriptor the server stopped listing — the compiled-in Claude included", async () => {
+  it("forgets a descriptor the server stopped listing — Claude included", async () => {
+    // Learnt from an earlier answer, then the Claude plugin was switched off.
+    registerProvider(claudeDescriptor);
     serve([codex]);
     await refreshHarnesses();
     expect(isKnownProvider("codex")).toBe(true);
-    // Claude is compiled into this bundle, but this server does not offer it.
     expect(isKnownProvider("claude")).toBe(false);
     expect(providerAvailability("claude", useHarnesses.getState().harnesses)).toMatchObject({
       reason: "unregistered",

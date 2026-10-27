@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ClaudeHarness } from "../harness/claude/index.js";
+import { ClaudeHarness } from "./index.js";
 import { makeFakeQuery } from "./fake-sdk.js";
 
 describe("the E2E fake SDK", () => {

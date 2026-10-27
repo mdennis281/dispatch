@@ -1,0 +1,14 @@
+# Built-in: ships inside the app payload and loads from there (never from
+# <configDir>/plugins/), activating before the server opens its port so no chat
+# can start before Claude is registered. Switching it off is how Dispatch runs
+# with no Claude at all: nothing else in the host imports the Agent SDK, so a
+# disabled plugin means no `claude` process and no Anthropic traffic (#422).
+# See docs/plugins.md → "Providers".
+id: claude
+name: Claude Code
+version: 1.0.0
+dispatch: ">=1"
+description: Runs chats on Anthropic's Claude Code through the Claude Agent SDK.
+server: ./server/main.js
+capabilities:
+  - providers

@@ -53,7 +53,6 @@ import { MemoryHistoryService } from "./memory-history.js";
 import { ProjectConfigService } from "./project-config.js";
 import { ProjectConfigArchive } from "./project-config-archive.js";
 import { InspectService, installedRoots } from "./inspect.js";
-import { makeFakeQuery } from "./fake-sdk.js";
 import { TitleService, makeFakeTitleGenerator } from "./title.js";
 import { CheckpointService } from "./checkpoint.js";
 import { WorktreeService } from "./worktree.js";
@@ -97,7 +96,7 @@ import { TokenBackfill } from "./metrics-tokens-backfill.js";
 import { LimitLedger } from "./limit-ledger.js";
 import { LimitSampler } from "./limit-sampler.js";
 import { FsExplorerService } from "./fs-explorer.js";
-import { ClaudeHarness, HarnessRegistry } from "../harness/index.js";
+import { HarnessRegistry } from "../harness/index.js";
 import { ManagerMcpBridge } from "./mcp/manager-http.js";
 import { PluginService } from "../plugins/service.js";
 import { findShippedPluginsRoot } from "../plugins/shipped.js";
@@ -313,17 +312,10 @@ export function createServices(
   overrides: ServiceOverrides = {},
 ): Services {
   const { config, store, bus } = base;
-  // `DISPATCH_FAKE_SDK=1` (E2E only) puts a deterministic in-process echo
-  // behind the Claude adapter — no `claude` subprocess, no auth, no network.
-  // At the adapter, not the broker: Claude chats run through `ClaudeHarness`
-  // like every other provider (#427), so that is where the SDK `query` lives.
-  const harnesses =
-    overrides.harnesses ??
-    new HarnessRegistry(
-      process.env.DISPATCH_FAKE_SDK === "1"
-        ? { harnesses: { claude: new ClaudeHarness({ query: makeFakeQuery() }) } }
-        : {},
-    );
+  // Empty until the provider plugins register in `start()`. The
+  // `DISPATCH_FAKE_SDK=1` echo the E2E runs on lives in the Claude plugin
+  // itself (`createClaudeHarness`), the one place a `ClaudeHarness` is built.
+  const harnesses = overrides.harnesses ?? new HarnessRegistry();
   const managerMcp =
     overrides.managerMcp ?? new ManagerMcpBridge(`http://127.0.0.1:${config.port}`);
   /** Retention sweep handle, armed in `start()` and cleared in `dispose()`. */
@@ -1620,9 +1612,9 @@ export function createServices(
       await plugins.load().catch((err: unknown) => {
         console.error("[Dispatch] plugin discovery failed (continuing):", err);
       });
-      // The built-in providers (Codex, goose) register HERE, before listen —
+      // The built-in providers (Claude, Codex, goose) register HERE, before listen —
       // see the header of plugins/service.ts. A failure is the plugin's row,
-      // not the boot's: chats on it fall back to Claude, the pane says why.
+      // not the boot's: chats on it show "provider unavailable", the pane says why.
       await plugins.activateShipped().catch((err: unknown) => {
         console.error("[Dispatch] built-in plugin activation failed (continuing):", err);
       });

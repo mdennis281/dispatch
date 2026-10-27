@@ -1,7 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { BUILTIN_HARNESS_KINDS, HarnessKindSchema } from "./common.js";
+import { HarnessKindSchema } from "./common.js";
 import {
-  BUILTIN_PROVIDERS,
   defaultModelFor,
   fallbackModels,
   isKnownProvider,
@@ -28,6 +27,16 @@ const opencode: ProviderDescriptor = {
   account: { configDirEnv: "OPENCODE_HOME", defaultConfigDir: ".opencode", loginFile: "auth.json" },
 };
 
+/** Claude's shape, as its plugin registers it — shared no longer has a copy (#428). */
+const claude: ProviderDescriptor = {
+  ...opencode,
+  id: "claude",
+  label: "Claude Code",
+  shortLabel: "Claude",
+  defaultModel: "default",
+  fallbackModels: [{ value: "default", label: "Default" }],
+};
+
 describe("providerAvailability", () => {
   const live = [{ kind: "claude", runtime: { available: true } }];
 
@@ -52,9 +61,12 @@ describe("providerAvailability", () => {
 });
 
 describe("provider registry", () => {
-  it("starts with exactly the built-ins, each keyed by its own id", () => {
-    expect(providerIds().slice(0, BUILTIN_HARNESS_KINDS.length)).toEqual([...BUILTIN_HARNESS_KINDS]);
-    for (const id of BUILTIN_HARNESS_KINDS) expect(BUILTIN_PROVIDERS[id].id).toBe(id);
+  // #428: Claude's descriptor was compiled in here, so every picker of an
+  // install without Claude still offered "Claude Code".
+  it("starts empty — every provider, Claude included, is registered by its plugin", () => {
+    expect(providerIds()).toEqual([]);
+    expect(isKnownProvider("claude")).toBe(false);
+    expect(providerFor("claude")).toMatchObject({ id: "claude", label: "claude", unregistered: true });
   });
 
   it("answers NO provider with a placeholder, never Claude and never undefined (#426)", () => {
@@ -65,14 +77,12 @@ describe("provider registry", () => {
     }
   });
 
-  it("lets a built-in descriptor be dropped — a client must forget what the server stopped listing", () => {
+  it("drops a descriptor — a client must forget what the server stopped listing", () => {
+    registerProvider(claude);
+    expect(providerFor("claude").label).toBe("Claude Code");
     unregisterProvider("claude");
-    try {
-      expect(isKnownProvider("claude")).toBe(false);
-      expect(providerFor("claude")).toMatchObject({ id: "claude", unregistered: true });
-    } finally {
-      registerProvider(BUILTIN_PROVIDERS.claude);
-    }
+    expect(isKnownProvider("claude")).toBe(false);
+    expect(providerFor("claude")).toMatchObject({ id: "claude", unregistered: true });
   });
 
   it("names an unregistered id after itself instead of passing it off as Claude", () => {
@@ -82,7 +92,7 @@ describe("provider registry", () => {
     expect(isKnownProvider("gemini")).toBe(false);
   });
 
-  it("registers a runtime provider into every list after the built-ins", () => {
+  it("registers a runtime provider into every list, after those already there", () => {
     registerProvider(opencode);
     expect(isKnownProvider("opencode")).toBe(true);
     expect(providerFor("opencode").label).toBe("OpenCode");
@@ -110,6 +120,7 @@ describe("provider registry", () => {
   });
 
   it("keeps each provider's default model and seed catalogue its own", () => {
+    registerProvider(claude);
     expect(defaultModelFor("claude")).toBe("default");
     // Codex has no alias; an unpinned chat sends no model at all.
     expect(defaultModelFor("codex")).toBeUndefined();

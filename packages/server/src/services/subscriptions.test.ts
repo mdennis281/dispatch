@@ -3,12 +3,14 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerProvider } from "@dispatch/shared";
+import { CLAUDE_PROVIDER } from "@dispatch/plugin-claude/descriptor";
 import { CODEX_PROVIDER } from "@dispatch/plugin-codex/descriptor";
 import { GOOSE_PROVIDER } from "@dispatch/plugin-goose/descriptor";
 
-// Codex and goose are plugins now; outside a running host nothing registers
-// them. These cases are about a directory login beside an endpoint account, so
+// Every provider is a plugin now, Claude included; outside a running host
+// nothing registers them. These cases are about a directory login beside an endpoint account, so
 // they register the real descriptors — the account fields are the point.
+registerProvider(CLAUDE_PROVIDER);
 registerProvider(CODEX_PROVIDER);
 registerProvider(GOOSE_PROVIDER);
 import {
