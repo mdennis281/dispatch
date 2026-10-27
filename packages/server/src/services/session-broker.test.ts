@@ -5259,6 +5259,31 @@ describe("SessionBroker — the usage ledger", () => {
     });
   });
 
+  it("counts an AskUserQuestion once, though its tool_use row is suppressed", async () => {
+    // The decoder drops the question's tool_use (the card is the one surface),
+    // so the ledger row has to come from the question itself — and only once,
+    // not again for the tool_use the SDK also sends.
+    const input = {
+      questions: [{ question: "Which?", header: "Pick", options: [{ label: "A" }], multiSelect: false }],
+    };
+    const { fn } = makeFakeQuery(async (_text, ctl) => {
+      await ctl.canUseTool!("AskUserQuestion", input, {});
+      return [initMsg("sess-1"), toolUseMsg("AskUserQuestion", input, "aq-1"), resultMsg()];
+    });
+    const { metrics, broker } = meteredBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+    const reqP = nextPermissionId();
+    const idle = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "ask");
+    broker.answerQuestion(await reqP, { optionId: "A", answer: "A" });
+    await idle;
+
+    const asked = metrics.recent().filter((r) => r.identifier === "AskUserQuestion");
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toMatchObject({ chatId: "c1", harness: "claude" });
+  });
+
   it("attributes a subagent's own tool call to that subagent", async () => {
     const { fn } = makeFakeQuery(() => [
       initMsg("sess-1"),

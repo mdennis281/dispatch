@@ -6236,6 +6236,12 @@ export class SessionBroker {
             options: q.options.map((o) => ({ id: o.label, ...o })),
           })),
         };
+        // Counted here because no `tool-use` ever arrives for it: the Claude
+        // decoder drops the AskUserQuestion block so the transcript shows one
+        // question surface, not a card plus an orphan "running" row. The direct
+        // loop counted it before that same skip; without this, every question a
+        // Claude chat asked vanished from the ledger when it moved to the seam.
+        this.recordUse(session, { ...classifyTool("AskUserQuestion", input) });
         this.registerHarnessPermission(
           session,
           event.requestId,
