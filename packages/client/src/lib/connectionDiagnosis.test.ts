@@ -300,6 +300,25 @@ describe("pipeline", () => {
     expect(pipeline(d.checks)).toMatchObject({ active: 3, reach: 3 });
   });
 
+  it("keeps a stale bundle red while the socket is still reconnecting", () => {
+    // The headline says reload. A rail showing only a pulsing blue "connecting…"
+    // beside it would contradict the one instruction on the screen.
+    const d = diagnose(input({ state: "reconnecting", serverVersion: "2026.08.21.00002" }));
+    expect(d.headline).toBe("This tab is running an old build");
+    const p = pipeline(d.checks);
+    expect(p.stages.map((s) => s.tone)).toEqual(["ok", "ok", "active", "fail"]);
+    expect(p.active).toBe(3);
+    // The line into Protocol stays dark — that link was never walked.
+    expect(p.reach).toBe(2);
+  });
+
+  it("still names a stale bundle behind a dead server", () => {
+    const d = diagnose(input({ probe: { kind: "unreachable", at: 0 }, serverVersion: "2026.08.21.00002" }));
+    const p = pipeline(d.checks);
+    expect(p.stages.map((s) => s.tone)).toEqual(["ok", "fail", "idle", "fail"]);
+    expect(p.active).toBe(3);
+  });
+
   it("reports the failing link once a protocol break is the cause", () => {
     const d = diagnose(input({ state: "open", handshaken: true, serverVersion: "2026.08.21.00002" }));
     expect(tones(d)).toEqual(["ok", "ok", "ok", "fail"]);

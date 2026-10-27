@@ -428,18 +428,29 @@ const STAGE_TONE: Record<CheckState, StageTone> = {
  * that isn't green.
  *
  * `diagnose` already skips most downstream checks, but not all: an open socket
- * still awaiting `hello` leaves protocol reading "agreed", and a stale bundle
- * behind a dead server reads protocol "fail". In a list those were tolerable;
- * on a rail, a green or red dot sitting past a blue one claims a result for a
- * step that was never reached. So the gate lives here, once, rather than in
+ * still awaiting `hello` leaves protocol reading "agreed". In a list that was
+ * tolerable; on a rail, a green dot sitting past a blue one claims a result for
+ * a step that was never reached. So the gate lives here, once, rather than in
  * each check.
+ *
+ * The one exception is a protocol FAILURE. It isn't learned by walking the
+ * chain — the server's version came from a `hello` on an earlier socket, and
+ * rejected frames were counted while one was live — so it is true whatever the
+ * links in front of it are doing right now. It is also the verdict `diagnose`
+ * ranks above all others. Gating it hid it exactly when it mattered: a stale
+ * bundle mid-reconnect drew a pulsing blue "connecting…" and no red anywhere,
+ * under a headline telling the user to reload. So it stays red, and the caption
+ * points at it.
  */
 export function pipeline(checks: Check[]): Pipeline {
   let blocked = false;
   let active = -1;
+  let verdict = -1;
   const stages = checks.map((check, i): Stage => {
     const bypassed = !blocked && check.state === "skip";
-    const tone: StageTone = blocked ? "idle" : STAGE_TONE[check.state];
+    const outOfBand = check.id === "protocol" && check.state === "fail";
+    const tone: StageTone = blocked && !outOfBand ? "idle" : STAGE_TONE[check.state];
+    if (outOfBand) verdict = i;
     if (!blocked && (tone === "active" || tone === "fail")) {
       blocked = true;
       active = i;
@@ -448,5 +459,6 @@ export function pipeline(checks: Check[]): Pipeline {
   });
   let reach = 0;
   while (reach < stages.length - 1 && (stages[reach]!.tone === "ok" || stages[reach]!.bypassed)) reach++;
+  if (verdict !== -1) active = verdict;
   return { stages, active: active === -1 ? stages.length - 1 : active, reach };
 }
