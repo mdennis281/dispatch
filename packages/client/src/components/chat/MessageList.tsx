@@ -6,6 +6,8 @@ import { useSubagentRuns } from "../../lib/useSubagentRuns.js";
 import { UserRow } from "./rows/UserRow.js";
 import { AssistantRow } from "./rows/AssistantRow.js";
 import { ToolCallCard } from "./rows/ToolCallCard.js";
+import { ToolSearchCard } from "./rows/ToolSearchCard.js";
+import { isToolSearch, parseToolSearchCall } from "../../lib/toolSearch.js";
 import { ShellRunGroup } from "./rows/ShellRunGroup.js";
 import { FileRunGroup } from "./rows/FileRunGroup.js";
 import { PrRunGroup } from "./rows/PrRunGroup.js";
@@ -189,6 +191,11 @@ export const MessageList = memo(function MessageList({ chatId, messages }: Messa
           const run = runsById.get(row.toolUseId);
           if (run) return <SubagentCard key={row.id} run={run} />;
           const result = resultsByUse.get(row.toolUseId);
+          // Its own card rather than a presentation: a loaded tool is neither a
+          // command nor a file, so it must not join a terminal or file run.
+          if (isToolSearch(row) && parseToolSearchCall(row)) {
+            return <ToolSearchCard key={row.id} use={row} result={result} />;
+          }
           const presentation = toolPresentation(row);
           if (presentation?.kind === "dispatch") {
             return (
