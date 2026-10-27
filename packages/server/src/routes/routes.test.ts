@@ -222,7 +222,7 @@ async function boot(query: QueryFn, overrides: Partial<ServerConfig> = {}): Prom
   // CLEARED `AppSettings.maxActiveSessions` falls back to, so a fixture that
   // withheld it would test a fallback production never takes.
   const broker = new SessionBroker({
-    harnesses: claudeOnlyRegistry(),
+    harnesses: claudeOnlyRegistry(query),
     store,
     bus,
     maxActiveSessions: config.maxActiveSessions,
@@ -231,7 +231,6 @@ async function boot(query: QueryFn, overrides: Partial<ServerConfig> = {}): Prom
     // background interval retiring a session mid-assertion is a flake with no
     // relationship to what is being tested. `broker.sweep` covers it directly.
     idleSweepMs: 0,
-    deps: { query },
   });
   const github = new GitHubService({ bus, store, exec: fakeGhExec });
   // Its own fake exec too: the default would make real `gh api` calls.

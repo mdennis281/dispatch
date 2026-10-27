@@ -184,10 +184,10 @@ describe("manager-mcp integration — wait_for_chat over a real SessionBroker", 
     let idc = 0;
     let clock = 1000;
     broker = new SessionBroker({
-      harnesses: claudeOnlyRegistry(),
+      harnesses: claudeOnlyRegistry(gatedFakeQuery(gate)),
       store,
       bus,
-      deps: { query: gatedFakeQuery(gate), genId: () => `id-${++idc}`, now: () => ++clock },
+      deps: { genId: () => `id-${++idc}`, now: () => ++clock },
     });
     await store.saveChat(chatFor("target"));
     broker.create(chatFor("target"));
@@ -214,10 +214,10 @@ describe("manager-mcp integration — wait_for_chat over a real SessionBroker", 
     let idc = 0;
     let clock = 1000;
     broker = new SessionBroker({
-      harnesses: claudeOnlyRegistry(),
+      harnesses: claudeOnlyRegistry(gatedFakeQuery(Promise.resolve())),
       store,
       bus,
-      deps: { query: gatedFakeQuery(Promise.resolve()), genId: () => `id-${++idc}`, now: () => ++clock },
+      deps: { genId: () => `id-${++idc}`, now: () => ++clock },
     });
     const { waitForChat } = createManagerTools({ chatId: "waiter", bus, broker });
     const res = await waitForChat.handler({ chatId: "ghost", timeoutSeconds: 1 }, {});
@@ -606,11 +606,11 @@ describe("manager-mcp integration — memory tools over a real MemoryService", (
     let idc = 0;
     let clock = 1000;
     broker = new SessionBroker({
-      harnesses: claudeOnlyRegistry(),
+      harnesses: claudeOnlyRegistry(fn),
       store,
       bus,
       memory,
-      deps: { query: fn, genId: () => `id-${++idc}`, now: () => ++clock },
+      deps: { genId: () => `id-${++idc}`, now: () => ++clock },
     });
 
     // Bind the memory runner to project "p1", exactly as buildOptions does.

@@ -46,13 +46,8 @@ beforeEach(async () => {
   await store.init();
   await seedDefaultProvider(store);
   const bus = new EventBus();
-  // The broker never runs a turn in these tests; a query that is never called
-  // keeps the app buildable without a scripted SDK.
-  const broker = new SessionBroker({
-    store,
-    bus,
-    deps: { query: (() => { throw new Error("not used"); }) as never },
-  });
+  // The broker never runs a turn in these tests, so it needs no provider.
+  const broker = new SessionBroker({ store, bus });
   app = await buildApp({
     config: { ...loadConfig(), dataDir: dir },
     store,

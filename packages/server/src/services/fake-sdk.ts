@@ -15,7 +15,7 @@
  * one shape the instant echo cannot produce, and the one the global-pause E2E
  * and screenshots need: a chat that is visibly running when Pause is pressed.
  */
-import type { QueryFn } from "./session-broker.js";
+import type { QueryFn } from "../harness/claude/session.js";
 
 let sessionSeq = 0;
 /** Ids for `[hold]` rows. A counter, not `Math.random()` — they only need to be unique. */

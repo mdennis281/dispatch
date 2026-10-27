@@ -1,24 +1,37 @@
 /**
  * Test-only: a registry holding just a Claude that reports itself installed.
  *
- * The broker suites drive Claude through an injected SDK `query`, and for years
- * built their broker with no registry at all — Claude was the fallback, so its
- * availability was never asked. It is asked now, for every provider (#426), so
- * those suites need a registry that answers "Claude is here". A stub rather
- * than the real `ClaudeHarness` so nothing in a test probes the SDK binary,
- * lists models or copies a session file the old registry-less broker never
- * touched.
+ * Given a scripted SDK `query`, that Claude is the REAL adapter over it: Claude
+ * chats run through `ClaudeHarness` like every other provider (#427), so the
+ * fake goes where the real SDK goes and every suite exercises the path
+ * production takes. Without one it is a stub whose sessions throw, for suites
+ * that never run a turn.
+ *
+ * Either way `runtime()` is pinned to "installed" and usage is never read, so
+ * nothing in a test probes for a `claude` binary or calls Anthropic.
  *
  * A plain module, not an export from a test file — see `store/db.testkit.ts`
  * for why importing one test file from another double-runs it.
  */
-import { CLAUDE_CAPABILITIES } from "./claude/index.js";
+import { CLAUDE_CAPABILITIES, ClaudeHarness } from "./claude/index.js";
+import type { QueryFn } from "./claude/session.js";
 import { HarnessRegistry } from "./index.js";
 import type { Harness } from "./types.js";
 import type { Store } from "../store/index.js";
 
-export function claudeOnlyRegistry(): HarnessRegistry {
-  const claude = {
+export function claudeOnlyRegistry(query?: QueryFn): HarnessRegistry {
+  return new HarnessRegistry({ harnesses: { claude: claudeTestHarness(query) } });
+}
+
+/** The Claude {@link claudeOnlyRegistry} holds. */
+export function claudeTestHarness(query?: QueryFn): Harness {
+  if (query) {
+    const harness = new ClaudeHarness({ query });
+    harness.runtime = () => ({ kind: "claude", source: "bundled", available: true });
+    harness.readLimits = async () => null;
+    return harness;
+  }
+  return {
     kind: "claude",
     capabilities: CLAUDE_CAPABILITIES,
     runtime: () => ({ kind: "claude", source: "bundled", available: true }),
@@ -26,10 +39,9 @@ export function claudeOnlyRegistry(): HarnessRegistry {
     readLimits: async () => null,
     generateText: async () => "",
     createSession: () => {
-      throw new Error("the Claude path runs through the injected SDK query in tests");
+      throw new Error("this suite runs no turns; pass claudeOnlyRegistry a scripted query");
     },
   } as unknown as Harness;
-  return new HarnessRegistry({ harnesses: { claude } });
 }
 
 /**
