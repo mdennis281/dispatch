@@ -218,13 +218,17 @@ export const PROVIDER_UNAVAILABLE = "provider-unavailable" as const;
  *  - `not-installed` — registered, but its runtime reports itself unavailable
  *                      (`HarnessRuntimeInfo.available === false`): the CLI it
  *                      drives is missing.
+ *  - `logged-out`    — installed, and its own login probe (`Harness.probeLogin`)
+ *                      last said the account is NOT logged in. Without this a
+ *                      chat on a provider with no login found out by failing
+ *                      mid-turn on the runtime's auth error (#428).
  *
- * Logged-out is not here yet. Login is probed asynchronously and per account
- * (`Harness.probeLogin`), and moving that probe behind the harness is #425's;
- * a logged-out provider still fails its first turn with the runtime's own
- * auth error rather than being switched to anything.
+ * `logged-out` is judged off a CACHED probe (see the server's
+ * `ProviderLogins`), never one per send, and only a probe that actually ran
+ * and said "no" counts: a probe that could not run, or a provider with nothing
+ * to log into, never refuses a turn.
  */
-export type ProviderUnavailableReason = "unset" | "unregistered" | "not-installed";
+export type ProviderUnavailableReason = "unset" | "unregistered" | "not-installed" | "logged-out";
 
 /**
  * A chat's provider is not able to run it. Derived, never stored: it is a fact
@@ -245,6 +249,11 @@ export interface ProviderUnavailable {
 export interface RegisteredRuntime {
   kind: HarnessKind;
   runtime: { available: boolean };
+  /**
+   * The last login probe for the account in question, when one has run.
+   * Absent means "not known yet", which is never a refusal.
+   */
+  login?: { checked: boolean; loggedIn: boolean; notRequired?: boolean };
 }
 
 /**
@@ -284,7 +293,28 @@ export function providerAvailability(
       message: `${label} is not installed on this machine.`,
     };
   }
+  if (isLoggedOut(found.login)) {
+    const command = providerFor(provider).account.loginCommand;
+    return {
+      code: PROVIDER_UNAVAILABLE,
+      provider,
+      reason: "logged-out",
+      message: command
+        ? // Plain text, no markdown: the composer banner renders it verbatim.
+          `${label} is not logged in — run "${command}", then send again.`
+        : `${label} is not logged in.`,
+    };
+  }
   return null;
+}
+
+/**
+ * Did a login probe actually run and say "no"? The ONLY shape that refuses a
+ * turn. `checked: false` is a probe that could not run (a missing binary, a
+ * timeout) — refusing on that would turn a flaky probe into a dead chat.
+ */
+export function isLoggedOut(login: RegisteredRuntime["login"]): boolean {
+  return !!login && login.checked && !login.loggedIn && !login.notRequired;
 }
 
 /** Every provider descriptor, in picker order. */

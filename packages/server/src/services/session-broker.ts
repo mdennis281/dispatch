@@ -249,6 +249,7 @@ import {
   type HarnessResolution,
 } from "../harness/index.js";
 import { accountOf, chatSubscription } from "./subscriptions.js";
+import type { ProviderLogins } from "./provider-logins.js";
 import type { ManagerMcpBridge, ManagerMcpGrant } from "./mcp/manager-http.js";
 import type { ManagerMcpContext } from "./mcp/manager-mcp.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -1327,6 +1328,12 @@ export interface SessionBrokerOptions {
   projectConfig?: BrokerProjectConfig;
   /** The providers chats run on — every chat, Claude's included. */
   harnesses?: HarnessRegistry;
+  /**
+   * Cached login state per provider account. When given, a chat whose account
+   * last probed as logged out is refused as `logged-out` before its turn
+   * starts, instead of failing mid-turn on the runtime's auth error (#428).
+   */
+  logins?: ProviderLogins;
   /** HTTP front door for Dispatch's manager MCP tools (required by Codex). */
   managerMcp?: ManagerMcpBridge;
   /** Read-only cross-chat inspection behind `chat_find`/`chat_read`/`project_info`. */
@@ -2433,6 +2440,7 @@ export class SessionBroker {
    *  a prewarm and a session can never disagree about which port a checkout got. */
   readonly mcpPrewarm?: McpPrewarmService;
   private readonly harnesses?: HarnessRegistry;
+  private readonly logins?: ProviderLogins;
   private readonly managerMcp?: ManagerMcpBridge;
   private readonly inspect?: BrokerInspect;
   private readonly metrics?: MetricsService;
@@ -2586,6 +2594,7 @@ export class SessionBroker {
     this.worktrees = opts.worktrees;
     this.projectConfig = opts.projectConfig;
     this.harnesses = opts.harnesses;
+    this.logins = opts.logins;
     this.managerMcp = opts.managerMcp;
     this.inspect = opts.inspect;
     this.metrics = opts.metrics;
@@ -4981,7 +4990,16 @@ export class SessionBroker {
     if (session.harnessKind && !this.harnesses.find(session.harnessKind)) {
       await this.plugins?.activationSettled?.();
     }
-    return this.harnesses.resolve(session.harnessKind);
+    if (!this.logins || !session.harnessKind) return this.harnesses.resolve(session.harnessKind);
+    // The account THIS chat runs under, worked out the way the session build
+    // does — a second login must be judged by its own probe, not the default's.
+    const settings = await this.store.getSettings().catch(() => undefined);
+    const account = accountOf(
+      chatSubscription(settings, { harness: session.harnessKind, subscriptionId: session.subscriptionId }),
+    );
+    return this.harnesses.resolve(session.harnessKind, {
+      login: await this.logins.current(session.harnessKind, account),
+    });
   }
 
   /** Throw {@link ProviderUnavailableError} unless the session's provider can run it. */

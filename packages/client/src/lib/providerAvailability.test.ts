@@ -11,7 +11,7 @@ import {
   registerProvider,
   type ProviderDescriptor,
 } from "@dispatch/shared";
-import { refreshHarnesses } from "./providerAvailability.js";
+import { chatAvailability, refreshHarnesses } from "./providerAvailability.js";
 import { useHarnesses } from "../stores/harnesses.js";
 import { useModels } from "../stores/models.js";
 import type { HarnessInfo } from "./api.js";
@@ -80,5 +80,31 @@ describe("useModels", () => {
     useModels.getState().setModels([{ value: "gpt-5", label: "GPT-5" }], "codex");
     useModels.getState().setModels([], undefined);
     expect(useModels.getState()).toMatchObject({ models: [], activeHarness: undefined });
+  });
+});
+
+describe("chatAvailability", () => {
+  const loggedOut = { checked: true, loggedIn: false };
+  const loggedIn = { checked: true, loggedIn: true };
+  registerProvider(codex.descriptor!);
+
+  it("judges a chat by its OWN account's login, not the default account's (#440 review)", () => {
+    // The default account is logged out; this chat is pinned to a working one.
+    const list = [{ ...codex, login: loggedOut }];
+    expect(chatAvailability("codex", list)).toMatchObject({ reason: "logged-out" });
+    expect(chatAvailability("codex", list, { login: loggedIn })).toBeNull();
+    // ...and the reverse: a fine default must not hide a logged-out pin.
+    expect(chatAvailability("codex", [{ ...codex, login: loggedIn }], { login: loggedOut })).toMatchObject({
+      reason: "logged-out",
+    });
+  });
+
+  it("never calls an account with no probe yet logged out", () => {
+    expect(chatAvailability("codex", [{ ...codex, login: loggedOut }], null)).toBeNull();
+    expect(chatAvailability("codex", [{ ...codex, login: loggedOut }], {})).toBeNull();
+  });
+
+  it("still reports what has nothing to do with logins", () => {
+    expect(chatAvailability("codex", [], { login: loggedIn })).toMatchObject({ reason: "unregistered" });
   });
 });

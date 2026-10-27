@@ -95,7 +95,11 @@ import { blockingQuestion, composerDeferred, isDoubleTap } from "../../lib/compo
 import { useChats } from "../../stores/chats.js";
 import { useModels } from "../../stores/models.js";
 import { useHarnesses } from "../../stores/harnesses.js";
-import { useAvailableProviders, useProviderAvailability } from "../../lib/providerAvailability.js";
+import {
+  useAvailableProviders,
+  useProviderAvailability,
+  useRecheckWhileLoggedOut,
+} from "../../lib/providerAvailability.js";
 import { useSubscriptions } from "../../stores/subscriptions.js";
 import { useLayoutMode } from "../../stores/layout.js";
 import { Drawer } from "../layout/Drawer.js";
@@ -329,7 +333,14 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   // Why this chat cannot run right now, if it can't: its provider plugin is off,
   // its CLI is missing, or it names none. Derived from the live provider list,
   // so the banner below clears by itself the moment the provider comes back.
-  const unavailable = useProviderAvailability(harness);
+  //
+  // Judged by the chat's OWN account's login (see `chatAccountOf` below), as
+  // the broker judges it — not the default account's, which would block a chat
+  // pinned to a second, working login. Until the account list loads there is
+  // no login to judge by, and the server still refuses a send if it must.
+  const chatAccount = useSubscriptions((s) => (harness ? chatAccountOf(s.list, chat, harness) : undefined));
+  const unavailable = useProviderAvailability(harness, chatAccount ?? null);
+  useRecheckWhileLoggedOut(unavailable);
   const switchable = useAvailableProviders();
   // What this chat RUNS as. `chat.effort` / `chat.modeId` / `chat.model` are
   // pins and may be absent; the resolved values below are what every control

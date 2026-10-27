@@ -67,12 +67,21 @@ export function registerModelRoutes(app: FastifyInstance): void {
       // The client's labels, pickers and account pane read the descriptor, and
       // only the server knows the ones a plugin registered.
       descriptor: providerFor(harness.kind),
+      // The DEFAULT account's cached login, so the composer can show
+      // "not logged in" before a send is refused. Absent until probed.
+      ...(app.services.logins?.peek(harness.kind) ? { login: app.services.logins.peek(harness.kind) } : {}),
     })),
   );
 
-  app.get("/api/subscriptions", async () =>
-    subscriptionStatuses(await store.getSettings().catch(() => null)),
-  );
+  app.get("/api/subscriptions", async () => {
+    const settings = await store.getSettings().catch(() => null);
+    // Each account's own cached login, so the composer judges a chat pinned to
+    // a second account by THAT account's probe, as the broker does (#428).
+    return subscriptionStatuses(settings).map((status) => {
+      const login = app.services.logins?.peek(status.provider, accountOf(status));
+      return login ? { ...status, login } : status;
+    });
+  });
 
   /**
    * Replace the stored list. Its own route rather than a field of the settings

@@ -14,9 +14,11 @@ import {
   providerAvailability,
   type HarnessKind,
   type ProviderUnavailable,
+  type SubscriptionStatus,
 } from "@dispatch/shared";
 import { api, type HarnessInfo } from "./api.js";
 import { useHarnesses } from "../stores/harnesses.js";
+import { useSubscriptions } from "../stores/subscriptions.js";
 
 /** Re-read the registered providers into the store. Never throws. */
 export async function refreshHarnesses(): Promise<void> {
@@ -47,12 +49,59 @@ export function useRegisteredProviders(): { harnesses: HarnessInfo[]; loaded: bo
  */
 export function useProviderAvailability(
   provider: HarnessKind | undefined | null,
+  account?: Pick<SubscriptionStatus, "login"> | null,
 ): ProviderUnavailable | null {
   const { harnesses, loaded } = useRegisteredProviders();
   return useMemo(
-    () => (loaded ? providerAvailability(provider, harnesses) : null),
-    [loaded, provider, harnesses],
+    () => (loaded ? chatAvailability(provider, harnesses, account) : null),
+    [loaded, provider, harnesses, account],
   );
+}
+
+/**
+ * The server's rule for one chat. The provider entry's `login` is the DEFAULT
+ * account's; when the caller knows the chat's own account (`account` given,
+ * even as null), that account's login replaces it — the broker judges the
+ * account the chat is pinned to, and so must the banner. An account with no
+ * probe yet is never "logged out": the server still refuses if it must.
+ */
+export function chatAvailability(
+  provider: HarnessKind | undefined | null,
+  harnesses: readonly HarnessInfo[],
+  account?: Pick<SubscriptionStatus, "login"> | null,
+): ProviderUnavailable | null {
+  if (account === undefined) return providerAvailability(provider, harnesses);
+  return providerAvailability(
+    provider,
+    harnesses.map((h) => (h.kind === provider ? { ...h, login: account?.login } : h)),
+  );
+}
+
+/** How often a "not logged in" banner re-asks while it is showing. */
+const LOGGED_OUT_RECHECK_MS = 15_000;
+
+/**
+ * Keep re-reading while a chat shows "not logged in". The user fixes that in a
+ * terminal, not here, and nothing else would ask again: the composer refuses
+ * the send that would have reached the server, and `providers-changed` only
+ * fires once some probe has seen the flip. Each read is a `peek` server-side,
+ * which re-probes a stale negative and announces the flip when it lands.
+ */
+export function useRecheckWhileLoggedOut(unavailable: ProviderUnavailable | null): void {
+  const loggedOut = unavailable?.reason === "logged-out";
+  useEffect(() => {
+    if (!loggedOut) return;
+    const recheck = () => {
+      void refreshHarnesses();
+      void useSubscriptions.getState().load();
+    };
+    const timer = setInterval(recheck, LOGGED_OUT_RECHECK_MS);
+    window.addEventListener("focus", recheck);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener("focus", recheck);
+    };
+  }, [loggedOut]);
 }
 
 /**
@@ -69,8 +118,12 @@ export function useProviderRegistered(provider: HarnessKind): boolean {
   return loaded && harnesses.some((h) => h.kind === provider);
 }
 
-/** The providers a chat could be switched to right now: registered and installed. */
+/**
+ * The providers a chat could be switched to right now: registered, installed
+ * and not known to be logged out — the same rule the banner applies, so it
+ * never offers "Switch to X" for an X that would show the banner itself.
+ */
 export function useAvailableProviders(): HarnessInfo[] {
   const { harnesses } = useRegisteredProviders();
-  return useMemo(() => harnesses.filter((h) => h.runtime.available), [harnesses]);
+  return useMemo(() => harnesses.filter((h) => providerAvailability(h.kind, [h]) === null), [harnesses]);
 }

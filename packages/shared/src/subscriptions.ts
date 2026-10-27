@@ -242,6 +242,14 @@ export interface SubscriptionStatus extends ResolvedSubscription {
    * chat wrote before subscriptions existed lives. See {@link chatAccountOf}.
    */
   atDefaultDir: boolean;
+  /**
+   * The server's cached login probe for THIS account (`ProviderLogins`), when
+   * one has run. Unlike `loggedIn` — a login FILE exists — this is what the
+   * server refuses a turn on, so the composer judges a chat by it: the
+   * provider-wide login on `/api/harnesses` is the DEFAULT account's, and a
+   * chat pinned to another account would be judged by the wrong probe (#428).
+   */
+  login?: { checked: boolean; loggedIn: boolean; notRequired?: boolean };
 }
 
 /**

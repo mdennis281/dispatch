@@ -35,6 +35,10 @@ export function claudeTestHarness(query?: QueryFn): Harness {
     const harness = new ClaudeHarness({ query });
     harness.runtime = () => ({ kind: "claude", source: "bundled", available: true });
     harness.readLimits = async () => null;
+    // The host probes a registered provider's login in the background now
+    // (#428); the real probe would spawn `claude auth status` from a test.
+    // "Not checked" is the one answer that neither refuses nor admits a turn.
+    harness.probeLogin = async () => ({ checked: false, loggedIn: false, error: "not probed in tests" });
     return harness;
   }
   return {

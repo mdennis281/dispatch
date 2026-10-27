@@ -25,6 +25,7 @@ import {
   type HarnessKind,
   type ProviderDescriptor,
   type ProviderUnavailable,
+  type RuntimeLoginStatus,
 } from "@dispatch/shared";
 import type { Harness, HarnessRuntimeInfo } from "./types.js";
 
@@ -130,13 +131,15 @@ export class HarnessRegistry {
    * call on every turn start, which is what lets a chat recover by itself the
    * moment its plugin is re-enabled.
    */
-  resolve(kind: HarnessKind | undefined): HarnessResolution {
+  resolve(kind: HarnessKind | undefined, opts: { login?: RuntimeLoginStatus } = {}): HarnessResolution {
     const wanted = this.find(kind);
     // Only the wanted harness is probed: `runtime()` can stat a binary, and
     // the other providers have no bearing on whether THIS chat can run.
+    // `login` is the caller's CACHED probe for the chat's account
+    // (`ProviderLogins`) — never a probe here, which is on every turn start.
     const unavailable = providerAvailability(
       kind,
-      wanted ? [{ kind: wanted.kind, runtime: wanted.runtime() }] : [],
+      wanted ? [{ kind: wanted.kind, runtime: wanted.runtime(), login: opts.login }] : [],
     );
     if (unavailable || !wanted) return { ok: false, unavailable: unavailable! };
     return { ok: true, harness: wanted };

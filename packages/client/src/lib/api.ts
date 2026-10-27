@@ -374,6 +374,11 @@ export interface HarnessInfo {
   kind: HarnessKind;
   descriptor: ProviderDescriptor;
   runtime: { path?: string; version?: string; source: string; available: boolean };
+  /**
+   * The default account's last login probe, cached server-side. Absent until
+   * one has run; only `checked && !loggedIn` reads as "not logged in" (#428).
+   */
+  login?: { checked: boolean; loggedIn: boolean; notRequired?: boolean };
   capabilities: {
     efforts: Effort[];
     compaction: boolean;
