@@ -42,6 +42,12 @@
  * in reach through its "interrupt" delivery, so gating the honest name for it
  * behind more than the tool it duplicates would only hide it. Archiving is
  * narrower, and `ChannelChatService.stop` enforces that.
+ *
+ * `persona_list` resolves against the project the caller names — or, for a
+ * token restricted to exactly one project, that one — because a project's own
+ * personas are valid `personaId`s that `config_list` cannot show here (this
+ * context has no project config dir). A project outside the allowlist reads as
+ * unknown, and the refusal lists the ones the caller CAN see.
  */
 import type { EventBus } from "../../bus.js";
 import type { Store } from "../../store/index.js";
@@ -77,6 +83,8 @@ export interface IntegrationContextDeps {
   getProject?: (id: string) => Promise<{ id: string; name: string } | null>;
   /** Every project, for `spawn_chat` to resolve a name against. Filtered here. */
   listProjects?: () => Promise<{ id: string; name: string }[]>;
+  /** The effective personas, with a project's own when `projectId` is given. */
+  listPersonas?: (projectId?: string) => Promise<{ id: string; name: string; scope: string }[]>;
   now?: () => number;
 }
 
@@ -127,7 +135,7 @@ export async function createIntegrationContext(
   deps: IntegrationContextDeps,
   identity: IntegrationIdentity,
 ): Promise<ManagerMcpContext> {
-  const { memory, memoryHistory, issues, inspect, messenger, authored, store, channelChats, summaries, getProject, listProjects } = deps;
+  const { memory, memoryHistory, issues, inspect, messenger, authored, store, channelChats, summaries, getProject, listProjects, listPersonas } = deps;
   const projectId = identity.projectIds?.length === 1 ? identity.projectIds[0] : undefined;
   const allow: Allowlist | null = identity.projectIds?.length
     ? {
@@ -276,6 +284,32 @@ export async function createIntegrationContext(
             },
           }
         : undefined,
+    personas: listPersonas
+      ? {
+          list: async (needle) => {
+            // No project named: a single-project token means that one; any
+            // other token gets the shared set, and is told so.
+            const wanted = needle ?? projectId;
+            let target: { id: string; name: string } | null = null;
+            if (wanted) {
+              const visible = realProjects((await listProjects?.().catch(() => [])) ?? []).filter((p) => projectVisible(p.id));
+              const lower = wanted.toLowerCase();
+              const named = visible.filter((p) => p.id === wanted || p.name.toLowerCase() === lower);
+              if (named.length !== 1) {
+                const known = visible.map((p) => `${p.name} (${p.id})`).join(", ");
+                throw new Error(
+                  named.length > 1
+                    ? `"${wanted}" names ${named.length} projects — pass one of their ids: ${named.map((p) => p.id).join(", ")}.`
+                    : `No project "${wanted}".${known ? ` Projects you can see: ${known}.` : ""}`,
+                );
+              }
+              target = { id: named[0]!.id, name: named[0]!.name };
+            }
+            const personas = (await listPersonas(target?.id)).map((p) => ({ id: p.id, name: p.name, scope: p.scope }));
+            return { project: target, personas };
+          },
+        }
+      : undefined,
     summary: summaries
       ? {
           summarize: async (chatId, focus) => {

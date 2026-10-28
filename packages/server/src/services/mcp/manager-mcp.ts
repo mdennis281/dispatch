@@ -1979,6 +1979,31 @@ export interface ManagerMcpChatControl {
   stop(chatId: string, opts: { archive: boolean }): Promise<ManagerMcpChatStopResult>;
 }
 
+/** One persona a chat can be started as, after precedence — see `listPersonas`. */
+export interface ManagerMcpPersonaEntry {
+  /** What `spawn_chat`'s `personaId` takes. */
+  id: string;
+  /** Display name: the definition's `# heading`, else the id title-cased. */
+  name: string;
+  /** Which scope's definition won: project > global > plugin > shipped. */
+  scope: string;
+}
+
+/**
+ * The personas available to a new chat in a project (omitted → no
+ * `persona_list`). Its own binding rather than `authoring`: `config_list`
+ * lists the raw FILES of every scope — duplicates included, no display name,
+ * and on the integration mount no project scope at all — while this answers
+ * the one question `spawn_chat` asks: which ids resolve, and as what.
+ * Throws with a sentence (naming the projects it can see) on an unknown one.
+ */
+export interface ManagerMcpPersonas {
+  list(project?: string): Promise<{
+    project: { id: string; name: string } | null;
+    personas: ManagerMcpPersonaEntry[];
+  }>;
+}
+
 /**
  * Read-only inspection of OTHER chats, their images, and project config.
  *
@@ -2168,6 +2193,8 @@ export interface ManagerMcpContext {
   summary?: ManagerMcpSummary;
   /** Stops (and archives) other chats (omitted → no `chat_stop` tool). */
   control?: ManagerMcpChatControl;
+  /** Persona discovery for `spawn_chat` (omitted → no `persona_list` tool). */
+  personas?: ManagerMcpPersonas;
   /** Project MCP-config editor for this session (omitted → no `mcp_*` tools). */
   mcpConfig?: ManagerMcpConfig;
   /** Instruction/skill/persona authoring for this session (omitted → no `config_*` tools). */
@@ -5967,8 +5994,8 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         .describe("Custom agent id for the new chat. This does not select its provider or persona."),
       personaId: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/).optional().describe(
         "Optional persona for a child or detached chat, e.g. product-owner. Omit for off; " +
-          "never inherited. Use config_list kind:persona to discover definitions; " +
-          "project overrides global and shipped.",
+          "never inherited. Discover ids with persona_list where it is offered, else " +
+          "config_list kind:persona; project overrides global and shipped.",
       ),
       effort: z
         .enum(["low", "medium", "high", "xhigh", "max"])
@@ -7574,6 +7601,41 @@ ${JSON.stringify(r)}`);
     },
   );
 
+  const personaList = tool(
+    "persona_list",
+    "The PERSONAS a new chat can be started as — each one's id (what spawn_chat's " +
+      "personaId takes) and its display name. A persona is an opt-in role (the product " +
+      "owner, the sceptical reviewer) layered on a chat's instructions; it never changes " +
+      "the model or permissions. Pass the project you will spawn into: a project can " +
+      "define its own personas and override the shared ones, so the list differs by project.",
+    {
+      project: z
+        .string()
+        .optional()
+        .describe("Project id or exact name. Omit for the personas every project shares."),
+    },
+    async (args): Promise<CallToolResult> => {
+      if (!ctx.personas) {
+        return textResult("The persona_list tool is not available in this session.", true);
+      }
+      const project = typeof args.project === "string" ? args.project.trim() || undefined : undefined;
+      try {
+        const { project: target, personas } = await ctx.personas.list(project);
+        const where = target ? `in ${target.name} (${target.id})` : "shared by every project";
+        const lines = personas.map((p) => `  • ${p.id} — ${p.name} (${p.scope})`);
+        return textResult(
+          `Personas ${where} (${personas.length}):\n` +
+            (lines.length ? lines.join("\n") : "  (none)") +
+            (personas.length ? "\nPass the id as spawn_chat's personaId." : "") +
+            (target ? "" : "\nA project can add its own — pass `project` to include them.") +
+            `\n${JSON.stringify({ project: target, personas })}`,
+        );
+      } catch (err) {
+        return textResult(`Could not list personas: ${err instanceof Error ? err.message : String(err)}`, true);
+      }
+    },
+  );
+
   const chatSetMode = tool(
     "chat_set_mode",
     "Switch a chat to a MODE — a named permission posture from mode_list (plan, auto, " +
@@ -8012,6 +8074,7 @@ ${JSON.stringify(r)}`);
     chatState,
     chatSummarize,
     chatStop,
+    personaList,
     chatSetMode,
     chatSetPersona,
     projectInfo,
@@ -8096,6 +8159,7 @@ const TOOL_WIRE_NAME: Record<ManagerToolKey, ManagerToolName> = {
   chatState: "chat_state",
   chatSummarize: "chat_summarize",
   chatStop: "chat_stop",
+  personaList: "persona_list",
   chatSetMode: "chat_set_mode",
   chatSetPersona: "chat_set_persona",
   projectInfo: "project_info",
@@ -8187,6 +8251,7 @@ const MANAGER_TOOL_GATE: Record<ManagerToolName, ManagerToolBinding | null> = {
   chat_state: "messaging",
   chat_summarize: "summary",
   chat_stop: "control",
+  persona_list: "personas",
   chat_set_mode: "messaging",
   chat_set_persona: "messaging",
   project_info: "inspect",
@@ -8219,6 +8284,7 @@ export type ManagerToolBinding =
   | "messaging"
   | "summary"
   | "control"
+  | "personas"
   | "secrets"
   | "issues";
 
@@ -8322,6 +8388,7 @@ function boundTools(ctx: ManagerMcpContext): Record<ManagerToolName, boolean> {
     chat_state: Boolean(ctx.messaging),
     chat_summarize: Boolean(ctx.summary),
     chat_stop: Boolean(ctx.control),
+    persona_list: Boolean(ctx.personas),
     // The posture writes ride the same binding: re-pointing a chat's mode or
     // persona is the same kind of reach into another chat as sending to it.
     chat_set_mode: Boolean(ctx.messaging),

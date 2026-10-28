@@ -132,6 +132,8 @@ export const MANAGER_TOOL_CATEGORY = {
   chat_state: "chat",
   chat_summarize: "chat",
   chat_stop: "chat",
+  /* …and the personas a new chat can be started as — spawn_chat's personaId. */
+  persona_list: "chat",
   /* …and the two POSTURE writes: re-pointing a chat at a mode or a persona.
      They ride the same `messaging` binding as `chat_send`, because both are
      the same kind of act — reaching into another chat and changing what it
@@ -257,6 +259,8 @@ export const MANAGER_TOOL_EXTERNAL: Record<ManagerToolName, boolean> = {
   chat_summarize: true,
   /* …and calling one off: interrupt any visible chat's turn, archive only one it started. */
   chat_stop: true,
+  /* …and naming the persona a chat it starts runs as: a read of resolved definitions. */
+  persona_list: true,
   /* …but re-posturing a chat is a write into its configuration, not a message. */
   chat_set_mode: false,
   chat_set_persona: false,

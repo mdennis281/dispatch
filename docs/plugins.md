@@ -1043,7 +1043,7 @@ cross-checked against the factory at compile time like the categories. The
 rule for the flag: a tool that acts on the calling chat's own session, shell or
 tree, or that puts a card in front of the human on the calling chat's behalf,
 is **not** external. So `chat_find`, `chat_read`, `chat_send`, `chat_ask`,
-`chat_reply`, `chat_state`, `chat_summarize`, `chat_stop`, `wait_for_chat`, `project_info`, `project_list`, the
+`chat_reply`, `chat_state`, `chat_summarize`, `chat_stop`, `persona_list`, `wait_for_chat`, `project_info`, `project_list`, the
 memory tools, the issue tools, `mode_list`, `config_list` and `config_read` are
 external; `wait`, `context_usage`, `compact_context`, the workspace tools, the
 PR tools, the confirm tools, the secrets tools, `chat_set_mode`,
@@ -1080,6 +1080,7 @@ sprinkled over the SPA's routes:
 | `POST chats/:id/stop { archive? }` (archive: own chats only, else 403) | `chats:write` |
 | `GET attention` · `POST attention/:id/answer { optionId \| answer \| answers \| decline }` | `attention:read` / `attention:answer` |
 | `GET projects` | `projects:read` |
+| `GET projects/:id/personas` → `{ personas: [{ id, name, scope }] }` | `projects:read` |
 | `GET openapi.json` | any |
 
 Token `projectIds` filter every route (a chat outside them is a 404).

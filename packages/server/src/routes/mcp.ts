@@ -216,6 +216,9 @@ export function registerMcpRoutes(app: FastifyInstance): void {
       summary: false,
       // `chat_stop` likewise: a session interrupts a peer with chat_send.
       control: false,
+      // `persona_list` likewise: a session reads personas with config_list,
+      // and its own project's config dir is already in reach.
+      personas: false,
       // Same story for cross-chat messaging: one messenger, constructed by the
       // container and bound by the broker for every session.
       messaging: !!services.chatMessenger,

@@ -11,7 +11,7 @@
  * does too) rather than on a subprocess.
  */
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { AddressInfo } from "node:net";
@@ -385,6 +385,25 @@ describe("REST", () => {
     await instance.close();
   });
 
+  it("lists a project's personas over REST, behind projects:read and the allowlist", async () => {
+    const { instance, store } = await app();
+    const access = await owner(instance);
+    const a = await project(instance, access, "alpha", join(dirs[0]!, "a"));
+    const b = await project(instance, access, "beta", join(dirs[0]!, "b"));
+    const personasDir = join(store.projectConfigDir(a.id), "personas");
+    await mkdir(personasDir, { recursive: true });
+    await writeFile(join(personasDir, "grump.md"), "# The Grump\n");
+    const { token } = await mint(instance, access, { name: "grok", scopes: ["projects:read"], projectIds: [a.id] });
+
+    const ok = await instance.inject({ url: `/api/integration/projects/${a.id}/personas`, headers: bearer(token) });
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect((ok.json() as { personas: unknown[] }).personas).toContainEqual({ id: "grump", name: "The Grump", scope: "project" });
+    expect((await instance.inject({ url: `/api/integration/projects/${b.id}/personas`, headers: bearer(token) })).statusCode).toBe(404);
+    const { token: blind } = await mint(instance, access, { name: "blind", scopes: ["chats:read"] });
+    expect((await instance.inject({ url: `/api/integration/projects/${a.id}/personas`, headers: bearer(blind) })).statusCode).toBe(403);
+    await instance.close();
+  });
+
   it("summarizes a visible chat, and hides the rest", async () => {
     const { instance } = await app();
     const access = await owner(instance);
@@ -587,4 +606,41 @@ describe("the external MCP mount", () => {
       await instance.close();
     }
   });
+
+  it("lists the personas a spawn can name, a project's own included", async () => {
+    const { instance, store } = await app();
+    const access = await owner(instance);
+    const a = await project(instance, access, "alpha", join(dirs[0]!, "a"));
+    const b = await project(instance, access, "beta", join(dirs[0]!, "b"));
+    // A persona only alpha defines — exactly the kind config_list cannot show
+    // on the mount, which has no project config dir.
+    const personasDir = join(store.projectConfigDir(a.id), "personas");
+    await mkdir(personasDir, { recursive: true });
+    await writeFile(join(personasDir, "grump.md"), "# The Grump\n\nDisagree first.\n");
+
+    const { token } = await mint(instance, access, { name: "grok", scopes: ["tools:chat", "projects:read"], projectIds: [a.id] });
+    await instance.listen({ port: 0, host: "127.0.0.1" });
+    const origin = `http://127.0.0.1:${(instance.server.address() as AddressInfo).port}`;
+    const call = async (args: Record<string, unknown>) =>
+      (await rpc(origin, token, "chat", "tools/call", { name: "persona_list", arguments: args })).json as {
+        result: { content: { text: string }[]; isError?: boolean };
+      };
+    try {
+      // By name, and by default for a single-project token.
+      for (const args of [{ project: "Alpha" }, {}]) {
+        const res = (await call(args)).result;
+        expect(res.isError ?? false, res.content[0]!.text).toBe(false);
+        expect(res.content[0]!.text).toContain("grump — The Grump (project)");
+        expect(res.content[0]!.text).toContain("product-owner"); // shipped
+      }
+      // Outside the allowlist reads as unknown, and the refusal names what IS visible.
+      const outside = (await call({ project: b.id })).result;
+      expect(outside.isError).toBe(true);
+      expect(outside.content[0]!.text).toContain(`alpha (${a.id})`);
+      expect(outside.content[0]!.text).not.toContain("beta");
+    } finally {
+      await instance.close();
+    }
+  });
+
 });
