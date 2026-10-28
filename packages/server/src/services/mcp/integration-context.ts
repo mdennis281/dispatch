@@ -52,6 +52,7 @@ import type { ChannelChatService } from "../channel-chats.js";
 import { ChannelChatRefusal } from "../channel-chats.js";
 import type { ChatSummaryService } from "../chat-summary.js";
 import { BUILTIN_MODE_PERMISSION } from "../session-broker.js";
+import { realProjects } from "@dispatch/shared";
 import { createAuthoringEditor } from "./authoring-editor.js";
 import { createModeEditor } from "./mode-editor.js";
 import { externalToolPolicy, type ManagerMcpBroker, type ManagerMcpContext } from "./manager-mcp.js";
@@ -69,6 +70,8 @@ export interface IntegrationContextDeps {
   channelChats?: Pick<ChannelChatService, "create">;
   summaries?: Pick<ChatSummaryService, "summarize">;
   getProject?: (id: string) => Promise<{ id: string; name: string } | null>;
+  /** Every project, for `spawn_chat` to resolve a name against. Filtered here. */
+  listProjects?: () => Promise<{ id: string; name: string }[]>;
   now?: () => number;
 }
 
@@ -119,7 +122,7 @@ export async function createIntegrationContext(
   deps: IntegrationContextDeps,
   identity: IntegrationIdentity,
 ): Promise<ManagerMcpContext> {
-  const { memory, memoryHistory, issues, inspect, messenger, authored, store, channelChats, summaries, getProject } = deps;
+  const { memory, memoryHistory, issues, inspect, messenger, authored, store, channelChats, summaries, getProject, listProjects } = deps;
   const projectId = identity.projectIds?.length === 1 ? identity.projectIds[0] : undefined;
   const allow: Allowlist | null = identity.projectIds?.length
     ? {
@@ -217,6 +220,14 @@ export async function createIntegrationContext(
               const p = await getProject(id).catch(() => null);
               return p ? { id: p.id, name: p.name } : null;
             },
+            // Filtered by the allowlist like every other listing here, so a
+            // restricted token's refusal cannot enumerate what it may not see.
+            listProjects: listProjects
+              ? async () =>
+                  realProjects(await listProjects().catch(() => []))
+                    .filter((p) => projectVisible(p.id))
+                    .map((p) => ({ id: p.id, name: p.name }))
+              : undefined,
             consent: async () => ({ approved: true, auto: true }),
             spawn: async ({ request, project }) => {
               try {

@@ -458,6 +458,30 @@ describe("the external MCP mount", () => {
     }
   });
 
+  it("spawn_chat's unknown-project refusal lists only the projects the token may see", async () => {
+    const { instance } = await app();
+    const access = await owner(instance);
+    const a = await project(instance, access, "alpha", join(dirs[0]!, "alpha"));
+    const b = await project(instance, access, "beta", join(dirs[0]!, "beta"));
+    // `tools:chat` without `tools:project`: the connector that had no project_list.
+    const { token } = await mint(instance, access, { name: "grok", scopes: ["tools:chat", "chats:create"], projectIds: [a.id] });
+    await instance.listen({ port: 0, host: "127.0.0.1" });
+    const origin = `http://127.0.0.1:${(instance.server.address() as AddressInfo).port}`;
+    try {
+      // B by NAME: resolving it must not leak it, and the listing must not either.
+      const r = await rpc(origin, token, "chat", "tools/call", {
+        name: "spawn_chat",
+        arguments: { prompt: "go", projectId: "beta" },
+      });
+      const result = (r.json as { result: { content: { text: string }[]; isError?: boolean } }).result;
+      expect(result.isError).toBe(true);
+      expect(result.content[0]!.text).toContain(`- alpha (id: ${a.id})`);
+      expect(result.content[0]!.text).not.toContain(b.id);
+    } finally {
+      await instance.close();
+    }
+  });
+
   it("lists exactly the external tools of a scoped category, and 403s the rest", async () => {
     const { instance } = await app();
     const access = await owner(instance);
