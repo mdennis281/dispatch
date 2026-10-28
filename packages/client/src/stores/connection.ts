@@ -93,6 +93,13 @@ interface ConnectionStore {
   stopped: boolean;
   stoppedReason?: string;
   /**
+   * The stop was a restart: the launcher is about to start the server again.
+   * Set alongside `stopped`, so the reconnect loop still stands down (the tab
+   * reloads into the new process instead), but the stopped screen yields to
+   * `RestartingScreen`. "Start it again from the Start menu" is wrong here.
+   */
+  restarting?: boolean;
+  /**
    * Dev-only: the offline mock seed ran, so this shell is showing fabricated
    * data on purpose (see main.tsx). The connecting screen stands down for it —
    * covering the mock with a diagnostic panel would break the design/screenshot
@@ -144,7 +151,7 @@ interface ConnectionStore {
   noteLiveStopped: () => void;
   clearStopped: () => void;
   onHello: (serverTime: number, version?: string) => void;
-  onServerShutdown: (reason?: string) => void;
+  onServerShutdown: (reason?: string, restarting?: boolean) => void;
 }
 
 /** How many distinct rejected frame `type`s are worth keeping for the report. */
@@ -208,6 +215,8 @@ export const useConnection = create<ConnectionStore>((set) => ({
       badFrameTypes: [],
       stopped: false,
       stoppedReason: undefined,
+      restarting: false,
     }),
-  onServerShutdown: (reason) => set({ stopped: true, stoppedReason: reason }),
+  onServerShutdown: (reason, restarting) =>
+    set({ stopped: true, stoppedReason: reason, restarting: restarting === true }),
 }));

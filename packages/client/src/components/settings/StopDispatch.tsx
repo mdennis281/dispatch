@@ -26,7 +26,7 @@ import { useRunners } from "../../stores/runners.js";
 import { useNotices } from "../../stores/notices.js";
 
 /** Chat statuses that mean a session is mid-flight and would be interrupted. */
-const BUSY: ReadonlySet<string> = new Set(["running", "queued", "awaiting-input"]);
+export const BUSY: ReadonlySet<string> = new Set(["running", "queued", "awaiting-input"]);
 /** Runner statuses that own a live OS process. */
 const LIVE: ReadonlySet<string> = new Set(["starting", "running", "stopping"]);
 

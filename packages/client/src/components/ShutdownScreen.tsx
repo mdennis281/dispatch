@@ -25,7 +25,10 @@ export function ShutdownScreen() {
   // reloads into a build that is being replaced, and the update is in fact
   // proceeding. `UpdatingScreen` owns that case end to end.
   const updating = useUpdate((s) => s.flight !== null);
-  if (!stopped || updating) return null;
+  // Same for a restart: nothing needs starting by hand. RestartingScreen
+  // waits for it.
+  const restarting = useConnection((s) => s.restarting === true);
+  if (!stopped || updating || restarting) return null;
 
   return (
     // Above EVERY other layer (see lib/layers). Anything that outranked this

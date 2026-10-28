@@ -176,6 +176,8 @@ export class RestartResumeService {
   private timer: unknown;
   private inflight: Promise<void> | null = null;
   private disposed = false;
+  /** Set by {@link skipNextCapture}; see there. */
+  private captureSkipped = false;
 
   constructor(opts: RestartResumeOpts) {
     this.store = opts.store;
@@ -202,6 +204,21 @@ export class RestartResumeService {
   /* ------------------------------------------------------------- shutdown */
 
   /**
+   * Make the coming shutdown write no tickets, so the next boot resumes nothing.
+   *
+   * The in-app Restart's "resume agents" switch, turned off. Restarting to pick
+   * up a config change is not always a moment you want every agent to carry on
+   * in — the restart may be precisely to stop a run that is going wrong — and
+   * without this the only restart that came back quiet was a crash.
+   *
+   * One-way and per process: the process is about to end, and a flag that
+   * could be un-set would let a second request race the first's teardown.
+   */
+  skipNextCapture(): void {
+    this.captureSkipped = true;
+  }
+
+  /**
    * Persist a resume ticket for every chat that was mid-flight.
    *
    * MUST be called before `broker.dispose()`, with a snapshot taken from
@@ -219,6 +236,7 @@ export class RestartResumeService {
       pending: NonNullable<ChatInterruption["pending"]>;
     }>,
   ): Promise<number> {
+    if (this.captureSkipped) return 0;
     const sha = safely(() => this.readSha());
     const at = this.now();
     let written = 0;

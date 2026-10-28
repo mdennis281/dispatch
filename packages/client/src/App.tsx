@@ -25,6 +25,7 @@ import { AppSettingsView } from "./components/settings/AppSettingsView.js";
 import { ManageConfigDialog } from "./components/sidebar/ManageConfigDialog.js";
 import { Toasts } from "./components/Toasts.js";
 import { ShutdownScreen } from "./components/ShutdownScreen.js";
+import { RestartingScreen } from "./components/RestartingScreen.js";
 import { UpdatingScreen } from "./components/update/UpdatingScreen.js";
 import { ConnectingScreen } from "./components/connection/ConnectingScreen.js";
 import { useChats } from "./stores/chats.js";
@@ -418,6 +419,7 @@ export default function App() {
           (see its guard) rather than being out-stacked by a screen that now
           lives outside this tree entirely. */}
       <ShutdownScreen />
+      <RestartingScreen />
       </div>
       </>
       )}

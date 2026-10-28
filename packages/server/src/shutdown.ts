@@ -48,6 +48,16 @@ export const SHUTDOWN_GRACE_MS = 20_000;
  */
 export const REAP_BUDGET_MS = 5_000;
 
+/**
+ * Exit status that means "start me again", as agreed with `tools/app/launch.py`.
+ *
+ * 75 is EX_TEMPFAIL from sysexits.h, "try again later", so it cannot be
+ * confused with a clean stop (0), the grace timer giving up (1), or a crash.
+ * The supervisor relaunches on exactly this code and on nothing else; a server
+ * that dies any other way stays down, as it always has.
+ */
+export const RESTART_EXIT_CODE = 75;
+
 export interface ShutdownOptions {
   graceMs?: number;
   /** Injected for tests so nothing actually exits the process. */
@@ -57,6 +67,8 @@ export interface ShutdownOptions {
    * {@link syncKillTree} for why an `exit` handler leaves no other option.
    */
   killTreeSync?: (pid: number) => void;
+  /** Injected for tests. Real value: does the launcher relaunch on {@link RESTART_EXIT_CODE}? */
+  restartable?: boolean;
 }
 
 /**
@@ -138,7 +150,7 @@ export function installShutdown(
     for (const { pid } of live) killTreeSync(pid);
   });
 
-  const close = (reason: string): Promise<void> => {
+  const close = (reason: string, restart = false): Promise<void> => {
     if (closing) return closing;
     // eslint-disable-next-line no-console
     console.log(`[dispatch] shutting down (${reason})…`);
@@ -148,7 +160,11 @@ export function installShutdown(
     // phone across the house spinning at a server that isn't coming back.
     // Guarded because `installShutdown` is also called on apps built for tests.
     try {
-      app.services?.bus?.publish({ type: "server-shutdown", reason });
+      app.services?.bus?.publish({
+        type: "server-shutdown",
+        reason,
+        ...(restart ? { restarting: true } : {}),
+      });
     } catch {
       /* no bus (or a listener threw) — teardown matters more than the notice */
     }
@@ -173,8 +189,8 @@ export function installShutdown(
       }
       clearTimeout(timer);
       // eslint-disable-next-line no-console
-      console.log("[dispatch] shutdown complete");
-      exit(0);
+      console.log(`[dispatch] shutdown complete${restart ? "; restarting" : ""}`);
+      exit(restart ? RESTART_EXIT_CODE : 0);
     })();
     return closing;
   };
@@ -191,6 +207,15 @@ export function installShutdown(
   // instance just to test signal handling would be a worse trade than this `if`.
   if (typeof app.decorate === "function") {
     app.decorate("requestShutdown", (reason: string) => close(reason));
+    // Restart is the same teardown with a different exit status, which only
+    // means anything if whatever started us is waiting to read it. The launcher
+    // says so with DISPATCH_RESTART=1. Without it (`pnpm dev`, `pnpm start`, a
+    // launcher older than this) exiting 75 is just a stop, and a Restart button
+    // that leaves the server down is the dead end it was meant to replace. So
+    // there's no decoration, and the route refuses.
+    if (opts.restartable ?? envVar(process.env, "RESTART") === "1") {
+      app.decorate("requestRestart", (reason: string) => close(reason, true));
+    }
   }
 
   // Only when a parent process owns us (the desktop shell sets this). Reading

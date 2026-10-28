@@ -72,6 +72,9 @@ START_GRACE_S = 15
 #: How long to give the server to tear down before we stop waiting on it.
 #: Matches SHUTDOWN_GRACE_MS in packages/server/src/shutdown.ts, plus slack.
 STOP_TIMEOUT_S = 25
+#: Exit status that asks for a restart. MIRROR of RESTART_EXIT_CODE in
+#: packages/server/src/shutdown.ts.
+RESTART_EXIT_CODE = 75
 
 
 def desktop_root() -> Path:
@@ -274,7 +277,27 @@ def supervise(paths: Paths, app: Path, port: int) -> int:
     runtime.json for its whole lifetime: written once the port answers, removed
     on the way out IF IT IS STILL OURS (see _release_runtime), so publish.mjs
     never sees a live app as stale (or the reverse).
+
+    The server exiting with RESTART_EXIT_CODE (Settings -> System -> Restart)
+    starts it again in THIS process. The restart has to happen here because
+    nothing the server spawns can do it: its teardown tree-kills its own
+    children. Doing it here also keeps runtime.json in place across the gap.
+    Releasing it would let the Start-menu shortcut, clicked mid-restart, see
+    nothing running and start a second supervisor that fights this one for the
+    port.
     """
+    while True:
+        code = _supervise_once(paths, app, port)
+        if code != RESTART_EXIT_CODE:
+            return code
+        # A --stop that landed while the old server was tearing down was meant
+        # for the instance, not for the half that happened to be exiting.
+        if paths.stop_request.exists():
+            _release_runtime(paths)
+            return 0
+
+
+def _supervise_once(paths: Paths, app: Path, port: int) -> int:
     node = shutil.which("node")
     if not node:
         raise SystemExit("node is not on PATH - install Node 24+ and retry")
@@ -288,6 +311,10 @@ def supervise(paths: Paths, app: Path, port: int) -> int:
         # Makes the server read stdin for "shutdown" — the only graceful stop
         # available on Windows. Without it this supervisor has no polite verb.
         "DISPATCH_IPC": "1",
+        # Tells the server that exiting RESTART_EXIT_CODE gets it started again,
+        # so it may offer Restart. A server under anything else (pnpm dev, an
+        # older launcher) doesn't offer it, because nobody would bring it back.
+        "DISPATCH_RESTART": "1",
         "DISPATCH_PORT": str(port),
         # Installed Dispatch is intentionally reachable on the LAN. Health
         # probes and the PWA URL below stay loopback so localhost remains the
@@ -352,40 +379,49 @@ def supervise(paths: Paths, app: Path, port: int) -> int:
     paths.boot_failure(port).unlink(missing_ok=True)
 
     url = f"http://127.0.0.1:{port}"
-    deadline = time.monotonic() + START_TIMEOUT_S
-    while time.monotonic() < deadline:
-        if proc.poll() is not None:
-            code = proc.returncode or 1
-            report_boot_failure(paths, port, "the server exited during boot", code)
-            return code
-        if port_alive(port, timeout=0.5):
-            break
-        time.sleep(0.25)
-    else:
-        proc.kill()
-        report_boot_failure(
-            paths, port, f"the server did not answer on {port} within {START_TIMEOUT_S}s", None
-        )
-        raise SystemExit(f"server did not answer on {port} within {START_TIMEOUT_S}s")
-
-    paths.root.mkdir(parents=True, exist_ok=True)
-    paths.runtime.write_text(
-        json.dumps(
-            {
-                "pid": proc.pid,
-                "supervisor": os.getpid(),
-                "url": url,
-                "port": port,
-                "appDir": str(app),
-                "startedAt": int(time.time() * 1000),
-            },
-            indent=2,
-        ),
-        "utf-8",
-    )
-
     stranded = False
+    restarting = False
+    # Inside the try, so a failed boot releases runtime.json too. On a first
+    # boot there is none of ours to release. On a restart there is: the last
+    # instance's, deliberately kept across the gap (see supervise()), and a
+    # restart that fails to boot must not leave it advertising a dead server.
     try:
+        deadline = time.monotonic() + START_TIMEOUT_S
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                # Never RESTART_EXIT_CODE here: a server that can't finish
+                # booting asking to be booted again is a loop, not a restart.
+                code = proc.returncode or 1
+                if code == RESTART_EXIT_CODE:
+                    code = 1
+                report_boot_failure(paths, port, "the server exited during boot", code)
+                return code
+            if port_alive(port, timeout=0.5):
+                break
+            time.sleep(0.25)
+        else:
+            proc.kill()
+            report_boot_failure(
+                paths, port, f"the server did not answer on {port} within {START_TIMEOUT_S}s", None
+            )
+            raise SystemExit(f"server did not answer on {port} within {START_TIMEOUT_S}s")
+
+        paths.root.mkdir(parents=True, exist_ok=True)
+        paths.runtime.write_text(
+            json.dumps(
+                {
+                    "pid": proc.pid,
+                    "supervisor": os.getpid(),
+                    "url": url,
+                    "port": port,
+                    "appDir": str(app),
+                    "startedAt": int(time.time() * 1000),
+                },
+                indent=2,
+            ),
+            "utf-8",
+        )
+
         while proc.poll() is None:
             if paths.stop_request.exists():
                 paths.stop_request.unlink(missing_ok=True)
@@ -417,9 +453,12 @@ def supervise(paths: Paths, app: Path, port: int) -> int:
                     file=sys.stderr,
                 )
                 return 1
+        restarting = proc.returncode == RESTART_EXIT_CODE
         return proc.returncode or 0
     finally:
-        if not stranded:
+        # A restart keeps runtime.json; supervise() is about to boot the next
+        # server and overwrite it. Everything else releases.
+        if not stranded and not restarting:
             _release_runtime(paths)
 
 

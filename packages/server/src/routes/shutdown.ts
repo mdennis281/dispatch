@@ -1,6 +1,9 @@
 /**
  * REST for stopping the app from inside the app.
  *   POST /api/shutdown → { ok: true }, then teardown begins
+ *   GET  /api/restart  → { supported, error? }
+ *   POST /api/restart  { resumeAgents? } → { ok: true }, then the same teardown,
+ *                       ending in the exit code the launcher relaunches on
  *
  * Until this existed the only stop verb was the literal string `shutdown` on the
  * process's stdin, which only the Python launcher can write — so "quit Dispatch"
@@ -21,6 +24,7 @@
  *      caller would see a dropped connection instead of its `{ ok: true }`.
  */
 import type { FastifyInstance } from "fastify";
+import { z } from "zod";
 
 /**
  * Breathing room after the response is on the wire, before teardown starts.
@@ -49,4 +53,48 @@ export function registerShutdownRoutes(app: FastifyInstance): void {
     });
     return { ok: true };
   });
+
+  /**
+   * Can this process restart itself? Asked by the Settings pane before it
+   * offers the button, so `pnpm dev` shows why it can't rather than a button
+   * that fails.
+   */
+  app.get("/api/restart", async () =>
+    app.requestRestart ? { supported: true } : { supported: false, error: RESTART_UNSUPPORTED },
+  );
+
+  /**
+   * Stop, then let the launcher start us again. Reloading a plugin's in-memory
+   * settings after a hand edit to config.json used to mean Stop, then finding
+   * the Start-menu shortcut.
+   *
+   * `resumeAgents: false` skips the restart-resume capture, so chats that were
+   * mid-turn come back idle rather than carrying on. It defaults to TRUE
+   * because that is what every other graceful stop already does, and a body
+   * that forgot the field shouldn't quietly change it.
+   */
+  app.post("/api/restart", async (req, reply) => {
+    const restart = app.requestRestart;
+    if (!restart) {
+      reply.code(503);
+      return { ok: false, error: RESTART_UNSUPPORTED };
+    }
+    const parsed = RestartBody.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { ok: false, error: "resumeAgents must be a boolean" };
+    }
+    if (parsed.data.resumeAgents === false) app.services.restartResume.skipNextCapture();
+
+    reply.raw.once("finish", () => {
+      setTimeout(() => void restart("restart requested"), SETTLE_MS).unref?.();
+    });
+    return { ok: true };
+  });
 }
+
+const RestartBody = z.object({ resumeAgents: z.boolean().optional() });
+
+const RESTART_UNSUPPORTED =
+  "this server wasn't started by the Dispatch launcher, so nothing would start it again. " +
+  "Under pnpm dev, restart the dev process yourself";

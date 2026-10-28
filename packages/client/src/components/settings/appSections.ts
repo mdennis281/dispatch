@@ -166,10 +166,10 @@ export const APP_SECTIONS: AppSectionDef[] = [
     id: "system",
     icon: Power,
     label: "System",
-    blurb: "Stop the server",
+    blurb: "Restart or stop the server",
     explainer:
-      "The one control in Settings that ends the session — for you and for every agent " +
-      "currently running.",
+      "The controls in Settings that end the session, for you and for every agent " +
+      "currently running. Restart brings it straight back. Stop leaves it down.",
   },
 ];
 

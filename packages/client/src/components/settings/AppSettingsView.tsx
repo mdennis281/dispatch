@@ -55,6 +55,7 @@ import { PluginsSection } from "./sections/PluginsSection.js";
 import { AuthSettings } from "../auth/AuthSettings.js";
 import { UpdateBanner } from "../update/UpdateBanner.js";
 import { StopDispatch } from "./StopDispatch.js";
+import { RestartDispatch } from "./RestartDispatch.js";
 
 /**
  * The server's response, filled out to the shape every section edits.
@@ -344,7 +345,10 @@ export function AppSettingsView() {
         ) : section === "updates" ? (
           <UpdateBanner />
         ) : section === "system" ? (
-          <StopDispatch />
+          <div className="flex flex-col gap-4">
+            <RestartDispatch />
+            <StopDispatch />
+          </div>
         ) : section === "accounts" ? (
           <AccountsSection />
         ) : section === "permissions" ? (
