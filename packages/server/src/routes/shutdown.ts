@@ -84,10 +84,21 @@ export function registerShutdownRoutes(app: FastifyInstance): void {
       reply.code(400);
       return { ok: false, error: "resumeAgents must be a boolean" };
     }
-    if (parsed.data.resumeAgents === false) app.services.restartResume.skipNextCapture();
+    // Refused rather than accepted-and-ignored: `close` drops a second request,
+    // so an `ok` here would leave the asking tab on "Restarting…" while the
+    // server simply stops. (A Stop landing inside SETTLE_MS still wins, but
+    // then its `server-shutdown` has no `restarting`, and the tab gets the
+    // ordinary stopped screen.)
+    if (app.shuttingDown?.()) {
+      reply.code(409);
+      return { ok: false, error: "Dispatch is already shutting down" };
+    }
+    // The resume choice travels INTO `close`, which applies it only if this
+    // call is the one that starts the teardown.
+    const resumeAgents = parsed.data.resumeAgents !== false;
 
     reply.raw.once("finish", () => {
-      setTimeout(() => void restart("restart requested"), SETTLE_MS).unref?.();
+      setTimeout(() => void restart("restart requested", resumeAgents), SETTLE_MS).unref?.();
     });
     return { ok: true };
   });

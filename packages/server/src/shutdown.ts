@@ -31,6 +31,7 @@
  * costs a port.
  */
 import { execFileSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
 import type { FastifyInstance } from "fastify";
 import { envVar } from "./config.js";
 
@@ -150,10 +151,30 @@ export function installShutdown(
     for (const { pid } of live) killTreeSync(pid);
   });
 
-  const close = (reason: string, restart = false): Promise<void> => {
+  const close = (
+    reason: string,
+    restart?: { resumeAgents: boolean },
+  ): Promise<void> => {
     if (closing) return closing;
     // eslint-disable-next-line no-console
     console.log(`[dispatch] shutting down (${reason})…`);
+    if (restart) {
+      // Only here, past the `closing` check: this call owns the teardown. If
+      // it were set by the route instead, a Restart(resume off) arriving while a
+      // Stop was already tearing down would cancel THAT stop's resume tickets.
+      if (!restart.resumeAgents) app.services?.restartResume?.skipNextCapture();
+      // Synchronously, before the listener closes: from that moment until the
+      // next server answers, this marker is the only thing telling the launcher
+      // the port is dark on purpose (see `read_runtime` in launch.py).
+      const marker = envVar(process.env, "RESTART_MARKER");
+      if (marker) {
+        try {
+          writeFileSync(marker, String(Date.now()));
+        } catch {
+          /* worst case is the old race, not a failed restart */
+        }
+      }
+    }
     // Tell every connected client FIRST, while the sockets are still up. A tab
     // that only sees its socket die can't tell a deliberate stop from a crash,
     // and would reconnect-loop forever — which in host mode means someone's
@@ -214,8 +235,13 @@ export function installShutdown(
     // that leaves the server down is the dead end it was meant to replace. So
     // there's no decoration, and the route refuses.
     if (opts.restartable ?? envVar(process.env, "RESTART") === "1") {
-      app.decorate("requestRestart", (reason: string) => close(reason, true));
+      app.decorate("requestRestart", (reason: string, resumeAgents: boolean) =>
+        close(reason, { resumeAgents }),
+      );
     }
+    // Lets the routes refuse a second stop or restart instead of answering
+    // `ok` to a request that `close` is about to ignore.
+    app.decorate("shuttingDown", () => closing !== undefined);
   }
 
   // Only when a parent process owns us (the desktop shell sets this). Reading

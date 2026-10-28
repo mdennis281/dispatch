@@ -115,19 +115,46 @@ describe("/api/restart", () => {
 
   it("skips the resume capture when resumeAgents is false", async () => {
     const skip = vi.spyOn(app.services.restartResume, "skipNextCapture");
-    installShutdown(app, { exit: vi.fn(), restartable: true });
+    const exited = new Promise<number>((resolve) => {
+      installShutdown(app, { exit: resolve, restartable: true });
+    });
 
     await app.inject({ method: "POST", url: "/api/restart", payload: { resumeAgents: false } });
+    await exited;
 
     expect(skip).toHaveBeenCalledTimes(1);
   });
 
   it("resumes by default: a body without the field doesn't skip anything", async () => {
     const skip = vi.spyOn(app.services.restartResume, "skipNextCapture");
-    installShutdown(app, { exit: vi.fn(), restartable: true });
+    const exited = new Promise<number>((resolve) => {
+      installShutdown(app, { exit: resolve, restartable: true });
+    });
 
     await app.inject({ method: "POST", url: "/api/restart", payload: {} });
+    await exited;
 
+    expect(skip).not.toHaveBeenCalled();
+  });
+
+  it("refuses while a stop is already under way, and leaves that stop's resume tickets alone", async () => {
+    const skip = vi.spyOn(app.services.restartResume, "skipNextCapture");
+    const exited = new Promise<number>((resolve) => {
+      installShutdown(app, { exit: resolve, restartable: true });
+    });
+    const stopping = app.requestShutdown!("api request");
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/restart",
+      payload: { resumeAgents: false },
+    });
+    // 409 from the route while terminals are being reaped. Once `app.close()`
+    // has begun, Fastify answers 503 itself. Either way it's a refusal, never `ok`.
+    expect([409, 503]).toContain(res.statusCode);
+
+    await stopping;
+    expect(await exited).toBe(0);
     expect(skip).not.toHaveBeenCalled();
   });
 });

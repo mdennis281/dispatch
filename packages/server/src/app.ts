@@ -58,7 +58,9 @@ declare module "fastify" {
      * again. Decorated only when the launcher says it will (`DISPATCH_RESTART`);
      * see `installShutdown`. Absent under `pnpm dev`.
      */
-    requestRestart?: (reason: string) => Promise<void>;
+    requestRestart?: (reason: string, resumeAgents: boolean) => Promise<void>;
+    /** A stop or restart has already begun. Decorated alongside `requestShutdown`. */
+    shuttingDown?: () => boolean;
   }
   interface FastifyRequest {
     authIdentity?: AnyRequestIdentity;
