@@ -173,26 +173,120 @@ describe("findChats", () => {
     expect(with_.chats.map((c) => c.id)).toContain("chat-archived");
   });
 
-  it("REPORTS a budget stop rather than silently returning a short list", async () => {
+  it("REPORTS a budget stop, and hands back a cursor past it", async () => {
     const result = await service().findChats({ query: "release workflow", scanBudgetBytes: 1 });
     expect(result.truncated).toBe(true);
     expect(result.unscanned).toBeGreaterThan(0);
-    expect(renderFind(result, "release workflow")).toContain("Scan budget reached");
+    expect(result.nextCursor).toBeTruthy();
+    const text = renderFind(result, "release workflow");
+    expect(text).toContain("Not finished");
+    expect(text).toContain(result.nextCursor);
   });
 
-  it("honours the budget even with workers already in flight", async () => {
-    // The budget is re-checked after the `stat` await: without that, workers
-    // that were already past the first check scan anyway, and the reported
-    // scanned/bytesScanned quietly exceed the cap they claim to respect.
+  it("covers at least one transcript per page, and otherwise stays inside the budget", async () => {
+    // Without the first-transcript exception a chat bigger than the budget is
+    // a page that covers nothing — and a cursor that never moves.
     const result = await service().findChats({ query: "release workflow", scanBudgetBytes: 1 });
-    expect(result.scanned).toBe(0);
-    expect(result.bytesScanned).toBe(0);
+    expect(result.scanned).toBe(1);
+    expect(result.bytesScanned).toBeGreaterThan(1);
+  });
+
+  it("pages through the whole search with the cursor, each chat exactly once", async () => {
+    const seen: string[] = [];
+    let scanned = 0;
+    let cursor: string | undefined;
+    let pages = 0;
+    do {
+      const page = await service().findChats({ query: "release workflow", scanBudgetBytes: 1, cursor });
+      seen.push(...page.chats.map((c) => c.id));
+      scanned += page.scanned;
+      cursor = page.nextCursor;
+      expect(++pages).toBeLessThanOrEqual(3);
+    } while (cursor);
+    expect(seen).toEqual(["chat-new", "chat-old"]);
+    expect(scanned).toBe(3);
+  });
+
+  it("ends a page at `limit` and resumes after it, rather than dropping the rest", async () => {
+    const first = await service().findChats({ query: "release", limit: 1 });
+    expect(first.chats.map((c) => c.id)).toEqual(["chat-new"]);
+    expect(first.truncated).toBe(true);
+    const second = await service().findChats({ query: "release", limit: 1, cursor: first.nextCursor });
+    expect(second.chats.map((c) => c.id)).toEqual(["chat-old"]);
+    expect(second.nextCursor).toBeUndefined();
+  });
+
+  it("lists a title match on page one even past the budget, and never again", async () => {
+    // "older" is only in chat-old's TITLE; its transcript is the last one a
+    // budget of 1 byte reaches.
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await service().findChats({ query: "older", scanBudgetBytes: 1, cursor });
+      seen.push(...page.chats.map((c) => c.id));
+      cursor = page.nextCursor;
+    } while (cursor);
+    expect(seen).toEqual(["chat-old"]);
+  });
+
+  describe("titles and content together", () => {
+    beforeEach(async () => {
+      await seedProject("p3", "Gamma");
+      const at = (n: number) => T0 + (10 - n) * DAY; // g-a newest
+      await seedChat("g-a", { projectId: "p3", updatedAt: at(0) }, [{ id: "a", ts: T0, kind: "user", text: "zebra crossing" }]);
+      await seedChat("g-b", { projectId: "p3", title: "zebra notes", updatedAt: at(1) }, [{ id: "b", ts: T0, kind: "user", text: "nothing here" }]);
+      await seedChat("g-c", { projectId: "p3", updatedAt: at(2) }, [{ id: "c", ts: T0, kind: "user", text: "another zebra" }]);
+      await seedChat("g-d", { projectId: "p3", title: "zebra again", updatedAt: at(3) }, [{ id: "d", ts: T0, kind: "user", text: "zebra in the body too" }]);
+    });
+
+    async function everyPage(q: Parameters<InspectService["findChats"]>[0]): Promise<string[]> {
+      const seen: string[] = [];
+      let cursor: string | undefined;
+      for (let pages = 0; pages < 10; pages++) {
+        const page = await service().findChats({ ...q, cursor });
+        seen.push(...page.chats.map((c) => c.id));
+        cursor = page.nextCursor;
+        if (!cursor) return seen;
+      }
+      throw new Error("cursor never ran out");
+    }
+
+    it("never loses a title-only match between two content matches when `limit` bites", async () => {
+      // The review's A/B/C: B matched by title alone used to be "covered" but
+      // never listed once A filled the page, and the cursor moved past it.
+      expect(await everyPage({ query: "zebra", project: "Gamma", limit: 1 })).toEqual(["g-a", "g-b", "g-c", "g-d"]);
+    });
+
+    it("lists a chat once even when page one took it by title and a later page reaches its transcript", async () => {
+      const seen = await everyPage({ query: "zebra", project: "Gamma", scanBudgetBytes: 1 });
+      expect([...seen].sort()).toEqual(["g-a", "g-b", "g-c", "g-d"]);
+    });
+  });
+
+  it("refuses a cursor from a different search, or one it never issued", async () => {
+    const first = await service().findChats({ query: "release", limit: 1 });
+    await expect(service().findChats({ query: "workflow", cursor: first.nextCursor })).rejects.toThrow(/different search/);
+    await expect(service().findChats({ query: "release", project: "hive", cursor: first.nextCursor })).rejects.toThrow(/different search/);
+    await expect(service().findChats({ query: "release", cursor: "not-a-cursor" })).rejects.toThrow(/not one chat_find handed out/);
   });
 
   it("lists chats by metadata alone when no query is given", async () => {
     const result = await service().findChats({ limit: 2 });
     expect(result.chats.map((c) => c.id)).toEqual(["chat-other", "chat-new"]);
     expect(result.scanned).toBe(0); // no transcript opened at all
+    // …and pages the listing the same way.
+    const rest = await service().findChats({ limit: 2, cursor: result.nextCursor });
+    expect(rest.chats.map((c) => c.id)).toEqual(["chat-old"]);
+    expect(rest.nextCursor).toBeUndefined();
+  });
+
+  it("orders equal activity times by id, so a boundary between them is exact", async () => {
+    await seedChat("tie-b", { title: "tie b", updatedAt: T0 + 3 * DAY }, [{ id: "t1", ts: T0, kind: "user", text: "tie" }]);
+    await seedChat("tie-a", { title: "tie a", updatedAt: T0 + 3 * DAY }, [{ id: "t2", ts: T0, kind: "user", text: "tie" }]);
+    const first = await service().findChats({ limit: 1 });
+    expect(first.chats.map((c) => c.id)).toEqual(["tie-a"]);
+    const second = await service().findChats({ limit: 1, cursor: first.nextCursor });
+    expect(second.chats.map((c) => c.id)).toEqual(["tie-b"]);
   });
 });
 

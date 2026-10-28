@@ -43,7 +43,7 @@ external tool are **offered** (`OFFERABLE_TOOL_SCOPES` in `@dispatch/shared`; to
 
 | route | scope |
 |---|---|
-| `GET chats?projectId&status&since&q&limit&archived` | `chats:read` |
+| `GET chats?projectId&status&since&q&limit&archived&cursor` → `{ chats, truncated, unscanned, nextCursor? }` | `chats:read` |
 | `GET chats/:id` (digest) | `chats:read` |
 | `GET chats/:id/messages?kinds&before&after&limit` | `chats:read` |
 | `POST chats/:id/messages { text, delivery?: "queue"\|"interrupt", sender? }` | `chats:write` |

@@ -31,6 +31,7 @@ import {
 import { AuthFailure, type RequestIdentity } from "../services/auth.js";
 import { ChannelChatRefusal } from "../services/channel-chats.js";
 import { SummaryRateLimitError } from "../services/chat-summary.js";
+import { FindCursorError } from "../services/inspect.js";
 import { ProviderUnavailableError } from "../harness/index.js";
 import {
   ScopeFailure,
@@ -55,6 +56,8 @@ const ListChatsQuery = z.object({
   q: z.string().optional(),
   limit: z.coerce.number().int().positive().max(200).optional(),
   archived: z.coerce.boolean().optional(),
+  /** `nextCursor` from the previous page of the same search. */
+  cursor: z.string().min(1).optional(),
 });
 
 const MessagesQuery = z.object({
@@ -141,11 +144,22 @@ export function registerIntegrationRoutes(app: FastifyInstance): void {
         since: q.since,
         limit: q.limit,
         archived: q.archived,
+        cursor: q.cursor,
+      }).catch((err: unknown) => {
+        // A foreign or mangled cursor is the caller's mistake, not a 500.
+        if (err instanceof FindCursorError) return err;
+        throw err;
       });
+      if (result instanceof FindCursorError) return reply.code(400).send({ error: result.message });
       // The allowlist is applied AFTER the search rather than by narrowing the
       // query: a token with two projects and no `projectId` filter needs both.
       const chats = result.chats.filter((c) => projectAllowed(req, c.projectId));
-      return { chats, truncated: result.truncated };
+      return {
+        chats,
+        truncated: result.truncated,
+        unscanned: result.unscanned,
+        ...(result.nextCursor ? { nextCursor: result.nextCursor } : {}),
+      };
     }),
   );
 
@@ -454,12 +468,17 @@ const OPENAPI = {
       get: {
         ...scoped("chats:read"),
         summary: "List chats",
-        parameters: ["projectId", "status", "since", "q", "limit"].map((name) => ({
+        description: "A search with `q` stops at a scan budget; when it does, `truncated` is true and " +
+          "`nextCursor` continues it — repeat the request with the same parameters plus `cursor`.",
+        parameters: ["projectId", "status", "since", "q", "limit", "cursor"].map((name) => ({
           name, in: "query", schema: { type: name === "since" || name === "limit" ? "integer" : "string" },
         })),
         responses: { "200": { description: "Chats", content: { "application/json": { schema: {
-          type: "object", properties: { chats: { type: "array", items: { $ref: "#/components/schemas/ChatSummary" } } },
-        } } } } },
+          type: "object", properties: {
+            chats: { type: "array", items: { $ref: "#/components/schemas/ChatSummary" } },
+            truncated: { type: "boolean" }, unscanned: { type: "integer" }, nextCursor: { type: "string" },
+          },
+        } } } }, "400": { description: "A cursor from a different search" } },
       },
       post: { ...scoped("chats:create"), summary: "Start a new chat in a project; the first message is attributed to this integration",
         description: "Runs in the project's default mode unless `modeId` names another; a mode that bypasses permission prompts is refused (403).",

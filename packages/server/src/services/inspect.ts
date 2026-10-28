@@ -18,6 +18,10 @@
  *     than per row (the same trick `readMessages` uses for cursor resolution);
  *   - stops at a byte budget and REPORTS having stopped. A silent cap on a
  *     search reads as "not found", which is worse than slow.
+ *   - hands back a CURSOR where it stopped, so the caller can carry on from
+ *     there. Reporting the stop was half of it: a connector told "2222 older
+ *     chats were not searched" had no way to search them short of guessing
+ *     `since`/`before` windows by hand.
  *
  * Rows are duck-typed, not zod-parsed. This reads production transcripts written
  * by months of older schema versions; a strict parse would drop historical rows
@@ -26,6 +30,7 @@
  * Everything here is READ-ONLY by construction — no method writes, and the
  * manager-MCP binding exposes no path that could.
  */
+import { createHash } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -130,6 +135,8 @@ export interface FindChatsQuery {
   limit?: number;
   hitsPerChat?: number;
   scanBudgetBytes?: number;
+  /** `nextCursor` from the previous page of the SAME search: carry on from there. */
+  cursor?: string;
 }
 
 export interface FindChatsResult {
@@ -139,10 +146,100 @@ export interface FindChatsResult {
   /** Transcripts actually opened. */
   scanned: number;
   bytesScanned: number;
-  /** True when the byte budget stopped the sweep before it finished. */
+  /** True when this page stopped before the search space did — `nextCursor` carries on. */
   truncated: boolean;
-  /** Chats never opened because the budget ran out — named, never silent. */
+  /** Chats this page did not reach — named, never silent. */
   unscanned: number;
+  /** Pass back as `cursor` to search the chats after this page. Absent on the last page. */
+  nextCursor?: string;
+}
+
+/**
+ * Where a page of `findChats` stopped. Opaque to callers (base64url JSON).
+ *
+ * It names the last chat the page COVERED by its sort key, not by position:
+ * between two calls a chat can take a turn and jump to the top of the
+ * newest-first order, and an index would then skip whichever chat slid into
+ * its place. A key boundary only loses a chat that moved from the unsearched
+ * tail to the head mid-paging — and that one is now the newest, where a fresh
+ * search finds it first.
+ */
+interface FindCursor {
+  v: 1;
+  /** Sort key of the last chat covered: activity time, then id. */
+  at: number;
+  id: string;
+  /** Fingerprint of the search it belongs to, so it cannot be replayed onto another. */
+  f: string;
+  /**
+   * Every title match past the boundary was already reported — page one lists
+   * title matches from the WHOLE search space (they are free), so later pages
+   * must not list them again.
+   */
+  t: boolean;
+}
+
+/**
+ * The parts of a query that decide WHICH chats match. `since`/`before` are
+ * deliberately left out: the tool accepts relative ages ("7d") and resolves
+ * them per call, so a cursor fingerprinting them would be refused on the very
+ * next page for the seconds that elapsed in between.
+ */
+function findFingerprint(q: FindChatsQuery): string {
+  const shape = JSON.stringify([
+    q.instance ?? "self",
+    q.query?.trim().toLowerCase() ?? "",
+    q.project ?? "",
+    q.status ?? "",
+    Boolean(q.archived),
+    [...(q.kinds ?? [])].sort(),
+  ]);
+  return createHash("sha256").update(shape).digest("base64url").slice(0, 12);
+}
+
+function encodeCursor(c: FindCursor): string {
+  return Buffer.from(JSON.stringify(c)).toString("base64url");
+}
+
+/** A cursor the caller got wrong — a 400 on REST, not a server fault. */
+export class FindCursorError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "FindCursorError";
+  }
+}
+
+function decodeCursor(raw: string, fingerprint: string): FindCursor {
+  let c: Partial<FindCursor> | null = null;
+  try {
+    c = JSON.parse(Buffer.from(raw, "base64url").toString("utf8")) as Partial<FindCursor>;
+  } catch {
+    // reported below
+  }
+  if (!c || c.v !== 1 || typeof c.at !== "number" || typeof c.id !== "string" || typeof c.f !== "string") {
+    throw new FindCursorError("That cursor is not one chat_find handed out. Run the search again without it.");
+  }
+  if (c.f !== fingerprint) {
+    throw new FindCursorError(
+      "That cursor belongs to a different search — query, project, status, archived and kinds " +
+        "must match the search that returned it. Run this search without a cursor to start it.",
+    );
+  }
+  return { v: 1, at: c.at, id: c.id, f: c.f, t: c.t === true };
+}
+
+/** Activity time — the sort key, newest first. */
+const activity = (c: Chat): number => c.updatedAt ?? c.createdAt;
+
+/** Newest first, then by id so equal times still have ONE order a cursor can name. */
+function newestFirst(a: Chat, b: Chat): number {
+  return activity(b) - activity(a) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+}
+
+/** Does `c` sort strictly after the cursor's boundary? */
+function pastBoundary(c: Chat, cur: FindCursor): boolean {
+  const at = activity(c);
+  return at < cur.at || (at === cur.at && c.id > cur.id);
 }
 
 export type ChatView = "digest" | "messages" | "grep";
@@ -553,99 +650,133 @@ export class InspectService {
     const limit = Math.max(1, q.limit ?? 20);
     const hitsPerChat = Math.max(1, q.hitsPerChat ?? 3);
     const kinds = q.kinds?.length ? new Set(q.kinds) : new Set(["user", "assistant"]);
+    const fingerprint = findFingerprint(q);
+    const cursor = q.cursor ? decodeCursor(q.cursor, fingerprint) : null;
 
     // Metadata filter first — cheap, and it decides which transcripts get opened.
     const candidates = all
       .filter((c) => (q.archived ? true : !c.archived))
       .filter((c) => (q.status ? c.status === q.status : true))
       .filter((c) => {
-        const at = c.updatedAt ?? c.createdAt;
+        const at = activity(c);
         if (q.since !== undefined && at < q.since) return false;
         if (q.before !== undefined && at >= q.before) return false;
         return true;
       })
-      .sort((a, b) => (b.updatedAt ?? b.createdAt) - (a.updatedAt ?? a.createdAt));
+      .sort(newestFirst);
+    // What this page may still cover: everything after the previous page's boundary.
+    const remaining = cursor ? candidates.filter((c) => pastBoundary(c, cursor)) : candidates;
+    const cursorAfter = (last: Chat, titlesDone: boolean): string =>
+      encodeCursor({ v: 1, at: activity(last), id: last.id, f: fingerprint, t: titlesDone });
 
     if (!query) {
+      const page = remaining.slice(0, limit);
+      const more = remaining.length > page.length;
       return {
-        chats: candidates.slice(0, limit).map((c) => this.toSummary(c, nameById.get(c.projectId))),
+        chats: page.map((c) => this.toSummary(c, nameById.get(c.projectId))),
         candidates: candidates.length,
         scanned: 0,
         bytesScanned: 0,
-        truncated: false,
-        unscanned: 0,
+        truncated: more,
+        unscanned: remaining.length - page.length,
+        ...(more ? { nextCursor: cursorAfter(page[page.length - 1]!, false) } : {}),
       };
     }
 
-    // A title match is free and is usually the strongest signal there is, so it
-    // never depends on the scan budget surviving long enough to reach the chat.
     const lower = query.toLowerCase();
-    const titleHits = new Set(
-      candidates.filter((c) => c.title?.toLowerCase().includes(lower)).map((c) => c.id),
-    );
-
     const budget = q.scanBudgetBytes ?? DEFAULT_SCAN_BUDGET_BYTES;
-    let bytesScanned = 0;
-    let scanned = 0;
-    let stopped = false;
 
-    // Chats that never got opened, for whatever reason — the count that makes
-    // `truncated` honest. Incremented only on a BUDGET skip, never on a chat
-    // that simply has no transcript (there is nothing there to have missed).
-    let skipped = 0;
+    // PLAN the page before scanning it: the newest-first run of chats whose
+    // transcripts fit the budget. Deciding it up front is what makes the stop
+    // a clean boundary a cursor can name — when the budget was checked inside
+    // the concurrent scan, which chats got skipped depended on which `stat`
+    // came back first, so "where it stopped" was not a place.
+    //
+    // The first transcript is taken even when it alone exceeds the budget:
+    // otherwise one oversized chat would be a page that covers nothing, and a
+    // cursor that never moves.
+    const window: { chat: Chat; size: number | null }[] = [];
+    let planned = 0;
+    let anyTranscript = false;
+    plan: for (let i = 0; i < remaining.length; i += SCAN_CONCURRENCY) {
+      const chunk = remaining.slice(i, i + SCAN_CONCURRENCY);
+      const sizes = await Promise.all(
+        chunk.map((c) =>
+          stat(this.transcriptPath(store, c.id)).then(
+            (st) => st.size,
+            () => null, // no transcript yet — costs nothing, nothing to miss
+          ),
+        ),
+      );
+      for (let j = 0; j < chunk.length; j++) {
+        const size = sizes[j]!;
+        if (size !== null) {
+          if (anyTranscript && planned + size > budget) break plan;
+          anyTranscript = true;
+          planned += size;
+        }
+        window.push({ chat: chunk[j]!, size });
+      }
+    }
 
-    const results = await mapLimit(candidates, SCAN_CONCURRENCY, async (chat) => {
-      if (stopped) {
-        skipped++;
-        return null;
-      }
-      const path = this.transcriptPath(store, chat.id);
-      let size = 0;
-      try {
-        size = (await stat(path)).size;
-      } catch {
-        return null; // no transcript yet — nothing skipped, nothing to report
-      }
-      // Re-check AFTER the await: up to SCAN_CONCURRENCY workers were already
-      // past the check above when another one exhausted the budget, and without
-      // this a small straggler still gets scanned — which would make the
-      // reported `scanned`/`bytesScanned` disagree with the cap they claim.
-      if (stopped || bytesScanned + size > budget) {
-        stopped = true;
-        skipped++;
-        return null;
-      }
-      bytesScanned += size;
-      scanned++;
-      const hits = await this.scanTranscript(path, query, kinds, hitsPerChat);
-      return hits.length ? { chat, hits } : null;
+    const results = await mapLimit(window, SCAN_CONCURRENCY, async ({ chat, size }) => {
+      if (size === null) return null;
+      const hits = await this.scanTranscript(this.transcriptPath(store, chat.id), query, kinds, hitsPerChat);
+      return hits.length ? hits : null;
     });
 
-    const matched: ChatSummary[] = [];
-    for (const r of results) {
-      if (!r) continue;
-      matched.push({
-        ...this.toSummary(r.chat, nameById.get(r.chat.projectId)),
-        hits: r.hits,
-      });
+    // Matches in page order — a content hit or a title hit, newest first. Past
+    // `limit`, the page ENDS at the last chat listed rather than dropping the
+    // rest: the cursor resumes right after it, so the next page lists them
+    // instead of nobody ever seeing them. (Capping title matches separately
+    // let one fall between "covered" and "listed" and vanish from every page.)
+    //
+    // A title match is free and is usually the strongest signal there is, so
+    // page one may also list title matches from PAST its window — never
+    // dependent on the budget reaching the chat. It does so only when every one
+    // of them fits; the cursor's `t` then tells later pages that every titled
+    // chat past the boundary is already listed, and they skip it even when its
+    // transcript matches too. All or nothing, so each chat is listed once.
+    const titled = (c: Chat): boolean => Boolean(c.title?.toLowerCase().includes(lower));
+    const summary = (c: Chat, hits: ChatHit[]): ChatSummary => ({
+      ...this.toSummary(c, nameById.get(c.projectId)),
+      hits,
+    });
+    let covered = window.length;
+    const listed: ChatSummary[] = [];
+    for (let i = 0; i < window.length; i++) {
+      const chat = window[i]!.chat;
+      if (cursor?.t && titled(chat)) continue; // listed on page one
+      const hits = results[i] ?? (titled(chat) ? [{ kind: "title", snippet: chat.title }] : null);
+      if (!hits) continue;
+      if (listed.length === limit) {
+        covered = i;
+        break;
+      }
+      listed.push(summary(chat, hits));
     }
-    // Title-only matches still belong in the answer, ranked after content hits.
-    for (const c of candidates) {
-      if (matched.length >= limit) break;
-      if (!titleHits.has(c.id) || matched.some((m) => m.id === c.id)) continue;
-      matched.push({
-        ...this.toSummary(c, nameById.get(c.projectId)),
-        hits: [{ kind: "title", snippet: c.title }],
-      });
+    const coveredChats = window.slice(0, covered).map((w) => w.chat);
+    const scanned = window.filter((w) => w.size !== null);
+
+    let titlesDone = cursor?.t ?? false;
+    if (!cursor && covered === window.length) {
+      const ahead = remaining.slice(window.length).filter(titled);
+      if (listed.length + ahead.length <= limit) {
+        for (const c of ahead) listed.push(summary(c, [{ kind: "title", snippet: c.title }]));
+        titlesDone = true;
+      }
     }
 
+    const unscanned = remaining.length - covered;
+    const last = coveredChats[coveredChats.length - 1];
     return {
-      chats: matched.slice(0, limit),
+      chats: listed,
       candidates: candidates.length,
-      scanned,
-      bytesScanned,
-      truncated: stopped,
-      unscanned: skipped,
+      scanned: scanned.length,
+      bytesScanned: scanned.reduce((n, w) => n + (w.size ?? 0), 0),
+      truncated: unscanned > 0,
+      unscanned,
+      ...(unscanned > 0 && last ? { nextCursor: cursorAfter(last, titlesDone) } : {}),
     };
   }
 

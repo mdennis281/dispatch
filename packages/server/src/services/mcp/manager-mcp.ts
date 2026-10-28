@@ -6965,8 +6965,10 @@ ${look}` : "")
       "error before\". `query` is matched against transcript CONTENT (and titles), so " +
       "a file path, an error string or a PR number all work. Returns each hit as a " +
       "one-line snippet with the chat id and row id, which feed straight into " +
-      "`chat_read`. Filter with `project`/`since` to keep a broad query fast. This is " +
-      "a read — it never touches a running chat.",
+      "`chat_read`. Filter with `project`/`since` to keep a broad query fast. A search " +
+      "too big for one call stops at a scan budget and returns a `cursor`: call again " +
+      "with the same arguments plus that cursor to search the older chats. This is a " +
+      "read — it never touches a running chat.",
     {
       query: z
         .string()
@@ -6998,6 +7000,13 @@ ${look}` : "")
         ),
       limit: z.number().optional().describe("Max chats to return (default 20)."),
       hitsPerChat: z.number().optional().describe("Max snippets per chat (default 3)."),
+      cursor: z
+        .string()
+        .optional()
+        .describe(
+          "Continue a search: the cursor the previous call returned. Pass the same query " +
+            "and filters with it.",
+        ),
       instance: inspectInstance,
     },
     async (args): Promise<CallToolResult> => {
@@ -7016,6 +7025,7 @@ ${look}` : "")
           kinds: args.kinds,
           limit: args.limit,
           hitsPerChat: args.hitsPerChat,
+          cursor: args.cursor?.trim() || undefined,
           instance: args.instance,
         });
         return textResult(renderFind(result, args.query));

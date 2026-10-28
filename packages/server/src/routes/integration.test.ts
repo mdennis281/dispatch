@@ -246,6 +246,12 @@ describe("REST", () => {
     const list = await instance.inject({ url: `/api/integration/chats?projectId=${proj.id}`, headers: bearer(token) });
     expect(list.statusCode, list.body).toBe(200);
     expect((list.json() as { chats: { id: string }[] }).chats.map((c) => c.id)).toEqual([target.id]);
+    expect(list.json()).toMatchObject({ truncated: false, unscanned: 0 });
+    expect(list.json()).not.toHaveProperty("nextCursor");
+    // A cursor the caller mangled is their mistake — a 400 that says so, not a 500.
+    const badCursor = await instance.inject({ url: `/api/integration/chats?q=x&cursor=nope`, headers: bearer(token) });
+    expect(badCursor.statusCode, badCursor.body).toBe(400);
+    expect(badCursor.body).toContain("cursor");
 
     const digest = await instance.inject({ url: `/api/integration/chats/${target.id}`, headers: bearer(token) });
     expect(digest.statusCode, digest.body).toBe(200);

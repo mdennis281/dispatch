@@ -1072,7 +1072,7 @@ sprinkled over the SPA's routes:
 
 | route | scope |
 |---|---|
-| `GET chats?projectId&status&since&q&limit&archived` | `chats:read` |
+| `GET chats?projectId&status&since&q&limit&archived&cursor` (→ `nextCursor` when the scan budget stops it) | `chats:read` |
 | `GET chats/:id` (digest) · `GET chats/:id/messages?kinds&before&after&limit` | `chats:read` |
 | `POST chats/:id/messages { text, delivery?, sender? }` | `chats:write` |
 | `POST chats { projectId, text, title?, modeId?, provider?, model?, effort? }` → 201 | `chats:create` |
