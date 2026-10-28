@@ -68,75 +68,81 @@ export function OAuthConsent({ nonce }: { nonce: string }) {
   };
 
   return (
-    <div className="grid min-h-screen place-items-center bg-app p-5">
-      <div
-        className="w-full max-w-md rounded-xl border border-line-strong bg-overlay p-6 shadow-[var(--shadow-pop)]"
-        data-testid="oauth-consent"
-      >
-        <div className="mb-5 flex items-start gap-3">
-          <span className="flex size-9 items-center justify-center rounded-lg text-accent [&_svg]:size-5">
-            <ShieldCheck />
-          </span>
-          <div>
-            <h1 className="text-lg font-semibold text-primary">Authorize a connector</h1>
-            <p className="mt-1 text-sm text-muted">
-              {user ? `Signed in as ${user.displayName || user.username}.` : "Sign in to continue."}
-            </p>
+    // Its own scroll container: html/body are `overflow: hidden` for the shell,
+    // so a connector asking for every scope pushed Approve below the fold with
+    // no way to reach it. Flex + `min-h-full` rather than `place-items-center`,
+    // which clips the TOP of a card taller than the viewport instead of scrolling.
+    <div className="fixed inset-0 overflow-y-auto bg-app">
+      <div className="flex min-h-full items-center justify-center p-5">
+        <div
+          className="w-full max-w-md rounded-xl border border-line-strong bg-overlay p-6 shadow-[var(--shadow-pop)]"
+          data-testid="oauth-consent"
+        >
+          <div className="mb-5 flex items-start gap-3">
+            <span className="flex size-9 items-center justify-center rounded-lg text-accent [&_svg]:size-5">
+              <ShieldCheck />
+            </span>
+            <div>
+              <h1 className="text-lg font-semibold text-primary">Authorize a connector</h1>
+              <p className="mt-1 text-sm text-muted">
+                {user ? `Signed in as ${user.displayName || user.username}.` : "Sign in to continue."}
+              </p>
+            </div>
           </div>
+
+          {error && !view ? (
+            <>
+              <InlineError message={error} />
+              <p className="mt-3 text-xs text-muted">
+                Start again from the application that asked. Authorization requests expire after ten minutes.
+              </p>
+              <div className="mt-4 flex justify-end">
+                <Button onClick={clear}>Back to Dispatch</Button>
+              </div>
+            </>
+          ) : !view ? (
+            <p className="text-sm text-muted">Loading the request…</p>
+          ) : (
+            <>
+              <div className="rounded-md border border-line bg-inset/40 p-3">
+                <p className="flex items-center gap-2 text-sm font-medium text-primary [&_svg]:size-4">
+                  <Plug className="text-accent" />
+                  {view.client.name}
+                </p>
+                <p className="mt-1 text-xs text-muted">
+                  wants to act on your behalf in Dispatch. On approval, a code is sent back to{" "}
+                  <span className="cm-mono text-secondary">{view.client.redirectHost}</span>.
+                </p>
+              </div>
+
+              <p className="mb-1.5 mt-4 text-xs font-medium text-secondary">It is asking to</p>
+              <ul className="space-y-1" aria-label="Requested scopes">
+                {view.scopes.map((scope) => (
+                  <li key={scope} className="flex items-start gap-2 rounded border border-line px-2 py-1.5 text-xs">
+                    <Chip tone={scope.startsWith("tools:") ? "agent" : "info"} className="!text-2xs shrink-0">
+                      {scope}
+                    </Chip>
+                    <span className="text-secondary">{scopeHint(scope)}</span>
+                  </li>
+                ))}
+              </ul>
+              <p className="mt-3 text-2xs leading-relaxed text-faint">
+                The connector receives a token with exactly these scopes, valid for an hour and renewable for thirty days.
+                It appears under Settings → Integrations, where you can revoke it at any time.
+              </p>
+
+              <InlineError message={error} />
+              <div className="mt-4 flex justify-end gap-2">
+                <Button variant="danger" disabled={busy || done !== null} onClick={() => void decide(false)}>
+                  Deny
+                </Button>
+                <Button variant="primary" disabled={busy || done !== null} onClick={() => void decide(true)}>
+                  {done === "approved" ? "Approved — redirecting…" : busy ? "Please wait…" : "Approve"}
+                </Button>
+              </div>
+            </>
+          )}
         </div>
-
-        {error && !view ? (
-          <>
-            <InlineError message={error} />
-            <p className="mt-3 text-xs text-muted">
-              Start again from the application that asked. Authorization requests expire after ten minutes.
-            </p>
-            <div className="mt-4 flex justify-end">
-              <Button onClick={clear}>Back to Dispatch</Button>
-            </div>
-          </>
-        ) : !view ? (
-          <p className="text-sm text-muted">Loading the request…</p>
-        ) : (
-          <>
-            <div className="rounded-md border border-line bg-inset/40 p-3">
-              <p className="flex items-center gap-2 text-sm font-medium text-primary [&_svg]:size-4">
-                <Plug className="text-accent" />
-                {view.client.name}
-              </p>
-              <p className="mt-1 text-xs text-muted">
-                wants to act on your behalf in Dispatch. On approval, a code is sent back to{" "}
-                <span className="cm-mono text-secondary">{view.client.redirectHost}</span>.
-              </p>
-            </div>
-
-            <p className="mb-1.5 mt-4 text-xs font-medium text-secondary">It is asking to</p>
-            <ul className="space-y-1" aria-label="Requested scopes">
-              {view.scopes.map((scope) => (
-                <li key={scope} className="flex items-start gap-2 rounded border border-line px-2 py-1.5 text-xs">
-                  <Chip tone={scope.startsWith("tools:") ? "agent" : "info"} className="!text-2xs shrink-0">
-                    {scope}
-                  </Chip>
-                  <span className="text-secondary">{scopeHint(scope)}</span>
-                </li>
-              ))}
-            </ul>
-            <p className="mt-3 text-2xs leading-relaxed text-faint">
-              The connector receives a token with exactly these scopes, valid for an hour and renewable for thirty days.
-              It appears under Settings → Integrations, where you can revoke it at any time.
-            </p>
-
-            <InlineError message={error} />
-            <div className="mt-4 flex justify-end gap-2">
-              <Button variant="danger" disabled={busy || done !== null} onClick={() => void decide(false)}>
-                Deny
-              </Button>
-              <Button variant="primary" disabled={busy || done !== null} onClick={() => void decide(true)}>
-                {done === "approved" ? "Approved — redirecting…" : busy ? "Please wait…" : "Approve"}
-              </Button>
-            </div>
-          </>
-        )}
       </div>
     </div>
   );
