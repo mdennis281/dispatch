@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Copy, FolderOpen, Link2, RefreshCw, RotateCw, Save, Trash2, Unlink2 } from "lucide-react";
 import type {
   PluginAutoUpdate,
+  PluginCleanupSummary,
   PluginInfo,
   PluginOAuthStatus,
   PluginStatus,
@@ -286,6 +287,9 @@ function PluginCard({
       </div>
 
       {plugin.error && <InlineError message={plugin.error} />}
+      {plugin.pendingCleanups && (
+        <PluginCleanupNotice plugin={plugin} pending={plugin.pendingCleanups} onChange={onChange} />
+      )}
       {plugin.needsRestart && (
         <p className="text-xs text-warn">
           {plugin.status === "active" ? "Updated" : "Not loaded yet"} — restart Dispatch to load it. Plugins are not
@@ -397,6 +401,82 @@ function PluginCard({
           onRemoved(res);
         }}
       />
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------- cleanups */
+
+/**
+ * Per-chat cleanups this plugin failed — a container a chat delete could not
+ * destroy, say — that Dispatch is still retrying. Shown because the only other
+ * trace is a server log, and what is stuck is usually something running (and
+ * costing) on another machine. Retry runs them now; Forget is for after the
+ * owner has cleaned up by hand.
+ */
+function PluginCleanupNotice({
+  plugin,
+  pending,
+  onChange,
+}: {
+  plugin: PluginInfo;
+  pending: PluginCleanupSummary;
+  onChange: (next: PluginInfo) => void;
+}) {
+  const [busy, setBusy] = useState<"retry" | "forget" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const run = async (what: "retry" | "forget") => {
+    setBusy(what);
+    setError(null);
+    try {
+      onChange(
+        what === "retry" ? await api.plugins.retryCleanups(plugin.id) : await api.plugins.discardCleanups(plugin.id),
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+  const when = (t: number) => new Date(t).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+  const n = pending.count;
+  return (
+    <div className="space-y-1.5 rounded-md border border-warn-line bg-warn-ghost px-2.5 py-2" role="status">
+      <p className="text-xs text-warn">
+        {n === 1 ? "1 chat cleanup" : `${n} chat cleanups`} failed and {n === 1 ? "is" : "are"} being retried —
+        stuck since {when(pending.oldestAt)}, {pending.attempts} attempt{pending.attempts === 1 ? "" : "s"}. Next try{" "}
+        {pending.nextAt <= Date.now() ? "when the plugin is next active" : when(pending.nextAt)}.
+      </p>
+      {pending.lastError && (
+        <p className="cm-mono text-2xs text-muted break-words" title={pending.lastError}>
+          {pending.lastError}
+        </p>
+      )}
+      <p className="cm-mono text-2xs text-faint truncate" title={pending.chats.join(", ")}>
+        chats: {pending.chats.join(", ")}
+        {pending.count > pending.chats.length ? ` +${pending.count - pending.chats.length} more` : ""}
+      </p>
+      <InlineError message={error} />
+      <div className="flex flex-wrap items-center gap-1">
+        <Button
+          variant="ghost"
+          size="sm"
+          leftIcon={busy === "retry" ? <Spinner size={12} /> : <RotateCw />}
+          disabled={busy !== null || plugin.status !== "active"}
+          onClick={() => void run("retry")}
+        >
+          Retry now
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={busy !== null}
+          onClick={() => void run("forget")}
+          title="Stop retrying. Use this once you have cleaned up by hand; nothing more is run."
+        >
+          Forget
+        </Button>
+      </div>
     </div>
   );
 }
