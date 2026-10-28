@@ -32,6 +32,7 @@ import { AuthFailure, type RequestIdentity } from "../services/auth.js";
 import { ChannelChatRefusal } from "../services/channel-chats.js";
 import { SummaryRateLimitError } from "../services/chat-summary.js";
 import { FindCursorError } from "../services/inspect.js";
+import { personasFor } from "../services/personas.js";
 import { ProviderUnavailableError } from "../harness/index.js";
 import {
   ScopeFailure,
@@ -384,6 +385,19 @@ export function registerIntegrationRoutes(app: FastifyInstance): void {
     }),
   );
 
+  // The REST twin of `persona_list`: what a `personaId` may name when starting
+  // a chat in this project — its own personas included, which nothing else on
+  // this surface can show.
+  app.get<{ Params: { id: string } }>("/api/integration/projects/:id/personas", (req, reply) =>
+    withScope(reply, async () => {
+      requireScope(req, "projects:read");
+      const project = await store.getProject(req.params.id).catch(() => null);
+      if (!project || !projectAllowed(req, project.id)) return reply.code(404).send({ error: "No such project." });
+      const personas = await personasFor(store, app.services.authored, project.id);
+      return { personas: personas.map((p) => ({ id: p.id, name: p.name, scope: p.scope })) };
+    }),
+  );
+
   /* -- openapi ---------------------------------------------------------- */
 
   app.get("/api/integration/openapi.json", async () => OPENAPI);
@@ -555,6 +569,11 @@ const OPENAPI = {
     },
     "/api/integration/projects": {
       get: { ...scoped("projects:read"), summary: "Every project this token can see", responses: { "200": { description: "Projects" } } },
+    },
+    "/api/integration/projects/{id}/personas": {
+      get: { ...scoped("projects:read"), summary: "The personas a chat started in this project can run as — each `id` is a valid `personaId`, with its display `name`",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "`{ personas: [{ id, name, scope }] }`" }, "404": { description: "No such project" } } },
     },
     "/api/integration/openapi.json": {
       get: { summary: "This document", security: [bearer], responses: { "200": { description: "OpenAPI" } } },

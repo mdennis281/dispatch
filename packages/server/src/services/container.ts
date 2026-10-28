@@ -39,6 +39,7 @@ import type { EventBus } from "../bus.js";
 import { createChat, ensureSession } from "../routes/dispatch.js";
 import { ChatMessenger } from "./chat-messenger.js";
 import { createIntegrationContext } from "./mcp/integration-context.js";
+import { personasFor } from "./personas.js";
 import { ChannelChatService } from "./channel-chats.js";
 import { ChatSummaryService } from "./chat-summary.js";
 import { ChatCompletionNotices } from "./chat-completion-notice.js";
@@ -1170,6 +1171,7 @@ export function createServices(
         summaries: chatSummaries,
         getProject: (id) => store.getProject(id).catch(() => null),
         listProjects: () => store.listProjects(),
+        listPersonas: (projectId) => personasFor(store, authored, projectId),
       },
       identity,
     ),
