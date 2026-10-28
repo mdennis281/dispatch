@@ -1691,6 +1691,12 @@ export const api = {
 
   /* stop the whole app (see routes/shutdown.ts) */
   shutdown: () => post<{ ok: boolean; error?: string }>("/api/shutdown"),
+  /* stop and have the launcher start it again (see routes/shutdown.ts) */
+  restart: {
+    status: () => get<{ supported: boolean; error?: string }>("/api/restart"),
+    request: (resumeAgents: boolean) =>
+      post<{ ok: boolean; error?: string }>("/api/restart", { resumeAgents }),
+  },
 
   /* in-app release updates (see routes/update.ts) */
   update: {

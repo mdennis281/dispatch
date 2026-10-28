@@ -130,6 +130,14 @@ describe("RestartResumeService", () => {
     ]);
   });
 
+  it("records nothing after skipNextCapture: Restart with 'resume agents' off", async () => {
+    await store.saveChat(chat("a"));
+    const svc = makeService();
+    svc.skipNextCapture();
+    expect(await svc.capture([{ chatId: "a", status: "running", pending: [] }])).toBe(0);
+    expect((await store.getChat("a"))?.interruption).toBeUndefined();
+  });
+
   it("skips archived chats — somebody already decided that work is over", async () => {
     await store.saveChat(chat("a", { archived: true }));
     const svc = makeService();

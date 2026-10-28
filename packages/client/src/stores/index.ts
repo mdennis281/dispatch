@@ -232,7 +232,7 @@ function reduceServerEvent(evt: WsServerEvent): void {
     case "server-shutdown":
       // Deliberate stop, not a dropped link. Recording it is what tells the WS
       // client to stop reconnecting and the shell to show the stopped screen.
-      useConnection.getState().onServerShutdown(evt.reason);
+      useConnection.getState().onServerShutdown(evt.reason, evt.restarting);
       return;
 
     case "attention-add": {

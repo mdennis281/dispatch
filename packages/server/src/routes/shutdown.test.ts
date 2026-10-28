@@ -17,7 +17,7 @@ import { buildApp } from "../app.js";
 import { loadConfig } from "../config.js";
 import { EventBus } from "../bus.js";
 import { Store } from "../store/index.js";
-import { installShutdown } from "../shutdown.js";
+import { installShutdown, RESTART_EXIT_CODE } from "../shutdown.js";
 
 let dir: string;
 let app: FastifyInstance;
@@ -77,5 +77,84 @@ describe("POST /api/shutdown", () => {
 
     // One teardown, one exit — not two.
     expect(exit).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("/api/restart", () => {
+  it("is unsupported unless the launcher will start the server again", async () => {
+    installShutdown(app, { exit: vi.fn(), restartable: false });
+
+    const status = await app.inject({ method: "GET", url: "/api/restart" });
+    expect(status.json().supported).toBe(false);
+
+    // A restart nobody would complete is a stop. Refuse it.
+    const res = await app.inject({ method: "POST", url: "/api/restart", payload: {} });
+    expect(res.statusCode).toBe(503);
+    expect(res.json().error).toContain("pnpm dev");
+  });
+
+  it("answers, announces a restart, and exits with the code the launcher relaunches on", async () => {
+    const seen: Array<{ reason?: string; restarting?: boolean }> = [];
+    bus.subscribe((evt) => {
+      if (evt.type === "server-shutdown") seen.push({ reason: evt.reason, restarting: evt.restarting });
+    });
+    const exited = new Promise<number>((resolve) => {
+      installShutdown(app, { exit: resolve, restartable: true });
+    });
+
+    expect((await app.inject({ method: "GET", url: "/api/restart" })).json()).toEqual({
+      supported: true,
+    });
+    const res = await app.inject({ method: "POST", url: "/api/restart", payload: {} });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true });
+
+    expect(await exited).toBe(RESTART_EXIT_CODE);
+    expect(seen).toEqual([{ reason: "restart requested", restarting: true }]);
+  });
+
+  it("skips the resume capture when resumeAgents is false", async () => {
+    const skip = vi.spyOn(app.services.restartResume, "skipNextCapture");
+    const exited = new Promise<number>((resolve) => {
+      installShutdown(app, { exit: resolve, restartable: true });
+    });
+
+    await app.inject({ method: "POST", url: "/api/restart", payload: { resumeAgents: false } });
+    await exited;
+
+    expect(skip).toHaveBeenCalledTimes(1);
+  });
+
+  it("resumes by default: a body without the field doesn't skip anything", async () => {
+    const skip = vi.spyOn(app.services.restartResume, "skipNextCapture");
+    const exited = new Promise<number>((resolve) => {
+      installShutdown(app, { exit: resolve, restartable: true });
+    });
+
+    await app.inject({ method: "POST", url: "/api/restart", payload: {} });
+    await exited;
+
+    expect(skip).not.toHaveBeenCalled();
+  });
+
+  it("refuses while a stop is already under way, and leaves that stop's resume tickets alone", async () => {
+    const skip = vi.spyOn(app.services.restartResume, "skipNextCapture");
+    const exited = new Promise<number>((resolve) => {
+      installShutdown(app, { exit: resolve, restartable: true });
+    });
+    const stopping = app.requestShutdown!("api request");
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/restart",
+      payload: { resumeAgents: false },
+    });
+    // 409 from the route while terminals are being reaped. Once `app.close()`
+    // has begun, Fastify answers 503 itself. Either way it's a refusal, never `ok`.
+    expect([409, 503]).toContain(res.statusCode);
+
+    await stopping;
+    expect(await exited).toBe(0);
+    expect(skip).not.toHaveBeenCalled();
   });
 });

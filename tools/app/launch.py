@@ -72,6 +72,13 @@ START_GRACE_S = 15
 #: How long to give the server to tear down before we stop waiting on it.
 #: Matches SHUTDOWN_GRACE_MS in packages/server/src/shutdown.ts, plus slack.
 STOP_TIMEOUT_S = 25
+#: Exit status that asks for a restart. MIRROR of RESTART_EXIT_CODE in
+#: packages/server/src/shutdown.ts.
+RESTART_EXIT_CODE = 75
+#: The longest a restart can legitimately keep the port dark: the old server's
+#: teardown, then the new one's boot, plus slack. A marker older than this
+#: belongs to a restart that died, and stops counting as "running".
+RESTART_WINDOW_S = STOP_TIMEOUT_S + START_TIMEOUT_S + 15
 
 
 def desktop_root() -> Path:
@@ -104,6 +111,11 @@ class Paths:
         #: file is crude, but it is the one channel that works across detached
         #: processes on Windows without opening a control port on localhost.
         self.stop_request = root / "shutdown.request"
+        #: Written BY THE SERVER the moment an in-app Restart begins (we hand it
+        #: the path as DISPATCH_RESTART_MARKER). Its listener closes long before
+        #: it exits, and then the next one takes seconds to boot. Without this,
+        #: read_runtime() reads that whole gap as "not running".
+        self.restart_marker = root / "restart.marker"
     # Both of the files below are keyed BY PORT, and that is load-bearing rather
     # than decorative. Two starts can overlap against one root — the liveness
     # check in `main` is not atomic, so a double-clicked shortcut can have two
@@ -168,7 +180,22 @@ def read_runtime(paths: Paths) -> dict | None:
     # only a real connection does.
     if isinstance(port, int) and port_alive(port):
         return rt
+    # A restart in progress: the port is dead on purpose, and the supervisor is
+    # about to boot the next server onto it. Answering None here let the
+    # shortcut start a second supervisor that raced it for the port, and let
+    # `--stop` report "not running" and drop the stop on the floor. Bounded by
+    # the marker's age, so a crash mid-restart can't make the claim permanent.
+    if _restart_in_progress(paths):
+        return rt
     return None
+
+
+def _restart_in_progress(paths: Paths) -> bool:
+    try:
+        age = time.time() - paths.restart_marker.stat().st_mtime
+    except OSError:
+        return False
+    return age < RESTART_WINDOW_S
 
 
 def find_free_port(start: int) -> int:
@@ -274,20 +301,54 @@ def supervise(paths: Paths, app: Path, port: int) -> int:
     runtime.json for its whole lifetime: written once the port answers, removed
     on the way out IF IT IS STILL OURS (see _release_runtime), so publish.mjs
     never sees a live app as stale (or the reverse).
+
+    The server exiting with RESTART_EXIT_CODE (Settings -> System -> Restart)
+    starts it again in THIS process. The restart has to happen here because
+    nothing the server spawns can do it: its teardown tree-kills its own
+    children. runtime.json stays in place across the gap, and the server's
+    restart marker makes read_runtime() count the gap as running. Together they
+    stop the Start-menu shortcut, clicked mid-restart, from starting a second
+    supervisor that fights this one for the port.
     """
+    # Once per supervisor, NOT per boot. A --stop sent during a restart's boot
+    # must survive into the poll loop that acts on it; clearing it on every
+    # relaunch would swallow it.
+    paths.stop_request.unlink(missing_ok=True)
+    paths.restart_marker.unlink(missing_ok=True)
+    try:
+        while True:
+            code = _supervise_once(paths, app, port)
+            if code != RESTART_EXIT_CODE:
+                return code
+            # A --stop that landed while the old server was tearing down was
+            # meant for the instance, not for the half that happened to be exiting.
+            if paths.stop_request.exists():
+                _release_runtime(paths)
+                return 0
+    finally:
+        paths.restart_marker.unlink(missing_ok=True)
+
+
+def _supervise_once(paths: Paths, app: Path, port: int) -> int:
     node = shutil.which("node")
     if not node:
         raise SystemExit("node is not on PATH - install Node 24+ and retry")
 
     paths.data_dir.mkdir(parents=True, exist_ok=True)
     paths.config_dir.mkdir(parents=True, exist_ok=True)
-    paths.stop_request.unlink(missing_ok=True)
 
     env = {
         **os.environ,
         # Makes the server read stdin for "shutdown" — the only graceful stop
         # available on Windows. Without it this supervisor has no polite verb.
         "DISPATCH_IPC": "1",
+        # Tells the server that exiting RESTART_EXIT_CODE gets it started again,
+        # so it may offer Restart. A server under anything else (pnpm dev, an
+        # older launcher) doesn't offer it, because nobody would bring it back.
+        "DISPATCH_RESTART": "1",
+        # ...and where to say "I'm restarting" before its port goes dark. See
+        # Paths.restart_marker.
+        "DISPATCH_RESTART_MARKER": str(paths.restart_marker),
         "DISPATCH_PORT": str(port),
         # Installed Dispatch is intentionally reachable on the LAN. Health
         # probes and the PWA URL below stay loopback so localhost remains the
@@ -352,40 +413,51 @@ def supervise(paths: Paths, app: Path, port: int) -> int:
     paths.boot_failure(port).unlink(missing_ok=True)
 
     url = f"http://127.0.0.1:{port}"
-    deadline = time.monotonic() + START_TIMEOUT_S
-    while time.monotonic() < deadline:
-        if proc.poll() is not None:
-            code = proc.returncode or 1
-            report_boot_failure(paths, port, "the server exited during boot", code)
-            return code
-        if port_alive(port, timeout=0.5):
-            break
-        time.sleep(0.25)
-    else:
-        proc.kill()
-        report_boot_failure(
-            paths, port, f"the server did not answer on {port} within {START_TIMEOUT_S}s", None
-        )
-        raise SystemExit(f"server did not answer on {port} within {START_TIMEOUT_S}s")
-
-    paths.root.mkdir(parents=True, exist_ok=True)
-    paths.runtime.write_text(
-        json.dumps(
-            {
-                "pid": proc.pid,
-                "supervisor": os.getpid(),
-                "url": url,
-                "port": port,
-                "appDir": str(app),
-                "startedAt": int(time.time() * 1000),
-            },
-            indent=2,
-        ),
-        "utf-8",
-    )
-
     stranded = False
+    restarting = False
+    # Inside the try, so a failed boot releases runtime.json too. On a first
+    # boot there is none of ours to release. On a restart there is: the last
+    # instance's, deliberately kept across the gap (see supervise()), and a
+    # restart that fails to boot must not leave it advertising a dead server.
     try:
+        deadline = time.monotonic() + START_TIMEOUT_S
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                # Never RESTART_EXIT_CODE here: a server that can't finish
+                # booting asking to be booted again is a loop, not a restart.
+                code = proc.returncode or 1
+                if code == RESTART_EXIT_CODE:
+                    code = 1
+                report_boot_failure(paths, port, "the server exited during boot", code)
+                return code
+            if port_alive(port, timeout=0.5):
+                break
+            time.sleep(0.25)
+        else:
+            proc.kill()
+            report_boot_failure(
+                paths, port, f"the server did not answer on {port} within {START_TIMEOUT_S}s", None
+            )
+            raise SystemExit(f"server did not answer on {port} within {START_TIMEOUT_S}s")
+
+        paths.root.mkdir(parents=True, exist_ok=True)
+        paths.runtime.write_text(
+            json.dumps(
+                {
+                    "pid": proc.pid,
+                    "supervisor": os.getpid(),
+                    "url": url,
+                    "port": port,
+                    "appDir": str(app),
+                    "startedAt": int(time.time() * 1000),
+                },
+                indent=2,
+            ),
+            "utf-8",
+        )
+        # The port answers again, so the restart (if this was one) is over.
+        paths.restart_marker.unlink(missing_ok=True)
+
         while proc.poll() is None:
             if paths.stop_request.exists():
                 paths.stop_request.unlink(missing_ok=True)
@@ -417,9 +489,12 @@ def supervise(paths: Paths, app: Path, port: int) -> int:
                     file=sys.stderr,
                 )
                 return 1
+        restarting = proc.returncode == RESTART_EXIT_CODE
         return proc.returncode or 0
     finally:
-        if not stranded:
+        # A restart keeps runtime.json; supervise() is about to boot the next
+        # server and overwrite it. Everything else releases.
+        if not stranded and not restarting:
             _release_runtime(paths)
 
 

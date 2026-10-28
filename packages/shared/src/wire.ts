@@ -602,6 +602,12 @@ export const ServerShutdownEventSchema = z.object({
   type: z.literal("server-shutdown"),
   /** Where the stop came from — "api request", "SIGINT", "desktop request". */
   reason: z.string().optional(),
+  /**
+   * The launcher will start the server again: this is a restart, not a stop.
+   * Clients wait for the new process and reload instead of offering a
+   * Reconnect that would find nothing there yet.
+   */
+  restarting: z.boolean().optional(),
 });
 
 export const WsServerEventSchema = z.discriminatedUnion("type", [
