@@ -233,7 +233,8 @@ export interface TerminalBackendSource {
    * leave it out, in which case `size > 0` decides.
    */
   wantsResolve?(ident: { chatId: string; projectId?: string }): boolean;
-  resolve(ident: { chatId: string; projectId?: string }): Promise<TerminalBackendResolution>;
+  /** `location` is the agent's per-terminal pick; absent ⇒ the chat → project → local rule. */
+  resolve(ident: { chatId: string; projectId?: string }, location?: string): Promise<TerminalBackendResolution>;
 }
 
 /** How long a backend's spawn may take before the shell falls back to local. */
@@ -297,6 +298,22 @@ export interface RunTerminalArgs {
    * `tail()`), and the shell stays busy until the command actually exits.
    */
   background?: boolean;
+  /**
+   * Where a NEW shell for this name runs — `local` or a backend id — chosen by
+   * the agent per terminal. Validated against the allowed list by the caller.
+   * Fixed for the shell's life: a different one for a live shell is refused
+   * (see {@link TerminalService.run}). Absent ⇒ the chat → project → local rule.
+   */
+  location?: string;
+}
+
+/** Where a run actually happened, as a result reports it. */
+export interface TerminalRanOn {
+  /** `local`, or the backend id serving the shell. A fallback reports `local`. */
+  id: string;
+  label: string;
+  /** Set when the shell is local only because `label`'s backend could not serve it. */
+  fallbackFrom?: string;
 }
 
 /** Result surfaced to the agent (and logged). */
@@ -315,6 +332,12 @@ export interface RunTerminalResult {
    * fallback). The agent's only window onto a location it cannot otherwise see.
    */
   notice?: string;
+  /**
+   * Where this run happened. Set whenever a backend is in play for the chat
+   * (one is registered, or the shell asked for one), so on an install with no
+   * backend plugin a result is exactly what it always was.
+   */
+  ranOn?: TerminalRanOn;
 }
 
 /* ------------------------------------------------------------------- markers */
@@ -381,6 +404,14 @@ interface Terminal {
   location?: TerminalLocation;
   /** The registered backend actually serving this shell (not set on a fallback). */
   backendId?: string;
+  /**
+   * The location this shell was opened FOR — the agent's `location`, else what
+   * the chat → project → local rule resolved to. Unset only while a shell with
+   * no explicit location is still resolving. What a later `location` is
+   * compared against; a fallback keeps the id it asked for, so asking for the
+   * same place again is not "a different location".
+   */
+  placement?: string;
   /** Delivered with the next run result, then cleared. */
   notice?: string;
 }
@@ -490,6 +521,9 @@ export class TerminalService {
         };
       }
       term = this.open(key, name, args.cwd ?? process.cwd(), args);
+    } else {
+      const moved = this.locationConflict(term, name, args.location);
+      if (moved) return moved;
     }
 
     // A background command owns its shell until it exits. Queueing behind it
@@ -507,7 +541,15 @@ export class TerminalService {
     // resolves as soon as it is written — leaves the shell held. Without this
     // second look the queued caller falls into `exec` behind a dev server and
     // hangs for the full timeout, which is the exact failure this guards.
-    const run = gate.then(() => this.backgroundBusy(term!, name) ?? this.exec(term!, args));
+    //
+    // The location is re-checked here too: a shell opened with no `location`
+    // only learns where it runs once it has resolved, which is this gate.
+    const run = gate.then(
+      () =>
+        this.locationConflict(term!, name, args.location) ??
+        this.backgroundBusy(term!, name) ??
+        this.exec(term!, args),
+    );
     term.queue = run.catch(() => {});
     return run;
   }
@@ -523,6 +565,27 @@ export class TerminalService {
         `Terminal '${name}' is busy running a background command ` +
         `(${truncate(term.background.command, 60)}). Use a different terminal name, ` +
         `read this one with terminal_output, or stop it from the Terminals tab.`,
+    };
+  }
+
+  /**
+   * The refusal for a `location` that differs from where this live shell runs,
+   * or null. Refused rather than honoured by respawning (that would kill
+   * whatever the shell holds — a cwd, an env, a dev server) or ignored (the
+   * agent would believe the command ran where it asked).
+   */
+  private locationConflict(term: Terminal, name: string, location: string | undefined): RunTerminalResult | null {
+    if (!location || term.status !== "live" || term.placement === undefined) return null;
+    if (term.placement === location) return null;
+    const where = term.location?.label ?? (term.placement === LOCAL_TERMINAL_BACKEND ? "this machine" : term.placement);
+    return {
+      output: "",
+      exitCode: null,
+      cwd: term.cwd,
+      error:
+        `Terminal '${name}' already runs on ${where} (\`${term.placement}\`); a terminal's location is ` +
+        `fixed for its life. Use a different terminal name to run on \`${location}\`, or omit \`location\` ` +
+        `to keep using this one.`,
     };
   }
 
@@ -578,17 +641,24 @@ export class TerminalService {
     key: string,
     name: string,
     cwd: string,
-    ident: { chatId: string; projectId?: string; origin?: TerminalOrigin },
+    ident: { chatId: string; projectId?: string; origin?: TerminalOrigin; location?: string },
   ): Terminal {
     // A registered backend, or a pin to one that is not registered right now,
     // means this chat MIGHT run elsewhere — and finding out is async (the pin
     // is on disk). Otherwise spawn here and now, exactly as before backends
     // existed. Checking `size` alone let a chat pinned to the only backend
     // plugin, while it was off, get a local shell with no warning at all.
+    //
+    // An explicit `location` decides on its own: `local` is a plain local shell
+    // even in a chat pinned elsewhere, and anything else must be resolved even
+    // when the chat itself has no pin the sync cache would know about.
     const backends = this.backends;
-    const resolveFirst = backends
-      ? (backends.wantsResolve?.({ chatId: ident.chatId, projectId: ident.projectId }) ?? backends.size > 0)
-      : false;
+    const location = ident.location || undefined;
+    const resolveFirst = !backends
+      ? false
+      : location
+        ? location !== LOCAL_TERMINAL_BACKEND
+        : (backends.wantsResolve?.({ chatId: ident.chatId, projectId: ident.projectId }) ?? backends.size > 0);
     const connecting = resolveFirst ? new ConnectingShell() : undefined;
     const proc = connecting ?? this.spawn(cwd);
     const now = this.now();
@@ -620,6 +690,9 @@ export class TerminalService {
       scrollback: [],
       queue: Promise.resolve(),
       flavour: this.flavour,
+      // Known up front for a local spawn or an explicit pick; otherwise learned
+      // when `connect` resolves.
+      placement: location ?? (connecting ? undefined : LOCAL_TERMINAL_BACKEND),
     };
     this.archived.delete(key);
     this.terminals.set(key, term);
@@ -629,7 +702,7 @@ export class TerminalService {
       // The run queue STARTS on the connect, so `run()` — which chains onto
       // `term.queue` — writes nothing until there is a real shell to write to.
       // `connect` never rejects.
-      term.queue = this.connect(term, connecting, ident, cwd);
+      term.queue = this.connect(term, connecting, ident, cwd, location);
     } else {
       this.attach(term, proc);
     }
@@ -662,6 +735,7 @@ export class TerminalService {
     placeholder: ConnectingShell,
     ident: { chatId: string; projectId?: string },
     cwd: string,
+    location?: string,
   ): Promise<void> {
     // Closed while connecting: `kill()` already took it off the map. Detached
     // (its backend went away) leaves it ON the map, and that one must end as an
@@ -673,13 +747,16 @@ export class TerminalService {
     };
     let res: TerminalBackendResolution;
     try {
-      res = await this.backends!.resolve(ident);
+      res = location
+        ? await this.backends!.resolve(ident, location)
+        : await this.backends!.resolve(ident);
     } catch {
       // The selection could not even be read (a corrupt chat row). That is not
       // a backend failing, and there is no backend to name — plain local.
-      res = { requested: LOCAL_TERMINAL_BACKEND };
+      res = { requested: location ?? LOCAL_TERMINAL_BACKEND };
     }
     if (abandoned()) return;
+    term.placement = res.requested;
 
     if (!res.backend) {
       if (res.missing) {
@@ -805,7 +882,26 @@ export class TerminalService {
     const notice = term.notice;
     term.notice = undefined;
     const run = this.execInner(term, args);
-    return notice ? run.then((r) => ({ ...r, notice })) : run;
+    const ranOn = this.ranOn(term);
+    return notice || ranOn
+      ? run.then((r) => ({ ...r, ...(notice ? { notice } : {}), ...(ranOn ? { ranOn } : {}) }))
+      : run;
+  }
+
+  /**
+   * Where this shell's commands run, for the result — or undefined on an
+   * install where no backend is in play, so those results stay byte-identical.
+   */
+  private ranOn(term: Terminal): TerminalRanOn | undefined {
+    const loc = term.location;
+    if (!loc) {
+      if (!this.backends?.size) return undefined;
+      return { id: LOCAL_TERMINAL_BACKEND, label: "this machine" };
+    }
+    if (loc.state === "fallback") {
+      return { id: LOCAL_TERMINAL_BACKEND, label: "this machine", fallbackFrom: loc.label };
+    }
+    return { id: loc.backend, label: loc.label };
   }
 
   private execInner(term: Terminal, args: RunTerminalArgs): Promise<RunTerminalResult> {

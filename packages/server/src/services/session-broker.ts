@@ -1287,7 +1287,8 @@ export interface SessionBrokerOptions {
    * asked for the "where your terminal runs" prompt section, and the source of
    * the forwarded ports terminal results list. Absent or empty ⇒ none of that.
    */
-  terminalBackends?: Pick<TerminalBackendRegistry, "size" | "chatIdle" | "agentNote" | "ports">;
+  terminalBackends?: Pick<TerminalBackendRegistry, "size" | "chatIdle" | "agentNote" | "ports"> &
+    Partial<Pick<TerminalBackendRegistry, "locations" | "checkLocation">>;
   /** Per-project agent memory: injected at start + exposed as `mcp__dispatch-memory__remember|recall|forget`. */
   memory?: MemoryService;
   /**
@@ -4250,11 +4251,20 @@ export class SessionBroker {
    * The chat's forwarded terminal ports, shaped for a tool result — or nothing
    * at all, so a result on an install with no backend is byte-identical.
    */
-  private forwardedPorts(chatId: string): { ports?: { remotePort: number; url: string; label?: string }[] } {
+  private forwardedPorts(chatId: string): {
+    ports?: { remotePort: number; url: string; label?: string; backend: string }[];
+  } {
     if (!this.terminalBackends?.size) return {};
     const ports = this.terminalBackends.ports(chatId);
     return ports.length
-      ? { ports: ports.map(({ remotePort, url, label }) => ({ remotePort, url, ...(label ? { label } : {}) })) }
+      ? {
+          ports: ports.map(({ remotePort, url, label, backend }) => ({
+            remotePort,
+            url,
+            backend,
+            ...(label ? { label } : {}),
+          })),
+        }
       : {};
   }
 
@@ -8221,6 +8231,15 @@ export class SessionBroker {
     // project-configured MCP servers; the session's abort signal cancels any
     // in-flight wait on stop/fork.
     const terminals = this.terminals;
+    // Where this chat's agent may put each terminal. Read once per session
+    // build: it decides whether the tool offers `location` at all. Each pick is
+    // still re-checked against the LIVE config when it is made.
+    const terminalBackends = this.terminalBackends;
+    const terminalChoices = terminals
+      ? await terminalBackends
+          ?.locations?.({ chatId: session.chatId, projectId: session.projectId })
+          .catch(() => undefined)
+      : undefined;
     const memory = this.memory;
     const memoryHistory = this.memoryHistory;
     const github = this.github;
@@ -8383,7 +8402,15 @@ export class SessionBroker {
       // worktree, else the repo root), so the agent just picks a name.
       terminals: terminals
         ? {
+            ...(terminalChoices?.enabled ? { locations: terminalChoices.options } : {}),
             run: async (a) => {
+              if (a.location) {
+                const ok = await terminalBackends?.checkLocation?.(
+                  { chatId: session.chatId, projectId: session.projectId },
+                  a.location,
+                );
+                if (ok && !ok.ok) return { output: "", exitCode: null, cwd: cwd ?? "", error: ok.error };
+              }
               const res = await terminals.run({
                 chatId: session.chatId,
                 projectId: session.projectId,

@@ -364,6 +364,11 @@ export function createServices(
         return chat ? { terminalBackend: chat.terminalBackend, projectId: chat.projectId } : null;
       },
       projectDefault: (projectId) => projectConfig.getDefaults(projectId)?.terminalBackend,
+      // Both layers raw; `resolveTerminalLocations` decides which one speaks.
+      allowedLocations: async (projectId) => ({
+        project: projectId ? projectConfig.getDefaults(projectId)?.terminalLocations : undefined,
+        app: (await store.getSettings().catch(() => null))?.terminalLocations,
+      }),
       repoPath: async (projectId) => (await store.getProject(projectId).catch(() => null))?.repoPath,
       log: (message, err) => console.warn(`[terminals] ${message}`, err ?? ""),
       // `plugins` is assigned further down; only called once a chat opens a shell.

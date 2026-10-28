@@ -3598,6 +3598,56 @@ describe("SessionBroker — subagent nesting", () => {
   });
 });
 
+describe("SessionBroker — terminal location choice reaches the prompt", () => {
+  it("an UNPINNED chat allowed to choose is told its locations; with no list it is told nothing", async () => {
+    const { TerminalBackendRegistry } = await import("./terminal-backends.js");
+    const { TerminalService } = await import("./terminal.js");
+    const allowed: { app?: string[] } = {};
+    const registry = new TerminalBackendRegistry({
+      bus,
+      chat: async (id) => {
+        const c = await store.getChat(id).catch(() => null);
+        return c ? { terminalBackend: c.terminalBackend, projectId: c.projectId } : null;
+      },
+      projectDefault: () => undefined,
+      allowedLocations: () => allowed,
+    });
+    registry.register(
+      {
+        id: "box",
+        label: "Test box",
+        shell: "bash",
+        spawn: async () => {
+          throw new Error("not under test");
+        },
+        agentNote: () => "BOX NOTE: code syncs before each command.",
+      },
+      "plug",
+    );
+    const terminals = new TerminalService({ bus });
+    const run = async (chatId: string) => {
+      const { fn, controllers } = makeFakeQuery((t) => [assistantText(t), resultMsg()]);
+      const broker = makeBroker(fn, 6, { terminals, terminalBackends: registry });
+      await store.saveChat(chatFor(chatId, "p1"));
+      broker.create(chatFor(chatId, "p1"));
+      const idleP = broker.waitFor(chatId, "idle");
+      await broker.sendMessage(chatId, "hi");
+      await idleP;
+      return (controllers[0]!.options as { systemPrompt?: { append?: string } }).systemPrompt?.append ?? "";
+    };
+
+    expect(await run("c1")).not.toContain("Where your terminal runs");
+
+    allowed.app = ["local", "box"];
+    const append = await run("c2");
+    expect(append).toContain("# Where your terminal runs");
+    expect(append).toContain("pass `location` the FIRST time");
+    expect(append).toContain("- `box` — Test box.");
+    expect(append).toContain("BOX NOTE: code syncs before each command.");
+    terminals.dispose();
+  });
+});
+
 describe("SessionBroker — project memory injection", () => {
   /** Build a broker wired to a MemoryService (kept out of the shared makeBroker). */
   function makeMemoryBroker(fn: QueryFn, memory: MemoryService): SessionBroker {

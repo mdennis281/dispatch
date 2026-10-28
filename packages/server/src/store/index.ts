@@ -105,6 +105,7 @@ import {
   WebhookDeliverySchema,
   type WebhookDelivery,
   ShellTranscriptFilterSchema,
+  TerminalLocationsSchema,
   McpEnabledMapSchema,
   ProjectConfigLocationSchema,
   SendModeSchema,
@@ -254,6 +255,14 @@ export const AppSettingsSchema = z.object({
   showInjectedContext: z.boolean().optional(),
   /** App-wide transcript-shell defaults. Unset resolves to every category on. */
   shellFilter: ShellTranscriptFilterSchema.optional(),
+  /**
+   * Terminal locations the agent may pick PER TERMINAL (`local` and/or plugin
+   * backend ids) — the bottom layer under project.yaml `defaults.terminalLocations`.
+   * Unset (or `[]`) means no choice: every shell goes where the chat → project →
+   * local rule sends it, which is how an install that never touches this keeps
+   * behaving exactly as before.
+   */
+  terminalLocations: TerminalLocationsSchema.optional(),
   /**
    * Per-server MCP on/off pins for THIS install, across every project — the
    * layer under a project's own `mcpEnabled` (see `mcp-enablement.ts`).

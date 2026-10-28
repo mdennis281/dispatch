@@ -373,6 +373,83 @@ describe("manager-mcp integration — terminal over a real TerminalService", () 
     expect(tail).toContain(":5173 → http://127.0.0.1:41000");
     svc.dispose();
   });
+
+  it("offers `location` only with a real choice, refuses a bad one, and says where each run happened", async () => {
+    const { TerminalBackendRegistry } = await import("../terminal-backends.js");
+    const allowed: { app?: string[] } = {};
+    const registry = new TerminalBackendRegistry({
+      bus,
+      chat: async () => ({ projectId: "p1" }),
+      projectDefault: () => undefined,
+      allowedLocations: () => allowed,
+    });
+    const remote: FakeShell[] = [];
+    let ids = 0;
+    registry.register(
+      {
+        id: "box",
+        label: "Test box",
+        shell: "powershell",
+        spawn: async () => {
+          const s = new FakeShell("/srv");
+          remote.push(s);
+          return s;
+        },
+      },
+      "plug",
+    );
+    const svc = new TerminalService({
+      bus,
+      backends: registry,
+      deps: { spawn: (cwd) => new FakeShell(cwd), genId: () => `t${++ids}`, now: () => 1000 },
+    });
+    // Mirrors SessionBroker.buildOptions' binding: the choices decide the
+    // schema, and every pick is checked against the live config.
+    const tools = async () => {
+      const choices = await registry.locations({ chatId: "c1", projectId: "p1" });
+      return createManagerTools({
+        chatId: "c1",
+        bus,
+        broker: nullBroker,
+        terminals: {
+          ...(choices.enabled ? { locations: choices.options } : {}),
+          run: async (a) => {
+            if (a.location) {
+              const ok = await registry.checkLocation({ chatId: "c1", projectId: "p1" }, a.location);
+              if (!ok.ok) return { output: "", exitCode: null, cwd: "", error: ok.error };
+            }
+            return svc.run({ chatId: "c1", projectId: "p1", cwd: "C:\\start", ...a });
+          },
+          tail: async (a) => svc.tail("c1", a.name, a.lines),
+          list: (a) => svc.catalog({ scope: a.scope ?? "chat", chatId: "c1", q: a.q }),
+        },
+      });
+    };
+
+    // Default: no list, no parameter — the tool is what it always was.
+    expect(Object.keys((await tools()).terminal.inputSchema)).not.toContain("location");
+
+    allowed.app = ["local", "box"];
+    const { terminal } = await tools();
+    expect(Object.keys(terminal.inputSchema)).toContain("location");
+    const call = (a: Record<string, unknown>) =>
+      terminal.handler({ timeoutMs: undefined, background: undefined, ...a } as never, {});
+
+    const refused = await call({ name: "x", command: "printout no", location: "mars" });
+    expect(refused.isError).toBe(true);
+    expect(resultText(refused)).toMatch(/"mars" is not an allowed terminal location.*Allowed: `local`, `box`/);
+
+    const built = resultText(await call({ name: "build", command: "printout remote", location: "box" }));
+    expect(built).toMatch(/^\[build\] on Test box \(`box`\) cwd=\/srv exit=0\nremote/m);
+    expect(remote).toHaveLength(1);
+    const quick = resultText(await call({ name: "quick", command: "printout here" }));
+    expect(quick).toMatch(/^\[quick\] on this machine \(`local`\) cwd=C:\\start exit=0/);
+
+    const moved = await call({ name: "build", command: "printout again", location: "local" });
+    expect(moved.isError).toBe(true);
+    expect(resultText(moved)).toMatch(/already runs on Test box.*fixed for its life/);
+    svc.dispose();
+  });
 });
 
 /* -------------------------------------------------- watch_pr: real GitHubService */
