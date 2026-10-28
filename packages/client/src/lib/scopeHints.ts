@@ -8,6 +8,7 @@ import { INTEGRATION_FIXED_SCOPES, type IntegrationScope } from "@dispatch/share
 export const SCOPE_HINT: Record<(typeof INTEGRATION_FIXED_SCOPES)[number], string> = {
   "chats:read": "List chats and read transcripts",
   "chats:write": "Send messages into chats",
+  "chats:create": "Start new chats — agents working in your projects, in each project's default mode",
   "attention:read": "See what is waiting on a human",
   "attention:answer": "Answer question cards",
   "memory:read": "Read project memory",

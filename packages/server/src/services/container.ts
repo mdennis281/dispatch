@@ -39,6 +39,8 @@ import type { EventBus } from "../bus.js";
 import { createChat, ensureSession } from "../routes/dispatch.js";
 import { ChatMessenger } from "./chat-messenger.js";
 import { createIntegrationContext } from "./mcp/integration-context.js";
+import { ChannelChatService } from "./channel-chats.js";
+import { ChatSummaryService } from "./chat-summary.js";
 import { ChatCompletionNotices } from "./chat-completion-notice.js";
 import { SessionBroker } from "./session-broker.js";
 import { TerminalService } from "./terminal.js";
@@ -250,6 +252,10 @@ export interface Services extends ServiceBase {
   restartResume: RestartResumeService;
   /** The global pause/resume control. See services/pause.ts. */
   pause: PauseService;
+  /** Chats an integration starts (`spawn_chat` on the external mount, `POST /api/integration/chats`). */
+  channelChats: ChannelChatService;
+  /** `chat_summarize` / `GET /api/integration/chats/:id/summary`. */
+  chatSummaries: ChatSummaryService;
   /** Chat-to-chat messaging behind `chat_send`/`chat_ask`/`chat_reply`/`chat_state`. */
   chatMessenger: ChatMessenger;
   chatCompletionNotices: ChatCompletionNotices;
@@ -1108,9 +1114,32 @@ export function createServices(
   // The external MCP mount: a category server per integration request, built
   // from a context with no self chat. Wired here rather than in the bridge's
   // constructor because it closes over services constructed after it.
+  // Late-bound through `services` like `broker.spawnChat`: `createChat` needs
+  // the whole container, which is assembled below.
+  const channelChats = new ChannelChatService({
+    getProject: (id) => store.getProject(id).catch(() => null),
+    createChat: (input) => createChat(services, input),
+    ensureSession: (chatId) => ensureSession(services, chatId),
+    permissionModeOf: (modeId) => broker.permissionModeOf(modeId),
+    send: (input) => chatMessenger.send(input),
+  });
+  const chatSummaries = new ChatSummaryService({ store, harnesses });
   managerMcp.setIntegrationContext((identity) =>
     createIntegrationContext(
-      { bus, store, broker, inspect, messenger: chatMessenger, memory, memoryHistory, issues, authored },
+      {
+        bus,
+        store,
+        broker,
+        inspect,
+        messenger: chatMessenger,
+        memory,
+        memoryHistory,
+        issues,
+        authored,
+        channelChats,
+        summaries: chatSummaries,
+        getProject: (id) => store.getProject(id).catch(() => null),
+      },
       identity,
     ),
   );
@@ -1512,6 +1541,8 @@ export function createServices(
     resume,
     failover,
     chatMessenger,
+    channelChats,
+    chatSummaries,
     chatCompletionNotices,
     plugins,
     pluginInspector,

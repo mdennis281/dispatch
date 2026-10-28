@@ -32,7 +32,7 @@ when a chat finishes — a webhook subscription on `chat-settled` (needs
   429 with `Retry-After`. WS tickets and account routes refuse integrations.
 - Token management (`/api/auth/tokens`) is owner-only.
 
-**Scopes.** Fixed: `chats:read`, `chats:write`, `attention:read`, `attention:answer`,
+**Scopes.** Fixed: `chats:read`, `chats:write`, `chats:create`, `attention:read`, `attention:answer`,
 `memory:read`, `memory:write`, `projects:read`, `webhooks:manage`. Plus
 `tools:<category>` per Dispatch tool category — but only categories with at least one
 external tool are **offered** (`OFFERABLE_TOOL_SCOPES` in `@dispatch/shared`; today
@@ -47,6 +47,8 @@ external tool are **offered** (`OFFERABLE_TOOL_SCOPES` in `@dispatch/shared`; to
 | `GET chats/:id` (digest) | `chats:read` |
 | `GET chats/:id/messages?kinds&before&after&limit` | `chats:read` |
 | `POST chats/:id/messages { text, delivery?: "queue"\|"interrupt", sender? }` | `chats:write` |
+| `POST chats { projectId, text, title?, modeId?, provider?, model?, effort? }` → 201 | `chats:create` |
+| `GET chats/:id/summary?focus` (cached; 429 + `Retry-After` past 30/h) | `chats:read` |
 | `GET attention` | `attention:read` |
 | `POST attention/:id/answer { optionId? \| answer? \| answers? \| decline: true }` | `attention:answer` (question items only) |
 | `GET projects` | `projects:read` |
@@ -70,8 +72,10 @@ issue_update` · `config_list config_read mode_list`.
 
 Not external: everything in github / confirm / workspace / mcp / session / secrets,
 `chat_set_mode`, `chat_set_persona`, `mode_read`, every `*_write` / `*_delete`.
-`spawn_chat` is flagged external in the registry but not offered yet (its consent card
-needs a parent session). Memory and issue tools bind only when the token names
+`spawn_chat` is offered only to a token holding `chats:create` (the grant is the
+consent): the chat runs in the project's default mode, a bypass mode is refused, and
+its brief is attributed to the token. `chat_summarize` is cached per chat and
+rate-limited per caller. Memory and issue tools bind only when the token names
 **exactly one** project. An unauthenticated request here gets a `WWW-Authenticate:
 Bearer resource_metadata=…` challenge, which is how an OAuth-capable MCP client
 discovers the authorization server from the refusal alone.

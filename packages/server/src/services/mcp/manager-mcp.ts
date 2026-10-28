@@ -1881,6 +1881,32 @@ export interface ManagerMcpChats {
     request: SpawnChatRequest;
     project: SpawnChatTarget;
   }): Promise<SpawnedChat>;
+  /**
+   * False when there is no caller chat to send a completion notice to — an
+   * integration. The tool then never promises one, whatever was asked.
+   */
+  canNotify?: boolean;
+}
+
+/** What `chat_summarize` hands back — see `ChatSummaryService`. */
+export interface ManagerMcpSummaryResult {
+  chatId: string;
+  title: string;
+  summary: string;
+  upToRowId?: string;
+  generatedAt: number;
+  provider: string;
+  cached: boolean;
+}
+
+/**
+ * A model's summary of ANOTHER chat (omitted → no `chat_summarize`). Its own
+ * binding rather than part of `inspect`, because unlike every read there it
+ * SPENDS: a model call on the summarized chat's account, which the service
+ * caches and rate-limits per caller.
+ */
+export interface ManagerMcpSummary {
+  summarize(chatId: string, focus?: string): Promise<ManagerMcpSummaryResult>;
 }
 
 /**
@@ -2068,6 +2094,8 @@ export interface ManagerMcpContext {
   prewarm?: ManagerMcpPrewarm;
   /** Chat spawner for this session (omitted → no `spawn_chat` tool). */
   chats?: ManagerMcpChats;
+  /** Chat summarizer (omitted → no `chat_summarize` tool). */
+  summary?: ManagerMcpSummary;
   /** Project MCP-config editor for this session (omitted → no `mcp_*` tools). */
   mcpConfig?: ManagerMcpConfig;
   /** Instruction/skill/persona authoring for this session (omitted → no `config_*` tools). */
@@ -5911,8 +5939,11 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         reason: typeof args.reason === "string" ? args.reason.trim() || undefined : undefined,
         detached: args.detached === true,
         // Default ON: `=== false` rather than `!== false`-with-a-default so an
-        // omitted argument and an explicit `true` are the same request.
-        notifyWhenComplete: args.notifyWhenComplete !== false,
+        // omitted argument and an explicit `true` are the same request. Never
+        // when there is no caller chat to notify (an integration): telling it
+        // "you will be messaged" would leave it waiting for a message to a
+        // chat that does not exist.
+        notifyWhenComplete: ctx.chats.canNotify !== false && args.notifyWhenComplete !== false,
       };
 
       const project = await ctx.chats.resolveProject(request.projectId);
@@ -7349,6 +7380,37 @@ ${look}` : "")
     },
   );
 
+  const chatSummarize = tool(
+    "chat_summarize",
+    "A model's summary of ANOTHER chat: what was asked, where it stands (done, in " +
+      "progress, blocked and on what), the decisions made and what is left open. Use it " +
+      "instead of paging through chat_read when you need the gist of a long chat. It " +
+      "spends a model call on that chat's own account, so answers are cached until the " +
+      "chat changes (a repeat costs nothing) and calls are rate-limited per caller. Pass " +
+      "focus to steer it at one question ('did the migration land?').",
+    {
+      chatId: z.string().describe("The chat to summarize, as reported by chat_find."),
+      focus: z.string().optional().describe("What the reader specifically wants to know."),
+    },
+    async (args): Promise<CallToolResult> => {
+      if (!ctx.summary) {
+        return textResult("The chat_summarize tool is not available in this session.", true);
+      }
+      const chatId = typeof args.chatId === "string" ? args.chatId.trim() : "";
+      if (!chatId) return textResult("chat_summarize requires a non-empty chatId.", true);
+      const focus = typeof args.focus === "string" ? args.focus.trim() || undefined : undefined;
+      try {
+        const s = await ctx.summary.summarize(chatId, focus);
+        return textResult(
+          `${s.title} — ${s.chatId}${s.cached ? " (cached: the chat has not changed since)" : ""}\n\n${s.summary}\n` +
+            JSON.stringify({ chatId: s.chatId, cached: s.cached, generatedAt: s.generatedAt, upToRowId: s.upToRowId, provider: s.provider }),
+        );
+      } catch (err) {
+        return textResult(`Could not summarize ${chatId}: ${err instanceof Error ? err.message : String(err)}`, true);
+      }
+    },
+  );
+
   const chatSetMode = tool(
     "chat_set_mode",
     "Switch a chat to a MODE — a named permission posture from mode_list (plan, auto, " +
@@ -7785,6 +7847,7 @@ ${look}` : "")
     chatAsk,
     chatReply,
     chatState,
+    chatSummarize,
     chatSetMode,
     chatSetPersona,
     projectInfo,
@@ -7867,6 +7930,7 @@ const TOOL_WIRE_NAME: Record<ManagerToolKey, ManagerToolName> = {
   chatAsk: "chat_ask",
   chatReply: "chat_reply",
   chatState: "chat_state",
+  chatSummarize: "chat_summarize",
   chatSetMode: "chat_set_mode",
   chatSetPersona: "chat_set_persona",
   projectInfo: "project_info",
@@ -7956,6 +8020,7 @@ const MANAGER_TOOL_GATE: Record<ManagerToolName, ManagerToolBinding | null> = {
   chat_ask: "messaging",
   chat_reply: "messaging",
   chat_state: "messaging",
+  chat_summarize: "summary",
   chat_set_mode: "messaging",
   chat_set_persona: "messaging",
   project_info: "inspect",
@@ -7986,6 +8051,7 @@ export type ManagerToolBinding =
   | "authoring"
   | "inspect"
   | "messaging"
+  | "summary"
   | "secrets"
   | "issues";
 
@@ -8087,6 +8153,7 @@ function boundTools(ctx: ManagerMcpContext): Record<ManagerToolName, boolean> {
     chat_ask: Boolean(ctx.messaging),
     chat_reply: Boolean(ctx.messaging),
     chat_state: Boolean(ctx.messaging),
+    chat_summarize: Boolean(ctx.summary),
     // The posture writes ride the same binding: re-pointing a chat's mode or
     // persona is the same kind of reach into another chat as sending to it.
     chat_set_mode: Boolean(ctx.messaging),

@@ -211,6 +211,9 @@ export function registerMcpRoutes(app: FastifyInstance): void {
       // are available wherever this catalog is viewable at all.
       worktrees: !!services.worktrees,
       inspect: !!services.inspect,
+      // `chat_summarize` is bound on the integration mount only — a session
+      // reads another chat with chat_read and summarizes it itself.
+      summary: false,
       // Same story for cross-chat messaging: one messenger, constructed by the
       // container and bound by the broker for every session.
       messaging: !!services.chatMessenger,

@@ -274,6 +274,72 @@ describe("REST", () => {
     await instance.close();
   });
 
+  it("creates a chat only with chats:create, as the integration, and never in a bypass mode", async () => {
+    const { instance, store } = await app();
+    const access = await owner(instance);
+    const a = await project(instance, access, "a", join(dirs[0]!, "a"));
+    const b = await project(instance, access, "b", join(dirs[0]!, "b"));
+    // No runtime in this suite: the session start is a no-op, and the first
+    // message is captured at the messenger the way the send test does.
+    const sends: unknown[] = [];
+    const messenger = instance.services.chatMessenger as unknown as {
+      sendFn: (chatId: string, text: string, opts: unknown) => Promise<void>;
+      ensureSession: (chatId: string) => Promise<void>;
+    };
+    messenger.ensureSession = async () => {};
+    messenger.sendFn = async (chatId, text, opts) => { sends.push({ chatId, text, opts }); };
+    (instance.services.channelChats as unknown as { deps: { ensureSession: () => Promise<void> } }).deps.ensureSession = async () => {};
+
+    const { token: writer } = await mint(instance, access, { name: "writer", scopes: ["chats:write"] });
+    const refused = await instance.inject({ method: "POST", url: "/api/integration/chats", headers: bearer(writer), payload: { projectId: a.id, text: "go" } });
+    expect(refused.statusCode).toBe(403);
+    expect(refused.body).toContain("chats:create");
+
+    const { token } = await mint(instance, access, { name: "grok", scopes: ["chats:create"], projectIds: [a.id] });
+    const made = await instance.inject({
+      method: "POST", url: "/api/integration/chats", headers: bearer(token),
+      payload: { projectId: a.id, text: "fix the flaky test", title: "Flaky test" },
+    });
+    expect(made.statusCode, made.body).toBe(201);
+    const created = made.json() as { chatId: string; projectId: string; title: string };
+    expect(created).toMatchObject({ projectId: a.id, title: "Flaky test" });
+    expect(sends).toEqual([{ chatId: created.chatId, text: "fix the flaky test", opts: { channel: { name: "grok" } } }]);
+    expect((await store.getChat(created.chatId))?.purpose).toMatchObject({ kind: "channel", label: "Started by grok" });
+
+    // A mode that turns prompts off is refused before any chat exists.
+    const before = (await store.listChats()).length;
+    const bypass = await instance.inject({ method: "POST", url: "/api/integration/chats", headers: bearer(token), payload: { projectId: a.id, text: "go", modeId: "yolo" } });
+    expect(bypass.statusCode, bypass.body).toBe(403);
+    expect((await store.listChats()).length).toBe(before);
+
+    // Outside the allowlist reads exactly like a project that does not exist.
+    const outside = await instance.inject({ method: "POST", url: "/api/integration/chats", headers: bearer(token), payload: { projectId: b.id, text: "go" } });
+    expect(outside.statusCode).toBe(404);
+    const unknown = await instance.inject({ method: "POST", url: "/api/integration/chats", headers: bearer(token), payload: { projectId: "nope", text: "go" } });
+    expect(unknown.statusCode).toBe(404);
+    await instance.close();
+  });
+
+  it("summarizes a visible chat, and hides the rest", async () => {
+    const { instance } = await app();
+    const access = await owner(instance);
+    const a = await project(instance, access, "a", join(dirs[0]!, "a"));
+    const b = await project(instance, access, "b", join(dirs[0]!, "b"));
+    const inA = await chat(instance, access, a.id, "in a");
+    const inB = await chat(instance, access, b.id, "in b");
+    (instance.services.chatSummaries as unknown as { generate: () => Promise<string> }).generate = async () => "a summary";
+    const { token } = await mint(instance, access, { name: "grok", scopes: ["chats:read"], projectIds: [a.id] });
+
+    const ok = await instance.inject({ url: `/api/integration/chats/${inA.id}/summary`, headers: bearer(token) });
+    expect(ok.statusCode, ok.body).toBe(200);
+    // An empty chat never reaches the model.
+    expect(ok.json()).toMatchObject({ chatId: inA.id, cached: false, summary: "Nothing has been said in this chat yet." });
+    expect((await instance.inject({ url: `/api/integration/chats/${inB.id}/summary`, headers: bearer(token) })).statusCode).toBe(404);
+    const { token: blind } = await mint(instance, access, { name: "blind", scopes: ["chats:write"] });
+    expect((await instance.inject({ url: `/api/integration/chats/${inA.id}/summary`, headers: bearer(blind) })).statusCode).toBe(403);
+    await instance.close();
+  });
+
   it("hides chats outside the token's project allowlist", async () => {
     const { instance } = await app();
     const access = await owner(instance);
@@ -402,10 +468,15 @@ describe("the external MCP mount", () => {
       const chat = await rpc(origin, token, "chat", "tools/list");
       expect(chat.status, JSON.stringify(chat.json)).toBe(200);
       const names = (chat.json as { result: { tools: { name: string }[] } }).result.tools.map((t) => t.name).sort();
-      // `spawn_chat` is external by the registry but unbound here: its consent
-      // card needs a parent session, and there is none.
+      // `spawn_chat` is external by the registry but unbound without
+      // `chats:create`: starting an agent is its own grant.
       expect(names).toEqual(externalManagerTools("chat").filter((n) => n !== "spawn_chat").sort());
+      expect(names).toContain("chat_summarize");
       expect(names).not.toContain("chat_set_mode");
+
+      const { token: creator } = await mint(instance, access, { name: "creator", scopes: ["tools:chat", "chats:create"] });
+      const withCreate = await rpc(origin, creator, "chat", "tools/list");
+      expect((withCreate.json as { result: { tools: { name: string }[] } }).result.tools.map((t) => t.name)).toContain("spawn_chat");
 
       const project = await rpc(origin, token, "project", "tools/list");
       expect((project.json as { result: { tools: { name: string }[] } }).result.tools.map((t) => t.name).sort()).toEqual(["project_info", "project_list"]);

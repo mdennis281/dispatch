@@ -7813,6 +7813,11 @@ export class SessionBroker {
 
   /* ---------------------------------------------------------- options */
 
+  /** The permission mode `modeId` resolves to — authored modes first, then built-ins. */
+  permissionModeOf(modeId: string): Promise<PermissionMode> {
+    return this.resolvePermissionMode(modeId);
+  }
+
   private async resolvePermissionMode(modeId: string): Promise<PermissionMode> {
     const mode = await this.resolveMode(modeId);
     if (mode) return mode.permissionMode;

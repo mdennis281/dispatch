@@ -487,7 +487,7 @@ export interface HarnessTextRequest {
    * Both are small, tool-less completions an economical model handles; a
    * commit message reads a staged diff, so it wants a little more output room.
    */
-  purpose: "title" | "commit-message";
+  purpose: "title" | "commit-message" | "summary";
   /**
    * A soft cap on the answer's length in tokens, for an adapter whose runtime
    * takes one. A hint, not a contract: adapters may ignore it.
