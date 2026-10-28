@@ -95,10 +95,16 @@ export function renderFind(result: FindChatsResult, query?: string): string {
     .join(", ");
   lines.push(`_${stats}._`);
   if (result.truncated) {
-    // Never let a budget stop read as "not found".
+    // Never let a page boundary read as "not found" — and say how to get past
+    // it, which a bare count did not: the caller was left guessing date windows.
+    const next = result.nextCursor
+      ? ` Next page: call again with the same arguments plus \`cursor: "${result.nextCursor}"\`.`
+      : "";
     lines.push(
-      `⚠ Scan budget reached — ${result.unscanned} older chat(s) were NOT searched. ` +
-        `Narrow with \`project\`/\`since\`, or raise the budget, before concluding it isn't there.`,
+      query
+        ? `⚠ Not finished — ${result.unscanned} older chat(s) not searched yet, so this is not "not found".${next}` +
+            " Or narrow with `project`/`since`."
+        : `${result.unscanned} more chat(s).${next}`,
     );
   }
   lines.push(
