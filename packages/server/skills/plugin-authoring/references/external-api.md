@@ -49,6 +49,7 @@ external tool are **offered** (`OFFERABLE_TOOL_SCOPES` in `@dispatch/shared`; to
 | `POST chats/:id/messages { text, delivery?: "queue"\|"interrupt", sender? }` | `chats:write` |
 | `POST chats { projectId, text, title?, modeId?, provider?, model?, effort? }` → 201 | `chats:create` |
 | `GET chats/:id/summary?focus` (cached; 429 + `Retry-After` past 30/h) | `chats:read` |
+| `POST chats/:id/stop { archive? }` → `{ interrupted, archived }` | `chats:write` (archive: only a chat this token started, else 403) |
 | `GET attention` | `attention:read` |
 | `POST attention/:id/answer { optionId? \| answer? \| answers? \| decline: true }` | `attention:answer` (question items only) |
 | `GET projects` | `projects:read` |
@@ -65,7 +66,7 @@ The same category servers a session gets, built with an *external* context that 
 self chat. A category is offered only with `tools:<category>`; one with nothing
 external is a 404. The external set:
 
-`chat_find chat_read chat_send chat_ask chat_reply chat_state wait_for_chat` ·
+`chat_find chat_read chat_send chat_ask chat_reply chat_state chat_summarize chat_stop wait_for_chat` ·
 `project_info project_list` · `remember recall forget memory_list memory_search
 memory_history memory_similar` · `issue_list issue_read issue_create issue_comment
 issue_update` · `config_list config_read mode_list`.
@@ -75,7 +76,9 @@ Not external: everything in github / confirm / workspace / mcp / session / secre
 `spawn_chat` is offered only to a token holding `chats:create` (the grant is the
 consent): the chat runs in the project's default mode, a bypass mode is refused, and
 its brief is attributed to the token. `chat_summarize` is cached per chat and
-rate-limited per caller. Memory and issue tools bind only when the token names
+rate-limited per caller. `chat_stop` rides with `chat_send`; it interrupts the running
+turn (the Stop button), and `archive: true` — only for a chat this token started —
+also releases the session and archives it. Memory and issue tools bind only when the token names
 **exactly one** project. An unauthenticated request here gets a `WWW-Authenticate:
 Bearer resource_metadata=…` challenge, which is how an OAuth-capable MCP client
 discovers the authorization server from the refusal alone.

@@ -1934,6 +1934,24 @@ export interface ManagerMcpSummary {
   summarize(chatId: string, focus?: string): Promise<ManagerMcpSummaryResult>;
 }
 
+/** What `chat_stop` hands back — see `ChannelChatService.stop`. */
+export interface ManagerMcpChatStopResult {
+  chatId: string;
+  title: string;
+  interrupted: boolean;
+  archived: boolean;
+}
+
+/**
+ * Calling ANOTHER chat off (omitted → no `chat_stop`). Bound on the integration
+ * mount only: a connector that spawned a duplicate had no way to stop it,
+ * whereas a session can already interrupt a peer with `chat_send` and has a
+ * human beside it for anything more. Throws with a sentence on refusal.
+ */
+export interface ManagerMcpChatControl {
+  stop(chatId: string, opts: { archive: boolean }): Promise<ManagerMcpChatStopResult>;
+}
+
 /**
  * Read-only inspection of OTHER chats, their images, and project config.
  *
@@ -2121,6 +2139,8 @@ export interface ManagerMcpContext {
   chats?: ManagerMcpChats;
   /** Chat summarizer (omitted → no `chat_summarize` tool). */
   summary?: ManagerMcpSummary;
+  /** Stops (and archives) other chats (omitted → no `chat_stop` tool). */
+  control?: ManagerMcpChatControl;
   /** Project MCP-config editor for this session (omitted → no `mcp_*` tools). */
   mcpConfig?: ManagerMcpConfig;
   /** Instruction/skill/persona authoring for this session (omitted → no `config_*` tools). */
@@ -7462,6 +7482,42 @@ ${look}` : "")
     },
   );
 
+  const chatStop = tool(
+    "chat_stop",
+    "Call ANOTHER chat off: interrupt its running turn, exactly as the human's Stop " +
+      "button does — the chat keeps its transcript and picks up again on the next " +
+      "message. Use it on a chat you spawned by mistake or twice, or one heading the " +
+      "wrong way (to redirect it instead, chat_send with delivery 'interrupt'). Pass " +
+      "archive: true to also release its session and archive it, which hides it from " +
+      "the sidebar — allowed only for a chat YOU started with spawn_chat, never one the " +
+      "owner opened.",
+    {
+      chatId: z.string().describe("The chat to stop, as reported by chat_find or spawn_chat."),
+      archive: z
+        .boolean()
+        .optional()
+        .describe("Also archive it (only a chat you started). Default false: just interrupt."),
+    },
+    async (args): Promise<CallToolResult> => {
+      if (!ctx.control) {
+        return textResult("The chat_stop tool is not available in this session.", true);
+      }
+      const chatId = typeof args.chatId === "string" ? args.chatId.trim() : "";
+      if (!chatId) return textResult("chat_stop requires a non-empty chatId.", true);
+      try {
+        const r = await ctx.control.stop(chatId, { archive: args.archive === true });
+        const did = [
+          r.interrupted ? "interrupted its running turn" : "it had no running turn to interrupt",
+          ...(r.archived ? ["it is archived"] : []),
+        ].join("; ");
+        return textResult(`${r.title} — ${r.chatId}: ${did}.
+${JSON.stringify(r)}`);
+      } catch (err) {
+        return textResult(`Could not stop ${chatId}: ${err instanceof Error ? err.message : String(err)}`, true);
+      }
+    },
+  );
+
   const chatSetMode = tool(
     "chat_set_mode",
     "Switch a chat to a MODE — a named permission posture from mode_list (plan, auto, " +
@@ -7899,6 +7955,7 @@ ${look}` : "")
     chatReply,
     chatState,
     chatSummarize,
+    chatStop,
     chatSetMode,
     chatSetPersona,
     projectInfo,
@@ -7982,6 +8039,7 @@ const TOOL_WIRE_NAME: Record<ManagerToolKey, ManagerToolName> = {
   chatReply: "chat_reply",
   chatState: "chat_state",
   chatSummarize: "chat_summarize",
+  chatStop: "chat_stop",
   chatSetMode: "chat_set_mode",
   chatSetPersona: "chat_set_persona",
   projectInfo: "project_info",
@@ -8072,6 +8130,7 @@ const MANAGER_TOOL_GATE: Record<ManagerToolName, ManagerToolBinding | null> = {
   chat_reply: "messaging",
   chat_state: "messaging",
   chat_summarize: "summary",
+  chat_stop: "control",
   chat_set_mode: "messaging",
   chat_set_persona: "messaging",
   project_info: "inspect",
@@ -8103,6 +8162,7 @@ export type ManagerToolBinding =
   | "inspect"
   | "messaging"
   | "summary"
+  | "control"
   | "secrets"
   | "issues";
 
@@ -8205,6 +8265,7 @@ function boundTools(ctx: ManagerMcpContext): Record<ManagerToolName, boolean> {
     chat_reply: Boolean(ctx.messaging),
     chat_state: Boolean(ctx.messaging),
     chat_summarize: Boolean(ctx.summary),
+    chat_stop: Boolean(ctx.control),
     // The posture writes ride the same binding: re-pointing a chat's mode or
     // persona is the same kind of reach into another chat as sending to it.
     chat_set_mode: Boolean(ctx.messaging),

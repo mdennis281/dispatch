@@ -1137,6 +1137,13 @@ export function createServices(
     ensureSession: (chatId) => ensureSession(services, chatId),
     permissionModeOf: (modeId) => broker.permissionModeOf(modeId),
     send: (input) => chatMessenger.send(input),
+    getChat: (id) => store.getChat(id).catch(() => null),
+    interrupt: (chatId) => broker.interrupt(chatId),
+    stopSession: (chatId) => broker.stop(chatId),
+    archive: async (chatId) => {
+      const saved = await store.patchChat(chatId, { archived: true });
+      if (saved) bus.publish({ type: "chat-update", chat: saved });
+    },
   });
   const chatSummaries = new ChatSummaryService({ store, harnesses });
   managerMcp.setIntegrationContext((identity) =>

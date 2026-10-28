@@ -214,6 +214,8 @@ export function registerMcpRoutes(app: FastifyInstance): void {
       // `chat_summarize` is bound on the integration mount only — a session
       // reads another chat with chat_read and summarizes it itself.
       summary: false,
+      // `chat_stop` likewise: a session interrupts a peer with chat_send.
+      control: false,
       // Same story for cross-chat messaging: one messenger, constructed by the
       // container and bound by the broker for every session.
       messaging: !!services.chatMessenger,

@@ -320,6 +320,54 @@ describe("REST", () => {
     await instance.close();
   });
 
+  it("stops any visible chat, but archives only the ones this integration started", async () => {
+    const { instance, store } = await app();
+    const access = await owner(instance);
+    const a = await project(instance, access, "a", join(dirs[0]!, "a"));
+    const b = await project(instance, access, "b", join(dirs[0]!, "b"));
+    const owners = await chat(instance, access, a.id, "the owner's own");
+    const inB = await chat(instance, access, b.id, "in b");
+    // What the integration's own spawn leaves behind — see ChannelChatService.create.
+    const mine = await chat(instance, access, a.id, "grok's duplicate");
+    await store.patchChat(mine.id, { purpose: { kind: "channel", label: "Started by grok" } });
+    // No runtime in this suite, so the broker half is recorded rather than run.
+    const calls: string[] = [];
+    const deps = (instance.services.channelChats as unknown as {
+      deps: { interrupt: (id: string) => Promise<boolean>; stopSession: (id: string) => Promise<void> };
+    }).deps;
+    deps.interrupt = async (id) => { calls.push(`interrupt:${id}`); return id === mine.id; };
+    deps.stopSession = async (id) => { calls.push(`stop:${id}`); };
+
+    const { token } = await mint(instance, access, { name: "grok", scopes: ["chats:write"], projectIds: [a.id] });
+    const stop = (id: string, payload: Record<string, unknown> = {}) =>
+      instance.inject({ method: "POST", url: `/api/integration/chats/${id}/stop`, headers: bearer(token), payload });
+
+    // Interrupting is open on any visible chat, and leaves it where it was.
+    const plain = await stop(owners.id);
+    expect(plain.statusCode, plain.body).toBe(200);
+    expect(plain.json()).toMatchObject({ chatId: owners.id, interrupted: false, archived: false });
+
+    // Archiving the owner's chat is refused BEFORE it is interrupted.
+    calls.length = 0;
+    const hide = await stop(owners.id, { archive: true });
+    expect(hide.statusCode, hide.body).toBe(403);
+    expect(calls).toEqual([]);
+    expect((await store.getChat(owners.id))?.archived).toBeUndefined();
+
+    // Its own duplicate: interrupted, released and archived.
+    const undo = await stop(mine.id, { archive: true });
+    expect(undo.statusCode, undo.body).toBe(200);
+    expect(undo.json()).toMatchObject({ chatId: mine.id, interrupted: true, archived: true });
+    expect(calls).toEqual([`interrupt:${mine.id}`, `stop:${mine.id}`]);
+    expect((await store.getChat(mine.id))?.archived).toBe(true);
+
+    // Outside the allowlist, and without the scope.
+    expect((await stop(inB.id)).statusCode).toBe(404);
+    const { token: reader } = await mint(instance, access, { name: "reader", scopes: ["chats:read"] });
+    expect((await instance.inject({ method: "POST", url: `/api/integration/chats/${mine.id}/stop`, headers: bearer(reader), payload: {} })).statusCode).toBe(403);
+    await instance.close();
+  });
+
   it("summarizes a visible chat, and hides the rest", async () => {
     const { instance } = await app();
     const access = await owner(instance);
@@ -450,6 +498,9 @@ describe("the external MCP mount", () => {
       const wait = text(await rpc(origin, token, "chat", "tools/call", { name: "wait_for_chat", arguments: { chatId: inB.id, timeoutSeconds: 5 } }));
       expect(wait.isError).toBe(true);
       expect(wait.content[0]!.text).toContain("Unknown chatId");
+      const stopped = text(await rpc(origin, token, "chat", "tools/call", { name: "chat_stop", arguments: { chatId: inB.id } }));
+      expect(stopped.isError).toBe(true);
+      expect(stopped.content[0]!.text).toContain("No chat");
       // …and A's chat still answers.
       const okState = text(await rpc(origin, token, "chat", "tools/call", { name: "chat_state", arguments: { chatId: inA.id } }));
       expect(okState.isError ?? false).toBe(false);
@@ -472,6 +523,7 @@ describe("the external MCP mount", () => {
       // `chats:create`: starting an agent is its own grant.
       expect(names).toEqual(externalManagerTools("chat").filter((n) => n !== "spawn_chat").sort());
       expect(names).toContain("chat_summarize");
+      expect(names).toContain("chat_stop");
       expect(names).not.toContain("chat_set_mode");
 
       const { token: creator } = await mint(instance, access, { name: "creator", scopes: ["tools:chat", "chats:create"] });
