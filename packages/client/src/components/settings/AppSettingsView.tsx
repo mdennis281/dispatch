@@ -91,6 +91,9 @@ function normalize(s: AppSettings): AppSettings {
     },
     showInjectedContext: s.showInjectedContext ?? false,
     shellFilter: s.shellFilter ?? [...SHELL_TRANSCRIPT_CATEGORIES],
+    // Carried RAW: unset means "no choice", and a field this function drops is
+    // a field the next save of anything else DELETES (PUT is a full replace).
+    terminalLocations: s.terminalLocations,
     spawnChat: { autoApprove: s.spawnChat?.autoApprove ?? false },
     // Both default TRUE — unset means fully enabled (see the schema). Spelling
     // the effective values out here is what keeps a save of some unrelated

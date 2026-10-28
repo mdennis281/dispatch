@@ -21,6 +21,7 @@
  */
 import { z } from "zod";
 import type { HostAbortSignal } from "./harness.js";
+import { resolveLayered, type Layered } from "./layered.js";
 
 /** The id that always means "a local shell on the Dispatch host". Never registrable. */
 export const LOCAL_TERMINAL_BACKEND = "local";
@@ -189,8 +190,57 @@ export const TerminalLocationSchema = z.object({
 });
 export type TerminalLocation = z.infer<typeof TerminalLocationSchema>;
 
-/** Where the chosen backend id came from. */
-export type TerminalBackendSource = "chat" | "project" | "default";
+/** Where the chosen backend id came from. `terminal` = the agent named it for that one shell. */
+export type TerminalBackendSource = "terminal" | "chat" | "project" | "default";
+
+/** The allowed-locations list: backend ids (`local` included) an agent may pick per terminal. */
+export const TerminalLocationsSchema = z.array(z.string().regex(TERMINAL_BACKEND_ID_PATTERN));
+
+/**
+ * Which locations the AGENT may choose between, per terminal — app setting
+ * `terminalLocations`, overridden whole by project.yaml `defaults.terminalLocations`.
+ *
+ * Absent at a layer means inherit; `[]` is a pin ("no choice here"), so a
+ * project can switch off a choice the app turned on. Unset everywhere is `[]`:
+ * the agent picks nothing and every shell goes where the chat → project →
+ * local rule sends it, exactly as before the list existed.
+ *
+ * The chat's own default location is always pickable on top of this list (it
+ * is what the agent gets by saying nothing), so choice is only REAL when the
+ * list adds a second registered location — see the registry's `locations()`.
+ */
+export function resolveTerminalLocations(layers: {
+  project?: readonly string[] | null;
+  app?: readonly string[] | null;
+}): Layered<string[]> {
+  return resolveLayered<string[]>(
+    {
+      ...(layers.project ? { project: [...layers.project] } : {}),
+      ...(layers.app ? { app: [...layers.app] } : {}),
+    },
+    [],
+  );
+}
+
+/** One place the agent may send a new terminal, as the registry offers it. */
+export interface TerminalLocationOption {
+  id: string;
+  label: string;
+  /** The chat's default — where a terminal goes when `location` is omitted. */
+  isDefault: boolean;
+}
+
+/** The agent's choice for one chat, resolved against what is actually registered. */
+export interface TerminalLocationChoices {
+  /** Where a terminal goes without `location` (may be an unregistered pin — it falls back). */
+  defaultId: string;
+  /** Selectable now: the default (when it can run) plus every allowed AND registered id. */
+  options: TerminalLocationOption[];
+  /** Allowed by config but not registered right now (plugin off or uninstalled). */
+  unavailable: string[];
+  /** True when there is a real choice — two or more options. */
+  enabled: boolean;
+}
 
 /**
  * The selection rule, in one place: the chat's pin, else the project's
@@ -200,9 +250,12 @@ export type TerminalBackendSource = "chat" | "project" | "default";
  * core reports it as a fallback rather than silently re-reading it as local.
  */
 export function resolveTerminalBackend(input: {
+  /** The agent's per-terminal `location`, when it named one. Beats the chat pin. */
+  terminal?: string | null;
   chat?: string | null;
   project?: string | null;
 }): { id: string; source: TerminalBackendSource } {
+  if (input.terminal) return { id: input.terminal, source: "terminal" };
   if (input.chat) return { id: input.chat, source: "chat" };
   if (input.project) return { id: input.project, source: "project" };
   return { id: LOCAL_TERMINAL_BACKEND, source: "default" };

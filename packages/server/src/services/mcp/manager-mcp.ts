@@ -373,6 +373,11 @@ interface ForwardedPort {
   remotePort: number;
   url: string;
   label?: string;
+  /**
+   * The backend forwarding it. Named in the result because one chat can hold
+   * shells on two backends now, each with its own :3000.
+   */
+  backend?: string;
 }
 
 /**
@@ -381,8 +386,17 @@ interface ForwardedPort {
  */
 function portsNote(ports: ForwardedPort[] | undefined): string {
   if (!ports?.length) return "";
-  const rows = ports.map((p) => `  :${p.remotePort} → ${p.url}${p.label ? ` (${p.label})` : ""}`);
+  const rows = ports.map((p) => {
+    const tags = [p.label, p.backend ? `on ${p.backend}` : undefined].filter(Boolean).join(", ");
+    return `  :${p.remotePort} → ${p.url}${tags ? ` (${tags})` : ""}`;
+  });
   return `\nForwarded ports (open these, not localhost:<port>):\n${rows.join("\n")}`;
+}
+
+/** " on <where>" for a terminal result header — the agent's record of where a command ran. */
+function ranOnText(r: { id: string; label: string; fallbackFrom?: string }): string {
+  if (r.fallbackFrom) return ` on ${r.label} (\`${r.id}\`, FELL BACK from ${r.fallbackFrom})`;
+  return ` on ${r.label} (\`${r.id}\`)`;
 }
 
 /**
@@ -391,12 +405,21 @@ function portsNote(ports: ForwardedPort[] | undefined): string {
  * already bound to this session's chat + default cwd by the broker.
  */
 export interface ManagerMcpTerminals {
+  /**
+   * The locations this session's agent may pick per terminal, as of session
+   * start — present only when there is a real choice (two or more). Decides
+   * whether the tool offers `location` at all, so a chat with no choice sees
+   * the same tool it always did.
+   */
+  locations?: { id: string; label: string; isDefault: boolean }[];
   run(args: {
     name: string;
     command: string;
     timeoutMs?: number;
     signal?: AbortSignal;
     background?: boolean;
+    /** Where a NEW terminal runs (validated by the binding; refused there with the allowed list). */
+    location?: string;
   }): Promise<{
     output: string;
     exitCode: number | null;
@@ -406,6 +429,8 @@ export interface ManagerMcpTerminals {
     backgrounded?: boolean;
     /** Once per shell: where it runs, or why it fell back to local (see TerminalService). */
     notice?: string;
+    /** Where this run happened. Absent on an install with no terminal backend in play. */
+    ranOn?: { id: string; label: string; fallbackFrom?: string };
     /** Remote listeners a terminal backend forwards for this chat. Absent with no backend. */
     ports?: ForwardedPort[];
   }>;
@@ -5102,6 +5127,26 @@ export function createManagerTools(ctx: ManagerMcpContext) {
     },
   );
 
+  // `location` is offered only when this session really has a choice — a chat
+  // with one place to run sees the tool exactly as it always was.
+  const locationChoices = ctx.terminals?.locations && ctx.terminals.locations.length > 1
+    ? ctx.terminals.locations
+    : undefined;
+  const locationParam: Record<string, z.ZodOptional<z.ZodString>> = locationChoices
+    ? {
+        location: z
+          .string()
+          .optional()
+          .describe(
+            "Where a NEW terminal runs, fixed for its life: " +
+              locationChoices
+                .map((o) => `\`${o.id}\` (${o.label}${o.isDefault ? ", the default" : ""})`)
+                .join(", ") +
+              ". Omit for the default. A different location for an existing terminal is refused — use a new name.",
+          ),
+      }
+    : {};
+
   const terminal = tool(
     "terminal",
     "Run a shell command in a NAMED, PERSISTENT terminal whose working directory " +
@@ -5132,6 +5177,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
           "Start it and return immediately — for a server/watcher that never exits. " +
             "Use a dedicated terminal name; this one stays busy until it stops.",
         ),
+      ...locationParam,
     },
     async (args, extra): Promise<CallToolResult> => {
       if (!ctx.terminals) {
@@ -5142,27 +5188,32 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       if (!name) return textResult("terminal requires a non-empty name.", true);
       if (!command.trim()) return textResult("terminal requires a command.", true);
 
+      const rawLocation = (args as { location?: unknown }).location;
+      const location =
+        locationChoices && typeof rawLocation === "string" && rawLocation.trim() ? rawLocation.trim() : undefined;
       const res = await ctx.terminals.run({
         name,
         command,
         timeoutMs: typeof args.timeoutMs === "number" ? args.timeoutMs : undefined,
         signal: extraSignal(extra) ?? ctx.signal,
         background: args.background === true,
+        ...(location ? { location } : {}),
       });
+      const where = res.ranOn ? ranOnText(res.ranOn) : "";
 
       // Where the shell runs — or why it is not where the chat asked — leads
       // the result: it changes how everything after it should be read.
       const notice = res.notice ? `${res.notice}\n\n` : "";
       if (res.backgrounded) {
         return textResult(
-          `${notice}[${name}] started in the background (cwd=${res.cwd}). ` +
+          `${notice}[${name}] started in the background${where} (cwd=${res.cwd}). ` +
             `Read its output with terminal_output({ name: "${name}" }). ` +
             `It is tracked against this chat and stops when the chat is torn down.` +
             portsNote(res.ports),
         );
       }
 
-      const header = `[${name}] cwd=${res.cwd} exit=${res.exitCode ?? "n/a"}`;
+      const header = `[${name}]${where} cwd=${res.cwd} exit=${res.exitCode ?? "n/a"}`;
       const body = res.output ? `\n${res.output}` : "";
       const note = res.error ? `\n(${res.error})` : "";
       return textResult(

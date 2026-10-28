@@ -190,6 +190,7 @@ export interface ProjectDefaultsPatch {
     showInjectedContext?: boolean | null;
     shellFilter?: ShellTranscriptFilter | null;
     terminalBackend?: string | null;
+    terminalLocations?: string[] | null;
   };
   spawnChat?: { autoApprove?: boolean | null };
 }
@@ -229,6 +230,12 @@ export interface AppSettings {
   showInjectedContext?: boolean;
   /** App-wide defaults for which tool families appear in transcript shells. */
   shellFilter?: ShellTranscriptFilter;
+  /**
+   * Terminal locations the agent may pick per terminal (`local` and/or backend
+   * ids). Unset or `[]` = no choice. A project's `defaults.terminalLocations`
+   * overrides it whole.
+   */
+  terminalLocations?: string[];
   /**
    * Where a NEW project's config dir goes when neither the project nor its repo
    * has said — `external` (unset reads as this) keeps everything Dispatch writes

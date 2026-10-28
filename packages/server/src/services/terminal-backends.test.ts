@@ -70,15 +70,19 @@ interface Harness {
   local: FakeShell[];
   chats: Map<string, { terminalBackend?: string; projectId?: string }>;
   projectDefaults: Map<string, string>;
+  /** The allowed-locations layers, mutable per test. Empty ⇒ no choice (the default). */
+  allowed: { project?: string[]; app?: string[] };
 }
 
 function setup(): Harness {
   const chats = new Map<string, { terminalBackend?: string; projectId?: string }>();
   const projectDefaults = new Map<string, string>();
+  const allowed: { project?: string[]; app?: string[] } = {};
   const registry = new TerminalBackendRegistry({
     bus,
     chat: async (id) => chats.get(id) ?? null,
     projectDefault: (pid) => projectDefaults.get(pid),
+    allowedLocations: () => allowed,
     repoPath: async () => "/repo",
   });
   const local: FakeShell[] = [];
@@ -98,7 +102,7 @@ function setup(): Harness {
   });
   registry.onDetach((id) => svc.detachBackend(id));
   services.push(svc);
-  return { registry, svc, local, chats, projectDefaults };
+  return { registry, svc, local, chats, projectDefaults, allowed };
 }
 
 /** A backend whose spawn the test controls. */
@@ -516,5 +520,175 @@ describe("lifecycle hooks and ports", () => {
     const note = await h.registry.agentNote("c1");
     expect(note).toContain("Keep git local");
     expect(note).toContain("by magic");
+  });
+});
+
+describe("per-terminal location (the agent's choice)", () => {
+  // ONE registered backend throughout, on purpose: the old pin-cache bug hid
+  // behind a second backend keeping `size > 0`, and so would a per-terminal
+  // pick that only "works" because something else forced a resolve.
+
+  it("is off by default: no list means no choice and no note for an unpinned chat", async () => {
+    const h = setup();
+    h.registry.register(fakeBackend(), "plug");
+    h.chats.set("c1", { projectId: "p1" });
+    const choices = await h.registry.locations({ chatId: "c1" });
+    expect(choices).toEqual({
+      defaultId: "local",
+      options: [{ id: "local", label: "this machine (the Dispatch host)", isDefault: true }],
+      unavailable: [],
+      enabled: false,
+    });
+    expect(await h.registry.agentNote("c1")).toBeUndefined();
+  });
+
+  it("the project list overrides the app's whole, and [] switches the choice off", async () => {
+    const h = setup();
+    h.registry.register(fakeBackend(), "plug");
+    h.chats.set("c1", { projectId: "p1" });
+    h.allowed.app = ["local", "box"];
+    expect((await h.registry.locations({ chatId: "c1" })).options.map((o) => o.id)).toEqual(["local", "box"]);
+    h.allowed.project = [];
+    expect((await h.registry.locations({ chatId: "c1" })).enabled).toBe(false);
+    // The default is always pickable on top of the list.
+    h.allowed.project = ["box"];
+    const c = await h.registry.locations({ chatId: "c1" });
+    expect(c.enabled).toBe(true);
+    expect(c.options).toEqual([
+      { id: "local", label: "this machine (the Dispatch host)", isDefault: true },
+      { id: "box", label: "Test box", isDefault: false },
+    ]);
+  });
+
+  it("refuses a location that is not allowed, or allowed but not registered, naming the allowed list", async () => {
+    const h = setup();
+    h.chats.set("c1", { projectId: "p1" });
+    h.allowed.app = ["local", "box"];
+    // The only backend plugin is off: `box` is allowed but cannot run.
+    const off = await h.registry.checkLocation({ chatId: "c1" }, "box");
+    expect(off).toEqual({ ok: false, error: expect.stringMatching(/"box" is allowed but not available right now/) });
+    expect((await h.registry.locations({ chatId: "c1" })).unavailable).toEqual(["box"]);
+
+    h.registry.register(fakeBackend(), "plug");
+    expect(await h.registry.checkLocation({ chatId: "c1" }, "box")).toEqual({ ok: true, label: "Test box" });
+    const nope = await h.registry.checkLocation({ chatId: "c1" }, "elsewhere");
+    expect(nope.ok).toBe(false);
+    expect(!nope.ok && nope.error).toMatch(/"elsewhere" is not an allowed terminal location.*Allowed: `local`, `box`/);
+  });
+
+  it("mixes locations in ONE unpinned chat: a build on the backend, a quick command local", async () => {
+    const h = setup();
+    const box = fakeBackend();
+    h.registry.register(box, "plug");
+    h.chats.set("c1", { projectId: "p1" });
+
+    const build = await h.svc.run({ chatId: "c1", projectId: "p1", name: "build", command: "say remote", cwd: "/w", location: "box" });
+    expect(build.output).toBe("remote");
+    expect(build.ranOn).toEqual({ id: "box", label: "Test box" });
+    expect(box.spawned).toHaveLength(1);
+
+    const quick = await h.svc.run({ chatId: "c1", projectId: "p1", name: "quick", command: "say here", cwd: "/w" });
+    expect(quick.output).toBe("here");
+    expect(quick.ranOn).toEqual({ id: "local", label: "this machine" });
+    expect(h.local).toHaveLength(1);
+
+    const byName = Object.fromEntries(h.svc.listChat("c1").map((t) => [t.name, t.location]));
+    expect(byName.build).toMatchObject({ backend: "box", state: "ready" });
+    expect(byName.quick).toBeUndefined();
+  });
+
+  it("a terminal's location is fixed: a different one is refused, the same one or none runs", async () => {
+    const h = setup();
+    const box = fakeBackend();
+    h.registry.register(box, "plug");
+    h.chats.set("c1", {});
+    await h.svc.run({ chatId: "c1", name: "build", command: "say a", cwd: "/w", location: "box" });
+
+    const moved = await h.svc.run({ chatId: "c1", name: "build", command: "say b", location: "local" });
+    expect(moved.error).toMatch(/Terminal 'build' already runs on Test box \(`box`\).*fixed for its life/);
+    expect(h.local).toHaveLength(0);
+    expect(box.spawned).toHaveLength(1);
+
+    expect((await h.svc.run({ chatId: "c1", name: "build", command: "say c", location: "box" })).output).toBe("c");
+    expect((await h.svc.run({ chatId: "c1", name: "build", command: "say d" })).output).toBe("d");
+  });
+
+  it("a shell opened with no location learns its placement on resolve, so a later different pick is refused", async () => {
+    const h = setup();
+    h.registry.register(fakeBackend(), "plug");
+    h.chats.set("c1", { terminalBackend: "box" });
+    h.registry.notePin("c1", "box");
+    // Two calls race the connect: the second carries a location the first's
+    // shell will turn out not to have.
+    const first = h.svc.run({ chatId: "c1", name: "main", command: "say one", cwd: "/w" });
+    const second = h.svc.run({ chatId: "c1", name: "main", command: "say two", location: "local" });
+    expect((await first).output).toBe("one");
+    expect((await second).error).toMatch(/already runs on Test box/);
+  });
+
+  it("`local` in a chat pinned to the backend is a plain local shell, spawned synchronously", () => {
+    const h = setup();
+    const box = fakeBackend();
+    h.registry.register(box, "plug");
+    h.chats.set("c1", { terminalBackend: "box" });
+    h.registry.notePin("c1", "box");
+    h.svc.create("c1", "pinned", "/w");
+    void h.svc.run({ chatId: "c1", name: "quick", command: "say x", cwd: "/w", location: "local" });
+    // `quick` spawned in the same tick, no resolve; `pinned` is still connecting.
+    expect(h.local).toHaveLength(1);
+    expect(h.svc.listChat("c1").find((t) => t.name === "quick")!.location).toBeUndefined();
+  });
+
+  it("an explicit pick to a backend whose spawn fails falls back, and the result says so", async () => {
+    const h = setup();
+    h.registry.register(fakeBackend({ spawn: async () => { throw new Error("no capacity"); } }), "plug");
+    h.chats.set("c1", {});
+    const res = await h.svc.run({ chatId: "c1", name: "build", command: "say x", cwd: "/w", location: "box" });
+    expect(res.ranOn).toEqual({ id: "local", label: "this machine", fallbackFrom: "Test box" });
+    expect(res.notice).toMatch(/could not start a shell: no capacity/);
+    // Asking for the same place again is not "a different location".
+    expect((await h.svc.run({ chatId: "c1", name: "build", command: "say y", location: "box" })).error).toBeUndefined();
+    // And a refusal names where it REALLY runs, not the backend it asked for.
+    const moved = await h.svc.run({ chatId: "c1", name: "build", command: "say z", location: "local" });
+    expect(moved.error).toMatch(/already runs on this machine \(a fallback — Test box could not start it\)/);
+  });
+
+  it("lifecycle hooks reach the backend a chat used only through a per-terminal pick", async () => {
+    const h = setup();
+    const box = fakeBackend();
+    h.registry.register(box, "plug");
+    h.chats.set("c1", { projectId: "p1" });
+    await h.svc.run({ chatId: "c1", projectId: "p1", name: "build", command: "say x", cwd: "/w", location: "box" });
+    h.registry.chatIdle({ chatId: "c1", projectId: "p1" });
+    h.svc.killChat("c1");
+    h.registry.chatDeleted({ chatId: "c1", projectId: "p1" });
+    await flush();
+    expect(box.idle).toEqual(["c1"]);
+    expect(box.deleted).toEqual(["c1"]);
+  });
+
+  it("the agent note lists every option with its backend's lines, for an UNPINNED chat", async () => {
+    const h = setup();
+    h.registry.register(fakeBackend(), "plug");
+    h.chats.set("c1", { projectId: "p1" });
+    h.allowed.app = ["local", "box", "gone"];
+    const note = (await h.registry.agentNote("c1"))!;
+    expect(note).toContain("pass `location` the FIRST time");
+    expect(note).toContain("- `local` — this machine (the Dispatch host) (the default).");
+    expect(note).toContain("- `box` — Test box.\n  Your code reaches the box by magic.");
+    expect(note).toContain("Allowed but unavailable right now: `gone`");
+    expect(note).toContain("keep git local");
+  });
+
+  it("keeps two backends' forwards of the same port in one chat apart", () => {
+    const h = setup();
+    h.registry.register(fakeBackend(), "plug");
+    h.registry.register(fakeBackend({ id: "b", label: "B" }), "plug");
+    h.registry.publishPort("box", { chatId: "c1", remotePort: 3000, url: "http://127.0.0.1:1" });
+    h.registry.publishPort("b", { chatId: "c1", remotePort: 3000, url: "http://127.0.0.1:2" });
+    expect(h.registry.ports("c1").map((p) => `${p.backend}:${p.url}`).sort()).toEqual([
+      "b:http://127.0.0.1:2",
+      "box:http://127.0.0.1:1",
+    ]);
   });
 });

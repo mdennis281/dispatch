@@ -26,6 +26,7 @@ import {
   HarnessKindSchema,
   ShellTranscriptFilterSchema,
   TERMINAL_BACKEND_ID_PATTERN,
+  TerminalLocationsSchema,
   WorkflowConfigSchema,
   type Project,
   type ShellTranscriptFilter,
@@ -278,6 +279,7 @@ export const ProjectDefaultsPatchSchema = z.object({
       showInjectedContext: z.boolean().nullable().optional(),
       shellFilter: ShellTranscriptFilterSchema.nullable().optional(),
       terminalBackend: z.string().regex(TERMINAL_BACKEND_ID_PATTERN).nullable().optional(),
+      terminalLocations: TerminalLocationsSchema.nullable().optional(),
     })
     .optional(),
   spawnChat: z

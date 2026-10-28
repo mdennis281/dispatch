@@ -15,6 +15,7 @@ import {
 import {
   LOCAL_TERMINAL_BACKEND,
   resolveTerminalBackend,
+  resolveTerminalLocations,
   type Chat,
   type TerminalInfo,
 } from "@dispatch/shared";
@@ -35,6 +36,7 @@ import { midTruncate } from "../../lib/format.js";
 import { useProcesses, useTerminalPorts } from "../../stores/processes.js";
 import { useChats } from "../../stores/chats.js";
 import { useProjectLayer } from "../../stores/config.js";
+import { useSettings } from "../../stores/settings.js";
 import { Select, type SelectOption } from "../ui/Select.js";
 
 const EMPTY_LINES: TerminalLine[] = [];
@@ -173,10 +175,15 @@ function LocationChip({ terminal }: { terminal: TerminalInfo }) {
  * The chat's own pick of where NEW shells run: inherit the project's default,
  * or pin one. Only rendered when a backend is registered. Read at spawn time,
  * so it moves the next shell, never one already running.
+ *
+ * When the agent may choose per terminal, the pin is only its DEFAULT, and the
+ * strip says so — otherwise a shell on a container in a chat "pinned" to this
+ * machine reads as a bug.
  */
 function TerminalBackendPicker({ chat }: { chat: Chat }) {
   const backends = useTerminals((s) => s.backends);
   const project = useProjectLayer(chat.projectId);
+  const appLocations = useSettings((s) => s.app.terminalLocations);
   // Also shown with NO backend registered when the chat or project still names
   // one — its plugin is off or gone, its shells come up local with a warning,
   // and this is the only place to see the stale pin and clear it.
@@ -205,26 +212,45 @@ function TerminalBackendPicker({ chat }: { chat: Chat }) {
     useChats.getState().upsertChat({ ...chat, terminalBackend: next ?? undefined });
     void api.chats.update(chat.id, { terminalBackend: next }).catch(() => {});
   };
+  // The same set the server offers the agent: the default plus every allowed
+  // location that can actually run (`TerminalBackendRegistry.locations`).
+  const allowed = resolveTerminalLocations({
+    project: project?.terminalLocations,
+    app: appLocations,
+  }).effective;
+  const choice = [...new Set([effective.id, ...allowed])].filter(
+    (id) => id === LOCAL_TERMINAL_BACKEND || backends.some((b) => b.id === id),
+  );
 
   return (
-    <div className="flex items-center gap-2 rounded-md border border-line-soft bg-panel-2/30 py-1 pl-2.5 pr-1">
-      <span className="text-2xs text-faint" title="Applies to shells opened from now on">
-        New shells run on
-      </span>
-      <span className="flex-1" />
-      <Select
-        width={220}
-        align="end"
-        value={effective.id}
-        onChange={(v) => pin(v)}
-        options={options}
-        inherit={{
-          label: `Inherit · ${labelOf(projectPick.id)}`,
-          hint: projectPick.source === "project" ? "from the project's defaults" : "the default",
-          active: chat.terminalBackend === undefined,
-          onSelect: () => pin(null),
-        }}
-      />
+    <div className="rounded-md border border-line-soft bg-panel-2/30 py-1 pl-2.5 pr-1">
+      <div className="flex items-center gap-2">
+        <span className="text-2xs text-faint" title="Applies to shells opened from now on">
+          {choice.length > 1 ? "New shells default to" : "New shells run on"}
+        </span>
+        <span className="flex-1" />
+        <Select
+          width={220}
+          align="end"
+          value={effective.id}
+          onChange={(v) => pin(v)}
+          options={options}
+          inherit={{
+            label: `Inherit · ${labelOf(projectPick.id)}`,
+            hint: projectPick.source === "project" ? "from the project's defaults" : "the default",
+            active: chat.terminalBackend === undefined,
+            onSelect: () => pin(null),
+          }}
+        />
+      </div>
+      {choice.length > 1 && (
+        <p
+          className="pb-0.5 pr-1.5 text-2xs leading-snug text-faint"
+          title="Allowed in app settings or the project's config. Each terminal keeps the location it opened on."
+        >
+          The agent picks per terminal: {choice.map(labelOf).join(" · ")}
+        </p>
+      )}
     </div>
   );
 }
