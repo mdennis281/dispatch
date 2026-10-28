@@ -32,6 +32,12 @@ export type {
   // server context
   PluginModule,
   PluginLog,
+  // cleanup lifecycle — `onShutdown` / `reconcile` on the module
+  // (docs/plugins.md → "Cleanup lifecycle")
+  PluginShutdownEvent,
+  PluginShutdownReason,
+  PluginReconcileEvent,
+  PluginLiveChat,
   PluginRouter,
   PluginRouteHandler,
   PluginChatSummary,
@@ -176,6 +182,8 @@ export type PluginContextOf<Req, Reply> = HostPluginContext<Req, Reply>;
 export function definePlugin(mod: {
   activate(ctx: PluginContext): Promise<void> | void;
   deactivate?(): Promise<void> | void;
+  onShutdown?: PluginModule["onShutdown"];
+  reconcile?: PluginModule["reconcile"];
 }): PluginModule {
   // The widening to the shared generic is sound: the host passes Fastify's
   // request and reply, which satisfy the structural subset above.

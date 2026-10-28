@@ -505,6 +505,32 @@ const MIGRATIONS: ReadonlyArray<string> = [
   `
   ALTER TABLE metric_tokens ADD COLUMN duration_ms INTEGER;
   `,
+  // 13 — plugin cleanups that have not succeeded yet.
+  //
+  // A terminal backend's `onChatDeleted` used to be fire-and-forget: if the
+  // hypervisor was unreachable at that moment the container it was meant to
+  // destroy was orphaned, and nothing ever asked again. A failed (or timed-out)
+  // call becomes a row here, retried with backoff and after the plugin's next
+  // activation until it succeeds. Per-instance like every table here, because
+  // the chat being cleaned up belongs to this instance.
+  //
+  // `target` is the backend id (one plugin may register several), `hook` the
+  // call to repeat. Dropped wholesale when the plugin is uninstalled.
+  `
+  CREATE TABLE plugin_cleanup (
+    plugin      TEXT    NOT NULL,
+    target      TEXT    NOT NULL,
+    hook        TEXT    NOT NULL,
+    chat_id     TEXT    NOT NULL,
+    project_id  TEXT,
+    attempts    INTEGER NOT NULL,
+    last_error  TEXT,
+    created_at  INTEGER NOT NULL,
+    next_at     INTEGER NOT NULL,
+    PRIMARY KEY (plugin, target, hook, chat_id)
+  );
+  CREATE INDEX plugin_cleanup_due ON plugin_cleanup(next_at);
+  `,
 ];
 
 /** Schema version a database must be at for this build to use it. */

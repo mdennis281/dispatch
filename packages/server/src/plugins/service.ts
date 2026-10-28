@@ -39,12 +39,16 @@ import { basename, resolve, sep } from "node:path";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import {
   PLUGIN_API_VERSION,
+  PLUGIN_RECONCILE_BUDGET_MS,
+  PLUGIN_SHUTDOWN_BUDGET_MS,
   manifestPathDir,
   type ModeConfig,
   type PluginInfo,
+  type PluginLiveChat,
   type PluginLog,
   type PluginModule,
   type PluginOrigin,
+  type PluginShutdownReason,
   type PluginSource,
   type PluginAutoUpdate,
   DEFAULT_PLUGIN_AUTO_UPDATE,
@@ -79,6 +83,7 @@ import {
   type PluginMcpDeclaration,
 } from "./contributions.js";
 import { PluginProcessHost, type PluginProcessRunner } from "./processes.js";
+import type { PluginCleanupQueue } from "./cleanup.js";
 
 /** The host is running its TypeScript sources (tsx in `pnpm dev`), not `dist/`. */
 const RUNNING_FROM_SOURCE = fileURLToPath(import.meta.url).endsWith(".ts");
@@ -121,6 +126,12 @@ interface PluginRecord extends DiscoveredPlugin {
   autoUpdate?: PluginAutoUpdate;
   module?: PluginModule;
   owned?: OwnedResources;
+  /** `onShutdown` already ran for this activation — a later deactivate must not run it again. */
+  shutDown?: boolean;
+  /** Aborts the `reconcile` in flight when the plugin goes down under it. */
+  reconcileAbort?: AbortController;
+  /** The post-activation reconcile + cleanup retry, so tests (and nothing else) can wait for it. */
+  reconciling?: Promise<void>;
   /** Snapshot of the plugin's static contributions, read once at `load()`. */
   contributions: PluginContributions;
 }
@@ -147,6 +158,22 @@ export interface PluginServiceOptions {
   portFree?: (port: number) => Promise<boolean>;
   activateBudgetMs?: number;
   deactivateBudgetMs?: number;
+  /** Override of {@link PLUGIN_SHUTDOWN_BUDGET_MS}, for tests. */
+  shutdownBudgetMs?: number;
+  /** Override of {@link PLUGIN_RECONCILE_BUDGET_MS}, for tests. */
+  reconcileBudgetMs?: number;
+  /**
+   * Failed per-chat cleanups (`plugin_cleanup`). Retried after each plugin's
+   * reconcile, dropped on uninstall, summarised on its row. Optional so a
+   * host built without one behaves as before.
+   */
+  cleanups?: PluginCleanupQueue;
+  /**
+   * Every chat that exists, as `reconcile` is told. Defaults to the store's
+   * list with no terminal-backend resolution; the container supplies one that
+   * resolves each chat's default backend.
+   */
+  liveChats?: () => Promise<PluginLiveChat[]>;
   /** Injected for tests so a module can be faked without a file on disk. */
   importModule?: (url: string) => Promise<unknown>;
   fault?: (kind: string, err: unknown) => void;
@@ -157,11 +184,14 @@ function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** What {@link withBudget} rejects with on a timeout — so a caller can tell "too slow" from "threw". */
+class BudgetExceeded extends Error {}
+
 /** Await `p` for at most `ms`; a timeout rejects with a message naming the budget. */
 function withBudget<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`${what} did not finish within ${ms / 1000}s`)), ms);
+    timer = setTimeout(() => reject(new BudgetExceeded(`${what} did not finish within ${ms / 1000}s`)), ms);
     timer.unref?.();
   });
   return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
@@ -188,6 +218,12 @@ export class PluginService implements PluginContributionSource {
   private readonly processHost: PluginProcessHost | undefined;
   private readonly activateBudgetMs: number;
   private readonly deactivateBudgetMs: number;
+  private readonly shutdownBudgetMs: number;
+  private readonly reconcileBudgetMs: number;
+  private readonly cleanups: PluginCleanupQueue | undefined;
+  private readonly liveChats: () => Promise<PluginLiveChat[]>;
+  /** The server-wide `onShutdown` pass, memoised: `installShutdown` starts it, `dispose()` joins it. */
+  private shuttingDown: Promise<void> | undefined;
   private readonly importModule: (url: string) => Promise<unknown>;
   private readonly fault: (kind: string, err: unknown) => void;
   private readonly log: (line: string) => void;
@@ -213,6 +249,17 @@ export class PluginService implements PluginContributionSource {
     this.ctxDeps = opts.context;
     this.activateBudgetMs = opts.activateBudgetMs ?? ACTIVATE_BUDGET_MS;
     this.deactivateBudgetMs = opts.deactivateBudgetMs ?? DEACTIVATE_BUDGET_MS;
+    this.shutdownBudgetMs = opts.shutdownBudgetMs ?? PLUGIN_SHUTDOWN_BUDGET_MS;
+    this.reconcileBudgetMs = opts.reconcileBudgetMs ?? PLUGIN_RECONCILE_BUDGET_MS;
+    this.cleanups = opts.cleanups;
+    this.liveChats =
+      opts.liveChats ??
+      (async () =>
+        (await this.store.listChats()).map((c) => ({
+          id: c.id,
+          projectId: c.projectId,
+          ...(c.archived ? { archived: true } : {}),
+        })));
     this.importModule = opts.importModule ?? ((url) => import(url));
     this.fault = opts.fault ?? recordFault;
     // eslint-disable-next-line no-console
@@ -364,6 +411,7 @@ export class PluginService implements PluginContributionSource {
     }
     const owned = newOwnedResources();
     rec.owned = owned;
+    rec.shutDown = false;
     try {
       const url = pathToFileURL(this.serverEntry(rec, manifest.server)).href;
       const ns = await withBudget(this.importModule(url), this.activateBudgetMs, "import");
@@ -398,6 +446,10 @@ export class PluginService implements PluginContributionSource {
       }
       rec.phase = "active";
       log.info(`active (v${manifest.version})`);
+      // Detached: a reconcile talks to whatever the plugin manages remotely and
+      // may take a minute. Neither boot nor the next plugin in `activateAll`
+      // should wait on it.
+      rec.reconciling = this.reconcileOne(rec, mod);
     } catch (err) {
       rec.phase = "error";
       rec.activationError = describe(err);
@@ -409,7 +461,9 @@ export class PluginService implements PluginContributionSource {
     }
   }
 
-  private async deactivateOne(rec: PluginRecord): Promise<void> {
+  private async deactivateOne(rec: PluginRecord, reason?: PluginShutdownReason): Promise<void> {
+    rec.reconcileAbort?.abort(new Error("the plugin is going down"));
+    if (reason) await this.runShutdownHooks([rec], reason);
     if (rec.phase === "active" && rec.module?.deactivate) {
       try {
         await withBudget(Promise.resolve(rec.module.deactivate()), this.deactivateBudgetMs, "deactivate()");
@@ -422,6 +476,130 @@ export class PluginService implements PluginContributionSource {
     this.teardown(rec);
     await this.stopProcesses(rec);
     rec.phase = "inactive";
+  }
+
+  /**
+   * Run `onShutdown` for each record that is active, has one, and has not had
+   * it this activation — all IN PARALLEL on one shared budget. An overrun
+   * aborts the signal, is logged by plugin, and is otherwise ignored: the
+   * caller (a Restart, a toggle) carries on regardless. Never rejects.
+   */
+  private async runShutdownHooks(recs: PluginRecord[], reason: PluginShutdownReason): Promise<void> {
+    const targets = recs.filter((r) => r.phase === "active" && !r.shutDown && r.module?.onShutdown);
+    for (const r of recs) {
+      if (r.phase !== "active") continue;
+      r.shutDown = true;
+      // A reconcile racing its own plugin's shutdown would rebuild what the
+      // shutdown is tearing down.
+      r.reconcileAbort?.abort(new Error("the plugin is going down"));
+    }
+    if (!targets.length) return;
+    const budget = this.shutdownBudgetMs;
+    const ac = new AbortController();
+    const deadline = Date.now() + budget;
+    const timer = setTimeout(() => ac.abort(new Error(`onShutdown budget of ${budget}ms exceeded`)), budget);
+    timer.unref?.();
+    try {
+      await Promise.all(
+        targets.map(async (rec) => {
+          const mod = rec.module!;
+          try {
+            await withBudget(
+              Promise.resolve().then(() => mod.onShutdown!({ reason, deadline, signal: ac.signal })),
+              budget,
+              `onShutdown(${reason})`,
+            );
+          } catch (err) {
+            if (err instanceof BudgetExceeded) {
+              // Not a crash — a plugin that did not return in time. Named in
+              // the log so the owner can tell whose hook made a restart slow.
+              this.log(`[dispatch] plugin "${rec.id}" onShutdown(${reason}) overran its ${budget / 1000}s budget — moving on without it`);
+            } else {
+              this.fault(`plugin "${rec.id}" onShutdown(${reason}) failed`, err);
+            }
+          }
+        }),
+      );
+    } finally {
+      clearTimeout(timer);
+      // Anything still running past this point is told to stop.
+      if (!ac.signal.aborted) ac.abort(new Error("shutdown pass finished"));
+    }
+  }
+
+  /**
+   * The server is going down: every active plugin's `onShutdown`, with the
+   * real reason. Called by `installShutdown` BEFORE `app.close()` — inside
+   * `dispose()` there is no way to know a restart from a stop — and joined by
+   * `dispose()`, which falls back to `stop` for a teardown that never came
+   * through there (tests, an embedded server). Memoised: the first reason
+   * wins. Never rejects.
+   */
+  shutdown(reason: Extract<PluginShutdownReason, "restart" | "stop">): Promise<void> {
+    this.shuttingDown ??= this.runShutdownHooks([...this.records.values()], reason);
+    return this.shuttingDown;
+  }
+
+  /**
+   * After a successful activation: the plugin's `reconcile` against every chat
+   * that exists, then a retry of its failed cleanups. In that order, so a
+   * plugin that has just settled its state against reality answers the
+   * retries from the settled state. Never rejects.
+   */
+  private async reconcileOne(rec: PluginRecord, mod: PluginModule): Promise<void> {
+    if (mod.reconcile) {
+      const ac = new AbortController();
+      rec.reconcileAbort = ac;
+      const budget = this.reconcileBudgetMs;
+      const timer = setTimeout(() => ac.abort(new Error(`reconcile budget of ${budget}ms exceeded`)), budget);
+      timer.unref?.();
+      try {
+        const chats = await this.liveChats();
+        // Went down while the chat list was read: a reconcile now would run
+        // against a plugin that has already had its `onShutdown`.
+        if (ac.signal.aborted || rec.phase !== "active" || rec.shutDown) return;
+        const deadline = Date.now() + budget;
+        await withBudget(
+          Promise.resolve().then(() => mod.reconcile!({ chats, deadline, signal: ac.signal })),
+          budget,
+          "reconcile()",
+        );
+      } catch (err) {
+        // A reconcile cut short because the plugin went down is not a fault.
+        if (rec.phase === "active" && !this.disposed) this.fault(`plugin "${rec.id}" reconcile failed`, err);
+      } finally {
+        clearTimeout(timer);
+        if (rec.reconcileAbort === ac) rec.reconcileAbort = undefined;
+      }
+    }
+    if (this.disposed || rec.phase !== "active") return;
+    await this.cleanups?.retry({ plugin: rec.id }).catch((err: unknown) => {
+      this.fault(`plugin "${rec.id}" cleanup retry failed`, err);
+    });
+  }
+
+  /** Resolves once the plugin's post-activation reconcile (and cleanup retry) has run. */
+  async whenReconciled(id: string): Promise<void> {
+    await this.records.get(id)?.reconciling;
+  }
+
+  /** Retry this plugin's failed cleanups now, ignoring backoff — Settings' "Retry now". */
+  async retryCleanups(id: string): Promise<PluginInfo> {
+    const rec = this.records.get(id);
+    if (!rec) throw new PluginNotFound(id);
+    await this.cleanups?.retry({ plugin: id });
+    return this.info(rec);
+  }
+
+  /**
+   * Forget this plugin's failed cleanups — the owner has dealt with them by
+   * hand. Nothing is run: a row dropped here is never retried.
+   */
+  async discardCleanups(id: string): Promise<PluginInfo> {
+    const rec = this.records.get(id);
+    if (!rec) throw new PluginNotFound(id);
+    this.cleanups?.dropPlugin(id);
+    return this.info(rec);
   }
 
   /**
@@ -487,6 +665,9 @@ export class PluginService implements PluginContributionSource {
     this.disposed = true;
     // Nothing more will activate; release anything still waiting on it.
     this.providersSettled.resolve();
+    // Joins the pass `installShutdown` already started with the real reason;
+    // a teardown that did not come through there is a stop.
+    await this.shutdown("stop");
     const recs = [...this.records.values()].sort((a, b) => b.id.localeCompare(a.id));
     for (const rec of recs) {
       if (rec.phase === "active" || rec.phase === "error") await this.deactivateOne(rec);
@@ -532,6 +713,7 @@ export class PluginService implements PluginContributionSource {
     const error = rec.phase === "error" ? rec.activationError : rec.error;
     const oauthView = m ? pluginOAuthManifestView(m) : undefined;
     const oauth = oauthView && this.ctxDeps.pluginOAuth ? this.ctxDeps.pluginOAuth.status(rec.id, oauthView) : undefined;
+    const pendingCleanups = this.cleanups?.summary(rec.id);
     return {
       id: rec.id,
       name: m?.name ?? rec.id,
@@ -556,6 +738,7 @@ export class PluginService implements PluginContributionSource {
       ...(m?.secrets ? { secrets: m.secrets } : {}),
       ...(oauth?.length ? { oauth } : {}),
       ...(rec.contributions.warnings.length ? { warnings: rec.contributions.warnings } : {}),
+      ...(pendingCleanups ? { pendingCleanups } : {}),
       origin: this.originOf(rec),
       // Served to every signed-in user and drawn on the row, so a token
       // someone put in a clone URL (the CLI strips it; a hand-edited config
@@ -697,7 +880,7 @@ export class PluginService implements PluginContributionSource {
     rec.enabled = enabled;
     if (!enabled) {
       if (rec.phase === "active" || rec.phase === "error" || rec.phase === "pending") {
-        await this.deactivateOne(rec);
+        await this.deactivateOne(rec, "disable");
       }
       rec.needsRestart = false;
     } else if (rec.manifest && !rec.incompatible && rec.phase !== "active") {
@@ -871,7 +1054,7 @@ export class PluginService implements PluginContributionSource {
     // Down BEFORE the files go: a process it started may hold its directory
     // open (Windows refuses to delete a process's cwd), and a `pending` record
     // must not be picked up by an `activateAll` still walking its snapshot.
-    if (wasRunning || rec.phase === "pending") await this.deactivateOne(rec);
+    if (wasRunning || rec.phase === "pending") await this.deactivateOne(rec, "uninstall");
     rec.phase = "inactive";
     this.processHost?.unregister(id);
     try {
@@ -880,6 +1063,10 @@ export class PluginService implements PluginContributionSource {
       throw new PluginLifecycleError(`could not remove ${rec.dir}: ${describe(err)}`, 500);
     }
     this.records.delete(id);
+    // Whatever it never managed to clean up is past saving: the code that
+    // could run those hooks is gone, and a row nobody can retry would sit on
+    // nothing forever. Its `onShutdown("uninstall")` above was the last word.
+    this.cleanups?.dropPlugin(id);
     await this.store.updateSettings((current) => {
       const plugins = { ...current.plugins };
       if (opts.purge) {

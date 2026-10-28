@@ -402,6 +402,26 @@ export const PluginStatusSchema = z.enum(["active", "disabled", "error", "invali
 export type PluginStatus = z.infer<typeof PluginStatusSchema>;
 
 /**
+ * Per-chat cleanups of this plugin's that have failed and are being retried
+ * (`plugin_cleanup` in state.db) — a container a delete could not destroy,
+ * say. Drawn on the plugin's Settings row so a stuck one is seen by a human
+ * rather than only by a log.
+ */
+export const PluginCleanupSummarySchema = z.object({
+  count: z.number().int(),
+  /** When the oldest still-pending cleanup first failed (epoch ms). */
+  oldestAt: z.number(),
+  /** When the next retry is due (epoch ms). */
+  nextAt: z.number(),
+  /** The most attempts any one of them has had. */
+  attempts: z.number().int(),
+  lastError: z.string().optional(),
+  /** The chats concerned, oldest first, at most 20. */
+  chats: z.array(z.string()),
+});
+export type PluginCleanupSummary = z.infer<typeof PluginCleanupSummarySchema>;
+
+/**
  * One row of `GET /api/plugins`. A summary of the manifest plus the host's
  * verdict on it — never the raw manifest, which may be the thing that failed
  * to parse.
@@ -463,6 +483,8 @@ export const PluginInfoSchema = z.object({
    * other place it shows is a server log nobody reads.
    */
   warnings: z.array(z.string()).optional(),
+  /** Failed per-chat cleanups still being retried — see {@link PluginCleanupSummarySchema}. */
+  pendingCleanups: PluginCleanupSummarySchema.optional(),
   /** Where it came from — see {@link PluginOriginSchema}. */
   origin: PluginOriginSchema,
   /** The recorded install source, when there is one (`url` and `local` origins). */

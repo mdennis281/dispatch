@@ -41,7 +41,11 @@ it("counts and answers", async () => {
 What it records: `emitted`, `kv` (a Map), `sent`, `asked`, `replied`, `answered`,
 `log`, `memory` (per project), `processes` (seed a Map entry, start/stop flip
 `status`), `oauthTokens` (set one to simulate Connected), `attention` (push items),
-`listenerCount()` (zero after a clean `deactivate`). Route handlers receive
+`listenerCount()` (zero after a clean `deactivate`). The cleanup lifecycle:
+`t.lifecycle.shutdown(mod, "restart")` runs `onShutdown` then `deactivate` on the host's
+5 s budget and returns `{ overran, error?, elapsedMs }` — assert `overran: false`;
+`t.lifecycle.reconcile(mod, chats)`; `t.terminals.chatDeleted(id)` rejects when your
+`onChatDeleted` does (the host would retry it — call it twice to prove idempotence). Route handlers receive
 `PluginRequest` / `PluginReply`; `reply.code().header().send()` is honoured and the
 result is `{ status, headers, body }`. An unregistered route throws, naming what exists.
 

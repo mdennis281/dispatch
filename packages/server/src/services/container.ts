@@ -106,6 +106,7 @@ import { findShippedPluginsRoot } from "../plugins/shipped.js";
 import { PluginInspector } from "../plugins/inspect/index.js";
 import { PluginUpdateWatcher, pluginUpdateHours } from "../plugins/inspect/watcher.js";
 import { PluginOAuthService } from "../plugins/oauth.js";
+import { PluginCleanupQueue } from "../plugins/cleanup.js";
 
 /** The shared base every service hangs off. */
 export interface ServiceBase {
@@ -361,9 +362,18 @@ export function createServices(
   // backend registered the registry is empty and every shell is local, exactly
   // as before. The closures read `projectConfig` lazily — it is constructed a
   // few lines below, and nothing calls them before a plugin has activated.
-  const terminalBackends =
+  // Plugin cleanups that failed — today a backend's `onChatDeleted` — kept in
+  // state.db and retried until they succeed. Its executor names the registry
+  // below lazily; nothing runs a row before `start()` arms the timer.
+  const pluginCleanups = new PluginCleanupQueue({
+    db: store.stateDb,
+    run: (row) => terminalBackends.runChatDeleted(row.target, { chatId: row.chatId, projectId: row.projectId }),
+    log: (message, err) => console.warn(`[plugins] ${message}`, err ?? ""),
+  });
+  const terminalBackends: TerminalBackendRegistry =
     overrides.terminalBackends ??
     new TerminalBackendRegistry({
+      cleanups: pluginCleanups,
       bus,
       chat: async (chatId) => {
         const chat = await store.getChat(chatId).catch(() => null);
@@ -1206,6 +1216,19 @@ export function createServices(
       // Plugin processes run through the SAME runner as sub-apps — port
       // allocation, log ring, env quarantine, `stopAll()` at shutdown.
       runner,
+      cleanups: pluginCleanups,
+      // What `reconcile` is told: every chat, with the backend its terminals
+      // go to by default, so a terminal plugin can tell its own chats apart.
+      liveChats: async () =>
+        (await store.listChats()).map((c) => {
+          const backend = terminalBackends.defaultBackendOf(c);
+          return {
+            id: c.id,
+            projectId: c.projectId,
+            ...(c.archived ? { archived: true } : {}),
+            ...(backend ? { terminalBackend: backend } : {}),
+          };
+        }),
     });
   // The `plugin` scope and the plugin mode/MCP homes. Wired after the fact
   // because both consumers were constructed before the host existed; until
@@ -1700,6 +1723,9 @@ export function createServices(
       safeStart("release", () => release.start());
       // Same shape as release polling: deferred first pass, unref'd interval.
       safeStart("pluginUpdates", () => pluginUpdates.start());
+      // Backoff retries of failed plugin cleanups. Each plugin's own rows are
+      // also retried right after it activates (see `PluginService.reconcileOne`).
+      safeStart("pluginCleanups", () => pluginCleanups.start());
       // AI title: generate one from the first user message IFF the chat is still
       // on its default "New chat" title. We fire as soon as the user's prompt
       // lands (`user` row) so a new chat is named right after the first send
@@ -1870,6 +1896,9 @@ export function createServices(
       // An auto-update mid-copy finishes rather than leaving a half-renamed slot.
       pluginUpdates.stop();
       await pluginUpdates.drain().catch(() => {});
+      // Rows not yet retried stay in state.db; the next boot picks them up.
+      pluginCleanups.stop();
+      await pluginCleanups.drain().catch(() => {});
       // Disarm first so nothing new fires, then let an in-flight resume land
       // before the broker goes away under it.
       resume.dispose();

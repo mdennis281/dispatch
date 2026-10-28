@@ -213,6 +213,29 @@ export function registerPluginRoutes(app: FastifyInstance): void {
     }
   });
 
+  // Failed per-chat cleanups (`PluginInfo.pendingCleanups`): run them now, or
+  // forget them once the owner has cleaned up by hand. Owner-only, like
+  // uninstall — discarding is how an orphaned container stops being tracked.
+  app.post<{ Params: { id: string } }>("/api/plugins/:id/cleanups/retry", async (req, reply) => {
+    const refused = refuseNonOwner(req, reply);
+    if (refused) return refused;
+    try {
+      return await plugins.retryCleanups(req.params.id);
+    } catch (err) {
+      return inspectFailure(reply, err);
+    }
+  });
+
+  app.delete<{ Params: { id: string } }>("/api/plugins/:id/cleanups", async (req, reply) => {
+    const refused = refuseNonOwner(req, reply);
+    if (refused) return refused;
+    try {
+      return await plugins.discardCleanups(req.params.id);
+    } catch (err) {
+      return inspectFailure(reply, err);
+    }
+  });
+
   app.all<{ Params: { id: string; "*": string } }>("/api/plugins/:id/*", async (req, reply) =>
     plugins.handle(req.params.id, req.params["*"] ?? "", req, reply),
   );

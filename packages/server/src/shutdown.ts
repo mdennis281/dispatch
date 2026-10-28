@@ -138,6 +138,22 @@ export function installShutdown(
   };
 
   /**
+   * Every plugin's `onShutdown`, told whether this is a restart or a stop —
+   * the one thing `services.dispose()` cannot know, which is why it is asked
+   * here and not there. Bounded by the plugins' own shared budget
+   * (`PLUGIN_SHUTDOWN_BUDGET_MS`); `plugins.dispose()` later joins this same
+   * pass instead of running the hooks a second time.
+   */
+  const shutDownPlugins = async (reason: "restart" | "stop"): Promise<void> => {
+    const plugins = app.services?.plugins;
+    if (!plugins) return;
+    await plugins.shutdown(reason).catch((err: unknown) => {
+      // eslint-disable-next-line no-console
+      console.error("[dispatch] error running plugin shutdown hooks:", err);
+    });
+  };
+
+  /**
    * The last line of defence: whatever pids the service still reports LIVE when
    * this process is on its way out, killed synchronously.
    *
@@ -201,7 +217,9 @@ export function installShutdown(
       timer.unref();
       // BEFORE `app.close()`, deliberately. Inside it, this is the last step of
       // `services.dispose()` and the first casualty of the timer above.
-      await reapTerminals();
+      // The plugin hooks run alongside: both are bounded, and a Restart waits
+      // on the slower of the two rather than on their sum.
+      await Promise.all([reapTerminals(), shutDownPlugins(restart ? "restart" : "stop")]);
       try {
         await app.close();
       } catch (err) {
