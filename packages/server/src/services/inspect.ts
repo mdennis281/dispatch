@@ -725,44 +725,52 @@ export class InspectService {
       return hits.length ? hits : null;
     });
 
-    // Content matches in page order. Past `limit`, the page ENDS at the last
-    // one returned rather than dropping the rest: the cursor then resumes right
-    // after it, so the next page finds those again instead of nobody ever
-    // seeing them.
+    // Matches in page order — a content hit or a title hit, newest first. Past
+    // `limit`, the page ENDS at the last chat listed rather than dropping the
+    // rest: the cursor resumes right after it, so the next page lists them
+    // instead of nobody ever seeing them. (Capping title matches separately
+    // let one fall between "covered" and "listed" and vanish from every page.)
+    //
+    // A title match is free and is usually the strongest signal there is, so
+    // page one may also list title matches from PAST its window — never
+    // dependent on the budget reaching the chat. It does so only when every one
+    // of them fits; the cursor's `t` then tells later pages that every titled
+    // chat past the boundary is already listed, and they skip it even when its
+    // transcript matches too. All or nothing, so each chat is listed once.
+    const titled = (c: Chat): boolean => Boolean(c.title?.toLowerCase().includes(lower));
+    const summary = (c: Chat, hits: ChatHit[]): ChatSummary => ({
+      ...this.toSummary(c, nameById.get(c.projectId)),
+      hits,
+    });
     let covered = window.length;
-    const content: ChatSummary[] = [];
+    const listed: ChatSummary[] = [];
     for (let i = 0; i < window.length; i++) {
-      const hits = results[i];
+      const chat = window[i]!.chat;
+      if (cursor?.t && titled(chat)) continue; // listed on page one
+      const hits = results[i] ?? (titled(chat) ? [{ kind: "title", snippet: chat.title }] : null);
       if (!hits) continue;
-      if (content.length === limit) {
+      if (listed.length === limit) {
         covered = i;
         break;
       }
-      const chat = window[i]!.chat;
-      content.push({ ...this.toSummary(chat, nameById.get(chat.projectId)), hits });
+      listed.push(summary(chat, hits));
     }
     const coveredChats = window.slice(0, covered).map((w) => w.chat);
     const scanned = window.filter((w) => w.size !== null);
 
-    // A title match is free and is usually the strongest signal there is, so
-    // page one takes title matches from the WHOLE search space — never
-    // dependent on the budget reaching the chat. Later pages take them only
-    // from what they covered, and none at all once page one listed every one.
-    const titlePool = !cursor ? remaining : cursor.t ? [] : coveredChats;
-    const titleMatches = titlePool.filter(
-      (c) => c.title?.toLowerCase().includes(lower) && !content.some((m) => m.id === c.id),
-    );
-    const titleRoom = Math.max(0, limit - content.length);
-    const titles: ChatSummary[] = titleMatches.slice(0, titleRoom).map((c) => ({
-      ...this.toSummary(c, nameById.get(c.projectId)),
-      hits: [{ kind: "title", snippet: c.title }],
-    }));
-    const titlesDone = cursor ? cursor.t : titleMatches.length <= titleRoom;
+    let titlesDone = cursor?.t ?? false;
+    if (!cursor && covered === window.length) {
+      const ahead = remaining.slice(window.length).filter(titled);
+      if (listed.length + ahead.length <= limit) {
+        for (const c of ahead) listed.push(summary(c, [{ kind: "title", snippet: c.title }]));
+        titlesDone = true;
+      }
+    }
 
     const unscanned = remaining.length - covered;
     const last = coveredChats[coveredChats.length - 1];
     return {
-      chats: [...content, ...titles],
+      chats: listed,
       candidates: candidates.length,
       scanned: scanned.length,
       bytesScanned: scanned.reduce((n, w) => n + (w.size ?? 0), 0),

@@ -229,6 +229,40 @@ describe("findChats", () => {
     expect(seen).toEqual(["chat-old"]);
   });
 
+  describe("titles and content together", () => {
+    beforeEach(async () => {
+      await seedProject("p3", "Gamma");
+      const at = (n: number) => T0 + (10 - n) * DAY; // g-a newest
+      await seedChat("g-a", { projectId: "p3", updatedAt: at(0) }, [{ id: "a", ts: T0, kind: "user", text: "zebra crossing" }]);
+      await seedChat("g-b", { projectId: "p3", title: "zebra notes", updatedAt: at(1) }, [{ id: "b", ts: T0, kind: "user", text: "nothing here" }]);
+      await seedChat("g-c", { projectId: "p3", updatedAt: at(2) }, [{ id: "c", ts: T0, kind: "user", text: "another zebra" }]);
+      await seedChat("g-d", { projectId: "p3", title: "zebra again", updatedAt: at(3) }, [{ id: "d", ts: T0, kind: "user", text: "zebra in the body too" }]);
+    });
+
+    async function everyPage(q: Parameters<InspectService["findChats"]>[0]): Promise<string[]> {
+      const seen: string[] = [];
+      let cursor: string | undefined;
+      for (let pages = 0; pages < 10; pages++) {
+        const page = await service().findChats({ ...q, cursor });
+        seen.push(...page.chats.map((c) => c.id));
+        cursor = page.nextCursor;
+        if (!cursor) return seen;
+      }
+      throw new Error("cursor never ran out");
+    }
+
+    it("never loses a title-only match between two content matches when `limit` bites", async () => {
+      // The review's A/B/C: B matched by title alone used to be "covered" but
+      // never listed once A filled the page, and the cursor moved past it.
+      expect(await everyPage({ query: "zebra", project: "Gamma", limit: 1 })).toEqual(["g-a", "g-b", "g-c", "g-d"]);
+    });
+
+    it("lists a chat once even when page one took it by title and a later page reaches its transcript", async () => {
+      const seen = await everyPage({ query: "zebra", project: "Gamma", scanBudgetBytes: 1 });
+      expect([...seen].sort()).toEqual(["g-a", "g-b", "g-c", "g-d"]);
+    });
+  });
+
   it("refuses a cursor from a different search, or one it never issued", async () => {
     const first = await service().findChats({ query: "release", limit: 1 });
     await expect(service().findChats({ query: "workflow", cursor: first.nextCursor })).rejects.toThrow(/different search/);
