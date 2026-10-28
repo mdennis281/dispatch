@@ -1556,6 +1556,8 @@ export const api = {
       put<PluginInfo>(`/api/plugins/${encodeURIComponent(id)}/settings`, { settings }),
     /** Open the plugin's directory in the file manager of the machine Dispatch runs on. */
     reveal: (id: string) => post<{ ok: boolean; dir: string }>(`/api/plugins/${encodeURIComponent(id)}/reveal`),
+    retryCleanups: (id: string) => post<PluginInfo>(`/api/plugins/${encodeURIComponent(id)}/cleanups/retry`),
+    discardCleanups: (id: string) => del<PluginInfo>(`/api/plugins/${encodeURIComponent(id)}/cleanups`),
     /** Start the host-run OAuth round trip for one of the plugin's declared clients; navigate to the URL. */
     oauthConnect: (id: string, name: string) =>
       post<PluginOAuthConnectResult>(`/api/plugins/${encodeURIComponent(id)}/oauth/${encodeURIComponent(name)}/connect`),

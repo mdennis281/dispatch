@@ -10,6 +10,8 @@ import { pathToFileURL } from "node:url";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createTestContext } from "./testing.js";
+import { definePlugin } from "./index.js";
+import { PLUGIN_RECONCILE_BUDGET_MS, PLUGIN_SHUTDOWN_BUDGET_MS } from "./manifest.js";
 import type { Harness, ProviderDescriptor } from "./index.js";
 import type { PluginModule } from "./index.js";
 
@@ -184,5 +186,60 @@ describe("createTestContext terminals", () => {
     await t.terminals.chatIdle("c1");
     await t.terminals.chatDeleted("c1");
     expect(calls).toEqual(["spawn:c1:main", "idle:c1", "deleted:c1"]);
+  });
+});
+
+describe("lifecycle", () => {
+  it("plays onShutdown then deactivate, and reports an overrun with the signal aborted", async () => {
+    const t = createTestContext();
+    const calls: string[] = [];
+    let signal: AbortSignal | undefined;
+    const mod = definePlugin({
+      activate: () => {},
+      deactivate: () => void calls.push("deactivate"),
+      onShutdown: (e) => {
+        calls.push(`shutdown:${e.reason}`);
+        signal = e.signal as AbortSignal;
+        if (e.reason === "uninstall") return new Promise<void>(() => {});
+      },
+    });
+
+    expect(await t.lifecycle.shutdown(mod, "restart")).toMatchObject({ overran: false });
+    const slow = await t.lifecycle.shutdown(mod, "uninstall", { budgetMs: 20 });
+    expect(slow.overran).toBe(true);
+    expect(signal?.aborted).toBe(true);
+    expect(calls).toEqual(["shutdown:restart", "deactivate", "shutdown:uninstall", "deactivate"]);
+  });
+
+  it("hands reconcile the live chats", async () => {
+    const t = createTestContext();
+    const seen: string[][] = [];
+    const mod = definePlugin({
+      activate: () => {},
+      reconcile: (e) => void seen.push(e.chats.map((c) => c.id)),
+    });
+    await t.lifecycle.reconcile(mod, [{ id: "c1", projectId: "p" }]);
+    expect(seen).toEqual([["c1"]]);
+  });
+
+  it("surfaces a failing onChatDeleted as a rejection — what the host records for retry", async () => {
+    const t = createTestContext({ capabilities: ["terminals"] });
+    t.ctx.terminals!.registerBackend({
+      id: "box",
+      label: "Box",
+      shell: "bash",
+      spawn: async () => {
+        throw new Error("unused");
+      },
+      onChatDeleted: async () => {
+        throw new Error("hypervisor down");
+      },
+    });
+    await expect(t.terminals.chatDeleted("c1")).rejects.toThrow(/hypervisor down/);
+  });
+
+  it("uses the host's budgets", () => {
+    expect(PLUGIN_SHUTDOWN_BUDGET_MS).toBe(5_000);
+    expect(PLUGIN_RECONCILE_BUDGET_MS).toBe(120_000);
   });
 });

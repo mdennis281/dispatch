@@ -29,6 +29,7 @@
 import {
   LOCAL_TERMINAL_BACKEND,
   TERMINAL_BACKEND_ID_PATTERN,
+  TERMINAL_CHAT_HOOK_TIMEOUT_MS,
   resolveTerminalBackend,
   resolveTerminalLocations,
   type TerminalBackend,
@@ -40,6 +41,7 @@ import {
   type TerminalPortForwardInput,
 } from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
+import type { CleanupKey, CleanupOutcome } from "../plugins/cleanup.js";
 import type { TerminalBackendResolution, TerminalBackendSource } from "./terminal.js";
 
 export interface TerminalBackendRegistryOptions {
@@ -64,6 +66,16 @@ export interface TerminalBackendRegistryOptions {
    * backend is not installed and handed a local shell.
    */
   settled?: () => Promise<void>;
+  /**
+   * Where a failed `onChatDeleted` is recorded for retry (the plugin cleanup
+   * queue). Absent = failures are only logged, as before.
+   */
+  cleanups?: {
+    failed(key: CleanupKey, error: string, projectId?: string): void;
+    succeeded(key: CleanupKey): void;
+  };
+  /** Override of {@link TERMINAL_CHAT_HOOK_TIMEOUT_MS}, for tests. */
+  hookTimeoutMs?: number;
   log?: (message: string, err?: unknown) => void;
 }
 
@@ -79,8 +91,9 @@ type DetachListener = (backendId: string) => void;
 /** What the agent note and refusals call the built-in location. */
 const LOCAL_LABEL = "this machine (the Dispatch host)";
 
-/** Lifecycle hooks are fire-and-forget, but not unbounded: one hung plugin must not pile up promises forever. */
-const HOOK_TIMEOUT_MS = 60_000;
+function describe(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
 
 export class TerminalBackendRegistry implements TerminalBackendSource {
   private readonly entries = new Map<string, Entry>();
@@ -401,8 +414,17 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
     this.fanOut("onChatIdle", e);
   }
 
-  /** The chat was deleted (its shells are already killed). Also drops its ports. */
-  chatDeleted(e: TerminalChatEvent): void {
+  /**
+   * The chat was deleted (its shells are already killed). Drops its ports and
+   * calls every backend's `onChatDeleted`.
+   *
+   * The returned promise settles when every hook has (or timed out); the
+   * delete itself does not wait for it — a hypervisor that takes a minute must
+   * not hold the request open. What it buys is the OUTCOME: a hook that
+   * rejects or times out is recorded in the cleanup queue and retried until
+   * it succeeds, because the alternative was a container destroyed by nobody.
+   */
+  chatDeleted(e: TerminalChatEvent): Promise<void> {
     let dropped = false;
     for (const [key, f] of this.forwards) {
       if (f.chatId === e.chatId) {
@@ -411,21 +433,84 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
       }
     }
     if (dropped) this.broadcast();
-    this.fanOut("onChatDeleted", e);
+    return Promise.all([...this.entries.values()].map((entry) => this.deliverChatDeleted(entry, e))).then(() => undefined);
   }
 
-  private fanOut(hook: "onChatIdle" | "onChatDeleted", e: TerminalChatEvent): void {
+  private keyFor(entry: Entry, chatId: string): CleanupKey {
+    // A backend registered outside a plugin (tests) is keyed by its own id.
+    return { plugin: entry.owner ?? entry.backend.id, target: entry.backend.id, hook: "onChatDeleted", chatId };
+  }
+
+  private async deliverChatDeleted(entry: Entry, e: TerminalChatEvent): Promise<void> {
+    const { backend } = entry;
+    if (typeof backend.onChatDeleted !== "function") return;
+    const key = this.keyFor(entry, e.chatId);
+    const call = Promise.resolve().then(() => backend.onChatDeleted!(e));
+    try {
+      await this.bounded(call, "onChatDeleted");
+      this.opts.cleanups?.succeeded(key);
+    } catch (err) {
+      this.opts.log?.(`terminal backend "${backend.id}": onChatDeleted failed for chat ${e.chatId} — will retry`, err);
+      this.opts.cleanups?.failed(key, describe(err), e.projectId);
+      // A hook that was merely SLOW still counts: when it lands, the retry it
+      // caused is withdrawn rather than repeating a destroy that already ran.
+      call.then(
+        () => this.opts.cleanups?.succeeded(key),
+        () => {},
+      );
+    }
+  }
+
+  /**
+   * Run one recorded `onChatDeleted` again — the cleanup queue's executor.
+   * `unavailable` when the backend is not registered (its plugin is off): the
+   * row waits for the next activation rather than burning an attempt.
+   */
+  async runChatDeleted(backendId: string, e: TerminalChatEvent): Promise<CleanupOutcome> {
+    const entry = this.entries.get(backendId);
+    if (!entry) return { ok: false, unavailable: true };
+    const fn = entry.backend.onChatDeleted;
+    if (typeof fn !== "function") return { ok: true };
+    try {
+      await this.bounded(Promise.resolve().then(() => fn.call(entry.backend, e)), "onChatDeleted");
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: describe(err) };
+    }
+  }
+
+  /**
+   * A chat's DEFAULT location when it is a backend (pin, else project
+   * default) — what a plugin's `reconcile` is told about each live chat.
+   */
+  defaultBackendOf(chat: { terminalBackend?: string; projectId?: string }): string | undefined {
+    const { id } = resolveTerminalBackend({
+      chat: chat.terminalBackend,
+      project: chat.projectId ? this.opts.projectDefault(chat.projectId) : undefined,
+    });
+    return id === LOCAL_TERMINAL_BACKEND ? undefined : id;
+  }
+
+  /** Lifecycle hooks are awaited, but not unboundedly: one hung plugin must not pile up promises forever. */
+  private bounded(p: Promise<unknown>, hook: string): Promise<void> {
+    const ms = this.opts.hookTimeoutMs ?? TERMINAL_CHAT_HOOK_TIMEOUT_MS;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${hook} did not settle in ${ms / 1000}s`)), ms);
+      timer.unref?.();
+    });
+    return Promise.race([p, timeout])
+      .then(() => undefined)
+      .finally(() => clearTimeout(timer));
+  }
+
+  private fanOut(hook: "onChatIdle", e: TerminalChatEvent): void {
     for (const { backend } of this.entries.values()) {
       const fn = backend[hook];
       if (typeof fn !== "function") continue;
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const timeout = new Promise<void>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`${hook} did not settle in ${HOOK_TIMEOUT_MS / 1000}s`)), HOOK_TIMEOUT_MS);
-        timer.unref?.();
-      });
-      void Promise.race([Promise.resolve().then(() => fn.call(backend, e)), timeout])
-        .catch((err: unknown) => this.opts.log?.(`terminal backend "${backend.id}": ${hook} failed`, err))
-        .finally(() => clearTimeout(timer));
+      void this.bounded(Promise.resolve().then(() => fn.call(backend, e)), hook).catch((err: unknown) =>
+        this.opts.log?.(`terminal backend "${backend.id}": ${hook} failed`, err),
+      );
     }
   }
 

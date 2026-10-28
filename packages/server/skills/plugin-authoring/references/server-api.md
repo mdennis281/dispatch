@@ -13,6 +13,9 @@ import { definePlugin } from "@dispatch/plugin-sdk";
 export default definePlugin({
   async activate(ctx) { /* register things */ },
   async deactivate() { /* optional; the host tears down what it owns regardless */ },
+  // Optional cleanup lifecycle — for anything you made OUTSIDE the process.
+  async onShutdown({ reason, deadline, signal }) { /* restart | stop | disable | uninstall */ },
+  async reconcile({ chats, deadline, signal }) { /* chats that still exist; the rest were deleted */ },
 });
 ```
 
@@ -36,10 +39,22 @@ and build it with `dispatchServerBuild` from `@dispatch/plugin-sdk/vite`
    or fails because of a plugin. Until you are active, your route prefix answers 503.
 3. Everything you register — bus listeners, routes, settings listeners, processes — is
    **owned** by the host under your id.
-4. **Deactivation** (the toggle in Settings, or server shutdown, reverse id order):
-   `deactivate()` if exported (10 s budget), then the host drops your listeners,
+4. **Deactivation** (the toggle in Settings, uninstall, or server shutdown, reverse
+   id order): `onShutdown({ reason })` if exported, then `deactivate()` if exported
+   (10 s budget), then the host drops your listeners,
    empties your route table (404 from then on), stops your processes, and pulls your
    client bundle. Flipping the toggle back on needs a restart; the pane says so.
+
+**Cleanup lifecycle** (docs/plugins.md → "Cleanup lifecycle"), for a plugin that makes
+things outside the process — containers, remote sessions, tunnels:
+- `onShutdown({ reason, deadline, signal })` — `restart | stop | disable | uninstall`.
+  All plugins run in parallel on ONE shared 5 s budget; past it `signal` aborts and you
+  are skipped. A Restart waits on this: INITIATE slow remote work, don't wait for it.
+  Only `uninstall` should destroy everything; `disable` keeps it. Never runs on a crash.
+- `reconcile({ chats, deadline, signal })` — after every successful activation,
+  detached, 120 s budget. `chats` is every chat that exists; settle what you made
+  against it. This, not `onShutdown`, is the guarantee.
+- Both idempotent and bounded. Keep your own record of what you made (`ctx.kv`).
 
 Do your slow work after `activate` returns (start it, don't await it), and keep
 `activate` to registrations. A plugin that needs to talk to its own managed process
@@ -119,7 +134,8 @@ ctx.terminals.registerBackend({
   spawn: async ({ chatId, projectId, name, cwd, repoPath, signal }) => handle,
   agentNote: ({ chatId }) => "what the agent can't infer (how code gets there, what isn't shared)",
   onChatIdle: ({ chatId }) => {},     // session retired by the idle sweep — shells are NOT killed by core
-  onChatDeleted: ({ chatId }) => {},  // shells already gone — destroy what you made
+  onChatDeleted: ({ chatId }) => {},  // shells already gone — destroy what you made. AWAITED (60 s):
+                                      // reject/timeout = persisted + retried until it resolves
 })
 const withdraw = ctx.terminals.publishPort("box", { chatId, remotePort: 5173, url: "http://127.0.0.1:53211" })
 ctx.terminals.ports(chatId)

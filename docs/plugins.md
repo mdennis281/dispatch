@@ -163,13 +163,15 @@ service container.
    never waits on one. A throw or timeout marks the plugin `error` with the
    message, files it through the crash log, and moves on. Until a plugin is
    active, its route prefix answers 503. `autostart` processes start before the
-   module's `activate`, so it can talk to them.
+   module's `activate`, so it can talk to them. A plugin that activated is then
+   `reconcile`d, detached — see "Cleanup lifecycle".
 4. **Run.** Everything the plugin registered (bus listeners, route handlers,
    settings listeners, processes) is tracked against the plugin id so
    deactivate can undo it.
 5. **Deactivate** on `services.dispose()` (reverse id order; an activation
-   still in flight is not waited for — it tears itself down when it returns) or
-   when the enable toggle flips off: `deactivate()` if exported (10 s budget),
+   still in flight is not waited for — it tears itself down when it returns),
+   when the enable toggle flips off, or on uninstall: `onShutdown` if exported
+   (see "Cleanup lifecycle"), then `deactivate()` if exported (10 s budget),
    then the host drops the plugin's listeners, empties its route table (the
    prefix answers 404 from then on), stops its processes and stops serving its
    client directory. Fastify cannot remove a route from a listening instance,
@@ -183,12 +185,109 @@ service container.
 `settingsSchema`, `settings`, the declared `secrets` names, `oauth[]` (per
 client: `connected`, `expiresAt`, `scopes`, `configError`), `warnings[]`
 (non-fatal contribution problems, on the row rather than only in a server log),
-`origin` (`url | local | linked | builtin | unknown`) and the recorded `source` —
-see "Updating and uninstalling".
+`pendingCleanups` (failed per-chat cleanups still being retried — see "Cleanup
+lifecycle"), `origin` (`url | local | linked | builtin | unknown`) and the
+recorded `source` — see "Updating and uninstalling".
 `PUT /api/plugins/:id/enabled` and `PUT /api/plugins/:id/settings` are targeted
 patches, not settings-draft writes; `POST /api/plugins/:id/reveal` opens the
 directory on the machine Dispatch runs on (from a remote browser the pane also
 shows and copies the path).
+
+### Cleanup lifecycle
+
+A plugin that makes things **outside** the Dispatch process (a container per
+chat, a remote session, a tunnel) needs to clean them up, and the moment it is
+told to is not always the moment it can. Three optional hooks cover it, all on
+the module next to `activate`:
+
+```ts
+export default definePlugin({
+  activate(ctx) { /* … */ },
+  /** The plugin is going down, and why. Initiate, don't wait. */
+  async onShutdown({ reason, deadline, signal }) {
+    if (reason === "uninstall") await destroyEverything({ signal });
+    else if (reason === "disable") { /* keep it — it is wanted again when switched back on */ }
+    else await stopRunningContainers({ signal }); // restart | stop: SEND the stop, don't poll for it
+  },
+  /** Settle what you made against what still exists. */
+  async reconcile({ chats, signal }) {
+    const live = new Set(chats.map((c) => c.id));
+    for (const made of await myRecords()) if (!live.has(made.chatId)) await destroy(made, { signal });
+  },
+  deactivate() { /* in-process resources only */ },
+});
+```
+
+**`onShutdown({ reason, deadline, signal })`** — `reason` is exact on every path:
+
+| reason | when | what to do |
+|---|---|---|
+| `restart` | Settings → System → Restart; this process exits 75 and the supervisor starts a new one | stop what costs money while nobody is driving it, or leave it for the next process's `reconcile` |
+| `stop` | Stop, `pnpm app:stop`, Ctrl-C, the desktop shell closing — no restart promised | same |
+| `disable` | the owner switched the plugin off | keep what you made; switching back on (after a restart) reconciles it |
+| `uninstall` | Settings → Plugins → Uninstall | destroy EVERYTHING — nothing will ever reconcile it again |
+
+On a server shutdown every active plugin's hook runs **in parallel** on one
+shared budget, `PLUGIN_SHUTDOWN_BUDGET_MS` (5 s), alongside the shell reap and
+before `app.close()` — it is `installShutdown`, not `dispose()`, that asks,
+because only it knows a restart from a stop. Past the budget `signal` aborts,
+the host logs `plugin "<id>" onShutdown(<reason>) overran its 5s budget —
+moving on without it`, and teardown carries on. A Restart waits on this, so:
+
+- **Initiate, don't wait.** A Proxmox `stop` takes 30 s or more; send it and
+  return. Pass `signal` to `fetch` so a request that overruns is cancelled
+  rather than leaked.
+- **Idempotent.** It can run for state that is already gone.
+- **Never load-bearing.** It does not run on a crash, a hard kill or a power
+  cut. Correctness comes from `reconcile`.
+
+After `onShutdown`, `deactivate()` runs as before. A plugin that is not active
+(switched off, failed to activate) gets no `onShutdown` — including on
+uninstall, so uninstalling a plugin while it is switched off cannot run its
+cleanup. Switch it on and restart first if it holds anything remote.
+
+**`reconcile({ chats, deadline, signal })`** — after every successful
+`activate` (every boot, and the first boot after a re-enable — re-enabling
+needs a restart anyway), detached: boot and the next plugin's activation do
+not wait. Budget `PLUGIN_RECONCILE_BUDGET_MS` (120 s); `signal` aborts at the
+deadline or when the plugin goes down first, and a reconcile is never started
+on a plugin that has already had its `onShutdown`. `chats` is every chat in
+this instance (archived ones flagged), each with `terminalBackend` when its
+DEFAULT terminal location — pin, else project default — is a backend. Per-
+terminal picks are not persisted, so a backend that must know every chat it
+served keeps its own record (`ctx.kv`). A chat missing from `chats` was
+deleted: anything held for it is an orphan from a delete the plugin never
+heard about. This is the guarantee the shutdown hook cannot be.
+
+**Durable per-chat cleanup.** A terminal backend's `onChatDeleted` is awaited
+(60 s, `TERMINAL_CHAT_HOOK_TIMEOUT_MS`) without holding the delete open. A
+rejection or a timeout is written to `plugin_cleanup` in `data/state.db`, keyed
+by plugin + backend + hook + chat, and retried:
+
+- with backoff while the server runs (1 min, 5 min, 15 min, 1 h, then every
+  6 h);
+- right after the plugin's next activation, once its `reconcile` has run;
+- on demand from the plugin's row in Settings → Plugins (**Retry now**).
+
+A hook that was only slow still counts: when it resolves after its timeout the
+retry is withdrawn. A row whose backend is not registered (the plugin is off)
+waits without spending an attempt. **Forget** drops the rows without running
+them, for when the owner has cleaned up by hand; uninstalling the plugin drops
+them too. While rows are pending the row shows how many, since when, the last
+error and the chats concerned (`PluginInfo.pendingCleanups`;
+`POST /api/plugins/:id/cleanups/retry`, `DELETE /api/plugins/:id/cleanups`,
+both owner-only).
+
+So `onChatDeleted` must resolve only once the destroy was **accepted**, reject
+when it was not, and be idempotent: a retry may arrive for a chat already
+cleaned up, or for one this backend never served.
+
+**Testing it.** `createTestContext()` plays the host's side:
+`t.lifecycle.shutdown(mod, reason, { budgetMs? })` calls `onShutdown` then
+`deactivate` and returns `{ overran, error?, elapsedMs }`;
+`t.lifecycle.reconcile(mod, chats)` calls `reconcile`; `t.terminals.chatDeleted`
+rejects when the hook does. The budgets are exported from
+`@dispatch/plugin-sdk/manifest`.
 
 ### Install and the CLI
 
@@ -756,7 +855,9 @@ session. Core does NOT kill the shells; stopping is the backend's call, and a
 shell that dies comes back on the next command because TerminalService re-opens
 an exited name. `onChatDeleted` fires after the chat's shells are killed. Both
 fan out to every registered backend, which must keep its own record of what it
-made. They are fire-and-forget, contained, and bounded at 60 s.
+made. `onChatIdle` is fire-and-forget, contained, and bounded at 60 s.
+`onChatDeleted` is awaited on the same bound, and a failure is persisted and
+retried until it succeeds — see "Cleanup lifecycle".
 
 **Ports.** A remote listener is useless to a browser on the Dispatch host until
 the backend forwards it. The backend owns the transport, so it does the

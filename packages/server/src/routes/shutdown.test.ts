@@ -113,6 +113,32 @@ describe("/api/restart", () => {
     expect(seen).toEqual([{ reason: "restart requested", restarting: true }]);
   });
 
+  // The plugin hooks are told WHICH: `dispose()` alone cannot know a restart
+  // from a stop, so `installShutdown` asks before `app.close()`, and the
+  // dispose that follows joins that pass rather than starting a `stop` one.
+  it("tells plugins it is a restart — once, before teardown", async () => {
+    const shutdown = vi.spyOn(app.services.plugins, "shutdown");
+    const exited = new Promise<number>((resolve) => {
+      installShutdown(app, { exit: resolve, restartable: true });
+    });
+    await app.inject({ method: "POST", url: "/api/restart", payload: {} });
+    await exited;
+    expect(shutdown.mock.calls.map((c) => c[0])).toEqual(["restart", "stop"]);
+    // The second call is `dispose()` joining: the memoised first reason won.
+    expect(await shutdown.mock.results[1]!.value).toBeUndefined();
+    expect(shutdown.mock.results[0]!.value).toBe(shutdown.mock.results[1]!.value);
+  });
+
+  it("tells plugins it is a stop on POST /api/shutdown", async () => {
+    const shutdown = vi.spyOn(app.services.plugins, "shutdown");
+    const exited = new Promise<number>((resolve) => {
+      installShutdown(app, { exit: resolve });
+    });
+    await app.inject({ method: "POST", url: "/api/shutdown" });
+    expect(await exited).toBe(0);
+    expect(shutdown.mock.calls[0]![0]).toBe("stop");
+  });
+
   it("skips the resume capture when resumeAgents is false", async () => {
     const skip = vi.spyOn(app.services.restartResume, "skipNextCapture");
     const exited = new Promise<number>((resolve) => {

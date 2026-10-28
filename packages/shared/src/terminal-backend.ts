@@ -95,6 +95,12 @@ export interface TerminalBackendHandle {
   cwd?: string;
 }
 
+/**
+ * How long core waits on `onChatIdle` / `onChatDeleted` before treating the
+ * call as failed. A late success still clears a recorded retry.
+ */
+export const TERMINAL_CHAT_HOOK_TIMEOUT_MS = 60_000;
+
 /** Passed to the lifecycle hooks. */
 export interface TerminalChatEvent {
   chatId: string;
@@ -136,7 +142,18 @@ export interface TerminalBackend {
    * next spawn) is the backend's call.
    */
   onChatIdle?(e: TerminalChatEvent): void | Promise<void>;
-  /** The chat was deleted. Its shells are already gone; destroy what you made for it. */
+  /**
+   * The chat was deleted. Its shells are already gone; destroy what you made
+   * for it.
+   *
+   * DURABLE: core awaits it (up to {@link TERMINAL_CHAT_HOOK_TIMEOUT_MS}) without
+   * holding the delete open, and a rejection or timeout is written to the
+   * state database and retried — with backoff while the server runs, and again
+   * after the plugin's next `activate` + `reconcile` — until it resolves.
+   * So: resolve only once the destroy is ACCEPTED (the request went through),
+   * reject when it did not, and be idempotent — a retry may arrive for a chat
+   * already cleaned up, or one this backend never served.
+   */
   onChatDeleted?(e: TerminalChatEvent): void | Promise<void>;
   /** Called when the backend is unregistered (the plugin deactivating). */
   dispose?(): void | Promise<void>;

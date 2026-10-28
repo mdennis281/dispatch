@@ -47,9 +47,11 @@ export async function deleteChat(deps: ChatDeletionDeps, id: string): Promise<vo
   await broker.stop(id).catch(() => {});
   terminals.killChat(id);
   // After the shells are killed, so a backend destroying the machine they ran
-  // on is not racing its own live channels. Fire-and-forget: a hypervisor that
-  // takes a minute to destroy a container must not hold the delete open.
-  deps.terminalBackends?.chatDeleted({ chatId: id, projectId: existing?.projectId });
+  // on is not racing its own live channels. Not awaited: a hypervisor that
+  // takes a minute to destroy a container must not hold the delete open. Not
+  // forgotten either — the registry awaits each hook, and a failure becomes a
+  // `plugin_cleanup` row retried until it succeeds (plugins/cleanup.ts).
+  void deps.terminalBackends?.chatDeleted({ chatId: id, projectId: existing?.projectId }).catch(() => {});
   // A browser shim can outlive the provider that launched it. Reap while the
   // chat id still exists as an ownership key; after deletion the UI has no
   // row from which a human could recover the orphan.

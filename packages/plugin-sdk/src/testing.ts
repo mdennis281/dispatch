@@ -20,6 +20,9 @@ import type {
   PluginCapability,
   PluginChatState,
   PluginChatSummary,
+  PluginLiveChat,
+  PluginModule,
+  PluginShutdownReason,
   PluginMemoryInput,
   PluginProjectSummary,
   PluginSendResult,
@@ -32,7 +35,7 @@ import type {
   WsServerEvent,
   WsServerEventType,
 } from "@dispatch/shared";
-import { PLUGIN_CAPABILITIES } from "@dispatch/shared";
+import { PLUGIN_CAPABILITIES, PLUGIN_RECONCILE_BUDGET_MS, PLUGIN_SHUTDOWN_BUDGET_MS } from "@dispatch/shared";
 import type { PluginContext, PluginReply, PluginRequest } from "./index.js";
 
 export interface TestContextOptions {
@@ -137,7 +140,32 @@ export interface TestContext {
       info: Partial<TerminalSpawnInfo> & { chatId: string },
     ): Promise<TerminalBackendHandle>;
     chatIdle(chatId: string, projectId?: string): Promise<void>;
+    /**
+     * Rejects when a backend's `onChatDeleted` does — which on the host means
+     * "recorded and retried later". Call it twice to check it is idempotent.
+     */
     chatDeleted(chatId: string, projectId?: string): Promise<void>;
+  };
+  /**
+   * Play the HOST's side of the cleanup lifecycle (docs/plugins.md → "Cleanup
+   * lifecycle") against your module, with the host's budgets.
+   *
+   * `shutdown` calls `onShutdown` then `deactivate`, exactly as the host does
+   * for `reason`, and reports whether the hook beat its budget — the thing to
+   * assert on, because an overrun on the host is a plugin quietly skipped.
+   * `reconcile` calls `reconcile` with the chats you say still exist.
+   */
+  lifecycle: {
+    shutdown(
+      mod: PluginModule,
+      reason: PluginShutdownReason,
+      opts?: { budgetMs?: number },
+    ): Promise<{ overran: boolean; error?: unknown; elapsedMs: number }>;
+    reconcile(
+      mod: PluginModule,
+      chats: PluginLiveChat[],
+      opts?: { budgetMs?: number },
+    ): Promise<{ overran: boolean; error?: unknown; elapsedMs: number }>;
   };
   /** How many listeners the bus currently holds — zero after a clean deactivate. */
   listenerCount(): number;
@@ -192,6 +220,30 @@ function makeReply(): { reply: PluginReply; sent: () => { status: number; header
     },
   };
   return { reply, sent: () => ({ status, headers, body, explicit }) };
+}
+
+/** Run `fn` the way the host runs a lifecycle hook: a deadline, a signal that aborts at it, and a race. */
+async function withHostBudget(
+  budgetMs: number,
+  fn: (deadline: number, signal: AbortSignal) => unknown,
+): Promise<{ overran: boolean; error?: unknown; elapsedMs: number }> {
+  const ac = new AbortController();
+  const started = Date.now();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const overrun = new Promise<"overran">((resolve) => {
+    timer = setTimeout(() => {
+      ac.abort(new Error(`budget of ${budgetMs}ms exceeded`));
+      resolve("overran");
+    }, budgetMs);
+  });
+  try {
+    const won = await Promise.race([Promise.resolve().then(() => fn(started + budgetMs, ac.signal)), overrun]);
+    return { overran: won === "overran", elapsedMs: Date.now() - started };
+  } catch (error) {
+    return { overran: false, error, elapsedMs: Date.now() - started };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** Build a fake context. See the module comment for what it is and is not. */
@@ -523,6 +575,19 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
         for (const p of terminalPorts.filter((f) => f.chatId === chatId)) terminalPorts.splice(terminalPorts.indexOf(p), 1);
         for (const b of terminalBackends.values()) await b.onChatDeleted?.({ chatId, projectId });
       },
+    },
+    lifecycle: {
+      shutdown: async (mod, reason, o = {}) => {
+        const result = await withHostBudget(o.budgetMs ?? PLUGIN_SHUTDOWN_BUDGET_MS, (deadline, signal) =>
+          mod.onShutdown?.({ reason, deadline, signal }),
+        );
+        await mod.deactivate?.();
+        return result;
+      },
+      reconcile: (mod, liveChats, o = {}) =>
+        withHostBudget(o.budgetMs ?? PLUGIN_RECONCILE_BUDGET_MS, (deadline, signal) =>
+          mod.reconcile?.({ chats: liveChats, deadline, signal }),
+        ),
     },
     listenerCount: () => listeners.size,
   };

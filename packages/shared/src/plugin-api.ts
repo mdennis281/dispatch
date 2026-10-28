@@ -1,9 +1,9 @@
 /**
  * The server-side plugin API — what a plugin's `activate(ctx)` receives.
  *
- * PURE TYPES. This file is what `@dispatch/plugin-sdk` re-exports to plugin
- * authors, so it must stay free of server imports: no Fastify, no Store, no
- * services. Everything the context hands out is expressed in the shared
+ * Types, plus the lifecycle budgets as constants. This file is what
+ * `@dispatch/plugin-sdk` re-exports to plugin authors, so it must stay free of
+ * server imports: no Fastify, no Store, no services. Everything the context hands out is expressed in the shared
  * domain vocabulary, and the server implements it in `packages/server/src/plugins/`.
  *
  * Versioning: the shape is additive within {@link PLUGIN_API_VERSION}. Removing
@@ -15,14 +15,96 @@ import type { ChatStatus } from "./common.js";
 import type { AttentionItem } from "./messages.js";
 import type { MemoryType } from "./domain.js";
 import type { QuestionAnswer, WsServerEvent, WsServerEventType } from "./wire.js";
-import type { Harness } from "./harness.js";
+import type { Harness, HostAbortSignal } from "./harness.js";
 import type { ProviderDescriptor } from "./providers.js";
 import type { TerminalBackend, TerminalPortForward, TerminalPortForwardInput } from "./terminal-backend.js";
 
 export interface PluginModule {
   activate(ctx: PluginContext): Promise<void> | void;
+  /**
+   * Called after {@link onShutdown} (when the plugin has one), on every way a
+   * running plugin goes down. Release in-process resources here; anything
+   * that outlives the process belongs in `onShutdown` and `reconcile`.
+   */
   deactivate?(): Promise<void> | void;
+  /**
+   * The plugin is about to go down, and why — the one chance to clean up
+   * whatever it made OUTSIDE this process (containers, remote sessions,
+   * tunnels). See docs/plugins.md → "Cleanup lifecycle".
+   *
+   * Every active plugin's hook runs IN PARALLEL on a shared budget of
+   * {@link PLUGIN_SHUTDOWN_BUDGET_MS}; past it `signal` aborts, the host logs
+   * the plugin as overrunning, and teardown carries on without it. A Restart
+   * waits on this, so INITIATE slow remote work (send the stop, don't poll for
+   * it) and return. Idempotent: it may be the second call for the same state.
+   *
+   * It NEVER runs on a crash, a hard kill or a power cut. Correctness must not
+   * depend on it — {@link reconcile} is the guarantee; this is the courtesy.
+   */
+  onShutdown?(e: PluginShutdownEvent): Promise<void> | void;
+  /**
+   * Settle what the plugin made against what still exists. Called after every
+   * successful `activate` — boot, and the first boot after a re-enable — and
+   * NOT awaited by boot: it runs on its own budget of
+   * {@link PLUGIN_RECONCILE_BUDGET_MS}, after which `signal` aborts.
+   *
+   * `chats` is every chat that exists in this instance (archived included).
+   * Anything the plugin holds for a chat NOT in the list is an orphan from a
+   * delete it never heard about (it was off, the process died, the hook
+   * failed) and should go. Idempotent and bounded, like every hook here.
+   */
+  reconcile?(e: PluginReconcileEvent): Promise<void> | void;
 }
+
+/** Why a plugin is going down. */
+export type PluginShutdownReason =
+  /** Settings → System → Restart: this process exits and a new one starts in seconds. */
+  | "restart"
+  /** The server is stopping (Stop, Ctrl-C, the desktop shell closing) with no restart promised. */
+  | "stop"
+  /** The owner switched the plugin off. Keep what you made; it will be wanted again when it is switched back on. */
+  | "disable"
+  /** The plugin is being uninstalled. Destroy everything it made — nothing will ever reconcile it again. */
+  | "uninstall";
+
+export interface PluginShutdownEvent {
+  reason: PluginShutdownReason;
+  /** Epoch ms after which the host stops waiting. Same instant `signal` aborts. */
+  deadline: number;
+  /** Aborted at `deadline`. Pass it to `fetch` and friends so overrunning work stops instead of leaking. */
+  signal: HostAbortSignal;
+}
+
+/** One chat that still exists, as {@link PluginReconcileEvent} lists it. */
+export interface PluginLiveChat {
+  id: string;
+  projectId: string;
+  archived?: boolean;
+  /**
+   * Where this chat's terminals go by default — its pin, else its project's
+   * `defaults.terminalBackend` — when that is not `local`. Per-terminal picks
+   * (`terminal({ location })`) are not persisted, so a backend that must know
+   * every chat it served keeps its own record (`ctx.kv`).
+   */
+  terminalBackend?: string;
+}
+
+export interface PluginReconcileEvent {
+  /** Every chat in this instance. A chat absent from here was deleted. */
+  chats: PluginLiveChat[];
+  /** Epoch ms after which the host stops waiting. */
+  deadline: number;
+  /** Aborted at `deadline`, and if the plugin goes down first. */
+  signal: HostAbortSignal;
+}
+
+/**
+ * Total budget for every plugin's {@link PluginModule.onShutdown}, run in
+ * parallel. Short on purpose: Settings → System → Restart waits for it.
+ */
+export const PLUGIN_SHUTDOWN_BUDGET_MS = 5_000;
+/** Budget for one {@link PluginModule.reconcile}. Nothing waits for it but the plugin itself. */
+export const PLUGIN_RECONCILE_BUDGET_MS = 120_000;
 
 export interface PluginLog {
   info(message: string): void;
