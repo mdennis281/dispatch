@@ -648,6 +648,9 @@ describe("per-terminal location (the agent's choice)", () => {
     expect(res.notice).toMatch(/could not start a shell: no capacity/);
     // Asking for the same place again is not "a different location".
     expect((await h.svc.run({ chatId: "c1", name: "build", command: "say y", location: "box" })).error).toBeUndefined();
+    // And a refusal names where it REALLY runs, not the backend it asked for.
+    const moved = await h.svc.run({ chatId: "c1", name: "build", command: "say z", location: "local" });
+    expect(moved.error).toMatch(/already runs on this machine \(a fallback — Test box could not start it\)/);
   });
 
   it("lifecycle hooks reach the backend a chat used only through a per-terminal pick", async () => {

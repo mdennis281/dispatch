@@ -63,13 +63,23 @@ export function TerminalLocationsPicker({
     // Keep the rows' order, so the same set always saves as the same list.
     onChange(rows.map((r) => r.id).filter((r) => next.has(r)));
   };
-  const runnable = rows.filter((r) => enabled.has(r.id) && r.hint !== "not installed").length;
+  // The server offers each chat its DEFAULT on top of this list, and this
+  // pane has no chat to know that default from. So a lone ticked backend is
+  // still a choice (it plus a local default), and only an empty list — or a
+  // lone `local` in a chat that defaults to local — is truly none. Counting
+  // ticked rows and calling one "no choice" contradicted the Terminals panel
+  // for the same config (review on #452).
+  const offered = rows.filter((r) => enabled.has(r.id) && r.hint !== "not installed").map((r) => r.label);
+  const reading =
+    offered.length === 0
+      ? "no choice — every terminal goes where the chat's default sends it"
+      : offered.length === 1 && enabled.has(LOCAL_TERMINAL_BACKEND)
+        ? "this machine on top of each chat's default — a choice only in chats that default to a backend"
+        : `${offered.join(" · ")}, plus each chat's default`;
   const summary =
     value === undefined && parentLabel
-      ? `Inheriting ${parentLabel}: ${runnable < 2 ? "no choice" : `${runnable} locations`}.`
-      : runnable < 2
-        ? "No choice — every terminal goes where the chat's default sends it."
-        : `The agent picks among ${runnable} locations, per terminal. The chat's default is always one of them.`;
+      ? `Inheriting ${parentLabel}: ${reading}.`
+      : `${reading.charAt(0).toUpperCase()}${reading.slice(1)}.`;
 
   return (
     <div>

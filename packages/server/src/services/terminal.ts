@@ -577,7 +577,13 @@ export class TerminalService {
   private locationConflict(term: Terminal, name: string, location: string | undefined): RunTerminalResult | null {
     if (!location || term.status !== "live" || term.placement === undefined) return null;
     if (term.placement === location) return null;
-    const where = term.location?.label ?? (term.placement === LOCAL_TERMINAL_BACKEND ? "this machine" : term.placement);
+    // A fallback keeps the id it ASKED for as its placement, but its commands
+    // run here — naming the backend would tell the agent a falsehood about
+    // where its last commands ran (review on #452).
+    const where =
+      term.location?.state === "fallback"
+        ? `this machine (a fallback — ${term.location.label} could not start it)`
+        : (term.location?.label ?? (term.placement === LOCAL_TERMINAL_BACKEND ? "this machine" : term.placement));
     return {
       output: "",
       exitCode: null,
