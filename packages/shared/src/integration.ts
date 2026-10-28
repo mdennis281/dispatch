@@ -22,6 +22,10 @@ export const INTEGRATION_TOKEN_PREFIX = "dsp_";
 export const INTEGRATION_FIXED_SCOPES = [
   "chats:read",
   "chats:write",
+  // Its own scope, not part of `chats:write`: sending a message into a chat
+  // the owner opened is a different grant from starting a NEW agent working
+  // in one of their repositories, and the consent page must say so separately.
+  "chats:create",
   "attention:read",
   "attention:answer",
   "memory:read",

@@ -29,10 +29,14 @@
  * EXACTLY ONE project — that is the only honest reading of "which project" —
  * and omitted otherwise. A token meant for memory curation gets one project.
  *
- * `spawn_chat` is external by the registry's rule, but its consent card is
- * routed through the PARENT session's permission channel, and there is no
- * parent here. It stays unbound until a session-less consent card exists; the
- * tool is simply not listed.
+ * `spawn_chat` is bound only for a token holding `chats:create`, and runs
+ * through `ChannelChatService` rather than the broker's spawn: there is no
+ * parent session to put a consent card in, so the owner's GRANT of that scope
+ * is the consent (see channel-chats.ts for the limits a grant cannot waive —
+ * no bypass mode, and the brief lands as this integration's message).
+ *
+ * `chat_summarize` spends a model call on the summarized chat's account; the
+ * service caches it and rate-limits it per token name.
  */
 import type { EventBus } from "../../bus.js";
 import type { Store } from "../../store/index.js";
@@ -44,6 +48,9 @@ import type { MemoryHistoryService } from "../memory-history.js";
 import type { IssueService } from "../issues/service.js";
 import type { AuthoredConfigService } from "../authored-config.js";
 import type { SessionBroker } from "../session-broker.js";
+import type { ChannelChatService } from "../channel-chats.js";
+import { ChannelChatRefusal } from "../channel-chats.js";
+import type { ChatSummaryService } from "../chat-summary.js";
 import { BUILTIN_MODE_PERMISSION } from "../session-broker.js";
 import { createAuthoringEditor } from "./authoring-editor.js";
 import { createModeEditor } from "./mode-editor.js";
@@ -59,6 +66,9 @@ export interface IntegrationContextDeps {
   memoryHistory?: MemoryHistoryService;
   issues?: IssueService;
   authored?: AuthoredConfigService;
+  channelChats?: Pick<ChannelChatService, "create">;
+  summaries?: Pick<ChatSummaryService, "summarize">;
+  getProject?: (id: string) => Promise<{ id: string; name: string } | null>;
   now?: () => number;
 }
 
@@ -109,7 +119,7 @@ export async function createIntegrationContext(
   deps: IntegrationContextDeps,
   identity: IntegrationIdentity,
 ): Promise<ManagerMcpContext> {
-  const { memory, memoryHistory, issues, inspect, messenger, authored, store } = deps;
+  const { memory, memoryHistory, issues, inspect, messenger, authored, store, channelChats, summaries, getProject } = deps;
   const projectId = identity.projectIds?.length === 1 ? identity.projectIds[0] : undefined;
   const allow: Allowlist | null = identity.projectIds?.length
     ? {
@@ -197,6 +207,48 @@ export async function createIntegrationContext(
           }
         : undefined,
     issues: issues && projectId ? { tracker: () => issues.forProject(projectId) } : undefined,
+    chats:
+      channelChats && getProject && identity.scopes.includes("chats:create")
+        ? {
+            canNotify: false,
+            // No caller project to default to: an omitted id is "nowhere".
+            resolveProject: async (id) => {
+              if (!id || !projectVisible(id)) return null;
+              const p = await getProject(id).catch(() => null);
+              return p ? { id: p.id, name: p.name } : null;
+            },
+            consent: async () => ({ approved: true, auto: true }),
+            spawn: async ({ request, project }) => {
+              try {
+                const made = await channelChats.create({
+                  channel: identity.name,
+                  projectId: project.id,
+                  prompt: request.prompt,
+                  ...(request.title ? { title: request.title } : {}),
+                  ...(request.modeId ? { modeId: request.modeId } : {}),
+                  ...(request.provider ? { provider: request.provider } : {}),
+                  ...(request.model ? { model: request.model } : {}),
+                  ...(request.effort ? { effort: request.effort } : {}),
+                  ...(request.personaId ? { personaId: request.personaId } : {}),
+                });
+                return { ...made };
+              } catch (err) {
+                // The tool reports a thrown spawn as its failure; the refusal's
+                // own sentence is the useful part.
+                if (err instanceof ChannelChatRefusal) throw new Error(err.message);
+                throw err;
+              }
+            },
+          }
+        : undefined,
+    summary: summaries
+      ? {
+          summarize: async (chatId, focus) => {
+            if (!chatVisible(chatId)) throw new Error(`No chat "${chatId}" exists. Find the right id with chat_find.`);
+            return summaries.summarize(chatId, { caller: `channel:${identity.name}`, ...(focus ? { focus } : {}) });
+          },
+        }
+      : undefined,
     // Reads of the shipped and global scopes. No project config dir: the
     // project-scoped copies belong to a checkout no integration is working in.
     authoring: authored

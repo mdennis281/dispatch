@@ -926,7 +926,7 @@ non-chat caller.
   dir because the file is per instance; the server re-reads it on mtime, so no
   restart.
 
-**Scopes:** `chats:read`, `chats:write`, `attention:read`, `attention:answer`,
+**Scopes:** `chats:read`, `chats:write`, `chats:create`, `attention:read`, `attention:answer`,
 `memory:read`, `memory:write`, `projects:read`, `webhooks:manage`, and
 `tools:<category>` per manager category. Every `tools:*` is valid to hold, but
 only categories with at least one external tool are **offered** — in the token
@@ -942,13 +942,21 @@ cross-checked against the factory at compile time like the categories. The
 rule for the flag: a tool that acts on the calling chat's own session, shell or
 tree, or that puts a card in front of the human on the calling chat's behalf,
 is **not** external. So `chat_find`, `chat_read`, `chat_send`, `chat_ask`,
-`chat_reply`, `chat_state`, `wait_for_chat`, `project_info`, `project_list`, the
+`chat_reply`, `chat_state`, `chat_summarize`, `wait_for_chat`, `project_info`, `project_list`, the
 memory tools, the issue tools, `mode_list`, `config_list` and `config_read` are
 external; `wait`, `context_usage`, `compact_context`, the workspace tools, the
 PR tools, the confirm tools, the secrets tools, `chat_set_mode`,
 `chat_set_persona`, `mode_read`, the `mcp_*` editors and every
-`*_write`/`*_delete` are not. `spawn_chat` is flagged external but not offered
-in v1 (its consent card needs a parent session). Memory and issue tools bind
+`*_write`/`*_delete` are not. `spawn_chat` binds only for a token holding
+`chats:create`: there is no parent session to put a consent card in, so the
+owner's grant of that scope IS the consent. It runs through
+`ChannelChatService` (not `broker.spawnChat`): the chat runs in the project's
+default mode, a named mode that resolves to `bypassPermissions` is refused, the
+brief lands as a `channel` row in the token's name, and no completion notice is
+promised. `chat_summarize` runs a model on the summarized chat's OWN provider
+and account (`ChatSummaryService`), cached until a new row lands, one call in
+flight per chat, and rate-limited to 30 model calls per caller per hour (cache
+hits are free). Memory and issue tools bind
 only when the token names exactly one project. A category is offered only when
 the token holds `tools:<category>`; the mount is authenticated by the gate (it
 does NOT ride the per-chat bridge's gate exemption), and the external context
@@ -962,6 +970,8 @@ sprinkled over the SPA's routes:
 | `GET chats?projectId&status&since&q&limit&archived` | `chats:read` |
 | `GET chats/:id` (digest) · `GET chats/:id/messages?kinds&before&after&limit` | `chats:read` |
 | `POST chats/:id/messages { text, delivery?, sender? }` | `chats:write` |
+| `POST chats { projectId, text, title?, modeId?, provider?, model?, effort? }` → 201 | `chats:create` |
+| `GET chats/:id/summary?focus` (429 + `Retry-After` past the limit) | `chats:read` |
 | `GET attention` · `POST attention/:id/answer { optionId \| answer \| answers \| decline }` | `attention:read` / `attention:answer` |
 | `GET projects` | `projects:read` |
 | `GET openapi.json` | any |

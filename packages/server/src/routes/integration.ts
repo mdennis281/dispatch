@@ -29,6 +29,9 @@ import {
   type IntegrationTokenCreateRequest,
 } from "@dispatch/shared";
 import { AuthFailure, type RequestIdentity } from "../services/auth.js";
+import { ChannelChatRefusal } from "../services/channel-chats.js";
+import { SummaryRateLimitError } from "../services/chat-summary.js";
+import { ProviderUnavailableError } from "../harness/index.js";
 import {
   ScopeFailure,
   projectAllowed,
@@ -67,6 +70,19 @@ const SendBody = z.object({
   /** A display name for the row; defaults to the token's name. */
   sender: z.string().trim().min(1).max(64).optional(),
 });
+
+const CreateChatBody = z.object({
+  projectId: z.string().min(1),
+  /** The first message — the new chat's whole brief, attributed to this integration. */
+  text: z.string().min(1),
+  title: z.string().trim().min(1).max(200).optional(),
+  modeId: z.string().min(1).optional(),
+  provider: z.string().min(1).optional(),
+  model: z.string().min(1).optional(),
+  effort: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
+});
+
+const SummaryQuery = z.object({ focus: z.string().max(500).optional() });
 
 const AnswerBody = z.object({
   answer: z.string().optional(),
@@ -205,6 +221,69 @@ export function registerIntegrationRoutes(app: FastifyInstance): void {
         interrupted: Boolean(result.interrupted),
         woke: Boolean(result.woke),
       });
+    }),
+  );
+
+  // Its own scope: starting an agent in a repository is not "sending a message".
+  app.post("/api/integration/chats", (req, reply) =>
+    withScope(reply, async () => {
+      requireScope(req, "chats:create");
+      const parsed = CreateChatBody.safeParse(req.body ?? {});
+      if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+      const body = parsed.data;
+      // Same answer as an unknown project: a restricted token cannot probe for others.
+      if (!projectAllowed(req, body.projectId)) return reply.code(404).send({ error: `No project "${body.projectId}".` });
+      const identity = req.authIdentity;
+      const channel =
+        identity?.kind === "integration" ? identity.name : identity?.kind === "user" ? identity.user.displayName : "integration";
+      try {
+        const chat = await app.services.channelChats.create({
+          channel,
+          projectId: body.projectId,
+          prompt: body.text,
+          ...(body.title ? { title: body.title } : {}),
+          ...(body.modeId ? { modeId: body.modeId } : {}),
+          ...(body.provider ? { provider: body.provider } : {}),
+          ...(body.model ? { model: body.model } : {}),
+          ...(body.effort ? { effort: body.effort } : {}),
+        });
+        return reply.code(201).send(chat);
+      } catch (err) {
+        if (err instanceof ChannelChatRefusal) return reply.code(err.status).send({ error: err.message });
+        // `createChat` throws a plain Error for "no provider can run this" and
+        // the like — the caller's to fix, not a server fault.
+        if (err instanceof Error && /provider|subscription|persona|mode/i.test(err.message)) {
+          return reply.code(409).send({ error: err.message });
+        }
+        throw err;
+      }
+    }),
+  );
+
+  app.get<{ Params: { id: string } }>("/api/integration/chats/:id/summary", (req, reply) =>
+    withScope(reply, async () => {
+      requireScope(req, "chats:read");
+      const parsed = SummaryQuery.safeParse(req.query ?? {});
+      if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+      const chat = await store.getChat(req.params.id).catch(() => null);
+      if (!chat || !projectAllowed(req, chat.projectId)) {
+        return reply.code(404).send({ error: "No such chat." });
+      }
+      const identity = req.authIdentity;
+      const caller =
+        identity?.kind === "integration" ? `channel:${identity.name}` : identity?.kind === "user" ? `user:${identity.user.username}` : "anonymous";
+      try {
+        return await app.services.chatSummaries.summarize(chat.id, {
+          caller,
+          ...(parsed.data.focus ? { focus: parsed.data.focus } : {}),
+        });
+      } catch (err) {
+        if (err instanceof SummaryRateLimitError) {
+          return reply.code(429).header("Retry-After", String(Math.ceil(err.retryAfterMs / 1000))).send({ error: err.message });
+        }
+        if (err instanceof ProviderUnavailableError) return reply.code(409).send({ error: err.message });
+        throw err;
+      }
     }),
   );
 
@@ -351,6 +430,25 @@ const OPENAPI = {
           type: "object", properties: { chats: { type: "array", items: { $ref: "#/components/schemas/ChatSummary" } } },
         } } } } },
       },
+      post: { ...scoped("chats:create"), summary: "Start a new chat in a project; the first message is attributed to this integration",
+        description: "Runs in the project's default mode unless `modeId` names another; a mode that bypasses permission prompts is refused (403).",
+        requestBody: { required: true, content: { "application/json": { schema: {
+          type: "object", required: ["projectId", "text"],
+          properties: {
+            projectId: { type: "string" }, text: { type: "string" }, title: { type: "string" },
+            modeId: { type: "string" }, provider: { type: "string" }, model: { type: "string" },
+            effort: { type: "string", enum: ["low", "medium", "high", "xhigh", "max"] },
+          },
+        } } } },
+        responses: { "201": { description: "Created and briefed" }, "403": { description: "Bypass mode refused" }, "404": { description: "No such project" }, "409": { description: "No provider can run it, or the brief was refused" } } },
+    },
+    "/api/integration/chats/{id}/summary": {
+      get: { ...scoped("chats:read"), summary: "A model's summary of the chat — cached until it changes, rate-limited per token",
+        parameters: [
+          { name: "id", in: "path", required: true, schema: { type: "string" } },
+          { name: "focus", in: "query", schema: { type: "string" }, description: "What the reader specifically wants to know" },
+        ],
+        responses: { "200": { description: "Summary" }, "404": { description: "No such chat" }, "409": { description: "The chat's provider is unavailable" }, "429": { description: "Summary rate limit" } } },
     },
     "/api/integration/chats/{id}": {
       get: { ...scoped("chats:read"), summary: "A chat's digest: its summary, the human's messages, and any problems",
