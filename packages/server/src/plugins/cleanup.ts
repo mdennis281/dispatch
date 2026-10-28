@@ -89,6 +89,17 @@ function fromDb(r: DbRow): CleanupRow {
   };
 }
 
+/** The delay {@link PluginCleanupQueue.failed} put after a row's latest attempt. */
+const backoffAfter = (attempts: number) => BACKOFF_MS[Math.min(Math.max(attempts, 1) - 1, BACKOFF_MS.length - 1)]!;
+
+/**
+ * When a row was last attempted. Derived rather than stored: `next_at` is
+ * always that moment plus the backoff for its attempt count. NOT `next_at`
+ * itself — the most backed-off row is the OLDEST failure, and picking it
+ * would show a stale error over the fresh one a human can act on.
+ */
+const lastAttemptAt = (r: CleanupRow) => r.nextAt - backoffAfter(r.attempts);
+
 const keyOf = (k: CleanupKey) => `${k.plugin}\u0000${k.target}\u0000${k.hook}\u0000${k.chatId}`;
 
 export class PluginCleanupQueue {
@@ -116,7 +127,7 @@ export class PluginCleanupQueue {
     const now = this.now();
     const prev = this.get(key);
     const attempts = (prev?.attempts ?? 0) + 1;
-    const delay = BACKOFF_MS[Math.min(attempts - 1, BACKOFF_MS.length - 1)]!;
+    const delay = backoffAfter(attempts);
     this.db
       .prepare(
         "INSERT INTO plugin_cleanup (plugin, target, hook, chat_id, project_id, attempts, last_error, created_at, next_at) " +
@@ -158,7 +169,7 @@ export class PluginCleanupQueue {
     const rows = this.list(plugin);
     if (!rows.length) return undefined;
     // The most recently attempted row carries the freshest error.
-    const latest = rows.reduce((a, b) => (b.nextAt > a.nextAt ? b : a));
+    const latest = rows.reduce((a, b) => (lastAttemptAt(b) > lastAttemptAt(a) ? b : a));
     return {
       count: rows.length,
       oldestAt: rows[0]!.createdAt,

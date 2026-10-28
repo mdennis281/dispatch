@@ -280,7 +280,8 @@ describe("reconcile", () => {
       },
     }));
     const h = await host({ base, modules: { one: one.mod } });
-    await tick();
+    // The reconcile is detached and reads the chat list first: wait for it to start.
+    for (let i = 0; i < 200 && !signal; i++) await tick(5);
     expect(signal?.aborted).toBe(false);
     await h.svc.setEnabled("one", false);
     expect(signal?.aborted).toBe(true);
@@ -331,14 +332,17 @@ describe("durable onChatDeleted", () => {
     expect(h.svc.get("boxy")!.pendingCleanups).toMatchObject({ count: 1, attempts: 1, chats: ["gone"] });
 
     // Still down: a retry counts an attempt and pushes the next one out.
-    await h.svc.retryCleanups("boxy");
+    await h.svc.retryCleanups("boxy").retrying;
     expect(h.cleanups.list("boxy")[0]).toMatchObject({ attempts: 2 });
 
     reachable = true;
-    const info = await h.svc.retryCleanups("boxy");
+    // Answers before the retry has run: the hook may take its whole timeout.
+    const { info: during, retrying } = h.svc.retryCleanups("boxy");
+    expect(during.pendingCleanups).toMatchObject({ count: 1 });
+    await retrying;
     expect(box.deleted).toEqual(["gone"]);
     expect(h.cleanups.list("boxy")).toEqual([]);
-    expect(info.pendingCleanups).toBeUndefined();
+    expect(h.svc.get("boxy")!.pendingCleanups).toBeUndefined();
     await h.svc.dispose();
   });
 
@@ -424,6 +428,23 @@ describe("durable onChatDeleted", () => {
     const info = await h.svc.discardCleanups("boxy");
     expect(info.pendingCleanups).toBeUndefined();
     expect(calls).toBe(1);
+    await h.svc.dispose();
+  });
+});
+
+describe("the cleanup summary", () => {
+  it("shows the error of the most recently FAILED row, not the most backed-off one", async () => {
+    const base = await paths();
+    const h = await host({ base, modules: {} });
+    let clock = 1_000_000;
+    const q = new PluginCleanupQueue({ db: h.store.stateDb, run: async () => ({ ok: true }), now: () => clock });
+    const key = (chatId: string) => ({ plugin: "p", target: "box", hook: "onChatDeleted" as const, chatId });
+    // A: failing for hours, backed off furthest.
+    for (let i = 0; i < 5; i++) q.failed(key("old"), "hypervisor timeout");
+    // B: deleted a minute ago, one fresh and different failure.
+    clock += 60_000;
+    q.failed(key("new"), "401 unauthorized");
+    expect(q.summary("p")).toMatchObject({ count: 2, attempts: 5, lastError: "401 unauthorized", chats: ["old", "new"] });
     await h.svc.dispose();
   });
 });

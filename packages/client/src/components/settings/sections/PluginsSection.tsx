@@ -429,9 +429,17 @@ function PluginCleanupNotice({
     setBusy(what);
     setError(null);
     try {
-      onChange(
-        what === "retry" ? await api.plugins.retryCleanups(plugin.id) : await api.plugins.discardCleanups(plugin.id),
-      );
+      if (what === "forget") {
+        onChange(await api.plugins.discardCleanups(plugin.id));
+        return;
+      }
+      // The server answers at once and retries in the background (a row can
+      // take a minute against an unreachable host), so read the outcome back
+      // a few seconds later rather than holding the button on a request.
+      await api.plugins.retryCleanups(plugin.id);
+      await new Promise((r) => setTimeout(r, 4_000));
+      const fresh = (await api.plugins.list()).find((p) => p.id === plugin.id);
+      if (fresh) onChange(fresh);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {

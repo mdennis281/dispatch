@@ -583,12 +583,21 @@ export class PluginService implements PluginContributionSource {
     await this.records.get(id)?.reconciling;
   }
 
-  /** Retry this plugin's failed cleanups now, ignoring backoff — Settings' "Retry now". */
-  async retryCleanups(id: string): Promise<PluginInfo> {
+  /**
+   * Retry this plugin's failed cleanups now, ignoring backoff — Settings'
+   * "Retry now". DETACHED: each row may take the full 60 s hook timeout, so
+   * ten rows against a hypervisor that black-holes connections would hold
+   * the request ten minutes and a proxy would cut it off first. The row's
+   * `attempts` / `nextAt` report the outcome on the next read; `retrying`
+   * lets a caller that can wait (tests) do so.
+   */
+  retryCleanups(id: string): { info: PluginInfo; retrying: Promise<void> } {
     const rec = this.records.get(id);
     if (!rec) throw new PluginNotFound(id);
-    await this.cleanups?.retry({ plugin: id });
-    return this.info(rec);
+    const retrying = (this.cleanups?.retry({ plugin: id }) ?? Promise.resolve())
+      .then(() => undefined)
+      .catch((err: unknown) => this.fault(`plugin "${id}" cleanup retry failed`, err));
+    return { info: this.info(rec), retrying };
   }
 
   /**

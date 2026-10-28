@@ -220,7 +220,8 @@ export function registerPluginRoutes(app: FastifyInstance): void {
     const refused = refuseNonOwner(req, reply);
     if (refused) return refused;
     try {
-      return await plugins.retryCleanups(req.params.id);
+      // Answers at once; the retry runs on (see `retryCleanups`).
+      return reply.code(202).send(plugins.retryCleanups(req.params.id).info);
     } catch (err) {
       return inspectFailure(reply, err);
     }
