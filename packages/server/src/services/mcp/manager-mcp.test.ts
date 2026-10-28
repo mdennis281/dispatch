@@ -4450,6 +4450,85 @@ function spawnArgs(over: Partial<SpawnChatRequest> & { prompt: string }) {
   };
 }
 
+describe("manager-mcp — spawn_chat resolves a project by name", () => {
+  const PROJECTS: SpawnChatTarget[] = [
+    { id: "p-disp", name: "Dispatch" },
+    { id: "p-anox", name: "anoxia" },
+    { id: "p-film", name: "anoxia-films" },
+  ];
+
+  /** resolveProject by id only, like both real bindings; `listProjects` is the name half. */
+  function byIdChats(list: SpawnChatTarget[] | undefined) {
+    const fake = fakeChats({});
+    const resolved: (string | undefined)[] = [];
+    const binding: ManagerMcpChats = {
+      ...fake.binding,
+      resolveProject: async (id) => {
+        resolved.push(id);
+        return PROJECTS.find((p) => p.id === id) ?? null;
+      },
+      ...(list ? { listProjects: async () => list } : {}),
+    };
+    return { binding, calls: fake.calls, resolved };
+  }
+
+  function tools(chats: ManagerMcpChats, chatId = "c1") {
+    return createManagerTools({ chatId, bus, broker: fakeBroker({}), chats });
+  }
+
+  it("spawns into the project whose name matches, case-insensitively", async () => {
+    const chats = byIdChats(PROJECTS);
+    const res = await tools(chats.binding).spawnChat.handler(spawnArgs({ prompt: "Go", projectId: "dispatch" }), {});
+    expect(res.isError).toBeFalsy();
+    expect(resultText(res)).toContain('"projectId":"p-disp"');
+    // Re-resolved by id, so the id path's visibility rules still decide.
+    expect(chats.resolved).toEqual(["dispatch", "p-disp"]);
+  });
+
+  it("does not substring-match: 'anoxia' is anoxia, not anoxia-films", async () => {
+    const chats = byIdChats(PROJECTS);
+    const res = await tools(chats.binding).spawnChat.handler(spawnArgs({ prompt: "Go", projectId: "ANOXIA" }), {});
+    expect(resultText(res)).toContain('"projectId":"p-anox"');
+  });
+
+  it("an id still wins without consulting the listing", async () => {
+    const chats = byIdChats(PROJECTS);
+    await tools(chats.binding).spawnChat.handler(spawnArgs({ prompt: "Go", projectId: "p-film" }), {});
+    expect(chats.resolved).toEqual(["p-film"]);
+    expect(chats.calls.spawned).toHaveLength(1);
+  });
+
+  it("a miss lists the projects it could have meant, by name and id", async () => {
+    const chats = byIdChats(PROJECTS);
+    const res = await tools(chats.binding, "").spawnChat.handler(spawnArgs({ prompt: "Go", projectId: "nope" }), {});
+    expect(res.isError).toBe(true);
+    const text = resultText(res);
+    expect(text).toContain('No project "nope"');
+    expect(text).toContain("- Dispatch (id: p-disp)");
+    expect(text).toContain("- anoxia-films (id: p-film)");
+    // No caller chat (an integration): don't suggest falling back to it.
+    expect(text).not.toContain("this chat's own project");
+    expect(chats.calls.consented).toHaveLength(0);
+  });
+
+  it("refuses a name two projects share, listing both", async () => {
+    const twins = [...PROJECTS, { id: "p-disp2", name: "dispatch" }];
+    const chats = byIdChats(twins);
+    const res = await tools(chats.binding).spawnChat.handler(spawnArgs({ prompt: "Go", projectId: "Dispatch" }), {});
+    expect(res.isError).toBe(true);
+    expect(resultText(res)).toContain("names 2 projects");
+    expect(resultText(res)).toContain("p-disp2");
+    expect(chats.calls.spawned).toHaveLength(0);
+  });
+
+  it("without listProjects, ids only — the old refusal", async () => {
+    const chats = byIdChats(undefined);
+    const res = await tools(chats.binding).spawnChat.handler(spawnArgs({ prompt: "Go", projectId: "dispatch" }), {});
+    expect(res.isError).toBe(true);
+    expect(resultText(res)).not.toContain("Projects you can spawn into");
+  });
+});
+
 describe("manager-mcp — spawn_chat", () => {
   it.each([
     ["omitted", undefined, true],

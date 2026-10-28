@@ -8734,6 +8734,8 @@ export class SessionBroker {
               const proj = await this.store.getProject(target).catch(() => null);
               return proj ? { id: proj.id, name: proj.name } : null;
             },
+            listProjects: async () =>
+              realProjects(await this.store.listProjects()).map((p) => ({ id: p.id, name: p.name })),
             nesting: async ({ request, project: target }) =>
               this.checkSpawnNesting(session.chatId, request, target),
             consent: async ({ request, project: target }) =>

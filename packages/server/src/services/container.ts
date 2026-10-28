@@ -1169,6 +1169,7 @@ export function createServices(
         channelChats,
         summaries: chatSummaries,
         getProject: (id) => store.getProject(id).catch(() => null),
+        listProjects: () => store.listProjects(),
       },
       identity,
     ),

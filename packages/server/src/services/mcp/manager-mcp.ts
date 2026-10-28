@@ -1847,6 +1847,21 @@ export interface SpawnChatTarget {
   name: string;
 }
 
+/**
+ * The targets whose name is exactly `needle`, ignoring case. Exact rather than
+ * the substring match `project_info` allows: that one only reads, but this one
+ * starts a chat, and "anoxia" must not land in "anoxia-films".
+ */
+export function matchSpawnTargetByName(needle: string, targets: readonly SpawnChatTarget[]): SpawnChatTarget[] {
+  const lower = needle.trim().toLowerCase();
+  return targets.filter((t) => t.name.toLowerCase() === lower);
+}
+
+/** One `- name (id)` line per target, for a refusal to hand back. */
+export function describeSpawnTargets(targets: readonly SpawnChatTarget[]): string {
+  return targets.map((t) => `- ${t.name} (id: ${t.id})`).join("\n");
+}
+
 /** The human's answer to a spawn request. */
 export interface SpawnChatConsent {
   approved: boolean;
@@ -1884,6 +1899,18 @@ export interface ManagerMcpChats {
    * than silently spawning somewhere else).
    */
   resolveProject(projectId?: string): Promise<SpawnChatTarget | null>;
+  /**
+   * Every project this caller may spawn into. Lets `projectId` take a project's
+   * NAME as well as its id, and lets a miss list the real targets.
+   *
+   * An integration (the Grok connector) knows projects only by the names it
+   * hears — "dispatch", "anoxia" — and its token may hold the `chat` mount
+   * without the `project` one, so `project_list` isn't there to translate. A
+   * bare "No project" left it with no way forward.
+   *
+   * Optional so older fakes stay valid — absent means ids only, as before.
+   */
+  listProjects?(): Promise<SpawnChatTarget[]>;
   /**
    * Whether the project's nesting cap lets this chat file another row under
    * itself (see `chat-nesting.ts`). Asked BEFORE `consent`, so a spawn the
@@ -5922,7 +5949,10 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       projectId: z
         .string()
         .optional()
-        .describe("Project to spawn in. Defaults to this chat's own project."),
+        .describe(
+          "Project to spawn in — its id, or its exact name (case-insensitive). Defaults to " +
+            "this chat's own project.",
+        ),
       modeId: z.string().optional().describe("Mode id for the new chat (default: your project's)."),
       // Strict here although the schema is open: stored rows must tolerate an
       // id nobody registers any more, but an agent asking for one is a typo,
@@ -6017,14 +6047,30 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         notifyWhenComplete: ctx.chats.canNotify !== false && args.notifyWhenComplete !== false,
       };
 
-      const project = await ctx.chats.resolveProject(request.projectId);
+      let project = await ctx.chats.resolveProject(request.projectId);
+      let targets: SpawnChatTarget[] = [];
+      if (!project && request.projectId && ctx.chats.listProjects) {
+        targets = await ctx.chats.listProjects().catch(() => []);
+        const named = matchSpawnTargetByName(request.projectId, targets);
+        // Back through resolveProject rather than trusting the listing, so a
+        // name can never reach a project the id path would have refused.
+        if (named.length === 1) project = await ctx.chats.resolveProject(named[0]!.id);
+        else if (named.length > 1) {
+          return textResult(
+            `"${request.projectId}" names ${named.length} projects — pass one of their ids:\n` +
+              describeSpawnTargets(named),
+            true,
+          );
+        }
+      }
       if (!project) {
+        const listing = targets.length ? `\nProjects you can spawn into:\n${describeSpawnTargets(targets)}` : "";
         return textResult(
-          request.projectId
-            ? `No project "${request.projectId}" — check the id, or omit projectId to ` +
-                "spawn in this chat's own project."
+          (request.projectId
+            ? `No project "${request.projectId}" — pass a project id or its exact name` +
+              (ctx.chatId ? ", or omit projectId to spawn in this chat's own project." : ".")
             : "This session has no project, so there is nowhere to spawn a chat. Pass " +
-                "an explicit projectId.",
+              "an explicit projectId.") + listing,
           true,
         );
       }
