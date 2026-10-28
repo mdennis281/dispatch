@@ -41,6 +41,9 @@ export interface ChannelChatRequest {
   model?: string;
   effort?: Effort;
   personaId?: string;
+  /** A specific login to run on; omitted → the provider's default account. */
+  subscriptionId?: string;
+  agentId?: string;
 }
 
 export interface ChannelChat {
@@ -74,6 +77,8 @@ export interface ChannelChatDeps {
     model?: string;
     effort?: Effort;
     personaId?: string;
+    subscriptionId?: string;
+    agentId?: string;
     purpose: { kind: string; label?: string };
   }) => Promise<Chat>;
   ensureSession: (chatId: string) => Promise<unknown>;
@@ -111,6 +116,8 @@ export class ChannelChatService {
       ...(req.model ? { model: req.model } : {}),
       ...(req.effort ? { effort: req.effort } : {}),
       ...(req.personaId ? { personaId: req.personaId } : {}),
+      ...(req.subscriptionId ? { subscriptionId: req.subscriptionId } : {}),
+      ...(req.agentId ? { agentId: req.agentId } : {}),
       purpose: { kind: "channel", label: `Started by ${req.channel}` },
     });
     await this.deps.ensureSession(chat.id);

@@ -230,6 +230,10 @@ export async function createIntegrationContext(
                   ...(request.model ? { model: request.model } : {}),
                   ...(request.effort ? { effort: request.effort } : {}),
                   ...(request.personaId ? { personaId: request.personaId } : {}),
+                  // Forwarded, not dropped: a request for one login must not
+                  // quietly start on (and spend) another.
+                  ...(request.subscription ? { subscriptionId: request.subscription } : {}),
+                  ...(request.agentId ? { agentId: request.agentId } : {}),
                 });
                 return { ...made };
               } catch (err) {

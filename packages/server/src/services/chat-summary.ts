@@ -148,13 +148,24 @@ export class ChatSummaryService {
     const running = this.inFlight.get(key);
     if (running) return running;
 
-    this.charge(opts.caller);
+    // Answered before `charge`: no model call is made, and a bot polling a chat
+    // it just created would otherwise spend its hour on "nothing yet".
     const source = summarySource(messages);
+    if (!source.trim()) {
+      return { chatId, title: chat.title, summary: "Nothing has been said in this chat yet.", ...(last ? { upToRowId: last } : {}), generatedAt: this.now(), provider: chat.harness ?? ("unknown" as HarnessKind), cached: false };
+    }
+
+    const refund = this.charge(opts.caller);
     const job = (async (): Promise<ChatSummary> => {
-      if (!source.trim()) {
-        return { chatId, title: chat.title, summary: "Nothing has been said in this chat yet.", ...(last ? { upToRowId: last } : {}), generatedAt: this.now(), provider: chat.harness ?? ("unknown" as HarnessKind), cached: false };
+      let generated: string;
+      try {
+        generated = await this.generate({ chat, prompt: summaryPrompt(chat.title, source, focus) });
+      } catch (err) {
+        // A timeout or a provider error returned nothing — it does not count.
+        refund();
+        throw err;
       }
-      const text = (await this.generate({ chat, prompt: summaryPrompt(chat.title, source, focus) })).trim();
+      const text = generated.trim();
       const result: ChatSummary = {
         chatId,
         title: chat.title,
@@ -171,12 +182,17 @@ export class ChatSummaryService {
     return job;
   }
 
-  /** Count a model call against `caller`, or refuse it. */
-  private charge(caller: string): void {
+  /** Count a model call against `caller`, or refuse it. Returns the refund. */
+  private charge(caller: string): () => void {
     const now = this.now();
     const recent = (this.calls.get(caller) ?? []).filter((t) => now - t < HOUR);
     if (recent.length >= this.limit) throw new SummaryRateLimitError(HOUR - (now - recent[0]!), this.limit);
     recent.push(now);
     this.calls.set(caller, recent);
+    return () => {
+      const list = this.calls.get(caller);
+      const at = list?.indexOf(now) ?? -1;
+      if (list && at >= 0) list.splice(at, 1);
+    };
   }
 }

@@ -88,6 +88,26 @@ describe("ChatSummaryService", () => {
     expect((await f.service.summarize("c1", { caller: "a" })).cached).toBe(false);
   });
 
+  it("charges nothing for an empty chat or a failed call", async () => {
+    const f = fixture({ limitPerHour: 1 });
+    f.rows.splice(0);
+    for (let i = 0; i < 3; i++) await f.service.summarize("c1", { caller: "a" });
+    expect(f.prompts).toHaveLength(0);
+
+    const failing = new ChatSummaryService({
+      store: {
+        getChat: async () => ({ id: "c1", title: "t", harness: "claude" }) as never,
+        readMessages: async () => [user("r1", "hi")],
+        getSettings: async () => null as never,
+      } as never,
+      generate: async () => { throw new Error("timed out"); },
+      limitPerHour: 1,
+    });
+    await expect(failing.summarize("c1", { caller: "a" })).rejects.toThrow("timed out");
+    // Still the full budget: the second failure is the model's, not the limit's.
+    await expect(failing.summarize("c1", { caller: "a" })).rejects.toThrow("timed out");
+  });
+
   it("refuses an unknown chat", async () => {
     await expect(fixture().service.summarize("nope", { caller: "a" })).rejects.toThrow(/No chat/);
   });

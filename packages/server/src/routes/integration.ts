@@ -250,11 +250,9 @@ export function registerIntegrationRoutes(app: FastifyInstance): void {
         return reply.code(201).send(chat);
       } catch (err) {
         if (err instanceof ChannelChatRefusal) return reply.code(err.status).send({ error: err.message });
-        // `createChat` throws a plain Error for "no provider can run this" and
-        // the like — the caller's to fix, not a server fault.
-        if (err instanceof Error && /provider|subscription|persona|mode/i.test(err.message)) {
-          return reply.code(409).send({ error: err.message });
-        }
+        // Typed, not matched on wording: a regex over messages turned a store
+        // failure that happened to say "model" into a 409 nobody logged.
+        if (err instanceof ProviderUnavailableError) return reply.code(409).send({ error: err.message });
         throw err;
       }
     }),
