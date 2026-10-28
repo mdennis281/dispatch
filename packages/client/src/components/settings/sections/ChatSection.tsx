@@ -23,6 +23,11 @@ import { Select, type SelectOption } from "../../ui/Select.js";
 import { SectionLabel } from "../../ui/Panel.js";
 import { Switch } from "../../ui/Switch.js";
 import { ShellFilterPanel } from "../../chat/ShellFilterPanel.js";
+import {
+  TerminalLocationsPicker,
+  offerTerminalLocations,
+} from "../../config/TerminalLocationsPicker.js";
+import { useTerminals } from "../../../stores/terminals.js";
 import { modeLabel } from "../../chat/ModeControl.js";
 import { EFFORT_OPTIONS } from "../../../lib/efforts.js";
 import { useProjects, useRealProjects } from "../../../stores/projects.js";
@@ -54,6 +59,7 @@ const configLocationOptions: SelectOption<ProjectConfigLocation>[] = [
 ];
 
 export function ChatSection({ draft, patch, harnesses, catalogs }: AppPaneProps) {
+  const terminalBackends = useTerminals((s) => s.backends);
   const modes = useProjects((s) => s.modes);
   const accounts = useSubscriptions((s) => s.list);
   const harness = draft.harness ?? {};
@@ -432,6 +438,22 @@ export function ChatSection({ draft, patch, harnesses, catalogs }: AppPaneProps)
           )}
         </div>
       </div>
+
+      {offerTerminalLocations(terminalBackends, draft.terminalLocations) && (
+        <div className="border-t border-line-soft pt-3">
+          <SectionLabel className="mb-1.5 px-0">Terminals</SectionLabel>
+          <div className="mb-1 text-xs font-medium text-secondary">Agent may run terminals on</div>
+          <p className="mb-2 text-2xs leading-snug text-faint">
+            Lets the agent choose, per terminal, where each managed shell runs — a heavy build on a
+            container next to a quick local command. A project&apos;s config can override this list.
+          </p>
+          <TerminalLocationsPicker
+            value={draft.terminalLocations}
+            inherited={[]}
+            onChange={(terminalLocations) => patch({ terminalLocations })}
+          />
+        </div>
+      )}
 
       <div className="border-t border-line-soft pt-3">
         <SectionLabel className="mb-1.5 px-0">Spawned chats</SectionLabel>

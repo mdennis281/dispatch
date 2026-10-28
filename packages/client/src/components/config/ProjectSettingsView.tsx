@@ -227,6 +227,7 @@ export function ProjectSettingsView() {
     if (d.model !== undefined) out.model = d.model;
     if (d.showInjectedContext !== undefined) out.showInjectedContext = d.showInjectedContext;
     if (d.terminalBackend !== undefined) out.terminalBackend = d.terminalBackend;
+    if (d.terminalLocations !== undefined) out.terminalLocations = d.terminalLocations;
     if (config?.spawnChat?.autoApprove !== undefined) out.autoApprove = config.spawnChat.autoApprove;
     return out;
   }, [config]);

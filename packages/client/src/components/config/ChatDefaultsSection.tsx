@@ -38,6 +38,7 @@ import { modeLabel } from "../chat/ModeControl.js";
 import { Select, type SelectOption } from "../ui/Select.js";
 import { Switch } from "../ui/Switch.js";
 import { LayeredField } from "./LayeredField.js";
+import { TerminalLocationsPicker, offerTerminalLocations } from "./TerminalLocationsPicker.js";
 
 export function ChatDefaultsSection({
   value,
@@ -319,6 +320,23 @@ export function ChatDefaultsSection({
                 }}
               />
             </LayeredField>
+          )}
+
+          {offerTerminalLocations(terminalBackends, value.terminalLocations, app.terminalLocations) && (
+            <div>
+              <div className="text-xs font-medium text-secondary">Agent may run terminals on</div>
+              <p className="mb-2 mt-0.5 text-2xs leading-snug text-faint">
+                Where the agent may put each terminal it opens, chosen per terminal. Replaces the app&apos;s
+                list for this repo; Off pins no choice here even if the app allows one.
+              </p>
+              <TerminalLocationsPicker
+                value={value.terminalLocations}
+                inherited={app.terminalLocations ?? []}
+                parentLabel="app settings"
+                onChange={(terminalLocations) => patch({ terminalLocations })}
+                disabled={off}
+              />
+            </div>
           )}
 
           <LayeredField

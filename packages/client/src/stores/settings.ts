@@ -42,6 +42,8 @@ export type AppLayer = Pick<
   // nothing — a "Cap: App default" that cannot say WHICH number is no better
   // than a blank.
   | "reviewAgent"
+  // What a project's "Agent may run terminals on" field inherits.
+  | "terminalLocations"
 >;
 
 interface SettingsStore {
@@ -90,6 +92,7 @@ export const useSettings = create<SettingsStore>((set) => ({
         spawnChat: settings.spawnChat,
         defaultSendMode: settings.defaultSendMode,
         reviewAgent: settings.reviewAgent,
+        terminalLocations: settings.terminalLocations,
       },
     });
   },

@@ -77,6 +77,7 @@ const SECTION_SLICE: Record<
     s.defaultModeId,
     s.showInjectedContext,
     s.shellFilter,
+    s.terminalLocations,
     s.spawnChat,
     s.issueWatcher,
     s.harness?.defaultHarness,
@@ -134,6 +135,8 @@ export interface ChatDefaultsDraft {
   autoApprove?: boolean;
   /** `defaults.terminalBackend` — only offered when a plugin registered a backend. */
   terminalBackend?: string;
+  /** `defaults.terminalLocations` — `[]` is a pin (no choice), `undefined` inherits the app's. */
+  terminalLocations?: string[];
 }
 
 /** The manifest patch that turns `saved` into `draft` — only the keys that moved. */
@@ -142,9 +145,20 @@ export function chatDefaultsPatch(
   draft: ChatDefaultsDraft,
 ): ProjectDefaultsPatch {
   const out: ProjectDefaultsPatch = {};
-  const moved = <K extends keyof ChatDefaultsDraft>(key: K) => saved[key] !== draft[key];
+  // JSON, not `!==`: `terminalLocations` is an array, and a re-built copy of
+  // the same list is not a change worth writing to a committed manifest.
+  const moved = <K extends keyof ChatDefaultsDraft>(key: K) =>
+    JSON.stringify(saved[key]) !== JSON.stringify(draft[key]);
   const value = <K extends keyof ChatDefaultsDraft>(key: K) => draft[key] ?? null;
-  for (const key of ["harness", "mode", "effort", "model", "showInjectedContext", "terminalBackend"] as const) {
+  for (const key of [
+    "harness",
+    "mode",
+    "effort",
+    "model",
+    "showInjectedContext",
+    "terminalBackend",
+    "terminalLocations",
+  ] as const) {
     if (moved(key)) (out.defaults ??= {})[key] = value(key) as never;
   }
   if (moved("autoApprove")) out.spawnChat = { autoApprove: value("autoApprove") };
