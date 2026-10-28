@@ -227,6 +227,7 @@ const DISPATCH_COPY: Record<string, { title: string; activity: string; category:
   chat_reply: { title: "Reply to chat", activity: "Replying", category: "peer" },
   chat_state: { title: "Chat state", activity: "Checking chat", category: "peer" },
   chat_summarize: { title: "Summarize chat", activity: "Summarizing chat", category: "peer" },
+  chat_stop: { title: "Stop chat", activity: "Stopping chat", category: "peer" },
   terminal_output: { title: "Terminal output", activity: "Reading terminal", category: "terminal" },
   create_pr: { title: "Open pull request", activity: "Opening pull request", category: "pr" },
   watch_pr: { title: "Watch pull request", activity: "Watching pull request", category: "pr" },

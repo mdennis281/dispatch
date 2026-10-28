@@ -84,6 +84,8 @@ const CreateChatBody = z.object({
 
 const SummaryQuery = z.object({ focus: z.string().max(500).optional() });
 
+const StopBody = z.object({ archive: z.boolean().optional() });
+
 const AnswerBody = z.object({
   answer: z.string().optional(),
   optionId: z.string().optional(),
@@ -239,6 +241,7 @@ export function registerIntegrationRoutes(app: FastifyInstance): void {
       try {
         const chat = await app.services.channelChats.create({
           channel,
+          ...(identity?.kind === "integration" ? { tokenId: identity.tokenId } : {}),
           projectId: body.projectId,
           prompt: body.text,
           ...(body.title ? { title: body.title } : {}),
@@ -253,6 +256,36 @@ export function registerIntegrationRoutes(app: FastifyInstance): void {
         // Typed, not matched on wording: a regex over messages turned a store
         // failure that happened to say "model" into a 409 nobody logged.
         if (err instanceof ProviderUnavailableError) return reply.code(409).send({ error: err.message });
+        throw err;
+      }
+    }),
+  );
+
+  // `chats:write`, not a scope of its own: interrupting a turn is already in
+  // reach through `POST …/messages` with delivery "interrupt". Archiving is
+  // limited to the chats this caller started — see ChannelChatService.stop.
+  app.post<{ Params: { id: string } }>("/api/integration/chats/:id/stop", (req, reply) =>
+    withScope(reply, async () => {
+      requireScope(req, "chats:write");
+      const parsed = StopBody.safeParse(req.body ?? {});
+      if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+      const chat = await store.getChat(req.params.id).catch(() => null);
+      if (!chat || !projectAllowed(req, chat.projectId)) {
+        return reply.code(404).send({ error: "No such chat." });
+      }
+      const identity = req.authIdentity;
+      const channel =
+        identity?.kind === "integration" ? identity.name : identity?.kind === "user" ? identity.user.displayName : "integration";
+      try {
+        return await app.services.channelChats.stop({
+          channel,
+          // Ownership is by token id; a browser session (no token) is the owner.
+          ...(identity?.kind === "integration" ? { tokenId: identity.tokenId } : {}),
+          chatId: chat.id,
+          archive: parsed.data.archive === true,
+        });
+      } catch (err) {
+        if (err instanceof ChannelChatRefusal) return reply.code(err.status).send({ error: err.message });
         throw err;
       }
     }),
@@ -439,6 +472,15 @@ const OPENAPI = {
           },
         } } } },
         responses: { "201": { description: "Created and briefed" }, "403": { description: "Bypass mode refused" }, "404": { description: "No such project" }, "409": { description: "No provider can run it, or the brief was refused" } } },
+    },
+    "/api/integration/chats/{id}/stop": {
+      post: { ...scoped("chats:write"), summary: "Interrupt the chat's running turn — the Stop button; optionally archive it",
+        description: "`archive: true` also releases the chat's session and archives it, and is allowed only for a chat this integration started (403 otherwise).",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { content: { "application/json": { schema: {
+          type: "object", properties: { archive: { type: "boolean" } },
+        } } } },
+        responses: { "200": { description: "`interrupted` says whether a turn was running; `archived` its state now" }, "403": { description: "Archive refused: not started by this integration" }, "404": { description: "No such chat" } } },
     },
     "/api/integration/chats/{id}/summary": {
       get: { ...scoped("chats:read"), summary: "A model's summary of the chat — cached until it changes, rate-limited per token",

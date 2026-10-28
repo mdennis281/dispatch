@@ -25,6 +25,23 @@
  *   - ATTRIBUTION. The brief is delivered through `ChatMessenger` as a
  *     `channel` row, so the transcript says who started it and the model is
  *     told it is hearing from an integration, not from the person.
+ *
+ * STOPPING (`chat_stop`, `POST /api/integration/chats/:id/stop`) lives here
+ * too, because the case that motivated it is undoing a create: a connector
+ * that spawned the same chat twice had no way to call the duplicate off. Two
+ * powers, deliberately unequal:
+ *
+ *   - INTERRUPT any visible chat's running turn — the Composer's Stop button.
+ *     Whatever lets a caller `chat_send` already grants this (delivery
+ *     "interrupt"), so it is not a new power, only an honest name for it.
+ *   - ARCHIVE only a chat THIS token started (`Chat.startedBy.tokenId` — the
+ *     id, never the name: names are not unique). An archived chat drops out of
+ *     the sidebar and the SPA has no control that brings it back, so a bot
+ *     that could archive the owner's own chats could make their work vanish
+ *     from view. Its own spawns — the duplicate — are fair game. Archiving
+ *     also kills the chat's shells and leftover processes, the same three steps
+ *     as the sidebar's reap: a hidden chat must not keep a `pnpm dev` running
+ *     where nobody can see it.
  */
 import type { Chat, Effort, HarnessKind, PermissionMode } from "@dispatch/shared";
 import type { PeerSendResult } from "./chat-messenger.js";
@@ -32,6 +49,8 @@ import type { PeerSendResult } from "./chat-messenger.js";
 export interface ChannelChatRequest {
   /** The integration's display name — the token name. */
   channel: string;
+  /** The token's id, recorded as the chat's owner. Absent for a browser session. */
+  tokenId?: string;
   projectId: string;
   /** The first message, delivered as the integration's. */
   prompt: string;
@@ -67,6 +86,17 @@ export class ChannelChatRefusal extends Error {
   }
 }
 
+/** What stopping a chat did. */
+export interface ChannelChatStop {
+  chatId: string;
+  title: string;
+  projectId: string;
+  /** A turn was running and has been interrupted. False: there was nothing to stop. */
+  interrupted: boolean;
+  /** The chat is archived now (whether by this call or before it). */
+  archived: boolean;
+}
+
 export interface ChannelChatDeps {
   getProject: (id: string) => Promise<{ id: string; name: string } | null>;
   createChat: (input: {
@@ -80,11 +110,23 @@ export interface ChannelChatDeps {
     subscriptionId?: string;
     agentId?: string;
     purpose: { kind: string; label?: string };
+    startedBy?: { tokenId: string; name: string };
   }) => Promise<Chat>;
   ensureSession: (chatId: string) => Promise<unknown>;
   /** The permission mode a mode id resolves to, project-authored modes included. */
   permissionModeOf: (modeId: string) => Promise<PermissionMode>;
   send: (input: { channel: { name: string }; to: string; message: string }) => Promise<PeerSendResult>;
+  getChat: (id: string) => Promise<Chat | null>;
+  /** End the running turn — the Stop button's path. False when no turn was running. */
+  interrupt: (chatId: string) => Promise<boolean>;
+  /**
+   * Release everything the chat is running — its session, its shells, and any
+   * process still attributed to it. The transcript and resume id stay, so the
+   * next message picks it back up.
+   */
+  release: (chatId: string) => Promise<void>;
+  /** Mark the chat archived and tell every client. */
+  archive: (chatId: string) => Promise<void>;
 }
 
 export class ChannelChatService {
@@ -119,6 +161,7 @@ export class ChannelChatService {
       ...(req.subscriptionId ? { subscriptionId: req.subscriptionId } : {}),
       ...(req.agentId ? { agentId: req.agentId } : {}),
       purpose: { kind: "channel", label: `Started by ${req.channel}` },
+      ...(req.tokenId ? { startedBy: { tokenId: req.tokenId, name: req.channel } } : {}),
     });
     await this.deps.ensureSession(chat.id);
     const sent = await this.deps.send({ channel: { name: req.channel }, to: chat.id, message: prompt });
@@ -141,5 +184,35 @@ export class ChannelChatService {
       ...(chat.model ? { model: chat.model } : {}),
       ...(chat.modeId ? { modeId: chat.modeId } : {}),
     };
+  }
+
+  /**
+   * Interrupt a chat's running turn and, with `archive`, also release what it
+   * runs and archive it — refused unless `tokenId` started it (see the file
+   * header for why the two are not equal). No `tokenId` is the owner's own
+   * browser session on REST, which may archive anything of theirs. The caller
+   * has already applied its project allowlist; an invisible chat never gets here.
+   */
+  async stop(req: { channel: string; tokenId?: string; chatId: string; archive?: boolean }): Promise<ChannelChatStop> {
+    const chat = await this.deps.getChat(req.chatId);
+    if (!chat) throw new ChannelChatRefusal(`No chat "${req.chatId}" exists. Find the right id with chat_find.`, 404);
+    // Checked before anything is touched, so a refused archive interrupts nothing.
+    if (req.archive && !chat.archived && req.tokenId !== undefined && chat.startedBy?.tokenId !== req.tokenId) {
+      throw new ChannelChatRefusal(
+        `Chat ${chat.id} was not started by ${req.channel}, so it cannot archive it — archiving hides a ` +
+          "chat from the owner's sidebar. Call chat_stop without archive to interrupt its turn instead.",
+        403,
+      );
+    }
+    const interrupted = await this.deps.interrupt(chat.id);
+    let archived = Boolean(chat.archived);
+    if (req.archive && !archived) {
+      // Released as well as interrupted: an archived chat nobody can see should
+      // not keep a provider, a shell or an MCP child alive.
+      await this.deps.release(chat.id);
+      await this.deps.archive(chat.id);
+      archived = true;
+    }
+    return { chatId: chat.id, title: chat.title, projectId: chat.projectId, interrupted, archived };
   }
 }

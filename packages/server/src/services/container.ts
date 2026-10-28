@@ -1137,6 +1137,21 @@ export function createServices(
     ensureSession: (chatId) => ensureSession(services, chatId),
     permissionModeOf: (modeId) => broker.permissionModeOf(modeId),
     send: (input) => chatMessenger.send(input),
+    getChat: (id) => store.getChat(id).catch(() => null),
+    interrupt: (chatId) => broker.interrupt(chatId),
+    // The sidebar reap's three steps (`POST /api/chats/processes/kill`):
+    // `broker.stop` owns only the provider's subtree — shells are separate
+    // roots, and Codex launches MCPs from its shared app-server.
+    release: async (chatId) => {
+      await broker.stop(chatId).catch(() => {});
+      terminals.killChat(chatId);
+      await reapChatResidual({ chatProcesses, processes }, chatId).catch(() => {});
+      chatProcesses.invalidate();
+    },
+    archive: async (chatId) => {
+      const saved = await store.patchChat(chatId, { archived: true });
+      if (saved) bus.publish({ type: "chat-update", chat: saved });
+    },
   });
   const chatSummaries = new ChatSummaryService({ store, harnesses });
   managerMcp.setIntegrationContext((identity) =>

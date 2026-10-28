@@ -131,6 +131,7 @@ export const MANAGER_TOOL_CATEGORY = {
   chat_reply: "chat",
   chat_state: "chat",
   chat_summarize: "chat",
+  chat_stop: "chat",
   /* …and the two POSTURE writes: re-pointing a chat at a mode or a persona.
      They ride the same `messaging` binding as `chat_send`, because both are
      the same kind of act — reaching into another chat and changing what it
@@ -254,6 +255,8 @@ export const MANAGER_TOOL_EXTERNAL: Record<ManagerToolName, boolean> = {
   chat_state: true,
   /* …and so is having a model read one for you — it spends the CHAT's own account, rate-limited per caller. */
   chat_summarize: true,
+  /* …and calling one off: interrupt any visible chat's turn, archive only one it started. */
+  chat_stop: true,
   /* …but re-posturing a chat is a write into its configuration, not a message. */
   chat_set_mode: false,
   chat_set_persona: false,

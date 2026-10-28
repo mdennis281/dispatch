@@ -1043,7 +1043,7 @@ cross-checked against the factory at compile time like the categories. The
 rule for the flag: a tool that acts on the calling chat's own session, shell or
 tree, or that puts a card in front of the human on the calling chat's behalf,
 is **not** external. So `chat_find`, `chat_read`, `chat_send`, `chat_ask`,
-`chat_reply`, `chat_state`, `chat_summarize`, `wait_for_chat`, `project_info`, `project_list`, the
+`chat_reply`, `chat_state`, `chat_summarize`, `chat_stop`, `wait_for_chat`, `project_info`, `project_list`, the
 memory tools, the issue tools, `mode_list`, `config_list` and `config_read` are
 external; `wait`, `context_usage`, `compact_context`, the workspace tools, the
 PR tools, the confirm tools, the secrets tools, `chat_set_mode`,
@@ -1057,7 +1057,11 @@ brief lands as a `channel` row in the token's name, and no completion notice is
 promised. `chat_summarize` runs a model on the summarized chat's OWN provider
 and account (`ChatSummaryService`), cached until a new row lands, one call in
 flight per chat, and rate-limited to 30 model calls per caller per hour (cache
-hits are free). Memory and issue tools bind
+hits are free). `chat_stop` binds wherever `chat_send` does (interrupting a turn
+is already in reach via its "interrupt" delivery): it
+interrupts the chat's running turn, and with `archive: true` also releases its
+session and archives it — allowed only for a chat that token started, because
+an archived chat leaves the sidebar and the SPA has no control to bring it back. Memory and issue tools bind
 only when the token names exactly one project. A category is offered only when
 the token holds `tools:<category>`; the mount is authenticated by the gate (it
 does NOT ride the per-chat bridge's gate exemption), and the external context
@@ -1073,6 +1077,7 @@ sprinkled over the SPA's routes:
 | `POST chats/:id/messages { text, delivery?, sender? }` | `chats:write` |
 | `POST chats { projectId, text, title?, modeId?, provider?, model?, effort? }` → 201 | `chats:create` |
 | `GET chats/:id/summary?focus` (429 + `Retry-After` past the limit) | `chats:read` |
+| `POST chats/:id/stop { archive? }` (archive: own chats only, else 403) | `chats:write` |
 | `GET attention` · `POST attention/:id/answer { optionId \| answer \| answers \| decline }` | `attention:read` / `attention:answer` |
 | `GET projects` | `projects:read` |
 | `GET openapi.json` | any |

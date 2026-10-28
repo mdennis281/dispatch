@@ -86,6 +86,7 @@ describe("mcp-catalog — builder", () => {
         inspect: true,
         messaging: true,
         summary: true,
+        control: true,
         prewarm: true,
         exemptions: true,
         secrets: true,

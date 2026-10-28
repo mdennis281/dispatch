@@ -37,6 +37,11 @@
  *
  * `chat_summarize` spends a model call on the summarized chat's account; the
  * service caches it and rate-limits it per token name.
+ *
+ * `chat_stop` is bound wherever `chat_send` is — interrupting a turn is already
+ * in reach through its "interrupt" delivery, so gating the honest name for it
+ * behind more than the tool it duplicates would only hide it. Archiving is
+ * narrower, and `ChannelChatService.stop` enforces that.
  */
 import type { EventBus } from "../../bus.js";
 import type { Store } from "../../store/index.js";
@@ -66,7 +71,7 @@ export interface IntegrationContextDeps {
   memoryHistory?: MemoryHistoryService;
   issues?: IssueService;
   authored?: AuthoredConfigService;
-  channelChats?: Pick<ChannelChatService, "create">;
+  channelChats?: Pick<ChannelChatService, "create" | "stop">;
   summaries?: Pick<ChatSummaryService, "summarize">;
   getProject?: (id: string) => Promise<{ id: string; name: string } | null>;
   now?: () => number;
@@ -222,6 +227,7 @@ export async function createIntegrationContext(
               try {
                 const made = await channelChats.create({
                   channel: identity.name,
+                  tokenId: identity.tokenId,
                   projectId: project.id,
                   prompt: request.prompt,
                   ...(request.title ? { title: request.title } : {}),
@@ -239,6 +245,20 @@ export async function createIntegrationContext(
               } catch (err) {
                 // The tool reports a thrown spawn as its failure; the refusal's
                 // own sentence is the useful part.
+                if (err instanceof ChannelChatRefusal) throw new Error(err.message);
+                throw err;
+              }
+            },
+          }
+        : undefined,
+    control:
+      channelChats && messenger
+        ? {
+            stop: async (chatId, { archive }) => {
+              if (!chatVisible(chatId)) throw new Error(`No chat "${chatId}" exists. Find the right id with chat_find.`);
+              try {
+                return await channelChats.stop({ channel: identity.name, tokenId: identity.tokenId, chatId, archive });
+              } catch (err) {
                 if (err instanceof ChannelChatRefusal) throw new Error(err.message);
                 throw err;
               }
