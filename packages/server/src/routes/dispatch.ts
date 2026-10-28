@@ -88,6 +88,8 @@ export interface CreateChatInput {
   model?: string;
   /** Why the app spawned this chat (drives its sidebar icon/tint). */
   purpose?: ChatPurpose;
+  /** The integration token that started it. See `Chat.startedBy`. */
+  startedBy?: Chat["startedBy"];
   /** The PR this chat reviews, `owner/repo#number`. See `Chat.reviewOf`. */
   reviewOf?: string;
   /** The chat that spawned this one, so the sidebar can file it. See `Chat.parentChatId`. */
@@ -205,6 +207,7 @@ export async function createChat(
     prs: [],
     status: "idle",
     ...(input.purpose ? { purpose: input.purpose } : {}),
+    ...(input.startedBy ? { startedBy: input.startedBy } : {}),
     ...(input.reviewOf ? { reviewOf: input.reviewOf } : {}),
     ...(input.parentChatId ? { parentChatId: input.parentChatId } : {}),
     createdAt: now,

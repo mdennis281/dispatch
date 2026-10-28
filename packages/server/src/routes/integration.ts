@@ -241,6 +241,7 @@ export function registerIntegrationRoutes(app: FastifyInstance): void {
       try {
         const chat = await app.services.channelChats.create({
           channel,
+          ...(identity?.kind === "integration" ? { tokenId: identity.tokenId } : {}),
           projectId: body.projectId,
           prompt: body.text,
           ...(body.title ? { title: body.title } : {}),
@@ -276,7 +277,13 @@ export function registerIntegrationRoutes(app: FastifyInstance): void {
       const channel =
         identity?.kind === "integration" ? identity.name : identity?.kind === "user" ? identity.user.displayName : "integration";
       try {
-        return await app.services.channelChats.stop({ channel, chatId: chat.id, archive: parsed.data.archive === true });
+        return await app.services.channelChats.stop({
+          channel,
+          // Ownership is by token id; a browser session (no token) is the owner.
+          ...(identity?.kind === "integration" ? { tokenId: identity.tokenId } : {}),
+          chatId: chat.id,
+          archive: parsed.data.archive === true,
+        });
       } catch (err) {
         if (err instanceof ChannelChatRefusal) return reply.code(err.status).send({ error: err.message });
         throw err;

@@ -295,7 +295,7 @@ describe("REST", () => {
     expect(refused.statusCode).toBe(403);
     expect(refused.body).toContain("chats:create");
 
-    const { token } = await mint(instance, access, { name: "grok", scopes: ["chats:create"], projectIds: [a.id] });
+    const { token, id: grokId } = await mint(instance, access, { name: "grok", scopes: ["chats:create"], projectIds: [a.id] });
     const made = await instance.inject({
       method: "POST", url: "/api/integration/chats", headers: bearer(token),
       payload: { projectId: a.id, text: "fix the flaky test", title: "Flaky test" },
@@ -305,6 +305,7 @@ describe("REST", () => {
     expect(created).toMatchObject({ projectId: a.id, title: "Flaky test" });
     expect(sends).toEqual([{ chatId: created.chatId, text: "fix the flaky test", opts: { channel: { name: "grok" } } }]);
     expect((await store.getChat(created.chatId))?.purpose).toMatchObject({ kind: "channel", label: "Started by grok" });
+    expect((await store.getChat(created.chatId))?.startedBy).toEqual({ tokenId: grokId, name: "grok" });
 
     // A mode that turns prompts off is refused before any chat exists.
     const before = (await store.listChats()).length;
@@ -329,16 +330,17 @@ describe("REST", () => {
     const inB = await chat(instance, access, b.id, "in b");
     // What the integration's own spawn leaves behind — see ChannelChatService.create.
     const mine = await chat(instance, access, a.id, "grok's duplicate");
-    await store.patchChat(mine.id, { purpose: { kind: "channel", label: "Started by grok" } });
     // No runtime in this suite, so the broker half is recorded rather than run.
     const calls: string[] = [];
     const deps = (instance.services.channelChats as unknown as {
-      deps: { interrupt: (id: string) => Promise<boolean>; stopSession: (id: string) => Promise<void> };
+      deps: { interrupt: (id: string) => Promise<boolean>; release: (id: string) => Promise<void> };
     }).deps;
     deps.interrupt = async (id) => { calls.push(`interrupt:${id}`); return id === mine.id; };
-    deps.stopSession = async (id) => { calls.push(`stop:${id}`); };
+    deps.release = async (id) => { calls.push(`release:${id}`); };
 
-    const { token } = await mint(instance, access, { name: "grok", scopes: ["chats:write"], projectIds: [a.id] });
+    const { token, id: tokenId } = await mint(instance, access, { name: "grok", scopes: ["chats:write"], projectIds: [a.id] });
+    // What the integration's own spawn leaves behind — see ChannelChatService.create.
+    await store.patchChat(mine.id, { startedBy: { tokenId, name: "grok" } });
     const stop = (id: string, payload: Record<string, unknown> = {}) =>
       instance.inject({ method: "POST", url: `/api/integration/chats/${id}/stop`, headers: bearer(token), payload });
 
@@ -354,11 +356,20 @@ describe("REST", () => {
     expect(calls).toEqual([]);
     expect((await store.getChat(owners.id))?.archived).toBeUndefined();
 
+    // Ownership is the token, not its name: another token ALSO called "grok"
+    // (names are not unique) cannot archive the first one's chat.
+    const { token: namesake } = await mint(instance, access, { name: "grok", scopes: ["chats:write"] });
+    const spoof = await instance.inject({
+      method: "POST", url: `/api/integration/chats/${mine.id}/stop`, headers: bearer(namesake), payload: { archive: true },
+    });
+    expect(spoof.statusCode, spoof.body).toBe(403);
+
     // Its own duplicate: interrupted, released and archived.
+    calls.length = 0;
     const undo = await stop(mine.id, { archive: true });
     expect(undo.statusCode, undo.body).toBe(200);
     expect(undo.json()).toMatchObject({ chatId: mine.id, interrupted: true, archived: true });
-    expect(calls).toEqual([`interrupt:${mine.id}`, `stop:${mine.id}`]);
+    expect(calls).toEqual([`interrupt:${mine.id}`, `release:${mine.id}`]);
     expect((await store.getChat(mine.id))?.archived).toBe(true);
 
     // Outside the allowlist, and without the scope.

@@ -951,6 +951,14 @@ export const ChatSchema = z.object({
   /** Why this chat exists, when the app spawned it for a job. Display-only. */
   purpose: ChatPurposeSchema.optional(),
   /**
+   * The integration token that started this chat, when one did (see
+   * `ChannelChatService`). NOT display metadata like `purpose`: it is what lets
+   * that integration — and only it — archive the chat. Keyed by token ID,
+   * because token NAMES are not unique: every OAuth client that registered
+   * without a name is "Unnamed connector".
+   */
+  startedBy: z.object({ tokenId: z.string(), name: z.string() }).optional(),
+  /**
    * Whether THIS chat's transcript shows the context Dispatch attached on your
    * behalf — surfaced memories, a working-tree snapshot, anything the model was
    * given that you never typed and never saw.

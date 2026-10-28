@@ -227,6 +227,7 @@ export async function createIntegrationContext(
               try {
                 const made = await channelChats.create({
                   channel: identity.name,
+                  tokenId: identity.tokenId,
                   projectId: project.id,
                   prompt: request.prompt,
                   ...(request.title ? { title: request.title } : {}),
@@ -256,7 +257,7 @@ export async function createIntegrationContext(
             stop: async (chatId, { archive }) => {
               if (!chatVisible(chatId)) throw new Error(`No chat "${chatId}" exists. Find the right id with chat_find.`);
               try {
-                return await channelChats.stop({ channel: identity.name, chatId, archive });
+                return await channelChats.stop({ channel: identity.name, tokenId: identity.tokenId, chatId, archive });
               } catch (err) {
                 if (err instanceof ChannelChatRefusal) throw new Error(err.message);
                 throw err;

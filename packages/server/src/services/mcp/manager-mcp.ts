@@ -7488,9 +7488,9 @@ ${look}` : "")
       "button does — the chat keeps its transcript and picks up again on the next " +
       "message. Use it on a chat you spawned by mistake or twice, or one heading the " +
       "wrong way (to redirect it instead, chat_send with delivery 'interrupt'). Pass " +
-      "archive: true to also release its session and archive it, which hides it from " +
-      "the sidebar — allowed only for a chat YOU started with spawn_chat, never one the " +
-      "owner opened.",
+      "archive: true to also archive it — hidden from the sidebar, with its session, " +
+      "shells and leftover processes killed — allowed only for a chat YOU started with " +
+      "spawn_chat, never one the owner opened.",
     {
       chatId: z.string().describe("The chat to stop, as reported by chat_find or spawn_chat."),
       archive: z
