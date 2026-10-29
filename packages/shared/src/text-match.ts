@@ -16,8 +16,8 @@
  *     dots) becomes one space. "Continue without reload — modular" and
  *     "continue-without-reload_modular" are then the same string.
  *   - SCORE a field in [0,1] by weighted token coverage (exact > stem > prefix >
- *     infix > typo) times a proximity factor, with a contiguous phrase pinned at
- *     1. Linear in the field's token count; edit distance only when the caller
+ *     infix > typo) times a minimal-window proximity factor, with a contiguous
+ *     phrase pinned at 1. Linear in the field's token count; edit distance only when the caller
  *     opts in (titles), and then BOUNDED so it is O(len·k), never O(len²).
  *   - PREFILTER a raw line with plain `includes` per token, so a scan over
  *     hundreds of MB still pays JSON.parse + scoring only on candidate lines.
@@ -189,7 +189,14 @@ export interface CompileOptions {
    * short fields only — titles, names — never on a full transcript row.
    */
   typos?: boolean;
-  /** Minimum token length (default 2). */
+  /**
+   * Every significant query token must match, or the field doesn't. The rule
+   * for long fields: one shared word in a 20 KB assistant turn is noise. The
+   * raw-line prefilter alone can't enforce it — it tests substrings, so a "1"
+   * in a timestamp satisfied the `1` of "exit code 1".
+   */
+  requireAll?: boolean;
+  /** Minimum token length (default 2). A lone digit is always kept. */
   minLength?: number;
 }
 
@@ -204,13 +211,12 @@ export interface TextMatcher {
   readonly needles: readonly string[];
   /**
    * Cheap gate for a RAW (e.g. JSON-encoded) line: the verbatim query, or EVERY
-   * significant token (as its stem's prefix). Long rows are only worth a hit
-   * when they say all of it — one shared word in a 20 KB assistant turn is
-   * noise — so this is the content rule, and a superset of every row that
-   * satisfies it once decoded and scored.
+   * significant token (as its stem's prefix). A superset of what
+   * {@link score} accepts under `requireAll`, so a line failing it is safe to
+   * skip without parsing.
    */
   prefilter(rawLine: string): boolean;
-  /** Score one field, or null when nothing in it matched at all. */
+  /** Score one field, or null when it doesn't match. */
   score(text: string): TextMatch | null;
   /** Lowercase strings to centre a snippet on, best first. */
   readonly focus: readonly string[];
@@ -235,27 +241,52 @@ function typoBudget(len: number): number {
 }
 
 /**
+ * Words of slack allowed per matched token before proximity starts to bite
+ * hard. At 4, two query words ~40 words apart (a paragraph) still clear the 0.5
+ * row threshold; spread across a 3000-word turn they score 0.4 and do not.
+ */
+const PROXIMITY_SLACK = 4;
+/** Share of the score proximity controls. Below 0.5 a scattered row can never pass. */
+const PROXIMITY_SHARE = 0.6;
+
+/**
+ * Query tokens: the normalized words of at least `minLength` chars — plus any
+ * lone DIGIT. Dropping 1-char tokens wholesale turned "exit code 1" into "exit
+ * code", which then scored 0.95 on "exit code 0": in an error search the digit
+ * is often the entire question.
+ */
+function queryTokenList(raw: string, minLength: number): string[] {
+  return [...new Set(tokenize(raw, 1).filter((t) => t.length >= minLength || /^\d$/.test(t)))];
+}
+
+/**
  * Compile a query for repeated scoring.
  *
  * Score of a field, when it isn't a phrase hit:
  *
- *     coverage  = Σ wᵢ·creditᵢ / Σ wᵢ          (wᵢ = 1, or 0.2 for a stopword)
- *     tightness = matched / span-in-tokens     (1 when ≤ 1 token matched)
- *     score     = coverage · (0.8 + 0.2 · tightness)
+ *     coverage  = Σ wᵢ·creditᵢ / Σ wᵢ            (wᵢ = 1, or 0.2 for a stopword)
+ *     slack     = smallest window holding every matched word − matched
+ *     tightness = 1 / (1 + slack / (4 · matched))  (1 when ≤ 1 word matched)
+ *     score     = min(0.95, coverage · (0.4 + 0.6 · tightness))
  *
- * so "seed loading continue" against the Anoxia title (every word present,
- * spread over 7 tokens) scores ≈0.89, and one stray word in common scores what
- * one-third coverage deserves.
+ * so "seed loading continue" against the Anoxia title (all three words inside
+ * a 7-word window) scores 0.85, while the same three words scattered through a
+ * long row fall toward 0.4.
+ *
+ * A token containing a digit is REQUIRED wherever it appears: "PR 421" is not
+ * a near-miss for "PR 420", it is a different PR.
  */
 export function compileQuery(query: string, opts: CompileOptions = {}): TextMatcher {
   const raw = String(query ?? "").trim();
   const rawLower = raw.toLowerCase();
   const minLength = opts.minLength ?? 2;
   const phrase = normalizeText(raw);
-  const tokens = [...new Set(tokenize(raw, minLength))];
-  const significant = significantTokens(raw, minLength);
+  const tokens = queryTokenList(raw, minLength);
+  const kept = tokens.filter((t) => !STOPWORDS.has(t));
+  const significant = kept.length ? kept : tokens;
   const sig = new Set(significant);
   const weights = tokens.map((t) => (sig.has(t) ? 1 : STOPWORD_WEIGHT));
+  const required = tokens.map((t, i) => /\d/.test(t) || (opts.requireAll === true && weights[i] === 1));
   const totalWeight = weights.reduce((a, b) => a + b, 0);
   const stems = tokens.map(stem);
   const needles = significant.map(stemNeedle).filter(Boolean);
@@ -273,8 +304,9 @@ export function compileQuery(query: string, opts: CompileOptions = {}): TextMatc
 
   const score = (text: string): TextMatch | null => {
     const isVerbatim = verbatim(text);
+    const fallback = (): TextMatch | null => (isVerbatim ? { score: VERBATIM_FLOOR, via: "verbatim" } : null);
     // No usable tokens ("—", "c#"): the old substring rule is all there is.
-    if (!tokens.length) return isVerbatim ? { score: VERBATIM_FLOOR, via: "verbatim" } : null;
+    if (!tokens.length) return fallback();
 
     const norm = normalizeText(text);
     if (phrase) {
@@ -285,24 +317,28 @@ export function compileQuery(query: string, opts: CompileOptions = {}): TextMatc
       }
     }
 
+    // One pass: each token's best credit, plus every place a significant token
+    // occurred, so proximity can use the TIGHTEST window rather than wherever
+    // each word happened to appear first.
     const words = norm ? norm.split(" ") : [];
     const credit = new Array<number>(tokens.length).fill(0);
-    const pos = new Array<number>(tokens.length).fill(-1);
+    const hitWord: number[] = [];
+    const hitToken: number[] = [];
+    const hitCredit: number[] = [];
     for (let w = 0; w < words.length; w++) {
       const word = words[w]!;
-      if (word.length < minLength) continue;
       let wordStem: string | undefined;
       for (let i = 0; i < tokens.length; i++) {
-        if (credit[i] === CREDIT.exact) continue;
         const t = tokens[i]!;
         let c = 0;
         if (word === t) c = CREDIT.exact;
+        else if (word.length < 2 || t.length < 2) c = 0; // a lone digit matches only itself
         else if ((wordStem ??= stem(word)) === stems[i]) c = CREDIT.stem;
         else if (t.length >= 3 && word.startsWith(t)) c = CREDIT.prefix;
         else if (t.length >= 4 && word.includes(t)) c = CREDIT.infix;
-        else if (opts.typos) {
+        else if (opts.typos && credit[i]! < CREDIT.typo1) {
           const budget = typoBudget(t.length);
-          if (budget > 0 && credit[i]! < CREDIT.typo1) {
+          if (budget > 0) {
             // `budget + 1` is the "too far" sentinel — with a budget of 1 that
             // is 2, which read as a genuine two-edit typo and credited "helm"
             // for "loading". Only a distance WITHIN the budget is a match.
@@ -311,30 +347,54 @@ export function compileQuery(query: string, opts: CompileOptions = {}): TextMatc
             else if (d === 2 && budget >= 2) c = CREDIT.typo2;
           }
         }
-        if (c > credit[i]!) {
-          credit[i] = c;
-          pos[i] = w;
+        if (c <= 0) continue;
+        if (c > credit[i]!) credit[i] = c;
+        if (weights[i] === 1) {
+          hitWord.push(w);
+          hitToken.push(i);
+          hitCredit.push(c);
         }
       }
     }
 
     let earned = 0;
     let matched = 0;
-    let lo = Infinity;
-    let hi = -Infinity;
     for (let i = 0; i < tokens.length; i++) {
-      if (credit[i]! <= 0) continue;
+      if (credit[i]! <= 0) {
+        if (required[i]) return fallback();
+        continue;
+      }
       earned += weights[i]! * credit[i]!;
-      if (weights[i] === 1) {
-        matched++;
-        lo = Math.min(lo, pos[i]!);
-        hi = Math.max(hi, pos[i]!);
+      if (weights[i] === 1) matched++;
+    }
+    if (earned <= 0) return fallback();
+
+    // Smallest window of words holding every matched significant token at its
+    // best credit — the classic sliding window over the occurrence list.
+    let span = matched;
+    if (matched > 1) {
+      span = Infinity;
+      const inWindow = new Map<number, number>();
+      let left = 0;
+      const best = (k: number): boolean => hitCredit[k] === credit[hitToken[k]!];
+      for (let right = 0; right < hitWord.length; right++) {
+        if (!best(right)) continue;
+        inWindow.set(hitToken[right]!, (inWindow.get(hitToken[right]!) ?? 0) + 1);
+        while (inWindow.size === matched) {
+          if (best(left)) {
+            span = Math.min(span, hitWord[right]! - hitWord[left]! + 1);
+            const n = inWindow.get(hitToken[left]!)! - 1;
+            if (n === 0) inWindow.delete(hitToken[left]!);
+            else inWindow.set(hitToken[left]!, n);
+          }
+          left++;
+        }
       }
     }
-    if (earned <= 0) return isVerbatim ? { score: VERBATIM_FLOOR, via: "verbatim" } : null;
+    const slack = Math.max(0, span - matched);
+    const tightness = matched <= 1 ? 1 : 1 / (1 + slack / (PROXIMITY_SLACK * matched));
     const coverage = earned / totalWeight;
-    const tightness = matched <= 1 ? 1 : Math.min(1, matched / (hi - lo + 1));
-    let s = Math.min(TOKENS_MAX, coverage * (0.8 + 0.2 * tightness));
+    let s = Math.min(TOKENS_MAX, coverage * (1 - PROXIMITY_SHARE + PROXIMITY_SHARE * tightness));
     if (isVerbatim && s < VERBATIM_FLOOR) return { score: VERBATIM_FLOOR, via: "verbatim" };
     s = Math.round(s * 100) / 100;
     return s > 0 ? { score: s, via: "tokens" } : null;

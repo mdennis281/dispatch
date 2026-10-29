@@ -31,7 +31,8 @@ NFKD → strip combining marks → lowercase → every run of [^\p{L}\p{N}] → 
 ```
 
 Em/en dashes, colons, underscores, hyphens, slashes and dots all become a
-single space; `café` → `cafe`. Tokens are the space-split result, ≥ 2 chars.
+single space; `café` → `cafe`. Tokens are the space-split result, ≥ 2 chars —
+except a lone digit, which is kept: in `exit code 1` the digit is the question.
 Stemming is the conservative suffix fold memory already used (`-ing`, `-ed`,
 `-ies→y`, `-s`, de-doubling), now shared.
 
@@ -47,10 +48,22 @@ Stemming is the conservative suffix fold memory already used (`-ing`, `-ed`,
 | typo, 2 edits (tokens ≥ 8 chars) — titles only | 0.55 |
 
 ```
-coverage  = Σ wᵢ·creditᵢ / Σ wᵢ        wᵢ = 1, or 0.2 for a stopword
-tightness = matched / span-in-tokens   (1 when ≤ 1 real token matched)
-score     = min(0.95, coverage · (0.8 + 0.2·tightness))
+coverage  = Σ wᵢ·creditᵢ / Σ wᵢ              wᵢ = 1, or 0.2 for a stopword
+slack     = smallest window holding every matched word − matched
+tightness = 1 / (1 + slack / (4 · matched))   (1 when ≤ 1 word matched)
+score     = min(0.95, coverage · (0.4 + 0.6·tightness))
 ```
+
+The window is the true minimum (sliding window over every occurrence), not
+first occurrences, so a row that rambles and then says the phrase tightly is
+judged by the tight part. Proximity owns 60% of the score: all words present
+but scattered across a long turn bottoms out at **0.4**.
+
+Hard rules:
+
+- a token containing a **digit** must match, or the field doesn't: `PR 421` is
+  not a near-miss for `PR 420`;
+- with `requireAll` (transcript rows), **every** significant token must match.
 
 Overrides, in order:
 
@@ -75,10 +88,13 @@ on the **raw** JSONL line, and `JSON.parse` + scoring only on lines that pass.
 - **Prefilter:** the line contains the verbatim query, **or** every significant
   (non-stopword) query token's stem-prefix. One `includes` per word, same as
   before — just k of them instead of one.
-- **Content rule:** therefore a transcript row must contain *every* significant
-  word (any order, any punctuation). A 20 KB assistant turn sharing one word
-  with the query is noise, not a hit. Rows then need score ≥ 0.5 (that is,
-  the words aren't scattered across the whole row).
+- **Content rule:** a transcript row must contain *every* significant word
+  (any order, any punctuation) — enforced by the scorer (`requireAll`), not
+  just the substring prefilter, which a `1` in a timestamp would satisfy. A
+  20 KB assistant turn sharing one word with the query is noise, not a hit.
+  Rows then need score ≥ 0.5, which is purely a proximity cut: two words
+  within ~40 words of each other pass, the same words 3,000 words apart (0.4)
+  do not.
 - **Titles:** all already in memory, scored once per chat per call (cached),
   with typos on; need ≥ 0.65 — two words of three side by side pass, one of
   two does not.
@@ -87,12 +103,14 @@ Measured on the live stable store (read-only):
 
 | | substring (before) | similarity (after) |
 |---|---|---|
-| titles, 2,520 chats, typo-tolerant | <1 ms | 19–38 ms |
-| content prefilter, 363 transcripts / 218 MB / 83,942 lines | 1.52–1.59 s | 1.66–2.19 s |
-| lines that reach `JSON.parse` | 2–24 | 18–235 |
+| titles, ~2,520 chats, typo-tolerant | <1 ms | 17–40 ms |
+| content: prefilter + parse + score, 364 transcripts / 219 MB / 84k lines | 1.34–1.46 s | 1.51–1.96 s |
+| lines that reach `JSON.parse` | 5–33 | 26–245 |
 
 Same order as before; the extra parsed lines are a rounding error against the
-I/O.
+I/O. The same run checked the superset claim on real rows: every
+user/assistant row the old rule hit is still a hit (0 lost across the three
+queries), and `continue without reload` finds 15 rows where substring found 5.
 
 ## Ranking and paging
 
@@ -142,7 +160,7 @@ Title hits at the default threshold, best first:
 | `continue without reload` | 1 hit, ranked **5th of 5** behind quoters | **1.00** Anoxia: Continue without reload — modular seed loading, ranked 1st |
 | `reload modular seed` | 0 | **1.00** Anoxia: Continue without reload — modular seed loading |
 | `modular-seed-loading` | 0 | **1.00** same |
-| `seed loading continue` | 0 | **0.90** same · 0.65 "feat(swap): Continue, Load and New game swap…" |
+| `seed loading continue` | 0 | **0.88** same · 0.65 "feat(swap): Continue, Load and New game swap…" |
 | `contnue without relaod` | 0 | **0.80** same |
 | `load time goes where` | 0 | **0.95** Anoxia: where the load time goes · 0.95 …where the remaining load time goes |
 | `initial load speedups` | 0 | **1.00** Anoxia: more initial-load speedups (×2) · 0.67 Initial Load Hitches Debug |

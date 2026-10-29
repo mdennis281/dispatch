@@ -59,9 +59,11 @@ const FIELD_CLIP = 2_000;
  */
 const TITLE_MIN_SCORE = 0.65;
 /**
- * Least similarity a transcript ROW needs. Lower than a title's because the
- * prefilter has already demanded every significant word of the query; what is
- * left to judge is only how scattered they are.
+ * Least similarity a transcript ROW needs. Rows are scored `requireAll`, so
+ * coverage is settled and this is purely a PROXIMITY cut: proximity owns 0.6
+ * of the score, so every word present but scattered through a long turn
+ * bottoms out at 0.4 and fails, while the same words within roughly a
+ * paragraph of each other pass.
  */
 const CONTENT_MIN_SCORE = 0.5;
 
@@ -725,7 +727,7 @@ export class InspectService {
 
     const lower = query.toLowerCase();
     const budget = q.scanBudgetBytes ?? DEFAULT_SCAN_BUDGET_BYTES;
-    const matcher = q.match === "exact" ? null : compileQuery(query);
+    const matcher = q.match === "exact" ? null : compileQuery(query, { requireAll: true });
     const titleMatcher = q.match === "exact" ? null : compileQuery(query, { typos: true });
     const titleMin = q.minScore ?? TITLE_MIN_SCORE;
     const contentMin = q.minScore ?? CONTENT_MIN_SCORE;

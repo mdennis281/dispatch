@@ -99,7 +99,35 @@ describe("compileQuery — before/after", () => {
     const loose = score("release workflow", "release notes, then later the CI workflow");
     expect(tight).toBe(1);
     expect(loose).toBeLessThan(tight);
-    expect(loose).toBeGreaterThan(0.8);
+    expect(loose).toBeGreaterThan(0.6);
+  });
+
+  it("lets proximity actually reject a row whose words are scattered", () => {
+    // Every word present, ~3000 words apart: coverage is perfect and must not
+    // be enough — this used to score 0.8 and clear the 0.5 row threshold.
+    const filler = "lorem ".repeat(3000);
+    const row = `steam ${filler} lobby ${filler} rejoin`;
+    const m = compileQuery("steam lobby rejoin", { requireAll: true });
+    expect(m.prefilter(JSON.stringify({ text: row }))).toBe(true);
+    expect(m.score(row)!.score).toBeLessThan(0.5);
+    // …and judges by the TIGHTEST window, not first occurrences.
+    expect(m.score(`${row} — later: steam lobby on rejoin`)!.score).toBeGreaterThan(0.8);
+  });
+
+  it("keeps a lone digit, and never lets a number near-miss", () => {
+    expect(compileQuery("exit code 1").tokens).toEqual(["exit", "code", "1"]);
+    expect(score("exit code 1", "process finished with exit code 0")).toBe(0);
+    expect(score("exit code 1", "exit code: 1")).toBe(1);
+    expect(score("PR 421", "PR 420 review")).toBe(0);
+    // A digit inside a timestamp satisfies the raw prefilter but not the scorer.
+    const m = compileQuery("exit code 1", { requireAll: true });
+    expect(m.score("exit code 0 at 10:41")).toBeNull();
+  });
+
+  it("requireAll drops a row that is missing a significant word", () => {
+    const m = compileQuery("reload modular seed", { requireAll: true });
+    expect(m.score("reload the modular page")).toBeNull();
+    expect(compileQuery("reload modular seed").score("reload the modular page")!.score).toBeGreaterThan(0);
   });
 
   it("never loses a verbatim match the old rule found", () => {
