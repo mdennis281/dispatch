@@ -41,8 +41,10 @@ import {
   OAUTH_REFRESH_TOKEN_DAYS,
   OAUTH_REFRESH_TOKEN_PREFIX,
   INTEGRATION_TOKEN_NAME_MAX,
+  isIntegrationTrust,
   parseIntegrationScopes,
   type IntegrationScope,
+  type IntegrationTrust,
   type OAuthDecisionResult,
   type OAuthGrantSummary,
   type OAuthRequestView,
@@ -145,6 +147,7 @@ interface GrantRow {
   last_refreshed_at: number | null;
   revoked_at: number | null;
   access_token_id: string | null;
+  trust: string | null;
 }
 
 interface RefreshRow {
@@ -652,7 +655,9 @@ export class OAuthServer {
     this.store.stateDb
       .prepare("INSERT INTO oauth_grant (id, client_id, scopes, auth_epoch, created_at) VALUES (?, ?, ?, ?, ?)")
       .run(grantId, client.id, JSON.stringify(issued.scopes), epoch, now);
-    const access = await this.mintAccess(client, issued.scopes);
+    // A fresh grant starts at the default level; only the owner raises it, in
+    // Settings, after they can see which connector it is.
+    const access = await this.mintAccess(client, issued.scopes, "external");
     this.store.stateDb.prepare("UPDATE oauth_grant SET access_token_id = ? WHERE id = ?").run(access.id, grantId);
     const landed = this.grant(grantId);
     if (!landed || landed.revoked_at !== null) {
@@ -724,10 +729,16 @@ export class OAuthServer {
       await this.refuseReuse(grant.id, fresh?.used_at ?? now);
     }
     const previous = grant.access_token_id;
-    const access = await this.mintAccess(client, scopes);
+    const trust = this.grantTrust(grant.id);
+    const access = await this.mintAccess(client, scopes, trust);
     this.store.stateDb
       .prepare("UPDATE oauth_grant SET access_token_id = ?, last_refreshed_at = ? WHERE id = ?")
       .run(access.id, now, grant.id);
+    // An owner who changed the level while the mint was in flight updated the
+    // PREVIOUS token, which is about to be removed. Re-read now that the grant
+    // points at the new one, so the change is not lost to the rotation.
+    const settled = this.grantTrust(grant.id);
+    if (settled !== trust) await this.auth.tokens.setTrust(access.id, settled).catch(() => null);
     const refreshToken = this.issueRefresh(grant.id);
     // REMOVED, not revoked. A revoked row stays in the token file forever by
     // design (the Settings list says "revoked" instead of a token vanishing
@@ -755,12 +766,17 @@ export class OAuthServer {
     throw new OAuthError(400, "invalid_grant", "This refresh token was already used; the grant has been revoked.");
   }
 
-  private async mintAccess(client: StoredClient, scopes: IntegrationScope[]): Promise<{ token: string; id: string }> {
+  private async mintAccess(
+    client: StoredClient,
+    scopes: IntegrationScope[],
+    trust: IntegrationTrust,
+  ): Promise<{ token: string; id: string }> {
     const created = await this.auth.mintIntegrationToken(
       { kind: "oauth", clientId: client.id },
       {
         name: client.name.slice(0, INTEGRATION_TOKEN_NAME_MAX),
         scopes,
+        trust,
         expiresAt: this.now() + OAUTH_ACCESS_TOKEN_SECONDS * 1000,
       },
     );
@@ -827,6 +843,27 @@ export class OAuthServer {
     return this.store.stateDb.prepare("SELECT * FROM oauth_grant WHERE id = ?").get(id) as GrantRow | undefined;
   }
 
+  private grantTrust(id: string): IntegrationTrust {
+    const trust = this.grant(id)?.trust;
+    return isIntegrationTrust(trust) ? trust : "external";
+  }
+
+  /**
+   * Set a grant's trust, and its CURRENT access token's too — otherwise the
+   * change would wait up to an hour for the next refresh to land, and the
+   * owner would flip it, send a message, and see nothing change. False when
+   * no such grant, or it is revoked.
+   */
+  async setGrantTrust(id: string, trust: IntegrationTrust): Promise<boolean> {
+    const grant = this.grant(id);
+    if (!grant || grant.revoked_at !== null) return false;
+    this.store.stateDb
+      .prepare("UPDATE oauth_grant SET trust = ? WHERE id = ?")
+      .run(trust === "external" ? null : trust, id);
+    if (grant.access_token_id) await this.auth.tokens.setTrust(grant.access_token_id, trust);
+    return true;
+  }
+
   /** Revoke a grant family: the grant, its refresh tokens, and the access token it backs. Idempotent. */
   async revokeGrant(id: string): Promise<boolean> {
     const grant = this.grant(id);
@@ -859,6 +896,7 @@ export class OAuthServer {
         ...(g.last_refreshed_at !== null ? { lastRefreshedAt: g.last_refreshed_at } : {}),
         ...(exp !== undefined ? { refreshExpiresAt: exp } : {}),
         ...(g.revoked_at !== null ? { revokedAt: g.revoked_at } : {}),
+        trust: isIntegrationTrust(g.trust) ? g.trust : "external",
       };
     });
   }

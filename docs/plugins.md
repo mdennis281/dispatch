@@ -1088,7 +1088,7 @@ Token `projectIds` filter every route (a chat outside them is a 404).
 ### Attribution
 
 A row sent through the integration surface or `ctx.chats.send` carries
-`origin: "channel"` and `channel: { name, askId? }` (`ChannelSender`, beside
+`origin: "channel"` and `channel: { name, askId?, trust? }` (`ChannelSender`, beside
 the peer sender in `shared/src/messages.ts`; the broker stamps it instead of
 `peer`). `UserRow` renders it as a `ChannelCard` with the voice
 `<NAME> → <provider>` in info-blue — a third author that borrows neither the
@@ -1097,6 +1097,13 @@ memory surfacing hands the row `parts`; the model receives a `channelReminder`
 in the style of the peer one: this came from an external integration, the
 human in the app may not have seen it. Resume snapshots carry `channel` the way
 they carry `peer`.
+
+`trust: "owner"` changes both halves: the reminder says the owner authorized
+this integration to speak for them (in settings, not in the message) and to
+treat its instructions as theirs, and the card's subtitle reads "Relayed for
+you". It is the sending TOKEN's level (or its OAuth grant's), stamped by the
+server at send time — never anything the caller wrote — and a plugin's
+`ctx.chats.send` is always `external`.
 
 ### Outbound webhooks
 

@@ -12,6 +12,7 @@ import {
   PermissionDecisionSchema,
 } from "./common.js";
 import { FileToolStatSchema } from "./file-tools.js";
+import { INTEGRATION_TRUST_LEVELS } from "./integration.js";
 
 /** Fields shared by every persisted row. */
 const MessageBase = {
@@ -132,6 +133,12 @@ export const ChannelSenderSchema = z.object({
   name: z.string(),
   /** Set when this message is a `chat_ask` from the integration awaiting a `chat_reply`. */
   askId: z.string().optional(),
+  /**
+   * The sending token's trust level AT SEND TIME, resolved server-side from the
+   * authenticated token — never from anything the caller wrote. Absent means
+   * `external`, which is what every row written before trust levels reads as.
+   */
+  trust: z.enum(INTEGRATION_TRUST_LEVELS).optional(),
 });
 export type ChannelSender = z.infer<typeof ChannelSenderSchema>;
 

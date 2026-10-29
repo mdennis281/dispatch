@@ -23,6 +23,7 @@ import {
   type IntegrationScope,
   type IntegrationTokenCreated,
   type IntegrationTokenSummary,
+  type IntegrationTrust,
 } from "@dispatch/shared";
 import { Button } from "../../ui/Button.js";
 import { Chip } from "../../ui/Chip.js";
@@ -38,6 +39,7 @@ import { cn } from "../../../lib/cn.js";
 import { WebhooksBlock } from "./WebhooksBlock.js";
 import { OAuthGrantsBlock } from "./OAuthGrantsBlock.js";
 import { SCOPE_HINT } from "../../../lib/scopeHints.js";
+import { TRUST_CONFIRM, TRUST_DETAIL, TRUST_OPTIONS } from "../../../lib/trustLevels.js";
 
 /* ------------------------------------------------------------------ api */
 
@@ -50,11 +52,23 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 const listTokens = () => request<{ tokens: IntegrationTokenSummary[] }>("/api/auth/tokens");
 const revokeToken = (id: string) => request<{ ok: true }>(`/api/auth/tokens/${encodeURIComponent(id)}`, { method: "DELETE" });
-const createToken = (body: { name: string; scopes: string[]; projectIds?: string[]; expiresAt?: number }) =>
+const createToken = (body: {
+  name: string;
+  scopes: string[];
+  projectIds?: string[];
+  expiresAt?: number;
+  trust?: IntegrationTrust;
+}) =>
   request<IntegrationTokenCreated>("/api/auth/tokens", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
+  });
+const setTokenTrust = (id: string, trust: IntegrationTrust) =>
+  request<{ token: IntegrationTokenSummary }>(`/api/auth/tokens/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ trust }),
   });
 
 /* ---------------------------------------------------------------- scopes */
@@ -118,6 +132,7 @@ function CreateTokenForm({ onCreated, onCancel }: { onCreated: (t: IntegrationTo
   const [allProjects, setAllProjects] = useState(true);
   const [projectIds, setProjectIds] = useState<Set<string>>(new Set());
   const [expiry, setExpiry] = useState<Expiry>("90d");
+  const [trust, setTrust] = useState<IntegrationTrust>("external");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -139,6 +154,7 @@ function CreateTokenForm({ onCreated, onCancel }: { onCreated: (t: IntegrationTo
         scopes: INTEGRATION_SCOPES.filter((s) => scopes.has(s)),
         ...(allProjects ? {} : { projectIds: [...projectIds] }),
         ...(expiresAtOf(expiry) !== undefined ? { expiresAt: expiresAtOf(expiry) } : {}),
+        ...(trust !== "external" ? { trust } : {}),
       });
       onCreated(created);
     } catch (e) {
@@ -254,6 +270,8 @@ function CreateTokenForm({ onCreated, onCancel }: { onCreated: (t: IntegrationTo
         <Select options={EXPIRY_OPTIONS} value={expiry} onChange={setExpiry} />
       </Field>
 
+      <TrustPicker value={trust} onChange={setTrust} />
+
       <InlineError message={error} />
       <div className="flex justify-end gap-2">
         <Button type="button" onClick={onCancel} disabled={busy}>
@@ -267,6 +285,45 @@ function CreateTokenForm({ onCreated, onCancel }: { onCreated: (t: IntegrationTo
   );
 }
 
+/* ---------------------------------------------------------------- trust */
+
+/**
+ * Both levels with their consequence spelled out, rather than a dropdown that
+ * hides the second one: "speaks for me" changes how every agent reads this
+ * bot, and should be chosen by someone who has read what it means. A radio
+ * group, not toggle buttons — one of N, with arrow-key roving for free.
+ */
+function TrustPicker({ value, onChange }: { value: IntegrationTrust; onChange: (t: IntegrationTrust) => void }) {
+  return (
+    <div role="radiogroup" aria-label="Trust">
+      <p className="mb-1 text-xs font-medium text-secondary">Trust</p>
+      <div className="grid gap-1 sm:grid-cols-2">
+        {TRUST_OPTIONS.map((option) => (
+          <label
+            key={option.value}
+            className={cn(
+              "flex cursor-pointer items-start gap-2 rounded border px-2 py-1.5 text-xs",
+              value === option.value ? "border-accent-line bg-accent-ghost/30" : "border-line",
+            )}
+          >
+            <input
+              type="radio"
+              name="token-trust"
+              className="mt-0.5"
+              checked={value === option.value}
+              onChange={() => onChange(option.value)}
+            />
+            <span className="min-w-0">
+              <span className="text-primary">{option.label}</span>
+              <span className="block text-2xs text-faint">{TRUST_DETAIL[option.value]}</span>
+            </span>
+          </label>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 /* ----------------------------------------------------------------- list */
 
 function tokenState(t: IntegrationTokenSummary, now: number): "active" | "expired" | "revoked" {
@@ -275,7 +332,15 @@ function tokenState(t: IntegrationTokenSummary, now: number): "active" | "expire
   return "active";
 }
 
-function TokenRow({ token, onRevoke }: { token: IntegrationTokenSummary; onRevoke: () => void }) {
+function TokenRow({
+  token,
+  onRevoke,
+  onTrust,
+}: {
+  token: IntegrationTokenSummary;
+  onRevoke: () => void;
+  onTrust: (trust: IntegrationTrust) => void;
+}) {
   const now = Date.now();
   const state = tokenState(token, now);
   const dead = state !== "active";
@@ -288,6 +353,7 @@ function TokenRow({ token, onRevoke }: { token: IntegrationTokenSummary; onRevok
             {token.name}
           </span>
           {token.clientId && <Chip tone="muted">oauth</Chip>}
+          {token.trust === "owner" && <Chip tone="info">speaks for you</Chip>}
           {state === "revoked" && <Chip tone="danger">revoked</Chip>}
           {state === "expired" && <Chip tone="warn">expired</Chip>}
         </div>
@@ -304,9 +370,23 @@ function TokenRow({ token, onRevoke }: { token: IntegrationTokenSummary; onRevok
         </p>
       </div>
       {!dead && (
-        <Button variant="danger" size="sm" leftIcon={<Trash2 />} onClick={onRevoke}>
-          Revoke
-        </Button>
+        <div className="flex shrink-0 items-center gap-1.5">
+          {/* An OAuth token is replaced hourly; its level lives on the grant,
+              in Connected apps below, where a change outlasts the rotation. */}
+          {!token.clientId && (
+            <Select
+              align="end"
+              width={220}
+              label="Trust"
+              options={TRUST_OPTIONS}
+              value={token.trust}
+              onChange={onTrust}
+            />
+          )}
+          <Button variant="danger" size="sm" leftIcon={<Trash2 />} onClick={onRevoke}>
+            Revoke
+          </Button>
+        </div>
       )}
     </div>
   );
@@ -389,6 +469,10 @@ export function TokensBlock() {
                 <TokenRow
                   key={t.id}
                   token={t}
+                  onTrust={(trust) => {
+                    if (trust === "owner" && !confirm(TRUST_CONFIRM(t.name))) return;
+                    void setTokenTrust(t.id, trust).then(reload, (e: unknown) => setError(e instanceof Error ? e.message : String(e)));
+                  }}
                   onRevoke={() => {
                     if (!confirm(`Revoke "${t.name}"? Anything using it stops working immediately.`)) return;
                     void revokeToken(t.id).then(reload, (e: unknown) => setError(e instanceof Error ? e.message : String(e)));

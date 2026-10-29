@@ -115,6 +115,30 @@ export function parseIntegrationScopes(
   return { ok: true, scopes: INTEGRATION_SCOPES.filter((s) => wanted.has(s)) };
 }
 
+/**
+ * How far the RECEIVING MODEL may take a token's messages — not what the token
+ * may call (that is scopes), but whose words the agent should read them as.
+ *
+ *  - `external`: a relay from outside Dispatch. The human may never have seen
+ *    it, so nothing it asks carries their consent. The default, and what every
+ *    token minted before this existed reads as.
+ *  - `owner`: the human's own channel — a bot they talk to that passes their
+ *    instructions on. Without this, an agent told "this is not from the human"
+ *    on every message sensibly refused to merge anything the bot relayed, and
+ *    the bot writing "this is Michael" in the text only made it look MORE like
+ *    an injection. The authority has to come from here, out of band, where only
+ *    the owner can set it.
+ *
+ * Grants no permission either way: a chat still runs in its own mode.
+ */
+export const INTEGRATION_TRUST_LEVELS = ["external", "owner"] as const;
+
+export type IntegrationTrust = (typeof INTEGRATION_TRUST_LEVELS)[number];
+
+export function isIntegrationTrust(value: unknown): value is IntegrationTrust {
+  return typeof value === "string" && (INTEGRATION_TRUST_LEVELS as readonly string[]).includes(value);
+}
+
 /** Requests per minute one token may make before the gate answers 429. */
 export const INTEGRATION_RATE_LIMIT_PER_MINUTE = 60;
 
@@ -131,6 +155,8 @@ export interface IntegrationTokenSummary {
   scopes: IntegrationScope[];
   /** When set, the token may only reach these projects' chats and memory. */
   projectIds?: string[];
+  /** Always present here; a row stored without one reads as `external`. */
+  trust: IntegrationTrust;
   createdAt: number;
   lastUsedAt?: number;
   expiresAt?: number;
@@ -149,6 +175,13 @@ export interface IntegrationTokenCreateRequest {
   projectIds?: string[];
   /** Epoch ms. Absent means the token never expires on its own. */
   expiresAt?: number;
+  /** Absent means `external`. */
+  trust?: IntegrationTrust;
+}
+
+/** What an edit to a live token may change — only what is safe to change in place. */
+export interface IntegrationTokenUpdateRequest {
+  trust: IntegrationTrust;
 }
 
 /** The ONE response that ever contains the token value. */

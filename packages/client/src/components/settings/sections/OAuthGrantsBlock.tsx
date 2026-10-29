@@ -7,11 +7,13 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import { Plug, Trash2 } from "lucide-react";
-import type { OAuthGrantSummary } from "@dispatch/shared";
+import type { IntegrationTrust, OAuthGrantSummary } from "@dispatch/shared";
 import { Button } from "../../ui/Button.js";
 import { Chip } from "../../ui/Chip.js";
 import { ScopeChips } from "../../ui/ScopeChips.js";
 import { InlineError } from "../../sidebar/Modal.js";
+import { Select } from "../../ui/Select.js";
+import { TRUST_CONFIRM, TRUST_OPTIONS } from "../../../lib/trustLevels.js";
 import { sessionFetch, useAuth } from "../../../stores/auth.js";
 import { relTime } from "../../../lib/format.js";
 import { cn } from "../../../lib/cn.js";
@@ -24,6 +26,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 const listGrants = () => request<{ grants: OAuthGrantSummary[] }>("/api/auth/oauth/grants");
+const setGrantTrust = (id: string, trust: IntegrationTrust) =>
+  request<{ ok: true }>(`/api/auth/oauth/grants/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ trust }),
+  });
 const revokeGrant = (id: string) => request<{ ok: true }>(`/api/auth/oauth/grants/${encodeURIComponent(id)}`, { method: "DELETE" });
 
 function grantState(g: OAuthGrantSummary, now: number): "active" | "expired" | "revoked" {
@@ -32,7 +40,15 @@ function grantState(g: OAuthGrantSummary, now: number): "active" | "expired" | "
   return "active";
 }
 
-function GrantRow({ grant, onRevoke }: { grant: OAuthGrantSummary; onRevoke: () => void }) {
+function GrantRow({
+  grant,
+  onRevoke,
+  onTrust,
+}: {
+  grant: OAuthGrantSummary;
+  onRevoke: () => void;
+  onTrust: (trust: IntegrationTrust) => void;
+}) {
   const now = Date.now();
   const state = grantState(grant, now);
   const dead = state !== "active";
@@ -44,6 +60,7 @@ function GrantRow({ grant, onRevoke }: { grant: OAuthGrantSummary; onRevoke: () 
             <Plug />
             {grant.clientName}
           </span>
+          {grant.trust === "owner" && <Chip tone="info">speaks for you</Chip>}
           {state === "revoked" && <Chip tone="danger">revoked</Chip>}
           {state === "expired" && <Chip tone="warn">expired</Chip>}
         </div>
@@ -57,9 +74,19 @@ function GrantRow({ grant, onRevoke }: { grant: OAuthGrantSummary; onRevoke: () 
         </p>
       </div>
       {!dead && (
-        <Button variant="danger" size="sm" leftIcon={<Trash2 />} onClick={onRevoke}>
-          Revoke
-        </Button>
+        <div className="flex shrink-0 items-center gap-1.5">
+          <Select
+            align="end"
+            width={220}
+            label="Trust"
+            options={TRUST_OPTIONS}
+            value={grant.trust}
+            onChange={onTrust}
+          />
+          <Button variant="danger" size="sm" leftIcon={<Trash2 />} onClick={onRevoke}>
+            Revoke
+          </Button>
+        </div>
       )}
     </div>
   );
@@ -119,6 +146,10 @@ export function OAuthGrantsBlock() {
                 <GrantRow
                   key={g.id}
                   grant={g}
+                  onTrust={(trust) => {
+                    if (trust === "owner" && !confirm(TRUST_CONFIRM(g.clientName))) return;
+                    void setGrantTrust(g.id, trust).then(reload, (e: unknown) => setError(e instanceof Error ? e.message : String(e)));
+                  }}
                   onRevoke={() => {
                     if (!confirm(`Disconnect "${g.clientName}"? It will have to sign in again.`)) return;
                     void revokeGrant(g.id).then(reload, (e: unknown) => setError(e instanceof Error ? e.message : String(e)));

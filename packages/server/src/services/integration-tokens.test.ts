@@ -35,7 +35,41 @@ describe("IntegrationTokenService", () => {
       name: "grok",
       scopes: ["chats:read", "tools:chat"],
       projectIds: ["p1"],
+      trust: "external",
     });
+  });
+
+  it("carries trust onto the identity and changes it in place, with no remint", async () => {
+    const { svc, path } = await service();
+    const owned = await svc.mint({ name: "relay", scopes: ["chats:write"], trust: "owner" }, { authEpoch: 0 });
+    expect(owned.summary.trust).toBe("owner");
+    expect((await svc.authenticate(owned.token, 0))?.trust).toBe("owner");
+
+    // Lowered: the very next request reads the new level, and the row goes
+    // back to having NO trust field — identical to an ordinary token's.
+    expect((await svc.setTrust(owned.summary.id, "external"))?.trust).toBe("external");
+    expect((await svc.authenticate(owned.token, 0))?.trust).toBe("external");
+    const { readIntegrationTokenFile } = await import("@dispatch/cli/core");
+    expect((await readIntegrationTokenFile(path)).tokens[0]).not.toHaveProperty("trust");
+
+    expect(await svc.setTrust("nope", "owner")).toBeNull();
+  });
+
+  it("refuses an unknown trust level instead of storing it", async () => {
+    const { svc } = await service();
+    await expect(
+      svc.mint({ name: "x", scopes: ["chats:read"], trust: "admin" as never }, { authEpoch: 0 }),
+    ).rejects.toThrow(/unknown trust level/);
+  });
+
+  it("reads a hand-edited, unrecognised trust as external, never higher", async () => {
+    const { svc, path } = await service();
+    const { token } = await svc.mint({ name: "x", scopes: ["chats:read"] }, { authEpoch: 0 });
+    const core = await import("@dispatch/cli/core");
+    const file = await core.readIntegrationTokenFile(path);
+    (file.tokens[0] as { trust?: unknown }).trust = "OWNER";
+    await core.writeIntegrationTokenFile(path, file);
+    expect((await svc.authenticate(token, 0))?.trust).toBe("external");
   });
 
   it("rejects a wrong value, a non-token bearer, and a stale epoch", async () => {

@@ -24,6 +24,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import * as z from "zod";
 import {
   INTEGRATION_SCOPES,
+  INTEGRATION_TRUST_LEVELS,
   QuestionAnswerSchema,
   type AttentionItem,
   type IntegrationTokenCreateRequest,
@@ -103,7 +104,10 @@ const CreateTokenBody = z.object({
   scopes: z.array(z.string()),
   projectIds: z.array(z.string()).optional(),
   expiresAt: z.number().optional(),
+  trust: z.enum(INTEGRATION_TRUST_LEVELS).optional(),
 });
+
+const UpdateTokenBody = z.object({ trust: z.enum(INTEGRATION_TRUST_LEVELS) });
 
 function csv(value: string | undefined): string[] | undefined {
   const out = (value ?? "")
@@ -221,8 +225,11 @@ export function registerIntegrationRoutes(app: FastifyInstance): void {
           : identity?.kind === "user"
             ? identity.user.displayName
             : "integration";
+      // Trust is the TOKEN's, whatever name the caller relays under: the
+      // token is the principal the owner vouched for, and `sender` is a label.
+      const trust = identity?.kind === "integration" ? identity.trust : undefined;
       const result = await chatMessenger.send({
-        channel: { name: parsed.data.sender ?? fallback },
+        channel: { name: parsed.data.sender ?? fallback, ...(trust === "owner" ? { trust } : {}) },
         to: chat.id,
         message: parsed.data.text,
         delivery: parsed.data.delivery ?? "queue",
@@ -256,7 +263,7 @@ export function registerIntegrationRoutes(app: FastifyInstance): void {
       try {
         const chat = await app.services.channelChats.create({
           channel,
-          ...(identity?.kind === "integration" ? { tokenId: identity.tokenId } : {}),
+          ...(identity?.kind === "integration" ? { tokenId: identity.tokenId, trust: identity.trust } : {}),
           projectId: body.projectId,
           prompt: body.text,
           ...(body.title ? { title: body.title } : {}),
@@ -422,6 +429,14 @@ export function registerIntegrationRoutes(app: FastifyInstance): void {
       // The ONE response that carries the value. Not logged by the request log
       // (it records paths and statuses, never bodies) and never written again.
       return app.auth.mintIntegrationToken(person(req), input);
+    }, reply),
+  );
+
+  app.patch<{ Params: { id: string } }>("/api/auth/tokens/:id", (req, reply) =>
+    run(async () => {
+      const parsed = UpdateTokenBody.safeParse(req.body ?? {});
+      if (!parsed.success) throw new AuthFailure(400, parsed.error.message);
+      return { token: await app.auth.setIntegrationTokenTrust(person(req), req.params.id, parsed.data.trust) };
     }, reply),
   );
 

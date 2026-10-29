@@ -11,6 +11,7 @@
  *   POST /api/oauth/token                            code + PKCE / rotating refresh — gate-exempt
  *   POST /api/oauth/revoke                           RFC 7009 — gate-exempt
  *   GET  /api/auth/oauth/grants                      Settings → Integrations — owner
+ *   PATCH  /api/auth/oauth/grants/:id                { trust } — owner
  *   DELETE /api/auth/oauth/grants/:id                revoke a grant family — owner
  *
  * CLIENT FLOW (Dispatch obtains tokens for a plugin)
@@ -34,6 +35,7 @@
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import * as z from "zod";
+import { INTEGRATION_TRUST_LEVELS } from "@dispatch/shared";
 import { AuthFailure, type RequestIdentity } from "../services/auth.js";
 import { OAuthError, type ClientCredentials } from "../services/oauth-server.js";
 import { PluginOAuthError } from "../plugins/oauth.js";
@@ -207,6 +209,16 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
     run(reply, () => {
       owner(req);
       return { grants: server.listGrants() };
+    }),
+  );
+
+  app.patch<{ Params: { id: string } }>("/api/auth/oauth/grants/:id", (req, reply) =>
+    run(reply, async () => {
+      owner(req);
+      const parsed = z.object({ trust: z.enum(INTEGRATION_TRUST_LEVELS) }).safeParse(req.body ?? {});
+      if (!parsed.success) throw new AuthFailure(400, parsed.error.message);
+      if (!(await server.setGrantTrust(req.params.id, parsed.data.trust))) throw new AuthFailure(404, "Grant not found.");
+      return { ok: true };
     }),
   );
 

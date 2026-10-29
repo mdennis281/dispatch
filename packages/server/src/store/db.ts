@@ -531,6 +531,13 @@ const MIGRATIONS: ReadonlyArray<string> = [
   );
   CREATE INDEX plugin_cleanup_due ON plugin_cleanup(next_at);
   `,
+  // 14 — an OAuth grant's trust level (see IntegrationTrust). On the grant,
+  // not the access token: that token is replaced every hour, and a level the
+  // owner set on one would silently drop back to `external` at the next
+  // refresh. NULL is `external`, which is what every existing grant was.
+  `
+  ALTER TABLE oauth_grant ADD COLUMN trust TEXT;
+  `,
 ];
 
 /** Schema version a database must be at for this build to use it. */

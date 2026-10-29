@@ -96,6 +96,7 @@ export {
   hashIntegrationToken,
   isIntegrationTokenShape,
   summarizeIntegrationToken,
+  trustOf,
   readIntegrationTokenFile,
   writeIntegrationTokenFile,
   withIntegrationTokenLock,

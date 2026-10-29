@@ -130,6 +130,75 @@ describe("minting", () => {
   });
 });
 
+describe("trust", () => {
+  /** Capture what the messenger hands the broker, without a live session. */
+  function capture(instance: Awaited<ReturnType<typeof buildApp>>) {
+    const sends: { chatId: string; text: string; opts: unknown }[] = [];
+    const messenger = instance.services.chatMessenger as unknown as {
+      sendFn: (chatId: string, text: string, opts: unknown) => Promise<void>;
+      ensureSession: (chatId: string) => Promise<void>;
+    };
+    messenger.ensureSession = async () => {};
+    messenger.sendFn = async (chatId, text, opts) => { sends.push({ chatId, text, opts }); };
+    return sends;
+  }
+
+  it("stamps the TOKEN's trust on a send, whatever name the caller relays under", async () => {
+    const { instance } = await app();
+    const access = await owner(instance);
+    const proj = await project(instance, access, "demo", dirs[0]!);
+    const target = await chat(instance, access, proj.id, "Hello");
+    const { token } = await mint(instance, access, { name: "grok", scopes: ["chats:write"], trust: "owner" });
+    const sends = capture(instance);
+    const sent = await instance.inject({
+      method: "POST", url: `/api/integration/chats/${target.id}/messages`, headers: bearer(token),
+      payload: { text: "ship it", sender: "Michael via Grok" },
+    });
+    expect(sent.statusCode, sent.body).toBe(202);
+    expect(sends[0]!.opts).toEqual({ channel: { name: "Michael via Grok", trust: "owner" } });
+    await instance.close();
+  });
+
+  it("changes a live token's trust in place, and only the owner can", async () => {
+    const { instance } = await app();
+    const access = await owner(instance);
+    const proj = await project(instance, access, "demo", dirs[0]!);
+    const target = await chat(instance, access, proj.id, "Hello");
+    const { token, id } = await mint(instance, access, { name: "grok", scopes: ["chats:write"] });
+
+    // The token itself cannot raise its own level: the route is outside the
+    // integration fence, so the gate refuses it before the handler runs.
+    const self = await instance.inject({
+      method: "PATCH", url: `/api/auth/tokens/${id}`, headers: bearer(token), payload: { trust: "owner" },
+    });
+    expect(self.statusCode).toBe(403);
+
+    const bad = await instance.inject({
+      method: "PATCH", url: `/api/auth/tokens/${id}`, headers: bearer(access), payload: { trust: "root" },
+    });
+    expect(bad.statusCode).toBe(400);
+
+    const raised = await instance.inject({
+      method: "PATCH", url: `/api/auth/tokens/${id}`, headers: bearer(access), payload: { trust: "owner" },
+    });
+    expect(raised.statusCode, raised.body).toBe(200);
+    expect(raised.json()).toMatchObject({ token: { id, trust: "owner" } });
+
+    // Takes effect on the very next message — the bot keeps its token.
+    const sends = capture(instance);
+    await instance.inject({
+      method: "POST", url: `/api/integration/chats/${target.id}/messages`, headers: bearer(token), payload: { text: "go" },
+    });
+    expect(sends[0]!.opts).toEqual({ channel: { name: "grok", trust: "owner" } });
+
+    const missing = await instance.inject({
+      method: "PATCH", url: "/api/auth/tokens/nope", headers: bearer(access), payload: { trust: "owner" },
+    });
+    expect(missing.statusCode).toBe(404);
+    await instance.close();
+  });
+});
+
 describe("the gate", () => {
   it("resolves a dsp_ bearer to an integration identity and a session to a user", async () => {
     const { instance } = await app();

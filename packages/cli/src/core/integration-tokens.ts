@@ -29,8 +29,11 @@ import { dirname, join } from "node:path";
 import {
   INTEGRATION_TOKEN_NAME_MAX,
   INTEGRATION_TOKEN_PREFIX,
+  INTEGRATION_TRUST_LEVELS,
+  isIntegrationTrust,
   parseIntegrationScopes,
   type IntegrationScope,
+  type IntegrationTrust,
   type IntegrationTokenCreateRequest,
   type IntegrationTokenSummary,
 } from "@dispatch/shared";
@@ -44,6 +47,8 @@ export interface StoredIntegrationToken {
   name: string;
   scopes: IntegrationScope[];
   projectIds?: string[];
+  /** Absent reads as `external` — every row written before trust levels has none. */
+  trust?: IntegrationTrust;
   createdAt: number;
   lastUsedAt?: number;
   expiresAt?: number;
@@ -84,12 +89,22 @@ export function isIntegrationTokenShape(value: string | undefined): value is str
   return typeof value === "string" && value.startsWith(INTEGRATION_TOKEN_PREFIX);
 }
 
+/**
+ * A row's trust, read defensively: the file is hand-editable and older rows
+ * have no field, and anything unrecognised must fall to the LOW level, never
+ * up to `owner`.
+ */
+export function trustOf(row: { trust?: unknown }): IntegrationTrust {
+  return isIntegrationTrust(row.trust) ? row.trust : "external";
+}
+
 export function summarizeIntegrationToken(row: StoredIntegrationToken): IntegrationTokenSummary {
   return {
     id: row.id,
     name: row.name,
     scopes: row.scopes,
     ...(row.projectIds ? { projectIds: row.projectIds } : {}),
+    trust: trustOf(row),
     createdAt: row.createdAt,
     ...(row.lastUsedAt !== undefined ? { lastUsedAt: row.lastUsedAt } : {}),
     ...(row.expiresAt !== undefined ? { expiresAt: row.expiresAt } : {}),
@@ -243,10 +258,16 @@ export function validateIntegrationTokenRequest(
       throw new CmError("expiry must be a future time");
     }
   }
+  if (input.trust !== undefined && !isIntegrationTrust(input.trust)) {
+    throw new CmError(`unknown trust level "${String(input.trust)}" — use ${INTEGRATION_TRUST_LEVELS.join(" or ")}`);
+  }
   return {
     name,
     scopes: scopes.scopes,
     ...(projectIds?.length ? { projectIds: [...new Set(projectIds)] } : {}),
+    // Only the non-default level is written, so a file of ordinary tokens
+    // reads the same as it did before trust levels existed.
+    ...(input.trust === "owner" ? { trust: input.trust } : {}),
     ...(input.expiresAt !== undefined ? { expiresAt: input.expiresAt } : {}),
   };
 }

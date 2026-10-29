@@ -43,12 +43,14 @@
  *     as the sidebar's reap: a hidden chat must not keep a `pnpm dev` running
  *     where nobody can see it.
  */
-import type { Chat, Effort, HarnessKind, PermissionMode } from "@dispatch/shared";
+import type { Chat, Effort, HarnessKind, IntegrationTrust, PermissionMode } from "@dispatch/shared";
 import type { PeerSendResult } from "./chat-messenger.js";
 
 export interface ChannelChatRequest {
   /** The integration's display name — the token name. */
   channel: string;
+  /** The token's trust level; carried onto the brief so the new chat reads it at the right authority. */
+  trust?: IntegrationTrust;
   /** The token's id, recorded as the chat's owner. Absent for a browser session. */
   tokenId?: string;
   projectId: string;
@@ -115,7 +117,7 @@ export interface ChannelChatDeps {
   ensureSession: (chatId: string) => Promise<unknown>;
   /** The permission mode a mode id resolves to, project-authored modes included. */
   permissionModeOf: (modeId: string) => Promise<PermissionMode>;
-  send: (input: { channel: { name: string }; to: string; message: string }) => Promise<PeerSendResult>;
+  send: (input: { channel: { name: string; trust?: IntegrationTrust }; to: string; message: string }) => Promise<PeerSendResult>;
   getChat: (id: string) => Promise<Chat | null>;
   /** End the running turn — the Stop button's path. False when no turn was running. */
   interrupt: (chatId: string) => Promise<boolean>;
@@ -164,7 +166,11 @@ export class ChannelChatService {
       ...(req.tokenId ? { startedBy: { tokenId: req.tokenId, name: req.channel } } : {}),
     });
     await this.deps.ensureSession(chat.id);
-    const sent = await this.deps.send({ channel: { name: req.channel }, to: chat.id, message: prompt });
+    const sent = await this.deps.send({
+      channel: { name: req.channel, ...(req.trust === "owner" ? { trust: req.trust } : {}) },
+      to: chat.id,
+      message: prompt,
+    });
     if (!sent.ok) {
       // The chat exists but never got its brief — say so with its id, rather
       // than reporting a failure the caller will "fix" by creating another.

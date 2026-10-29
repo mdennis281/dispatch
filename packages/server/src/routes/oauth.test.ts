@@ -629,6 +629,42 @@ describe("revocation", () => {
   });
 });
 
+describe("grant trust", () => {
+  it("starts external, is raised on the grant AND its live token, and survives the hourly rotation", async () => {
+    const { instance } = await app();
+    const access = await owner(instance);
+    const { clientId, tokens } = await fullGrant(instance, access);
+    type Grants = { grants: Array<{ id: string; trust: string }> };
+    type Tokens = { tokens: Array<{ id: string; trust: string }> };
+    const grants = async () => ((await instance.inject({ url: "/api/auth/oauth/grants", headers: bearer(access) })).json() as Grants).grants;
+    const liveTokens = async () => ((await instance.inject({ url: "/api/auth/tokens", headers: bearer(access) })).json() as Tokens).tokens;
+
+    const [grant] = await grants();
+    expect(grant!.trust).toBe("external");
+    expect((await liveTokens())[0]!.trust).toBe("external");
+
+    // The connector's own token cannot raise it.
+    const self = await instance.inject({ method: "PATCH", url: `/api/auth/oauth/grants/${grant!.id}`, headers: bearer(tokens.access_token), payload: { trust: "owner" } });
+    expect(self.statusCode).toBe(403);
+
+    const raised = await instance.inject({ method: "PATCH", url: `/api/auth/oauth/grants/${grant!.id}`, headers: bearer(access), payload: { trust: "owner" } });
+    expect(raised.statusCode, raised.body).toBe(200);
+    expect((await grants())[0]!.trust).toBe("owner");
+    // At once, on the token the connector is holding right now — not in an hour.
+    expect((await liveTokens())[0]!.trust).toBe("owner");
+
+    // The rotation: the old token is removed and the new one inherits the GRANT's level.
+    const r1 = await tokenRequest(instance, { grant_type: "refresh_token", refresh_token: tokens.refresh_token, client_id: clientId });
+    expect(r1.statusCode, r1.body).toBe(200);
+    const after = await liveTokens();
+    expect(after).toHaveLength(1);
+    expect(after[0]!.trust).toBe("owner");
+
+    expect((await instance.inject({ method: "PATCH", url: "/api/auth/oauth/grants/nope", headers: bearer(access), payload: { trust: "owner" } })).statusCode).toBe(404);
+    expect((await instance.inject({ method: "PATCH", url: `/api/auth/oauth/grants/${grant!.id}`, headers: bearer(access), payload: { trust: "god" } })).statusCode).toBe(400);
+  });
+});
+
 /* ===================================================== plugin flow */
 
 /** An in-process provider: a token endpoint that records what it was asked and hands out short-lived tokens. */
