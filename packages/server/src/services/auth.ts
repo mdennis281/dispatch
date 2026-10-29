@@ -28,7 +28,12 @@ import { describeTrustProxy, trustProxyError } from "../trust-proxy.js";
 import type { Store } from "../store/index.js";
 import { readJson, writeJsonAtomic } from "../store/fsq.js";
 import { IntegrationTokenService, type IntegrationIdentity } from "./integration-tokens.js";
-import type { IntegrationTokenCreateRequest, IntegrationTokenCreated, IntegrationTokenSummary } from "@dispatch/shared";
+import type {
+  IntegrationTokenCreateRequest,
+  IntegrationTokenCreated,
+  IntegrationTokenSummary,
+  IntegrationTrust,
+} from "@dispatch/shared";
 
 const ACCESS_SECONDS = 10 * 60;
 const REFRESH_SLIDING_MS = 30 * 24 * 60 * 60 * 1000;
@@ -699,6 +704,21 @@ export class AuthService {
       if (error instanceof Error && error.name === "CmError") throw new AuthFailure(400, error.message);
       throw error;
     }
+  }
+
+  /**
+   * Owner-only for the same reason minting is, and more so: `owner` trust tells
+   * every agent the token's words are the human's own.
+   */
+  async setIntegrationTokenTrust(
+    identity: RequestIdentity,
+    id: string,
+    trust: IntegrationTrust,
+  ): Promise<IntegrationTokenSummary> {
+    if (!identity.user.owner) throw new AuthFailure(403, "Owner access required.");
+    const summary = await this.tokens.setTrust(id, trust);
+    if (!summary) throw new AuthFailure(404, "Token not found.");
+    return summary;
   }
 
   async revokeIntegrationToken(identity: RequestIdentity, id: string): Promise<void> {

@@ -16,7 +16,7 @@
  *
  * See docs/plugins.md → "OAuth".
  */
-import type { IntegrationScope } from "./integration.js";
+import type { IntegrationScope, IntegrationTrust } from "./integration.js";
 
 /** An access token minted by a grant lives this long; the connector refreshes after. */
 export const OAUTH_ACCESS_TOKEN_SECONDS = 60 * 60;
@@ -74,6 +74,12 @@ export interface OAuthGrantSummary {
   /** When the live refresh token expires — after this the connector must re-consent. */
   refreshExpiresAt?: number;
   revokedAt?: number;
+  /**
+   * The trust every access token this grant mints carries. Lives on the GRANT
+   * because the token is replaced hourly: a level set on one access token was
+   * gone by the next refresh.
+   */
+  trust: IntegrationTrust;
 }
 
 /**

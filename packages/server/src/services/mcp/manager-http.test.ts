@@ -280,6 +280,7 @@ describe("serving the manager tools", () => {
       tokenId: "t1",
       name: "bot",
       scopes: ["tools:chat"],
+      trust: "external",
     };
     const origin = await listen(bridge, "integration", identity);
 

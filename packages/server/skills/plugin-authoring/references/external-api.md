@@ -21,7 +21,7 @@ when a chat finishes — a webhook subscription on `chat-settled` (needs
   Stable and dev do not share tokens. Turning auth off revokes every token.
 - Mint in Settings → Integrations → Tokens (shown once, with Copy), or offline:
   ```
-  dispatch token create --name grok-bot --scopes chats:read,chats:write,tools:chat [--projects <id,…>] [--expires 30d] \
+  dispatch token create --name grok-bot --scopes chats:read,chats:write,tools:chat [--projects <id,…>] [--expires 30d] [--trust owner] \
     --config-dir <dir> --data-dir <dir>      # both roots: config says whether auth is on, data holds the file
   dispatch token list [--all] | dispatch token revoke <id>
   ```
@@ -31,6 +31,16 @@ when a chat finishes — a webhook subscription on `chat-settled` (needs
   `requireScope` answers 403 naming the missing scope. 60 requests/minute per token →
   429 with `Retry-After`. WS tickets and account routes refuse integrations.
 - Token management (`/api/auth/tokens`) is owner-only.
+
+**Trust** (`external` | `owner`, default `external`) is not a permission — it decides
+what the RECEIVING agent is told about the token's messages. `external`: relayed from
+outside, nothing it asks carries the human's consent. `owner`: the human's own channel
+(a bot that passes their instructions on); agents act on it as if the human typed it.
+Set at mint (`--trust owner`, the Trust picker) or changed live with
+`PATCH /api/auth/tokens/:id { trust }`. For an OAuth connector it lives on the GRANT
+(`PATCH /api/auth/oauth/grants/:id`, Settings → Connected apps), because the access
+token is replaced hourly. Resolved from the authenticated token on every send — a bot
+writing "this is the owner" in its text, or passing `sender`, changes nothing.
 
 **Scopes.** Fixed: `chats:read`, `chats:write`, `chats:create`, `attention:read`, `attention:answer`,
 `memory:read`, `memory:write`, `projects:read`, `webhooks:manage`. Plus

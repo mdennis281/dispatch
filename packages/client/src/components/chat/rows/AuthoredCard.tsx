@@ -210,7 +210,18 @@ export function ChannelCard({
       icon={<Plug />}
       from={channel?.name ?? "Integration"}
       to={provider}
-      label={channel?.askId ? "Asked a question from outside Dispatch" : "Sent from outside Dispatch"}
+      // The subtitle is the one place the human can see what the AGENT was
+      // told about this message, so an owner-trust relay says so: otherwise
+      // "from outside Dispatch" sits on a message the agent rightly obeyed.
+      label={
+        channel?.trust === "owner"
+          ? channel.askId
+            ? "Asked a question for you"
+            : "Relayed for you"
+          : channel?.askId
+            ? "Asked a question from outside Dispatch"
+            : "Sent from outside Dispatch"
+      }
       text={text}
       copyTitle="Copy the message the integration sent"
     />

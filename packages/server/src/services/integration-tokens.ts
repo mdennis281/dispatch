@@ -25,6 +25,7 @@ import {
   type IntegrationScope,
   type IntegrationTokenCreateRequest,
   type IntegrationTokenSummary,
+  type IntegrationTrust,
 } from "@dispatch/shared";
 import {
   hashIntegrationToken,
@@ -32,6 +33,7 @@ import {
   mintIntegrationToken,
   readIntegrationTokenFile,
   summarizeIntegrationToken,
+  trustOf,
   withIntegrationTokenLock,
   writeIntegrationTokenFile,
   type StoredIntegrationToken,
@@ -49,6 +51,12 @@ export interface IntegrationIdentity {
   scopes: IntegrationScope[];
   /** When set, the only projects this caller may see. Absent = every project. */
   projectIds?: string[];
+  /**
+   * Whose words this caller's messages are. Read off the token row on every
+   * request, so an owner flipping it in Settings takes effect on the bot's
+   * next message, not its next token.
+   */
+  trust: IntegrationTrust;
 }
 
 /**
@@ -137,6 +145,7 @@ export class IntegrationTokenService {
         name: row.name,
         scopes: row.scopes,
         ...(row.projectIds?.length ? { projectIds: row.projectIds } : {}),
+        trust: trustOf(row),
       };
     }
     return null;
@@ -230,6 +239,26 @@ export class IntegrationTokenService {
     // whenever the stamp happens to be re-read.
     this.data = null;
     return { token, summary: summarizeIntegrationToken(row) };
+  }
+
+  /**
+   * Change a token's trust in place. Allowed on any row the file still holds —
+   * revoked included, harmlessly — and returns the new summary, or null when
+   * no such id. The default level is stored as ABSENT, so lowering a token
+   * leaves its row exactly as an ordinary one reads.
+   */
+  async setTrust(id: string, trust: IntegrationTrust): Promise<IntegrationTokenSummary | null> {
+    const summary = await withIntegrationTokenLock(this.path, async () => {
+      const fresh = await readIntegrationTokenFile(this.path);
+      const row = fresh.tokens.find((t) => t.id === id);
+      if (!row) return null;
+      if (trust === "owner") row.trust = trust;
+      else delete row.trust;
+      await writeIntegrationTokenFile(this.path, fresh);
+      return summarizeIntegrationToken(row);
+    });
+    this.data = null;
+    return summary;
   }
 
   async revoke(id: string): Promise<boolean> {

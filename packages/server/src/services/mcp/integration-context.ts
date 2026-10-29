@@ -151,8 +151,9 @@ export async function createIntegrationContext(
   const projectVisible = (id: string | undefined): boolean =>
     !allow || (id !== undefined && allow.projects.has(id));
   // What the row says and what the reminder names: the token's name, which is
-  // what the human chose when they minted it.
-  const channel = { name: identity.name };
+  // what the human chose when they minted it — and its trust, which only the
+  // owner can set and which no tool argument can raise.
+  const channel = { name: identity.name, ...(identity.trust === "owner" ? { trust: identity.trust } : {}) };
   return {
     chatId: "",
     bus: deps.bus,
@@ -247,6 +248,7 @@ export async function createIntegrationContext(
                 const made = await channelChats.create({
                   channel: identity.name,
                   tokenId: identity.tokenId,
+                  trust: identity.trust,
                   projectId: project.id,
                   prompt: request.prompt,
                   ...(request.title ? { title: request.title } : {}),

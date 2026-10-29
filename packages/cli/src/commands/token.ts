@@ -15,7 +15,12 @@
  */
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { INTEGRATION_SCOPES, type IntegrationTokenCreateRequest } from "@dispatch/shared";
+import {
+  INTEGRATION_SCOPES,
+  INTEGRATION_TRUST_LEVELS,
+  type IntegrationTokenCreateRequest,
+  type IntegrationTrust,
+} from "@dispatch/shared";
 import { CmError } from "../core/manifest.js";
 import { parseArgs, flag, has, type ParsedArgs } from "../core/args.js";
 import {
@@ -30,7 +35,7 @@ import {
 const HELP = `dispatch token — integration tokens for bots and scripts
 
 Usage:
-  dispatch token create --name <name> --scopes <a,b,…> [--projects <id,…>] [--expires <30d|12h|ISO>]
+  dispatch token create --name <name> --scopes <a,b,…> [--projects <id,…>] [--expires <30d|12h|ISO>] [--trust <external|owner>]
   dispatch token list [--all]
   dispatch token revoke <id>
 
@@ -39,6 +44,10 @@ Every command needs the instance's roots:
   --data-dir <dir>     or DISPATCH_DATA_DIR     (where the token file lives; per instance)
 
 Scopes: ${INTEGRATION_SCOPES.join(", ")}
+
+Trust (${INTEGRATION_TRUST_LEVELS.join(", ")}; default external): whose words a chat
+should read the token's messages as. "owner" is for a bot that relays YOUR
+instructions — agents then act on them as if you typed them here.
 
 Minting refuses while authentication is disabled: an open install has nothing
 to scope. The token is printed once and never stored in clear.
@@ -130,6 +139,9 @@ async function create(args: ParsedArgs): Promise<void> {
     scopes: splitList(flag(args, "scopes")),
     ...(flag(args, "projects") ? { projectIds: splitList(flag(args, "projects")) } : {}),
     ...(expires ? { expiresAt: parseExpiry(expires) } : {}),
+    // Passed through unchecked: the core validates it with the same words the
+    // server uses, so a typo is refused here exactly as it is in Settings.
+    ...(flag(args, "trust") ? { trust: flag(args, "trust") as IntegrationTrust } : {}),
   };
   const { token, row } = await mintIntegrationToken(integrationTokensPath(dataDir), request, {
     authEpoch: auth.epoch,
@@ -141,6 +153,7 @@ async function create(args: ParsedArgs): Promise<void> {
       `  scopes:   ${summary.scopes.join(", ")}\n` +
       (summary.projectIds ? `  projects: ${summary.projectIds.join(", ")}\n` : "") +
       (summary.expiresAt ? `  expires:  ${new Date(summary.expiresAt).toISOString()}\n` : "") +
+      `  trust:    ${summary.trust}\n` +
       `\n${token}\n\n` +
       `This is the only time it will be shown.\n`,
   );
@@ -162,7 +175,7 @@ async function list(args: ParsedArgs): Promise<void> {
         ? "expired"
         : "active";
     const used = r.lastUsedAt ? new Date(r.lastUsedAt).toISOString() : "never";
-    process.stdout.write(`${r.id}  ${r.name}  [${state}]  scopes=${r.scopes.join(",")}  last used ${used}\n`);
+    process.stdout.write(`${r.id}  ${r.name}  [${state}]  trust=${r.trust}  scopes=${r.scopes.join(",")}  last used ${used}\n`);
   }
 }
 

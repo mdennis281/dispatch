@@ -650,9 +650,11 @@ export class ChatMessenger {
     }
 
     if ("channel" in sender) {
-      // Attribution is the name only: an integration has no title to look up
-      // and no project of its own. `askId`, when there is one, is added by `ask`.
-      return { ok: true, attribution: { channel: { name: sender.channel.name } } };
+      // Attribution is the name (and the trust its token was resolved to): an
+      // integration has no title to look up and no project of its own.
+      // `askId`, when there is one, is added by `ask`.
+      const { name, trust } = sender.channel;
+      return { ok: true, attribution: { channel: { name, ...(trust === "owner" ? { trust } : {}) } } };
     }
     const record = await this.getChat(sender.chatId);
     return {
