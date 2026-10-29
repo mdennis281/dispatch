@@ -43,6 +43,11 @@ import {
   MemoryTypeSchema,
   type ProjectMemory,
   type MemoryType,
+  jaccard,
+  normalizeText,
+  significantTokens,
+  stem,
+  tokenize,
 } from "@dispatch/shared";
 import { KeyedMutex } from "../store/fsq.js";
 import type { Store } from "../store/index.js";
@@ -273,73 +278,22 @@ export interface ScoredMemory extends ProjectMemory {
   linked?: boolean;
 }
 
-/** Split arbitrary text into lowercased word tokens (≥2 chars) for scoring. */
-function tokenize(text: string): string[] {
-  return String(text)
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .filter((t) => t.length >= 2);
-}
-
-/**
- * Fold a token to a crude stem so inflections match: a user asks why the client
- * is "desyncing" while the memory is named `steam-lobby-rejoin-desync`, and a
- * whole-token comparison misses it entirely — which on a real corpus demoted the
- * one exactly-right memory below unrelated ones.
- *
- * Deliberately conservative and NOT linguistically correct. It's applied to both
- * sides of every comparison, so all that matters is that it folds consistently;
- * an over-eager rule would collide unrelated words and invent matches.
+/*
+ * Tokenizing, stemming, stopwords and Jaccard live in @dispatch/shared's
+ * text-match now, so memory recall and chat_find judge "same word" the same
+ * way. The one behavioural difference from the private copy that used to be
+ * here: tokens are accent-folded rather than split at the first non-ASCII
+ * letter, so "naïve" is one token `naive`, not `na` + `ve`.
  */
-function stem(token: string): string {
-  let t = token;
-  if (t.length > 5 && t.endsWith("ing")) t = t.slice(0, -3);
-  else if (t.length > 4 && t.endsWith("ed")) t = t.slice(0, -2);
-  else if (t.length > 4 && t.endsWith("ies")) t = `${t.slice(0, -3)}y`;
-  else if (t.length > 3 && t.endsWith("s") && !t.endsWith("ss")) t = t.slice(0, -1);
-  // "running" → "runn" → "run"; harmless when the doubling wasn't inflectional.
-  if (t.length > 3 && t[t.length - 1] === t[t.length - 2]) t = t.slice(0, -1);
-  return t;
-}
-
-/** Tokenize into the stem space used for all whole-token comparisons. */
-function stemSet(text: string): Set<string> {
-  return new Set(tokenize(text).map(stem));
-}
-
-/**
- * Function words that carry no retrieval intent. A user turn is a SENTENCE, not
- * a search box ("why is the client desyncing after someone leaves the lobby"),
- * so without this every memory collects a hit for `the`/`is`/`to`/… — on a real
- * ~140-memory store that alone put a uniform floor under EVERY memory's score,
- * which is what let unrelated facts outrank the right one. IDF ({@link
- * tokenWeights}) demotes corpus-specific filler on top of this fixed list.
- */
-const STOPWORDS = new Set([
-  "about","after","again","all","also","am","an","and","any","are","as","at","be",
-  "because","been","before","being","below","between","both","but","by","can","did",
-  "do","does","doing","don","down","during","each","few","for","from","further","had",
-  "has","have","having","he","her","here","hers","him","his","how","if","in","into",
-  "is","it","its","just","me","more","most","my","no","nor","not","now","of","off",
-  "on","once","only","or","other","our","ours","out","over","own","re","same","she",
-  "should","so","some","such","than","that","the","their","theirs","them","then",
-  "there","these","they","this","those","through","to","too","under","until","up",
-  "ve","very","was","we","were","what","when","where","which","while","who","whom",
-  "why","will","with","would","you","your","yours",
-  // conversational verbs that appear in almost every turn AND every memory body
-  "add","added","fix","fixed","get","give","got","let","look","make","made","need",
-  "please","see","take","try","use","used","want","work","works",
-]);
 
 /**
  * Query tokens worth scoring: stopwords removed, stemmed, deduped. Falls back to
  * the raw tokens when a query is ALL stopwords (e.g. the UI search box typed
- * "how to"), so a deliberate search never silently returns nothing.
+ * "how to"), so a deliberate search never silently returns nothing. IDF ({@link
+ * tokenWeights}) demotes corpus-specific filler on top of the fixed stopwords.
  */
 function queryTokens(query: string): string[] {
-  const all = tokenize(query);
-  const kept = all.filter((t) => !STOPWORDS.has(t));
-  return [...new Set((kept.length ? kept : all).map(stem))];
+  return [...new Set(significantTokens(query).map(stem))];
 }
 
 /** The searchable text of one memory, pre-tokenized once per search call. */
@@ -348,21 +302,36 @@ interface MemoryIndexEntry {
   name: string;
   desc: string;
   body: string;
+  /** {@link normalizeText} forms — punctuation as spaces — for the phrase bonus. */
+  nameNorm: string;
+  descNorm: string;
+  bodyNorm: string;
   nameTokens: Set<string>;
   descTokens: Set<string>;
   bodyTokens: Set<string>;
 }
 
+/** Stems of already-normalized text — normalizing once serves both forms. */
+function stemsOfNormalized(norm: string): Set<string> {
+  return new Set(norm ? norm.split(" ").filter((t) => t.length >= 2).map(stem) : []);
+}
+
 /** Pre-tokenize a memory's fields (built once per search, reused per token). */
 function indexMemory(m: ProjectMemory): MemoryIndexEntry {
+  const nameNorm = normalizeText(m.name);
+  const descNorm = normalizeText(m.description);
+  const bodyNorm = normalizeText(m.body);
   return {
     memory: m,
     name: m.name.toLowerCase(),
     desc: m.description.toLowerCase(),
     body: m.body.toLowerCase(),
-    nameTokens: stemSet(m.name),
-    descTokens: stemSet(m.description),
-    bodyTokens: stemSet(m.body),
+    nameNorm,
+    descNorm,
+    bodyNorm,
+    nameTokens: stemsOfNormalized(nameNorm),
+    descTokens: stemsOfNormalized(descNorm),
+    bodyTokens: stemsOfNormalized(bodyNorm),
   };
 }
 
@@ -460,12 +429,18 @@ function scoreMemory(
   // Whole-phrase hits are strong intent signals — reward them on top. These stay
   // additive (not normalized) because a literal phrase match is evidence in its
   // own right, independent of how many other tokens the query happened to carry.
+  //
+  // Compared in BOTH spaces: raw, so a deliberate "c++" or "#421" still counts;
+  // and normalized, because names are kebab-case — "steam lobby rejoin" never
+  // contained `steam-lobby-rejoin-desync` verbatim, so the one query that named
+  // a memory outright earned no phrase bonus at all.
   const q = rawQuery.trim().toLowerCase();
-  if (q.length >= 3) {
-    if (e.name.includes(q)) score += 15;
-    if (e.desc.includes(q)) score += 8;
-    if (e.body.includes(q)) score += 5;
-  }
+  const qn = normalizeText(rawQuery);
+  const has = (raw: string, norm: string): boolean =>
+    (q.length >= 3 && raw.includes(q)) || (qn.length >= 3 && norm.includes(qn));
+  if (has(e.name, e.nameNorm)) score += 15;
+  if (has(e.desc, e.descNorm)) score += 8;
+  if (has(e.body, e.bodyNorm)) score += 5;
   return Math.min(100, Math.round(score * 10) / 10);
 }
 
@@ -473,15 +448,6 @@ function scoreMemory(
 function coerceType(value: string | undefined): MemoryType {
   const parsed = MemoryTypeSchema.safeParse(value);
   return parsed.success ? parsed.data : "project";
-}
-
-/** Jaccard overlap of two token sets — |A∩B| / |A∪B|, in [0,1]. */
-function jaccard(a: Set<string>, b: Set<string>): number {
-  if (!a.size || !b.size) return 0;
-  let inter = 0;
-  for (const t of a) if (b.has(t)) inter++;
-  const union = a.size + b.size - inter;
-  return union ? inter / union : 0;
 }
 
 /** The text fields that define a memory's identity, for similarity comparison. */

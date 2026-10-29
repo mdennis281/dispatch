@@ -398,6 +398,23 @@ describe("scoreCorpus — normalized relevance", () => {
     const long = scoreOf(corpus, "can you look at the turret please", "turret-aim");
     expect(Math.abs(short - long)).toBeLessThan(25);
   });
+
+  it("earns the phrase bonus across punctuation — kebab names, em dashes", () => {
+    const corpus = [
+      mem("steam-lobby-rejoin-desync", "roster desync — after a rejoin", "peers drift"),
+      mem("steam-lobby-ui", "lobby rejoin button", "steam overlay"),
+    ];
+    // Same three tokens hit both names; only the first NAMES the phrase, and
+    // that is what the +15 name bonus is for. Before, "steam lobby rejoin" was
+    // never a substring of "steam-lobby-rejoin-desync", so neither got it.
+    const named = scoreOf(corpus, "steam lobby rejoin", "steam-lobby-rejoin-desync");
+    const other = scoreOf(corpus, "steam lobby rejoin", "steam-lobby-ui");
+    expect(named - other).toBeGreaterThanOrEqual(15);
+    // And the description's em dash no longer splits "desync after a rejoin".
+    const desc = scoreOf(corpus, "desync after a rejoin", "steam-lobby-rejoin-desync");
+    const descWithout = scoreOf([mem("x", "roster desync then rejoin", "")], "desync after a rejoin", "x");
+    expect(desc).toBeGreaterThan(descWithout);
+  });
 });
 
 describe("MemoryService — graded auto-surface", () => {
