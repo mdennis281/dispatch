@@ -37,8 +37,8 @@ import { homedir } from "node:os";
 import { createInterface } from "node:readline";
 import { basename, isAbsolute, join, resolve } from "node:path";
 
-import type { Chat, ImageRef, Project } from "@dispatch/shared";
-import { realProjects, resolveWorkflow, withSentContextSummary } from "@dispatch/shared";
+import type { Chat, ImageRef, Project, TextMatcher } from "@dispatch/shared";
+import { compileQuery, realProjects, resolveWorkflow, withSentContextSummary } from "@dispatch/shared";
 
 import type { Store } from "../store/index.js";
 
@@ -52,6 +52,20 @@ const SCAN_CONCURRENCY = 8;
 const SNIPPET_PAD = 140;
 /** Hard cap on a single rendered field, so one huge row can't fill the result. */
 const FIELD_CLIP = 2_000;
+/**
+ * Least similarity a TITLE needs to count as a match. Two of a three-word query,
+ * side by side, clears it (0.67); one shared word of two (0.5) does not — that
+ * is what keeps "continue without reload" from listing every chat about "load".
+ */
+const TITLE_MIN_SCORE = 0.65;
+/**
+ * Least similarity a transcript ROW needs. Rows are scored `requireAll`, so
+ * coverage is settled and this is purely a PROXIMITY cut: proximity owns 0.6
+ * of the score, so every word present but scattered through a long turn
+ * bottoms out at 0.4 and fails, while the same words within roughly a
+ * paragraph of each other pass.
+ */
+const CONTENT_MIN_SCORE = 0.5;
 
 /* ------------------------------------------------------------------- types */
 
@@ -97,6 +111,8 @@ export interface ChatHit {
   /** Tool name / subtype, when the row has one. */
   label?: string;
   snippet: string;
+  /** Similarity to the query in [0,1] — absent on an `exact` search. */
+  score?: number;
 }
 
 export interface ChatSummary {
@@ -115,12 +131,22 @@ export interface ChatSummary {
   worktrees?: string[];
   prs?: number[];
   hits?: ChatHit[];
+  /** Best similarity among this chat's hits and its title, when a query ran. */
+  score?: number;
 }
 
 export interface FindChatsQuery {
   instance?: InspectInstance;
   /** Free text matched against transcript content (and always against titles). */
   query?: string;
+  /**
+   * `similar` (default): token similarity, ranked by score — punctuation-blind,
+   * word-order-blind, stem- and (on titles) typo-tolerant, and a superset of
+   * `exact`. `exact`: the old case-insensitive substring, unranked.
+   */
+  match?: "similar" | "exact";
+  /** Drop hits scoring below this (0–1). Defaults: titles 0.65, rows 0.5. */
+  minScore?: number;
   /** Project id, or a case-insensitive substring of a project name. */
   project?: string;
   status?: string;
@@ -193,6 +219,8 @@ function findFingerprint(q: FindChatsQuery): string {
     q.status ?? "",
     Boolean(q.archived),
     [...(q.kinds ?? [])].sort(),
+    q.match ?? "similar",
+    q.minScore ?? null,
   ]);
   return createHash("sha256").update(shape).digest("base64url").slice(0, 12);
 }
@@ -472,12 +500,26 @@ export function rowLabel(row: RawRow): string | undefined {
   }
 }
 
-/** Extract a padded snippet around the first match of `needle`. */
-function snippet(text: string, needle: string): string {
-  const idx = text.toLowerCase().indexOf(needle.toLowerCase());
+/**
+ * Extract a padded snippet around the first of `needles` that occurs, tried in
+ * order — the verbatim query first, then single query words, because a
+ * similarity hit need never contain the query contiguously and centring on
+ * nothing returned the row's first 280 chars, usually a system-reminder.
+ */
+function snippet(text: string, needles: readonly string[]): string {
+  const lower = text.toLowerCase();
+  let idx = -1;
+  let len = 0;
+  for (const n of needles) {
+    idx = n ? lower.indexOf(n.toLowerCase()) : -1;
+    if (idx >= 0) {
+      len = n.length;
+      break;
+    }
+  }
   if (idx < 0) return clip(text, SNIPPET_PAD * 2);
   const start = Math.max(0, idx - SNIPPET_PAD);
-  const end = Math.min(text.length, idx + needle.length + SNIPPET_PAD);
+  const end = Math.min(text.length, idx + len + SNIPPET_PAD);
   return `${start > 0 ? "…" : ""}${text.slice(start, end)}${end < text.length ? "…" : ""}`;
 }
 
@@ -685,6 +727,10 @@ export class InspectService {
 
     const lower = query.toLowerCase();
     const budget = q.scanBudgetBytes ?? DEFAULT_SCAN_BUDGET_BYTES;
+    const matcher = q.match === "exact" ? null : compileQuery(query, { requireAll: true });
+    const titleMatcher = q.match === "exact" ? null : compileQuery(query, { typos: true });
+    const titleMin = q.minScore ?? TITLE_MIN_SCORE;
+    const contentMin = q.minScore ?? CONTENT_MIN_SCORE;
 
     // PLAN the page before scanning it: the newest-first run of chats whose
     // transcripts fit the budget. Deciding it up front is what makes the stop
@@ -721,7 +767,14 @@ export class InspectService {
 
     const results = await mapLimit(window, SCAN_CONCURRENCY, async ({ chat, size }) => {
       if (size === null) return null;
-      const hits = await this.scanTranscript(this.transcriptPath(store, chat.id), query, kinds, hitsPerChat);
+      const hits = await this.scanTranscript(
+        this.transcriptPath(store, chat.id),
+        query,
+        kinds,
+        hitsPerChat,
+        matcher,
+        contentMin,
+      );
       return hits.length ? hits : null;
     });
 
@@ -737,17 +790,39 @@ export class InspectService {
     // of them fits; the cursor's `t` then tells later pages that every titled
     // chat past the boundary is already listed, and they skip it even when its
     // transcript matches too. All or nothing, so each chat is listed once.
-    const titled = (c: Chat): boolean => Boolean(c.title?.toLowerCase().includes(lower));
+    //
+    // Title scores are computed once per chat: `titled` is asked of the same
+    // chat up to three times below, and with typo matching on it is the one
+    // place in this method that does real work per candidate.
+    const titleScores = new Map<string, number | null>();
+    const titleScore = (c: Chat): number | null => {
+      if (titleScores.has(c.id)) return titleScores.get(c.id)!;
+      let s: number | null = null;
+      if (c.title) {
+        if (!titleMatcher) s = c.title.toLowerCase().includes(lower) ? 1 : null;
+        else {
+          const m = titleMatcher.score(c.title);
+          s = m && m.score >= titleMin ? m.score : null;
+        }
+      }
+      titleScores.set(c.id, s);
+      return s;
+    };
+    const titled = (c: Chat): boolean => titleScore(c) !== null;
+    const titleHit = (c: Chat): ChatHit[] => [
+      { kind: "title", snippet: c.title, ...(matcher ? { score: titleScore(c)! } : {}) },
+    ];
     const summary = (c: Chat, hits: ChatHit[]): ChatSummary => ({
       ...this.toSummary(c, nameById.get(c.projectId)),
       hits,
+      ...(matcher ? { score: Math.max(titleScore(c) ?? 0, ...hits.map((h) => h.score ?? 0)) } : {}),
     });
     let covered = window.length;
     const listed: ChatSummary[] = [];
     for (let i = 0; i < window.length; i++) {
       const chat = window[i]!.chat;
       if (cursor?.t && titled(chat)) continue; // listed on page one
-      const hits = results[i] ?? (titled(chat) ? [{ kind: "title", snippet: chat.title }] : null);
+      const hits = results[i] ?? (titled(chat) ? titleHit(chat) : null);
       if (!hits) continue;
       if (listed.length === limit) {
         covered = i;
@@ -762,9 +837,24 @@ export class InspectService {
     if (!cursor && covered === window.length) {
       const ahead = remaining.slice(window.length).filter(titled);
       if (listed.length + ahead.length <= limit) {
-        for (const c of ahead) listed.push(summary(c, [{ kind: "title", snippet: c.title }]));
+        for (const c of ahead) listed.push(summary(c, titleHit(c)));
         titlesDone = true;
       }
+    }
+
+    // Best match first WITHIN the page. The page boundary itself stays a
+    // recency cut: the scan budget walks newest-first, so a global ranking
+    // would mean reading every transcript before answering — the very cost
+    // the budget exists to cap.
+    //
+    // Ties go to the TITLE: a chat that quotes another's title verbatim scores
+    // the same 1.0 as the chat that bears it, and on the live store three such
+    // quoters were all newer than the chat being searched for. A title is the
+    // chat's own name for itself; a quote is a mention. `sort` is stable, so
+    // what is still tied keeps its newest-first order.
+    if (matcher) {
+      const title = (s: ChatSummary): number => titleScores.get(s.id) ?? 0;
+      listed.sort((a, b) => (b.score ?? 0) - (a.score ?? 0) || title(b) - title(a));
     }
 
     const unscanned = remaining.length - covered;
@@ -785,12 +875,20 @@ export class InspectService {
    * superset of the real one (JSON escaping can hide a match, and a match can
    * land in a field the kind filter excludes), so every raw hit is re-checked
    * against the parsed row — cheap, because raw hits are rare.
+   *
+   * With a `matcher` the raw test is {@link TextMatcher.prefilter} — still one
+   * `includes` per query word, so the scan stays linear in bytes — and the
+   * re-check is a similarity score held to `minScore`. Typo matching is never
+   * on here: an edit-distance pass over every word of an 800 MB store is the
+   * pairwise cost this design exists to avoid.
    */
   private async scanTranscript(
     path: string,
     query: string,
     kinds: Set<string>,
     maxHits: number,
+    matcher: TextMatcher | null,
+    minScore: number,
   ): Promise<ChatHit[]> {
     const needle = query.toLowerCase();
     const hits: ChatHit[] = [];
@@ -799,17 +897,24 @@ export class InspectService {
     try {
       for await (const line of lines) {
         if (hits.length >= maxHits) break;
-        if (!line || !line.toLowerCase().includes(needle)) continue;
+        if (!line) continue;
+        if (matcher ? !matcher.prefilter(line) : !line.toLowerCase().includes(needle)) continue;
         const row = parseRow(line);
         if (!row?.kind || !kinds.has(row.kind)) continue;
         const text = rowText(row);
-        if (!text.toLowerCase().includes(needle)) continue;
+        let score: number | undefined;
+        if (matcher) {
+          const m = matcher.score(text);
+          if (!m || m.score < minScore) continue;
+          score = m.score;
+        } else if (!text.toLowerCase().includes(needle)) continue;
         hits.push({
           id: row.id,
           ts: row.ts,
           kind: row.kind,
           label: rowLabel(row),
-          snippet: snippet(text, query),
+          snippet: snippet(text, matcher?.focus ?? [query]),
+          ...(score !== undefined ? { score } : {}),
         });
       }
     } finally {

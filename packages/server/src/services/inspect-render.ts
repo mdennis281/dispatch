@@ -59,7 +59,8 @@ function chatHeadline(c: ChatSummary): string {
     c.archived ? "archived" : undefined,
     c.prs?.length ? `PR #${c.prs.join(", #")}` : undefined,
   ].filter(Boolean);
-  return `${c.id}  ${when(c.updatedAt)}  ${c.title}\n    ${bits.join(" · ")}`;
+  const score = c.score !== undefined ? `  (${c.score.toFixed(2)})` : "";
+  return `${c.id}  ${when(c.updatedAt)}  ${c.title}${score}\n    ${bits.join(" · ")}`;
 }
 
 /* ------------------------------------------------------------- chat_find */
@@ -73,8 +74,12 @@ export function renderFind(result: FindChatsResult, query?: string): string {
         : "No chats matched those filters.",
     );
   } else {
+    // A similarity search arrives ranked; say so, or a reader assumes the
+    // first chat is merely the newest and goes looking further down.
+    const ranked = result.chats.some((c) => c.score !== undefined);
     lines.push(
-      `${result.chats.length} chat(s)${query ? ` matching "${query}"` : ""}, newest first:`,
+      `${result.chats.length} chat(s)${query ? ` matching "${query}"` : ""}, ` +
+        `${ranked ? "best match first (score 0–1, then newest)" : "newest first"}:`,
       "",
     );
     for (const c of result.chats) {
@@ -82,7 +87,8 @@ export function renderFind(result: FindChatsResult, query?: string): string {
       for (const h of c.hits ?? []) {
         const label = h.label ? ` ${h.label}` : "";
         const id = h.id ? ` ${h.id}` : "";
-        lines.push(`      · [${h.kind}${label}${id}] ${oneLine(h.snippet)}`);
+        const score = h.score !== undefined ? ` ${h.score.toFixed(2)}` : "";
+        lines.push(`      · [${h.kind}${label}${id}${score}] ${oneLine(h.snippet)}`);
       }
       lines.push("");
     }

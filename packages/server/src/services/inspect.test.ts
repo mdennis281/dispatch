@@ -263,6 +263,80 @@ describe("findChats", () => {
     });
   });
 
+  describe("similarity", () => {
+    const TITLE = "Anoxia: Continue without reload — modular seed loading";
+    beforeEach(async () => {
+      await seedProject("p4", "anoxia");
+      // The live store's shape: the chat itself is OLDEST, and three newer
+      // chats merely quote its title — which under newest-first buried the
+      // one chat the search was for at the bottom of the list.
+      await seedChat("anoxia-seed", { projectId: "p4", title: TITLE, updatedAt: T0 + 5 * DAY }, [
+        { id: "s1", ts: T0, kind: "user", text: "split the seed into modules" },
+      ]);
+      await seedChat("anoxia-load", { projectId: "p4", title: "Anoxia: where the load time goes", updatedAt: T0 + 6 * DAY }, [
+        { id: "l1", ts: T0, kind: "user", text: `see the chat "${TITLE}" for that direction` },
+      ]);
+      await seedChat("anoxia-speed", { projectId: "p4", title: "Anoxia: more initial-load speedups", updatedAt: T0 + 7 * DAY }, [
+        { id: "x1", ts: T0, kind: "user", text: "measure the cold reload, then continue without it if it is slow" },
+      ]);
+    });
+
+    it("finds a title across an em dash the old substring rule could not", async () => {
+      const result = await service().findChats({ query: "reload modular seed", project: "anoxia" });
+      expect(result.chats[0]!.id).toBe("anoxia-seed");
+      expect(result.chats[0]!.score).toBeGreaterThanOrEqual(0.9);
+
+      const exact = await service().findChats({ query: "reload modular seed", project: "anoxia", match: "exact" });
+      expect(exact.chats).toEqual([]);
+    });
+
+    it("finds a reordered, misspelled title", async () => {
+      const result = await service().findChats({ query: "seed modulr continue", project: "anoxia" });
+      expect(result.chats.map((c) => c.id)).toEqual(["anoxia-seed"]);
+      expect(result.chats[0]!.hits?.[0]!.kind).toBe("title");
+    });
+
+    it("ranks the chat a title names above newer chats that only quote it", async () => {
+      const result = await service().findChats({ query: "continue without reload", project: "anoxia" });
+      expect(result.chats[0]!.id).toBe("anoxia-seed");
+      // Both quoters still come back — exact and ranked below the real one.
+      expect(result.chats.map((c) => c.id)).toEqual(expect.arrayContaining(["anoxia-load", "anoxia-speed"]));
+      const scores = result.chats.map((c) => c.score!);
+      expect([...scores].sort((a, b) => b - a)).toEqual(scores);
+      expect(renderFind(result, "continue without reload")).toContain("best match first");
+    });
+
+    it("scores every hit, and drops what falls under minScore", async () => {
+      const all = await service().findChats({ query: "continue without reload", project: "anoxia" });
+      const scattered = all.chats.find((c) => c.id === "anoxia-speed")!;
+      expect(scattered.hits?.[0]!.score).toBeLessThan(1);
+
+      const strict = await service().findChats({ query: "continue without reload", project: "anoxia", minScore: 0.99 });
+      expect(strict.chats.map((c) => c.id)).not.toContain("anoxia-speed");
+    });
+
+    it("keeps `exact` exactly as it was: substring only, newest first, no scores", async () => {
+      const result = await service().findChats({ query: "continue without reload", project: "anoxia", match: "exact" });
+      expect(result.chats.map((c) => c.id)).toEqual(["anoxia-load", "anoxia-seed"]);
+      expect(result.chats.every((c) => c.score === undefined)).toBe(true);
+    });
+
+    it("centres a snippet on a query word when the phrase never appears whole", async () => {
+      await seedChat("long-row", { projectId: "p4", title: "x", updatedAt: T0 + 8 * DAY }, [
+        { id: "z1", ts: T0, kind: "assistant", text: `${"filler ".repeat(80)}the zebra and then the giraffe` },
+      ]);
+      const result = await service().findChats({ query: "giraffe zebra", project: "anoxia" });
+      expect(result.chats[0]!.hits?.[0]!.snippet).toContain("zebra");
+    });
+
+    it("refuses a cursor minted under a different match mode", async () => {
+      const first = await service().findChats({ query: "anoxia", project: "anoxia", limit: 1 });
+      await expect(
+        service().findChats({ query: "anoxia", project: "anoxia", limit: 1, match: "exact", cursor: first.nextCursor }),
+      ).rejects.toThrow(/different search/);
+    });
+  });
+
   it("refuses a cursor from a different search, or one it never issued", async () => {
     const first = await service().findChats({ query: "release", limit: 1 });
     await expect(service().findChats({ query: "workflow", cursor: first.nextCursor })).rejects.toThrow(/different search/);
