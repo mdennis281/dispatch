@@ -7033,11 +7033,13 @@ ${look}` : "")
 
   const chatFind = tool(
     "chat_find",
-    "Search ACROSS every chat in the store and get back the few that matter, newest " +
-      "first — the fast way to answer \"which chat was that\" or \"has anyone hit this " +
+    "Search ACROSS every chat in the store and get back the few that matter, best " +
+      "match first — the fast way to answer \"which chat was that\" or \"has anyone hit this " +
       "error before\". `query` is matched against transcript CONTENT (and titles), so " +
-      "a file path, an error string or a PR number all work. Returns each hit as a " +
-      "one-line snippet with the chat id and row id, which feed straight into " +
+      "a file path, an error string or a PR number all work. Matching is by WORDS, not " +
+      "exact text: punctuation, word order and inflections don't matter, and titles " +
+      "forgive a typo. Returns each hit as a one-line snippet with a 0–1 score, the " +
+      "chat id and row id, which feed straight into " +
       "`chat_read`. Filter with `project`/`since` to keep a broad query fast. A search " +
       "too big for one call stops at a scan budget and returns a `cursor`: call again " +
       "with the same arguments plus that cursor to search the older chats. This is a " +
@@ -7047,9 +7049,23 @@ ${look}` : "")
         .string()
         .optional()
         .describe(
-          "Text to look for inside transcripts. Case-insensitive substring, not regex. " +
-            "Omit to just list chats matching the filters.",
+          "Text to look for inside transcripts. A transcript row matches when it has " +
+            "every significant word (any order, any punctuation between); a title " +
+            "matches on most of them. Not regex. Omit to just list chats matching the filters.",
         ),
+      match: z
+        .enum(["similar", "exact"])
+        .optional()
+        .describe(
+          "'similar' (default): word-based, ranked by score. 'exact': case-insensitive " +
+            "substring only, newest first — for an exact error string where near-misses are noise.",
+        ),
+      minScore: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe("Drop hits scoring below this (0–1). Default 0.65 for titles, 0.5 for transcript rows."),
       project: z
         .string()
         .optional()
@@ -7090,6 +7106,8 @@ ${look}` : "")
       try {
         const result = await ctx.inspect.findChats({
           query: args.query,
+          match: args.match,
+          minScore: args.minScore,
           project: args.project,
           status: args.status,
           archived: args.archived,
