@@ -29,11 +29,7 @@
  * read-modify-write round trips through the store would.
  */
 import { createHmac, randomBytes } from "node:crypto";
-import {
-  AT_REST,
-  NOTICE_QUIESCE_TRIES,
-  NOTICE_SETTLE_MS,
-} from "./chat-completion-notice.js";
+import { ChatSettleWatcher, lastAssistantText } from "./chat-settle.js";
 import {
   CHAT_SETTLED_EVENT,
   WEBHOOK_EXCLUDED_WIRE_EVENTS,
@@ -41,7 +37,6 @@ import {
   WEBHOOK_PAUSE_AFTER_DEAD,
   WEBHOOK_RETRY_DELAYS_MS,
   WebhookSubscriptionInputSchema,
-  isChatWorking,
   webhookFilterMatches,
   withSentContextSummary,
   type ChatSettledPayload,
@@ -147,15 +142,6 @@ export function verifyWebhookSignature(
   return diff === 0;
 }
 
-/** Per chat, the state of the settle watch. */
-interface SettleWatch {
-  /** Seen mid-turn since the last fire — the gate against a fresh session's idle. */
-  working: boolean;
-  settle?: unknown;
-  tries: number;
-  status: ChatStatus;
-}
-
 function newId(): string {
   return randomBytes(12).toString("base64url");
 }
@@ -183,13 +169,10 @@ export class WebhookService {
   private readonly bus: EventBus;
   private readonly store: Store;
   private readonly fetchImpl: FetchLike;
-  private readonly getStatus?: WebhookServiceDeps["getStatus"];
-  private readonly hasPendingWork?: WebhookServiceDeps["hasPendingWork"];
   private readonly resolveHost: HostResolver;
   private readonly now: () => number;
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
   private readonly clearTimer: (handle: unknown) => void;
-  private readonly settleMs: number;
   private readonly log: (line: string) => void;
 
   /** Authoritative in-memory copy of every subscription (see the header). */
@@ -200,7 +183,7 @@ export class WebhookService {
   private readonly inFlight = new Set<string>();
   /** Every async path, so tests can await the bus settling. */
   private readonly pending = new Set<Promise<unknown>>();
-  private readonly watches = new Map<string, SettleWatch>();
+  private readonly settle: ChatSettleWatcher;
   private offAll?: () => void;
   private started = false;
   private disposed = false;
@@ -209,11 +192,8 @@ export class WebhookService {
     this.bus = deps.bus;
     this.store = deps.store;
     this.fetchImpl = deps.fetch ?? ((url, init) => fetch(url, init));
-    this.getStatus = deps.getStatus;
-    this.hasPendingWork = deps.hasPendingWork;
     this.resolveHost = deps.resolveHost ?? resolveHostAddresses;
     this.now = deps.now ?? Date.now;
-    this.settleMs = deps.settleMs ?? NOTICE_SETTLE_MS;
     this.log = deps.log ?? ((line) => console.log(`[Dispatch] webhooks: ${line}`));
     this.setTimer =
       deps.setTimer ??
@@ -224,6 +204,14 @@ export class WebhookService {
         return t;
       });
     this.clearTimer = deps.clearTimer ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>));
+    this.settle = new ChatSettleWatcher({
+      getStatus: deps.getStatus,
+      hasPendingWork: deps.hasPendingWork,
+      setTimer: this.setTimer,
+      clearTimer: this.clearTimer,
+      settleMs: deps.settleMs,
+      onSettled: (chatId, status) => void this.track(this.fireSettled(chatId, status)),
+    });
   }
 
   /* ------------------------------------------------------------ lifecycle */
@@ -248,10 +236,7 @@ export class WebhookService {
     this.offAll = undefined;
     for (const t of this.timers.values()) this.clearTimer(t);
     this.timers.clear();
-    for (const w of this.watches.values()) {
-      if (w.settle !== undefined) this.clearTimer(w.settle);
-    }
-    this.watches.clear();
+    this.settle.dispose();
   }
 
   /** Resolve once every in-flight ingest and attempt has settled (tests). */
@@ -280,7 +265,7 @@ export class WebhookService {
   private onEvent(evt: WsServerEvent): void {
     if (this.disposed) return;
     if (evt.type === "chat-status") this.onChatStatus(evt.chatId, evt.status);
-    if (evt.type === "chat-deleted") this.dropWatch(evt.chatId);
+    if (evt.type === "chat-deleted") this.settle.drop(evt.chatId);
     if (WEBHOOK_EXCLUDED_WIRE_EVENTS.has(evt.type)) return;
     // The cheap exit: with nothing subscribed, every event costs one Set lookup
     // and one array scan, and never an async hop or a store read.
@@ -371,60 +356,13 @@ export class WebhookService {
 
   /* --------------------------------------------------------- chat-settled */
 
+  /** The settle rule itself lives in chat-settle.ts, shared with the event feed. */
   private onChatStatus(chatId: string, status: ChatStatus): void {
     if (this.activeSubs().length === 0) {
-      this.dropWatch(chatId);
+      this.settle.drop(chatId);
       return;
     }
-    const w = this.watches.get(chatId) ?? { working: false, tries: 0, status };
-    this.watches.set(chatId, w);
-    w.status = status;
-    if (isChatWorking(status)) {
-      w.working = true;
-      // Picked work back up inside the window — the queued message, most
-      // likely. The settle is cancelled outright; the NEXT at-rest edge opens a
-      // fresh one.
-      if (w.settle !== undefined) {
-        this.clearTimer(w.settle);
-        w.settle = undefined;
-      }
-      return;
-    }
-    // A session that started and has no work yet IS at rest. Firing on that
-    // would announce a turn that never happened, so the gate is the same as the
-    // completion notice's: at rest AFTER having been seen working.
-    if (!w.working || !AT_REST.has(status)) return;
-    if (w.settle !== undefined) return;
-    w.tries = 0;
-    w.settle = this.setTimer(() => this.confirmSettled(chatId), this.settleMs);
-  }
-
-  private dropWatch(chatId: string): void {
-    const w = this.watches.get(chatId);
-    if (!w) return;
-    if (w.settle !== undefined) this.clearTimer(w.settle);
-    this.watches.delete(chatId);
-  }
-
-  /**
-   * The window elapsed. Fire only if the chat is STILL at rest and has nothing
-   * queued; otherwise re-check, up to the notice's budget, because a pending
-   * flush can clear without a status edge following it.
-   */
-  private confirmSettled(chatId: string): void {
-    const w = this.watches.get(chatId);
-    if (!w) return;
-    w.settle = undefined;
-    const live = this.getStatus?.(chatId);
-    if ((live !== undefined && !AT_REST.has(live)) || this.hasPendingWork?.(chatId)) {
-      if (w.tries >= NOTICE_QUIESCE_TRIES) return;
-      w.tries += 1;
-      w.settle = this.setTimer(() => this.confirmSettled(chatId), this.settleMs);
-      return;
-    }
-    // One fire per settled turn: the gate re-arms on the next working status.
-    w.working = false;
-    void this.track(this.fireSettled(chatId, live ?? w.status));
+    this.settle.onStatus(chatId, status);
   }
 
   private async fireSettled(chatId: string, status: ChatStatus): Promise<void> {
@@ -433,25 +371,13 @@ export class WebhookService {
       chatId,
       projectId: chat?.projectId ?? "",
       status,
-      lastAssistantText: await this.lastAssistantText(chatId),
+      lastAssistantText: await lastAssistantText(this.store, chatId),
     };
     await this.fanOut(
       { type: CHAT_SETTLED_EVENT, chatId, projectId: chat?.projectId },
       this.now(),
       payload,
     );
-  }
-
-  /** The newest assistant row's text, read off the transcript tail. */
-  private async lastAssistantText(chatId: string): Promise<string> {
-    const rows = await this.store.readMessages(chatId, { limit: 50 }).catch(() => []);
-    for (let i = rows.length - 1; i >= 0; i--) {
-      const row = rows[i]!;
-      // Only the main thread's own prose: a subagent's row is not the answer
-      // the human was waiting on.
-      if (row.kind === "assistant" && !row.parentToolUseId && row.text.trim()) return row.text;
-    }
-    return "";
   }
 
   /* ------------------------------------------------------------ delivery */

@@ -77,6 +77,7 @@ import { IssueService } from "./issues/service.js";
 import { IssueWatcher } from "./issue-watcher.js";
 import { Notifier } from "./notifier.js";
 import { WebhookService } from "./webhooks.js";
+import { EventFeedService } from "./event-feed.js";
 import { PushService } from "./push.js";
 import { AttentionQueue } from "./attention.js";
 import { HomeService } from "./home.js";
@@ -154,6 +155,7 @@ export interface ServiceOverrides {
   ci?: CiService;
   notifier?: Notifier;
   webhooks?: WebhookService;
+  eventFeed?: EventFeedService;
   push?: PushService;
   attention?: AttentionQueue;
   home?: HomeService;
@@ -239,6 +241,8 @@ export interface Services extends ServiceBase {
   notifier: Notifier;
   /** Signed outbound POSTs of bus events to subscribed URLs; see services/webhooks.ts. */
   webhooks: WebhookService;
+  /** The durable "what happened" log integrations poll; see services/event-feed.ts. */
+  eventFeed: EventFeedService;
   /** Server-sent Web Push — the only delivery path an iOS home-screen app has. */
   push: PushService;
   attention: AttentionQueue;
@@ -702,6 +706,18 @@ export function createServices(
     overrides.webhooks ??
     new WebhookService({
       bus,
+      store,
+      getStatus: (chatId) => broker.getStatus(chatId),
+      hasPendingWork: (chatId) =>
+        broker.hasPendingWork(chatId) || chatMessenger.hasPending(chatId),
+    });
+  // The integration event feed: the pull-side twin of the webhooks, for a
+  // connector that can only make tool calls. Same settle inputs, same reason.
+  const eventFeed =
+    overrides.eventFeed ??
+    new EventFeedService({
+      bus,
+      db: store.stateDb,
       store,
       getStatus: (chatId) => broker.getStatus(chatId),
       hasPendingWork: (chatId) =>
@@ -1172,6 +1188,7 @@ export function createServices(
         getProject: (id) => store.getProject(id).catch(() => null),
         listProjects: () => store.listProjects(),
         listPersonas: (projectId) => personasFor(store, authored, projectId),
+        events: eventFeed,
       },
       identity,
     ),
@@ -1580,6 +1597,7 @@ export function createServices(
     ci,
     notifier,
     webhooks,
+    eventFeed,
     push,
     attention,
     home,
@@ -1713,6 +1731,10 @@ export function createServices(
       // safeStart's try so a corrupt row is logged rather than fatal.
       safeStart("webhooks", () => void webhooks.start().catch((err: unknown) =>
         console.error("[Dispatch] webhooks failed to start:", err)));
+      // Seeds each tracked PR's last state first, so a boot never announces
+      // every open PR as newly opened.
+      safeStart("eventFeed", () => void eventFeed.start().catch((err: unknown) =>
+        console.error("[Dispatch] event feed failed to start:", err)));
       safeStart("push", () => push.start());
       // Ahead of the limit sampler, so its first pass already sees the
       // built-in providers' accounts.
@@ -1901,6 +1923,7 @@ export function createServices(
       notifier.stop();
       // Clears every retry timer; pending rows are resumed by the next boot.
       webhooks.dispose();
+      eventFeed.dispose();
       push.stop();
       attention.stop();
       // Unsubscribe first, then let an in-flight sweep land rather than yanking

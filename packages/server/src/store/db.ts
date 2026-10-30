@@ -538,6 +538,21 @@ const MIGRATIONS: ReadonlyArray<string> = [
   `
   ALTER TABLE oauth_grant ADD COLUMN trust TEXT;
   `,
+  // 15 — the integration event feed (services/event-feed.ts). AUTOINCREMENT,
+  // not a plain rowid: `seq` IS the poller's cursor, and a plain rowid may hand
+  // a pruned tail's numbers out again — a poller holding cursor 900 would then
+  // silently skip the next events numbered 901… after a prune emptied the tail.
+  `
+  CREATE TABLE integration_event (
+    seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+    type       TEXT    NOT NULL,
+    chat_id    TEXT,
+    project_id TEXT,
+    ts         INTEGER NOT NULL,
+    payload    TEXT    NOT NULL
+  );
+  CREATE INDEX integration_event_ts ON integration_event(ts);
+  `,
 ];
 
 /** Schema version a database must be at for this build to use it. */

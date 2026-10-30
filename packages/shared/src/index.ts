@@ -73,4 +73,6 @@ export * from "./plugin-inspection.js";
 export * from "./plugin-collection.js";
 export * from "./plugin-lifecycle.js";
 export * from "./webhooks.js";
+export * from "./integration-events.js";
+export * from "./local-time.js";
 export * from "./plugin-client-api.js";

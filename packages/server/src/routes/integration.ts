@@ -23,7 +23,10 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import * as z from "zod";
 import {
+  INTEGRATION_EVENT_PAGE_MAX,
+  INTEGRATION_EVENT_TYPES,
   INTEGRATION_SCOPES,
+  isIntegrationEventType,
   INTEGRATION_TRUST_LEVELS,
   QuestionAnswerSchema,
   type AttentionItem,
@@ -34,6 +37,7 @@ import { ChannelChatRefusal } from "../services/channel-chats.js";
 import { SummaryRateLimitError } from "../services/chat-summary.js";
 import { FindCursorError } from "../services/inspect.js";
 import { personasFor } from "../services/personas.js";
+import { EventCursorError, eventReachFor } from "../services/event-feed.js";
 import { ProviderUnavailableError } from "../harness/index.js";
 import {
   ScopeFailure,
@@ -85,6 +89,17 @@ const CreateChatBody = z.object({
   provider: z.string().min(1).optional(),
   model: z.string().min(1).optional(),
   effort: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
+});
+
+const EventsQuery = z.object({
+  cursor: z.string().min(1).optional(),
+  /** Epoch ms or ISO 8601; parsed in the route so a bad value is a sentence, not a zod dump. */
+  since: z.string().min(1).optional(),
+  limit: z.coerce.number().int().positive().max(INTEGRATION_EVENT_PAGE_MAX).optional(),
+  /** Comma-separated event types. */
+  types: z.string().optional(),
+  projectId: z.string().min(1).optional(),
+  chatId: z.string().min(1).optional(),
 });
 
 const SummaryQuery = z.object({ focus: z.string().max(500).optional() });
@@ -382,6 +397,53 @@ export function registerIntegrationRoutes(app: FastifyInstance): void {
     }),
   );
 
+  /* -- events ----------------------------------------------------------- */
+
+  // The REST twin of `events_poll`. No scope of its own: each event TYPE needs
+  // the read scope its subject does (INTEGRATION_EVENT_SCOPES), so a token
+  // reads the feed exactly as far as it could read the things it describes.
+  app.get("/api/integration/events", async (req, reply) => {
+    const parsed = EventsQuery.safeParse(req.query ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+    const q = parsed.data;
+    const identity = req.authIdentity;
+    const reach = eventReachFor(identity?.kind === "integration" ? identity : null);
+    if (reach.types.length === 0) {
+      return reply.code(403).send({ error: "This token has no read scope any event falls under (chats:read, projects:read or attention:read)." });
+    }
+    const types = csv(q.types);
+    const unknown = types?.filter((t) => !isIntegrationEventType(t));
+    if (unknown?.length) {
+      return reply.code(400).send({ error: `Unknown event type(s): ${unknown.join(", ")}. Valid: ${INTEGRATION_EVENT_TYPES.join(", ")}.` });
+    }
+    let since: number | undefined;
+    if (q.since) {
+      since = /^\d+$/.test(q.since) ? Number(q.since) : Date.parse(q.since);
+      if (!Number.isFinite(since)) return reply.code(400).send({ error: `"${q.since}" is not a time — pass epoch ms or ISO 8601.` });
+    }
+    if (q.projectId && !projectAllowed(req, q.projectId)) return reply.code(404).send({ error: `No project "${q.projectId}".` });
+    if (q.chatId) {
+      const chat = await store.getChat(q.chatId).catch(() => null);
+      if (!chat || !projectAllowed(req, chat.projectId)) return reply.code(404).send({ error: "No such chat." });
+    }
+    try {
+      return app.services.eventFeed.poll(
+        {
+          ...(q.cursor ? { cursor: q.cursor } : {}),
+          ...(since !== undefined ? { since } : {}),
+          ...(q.limit ? { limit: q.limit } : {}),
+          ...(types ? { types: types.filter(isIntegrationEventType) } : {}),
+          ...(q.projectId ? { projectIds: [q.projectId] } : {}),
+          ...(q.chatId ? { chatId: q.chatId } : {}),
+        },
+        reach,
+      );
+    } catch (err) {
+      if (err instanceof EventCursorError) return reply.code(400).send({ error: err.message });
+      throw err;
+    }
+  });
+
   /* -- projects --------------------------------------------------------- */
 
   app.get("/api/integration/projects", (req, reply) =>
@@ -581,6 +643,26 @@ const OPENAPI = {
           },
         } } } },
         responses: { "200": { description: "Answered" }, "409": { description: "Not a pending question" } } },
+    },
+    "/api/integration/events": {
+      get: {
+        security: [bearer],
+        "x-scope": "chats:read | projects:read | attention:read (per event type)",
+        summary: "The event feed: chats that settled, PRs opened/merged/closed, attention raised/resolved — oldest first, from a cursor",
+        description: "Store `nextCursor` and pass it back as `cursor`; it survives server restarts. Without a cursor (and without `since`) " +
+          "the newest page is returned. Each event type is visible only with the read scope its subject needs. " +
+          "`gap: true` means events between your cursor and this page were pruned (7-day retention).",
+        parameters: [
+          { name: "cursor", in: "query", schema: { type: "string" } },
+          { name: "since", in: "query", schema: { type: "string" }, description: "Epoch ms or ISO 8601" },
+          { name: "limit", in: "query", schema: { type: "integer", maximum: INTEGRATION_EVENT_PAGE_MAX } },
+          { name: "types", in: "query", schema: { type: "string" }, description: `Comma-separated: ${INTEGRATION_EVENT_TYPES.join(", ")}` },
+          { name: "projectId", in: "query", schema: { type: "string" } },
+          { name: "chatId", in: "query", schema: { type: "string" } },
+        ],
+        responses: { "200": { description: "`{ events: [{ id, type, chatId, projectId, ts, tsLocal, payload }], nextCursor, hasMore, gap? }`" },
+          "400": { description: "Bad cursor, time or type" }, "403": { description: "No read scope" }, "404": { description: "No such project or chat" } },
+      },
     },
     "/api/integration/projects": {
       get: { ...scoped("projects:read"), summary: "Every project this token can see", responses: { "200": { description: "Projects" } } },

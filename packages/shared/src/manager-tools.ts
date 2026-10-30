@@ -134,6 +134,10 @@ export const MANAGER_TOOL_CATEGORY = {
   chat_stop: "chat",
   /* …and the personas a new chat can be started as — spawn_chat's personaId. */
   persona_list: "chat",
+  /* …and the event feed: "what finished, merged or needs me since I looked".
+     In `chat` rather than a category of its own because the connector that
+     needs it most holds this mount already, and a poll is a read about chats. */
+  events_poll: "chat",
   /* …and the two POSTURE writes: re-pointing a chat at a mode or a persona.
      They ride the same `messaging` binding as `chat_send`, because both are
      the same kind of act — reaching into another chat and changing what it
@@ -261,6 +265,8 @@ export const MANAGER_TOOL_EXTERNAL: Record<ManagerToolName, boolean> = {
   chat_stop: true,
   /* …and naming the persona a chat it starts runs as: a read of resolved definitions. */
   persona_list: true,
+  /* …and polling the derived event feed — a read, scoped per event type. */
+  events_poll: true,
   /* …but re-posturing a chat is a write into its configuration, not a message. */
   chat_set_mode: false,
   chat_set_persona: false,
