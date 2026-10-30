@@ -887,6 +887,27 @@ describe("the external MCP mount", () => {
       expect(perm.content[0]!.text).toContain("Permission items can't be answered");
       expect((await answer({ id: "done-b", answer: "x" })).content[0]!.text).toContain("No attention item");
 
+      // A question reaches the broker exactly as the SPA's click would; no runtime here, so record it.
+      const broker = instance.services.broker as unknown as {
+        answerQuestion: (requestId: string, a: unknown) => boolean;
+        declineQuestion: (requestId: string) => boolean;
+      };
+      const sent: unknown[] = [];
+      broker.answerQuestion = (requestId, a) => { sent.push([requestId, a]); return true; };
+      broker.declineQuestion = (requestId) => { sent.push([requestId, "declined"]); return requestId !== "gone"; };
+      q.add({ id: "ask-2", chatId: ca, projectId: a.id, kind: "question", summary: "which db?", permissionRequestId: "r2", createdAt: 5 });
+      q.add({ id: "ask-3", chatId: ca, projectId: a.id, kind: "question", summary: "go on?", permissionRequestId: "gone", createdAt: 6 });
+      const ok = await answer({ id: "ask-2", answer: "Postgres", notes: "use v16" });
+      expect(ok.isError ?? false, ok.content[0]!.text).toBe(false);
+      expect(ok.content[0]!.text).toContain(`Answered ask-2 — chat ${ca} continues.`);
+      expect(sent).toEqual([["r2", { optionId: undefined, answer: "Postgres", notes: "use v16", answers: undefined }]]);
+      expect((await answer({ id: "ask-2" })).content[0]!.text).toContain("Give an answer");
+      // Declining a question the turn already moved past is a clear 409, not a silent success.
+      const stale = await answer({ id: "ask-3", decline: true });
+      expect(stale.isError).toBe(true);
+      expect(stale.content[0]!.text).toContain("no longer pending");
+      expect(sent).toHaveLength(2);
+
       // REST twin.
       const rest = await instance.inject({ method: "POST", url: "/api/integration/attention/dismiss", headers: bearer(token), payload: { ids: ["done-b"] } });
       expect(rest.json()).toEqual({ dismissed: [], missing: ["done-b"] });
