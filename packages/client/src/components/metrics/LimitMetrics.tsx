@@ -439,6 +439,7 @@ export function LimitMetrics() {
               period={report?.period ?? period}
               from={from}
               to={to}
+              truncatedBefore={report?.yieldsTruncatedBefore ?? null}
             />
             <details className="group cm-hairline-t">
               <summary className="cursor-pointer select-none px-3 py-2 text-2xs text-muted hover:text-secondary">

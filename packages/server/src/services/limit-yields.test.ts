@@ -151,6 +151,19 @@ describe("LimitLedger.yields — coverage", () => {
     expect(day!.partial).toBe(true);
   });
 
+  it("cuts at a whole period when capped, and says where", () => {
+    morningThenGap();
+    limits.observe({ ts: at(11, 30), subscriptionId: "codex1", provider: "codex", readings: [weekly(5, W)] });
+    limits.observe({ ts: at(11, 50), subscriptionId: "codex1", provider: "codex", readings: [weekly(6, W)] });
+    // Newest first: 15 (claude1), 11 (claude1, codex1), 10, 9. A cap of 2 lands
+    // inside hour 11 — so ALL of hour 11 goes, not just one account's row, and
+    // the client is told everything up to 12:00 is unknown rather than unwatched.
+    const { rows, truncatedBefore } = limits.yieldPeriods({}, label, "1h", 2);
+    expect(rows.map((y) => [new Date(y.start).getHours(), y.subscriptionId])).toEqual([[15, "claude1"]]);
+    expect(truncatedBefore).toBe(at(12));
+    expect(limits.yieldPeriods({}, label, "1h").truncatedBefore).toBeNull();
+  });
+
   it("counts the running period as covered up to now while reads are fresh", () => {
     limits = new LimitLedger(store.stateDb, () => at(16, 30));
     morningThenGap();

@@ -10,15 +10,20 @@
  * therefore lands in exactly one state, each drawn differently:
  *
  *   untracked — before this account was first read. Blank: nothing was lost.
+ *   unloaded  — older than the server's row cap reached. Blank too: UNKNOWN,
+ *               which must never be drawn as unwatched.
  *   unwatched — after tracking began, but nothing read it (app off, reads
  *               failing). Hatched, because THIS is the missing data.
  *   idle      — read the whole time; nothing moved, nothing spent. A floor tick.
  *   elsewhere — the window moved but no Dispatch turn ran: claude.ai, another
  *               machine. A hollow ring — a ratio here would read $0 per 1%.
+ *   unpriced  — Dispatch spend, but none of it carried a price, on an account
+ *               that is otherwise priced. The same ring, for the same reason.
  *   flat      — spend, but the window didn't move a whole point. A tick at the
  *               ceiling: the ratio is "more than the scale", not infinity.
  *   value     — a bar. Faded when it can't be trusted (under 3 points, or only
- *               partly watched); dashed when its period is still running.
+ *               partly watched, or some of its spend unpriced); dashed when
+ *               its period is still running.
  */
 import { useMemo } from "react";
 import {
@@ -51,8 +56,10 @@ interface Watched extends Span {
 type Cell =
   | (Span & { kind: "untracked" })
   | (Span & { kind: "unwatched" })
+  | (Span & { kind: "unloaded" })
   | (Watched & { kind: "idle" })
   | (Watched & { kind: "elsewhere" })
+  | (Watched & { kind: "unpriced" })
   | (Watched & { kind: "flat" })
   | (Watched & { kind: "value"; value: number; weak: boolean; live: boolean });
 
@@ -105,6 +112,7 @@ function buildRows(
   period: LimitPeriod,
   from: number,
   to: number,
+  truncatedBefore: number | null,
   palette: ReturnType<typeof useChartPalette>,
 ): { grid: { start: number; end: number }[]; rows: Row[] } {
   const hours = LIMIT_PERIOD_HOURS[period];
@@ -133,6 +141,7 @@ function buildRows(
       let moved = 0;
       const cells: Cell[] = grid.map(({ start, end }) => {
         const y = mine.get(start);
+        if (!y && truncatedBefore !== null && end <= truncatedBefore) return { start, end, kind: "unloaded" };
         if (!y || y.coverage === 0) {
           // A period that ENDED before the first read was never going to have
           // data; one that ends after it should have.
@@ -142,6 +151,9 @@ function buildRows(
         const amount = priced ? (y.tokens.costUsd ?? 0) : y.tokens.total;
         if (points <= 0 && y.tokens.total <= 0) return { start, end, kind: "idle", y, points };
         if (y.tokens.total <= 0) return { start, end, kind: "elsewhere", y, points };
+        // Priced account, unpriced period: `amount` is 0, and a $0 bar would
+        // read as the cheapest 1% of the range while dragging the average down.
+        if (priced && y.tokens.costUsd === null) return { start, end, kind: "unpriced", y, points };
         if (points <= 0) return { start, end, kind: "flat", y, points };
         spent += amount;
         moved += points;
@@ -152,7 +164,8 @@ function buildRows(
           y,
           points,
           value: amount / points,
-          weak: points < WEAK_POINTS || y.partial,
+          // Some turns unpriced: `costUsd` leaves them out, so the ratio is low.
+          weak: points < WEAK_POINTS || y.partial || (priced && y.tokens.unpriced > 0),
           live: end > now,
         };
       });
@@ -189,16 +202,19 @@ function periodName(start: number, end: number, period: LimitPeriod): string {
 
 function tooltip(row: Row, c: Cell, period: LimitPeriod): string {
   const head = `${periodName(c.start, c.end, period)}\n${row.account} · ${row.window}`;
-  if (c.kind === "untracked" || c.kind === "unwatched") {
-    return c.kind === "untracked"
-      ? `${head}\nBefore tracking began for this account`
-      : `${head}\nNo readings — the app was off or every read failed`;
+  if (c.kind === "untracked") return `${head}\nBefore tracking began for this account`;
+  if (c.kind === "unwatched") return `${head}\nNo readings — the app was off or every read failed`;
+  if (c.kind === "unloaded") {
+    return `${head}\nNot loaded — too many periods for one response; pick a shorter range or a wider "Per"`;
   }
   const pts = `${Math.round(c.points)} point(s)`;
   const watched = c.y.partial ? `\nOnly ${Math.round(c.y.coverage * 100)}% of this period was watched` : "";
   if (c.kind === "idle") return `${head}\nIdle — nothing moved, nothing spent${watched}`;
   if (c.kind === "elsewhere") {
     return `${head}\nMoved ${pts} with no Dispatch turns — used outside Dispatch${watched}`;
+  }
+  if (c.kind === "unpriced") {
+    return `${head}\nMoved ${pts}; ${compact(c.y.tokens.total)} tokens spent, none of it priced — no ratio${watched}`;
   }
   const spend =
     c.y.tokens.costUsd !== null ? `${usd(c.y.tokens.costUsd)} API value · ` : "";
@@ -207,6 +223,9 @@ function tooltip(row: Row, c: Cell, period: LimitPeriod): string {
   return (
     `${head}\n${formatPerPoint(c.value, row.priced)} per 1% — ${pts}, ${spend}${toks}` +
     (c.points < WEAK_POINTS ? `\nUnder ${WEAK_POINTS} points: ±1-point rounding dominates` : "") +
+    (row.priced && c.y.tokens.unpriced > 0
+      ? `\n${c.y.tokens.unpriced} turn(s) carried no price, so this is understated`
+      : "") +
     watched +
     (c.live ? "\nStill running — so far" : "")
   );
@@ -234,7 +253,7 @@ function Plot({ row, period, dense }: { row: Row; period: LimitPeriod; dense: bo
             style={c.kind === "unwatched" ? { backgroundImage: HATCH } : undefined}
           >
             {c.kind === "idle" && <div className="absolute inset-x-px bottom-0 h-0.5 rounded-full bg-line-strong" />}
-            {c.kind === "elsewhere" && (
+            {(c.kind === "elsewhere" || c.kind === "unpriced") && (
               <div className="absolute bottom-0.5 left-1/2 size-2 -translate-x-1/2 rounded-full border-2 border-muted" />
             )}
             {c.kind === "flat" && (
@@ -312,7 +331,8 @@ function Key() {
         <span className="inline-block h-0.5 w-3 rounded-full bg-line-strong" /> Idle
       </span>
       <span className="inline-flex items-center gap-1.5">
-        <span className="inline-block size-2 rounded-full border-2 border-muted" /> Used outside Dispatch
+        <span className="inline-block size-2 rounded-full border-2 border-muted" /> No ratio: used outside
+        Dispatch, or spend unpriced
       </span>
       <span className="inline-flex items-center gap-1.5">
         <span className="inline-flex h-2.5 w-3 items-start">
@@ -330,17 +350,19 @@ export function YieldChart({
   period,
   from,
   to,
+  truncatedBefore,
 }: {
   yields: LimitYield[];
   windows: LimitWindowSeries[];
   period: LimitPeriod;
   from: number;
   to: number;
+  truncatedBefore: number | null;
 }) {
   const palette = useChartPalette();
   const { grid, rows } = useMemo(
-    () => buildRows(yields, windows, period, from, to, palette),
-    [yields, windows, period, from, to, palette],
+    () => buildRows(yields, windows, period, from, to, truncatedBefore, palette),
+    [yields, windows, period, from, to, truncatedBefore, palette],
   );
   if (!rows.length || !grid.length) {
     return <p className="px-3 py-3 text-xs text-muted">Nothing yet — this fills in as accounts are read.</p>;

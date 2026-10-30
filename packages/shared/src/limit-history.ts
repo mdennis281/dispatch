@@ -232,6 +232,11 @@ export interface LimitReport {
   windows: LimitWindowSeries[];
   /** Per account per period, newest first. */
   yields: LimitYield[];
+  /**
+   * Set when the row cap cut `yields`: periods ending at or before this weren't
+   * sent, and are UNKNOWN — not unwatched. Null when nothing was cut.
+   */
+  yieldsTruncatedBefore: number | null;
   period: LimitPeriod;
   /** Newest first. */
   events: LimitEvent[];

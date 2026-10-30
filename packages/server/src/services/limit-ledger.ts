@@ -46,6 +46,13 @@ export const HOLD_MS = 30 * 60_000;
 export const COVER_GAP_MS = 60 * 60_000;
 
 /**
+ * Most yield rows one response carries. Idle periods are rows (that is how
+ * idle is told from unwatched), so an hourly 90 days is ~2160 per account —
+ * and the page re-fetches every minute.
+ */
+export const YIELD_ROW_CAP = 3000;
+
+/**
  * Consecutive successful reads a window must be missing from before it is
  * declared gone. Claude reports some per-model windows as `null` on and off;
  * one absent read is noise, three in a row is the provider having stopped.
@@ -464,6 +471,21 @@ export class LimitLedger {
    * onward counts: before it there are no points to set it against.
    */
   yields(q: LimitQueryInput, label: LimitAccountLabeller, period: LimitPeriod = "1d"): LimitYield[] {
+    return this.yieldPeriods(q, label, period).rows;
+  }
+
+  /**
+   * {@link yields}, plus where the row cap cut it. The cut is always on a
+   * period boundary and always reported: a period silently missing from the
+   * response is drawn as "nobody was reading", which is precisely the claim
+   * `coverage` exists to keep honest.
+   */
+  yieldPeriods(
+    q: LimitQueryInput,
+    label: LimitAccountLabeller,
+    period: LimitPeriod = "1d",
+    cap = YIELD_ROW_CAP,
+  ): { rows: LimitYield[]; truncatedBefore: number | null } {
     const hours = LIMIT_PERIOD_HOURS[period];
     const to = Math.min(q.to ?? this.now() + 1, this.now() + 1);
     const cover = new Map(
@@ -477,7 +499,7 @@ export class LimitLedger {
     );
     const wanted = q.subscriptionIds?.length ? new Set(q.subscriptionIds) : null;
     const subs = [...cover.keys()].filter((s) => !wanted || wanted.has(s));
-    if (!subs.length) return [];
+    if (!subs.length) return { rows: [], truncatedBefore: null };
     const from = q.from ?? Math.min(...subs.map((s) => cover.get(s)!.lo));
 
     interface Cell {
@@ -623,11 +645,12 @@ export class LimitLedger {
         partial: coverage < 0.98,
       });
     }
-    // Idle periods are rows now, so an hourly month is ~720 per account; the
-    // cap is a payload guard, not a display limit, and newest survive it.
-    return out
-      .sort((a, b) => b.start - a.start || a.subscriptionLabel.localeCompare(b.subscriptionLabel))
-      .slice(0, 5000);
+    out.sort((a, b) => b.start - a.start || a.subscriptionLabel.localeCompare(b.subscriptionLabel));
+    if (out.length <= cap) return { rows: out, truncatedBefore: null };
+    // Newest survive. Drop the WHOLE period the cap lands in, so no period
+    // comes back with some accounts' rows and not others'.
+    const cut = out[cap]!.start;
+    return { rows: out.filter((y) => y.start > cut), truncatedBefore: limitPeriodEnd(cut, hours) };
   }
 
   /**
