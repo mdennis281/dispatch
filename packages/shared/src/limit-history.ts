@@ -120,6 +120,26 @@ export const LimitPeriodSchema = z.enum(["1h", "3h", "6h", "1d"]);
 export type LimitPeriod = z.infer<typeof LimitPeriodSchema>;
 export const LIMIT_PERIOD_HOURS: Record<LimitPeriod, number> = { "1h": 1, "3h": 3, "6h": 6, "1d": 24 };
 
+/**
+ * The local-time period containing `ts`: hours aligned to midnight, or the day.
+ * Shared so the client lays its period grid on exactly the server's edges —
+ * an empty column has to land where a missing row would have been.
+ */
+export function limitPeriodStart(ts: number, hours: number): number {
+  const d = new Date(ts);
+  d.setMinutes(0, 0, 0);
+  d.setHours(hours >= 24 ? 0 : Math.floor(d.getHours() / hours) * hours);
+  return d.getTime();
+}
+
+/** Where the period starting at `start` ends — calendar arithmetic, so DST-safe. */
+export function limitPeriodEnd(start: number, hours: number): number {
+  const d = new Date(start);
+  if (hours >= 24) d.setDate(d.getDate() + 1);
+  else d.setHours(d.getHours() + hours);
+  return d.getTime();
+}
+
 export const LimitQuerySchema = z.object({
   from: z.number().int().optional(),
   to: z.number().int().optional(),
@@ -197,7 +217,14 @@ export interface LimitYield {
     /** Of those, turns with no price — their API value is missing from `costUsd`. */
     unpriced: number;
   };
-  /** Readings didn't cover the whole period (tracking started/stopped inside it). */
+  /**
+   * How much of the period (0–1) the account was actually being read — of the
+   * part that has happened, for the period still running. A period nobody read
+   * has no row at all; a row at 0 is spend booked while reads were failing.
+   * This is what separates "idle" from "we weren't looking".
+   */
+  coverage: number;
+  /** `coverage` fell short of the whole period: the app was off, or reads failed, inside it. */
   partial: boolean;
 }
 

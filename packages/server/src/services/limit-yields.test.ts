@@ -2,9 +2,9 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { LimitReading } from "@dispatch/shared";
+import { limitPeriodEnd, limitPeriodStart, type LimitReading } from "@dispatch/shared";
 import { Store } from "../store/index.js";
-import { LimitLedger, periodEnd, periodStart } from "./limit-ledger.js";
+import { LimitLedger } from "./limit-ledger.js";
 import { TokenLedger } from "./metrics-tokens.js";
 
 const MIN = 60_000;
@@ -112,10 +112,57 @@ describe("LimitLedger.yields", () => {
   });
 });
 
+describe("LimitLedger.yields — coverage", () => {
+  const W = at(23, 0) + 3 * 24 * HOUR;
+  // Read every 20 minutes 09:00–12:00, nothing 12:00–15:00 (the app was off),
+  // then 15:00–15:55 with the window moving 2 points.
+  const morningThenGap = () => {
+    for (let t = at(9); t <= at(12); t += 20 * MIN) read(t, [weekly(10, W)]);
+    for (const [t, p] of [
+      [at(15), 12],
+      [at(15, 20), 12],
+      [at(15, 40), 12],
+      [at(15, 55), 14],
+    ] as const) {
+      read(t, [weekly(p, W)]);
+    }
+  };
+
+  it("gives a watched idle hour a row, and an unwatched one none", () => {
+    morningThenGap();
+    const hours = limits.yields({}, label, "1h");
+    expect(hours.map((y) => [new Date(y.start).getHours(), y.coverage, y.windows[0]!.points])).toEqual([
+      // The 10→12 rise that happened somewhere in the outage lands here, on
+      // the read that saw it — which is exactly why this hour must say it was
+      // only partly watched.
+      [15, 55 / 60, 4],
+      [11, 1, 0],
+      [10, 1, 0],
+      [9, 1, 0],
+    ]);
+    expect(hours.map((y) => y.partial)).toEqual([true, false, false, false]);
+  });
+
+  it("marks a day the app was off for most of as partial", () => {
+    morningThenGap();
+    const [day] = limits.yields({}, label, "1d");
+    // 09–12 and 15–15:55, of a day that has run to 23:59.
+    expect(day!.coverage).toBeCloseTo((3 + 55 / 60) / (23 + 59 / 60), 3);
+    expect(day!.partial).toBe(true);
+  });
+
+  it("counts the running period as covered up to now while reads are fresh", () => {
+    limits = new LimitLedger(store.stateDb, () => at(16, 30));
+    morningThenGap();
+    const now = limits.yields({}, label, "1h").find((y) => new Date(y.start).getHours() === 16);
+    expect(now).toMatchObject({ coverage: 1, partial: false });
+  });
+});
+
 describe("periods", () => {
   it("align to local midnight", () => {
-    expect(periodStart(at(14, 37), 6)).toBe(at(12));
-    expect(periodStart(at(14, 37), 24)).toBe(at(0));
-    expect(periodEnd(at(18), 6)).toBe(new Date(2026, 9, 23, 0).getTime());
+    expect(limitPeriodStart(at(14, 37), 6)).toBe(at(12));
+    expect(limitPeriodStart(at(14, 37), 24)).toBe(at(0));
+    expect(limitPeriodEnd(at(18), 6)).toBe(new Date(2026, 9, 23, 0).getTime());
   });
 });
