@@ -56,6 +56,7 @@ function chatHeadline(c: ChatSummary): string {
   const bits = [
     c.projectName ?? c.projectId,
     c.status,
+    c.blockedOnHuman ? "⏸ waiting on the human" : undefined,
     c.archived ? "archived" : undefined,
     c.prs?.length ? `PR #${c.prs.join(", #")}` : undefined,
   ].filter(Boolean);

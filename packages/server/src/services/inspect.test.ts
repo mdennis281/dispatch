@@ -12,6 +12,7 @@ import {
   rowLabel,
   rowText,
   type RawRow,
+  FindFilterError,
 } from "./inspect.js";
 import { renderFind, renderRead, renderProject, renderProjectList } from "./inspect-render.js";
 import { GLOBAL_PROJECT_ID } from "@dispatch/shared";
@@ -160,6 +161,27 @@ describe("findChats", () => {
 
     const before = await service().findChats({ before: T0 + DAY });
     expect(before.chats.map((c) => c.id)).toEqual(["chat-old"]);
+  });
+
+  it("filters to chats blocked on the human, and flags them in the listing", async () => {
+    await seedChat("chat-stuck", { title: "needs a yes", status: "awaiting-input", updatedAt: T0 + 3 * DAY }, []);
+    const blocked = await service().findChats({ blockedOnHuman: true });
+    expect(blocked.chats.map((c) => [c.id, c.blockedOnHuman])).toEqual([["chat-stuck", true]]);
+    expect(renderFind(blocked)).toContain("⏸ waiting on the human");
+    const rest = await service().findChats({ blockedOnHuman: false });
+    expect(rest.chats.map((c) => c.id)).not.toContain("chat-stuck");
+    expect(rest.chats.every((c) => c.blockedOnHuman === undefined)).toBe(true);
+  });
+
+  it("refuses a status, row kind or time window nothing could match — and says what IS valid", async () => {
+    await expect(service().findChats({ status: "finished" })).rejects.toThrow(FindFilterError);
+    await expect(service().findChats({ status: "finished" })).rejects.toThrow(
+      "Valid statuses: idle, queued, running, waiting, awaiting-input, done, failed, error.",
+    );
+    await expect(service().findChats({ query: "x", kinds: ["tool_call"] })).rejects.toThrow(/Unknown row kind\(s\): tool_call\. Valid kinds: user, assistant/);
+    await expect(service().findChats({ since: T0 + DAY, before: T0 })).rejects.toThrow(/`before` is not after `since`/);
+    // A valid status still filters.
+    expect((await service().findChats({ status: "done" })).chats).toEqual([]);
   });
 
   it("excludes archived chats unless asked", async () => {
