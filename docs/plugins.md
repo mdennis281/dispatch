@@ -1043,7 +1043,7 @@ cross-checked against the factory at compile time like the categories. The
 rule for the flag: a tool that acts on the calling chat's own session, shell or
 tree, or that puts a card in front of the human on the calling chat's behalf,
 is **not** external. So `chat_find`, `chat_read`, `chat_send`, `chat_ask`,
-`chat_reply`, `chat_state`, `chat_summarize`, `chat_stop`, `persona_list`, `events_poll`, `attention_list`, `attention_dismiss`, `wait_for_chat`, `project_info`, `project_list`, the
+`chat_reply`, `chat_state`, `chat_summarize`, `chat_stop`, `persona_list`, `events_poll`, `attention_list`, `attention_dismiss`, `attention_answer`, `wait_for_chat`, `project_info`, `project_list`, the
 memory tools, the issue tools, `mode_list`, `config_list` and `config_read` are
 external; `wait`, `context_usage`, `compact_context`, the workspace tools, the
 PR tools, the confirm tools, the secrets tools, `chat_set_mode`,
@@ -1072,7 +1072,11 @@ read off the broker's permission snapshot. `attention_dismiss` (and
 `POST attention/dismiss`) needs `attention:answer`: named ids go whatever their
 kind, a sweep defaults to idle/done/review (`AttentionQueue.dismiss`), anything
 outside the allowlist is reported `missing`, and each removal is broadcast as
-`attention-resolve`. Dismissing never answers or denies. Memory and issue tools bind
+`attention-resolve`. Dismissing never answers or denies. `attention_answer`
+(`attention:answer`) and `POST attention/:id/answer` share `answerAttentionItem`:
+a question goes through `broker.answerQuestion` / `declineQuestion` exactly as a
+click would, an empty answer is a 400, and a PERMISSION card is refused by name —
+a bearer token approving tool calls would be a way around the prompt. Memory and issue tools bind
 only when the token names exactly one project. A category is offered only when
 the token holds `tools:<category>`; the mount is authenticated by the gate (it
 does NOT ride the per-chat bridge's gate exemption), and the external context

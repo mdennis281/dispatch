@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { AttentionItem, PermissionRequest } from "@dispatch/shared";
-import { buildAttentionEntries, createAttentionTools, questionsFromInput, type AttentionEntry } from "./attention-tools.js";
+import {
+  AttentionAnswerError,
+  answerAttentionItem,
+  buildAttentionEntries,
+  createAttentionTools,
+  questionsFromInput,
+  type AttentionEntry,
+} from "./attention-tools.js";
 
 const askInput = {
   questions: [
@@ -91,4 +98,54 @@ describe("attention_list", () => {
   function items(): AttentionItem[] {
     return [{ id: "q1", chatId: "c1", kind: "question", summary: "asks", permissionRequestId: "r1", createdAt: 1 }];
   }
+});
+
+describe("answerAttentionItem", () => {
+  const queue = new Map<string, AttentionItem>([
+    ["q", { id: "q", chatId: "c1", kind: "question", summary: "which?", permissionRequestId: "r1", createdAt: 1 }],
+    ["p", { id: "p", chatId: "c1", kind: "permission", summary: "Bash", permissionRequestId: "r2", createdAt: 2 }],
+    ["d", { id: "d", chatId: "c1", kind: "done", summary: "done", createdAt: 3 }],
+    ["hidden", { id: "hidden", chatId: "c9", kind: "question", summary: "x", permissionRequestId: "r9", createdAt: 4 }],
+  ]);
+  function deps(pending = true) {
+    const calls: unknown[] = [];
+    return {
+      calls,
+      deps: {
+        attention: { get: (id: string) => queue.get(id) },
+        broker: {
+          answerQuestion: (req: string, a: unknown) => (calls.push(["answer", req, a]), pending),
+          declineQuestion: (req: string) => (calls.push(["decline", req]), pending),
+        },
+      },
+    };
+  }
+  const visible = (i: AttentionItem) => i.chatId !== "c9";
+  const status = (fn: () => unknown): number | undefined => {
+    try {
+      fn();
+      return undefined;
+    } catch (err) {
+      return err instanceof AttentionAnswerError ? err.status : -1;
+    }
+  };
+
+  it("answers a question through the broker, exactly as a click would", () => {
+    const { deps: d, calls } = deps();
+    expect(answerAttentionItem(d, "q", { answer: "main", notes: "and rebase" }, visible)).toEqual({ id: "q", chatId: "c1", declined: false });
+    expect(calls).toEqual([["answer", "r1", { optionId: undefined, answer: "main", notes: "and rebase", answers: undefined }]]);
+    expect(answerAttentionItem(d, "q", { decline: true }, visible).declined).toBe(true);
+    expect(calls[1]).toEqual(["decline", "r1"]);
+  });
+
+  it("refuses a permission card by name, and everything else with the right status", () => {
+    const { deps: d, calls } = deps();
+    expect(() => answerAttentionItem(d, "p", { answer: "allow" }, visible)).toThrow(/Permission items can't be answered/);
+    expect(status(() => answerAttentionItem(d, "d", { answer: "x" }, visible))).toBe(409);
+    expect(status(() => answerAttentionItem(d, "hidden", { answer: "x" }, visible))).toBe(404);
+    expect(status(() => answerAttentionItem(d, "nope", { answer: "x" }, visible))).toBe(404);
+    expect(status(() => answerAttentionItem(d, "q", { answer: "  " }, visible))).toBe(400);
+    expect(calls).toEqual([]);
+    expect(status(() => answerAttentionItem(deps(false).deps, "q", { answer: "main" }, visible))).toBe(409);
+  });
 });

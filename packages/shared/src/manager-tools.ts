@@ -142,6 +142,7 @@ export const MANAGER_TOOL_CATEGORY = {
      connector is asked is "what's waiting on me?". */
   attention_list: "chat",
   attention_dismiss: "chat",
+  attention_answer: "chat",
   /* …and the two POSTURE writes: re-pointing a chat at a mode or a persona.
      They ride the same `messaging` binding as `chat_send`, because both are
      the same kind of act — reaching into another chat and changing what it
@@ -275,6 +276,8 @@ export const MANAGER_TOOL_EXTERNAL: Record<ManagerToolName, boolean> = {
   attention_list: true,
   /* …and clearing it, behind `attention:answer`; blocking kinds only by name. */
   attention_dismiss: true,
+  /* …and answering a QUESTION card (never a permission one), behind `attention:answer`. */
+  attention_answer: true,
   /* …but re-posturing a chat is a write into its configuration, not a message. */
   chat_set_mode: false,
   chat_set_persona: false,

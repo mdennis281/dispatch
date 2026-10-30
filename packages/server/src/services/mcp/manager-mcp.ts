@@ -8310,6 +8310,7 @@ const TOOL_WIRE_NAME: Record<ManagerToolKey, ManagerToolName> = {
   eventsPoll: "events_poll",
   attentionList: "attention_list",
   attentionDismiss: "attention_dismiss",
+  attentionAnswer: "attention_answer",
   chatSetMode: "chat_set_mode",
   chatSetPersona: "chat_set_persona",
   projectInfo: "project_info",
@@ -8405,6 +8406,7 @@ const MANAGER_TOOL_GATE: Record<ManagerToolName, ManagerToolBinding | null> = {
   events_poll: "events",
   attention_list: "attention",
   attention_dismiss: "attention",
+  attention_answer: "attention",
   chat_set_mode: "messaging",
   chat_set_persona: "messaging",
   project_info: "inspect",
@@ -8547,6 +8549,7 @@ function boundTools(ctx: ManagerMcpContext): Record<ManagerToolName, boolean> {
     events_poll: Boolean(ctx.events),
     attention_list: Boolean(ctx.attention?.list),
     attention_dismiss: Boolean(ctx.attention?.dismiss),
+    attention_answer: Boolean(ctx.attention?.answer),
     // The posture writes ride the same binding: re-pointing a chat's mode or
     // persona is the same kind of reach into another chat as sending to it.
     chat_set_mode: Boolean(ctx.messaging),

@@ -739,7 +739,9 @@ describe("the external MCP mount", () => {
       // `chats:create`: starting an agent is its own grant. `events_poll` is
       // unbound without a read scope any event type falls under.
       expect(names).toEqual(
-        externalManagerTools("chat").filter((n) => !["spawn_chat", "events_poll", "attention_list", "attention_dismiss"].includes(n)).sort(),
+        externalManagerTools("chat")
+          .filter((n) => !["spawn_chat", "events_poll", "attention_list", "attention_dismiss", "attention_answer"].includes(n))
+          .sort(),
       );
       expect(names).toContain("chat_summarize");
       expect(names).toContain("chat_stop");
@@ -872,6 +874,18 @@ describe("the external MCP mount", () => {
       const names = ((await rpc(origin, reader, "chat", "tools/list")).json as { result: { tools: { name: string }[] } }).result.tools.map((t) => t.name);
       expect(names).toContain("attention_list");
       expect(names).not.toContain("attention_dismiss");
+      expect(names).not.toContain("attention_answer");
+
+      // attention_answer refuses a permission card by name, and a non-question.
+      q.add({ id: "perm-a", chatId: ca, projectId: a.id, kind: "permission", summary: "Bash", permissionRequestId: "r1", createdAt: 4 });
+      const answer = async (args: Record<string, unknown>) =>
+        ((await rpc(origin, token, "chat", "tools/call", { name: "attention_answer", arguments: args })).json as {
+          result: { content: { text: string }[]; isError?: boolean };
+        }).result;
+      const perm = await answer({ id: "perm-a", answer: "allow" });
+      expect(perm.isError).toBe(true);
+      expect(perm.content[0]!.text).toContain("Permission items can't be answered");
+      expect((await answer({ id: "done-b", answer: "x" })).content[0]!.text).toContain("No attention item");
 
       // REST twin.
       const rest = await instance.inject({ method: "POST", url: "/api/integration/attention/dismiss", headers: bearer(token), payload: { ids: ["done-b"] } });

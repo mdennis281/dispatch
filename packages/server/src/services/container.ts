@@ -1190,6 +1190,7 @@ export function createServices(
         listPersonas: (projectId) => personasFor(store, authored, projectId),
         events: eventFeed,
         attention,
+        questions: broker,
       },
       identity,
     ),

@@ -72,9 +72,93 @@ export interface AttentionDismissResult {
   missing: string[];
 }
 
+/** What a caller sends to answer a question card — the SPA's `answer-question` shape. */
+export interface AttentionAnswerInput {
+  /** The chosen option's label, or free text (comma-joined labels for multi-select). */
+  answer?: string;
+  /** An option label, when `answer` is not given. */
+  optionId?: string;
+  notes?: string;
+  /** Several questions at once, by `questionIndex`. */
+  answers?: { questionIndex: number; optionId?: string; answer?: string; notes?: string }[];
+  /** Decline instead: the agent is told the human chose not to answer. */
+  decline?: boolean;
+}
+
+export interface AttentionAnswerResult {
+  id: string;
+  chatId: string;
+  declined: boolean;
+}
+
+/** A refusal with the HTTP status the REST twin answers with. */
+export class AttentionAnswerError extends Error {
+  constructor(
+    readonly status: 400 | 404 | 409,
+    message: string,
+  ) {
+    super(message);
+    this.name = "AttentionAnswerError";
+  }
+}
+
+/**
+ * Answer (or decline) a QUESTION card through the broker — the same
+ * `answerQuestion` the SPA's `answer-question` action calls, so the model gets
+ * exactly what a click would have given it. Shared by `attention_answer` and
+ * `POST /api/integration/attention/:id/answer` so the two refuse alike.
+ *
+ * A PERMISSION card is refused by name: it is a tool call waiting on a human's
+ * approval, and a bearer token approving it would turn every integration into
+ * a way around the permission prompt. `visible` is the caller's reach; an item
+ * outside it is unknown (404), as everywhere on this surface.
+ */
+export function answerAttentionItem(
+  deps: {
+    attention: { get(id: string): AttentionItem | undefined };
+    broker: {
+      answerQuestion(requestId: string, answer: Omit<AttentionAnswerInput, "decline">): boolean;
+      declineQuestion(requestId: string): boolean;
+    };
+  },
+  id: string,
+  input: AttentionAnswerInput,
+  visible: (item: AttentionItem) => boolean,
+): AttentionAnswerResult {
+  const item = deps.attention.get(id);
+  if (!item || !visible(item)) throw new AttentionAnswerError(404, `No attention item "${id}". List them with attention_list.`);
+  if (item.kind === "permission") {
+    throw new AttentionAnswerError(
+      409,
+      "Permission items can't be answered by an integration — a tool call is waiting on the human's own approval in Dispatch.",
+    );
+  }
+  if (item.kind !== "question" || !item.permissionRequestId) {
+    throw new AttentionAnswerError(409, `Only question items can be answered; this one is "${item.kind}". Dismiss it with attention_dismiss.`);
+  }
+  const hasAnswer =
+    Boolean(input.answer?.trim() || input.optionId?.trim()) ||
+    Boolean(input.answers?.some((a) => a.answer?.trim() || a.optionId?.trim()));
+  if (!input.decline && !hasAnswer) {
+    throw new AttentionAnswerError(400, "Give an answer (an option label or free text), answers[], or decline: true.");
+  }
+  const ok = input.decline
+    ? deps.broker.declineQuestion(item.permissionRequestId)
+    : deps.broker.answerQuestion(item.permissionRequestId, {
+        optionId: input.optionId,
+        answer: input.answer,
+        notes: input.notes,
+        answers: input.answers,
+      });
+  if (!ok) throw new AttentionAnswerError(409, "That question is no longer pending — it was answered or the turn moved on.");
+  return { id: item.id, chatId: item.chatId, declined: Boolean(input.decline) };
+}
+
 export interface ManagerMcpAttention {
   /** Present for a token holding `attention:read` (omitted → no `attention_list`). */
   list?(q: AttentionListQuery): Promise<AttentionEntry[]>;
+  /** Present for a token holding `attention:answer` (omitted → no `attention_answer`). Throws a sentence. */
+  answer?(id: string, input: AttentionAnswerInput): Promise<AttentionAnswerResult>;
   /** Present for a token holding `attention:answer` (omitted → no `attention_dismiss`). */
   dismiss?(q: AttentionDismissQuery): Promise<AttentionDismissResult>;
 }
@@ -197,7 +281,7 @@ export function createAttentionTools(ctx: { attention?: ManagerMcpAttention }) {
       "retrospective kinds — idle, done, review — optionally narrowed by chat or project. A " +
       "permission or question item is a blocked agent, not clutter: it is dismissed only when " +
       "you name it, by id or by passing its kind. Dismissing never answers or denies anything — " +
-      "the agent behind a dismissed question or permission card is still waiting.",
+      "the agent behind a dismissed card is still waiting; to answer a question use attention_answer.",
     {
       ids: z.array(z.string().min(1)).optional().describe("Exact item ids from attention_list."),
       kinds: z
@@ -236,5 +320,46 @@ export function createAttentionTools(ctx: { attention?: ManagerMcpAttention }) {
       }
     },
   );
-  return { attentionList, attentionDismiss };
+  const attentionAnswer = tool(
+    "attention_answer",
+    "Answer a QUESTION item from the attention queue — what the human would have clicked on " +
+      "the card. Get the id, the question text and its option labels from attention_list. Pass " +
+      "an option label (or free text) as `answer`; for a multi-select, comma-join the labels; " +
+      "for a card with several questions use `answers` with each questionIndex. `decline: true` " +
+      "tells the agent the human chose not to answer. Permission items (a tool waiting for " +
+      "approval) cannot be answered here.",
+    {
+      id: z.string().min(1).describe("The attention item id (attention_list)."),
+      answer: z.string().optional().describe("An option label, or free text."),
+      notes: z.string().optional().describe("Extra instructions sent along with the choice."),
+      answers: z
+        .array(
+          z.object({
+            questionIndex: z.number().int().min(0),
+            answer: z.string().optional(),
+            notes: z.string().optional(),
+          }),
+        )
+        .optional()
+        .describe("One entry per question, for a card with several."),
+      decline: z.boolean().optional().describe("Decline instead of answering."),
+    },
+    async (args) => {
+      if (!ctx.attention?.answer) return textResult("The attention_answer tool is not available in this session.", true);
+      try {
+        const r = await ctx.attention.answer(args.id.trim(), {
+          ...(args.answer !== undefined ? { answer: args.answer } : {}),
+          ...(args.notes !== undefined ? { notes: args.notes } : {}),
+          ...(args.answers?.length ? { answers: args.answers } : {}),
+          ...(args.decline ? { decline: true } : {}),
+        });
+        return textResult(
+          `${r.declined ? "Declined" : "Answered"} ${r.id} — chat ${r.chatId} continues.\n${JSON.stringify(r)}`,
+        );
+      } catch (err) {
+        return textResult(`Could not answer: ${err instanceof Error ? err.message : String(err)}`, true);
+      }
+    },
+  );
+  return { attentionList, attentionDismiss, attentionAnswer };
 }

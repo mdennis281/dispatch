@@ -30,7 +30,6 @@ import {
   INTEGRATION_TRUST_LEVELS,
   QuestionAnswerSchema,
   AttentionItemSchema,
-  type AttentionItem,
   type IntegrationTokenCreateRequest,
 } from "@dispatch/shared";
 import { AuthFailure, type RequestIdentity } from "../services/auth.js";
@@ -39,7 +38,7 @@ import { SummaryRateLimitError } from "../services/chat-summary.js";
 import { FindCursorError, FindFilterError } from "../services/inspect.js";
 import { personasFor } from "../services/personas.js";
 import { EventCursorError, eventReachFor } from "../services/event-feed.js";
-import { buildAttentionEntries } from "../services/mcp/attention-tools.js";
+import { AttentionAnswerError, answerAttentionItem, buildAttentionEntries } from "../services/mcp/attention-tools.js";
 import { ProviderUnavailableError } from "../harness/index.js";
 import {
   ScopeFailure,
@@ -431,24 +430,16 @@ export function registerIntegrationRoutes(app: FastifyInstance): void {
       requireScope(req, "attention:answer");
       const parsed = AnswerBody.safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
-      const item: AttentionItem | undefined = attention.get(req.params.id);
-      if (!item || !projectAllowed(req, item.projectId)) {
-        return reply.code(404).send({ error: "No such attention item." });
+      // The same function `attention_answer` calls, so the two refuse alike.
+      try {
+        const r = answerAttentionItem({ attention, broker }, req.params.id, parsed.data, (i) => projectAllowed(req, i.projectId));
+        return { ok: true, ...r };
+      } catch (err) {
+        if (err instanceof AttentionAnswerError) {
+          return reply.code(err.status).send({ error: err.message, kind: attention.get(req.params.id)?.kind });
+        }
+        throw err;
       }
-      if (item.kind !== "question" || !item.permissionRequestId) {
-        return reply.code(409).send({ error: "Only question items can be answered here.", kind: item.kind });
-      }
-      const body = parsed.data;
-      const ok = body.decline
-        ? broker.declineQuestion(item.permissionRequestId)
-        : broker.answerQuestion(item.permissionRequestId, {
-            optionId: body.optionId,
-            answer: body.answer,
-            notes: body.notes,
-            answers: body.answers,
-          });
-      if (!ok) return reply.code(409).send({ error: "That question is no longer pending." });
-      return { ok: true, id: item.id, chatId: item.chatId, declined: Boolean(body.decline) };
     }),
   );
 
