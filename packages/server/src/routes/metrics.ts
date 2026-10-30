@@ -113,9 +113,11 @@ export function registerMetricsRoutes(app: FastifyInstance): void {
     const settings = await store.getSettings().catch(() => null);
     const label = tokenLabeller(settings);
     const stats = limits.stats();
+    const yields = limits.yieldPeriods(parsed.data, (id) => label("subscription", id), parsed.data.period);
     const report: LimitReport = {
       windows: limits.windows(parsed.data, (id) => label("subscription", id)),
-      yields: limits.yields(parsed.data, (id) => label("subscription", id), parsed.data.period),
+      yields: yields.rows,
+      yieldsTruncatedBefore: yields.truncatedBefore,
       period: parsed.data.period,
       events: limits.events(parsed.data),
       accounts: limitSampler.status(),

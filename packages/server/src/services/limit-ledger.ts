@@ -19,6 +19,8 @@
  */
 import {
   LIMIT_PERIOD_HOURS,
+  limitPeriodEnd,
+  limitPeriodStart,
   type LimitEvent,
   type LimitEventKind,
   type LimitPeriod,
@@ -33,6 +35,22 @@ import { classifyStep, readingChanged, type Seen } from "./limit-detect.js";
 
 /** Longest an unchanged reading goes unstored. */
 export const HOLD_MS = 30 * 60_000;
+
+/**
+ * Two stored readings further apart than this mean nobody was reading the
+ * account in between — the app was off, or every read failed. A live idle
+ * account is stored every HOLD_MS, read at most every 15 minutes, and a failing
+ * one backs off to 30: so a healthy gap tops out near 45 minutes, and an hour
+ * is the first span that can't be explained by compression alone.
+ */
+export const COVER_GAP_MS = 60 * 60_000;
+
+/**
+ * Most yield rows one response carries. Idle periods are rows (that is how
+ * idle is told from unwatched), so an hourly 90 days is ~2160 per account —
+ * and the page re-fetches every minute.
+ */
+export const YIELD_ROW_CAP = 3000;
 
 /**
  * Consecutive successful reads a window must be missing from before it is
@@ -453,6 +471,21 @@ export class LimitLedger {
    * onward counts: before it there are no points to set it against.
    */
   yields(q: LimitQueryInput, label: LimitAccountLabeller, period: LimitPeriod = "1d"): LimitYield[] {
+    return this.yieldPeriods(q, label, period).rows;
+  }
+
+  /**
+   * {@link yields}, plus where the row cap cut it. The cut is always on a
+   * period boundary and always reported: a period silently missing from the
+   * response is drawn as "nobody was reading", which is precisely the claim
+   * `coverage` exists to keep honest.
+   */
+  yieldPeriods(
+    q: LimitQueryInput,
+    label: LimitAccountLabeller,
+    period: LimitPeriod = "1d",
+    cap = YIELD_ROW_CAP,
+  ): { rows: LimitYield[]; truncatedBefore: number | null } {
     const hours = LIMIT_PERIOD_HOURS[period];
     const to = Math.min(q.to ?? this.now() + 1, this.now() + 1);
     const cover = new Map(
@@ -466,7 +499,7 @@ export class LimitLedger {
     );
     const wanted = q.subscriptionIds?.length ? new Set(q.subscriptionIds) : null;
     const subs = [...cover.keys()].filter((s) => !wanted || wanted.has(s));
-    if (!subs.length) return [];
+    if (!subs.length) return { rows: [], truncatedBefore: null };
     const from = q.from ?? Math.min(...subs.map((s) => cover.get(s)!.lo));
 
     interface Cell {
@@ -513,7 +546,7 @@ export class LimitLedger {
               ? 0
               : Math.max(0, next.percent - prev.percent);
         if (gained <= 0) continue;
-        const c = cell(series.subscriptionId, periodStart(next.ts, hours));
+        const c = cell(series.subscriptionId, limitPeriodStart(next.ts, hours));
         c.points.set(series.windowId, (c.points.get(series.windowId) ?? 0) + gained);
       }
     }
@@ -544,8 +577,8 @@ export class LimitLedger {
       const hi = Math.min(end, to);
       // A point-in-time row (no duration) counts only if its instant is in range.
       if (run === 0 ? end < lo || end >= to : hi <= lo) continue;
-      for (let p = periodStart(lo, hours); p <= hi; p = periodEnd(p, hours)) {
-        const share = run === 0 ? 1 : (Math.min(hi, periodEnd(p, hours)) - Math.max(lo, p)) / run;
+      for (let p = limitPeriodStart(lo, hours); p <= hi; p = limitPeriodEnd(p, hours)) {
+        const share = run === 0 ? 1 : (Math.min(hi, limitPeriodEnd(p, hours)) - Math.max(lo, p)) / run;
         if (share <= 0) continue;
         const c = cell(r.s, p);
         c.total += Number(r.tot) * share;
@@ -560,11 +593,31 @@ export class LimitLedger {
       }
     }
 
+    /* ---- coverage: when was anyone actually reading each account ---- */
+    // Without this an idle period and a period the app was OFF are the same
+    // thing — both simply have no row — and a day the sampler missed reads as
+    // a day nothing was used. Every period the account was watched gets a row,
+    // zeros and all, and each row says how much of itself was watched.
+    const now = this.now();
+    const watched = this.watchedSpans(subs, from, to, now);
+    for (const [sub, spans] of watched) {
+      for (const [lo, hi] of spans) {
+        for (let p = limitPeriodStart(lo, hours); p < hi; p = limitPeriodEnd(p, hours)) cell(sub, p);
+      }
+    }
+
     const out: LimitYield[] = [];
     for (const c of cells.values()) {
       const m = meta.get(c.sub);
-      const range = cover.get(c.sub)!;
-      const end = periodEnd(c.start, hours);
+      const end = limitPeriodEnd(c.start, hours);
+      // Against the part of the period that has HAPPENED: today at noon, read
+      // all morning, is fully covered so far rather than half missing.
+      const span = Math.min(end, now) - c.start;
+      let seen = 0;
+      for (const [lo, hi] of watched.get(c.sub) ?? []) {
+        seen += Math.max(0, Math.min(hi, end, now) - Math.max(lo, c.start));
+      }
+      const coverage = span > 0 ? Math.min(1, seen / span) : 0;
       out.push({
         start: c.start,
         end,
@@ -586,12 +639,65 @@ export class LimitLedger {
           turns: c.turns,
           unpriced: c.unpriced,
         },
-        partial: c.start < range.lo || end > range.hi,
+        coverage,
+        // A couple of percent of slack: the first read after midnight lands a
+        // few minutes in, and that isn't a gap anyone needs flagged.
+        partial: coverage < 0.98,
       });
     }
-    return out
-      .sort((a, b) => b.start - a.start || a.subscriptionLabel.localeCompare(b.subscriptionLabel))
-      .slice(0, 2000);
+    out.sort((a, b) => b.start - a.start || a.subscriptionLabel.localeCompare(b.subscriptionLabel));
+    if (out.length <= cap) return { rows: out, truncatedBefore: null };
+    // Newest survive. Drop the WHOLE period the cap lands in, so no period
+    // comes back with some accounts' rows and not others'.
+    const cut = out[cap]!.start;
+    return { rows: out.filter((y) => y.start > cut), truncatedBefore: limitPeriodEnd(cut, hours) };
+  }
+
+  /**
+   * Per account, the merged spans of [from, to) during which it was being read:
+   * consecutive stored readings no more than COVER_GAP_MS apart cover the time
+   * between them. The newest reading also covers up to `now` while it is still
+   * that fresh — the sampler holds an unchanged figure back for up to HOLD_MS,
+   * and an idle account's last half hour is watched, not missing.
+   */
+  private watchedSpans(subs: string[], from: number, to: number, now: number): Map<string, [number, number][]> {
+    const rows = this.db
+      .prepare(
+        `SELECT subscription_id AS s, ts FROM limit_samples
+          WHERE ts >= ? AND ts < ? AND subscription_id IN (${subs.map(() => "?").join(",")})
+          GROUP BY s, ts ORDER BY s, ts`,
+      )
+      // A gap's look-behind: a read just before `from` covers its start.
+      .all(from - COVER_GAP_MS, to, ...subs) as { s: string; ts: number }[];
+    const stamps = new Map<string, number[]>();
+    for (const r of rows) {
+      let list = stamps.get(r.s);
+      if (!list) stamps.set(r.s, (list = []));
+      list.push(Number(r.ts));
+    }
+    const out = new Map<string, [number, number][]>();
+    for (const [sub, list] of stamps) {
+      // Held-back reads are in memory, not the table; they are reads all the same.
+      for (const w of this.accounts.get(sub)?.windows.values() ?? []) {
+        if (!w.stored && w.ts < to && w.ts > list.at(-1)!) list.push(w.ts);
+      }
+      const last = list.at(-1)!;
+      if (now - last <= COVER_GAP_MS && now > last) list.push(Math.min(now, to));
+      const spans: [number, number][] = [];
+      for (let i = 1; i < list.length; i++) {
+        const a = list[i - 1]!;
+        const b = list[i]!;
+        if (b - a > COVER_GAP_MS) continue;
+        const lo = Math.max(a, from);
+        const hi = Math.min(b, to);
+        if (hi <= lo) continue;
+        const prev = spans.at(-1);
+        if (prev && prev[1] >= lo) prev[1] = Math.max(prev[1], hi);
+        else spans.push([lo, hi]);
+      }
+      out.set(sub, spans);
+    }
+    return out;
   }
 
   stats(): { rows: number; oldest: number | null } {
@@ -600,20 +706,4 @@ export class LimitLedger {
       .get() as { n: number; lo: number | null } | undefined;
     return { rows: Number(r?.n ?? 0), oldest: r?.lo === null || r?.lo === undefined ? null : Number(r.lo) };
   }
-}
-
-/** The local-time period containing `ts`: hours aligned to midnight, or the day. */
-export function periodStart(ts: number, hours: number): number {
-  const d = new Date(ts);
-  d.setMinutes(0, 0, 0);
-  d.setHours(hours >= 24 ? 0 : Math.floor(d.getHours() / hours) * hours);
-  return d.getTime();
-}
-
-/** Where the period starting at `start` ends — calendar arithmetic, so DST-safe. */
-export function periodEnd(start: number, hours: number): number {
-  const d = new Date(start);
-  if (hours >= 24) d.setDate(d.getDate() + 1);
-  else d.setHours(d.getHours() + hours);
-  return d.getTime();
 }
