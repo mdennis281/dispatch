@@ -62,6 +62,7 @@ import type { SessionBroker } from "../session-broker.js";
 import type { ChannelChatService } from "../channel-chats.js";
 import { ChannelChatRefusal } from "../channel-chats.js";
 import type { ChatSummaryService } from "../chat-summary.js";
+import { eventReachFor, type EventFeedService } from "../event-feed.js";
 import { BUILTIN_MODE_PERMISSION } from "../session-broker.js";
 import { realProjects } from "@dispatch/shared";
 import { createAuthoringEditor } from "./authoring-editor.js";
@@ -85,6 +86,8 @@ export interface IntegrationContextDeps {
   listProjects?: () => Promise<{ id: string; name: string }[]>;
   /** The effective personas, with a project's own when `projectId` is given. */
   listPersonas?: (projectId?: string) => Promise<{ id: string; name: string; scope: string }[]>;
+  /** The integration event feed behind `events_poll`. */
+  events?: Pick<EventFeedService, "poll">;
   now?: () => number;
 }
 
@@ -135,7 +138,7 @@ export async function createIntegrationContext(
   deps: IntegrationContextDeps,
   identity: IntegrationIdentity,
 ): Promise<ManagerMcpContext> {
-  const { memory, memoryHistory, issues, inspect, messenger, authored, store, channelChats, summaries, getProject, listProjects, listPersonas } = deps;
+  const { memory, memoryHistory, issues, inspect, messenger, authored, store, channelChats, summaries, getProject, listProjects, listPersonas, events } = deps;
   const projectId = identity.projectIds?.length === 1 ? identity.projectIds[0] : undefined;
   const allow: Allowlist | null = identity.projectIds?.length
     ? {
@@ -309,6 +312,24 @@ export async function createIntegrationContext(
             }
             const personas = (await listPersonas(target?.id)).map((p) => ({ id: p.id, name: p.name, scope: p.scope }));
             return { project: target, personas };
+          },
+        }
+      : undefined,
+    // Scoped per event TYPE rather than gated whole: a token with chats:read
+    // but not attention:read polls chat and nothing else, the same split the
+    // REST routes and the webhook filters make.
+    // Not offered at all to a token that could read nothing from it — a tool
+    // that always answers "0 events" reads as a quiet feed, not a missing grant.
+    events: events && eventReachFor(identity).types.length > 0
+      ? {
+          poll: async ({ project, ...q }) => {
+            if (project !== undefined && !projectVisible(project)) {
+              throw new Error(`No project "${project}". Find ids with project_list.`);
+            }
+            if (q.chatId !== undefined && !chatVisible(q.chatId)) {
+              throw new Error(`No chat "${q.chatId}" exists. Find the right id with chat_find.`);
+            }
+            return events.poll({ ...q, ...(project ? { projectIds: [project] } : {}) }, eventReachFor(identity));
           },
         }
       : undefined,

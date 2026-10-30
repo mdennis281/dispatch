@@ -158,6 +158,12 @@ import {
   providerIds,
   COMPACT_FOCUS_MAX,
   MANAGER_TOOL_EXTERNAL,
+  INTEGRATION_EVENT_PAGE_DEFAULT,
+  INTEGRATION_EVENT_PAGE_MAX,
+  INTEGRATION_EVENT_TYPES,
+  type IntegrationEvent,
+  type IntegrationEventPage,
+  type IntegrationEventType,
 } from "@dispatch/shared";
 import { classifyActivity } from "../metrics-activity.js";
 import type { EventBus } from "../../bus.js";
@@ -2004,6 +2010,27 @@ export interface ManagerMcpPersonas {
   }>;
 }
 
+/** A page request to the integration event feed — see shared/integration-events.ts. */
+export interface ManagerMcpEventsQuery {
+  cursor?: string;
+  since?: number;
+  limit?: number;
+  types?: IntegrationEventType[];
+  project?: string;
+  chatId?: string;
+}
+
+/**
+ * The integration EVENT FEED (omitted → no `events_poll`). Integration-only: a
+ * session already hears about its own children through completion notices and
+ * `wait_for_chat`, and has no use for a cursor it would lose at compaction.
+ * The binding applies the caller's scopes and project allowlist; throws with a
+ * sentence on a bad cursor or an unknown project.
+ */
+export interface ManagerMcpEvents {
+  poll(q: ManagerMcpEventsQuery): Promise<IntegrationEventPage>;
+}
+
 /**
  * Read-only inspection of OTHER chats, their images, and project config.
  *
@@ -2195,6 +2222,8 @@ export interface ManagerMcpContext {
   control?: ManagerMcpChatControl;
   /** Persona discovery for `spawn_chat` (omitted → no `persona_list` tool). */
   personas?: ManagerMcpPersonas;
+  /** The integration event feed (omitted → no `events_poll` tool). */
+  events?: ManagerMcpEvents;
   /** Project MCP-config editor for this session (omitted → no `mcp_*` tools). */
   mcpConfig?: ManagerMcpConfig;
   /** Instruction/skill/persona authoring for this session (omitted → no `config_*` tools). */
@@ -2298,6 +2327,21 @@ function steeredResult(what: string, resume: string): CallToolResult {
 
 function textResult(text: string, isError = false): CallToolResult {
   return { content: [{ type: "text", text }], isError };
+}
+
+/** One feed event as a scannable line; the JSON after it carries everything. */
+function renderFeedEvent(e: IntegrationEvent): string {
+  const p = e.payload as Record<string, unknown>;
+  const str = (v: unknown): string => (typeof v === "string" ? v : "");
+  let what: string;
+  if (e.type === "chat.settled") {
+    what = `${str(p.title) || "(untitled)"} — ${str(p.status)}`;
+  } else if (e.type.startsWith("pr.")) {
+    what = `${str(p.repo)}#${String(p.number)} ${str(p.title)}${p.reopened ? " (reopened)" : ""}`;
+  } else {
+    what = `${str(p.kind)}: ${str(p.summary)}`;
+  }
+  return `  • ${e.id} ${e.tsLocal} ${e.type}${e.chatId ? ` chat=${e.chatId}` : ""} — ${what}`;
 }
 
 /**
@@ -7654,6 +7698,60 @@ ${JSON.stringify(r)}`);
     },
   );
 
+  const eventsPoll = tool(
+    "events_poll",
+    "Poll Dispatch's EVENT FEED — what happened since you last looked, oldest first: " +
+      "chat.settled (a chat finished its turn and stayed at rest), pr.opened / pr.merged / " +
+      "pr.closed, attention.raised / attention.resolved (the human-needed queue). Pass the " +
+      "`nextCursor` from the previous call as `cursor` and you never miss or repeat an event, " +
+      "even across a server restart. With no cursor you get the newest page and a cursor to " +
+      "continue from. Needs no chat of your own.",
+    {
+      cursor: z.string().optional().describe("nextCursor from your previous poll (an event id)."),
+      since: z
+        .string()
+        .optional()
+        .describe("Only events at/after this time: epoch ms, or ISO 8601 with an offset. Ignored when `cursor` is given."),
+      limit: z.number().int().min(1).max(INTEGRATION_EVENT_PAGE_MAX).optional().describe(
+        `Page size (default ${INTEGRATION_EVENT_PAGE_DEFAULT}, max ${INTEGRATION_EVENT_PAGE_MAX}).`,
+      ),
+      types: z.array(z.enum(INTEGRATION_EVENT_TYPES)).optional().describe("Only these event types."),
+      project: z.string().optional().describe("Only events in this project (id)."),
+      chatId: z.string().optional().describe("Only events about this chat."),
+    },
+    async (args): Promise<CallToolResult> => {
+      if (!ctx.events) return textResult("The events_poll tool is not available in this session.", true);
+      let since: number | undefined;
+      if (typeof args.since === "string" && args.since.trim()) {
+        const raw = args.since.trim();
+        since = /^\d+$/.test(raw) ? Number(raw) : Date.parse(raw);
+        if (!Number.isFinite(since)) {
+          return textResult(`"${raw}" is not a time — pass epoch ms or ISO 8601, e.g. 2026-10-29T14:00:00-05:00.`, true);
+        }
+      }
+      try {
+        const page = await ctx.events.poll({
+          ...(args.cursor?.trim() ? { cursor: args.cursor.trim() } : {}),
+          ...(since !== undefined ? { since } : {}),
+          ...(args.limit ? { limit: args.limit } : {}),
+          ...(args.types?.length ? { types: args.types } : {}),
+          ...(args.project?.trim() ? { project: args.project.trim() } : {}),
+          ...(args.chatId?.trim() ? { chatId: args.chatId.trim() } : {}),
+        });
+        const lines = page.events.map(renderFeedEvent);
+        return textResult(
+          `${page.events.length} event${page.events.length === 1 ? "" : "s"}` +
+            (page.hasMore ? " (more waiting — poll again with nextCursor)" : "") +
+            (page.gap ? "\nSome events before this page were pruned (older than the retention window)." : "") +
+            (lines.length ? `\n${lines.join("\n")}` : "") +
+            `\nnextCursor: ${page.nextCursor}\n${JSON.stringify(page)}`,
+        );
+      } catch (err) {
+        return textResult(`Could not poll events: ${err instanceof Error ? err.message : String(err)}`, true);
+      }
+    },
+  );
+
   const chatSetMode = tool(
     "chat_set_mode",
     "Switch a chat to a MODE — a named permission posture from mode_list (plan, auto, " +
@@ -8093,6 +8191,7 @@ ${JSON.stringify(r)}`);
     chatSummarize,
     chatStop,
     personaList,
+    eventsPoll,
     chatSetMode,
     chatSetPersona,
     projectInfo,
@@ -8178,6 +8277,7 @@ const TOOL_WIRE_NAME: Record<ManagerToolKey, ManagerToolName> = {
   chatSummarize: "chat_summarize",
   chatStop: "chat_stop",
   personaList: "persona_list",
+  eventsPoll: "events_poll",
   chatSetMode: "chat_set_mode",
   chatSetPersona: "chat_set_persona",
   projectInfo: "project_info",
@@ -8270,6 +8370,7 @@ const MANAGER_TOOL_GATE: Record<ManagerToolName, ManagerToolBinding | null> = {
   chat_summarize: "summary",
   chat_stop: "control",
   persona_list: "personas",
+  events_poll: "events",
   chat_set_mode: "messaging",
   chat_set_persona: "messaging",
   project_info: "inspect",
@@ -8303,6 +8404,7 @@ export type ManagerToolBinding =
   | "summary"
   | "control"
   | "personas"
+  | "events"
   | "secrets"
   | "issues";
 
@@ -8407,6 +8509,7 @@ function boundTools(ctx: ManagerMcpContext): Record<ManagerToolName, boolean> {
     chat_summarize: Boolean(ctx.summary),
     chat_stop: Boolean(ctx.control),
     persona_list: Boolean(ctx.personas),
+    events_poll: Boolean(ctx.events),
     // The posture writes ride the same binding: re-pointing a chat's mode or
     // persona is the same kind of reach into another chat as sending to it.
     chat_set_mode: Boolean(ctx.messaging),

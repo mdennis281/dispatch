@@ -473,6 +473,33 @@ describe("REST", () => {
     await instance.close();
   });
 
+  it("polls the event feed over REST, each type behind its read scope, inside the allowlist", async () => {
+    const { instance } = await app();
+    const access = await owner(instance);
+    const a = await project(instance, access, "alpha", join(dirs[0]!, "a"));
+    const b = await project(instance, access, "beta", join(dirs[0]!, "b"));
+    const feed = instance.services.eventFeed;
+    feed.append("chat.settled", { chatId: "ca", projectId: a.id }, { status: "idle" });
+    feed.append("attention.raised", { chatId: "ca", projectId: a.id }, { kind: "question" });
+    feed.append("chat.settled", { chatId: "cb", projectId: b.id }, { status: "idle" });
+    const { token } = await mint(instance, access, { name: "grok", scopes: ["chats:read"], projectIds: [a.id] });
+
+    const page = await instance.inject({ url: "/api/integration/events?cursor=0", headers: bearer(token) });
+    expect(page.statusCode, page.body).toBe(200);
+    const body = page.json() as { events: { type: string; projectId: string; tsLocal: string }[]; nextCursor: string };
+    expect(body.events.map((e) => [e.type, e.projectId])).toEqual([["chat.settled", a.id]]);
+    expect(body.nextCursor).toBe("3");
+
+    const bad = async (qs: string) => (await instance.inject({ url: `/api/integration/events?${qs}`, headers: bearer(token) }));
+    expect((await bad("types=chat.done")).body).toContain("Valid: chat.settled");
+    expect((await bad("since=yesterday")).statusCode).toBe(400);
+    expect((await bad("cursor=42")).body).toContain("ahead of this feed");
+    expect((await bad(`projectId=${b.id}`)).statusCode).toBe(404);
+    const { token: blind } = await mint(instance, access, { name: "blind", scopes: ["memory:read"] });
+    expect((await instance.inject({ url: "/api/integration/events", headers: bearer(blind) })).statusCode).toBe(403);
+    await instance.close();
+  });
+
   it("summarizes a visible chat, and hides the rest", async () => {
     const { instance } = await app();
     const access = await owner(instance);
@@ -649,8 +676,9 @@ describe("the external MCP mount", () => {
       expect(chat.status, JSON.stringify(chat.json)).toBe(200);
       const names = (chat.json as { result: { tools: { name: string }[] } }).result.tools.map((t) => t.name).sort();
       // `spawn_chat` is external by the registry but unbound without
-      // `chats:create`: starting an agent is its own grant.
-      expect(names).toEqual(externalManagerTools("chat").filter((n) => n !== "spawn_chat").sort());
+      // `chats:create`: starting an agent is its own grant. `events_poll` is
+      // unbound without a read scope any event type falls under.
+      expect(names).toEqual(externalManagerTools("chat").filter((n) => n !== "spawn_chat" && n !== "events_poll").sort());
       expect(names).toContain("chat_summarize");
       expect(names).toContain("chat_stop");
       expect(names).not.toContain("chat_set_mode");
@@ -658,6 +686,9 @@ describe("the external MCP mount", () => {
       const { token: creator } = await mint(instance, access, { name: "creator", scopes: ["tools:chat", "chats:create"] });
       const withCreate = await rpc(origin, creator, "chat", "tools/list");
       expect((withCreate.json as { result: { tools: { name: string }[] } }).result.tools.map((t) => t.name)).toContain("spawn_chat");
+      const { token: reader } = await mint(instance, access, { name: "reader", scopes: ["tools:chat", "chats:read"] });
+      const withRead = await rpc(origin, reader, "chat", "tools/list");
+      expect((withRead.json as { result: { tools: { name: string }[] } }).result.tools.map((t) => t.name)).toContain("events_poll");
 
       const project = await rpc(origin, token, "project", "tools/list");
       expect((project.json as { result: { tools: { name: string }[] } }).result.tools.map((t) => t.name).sort()).toEqual(["project_info", "project_list"]);
@@ -707,6 +738,40 @@ describe("the external MCP mount", () => {
       expect(outside.isError).toBe(true);
       expect(outside.content[0]!.text).toContain(`alpha (${a.id})`);
       expect(outside.content[0]!.text).not.toContain("beta");
+    } finally {
+      await instance.close();
+    }
+  });
+
+  it("events_poll pages the feed from a cursor with no chat of its own", async () => {
+    const { instance } = await app();
+    const access = await owner(instance);
+    const a = await project(instance, access, "alpha", join(dirs[0]!, "a"));
+    const b = await project(instance, access, "beta", join(dirs[0]!, "b"));
+    const feed = instance.services.eventFeed;
+    feed.append("pr.merged", { chatId: "ca", projectId: a.id }, { repo: "o/r", number: 12, title: "Ship it" });
+    feed.append("pr.merged", { chatId: "cb", projectId: b.id }, { repo: "o/r", number: 13, title: "Hidden" });
+    feed.append("attention.raised", { chatId: "ca", projectId: a.id }, { kind: "question", summary: "Which?" });
+    const { token } = await mint(instance, access, { name: "grok", scopes: ["tools:chat", "projects:read"], projectIds: [a.id] });
+    await instance.listen({ port: 0, host: "127.0.0.1" });
+    const origin = `http://127.0.0.1:${(instance.server.address() as AddressInfo).port}`;
+    const call = async (args: Record<string, unknown>) =>
+      ((await rpc(origin, token, "chat", "tools/call", { name: "events_poll", arguments: args })).json as {
+        result: { content: { text: string }[]; isError?: boolean };
+      }).result;
+    try {
+      const first = await call({ cursor: "0" });
+      expect(first.isError ?? false, first.content[0]!.text).toBe(false);
+      const text = first.content[0]!.text;
+      expect(text).toContain("pr.merged chat=ca — o/r#12 Ship it");
+      // Another project's PR, and a type this token has no scope for.
+      expect(text).not.toContain("Hidden");
+      expect(text).not.toContain("attention.raised");
+      expect(text).toContain("nextCursor: 3");
+      expect((await call({ cursor: "3" })).content[0]!.text).toMatch(/^0 events/);
+      expect((await call({ cursor: "nope" })).isError).toBe(true);
+      expect((await call({ since: "not a time" })).isError).toBe(true);
+      expect((await call({ project: b.id })).content[0]!.text).toContain(`No project "${b.id}"`);
     } finally {
       await instance.close();
     }

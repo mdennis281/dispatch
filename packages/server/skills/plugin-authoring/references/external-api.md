@@ -64,6 +64,7 @@ external tool are **offered** (`OFFERABLE_TOOL_SCOPES` in `@dispatch/shared`; to
 | `POST attention/:id/answer { optionId? \| answer? \| answers? \| decline: true }` | `attention:answer` (question items only) |
 | `GET projects` | `projects:read` |
 | `GET projects/:id/personas` → `{ personas: [{ id, name, scope }] }` (valid `personaId`s there) | `projects:read` |
+| `GET events?cursor&since&limit&types&projectId&chatId` → `{ events: [{ id, type, chatId, projectId, ts, tsLocal, payload }], nextCursor, hasMore, gap? }` — `chat.settled`, `pr.opened\|merged\|closed`, `attention.raised\|resolved`; pass `nextCursor` back as `cursor` (survives restarts) | per type: `chats:read` / `projects:read` / `attention:read` |
 | `GET openapi.json` | any |
 
 A token's `projectIds` filter every route (a chat outside them is a 404). Messages
@@ -77,7 +78,7 @@ The same category servers a session gets, built with an *external* context that 
 self chat. A category is offered only with `tools:<category>`; one with nothing
 external is a 404. The external set:
 
-`chat_find chat_read chat_send chat_ask chat_reply chat_state chat_summarize chat_stop persona_list wait_for_chat` ·
+`chat_find chat_read chat_send chat_ask chat_reply chat_state chat_summarize chat_stop persona_list events_poll wait_for_chat` ·
 `project_info project_list` · `remember recall forget memory_list memory_search
 memory_history memory_similar` · `issue_list issue_read issue_create issue_comment
 issue_update` · `config_list config_read mode_list`.
@@ -92,7 +93,9 @@ turn (the Stop button), and `archive: true` — only for a chat this token start
 also releases the session and archives it.
 rate-limited per caller. `persona_list { project? }` returns the personas a chat
 started in that project can run as — `id` (spawn_chat's `personaId`) and display
-`name`, the project's own included. Memory and issue tools bind only when the token names
+`name`, the project's own included. `events_poll { cursor?, since?, limit?, types?,
+project?, chatId? }` pages the event feed (see `GET events` above); it is offered only
+to a token with `chats:read`, `projects:read` or `attention:read`. Memory and issue tools bind only when the token names
 **exactly one** project. An unauthenticated request here gets a `WWW-Authenticate:
 Bearer resource_metadata=…` challenge, which is how an OAuth-capable MCP client
 discovers the authorization server from the refusal alone.

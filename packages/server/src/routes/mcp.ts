@@ -219,6 +219,9 @@ export function registerMcpRoutes(app: FastifyInstance): void {
       // `persona_list` likewise: a session reads personas with config_list,
       // and its own project's config dir is already in reach.
       personas: false,
+      // `events_poll` likewise: a session hears about its own children through
+      // completion notices, and a cursor would not survive its compaction.
+      events: false,
       // Same story for cross-chat messaging: one messenger, constructed by the
       // container and bound by the broker for every session.
       messaging: !!services.chatMessenger,

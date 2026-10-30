@@ -1043,7 +1043,7 @@ cross-checked against the factory at compile time like the categories. The
 rule for the flag: a tool that acts on the calling chat's own session, shell or
 tree, or that puts a card in front of the human on the calling chat's behalf,
 is **not** external. So `chat_find`, `chat_read`, `chat_send`, `chat_ask`,
-`chat_reply`, `chat_state`, `chat_summarize`, `chat_stop`, `persona_list`, `wait_for_chat`, `project_info`, `project_list`, the
+`chat_reply`, `chat_state`, `chat_summarize`, `chat_stop`, `persona_list`, `events_poll`, `wait_for_chat`, `project_info`, `project_list`, the
 memory tools, the issue tools, `mode_list`, `config_list` and `config_read` are
 external; `wait`, `context_usage`, `compact_context`, the workspace tools, the
 PR tools, the confirm tools, the secrets tools, `chat_set_mode`,
@@ -1061,7 +1061,9 @@ hits are free). `chat_stop` binds wherever `chat_send` does (interrupting a turn
 is already in reach via its "interrupt" delivery): it
 interrupts the chat's running turn, and with `archive: true` also releases its
 session and archives it — allowed only for a chat that token started, because
-an archived chat leaves the sidebar and the SPA has no control to bring it back. Memory and issue tools bind
+an archived chat leaves the sidebar and the SPA has no control to bring it back.
+`events_poll` reads the integration event feed (`EventFeedService`, below) and
+binds only for a token holding a read scope some event type falls under. Memory and issue tools bind
 only when the token names exactly one project. A category is offered only when
 the token holds `tools:<category>`; the mount is authenticated by the gate (it
 does NOT ride the per-chat bridge's gate exemption), and the external context
@@ -1081,9 +1083,25 @@ sprinkled over the SPA's routes:
 | `GET attention` · `POST attention/:id/answer { optionId \| answer \| answers \| decline }` | `attention:read` / `attention:answer` |
 | `GET projects` | `projects:read` |
 | `GET projects/:id/personas` → `{ personas: [{ id, name, scope }] }` | `projects:read` |
+| `GET events?cursor&since&limit&types&projectId&chatId` → `{ events, nextCursor, hasMore, gap? }` | per event type (below) |
 | `GET openapi.json` | any |
 
 Token `projectIds` filter every route (a chat outside them is a 404).
+
+**The event feed** (`services/event-feed.ts`, contract in
+`shared/integration-events.ts`) is the pull-side twin of the webhooks, for a
+connector that can only make tool calls. A bus consumer derives six facts and
+appends each to `integration_event` in state.db: `chat.settled` (the shared
+settle rule in `chat-settle.ts`, not the raw `idle` edge), `pr.opened` /
+`pr.merged` / `pr.closed` (state TRANSITIONS, seeded from the PR registry on
+start so a boot never re-announces open PRs), and `attention.raised` /
+`attention.resolved` (deduped by item id). `id` is an AUTOINCREMENT `seq`, so a
+cursor survives restarts and is never reused after a prune; 7 days / 10k rows
+are kept, and a cursor older than the oldest row gets `gap: true`. No cursor →
+the newest page. Each type needs its subject's read scope (`chat.*` →
+`chats:read`, `pr.*` → `projects:read`, `attention.*` → `attention:read`).
+Every event carries `ts` (epoch ms) and `tsLocal` (`2026-10-29 14:03:12 CDT`,
+the server's zone, labelled).
 
 ### Attribution
 
