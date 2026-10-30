@@ -224,6 +224,8 @@ export function registerMcpRoutes(app: FastifyInstance): void {
       events: false,
       // `chat_tree` likewise: a session's sidebar already draws the nesting.
       chatTree: false,
+      // `chat_archive` likewise: a session has its human and the sidebar.
+      archive: false,
       // The attention tools likewise: a session's human sees the queue itself.
       attention: false,
       // Same story for cross-chat messaging: one messenger, constructed by the

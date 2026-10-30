@@ -461,6 +461,24 @@ describe("readChat", () => {
     expect(result.rows.map((r) => r.id)).toEqual(["a", "e"]);
   });
 
+  it("fullText keeps assistant prose whole while tool payloads stay clipped", async () => {
+    // `full: true` used to fetch the row unclipped and then print 600 chars of it.
+    const prose = `${"long answer ".repeat(400)}THE END`;
+    const payload = "x".repeat(20_000);
+    await seedChat("c3", { title: "verbose", updatedAt: T0 + DAY }, [
+      { id: "p", ts: T0, kind: "assistant", text: prose },
+      { id: "q", ts: T0 + 1, kind: "tool_result", name: "Bash", ok: true, content: payload },
+    ]);
+    const clipped = await service().readChat({ chatId: "c3", view: "messages" });
+    expect(renderRead(clipped)).not.toContain("THE END");
+    const whole = await service().readChat({ chatId: "c3", view: "messages", fullText: true });
+    const text = renderRead(whole, { fullText: true });
+    expect(text).toContain(prose.trim());
+    expect(text).not.toContain(payload);
+    // Times carry their zone, so a reader elsewhere can't misread them.
+    expect(text).toMatch(/\d{4}-\d{2}-\d{2} \d{2}:\d{2} [A-Z][A-Za-z0-9+:-]*\]/);
+  });
+
   it("neither matches nor serves a session start's prompt text in the clipped view", async () => {
     // The sent context IS the system prompt: in grep every instruction word made
     // the init row a hit, and the clipped view is what the integration API serves.

@@ -43,6 +43,7 @@ import {
   ChatStatusSchema,
   chatPrStatuses,
   compileQuery,
+  formatLocalTime,
   isUnmerged,
   realProjects,
   resolveWorkflow,
@@ -135,6 +136,8 @@ export interface ChatSummary {
   model?: string;
   createdAt: number;
   updatedAt: number;
+  /** `updatedAt` as text with its zone, e.g. `2026-10-29 14:03:12 CDT`. */
+  updatedAtLocal?: string;
   /** Bytes of transcript on disk — a cheap stand-in for "how big is this chat". */
   transcriptBytes?: number;
   /**
@@ -343,6 +346,12 @@ export interface ReadChatQuery {
   afterId?: string;
   /** Keep verbatim payloads instead of clipping them. */
   full?: boolean;
+  /**
+   * Keep user and assistant TEXT verbatim, everything else clipped — what a
+   * reader asking "what did it actually say?" needs, without paying for every
+   * tool payload the way `full` does.
+   */
+  fullText?: boolean;
 }
 
 export interface ChatImage {
@@ -717,6 +726,7 @@ export class InspectService {
       model: chat.model,
       createdAt: chat.createdAt,
       updatedAt: chat.updatedAt ?? chat.createdAt,
+      updatedAtLocal: formatLocalTime(chat.updatedAt ?? chat.createdAt),
       ...(chat.status === "awaiting-input" ? { blockedOnHuman: true } : {}),
       worktrees: chat.worktrees,
       prs: chat.prs?.map((p) => p.number),
@@ -1110,7 +1120,8 @@ export class InspectService {
       transcriptBytes = 0;
     }
 
-    const rows = q.full ? kept : kept.map((r) => clipRow(r));
+    const prose = { keepProse: Boolean(q.fullText) };
+    const rows = q.full ? kept : kept.map((r) => clipRow(r, prose));
     return {
       chat: { ...this.toSummary(chat, project?.name), transcriptBytes },
       view,
@@ -1118,7 +1129,7 @@ export class InspectService {
       totalRows,
       rows,
       images,
-      userMessages: view === "digest" ? userMessages.map((r) => clipRow(r)) : undefined,
+      userMessages: view === "digest" ? userMessages.map((r) => clipRow(r, prose)) : undefined,
       problems: view === "digest" ? problems.slice(-10).map((r) => clipRow(r)) : undefined,
       truncated: totalRows > rows.length,
     };
@@ -1253,9 +1264,10 @@ export class InspectService {
 }
 
 /** Clip the bulky payloads on a row so one result can't blow the token cap. */
-function clipRow(row: RawRow): RawRow {
+function clipRow(row: RawRow, opts: { keepProse?: boolean } = {}): RawRow {
   const out: RawRow = { ...row };
-  if (typeof out.text === "string") out.text = clip(out.text, FIELD_CLIP);
+  const prose = opts.keepProse && (out.kind === "user" || out.kind === "assistant");
+  if (typeof out.text === "string" && !prose) out.text = clip(out.text, FIELD_CLIP);
   if (typeof out.thinking === "string") out.thinking = clip(out.thinking, FIELD_CLIP);
   if (typeof out.result === "string") out.result = clip(out.result, FIELD_CLIP);
   if (out.input !== undefined) out.input = clip(stringify(out.input), FIELD_CLIP);

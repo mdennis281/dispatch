@@ -447,6 +447,21 @@ describe("REST", () => {
     expect(calls).toEqual([`interrupt:${mine.id}`, `release:${mine.id}`]);
     expect((await store.getChat(mine.id))?.archived).toBe(true);
 
+    // `archive` is the flag alone: restore and re-archive touch no session.
+    const archive = (id: string, archived: boolean) =>
+      instance.inject({ method: "POST", url: `/api/integration/chats/${id}/archive`, headers: bearer(token), payload: { archived } });
+    calls.length = 0;
+    const back = await archive(mine.id, false);
+    expect(back.statusCode, back.body).toBe(200);
+    expect(back.json()).toMatchObject({ chatId: mine.id, archived: false, changed: true });
+    expect((await archive(mine.id, true)).json()).toMatchObject({ archived: true, changed: true });
+    expect(calls).toEqual([]);
+    expect((await archive(owners.id, true)).statusCode).toBe(403);
+    await store.patchChat(owners.id, { archived: true });
+    expect((await archive(owners.id, false)).json()).toMatchObject({ archived: false, changed: true });
+    expect((await archive(inB.id, false)).statusCode).toBe(404);
+    expect((await instance.inject({ method: "POST", url: `/api/integration/chats/${mine.id}/archive`, headers: bearer(token), payload: {} })).statusCode).toBe(400);
+
     // Outside the allowlist, and without the scope.
     expect((await stop(inB.id)).statusCode).toBe(404);
     const { token: reader } = await mint(instance, access, { name: "reader", scopes: ["chats:read"] });
@@ -731,6 +746,46 @@ describe("the external MCP mount", () => {
       expect(state.content[0]!.text).toContain(`${kids[1]!.id} "kid two"`);
       const kidState = await call("chat_state", { chatId: kids[1]!.id });
       expect(kidState.content[0]!.text).toContain(`parent: ${parent.id} "the parent"`);
+    } finally {
+      await instance.close();
+    }
+  });
+
+  it("chat_archive flips only the flag: own chats archive, any visible chat restores", async () => {
+    const { instance, store } = await app();
+    const access = await owner(instance);
+    const a = await project(instance, access, "alpha", join(dirs[0]!, "a"));
+    const theirs = await chat(instance, access, a.id, "the owner's work");
+    const { token, id: tokenId } = await mint(instance, access, { name: "grok", scopes: ["tools:chat"] });
+    const mine = await chat(instance, access, a.id, "grok's chat");
+    await store.patchChat(mine.id, { startedBy: { tokenId, name: "grok" }, status: "running" });
+    await instance.listen({ port: 0, host: "127.0.0.1" });
+    const origin = `http://127.0.0.1:${(instance.server.address() as AddressInfo).port}`;
+    const call = async (name: string, args: Record<string, unknown>) =>
+      ((await rpc(origin, token, "chat", "tools/call", { name, arguments: args })).json as {
+        result: { content: { text: string }[]; isError?: boolean };
+      }).result;
+    try {
+      const archived = await call("chat_archive", { chatId: mine.id, archived: true });
+      expect(archived.isError ?? false, archived.content[0]!.text).toBe(false);
+      // Hidden, not halted: the running turn was never interrupted.
+      expect((await store.getChat(mine.id))?.archived).toBe(true);
+      expect((await store.getChat(mine.id))?.status).toBe("running");
+      const state = await call("chat_state", { chatId: mine.id });
+      expect(state.content[0]!.text).toContain("ARCHIVED");
+      expect(state.content[0]!.text).toMatch(/last updated: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \S+/);
+      expect((await call("chat_archive", { chatId: mine.id, archived: false })).content[0]!.text).toContain("restored");
+      expect((await store.getChat(mine.id))?.archived).toBe(false);
+
+      // Not its chat: archiving is refused, restoring is not.
+      const refused = await call("chat_archive", { chatId: theirs.id, archived: true });
+      expect(refused.isError).toBe(true);
+      expect(refused.content[0]!.text).toContain("was not started by grok");
+      expect((await store.getChat(theirs.id))?.archived).toBeFalsy();
+      await store.patchChat(theirs.id, { archived: true });
+      expect((await call("chat_archive", { chatId: theirs.id, archived: false })).isError ?? false).toBe(false);
+      expect((await store.getChat(theirs.id))?.archived).toBe(false);
+      expect((await call("chat_archive", { chatId: theirs.id, archived: false })).content[0]!.text).toContain("Already restored");
     } finally {
       await instance.close();
     }

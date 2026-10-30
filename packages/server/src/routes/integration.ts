@@ -80,6 +80,8 @@ const ListChatsQuery = z.object({
 
 const MessagesQuery = z.object({
   kinds: z.string().optional(),
+  /** User/assistant text unclipped; tool payloads stay clipped. */
+  fullText: queryBool.optional(),
   before: z.string().min(1).optional(),
   after: z.string().min(1).optional(),
   limit: z.coerce.number().int().positive().max(500).optional(),
@@ -117,6 +119,8 @@ const EventsQuery = z.object({
 const SummaryQuery = z.object({ focus: z.string().max(500).optional() });
 
 const StopBody = z.object({ archive: z.boolean().optional() });
+
+const ArchiveBody = z.object({ archived: z.boolean() });
 
 const AnswerBody = z.object({
   answer: z.string().optional(),
@@ -235,6 +239,7 @@ export function registerIntegrationRoutes(app: FastifyInstance): void {
         beforeId: q.before,
         afterId: q.after,
         limit: q.limit,
+        fullText: q.fullText,
       });
       return {
         chat: result.chat,
@@ -344,6 +349,32 @@ export function registerIntegrationRoutes(app: FastifyInstance): void {
           ...(identity?.kind === "integration" ? { tokenId: identity.tokenId } : {}),
           chatId: chat.id,
           archive: parsed.data.archive === true,
+        });
+      } catch (err) {
+        if (err instanceof ChannelChatRefusal) return reply.code(err.status).send({ error: err.message });
+        throw err;
+      }
+    }),
+  );
+
+  // The REST twin of `chat_archive`: archive (own chats only) or restore, and
+  // nothing else — `stop` is the route that interrupts.
+  app.post<{ Params: { id: string } }>("/api/integration/chats/:id/archive", (req, reply) =>
+    withScope(reply, async () => {
+      requireScope(req, "chats:write");
+      const parsed = ArchiveBody.safeParse(req.body ?? {});
+      if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+      const chat = await store.getChat(req.params.id).catch(() => null);
+      if (!chat || !projectAllowed(req, chat.projectId)) return reply.code(404).send({ error: "No such chat." });
+      const identity = req.authIdentity;
+      const channel =
+        identity?.kind === "integration" ? identity.name : identity?.kind === "user" ? identity.user.displayName : "integration";
+      try {
+        return await app.services.channelChats.setArchived({
+          channel,
+          ...(identity?.kind === "integration" ? { tokenId: identity.tokenId } : {}),
+          chatId: chat.id,
+          archived: parsed.data.archived,
         });
       } catch (err) {
         if (err instanceof ChannelChatRefusal) return reply.code(err.status).send({ error: err.message });
@@ -647,6 +678,14 @@ const OPENAPI = {
         } } } },
         responses: { "200": { description: "`interrupted` says whether a turn was running; `archived` its state now" }, "403": { description: "Archive refused: not started by this integration" }, "404": { description: "No such chat" } } },
     },
+    "/api/integration/chats/{id}/archive": {
+      post: { ...scoped("chats:write"), summary: "Archive a chat (only one this integration started) or restore any — without interrupting it",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { required: true, content: { "application/json": { schema: {
+          type: "object", required: ["archived"], properties: { archived: { type: "boolean" } },
+        } } } },
+        responses: { "200": { description: "`{ chatId, title, projectId, archived, changed }`" }, "403": { description: "Archive refused: not started by this integration" }, "404": { description: "No such chat" } } },
+    },
     "/api/integration/chats/{id}/summary": {
       get: { ...scoped("chats:read"), summary: "A model's summary of the chat — cached until it changes, rate-limited per token",
         parameters: [
@@ -668,6 +707,7 @@ const OPENAPI = {
           { name: "before", in: "query", schema: { type: "string" } },
           { name: "after", in: "query", schema: { type: "string" } },
           { name: "limit", in: "query", schema: { type: "integer" } },
+          { name: "fullText", in: "query", schema: { type: "boolean" }, description: "User and assistant text unclipped (tool payloads stay clipped)" },
         ],
         responses: { "200": { description: "Rows" } } },
       post: { ...scoped("chats:write"), summary: "Send a message into a chat, attributed to this integration",

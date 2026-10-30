@@ -83,7 +83,7 @@ export interface IntegrationContextDeps {
   memoryHistory?: MemoryHistoryService;
   issues?: IssueService;
   authored?: AuthoredConfigService;
-  channelChats?: Pick<ChannelChatService, "create" | "stop">;
+  channelChats?: Pick<ChannelChatService, "create" | "stop" | "setArchived">;
   summaries?: Pick<ChatSummaryService, "summarize">;
   getProject?: (id: string) => Promise<{ id: string; name: string } | null>;
   /** Every project, for `spawn_chat` to resolve a name against. Filtered here. */
@@ -292,6 +292,21 @@ export async function createIntegrationContext(
               if (!chatVisible(chatId)) throw new Error(`No chat "${chatId}" exists. Find the right id with chat_find.`);
               try {
                 return await channelChats.stop({ channel: identity.name, tokenId: identity.tokenId, chatId, archive });
+              } catch (err) {
+                if (err instanceof ChannelChatRefusal) throw new Error(err.message);
+                throw err;
+              }
+            },
+          }
+        : undefined,
+    // Wherever chat_stop is: the same reach into another chat, minus the stop.
+    archive:
+      channelChats && messenger
+        ? {
+            setArchived: async (chatId, archived) => {
+              if (!chatVisible(chatId)) throw new Error(`No chat "${chatId}" exists. Find the right id with chat_find.`);
+              try {
+                return await channelChats.setArchived({ channel: identity.name, tokenId: identity.tokenId, chatId, archived });
               } catch (err) {
                 if (err instanceof ChannelChatRefusal) throw new Error(err.message);
                 throw err;

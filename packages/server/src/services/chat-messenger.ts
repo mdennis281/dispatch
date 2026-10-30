@@ -28,7 +28,7 @@
  *     burning tokens with nobody watching. Subagents structurally cannot do
  *     this, so it is a genuinely new failure mode and it gets a real guard.
  */
-import { chatPrStatuses, prRecordKey } from "@dispatch/shared";
+import { chatPrStatuses, formatLocalTime, prRecordKey } from "@dispatch/shared";
 import type { Chat, ChannelSender, ChatPrStatus, ChatStatus, ContextUsage, PeerSender, PrRecord } from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
 import type { ChatFamily } from "./chat-tree.js";
@@ -186,6 +186,11 @@ export interface PeerChatState {
    * reporting `0` there would date it to 1970 in every "how stale is this" read.
    */
   updatedAt: number;
+  /** `updatedAt` / `lastUserMessageAt` as text with their zone, e.g. `2026-10-29 14:03:12 CDT`. */
+  updatedAtLocal: string;
+  lastUserMessageAtLocal?: string;
+  /** Hidden from the sidebar (`chat_archive` restores it). */
+  archived: boolean;
   /**
    * PRs this chat opened, each joined to the PR registry: open/merged/closed,
    * the CI rollup and the review state. A superset of the `PRRef` this used to
@@ -601,7 +606,10 @@ export class ChatMessenger {
       dormant: live === undefined,
       blockedOnHuman: live === "awaiting-input" || this.isBlockedOnHuman(chatId),
       lastUserMessageAt: chat.lastUserMessageAt,
+      ...(chat.lastUserMessageAt ? { lastUserMessageAtLocal: formatLocalTime(chat.lastUserMessageAt) } : {}),
       updatedAt: chat.updatedAt ?? chat.createdAt,
+      updatedAtLocal: formatLocalTime(chat.updatedAt ?? chat.createdAt),
+      archived: Boolean(chat.archived),
       prs: await this.prStatuses(chat),
       reviewOf: chat.reviewOf,
       ...(await this.familyOf(chat)),

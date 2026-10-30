@@ -127,8 +127,18 @@ export interface ChannelChatDeps {
    * next message picks it back up.
    */
   release: (chatId: string) => Promise<void>;
-  /** Mark the chat archived and tell every client. */
-  archive: (chatId: string) => Promise<void>;
+  /** Mark the chat archived (or restore it) and tell every client. */
+  archive: (chatId: string, archived?: boolean) => Promise<void>;
+}
+
+/** What `setArchived` did. */
+export interface ChannelChatArchive {
+  chatId: string;
+  title: string;
+  projectId: string;
+  archived: boolean;
+  /** False when the chat was already in the asked state. */
+  changed: boolean;
 }
 
 export class ChannelChatService {
@@ -220,5 +230,32 @@ export class ChannelChatService {
       archived = true;
     }
     return { chatId: chat.id, title: chat.title, projectId: chat.projectId, interrupted, archived };
+  }
+
+  /**
+   * Archive or restore a chat and touch nothing else — no interrupt, no
+   * release. A finished chat being tidied away has nothing to stop, and a
+   * running one keeps running (an archived chat is hidden, not halted).
+   *
+   * ARCHIVING keeps `stop`'s ownership rule: the SPA lists no archived chats,
+   * so a bot that could archive the owner's work could hide it. RESTORING has
+   * no such rule — putting a chat back where the owner can see it is never
+   * the harm the rule guards against, and it is how an archive is undone.
+   */
+  async setArchived(req: { channel: string; tokenId?: string; chatId: string; archived: boolean }): Promise<ChannelChatArchive> {
+    const chat = await this.deps.getChat(req.chatId);
+    if (!chat) throw new ChannelChatRefusal(`No chat "${req.chatId}" exists. Find the right id with chat_find.`, 404);
+    const was = Boolean(chat.archived);
+    const base = { chatId: chat.id, title: chat.title, projectId: chat.projectId, archived: req.archived };
+    if (was === req.archived) return { ...base, changed: false };
+    if (req.archived && req.tokenId !== undefined && chat.startedBy?.tokenId !== req.tokenId) {
+      throw new ChannelChatRefusal(
+        `Chat ${chat.id} was not started by ${req.channel}, so it cannot archive it — archiving hides a ` +
+          "chat from the owner's sidebar.",
+        403,
+      );
+    }
+    await this.deps.archive(chat.id, req.archived);
+    return { ...base, changed: true };
   }
 }
