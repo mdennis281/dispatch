@@ -64,7 +64,7 @@ import { ChannelChatRefusal } from "../channel-chats.js";
 import type { ChatSummaryService } from "../chat-summary.js";
 import { eventReachFor, type EventFeedService } from "../event-feed.js";
 import type { AttentionQueue } from "../attention.js";
-import { buildAttentionEntries } from "./attention-tools.js";
+import { buildAttentionEntries, type ManagerMcpAttention } from "./attention-tools.js";
 import { BUILTIN_MODE_PERMISSION } from "../session-broker.js";
 import { realProjects } from "@dispatch/shared";
 import { createAuthoringEditor } from "./authoring-editor.js";
@@ -92,7 +92,7 @@ export interface IntegrationContextDeps {
   /** The integration event feed behind `events_poll`. */
   events?: Pick<EventFeedService, "poll">;
   /** The global attention queue behind the `attention_*` tools. */
-  attention?: Pick<AttentionQueue, "list">;
+  attention?: Pick<AttentionQueue, "list" | "dismiss">;
   now?: () => number;
 }
 
@@ -338,25 +338,56 @@ export async function createIntegrationContext(
           },
         }
       : undefined,
-    // `attention:read`, the same scope `GET /api/integration/attention` asks.
+    // Each tool behind the scope its REST twin asks: listing needs
+    // `attention:read`, dismissing `attention:answer` — a token holding only
+    // the latter gets `attention_dismiss` without `attention_list`, exactly as
+    // it gets `POST attention/dismiss` without `GET attention`.
     attention:
-      attention && identity.scopes.includes("attention:read")
+      attention && (identity.scopes.includes("attention:read") || identity.scopes.includes("attention:answer"))
         ? {
-            list: async ({ kinds, project, chatId }) => {
-              if (project !== undefined && !projectVisible(project)) {
-                throw new Error(`No project "${project}". Find ids with project_list.`);
-              }
-              const items = attention
-                .list()
-                .filter((i) => projectVisible(i.projectId) && chatVisible(i.chatId))
-                .filter((i) => !kinds?.length || kinds.includes(i.kind))
-                .filter((i) => !project || i.projectId === project)
-                .filter((i) => !chatId || i.chatId === chatId);
-              return buildAttentionEntries(items, {
-                pending: deps.broker.pendingPermissionSnapshot?.() ?? [],
-                chatTitle: async (id) => (await store.getChat(id).catch(() => null))?.title,
-              });
-            },
+            ...(identity.scopes.includes("attention:read")
+              ? {
+                  list: async ({ kinds, project, chatId }: Parameters<NonNullable<ManagerMcpAttention["list"]>>[0]) => {
+                    if (project !== undefined && !projectVisible(project)) {
+                      throw new Error(`No project "${project}". Find ids with project_list.`);
+                    }
+                    const items = attention
+                      .list()
+                      .filter((i) => projectVisible(i.projectId) && chatVisible(i.chatId))
+                      .filter((i) => !kinds?.length || kinds.includes(i.kind))
+                      .filter((i) => !project || i.projectId === project)
+                      .filter((i) => !chatId || i.chatId === chatId);
+                    return buildAttentionEntries(items, {
+                      pending: deps.broker.pendingPermissionSnapshot?.() ?? [],
+                      chatTitle: async (id) => (await store.getChat(id).catch(() => null))?.title,
+                    });
+                  },
+                }
+              : {}),
+            // A write to the queue: `attention:answer`, the scope that already
+            // lets this token resolve a question item.
+            ...(identity.scopes.includes("attention:answer")
+              ? {
+                  dismiss: async ({ ids, kinds, project, chatId }) => {
+                    if (project !== undefined && !projectVisible(project)) {
+                      throw new Error(`No project "${project}". Find ids with project_list.`);
+                    }
+                    const { removed, missing } = attention.dismiss({
+                      ...(ids ? { ids } : {}),
+                      ...(kinds ? { kinds } : {}),
+                      ...(chatId ? { chatId } : {}),
+                      ...(project ? { projectId: project } : {}),
+                      visible: (i) => projectVisible(i.projectId) && chatVisible(i.chatId),
+                    });
+                    // Same broadcast as the SPA's clear: every client holds these.
+                    for (const i of removed) deps.bus.publish({ type: "attention-resolve", id: i.id, chatId: i.chatId });
+                    return {
+                      dismissed: removed.map((i) => ({ id: i.id, kind: i.kind, chatId: i.chatId, summary: i.summary })),
+                      missing,
+                    };
+                  },
+                }
+              : {}),
           }
         : undefined,
     summary: summaries

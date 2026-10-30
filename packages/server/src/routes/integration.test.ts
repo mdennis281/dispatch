@@ -739,7 +739,7 @@ describe("the external MCP mount", () => {
       // `chats:create`: starting an agent is its own grant. `events_poll` is
       // unbound without a read scope any event type falls under.
       expect(names).toEqual(
-        externalManagerTools("chat").filter((n) => !["spawn_chat", "events_poll", "attention_list"].includes(n)).sort(),
+        externalManagerTools("chat").filter((n) => !["spawn_chat", "events_poll", "attention_list", "attention_dismiss"].includes(n)).sort(),
       );
       expect(names).toContain("chat_summarize");
       expect(names).toContain("chat_stop");
@@ -829,6 +829,62 @@ describe("the external MCP mount", () => {
       expect(text).not.toContain("att-b");
       const names = ((await rpc(origin, blind, "chat", "tools/list")).json as { result: { tools: { name: string }[] } }).result.tools.map((t) => t.name);
       expect(names).not.toContain("attention_list");
+    } finally {
+      await instance.close();
+    }
+  });
+
+  it("attention_dismiss clears retrospective items, blocking ones only by name, behind attention:answer", async () => {
+    const { instance } = await app();
+    const access = await owner(instance);
+    const a = await project(instance, access, "alpha", join(dirs[0]!, "a"));
+    const b = await project(instance, access, "beta", join(dirs[0]!, "b"));
+    const ca = (await chat(instance, access, a.id, "in a")).id;
+    const cb = (await chat(instance, access, b.id, "in b")).id;
+    const q = instance.services.attention;
+    q.add({ id: "done-a", chatId: ca, projectId: a.id, kind: "done", summary: "finished", createdAt: 1 });
+    q.add({ id: "ask-a", chatId: ca, projectId: a.id, kind: "question", summary: "which?", createdAt: 2 });
+    q.add({ id: "done-b", chatId: cb, projectId: b.id, kind: "done", summary: "theirs", createdAt: 3 });
+    const resolved: string[] = [];
+    instance.cm.bus.on("attention-resolve", (e) => resolved.push(e.id));
+    const { token } = await mint(instance, access, { name: "grok", scopes: ["tools:chat", "attention:read", "attention:answer"], projectIds: [a.id] });
+    const { token: reader } = await mint(instance, access, { name: "reader", scopes: ["tools:chat", "attention:read"] });
+    await instance.listen({ port: 0, host: "127.0.0.1" });
+    const origin = `http://127.0.0.1:${(instance.server.address() as AddressInfo).port}`;
+    const call = async (args: Record<string, unknown>) =>
+      ((await rpc(origin, token, "chat", "tools/call", { name: "attention_dismiss", arguments: args })).json as {
+        result: { content: { text: string }[]; isError?: boolean };
+      }).result;
+    try {
+      // The default sweep takes the done item in reach — not the question, not beta's.
+      expect((await call({})).content[0]!.text).toContain("Dismissed 1 item.");
+      expect(q.list().map((i) => i.id).sort()).toEqual(["ask-a", "done-b"]);
+      // Another project's item is "missing", not dismissed.
+      expect((await call({ ids: ["done-b"] })).content[0]!.text).toContain("Not in the queue (already resolved, or unknown): done-b");
+      // A question goes when named.
+      expect((await call({ ids: ["ask-a"] })).content[0]!.text).toContain("ask-a [question]");
+      expect((await call({ ids: ["x"], kinds: ["done"] })).isError).toBe(true);
+      // Named nothing: refused, and nothing was swept.
+      const blank = await call({ ids: [" "] });
+      expect(blank.isError).toBe(true);
+      expect(blank.content[0]!.text).toContain("names no item");
+      expect(resolved.sort()).toEqual(["ask-a", "done-a"]);
+      const names = ((await rpc(origin, reader, "chat", "tools/list")).json as { result: { tools: { name: string }[] } }).result.tools.map((t) => t.name);
+      expect(names).toContain("attention_list");
+      expect(names).not.toContain("attention_dismiss");
+
+      // REST twin.
+      const rest = await instance.inject({ method: "POST", url: "/api/integration/attention/dismiss", headers: bearer(token), payload: { ids: ["done-b"] } });
+      expect(rest.json()).toEqual({ dismissed: [], missing: ["done-b"] });
+      expect((await instance.inject({ method: "POST", url: "/api/integration/attention/dismiss", headers: bearer(token), payload: { ids: [] } })).statusCode).toBe(400);
+      expect(q.list().map((i) => i.id)).toContain("done-b");
+
+      // `attention:answer` alone offers dismiss without list — the REST split.
+      const { token: answerOnly } = await mint(instance, access, { name: "answerer", scopes: ["tools:chat", "attention:answer"] });
+      const answerNames = ((await rpc(origin, answerOnly, "chat", "tools/list")).json as { result: { tools: { name: string }[] } }).result.tools.map((t) => t.name);
+      expect(answerNames).toContain("attention_dismiss");
+      expect(answerNames).not.toContain("attention_list");
+      expect((await instance.inject({ method: "POST", url: "/api/integration/attention/dismiss", headers: bearer(reader), payload: {} })).statusCode).toBe(403);
     } finally {
       await instance.close();
     }
