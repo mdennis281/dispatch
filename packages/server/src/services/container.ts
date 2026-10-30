@@ -1189,6 +1189,7 @@ export function createServices(
         listProjects: () => store.listProjects(),
         listPersonas: (projectId) => personasFor(store, authored, projectId),
         events: eventFeed,
+        attention,
       },
       identity,
     ),

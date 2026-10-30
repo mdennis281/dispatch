@@ -166,6 +166,7 @@ import {
   type IntegrationEventType,
 } from "@dispatch/shared";
 import { classifyActivity } from "../metrics-activity.js";
+import { createAttentionTools, type ManagerMcpAttention } from "./attention-tools.js";
 import type { EventBus } from "../../bus.js";
 import type { ManagerMcpModes, ModeScope, WritableModeScope } from "./mode-editor.js";
 import { MODE_SCOPES } from "./mode-editor.js";
@@ -218,7 +219,7 @@ export interface ManagerToolDefinition<Shape extends z.ZodRawShape = z.ZodRawSha
   handler: (args: ManagerToolArgs<Shape>, extra: unknown) => Promise<CallToolResult>;
 }
 
-type ManagerToolArgs<Shape extends z.ZodRawShape> = {
+export type ManagerToolArgs<Shape extends z.ZodRawShape> = {
   [K in keyof Shape]: z.output<Shape[K]>;
 };
 
@@ -2224,6 +2225,8 @@ export interface ManagerMcpContext {
   personas?: ManagerMcpPersonas;
   /** The integration event feed (omitted → no `events_poll` tool). */
   events?: ManagerMcpEvents;
+  /** The global attention queue (omitted → no `attention_*` tools). See attention-tools.ts. */
+  attention?: ManagerMcpAttention;
   /** Project MCP-config editor for this session (omitted → no `mcp_*` tools). */
   mcpConfig?: ManagerMcpConfig;
   /** Instruction/skill/persona authoring for this session (omitted → no `config_*` tools). */
@@ -8192,6 +8195,7 @@ ${JSON.stringify(r)}`);
     chatStop,
     personaList,
     eventsPoll,
+    ...createAttentionTools(ctx),
     chatSetMode,
     chatSetPersona,
     projectInfo,
@@ -8278,6 +8282,7 @@ const TOOL_WIRE_NAME: Record<ManagerToolKey, ManagerToolName> = {
   chatStop: "chat_stop",
   personaList: "persona_list",
   eventsPoll: "events_poll",
+  attentionList: "attention_list",
   chatSetMode: "chat_set_mode",
   chatSetPersona: "chat_set_persona",
   projectInfo: "project_info",
@@ -8371,6 +8376,7 @@ const MANAGER_TOOL_GATE: Record<ManagerToolName, ManagerToolBinding | null> = {
   chat_stop: "control",
   persona_list: "personas",
   events_poll: "events",
+  attention_list: "attention",
   chat_set_mode: "messaging",
   chat_set_persona: "messaging",
   project_info: "inspect",
@@ -8405,6 +8411,7 @@ export type ManagerToolBinding =
   | "control"
   | "personas"
   | "events"
+  | "attention"
   | "secrets"
   | "issues";
 
@@ -8510,6 +8517,7 @@ function boundTools(ctx: ManagerMcpContext): Record<ManagerToolName, boolean> {
     chat_stop: Boolean(ctx.control),
     persona_list: Boolean(ctx.personas),
     events_poll: Boolean(ctx.events),
+    attention_list: Boolean(ctx.attention),
     // The posture writes ride the same binding: re-pointing a chat's mode or
     // persona is the same kind of reach into another chat as sending to it.
     chat_set_mode: Boolean(ctx.messaging),

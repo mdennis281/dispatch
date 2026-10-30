@@ -276,7 +276,7 @@ describe("the external verdicts", () => {
 
   it("exports the cross-chat reads and messaging, projects, memory and issues", () => {
     expect(externalManagerTools("chat").sort()).toEqual(
-      ["chat_ask", "chat_find", "chat_read", "chat_reply", "chat_send", "chat_state", "chat_stop", "chat_summarize", "events_poll", "persona_list", "spawn_chat", "wait_for_chat"].sort(),
+      ["attention_list", "chat_ask", "chat_find", "chat_read", "chat_reply", "chat_send", "chat_state", "chat_stop", "chat_summarize", "events_poll", "persona_list", "spawn_chat", "wait_for_chat"].sort(),
     );
     expect(externalManagerTools("project").sort()).toEqual(["project_info", "project_list"]);
     expect(externalManagerTools("config").sort()).toEqual(["config_list", "config_read", "mode_list"]);

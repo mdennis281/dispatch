@@ -546,6 +546,9 @@ describe("REST", () => {
     instance.services.attention.add({ id: "att2", chatId: "c1", kind: "question", summary: "which?", permissionRequestId: "req-gone", createdAt: 2 });
     const list = await instance.inject({ url: "/api/integration/attention", headers: bearer(token) });
     expect((list.json() as { items: { id: string }[] }).items.map((i) => i.id).sort()).toEqual(["att1", "att2"]);
+    // Enriched like attention_list: dismissibility and local time ride along.
+    expect((list.json() as { items: { id: string; dismissible: boolean; createdAtLocal: string }[] }).items
+      .map((i) => [i.id, i.dismissible, typeof i.createdAtLocal]).sort()).toEqual([["att1", true, "string"], ["att2", false, "string"]]);
     expect((await instance.inject({ method: "POST", url: "/api/integration/attention/att1/answer", headers: bearer(token), payload: { answer: "x" } })).statusCode).toBe(409);
     // A question whose request is no longer pending in the broker is a 409 too,
     // not a 200 that pretends.
@@ -678,7 +681,9 @@ describe("the external MCP mount", () => {
       // `spawn_chat` is external by the registry but unbound without
       // `chats:create`: starting an agent is its own grant. `events_poll` is
       // unbound without a read scope any event type falls under.
-      expect(names).toEqual(externalManagerTools("chat").filter((n) => n !== "spawn_chat" && n !== "events_poll").sort());
+      expect(names).toEqual(
+        externalManagerTools("chat").filter((n) => !["spawn_chat", "events_poll", "attention_list"].includes(n)).sort(),
+      );
       expect(names).toContain("chat_summarize");
       expect(names).toContain("chat_stop");
       expect(names).not.toContain("chat_set_mode");
@@ -738,6 +743,35 @@ describe("the external MCP mount", () => {
       expect(outside.isError).toBe(true);
       expect(outside.content[0]!.text).toContain(`alpha (${a.id})`);
       expect(outside.content[0]!.text).not.toContain("beta");
+    } finally {
+      await instance.close();
+    }
+  });
+
+  it("attention_list reads the queue inside the allowlist, behind attention:read", async () => {
+    const { instance } = await app();
+    const access = await owner(instance);
+    const a = await project(instance, access, "alpha", join(dirs[0]!, "a"));
+    const b = await project(instance, access, "beta", join(dirs[0]!, "b"));
+    const inA = await chat(instance, access, a.id, "Fix the build");
+    const inB = await chat(instance, access, b.id, "Secret work");
+    instance.services.attention.add({ id: "att-a", chatId: inA.id, projectId: a.id, kind: "review", summary: "CI failed", prNumber: 9, createdAt: 2 });
+    instance.services.attention.add({ id: "att-b", chatId: inB.id, projectId: b.id, kind: "done", summary: "finished", createdAt: 1 });
+    const { token } = await mint(instance, access, { name: "grok", scopes: ["tools:chat", "attention:read"], projectIds: [a.id] });
+    const { token: blind } = await mint(instance, access, { name: "blind", scopes: ["tools:chat", "chats:read"] });
+    await instance.listen({ port: 0, host: "127.0.0.1" });
+    const origin = `http://127.0.0.1:${(instance.server.address() as AddressInfo).port}`;
+    try {
+      const res = ((await rpc(origin, token, "chat", "tools/call", { name: "attention_list", arguments: {} })).json as {
+        result: { content: { text: string }[]; isError?: boolean };
+      }).result;
+      expect(res.isError ?? false, res.content[0]!.text).toBe(false);
+      const text = res.content[0]!.text;
+      expect(text).toContain(`att-a [review]`);
+      expect(text).toContain(`"Fix the build" — CI failed (PR #9)`);
+      expect(text).not.toContain("att-b");
+      const names = ((await rpc(origin, blind, "chat", "tools/list")).json as { result: { tools: { name: string }[] } }).result.tools.map((t) => t.name);
+      expect(names).not.toContain("attention_list");
     } finally {
       await instance.close();
     }
