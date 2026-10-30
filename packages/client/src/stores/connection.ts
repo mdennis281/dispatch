@@ -137,6 +137,18 @@ interface ConnectionStore {
    * rather than as silence.
    */
   hydrating: boolean;
+  /**
+   * Consecutive failed snapshots since the last one that landed, and the last
+   * error. The app shell waits on `hydrated` (App.tsx), so a server that
+   * handshakes but keeps failing one core list would otherwise hold a boot on
+   * a logo forever with nothing to say why — `ConnectingScreen` stands down
+   * the moment `hello` lands. Past a few of these the loading screen shows the
+   * error and offers a way through.
+   */
+  hydrateFailures: number;
+  hydrateError?: string;
+  /** The user chose to go into the shell without a snapshot. One-way. */
+  hydrateSkipped: boolean;
   setState: (s: ConnState) => void;
   noteAttempt: () => void;
   setNextRetry: (at?: number) => void;
@@ -146,6 +158,8 @@ interface ConnectionStore {
   setOnline: (online: boolean) => void;
   noteHydrated: () => void;
   noteHydrating: (hydrating: boolean) => void;
+  noteHydrateFailed: (error: string) => void;
+  skipHydrateWait: () => void;
   noteMockSeeded: () => void;
   noteLiveStarted: () => void;
   noteLiveStopped: () => void;
@@ -171,6 +185,8 @@ export const useConnection = create<ConnectionStore>((set) => ({
   online: typeof navigator === "undefined" ? true : navigator.onLine,
   hydrated: false,
   hydrating: false,
+  hydrateFailures: 0,
+  hydrateSkipped: false,
   mockSeeded: false,
   liveStarted: false,
   stopped: false,
@@ -192,8 +208,11 @@ export const useConnection = create<ConnectionStore>((set) => ({
     })),
   setProbe: (probe) => set({ probe }),
   setOnline: (online) => set({ online }),
-  noteHydrated: () => set({ hydrated: true }),
+  noteHydrated: () => set({ hydrated: true, hydrateFailures: 0, hydrateError: undefined }),
   noteHydrating: (hydrating) => set({ hydrating }),
+  noteHydrateFailed: (hydrateError) =>
+    set((p) => ({ hydrateFailures: p.hydrateFailures + 1, hydrateError })),
+  skipHydrateWait: () => set({ hydrateSkipped: true }),
   noteMockSeeded: () => set({ mockSeeded: true }),
   noteLiveStarted: () => set({ liveStarted: true }),
   noteLiveStopped: () => set({ liveStarted: false }),

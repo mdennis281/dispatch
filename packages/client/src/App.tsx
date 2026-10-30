@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { startSystemPolling } from "./stores/resources.js";
-import { MessageSquareDashed } from "lucide-react";
+import { MessageSquareDashed, RotateCw } from "lucide-react";
 import { TopBar } from "./components/layout/TopBar.js";
 import { Sidebar } from "./components/layout/Sidebar.js";
 import { RightPanel } from "./components/layout/RightPanel.js";
@@ -28,6 +28,13 @@ import { ShutdownScreen } from "./components/ShutdownScreen.js";
 import { RestartingScreen } from "./components/RestartingScreen.js";
 import { UpdatingScreen } from "./components/update/UpdatingScreen.js";
 import { ConnectingScreen } from "./components/connection/ConnectingScreen.js";
+import { BootScreen } from "./components/brand/BootScreen.js";
+import { useConnection } from "./stores/connection.js";
+import { hydrateUntilLanded } from "./stores/index.js";
+import { Button } from "./components/ui/Button.js";
+
+/** ~1 + 2 + 4s of backoff: long enough that a busy server is not reported as a fault. */
+const HYDRATE_FAILURES_BEFORE_EXPLAINING = 3;
 import { useChats } from "./stores/chats.js";
 import { useProjects, useActiveProject } from "./stores/projects.js";
 import { visibleChat } from "./stores/navigation.js";
@@ -192,6 +199,22 @@ export default function App() {
   // only thing to decide is whether it may act as them.
   const consentNonce = useOAuthConsent((s) => s.nonce);
 
+  // Has the shell ever had its rows? The REST snapshot lands a full round trip
+  // after `/api/setup` answers — and on a loaded machine, many seconds after —
+  // so rendering the shell on `setupPending === false` alone put "No project /
+  // No chat selected" on screen as if that were the answer, until the sidebar
+  // filled in around it. The splash waits for this too, but it is capped, and a
+  // PWA opened before its server was up lifts it long before any of this; see
+  // components/brand/BootScreen.tsx. One-way, so a reconnect never lands here.
+  const shellReady = useConnection((s) => s.hydrated || s.mockSeeded || s.hydrateSkipped);
+  // …but a server that handshakes and then keeps failing a core list would hold
+  // that gate shut forever, behind a logo, with `ConnectingScreen` stood down
+  // because `hello` landed. Before the gate that state was at least an empty
+  // shell you could reach Settings from; so past a few failures, say what is
+  // wrong and offer the way through. Retries keep running underneath either way.
+  const hydrateFailures = useConnection((s) => s.hydrateFailures);
+  const hydrateError = useConnection((s) => s.hydrateError);
+
   return (
     <>
       {/* OUTSIDE the auth gate, deliberately. An update restarts the server, so
@@ -239,9 +262,23 @@ export default function App() {
       {consentNonce ? (
         <OAuthConsent nonce={consentNonce} />
       ) : setupPending === null ? (
-        <div className="grid h-screen place-items-center bg-app text-sm text-muted">Starting Dispatch…</div>
+        <BootScreen />
       ) : setupPending ? (
         <SetupWizard />
+      ) : !shellReady && hydrateFailures >= HYDRATE_FAILURES_BEFORE_EXPLAINING ? (
+        <BootScreen caption="Couldn't load projects and chats — still retrying.">
+          {hydrateError && (
+            <p className="max-w-[440px] text-center text-xs text-faint">{hydrateError}</p>
+          )}
+          <div className="flex items-center gap-2">
+            <Button variant="primary" leftIcon={<RotateCw />} onClick={() => void hydrateUntilLanded()}>
+              Retry now
+            </Button>
+            <Button onClick={() => useConnection.getState().skipHydrateWait()}>Continue anyway</Button>
+          </div>
+        </BootScreen>
+      ) : !shellReady ? (
+        <BootScreen caption="Loading projects and chats…" />
       ) : (
       <>
       {/* `100dvh`, not `100vh`. On mobile Safari `vh` is pinned to the LARGEST

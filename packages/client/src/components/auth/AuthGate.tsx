@@ -6,6 +6,7 @@ import { Button } from "../ui/Button.js";
 import { Field, InlineError, TextInput } from "../sidebar/Modal.js";
 import { authPost, useAuth } from "../../stores/auth.js";
 import { startLiveApp } from "../../lib/live.js";
+import { BootScreen } from "../brand/BootScreen.js";
 
 function enter(session: AuthSessionResponse): void {
   useAuth.getState().applySession(session);
@@ -87,7 +88,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
   const ready = useAuth((state) => state.ready);
   const status = useAuth((state) => state.status);
   const user = useAuth((state) => state.user);
-  if (!ready || !status) return <div className="grid h-screen place-items-center bg-app text-sm text-muted">Starting Dispatch…</div>;
+  if (!ready || !status) return <BootScreen />;
   if (status.enabled && !user) return <div className="grid min-h-screen place-items-center bg-app p-5"><Login /></div>;
   return <>{children}</>;
 }

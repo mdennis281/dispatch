@@ -133,6 +133,23 @@ describe("capExtension", () => {
     expect(capExtension(BOOT_SPLASH_HARD_MAX_MS, 0)).toBeNull();
     expect(capExtension(BOOT_SPLASH_HARD_MAX_MS + 5_000, 0)).toBeNull();
   });
+
+  it("does not call a slow snapshot a stall — the server answered the hello", () => {
+    // The busy-box boot: socket open, snapshot outstanding for well past the
+    // stall window. Lifting here uncovered "No project / No chat selected".
+    expect(capExtension(BOOT_SPLASH_MAX_MS, BOOT_SPLASH_STALL_MS * 2, true)).toBe(
+      BOOT_SPLASH_STALL_MS,
+    );
+  });
+
+  it("re-arms an in-flight wait one window at a time, so a failed snapshot is noticed", () => {
+    expect(capExtension(BOOT_SPLASH_MAX_MS, 60_000, true)).toBeLessThanOrEqual(BOOT_SPLASH_STALL_MS);
+  });
+
+  it("still lifts at the hard ceiling with a snapshot outstanding", () => {
+    expect(capExtension(BOOT_SPLASH_HARD_MAX_MS - 400, 60_000, true)).toBe(400);
+    expect(capExtension(BOOT_SPLASH_HARD_MAX_MS, 60_000, true)).toBeNull();
+  });
 });
 
 /**
