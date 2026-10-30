@@ -504,7 +504,7 @@ let hydrateGeneration = 0;
  */
 const HYDRATE_RETRY_BASE_MS = 1_000;
 const HYDRATE_RETRY_MAX_MS = 10_000;
-async function hydrateUntilLanded(
+export async function hydrateUntilLanded(
   attempt = 0,
   generation = ++hydrateGeneration,
 ): Promise<void> {
@@ -550,7 +550,8 @@ export async function hydrateFromServer(): Promise<boolean> {
       // the PRs tab can render on open with no fetch of its own.
       api.prs.list().catch(() => []),
     ]);
-  } catch {
+  } catch (err) {
+    useConnection.getState().noteHydrateFailed(err instanceof Error ? err.message : String(err));
     useConnection.getState().noteHydrating(false);
     return false;
   }

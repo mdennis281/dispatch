@@ -21,12 +21,23 @@
  * a boot somebody is now watching, and that person should be told what it is
  * waiting for.
  */
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { BootMark } from "./BootMark.js";
 
 const CAPTION_DELAY_MS = 1_500;
 
-export function BootScreen({ caption = "Starting Dispatch…" }: { caption?: string }) {
+/**
+ * `children` render under the caption with no delay — they are for a boot that
+ * has something to SAY (a failure, a way through), not a boot that is merely
+ * taking its time.
+ */
+export function BootScreen({
+  caption = "Starting Dispatch…",
+  children,
+}: {
+  caption?: string;
+  children?: ReactNode;
+}) {
   const [showCaption, setShowCaption] = useState(false);
   useEffect(() => {
     const timer = setTimeout(() => setShowCaption(true), CAPTION_DELAY_MS);
@@ -41,10 +52,11 @@ export function BootScreen({ caption = "Starting Dispatch…" }: { caption?: str
     >
       <BootMark />
       <p
-        className={`text-sm text-muted transition-opacity duration-300 ${showCaption ? "opacity-100" : "opacity-0"}`}
+        className={`text-sm text-muted transition-opacity duration-300 ${showCaption || children ? "opacity-100" : "opacity-0"}`}
       >
         {caption}
       </p>
+      {children}
     </div>
   );
 }
