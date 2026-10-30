@@ -28,7 +28,7 @@
  *     burning tokens with nobody watching. Subagents structurally cannot do
  *     this, so it is a genuinely new failure mode and it gets a real guard.
  */
-import { chatPrStatuses } from "@dispatch/shared";
+import { chatPrStatuses, prRecordKey } from "@dispatch/shared";
 import type { Chat, ChannelSender, ChatPrStatus, ChatStatus, ContextUsage, PeerSender, PrRecord } from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
 
@@ -235,8 +235,13 @@ export interface ChatMessengerOpts {
   getContextUsage?: (chatId: string) => Promise<ContextUsage | null>;
   /** Is this chat blocked on a human right now (open permission/question)? */
   isBlockedOnHuman?: (chatId: string) => boolean;
-  /** The PR registry's rows, by `repo#number` — what `state` reports CI and review from. */
-  listPrRecords?: () => Promise<PrRecord[]>;
+  /**
+   * One PR registry row by `repo#number` — what `state` reports CI and review
+   * from. By key, not a table scan: `chat_state` is the cheap poll, and the
+   * registry keeps rows long after their PRs close, so a scan grows with all
+   * PR history rather than with this chat's own PRs.
+   */
+  getPrRecord?: (key: string) => Promise<PrRecord | null>;
   deps?: ChatMessengerDeps;
 }
 
@@ -306,7 +311,7 @@ export class ChatMessenger {
   private readonly sendFn: ChatMessengerOpts["send"];
   private readonly getContextUsage: ChatMessengerOpts["getContextUsage"];
   private readonly isBlockedOnHuman: (chatId: string) => boolean;
-  private readonly listPrRecords?: () => Promise<PrRecord[]>;
+  private readonly getPrRecord?: (key: string) => Promise<PrRecord | null>;
   private readonly now: () => number;
   private readonly genId: () => string;
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
@@ -363,7 +368,7 @@ export class ChatMessenger {
     this.sendFn = opts.send;
     this.getContextUsage = opts.getContextUsage;
     this.isBlockedOnHuman = opts.isBlockedOnHuman ?? (() => false);
-    this.listPrRecords = opts.listPrRecords;
+    this.getPrRecord = opts.getPrRecord;
     this.now = opts.deps?.now ?? (() => Date.now());
     this.genId =
       opts.deps?.genId ?? (() => `ask_${Math.random().toString(36).slice(2, 11)}`);
@@ -597,9 +602,15 @@ export class ChatMessenger {
   /** The chat's refs joined to the registry; refs alone when it can't be read. */
   private async prStatuses(chat: Chat): Promise<ChatPrStatus[]> {
     if (!chat.prs?.length) return [];
-    const records = (await this.listPrRecords?.().catch(() => [])) ?? [];
-    const byKey = new Map(records.map((r) => [r.key, r]));
-    return chatPrStatuses(chat.prs, (key) => byKey.get(key));
+    const rows = new Map<string, PrRecord | null>();
+    await Promise.all(
+      chat.prs.map(async (ref) => {
+        if (!ref.repo) return;
+        const key = prRecordKey(ref.repo, ref.number);
+        rows.set(key, (await this.getPrRecord?.(key).catch(() => null)) ?? null);
+      }),
+    );
+    return chatPrStatuses(chat.prs, (key) => rows.get(key));
   }
 
   /**

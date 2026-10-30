@@ -7141,7 +7141,10 @@ ${look}` : "")
       unmerged: z
         .boolean()
         .optional()
-        .describe("true: only chats with at least one PR still open (not merged or closed). Each hit lists its PRs' state and CI."),
+        .describe(
+          "true: only chats with at least one PR not seen to merge or close (state open, or unknown before the " +
+            "registry has polled it). Each hit lists its PRs' state and CI.",
+        ),
       archived: z.boolean().optional().describe("Include archived chats (default false)."),
       kinds: z
         .array(z.string())

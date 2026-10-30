@@ -1141,7 +1141,7 @@ export function createServices(
       // a question is open in front of the human — the one thing a project
       // manager most needs to know it cannot fix by waiting.
       isBlockedOnHuman: (chatId) => broker.getStatus(chatId) === "awaiting-input",
-      listPrRecords: () => store.listPrRecords(),
+      getPrRecord: (key) => store.getPrRecord(key),
     });
   broker.messenger = chatMessenger;
   // The external MCP mount: a category server per integration request, built

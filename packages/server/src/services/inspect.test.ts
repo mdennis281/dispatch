@@ -742,6 +742,8 @@ describe("instance: stable", () => {
 
     const result = await svc.findChats({ instance: "stable", query: "production only" });
     expect(result.chats.map((c) => c.id)).toEqual(["prod-chat"]);
+    // No registry over there: `unmerged` would guess, so it refuses.
+    await expect(svc.findChats({ instance: "stable", unmerged: true })).rejects.toThrow(FindFilterError);
     // …and the caller's own store is untouched by that.
     expect((await svc.findChats({ query: "production only" })).chats).toEqual([]);
     otherStore.close();

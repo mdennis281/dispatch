@@ -739,9 +739,18 @@ export class InspectService {
     // and opening that from here would hold the file for this process's
     // lifetime — the handle that stops the upgrader moving `data/` aside on
     // Windows. A foreign read falls back to the refs' own `state`.
-    const prRecords = new Map(
-      (store === this.store ? await store.listPrRecords().catch(() => []) : []).map((r) => [r.key, r]),
-    );
+    const foreign = store !== this.store;
+    // Without the registry a ref's state is only what that chat's own watcher
+    // stamped — a PR merged by a human or another chat stays unset and reads
+    // `unknown`, which `isUnmerged` counts as open. Filtering on that would
+    // report merged PRs as unmerged, so the filter refuses rather than guesses.
+    if (q.unmerged && foreign) {
+      throw new FindFilterError(
+        "unmerged needs the PR registry of the instance being searched, which is not readable for instance: 'stable' " +
+          "from here. Search without `instance`, or drop `unmerged` and read each chat's prStatus.",
+      );
+    }
+    const prRecords = new Map((foreign ? [] : await store.listPrRecords().catch(() => [])).map((r) => [r.key, r]));
     const summarize = (c: Chat): ChatSummary => this.toSummary(c, nameById.get(c.projectId), prRecords);
 
     let projectId: string | undefined;

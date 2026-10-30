@@ -83,7 +83,7 @@ function harness(
       delivered.push({ chatId, text, ...(peer ? { peer } : {}), ...(channel ? { channel } : {}) });
     },
     getContextUsage: async () => opts.contextUsage ?? null,
-    listPrRecords: async () => opts.prRecords ?? [],
+    getPrRecord: async (key) => opts.prRecords?.find((r) => r.key === key) ?? null,
     deps: {
       now: () => now,
       genId: () => `ask_${nextAsk++}`,
