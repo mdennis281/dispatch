@@ -38,6 +38,7 @@ import { SummaryRateLimitError } from "../services/chat-summary.js";
 import { FindCursorError } from "../services/inspect.js";
 import { personasFor } from "../services/personas.js";
 import { EventCursorError, eventReachFor } from "../services/event-feed.js";
+import { buildAttentionEntries } from "../services/mcp/attention-tools.js";
 import { ProviderUnavailableError } from "../harness/index.js";
 import {
   ScopeFailure,
@@ -360,7 +361,15 @@ export function registerIntegrationRoutes(app: FastifyInstance): void {
   app.get("/api/integration/attention", (req, reply) =>
     withScope(reply, async () => {
       requireScope(req, "attention:read");
-      return { items: attention.list().filter((i) => projectAllowed(req, i.projectId)) };
+      // Enriched exactly as `attention_list` is — question text and options,
+      // chat title, local time — so a bot can answer without a second call.
+      const items = attention.list().filter((i) => projectAllowed(req, i.projectId));
+      return {
+        items: await buildAttentionEntries(items, {
+          pending: broker.pendingPermissionSnapshot(),
+          chatTitle: async (id) => (await store.getChat(id).catch(() => null))?.title,
+        }),
+      };
     }),
   );
 

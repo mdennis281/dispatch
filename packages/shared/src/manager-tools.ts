@@ -138,6 +138,9 @@ export const MANAGER_TOOL_CATEGORY = {
      In `chat` rather than a category of its own because the connector that
      needs it most holds this mount already, and a poll is a read about chats. */
   events_poll: "chat",
+  /* …and the global attention queue, read from outside: the first thing a
+     connector is asked is "what's waiting on me?". */
+  attention_list: "chat",
   /* …and the two POSTURE writes: re-pointing a chat at a mode or a persona.
      They ride the same `messaging` binding as `chat_send`, because both are
      the same kind of act — reaching into another chat and changing what it
@@ -267,6 +270,8 @@ export const MANAGER_TOOL_EXTERNAL: Record<ManagerToolName, boolean> = {
   persona_list: true,
   /* …and polling the derived event feed — a read, scoped per event type. */
   events_poll: true,
+  /* …and reading the attention queue, behind `attention:read`. */
+  attention_list: true,
   /* …but re-posturing a chat is a write into its configuration, not a message. */
   chat_set_mode: false,
   chat_set_persona: false,

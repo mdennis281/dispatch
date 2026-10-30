@@ -1043,7 +1043,7 @@ cross-checked against the factory at compile time like the categories. The
 rule for the flag: a tool that acts on the calling chat's own session, shell or
 tree, or that puts a card in front of the human on the calling chat's behalf,
 is **not** external. So `chat_find`, `chat_read`, `chat_send`, `chat_ask`,
-`chat_reply`, `chat_state`, `chat_summarize`, `chat_stop`, `persona_list`, `events_poll`, `wait_for_chat`, `project_info`, `project_list`, the
+`chat_reply`, `chat_state`, `chat_summarize`, `chat_stop`, `persona_list`, `events_poll`, `attention_list`, `wait_for_chat`, `project_info`, `project_list`, the
 memory tools, the issue tools, `mode_list`, `config_list` and `config_read` are
 external; `wait`, `context_usage`, `compact_context`, the workspace tools, the
 PR tools, the confirm tools, the secrets tools, `chat_set_mode`,
@@ -1063,7 +1063,12 @@ interrupts the chat's running turn, and with `archive: true` also releases its
 session and archives it — allowed only for a chat that token started, because
 an archived chat leaves the sidebar and the SPA has no control to bring it back.
 `events_poll` reads the integration event feed (`EventFeedService`, below) and
-binds only for a token holding a read scope some event type falls under. Memory and issue tools bind
+binds only for a token holding a read scope some event type falls under.
+`attention_list` (binding and tools in `mcp/attention-tools.ts`) binds for
+`attention:read`; it and `GET attention` return the same enriched entries
+(`buildAttentionEntries`): chat title, `createdAtLocal`, `dismissible`, and for
+a pending question its `questions[]` (text, header, multiSelect, option labels)
+read off the broker's permission snapshot. Memory and issue tools bind
 only when the token names exactly one project. A category is offered only when
 the token holds `tools:<category>`; the mount is authenticated by the gate (it
 does NOT ride the per-chat bridge's gate exemption), and the external context

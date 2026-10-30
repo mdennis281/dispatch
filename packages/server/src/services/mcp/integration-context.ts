@@ -63,6 +63,8 @@ import type { ChannelChatService } from "../channel-chats.js";
 import { ChannelChatRefusal } from "../channel-chats.js";
 import type { ChatSummaryService } from "../chat-summary.js";
 import { eventReachFor, type EventFeedService } from "../event-feed.js";
+import type { AttentionQueue } from "../attention.js";
+import { buildAttentionEntries } from "./attention-tools.js";
 import { BUILTIN_MODE_PERMISSION } from "../session-broker.js";
 import { realProjects } from "@dispatch/shared";
 import { createAuthoringEditor } from "./authoring-editor.js";
@@ -72,7 +74,8 @@ import { externalToolPolicy, type ManagerMcpBroker, type ManagerMcpContext } fro
 export interface IntegrationContextDeps {
   bus: EventBus;
   store: Pick<Store, "getChat" | "listChats"> & Parameters<typeof createModeEditor>[0]["store"];
-  broker: Pick<SessionBroker, "has" | "getStatus" | "getContextUsage">;
+  broker: Pick<SessionBroker, "has" | "getStatus" | "getContextUsage"> &
+    Partial<Pick<SessionBroker, "pendingPermissionSnapshot">>;
   inspect?: InspectService;
   messenger?: ChatMessenger;
   memory?: MemoryService;
@@ -88,6 +91,8 @@ export interface IntegrationContextDeps {
   listPersonas?: (projectId?: string) => Promise<{ id: string; name: string; scope: string }[]>;
   /** The integration event feed behind `events_poll`. */
   events?: Pick<EventFeedService, "poll">;
+  /** The global attention queue behind the `attention_*` tools. */
+  attention?: Pick<AttentionQueue, "list">;
   now?: () => number;
 }
 
@@ -138,7 +143,7 @@ export async function createIntegrationContext(
   deps: IntegrationContextDeps,
   identity: IntegrationIdentity,
 ): Promise<ManagerMcpContext> {
-  const { memory, memoryHistory, issues, inspect, messenger, authored, store, channelChats, summaries, getProject, listProjects, listPersonas, events } = deps;
+  const { memory, memoryHistory, issues, inspect, messenger, authored, store, channelChats, summaries, getProject, listProjects, listPersonas, events, attention } = deps;
   const projectId = identity.projectIds?.length === 1 ? identity.projectIds[0] : undefined;
   const allow: Allowlist | null = identity.projectIds?.length
     ? {
@@ -333,6 +338,27 @@ export async function createIntegrationContext(
           },
         }
       : undefined,
+    // `attention:read`, the same scope `GET /api/integration/attention` asks.
+    attention:
+      attention && identity.scopes.includes("attention:read")
+        ? {
+            list: async ({ kinds, project, chatId }) => {
+              if (project !== undefined && !projectVisible(project)) {
+                throw new Error(`No project "${project}". Find ids with project_list.`);
+              }
+              const items = attention
+                .list()
+                .filter((i) => projectVisible(i.projectId) && chatVisible(i.chatId))
+                .filter((i) => !kinds?.length || kinds.includes(i.kind))
+                .filter((i) => !project || i.projectId === project)
+                .filter((i) => !chatId || i.chatId === chatId);
+              return buildAttentionEntries(items, {
+                pending: deps.broker.pendingPermissionSnapshot?.() ?? [],
+                chatTitle: async (id) => (await store.getChat(id).catch(() => null))?.title,
+              });
+            },
+          }
+        : undefined,
     summary: summaries
       ? {
           summarize: async (chatId, focus) => {
