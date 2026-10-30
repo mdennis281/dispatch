@@ -90,6 +90,7 @@ describe("mcp-catalog — builder", () => {
         personas: true,
         events: true,
         chatTree: true,
+        archive: true,
         attention: true,
         prewarm: true,
         exemptions: true,

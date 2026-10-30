@@ -1043,7 +1043,7 @@ cross-checked against the factory at compile time like the categories. The
 rule for the flag: a tool that acts on the calling chat's own session, shell or
 tree, or that puts a card in front of the human on the calling chat's behalf,
 is **not** external. So `chat_find`, `chat_read`, `chat_send`, `chat_ask`,
-`chat_reply`, `chat_state`, `chat_summarize`, `chat_stop`, `persona_list`, `events_poll`, `chat_tree`, `attention_list`, `attention_dismiss`, `attention_answer`, `wait_for_chat`, `project_info`, `project_list`, the
+`chat_reply`, `chat_state`, `chat_summarize`, `chat_stop`, `chat_archive`, `persona_list`, `events_poll`, `chat_tree`, `attention_list`, `attention_dismiss`, `attention_answer`, `wait_for_chat`, `project_info`, `project_list`, the
 memory tools, the issue tools, `mode_list`, `config_list` and `config_read` are
 external; `wait`, `context_usage`, `compact_context`, the workspace tools, the
 PR tools, the confirm tools, the secrets tools, `chat_set_mode`,
@@ -1062,6 +1062,16 @@ is already in reach via its "interrupt" delivery): it
 interrupts the chat's running turn, and with `archive: true` also releases its
 session and archives it — allowed only for a chat that token started, because
 an archived chat leaves the sidebar and the SPA has no control to bring it back.
+`chat_archive { chatId, archived }` (`mcp/chat-archive-tool.ts`, beside
+`chat_stop`) flips ONLY the flag — no interrupt, no release
+(`ChannelChatService.setArchived`). Archiving keeps that same own-chats rule;
+restoring is allowed for any visible chat, since putting a chat back in front of
+the owner is not the harm the rule guards. `chat_state` reports `archived`, and
+its times (like `chat_find`'s) are zone-labelled local time (`formatLocalTime`,
+e.g. `2026-10-29 14:03 CDT`) rather than unlabelled local in one and UTC ISO in
+the other. `chat_read { fullText: true }` prints user and assistant messages
+whole, where every row used to be cut to a 600-character preview even under
+`full: true`; tool payloads stay clipped.
 `events_poll` reads the integration event feed (`EventFeedService`, below) and
 binds only for a token holding a read scope some event type falls under.
 `chat_tree` (`services/chat-tree.ts`) walks the sidebar's own two parent edges —
@@ -1095,11 +1105,12 @@ sprinkled over the SPA's routes:
 | route | scope |
 |---|---|
 | `GET chats?projectId&status&blockedOnHuman&unmerged&since&before&q&limit&archived&cursor` (each chat's `prStatus[]`: state, CI, review — `shared/chat-pr-status.ts`) (→ `nextCursor` when the scan budget stops it; an unknown `status`, a bad boolean or `before ≤ since` is a 400 naming the valid values) | `chats:read` |
-| `GET chats/:id` (digest) · `GET chats/:id/messages?kinds&before&after&limit` | `chats:read` |
+| `GET chats/:id` (digest) · `GET chats/:id/messages?kinds&before&after&limit&fullText` | `chats:read` |
 | `POST chats/:id/messages { text, delivery?, sender? }` | `chats:write` |
 | `POST chats { projectId, text, title?, modeId?, provider?, model?, effort? }` → 201 | `chats:create` |
 | `GET chats/:id/summary?focus` (429 + `Retry-After` past the limit) | `chats:read` |
 | `POST chats/:id/stop { archive? }` (archive: own chats only, else 403) | `chats:write` |
+| `POST chats/:id/archive { archived }` — flag only, no interrupt (archive: own chats only, else 403; restore: any) | `chats:write` |
 | `GET attention` · `POST attention/:id/answer { optionId \| answer \| answers \| decline }` | `attention:read` / `attention:answer` |
 | `POST attention/dismiss { ids? \| kinds?, chatId?, projectId? }` → `{ dismissed, missing }` | `attention:answer` |
 | `GET projects` | `projects:read` |

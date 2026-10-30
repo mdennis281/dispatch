@@ -43,10 +43,15 @@ function partsFor(ms: number, timeZone: string, zoneName: "short" | "longOffset"
   return out;
 }
 
-/** `2026-10-29 14:03:12 CDT` — the zone abbreviation is part of the string. */
-export function formatLocalTime(ms: number, timeZone = serverTimeZone()): string {
+/**
+ * `2026-10-29 14:03:12 CDT` — the zone abbreviation is part of the string.
+ * `seconds: false` gives `2026-10-29 14:03 CDT`, for listings where a second
+ * is noise.
+ */
+export function formatLocalTime(ms: number, timeZone = serverTimeZone(), opts: { seconds?: boolean } = {}): string {
   const p = partsFor(ms, timeZone, "short");
-  return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}:${p.second} ${p.timeZoneName}`;
+  const sec = opts.seconds === false ? "" : `:${p.second}`;
+  return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}${sec} ${p.timeZoneName}`;
 }
 
 /** `2026-10-29T14:03:12-05:00` — ISO 8601 with the zone's offset, never `Z`-shifted. */

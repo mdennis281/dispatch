@@ -55,11 +55,12 @@ external tool are **offered** (`OFFERABLE_TOOL_SCOPES` in `@dispatch/shared`; to
 |---|---|
 | `GET chats?projectId&status&blockedOnHuman&unmerged&since&before&q&limit&archived&cursor` → `{ chats, truncated, unscanned, nextCursor? }` — each chat carries `prStatus[]` (`state` open/merged/closed/unknown — `unknown` until the registry has seen the PR; `ci` none/running/failing/passing, `review`, `unresolvedThreads`); `unmerged=true` keeps chats with a PR not seen to merge or close (refused for `instance: stable`); `blockedOnHuman=true` is chats a permission prompt or question holds (`awaiting-input`); an unknown status is a 400 that lists the valid ones | `chats:read` |
 | `GET chats/:id` (digest) | `chats:read` |
-| `GET chats/:id/messages?kinds&before&after&limit` | `chats:read` |
+| `GET chats/:id/messages?kinds&before&after&limit&fullText` | `chats:read` |
 | `POST chats/:id/messages { text, delivery?: "queue"\|"interrupt", sender? }` | `chats:write` |
 | `POST chats { projectId, text, title?, modeId?, provider?, model?, effort? }` → 201 | `chats:create` |
 | `GET chats/:id/summary?focus` (cached; 429 + `Retry-After` past 30/h) | `chats:read` |
 | `POST chats/:id/stop { archive? }` → `{ interrupted, archived }` | `chats:write` (archive: only a chat this token started, else 403) |
+| `POST chats/:id/archive { archived }` → `{ archived, changed }` (no interrupt) | `chats:write` (archive: own chats only, else 403; restore: any) |
 | `GET attention` → items with `chatTitle`, `createdAtLocal`, `dismissible`, and `questions[]` (text + option labels) on a pending question | `attention:read` |
 | `POST attention/:id/answer { optionId? \| answer? \| answers? \| decline: true }` | `attention:answer` (question items only) |
 | `POST attention/dismiss { ids? \| kinds?, chatId?, projectId? }` → `{ dismissed, missing }` — named ids whatever their kind; a sweep defaults to idle/done/review | `attention:answer` |
@@ -79,7 +80,7 @@ The same category servers a session gets, built with an *external* context that 
 self chat. A category is offered only with `tools:<category>`; one with nothing
 external is a 404. The external set:
 
-`chat_find chat_read chat_send chat_ask chat_reply chat_state chat_summarize chat_stop persona_list events_poll chat_tree attention_list attention_dismiss attention_answer wait_for_chat` ·
+`chat_find chat_read chat_send chat_ask chat_reply chat_state chat_summarize chat_stop chat_archive persona_list events_poll chat_tree attention_list attention_dismiss attention_answer wait_for_chat` ·
 `project_info project_list` · `remember recall forget memory_list memory_search
 memory_history memory_similar` · `issue_list issue_read issue_create issue_comment
 issue_update` · `config_list config_read mode_list`.
@@ -91,8 +92,10 @@ consent): the chat runs in the project's default mode, a bypass mode is refused,
 its brief is attributed to the token. `chat_summarize` is cached per chat and
 rate-limited per caller. `chat_stop` rides with `chat_send`; it interrupts the running
 turn (the Stop button), and `archive: true` — only for a chat this token started —
-also releases the session and archives it.
-rate-limited per caller. `persona_list { project? }` returns the personas a chat
+also releases the session and archives it. `chat_archive { chatId, archived }` flips only
+the flag, never interrupting: archive only a chat this token started, restore any visible
+one. `chat_read { fullText: true }` prints user/assistant text whole (tool payloads stay
+clipped); `chat_state` and `chat_find` print zone-labelled local times. `persona_list { project? }` returns the personas a chat
 started in that project can run as — `id` (spawn_chat's `personaId`) and display
 `name`, the project's own included. `events_poll { cursor?, since?, limit?, types?,
 project?, chatId? }` pages the event feed (see `GET events` above); it is offered only

@@ -21,7 +21,7 @@ import type {
   ReadChatResult,
 } from "./inspect.js";
 import { rowLabel, rowText } from "./inspect.js";
-import { isUnmerged } from "@dispatch/shared";
+import { formatLocalTime, isUnmerged } from "@dispatch/shared";
 
 /** Bytes → a short human size. */
 function size(bytes: number | undefined): string {
@@ -36,15 +36,16 @@ function size(bytes: number | undefined): string {
   return `${n < 10 && i > 0 ? n.toFixed(1) : Math.round(n)}${units[i]}`;
 }
 
-/** Epoch ms → `2026-08-16 09:31`, or `?` when absent. */
+/**
+ * Epoch ms → `2026-08-16 09:31 CDT`, or `?` when absent.
+ *
+ * The zone is printed because a reader outside the machine (a connector in a
+ * car, a model summarising for its human) cannot know what "09:31" meant; it
+ * read chat_find's bare local time as UTC and chat_state's UTC ISO as local.
+ */
 function when(ts: number | undefined): string {
   if (!ts) return "?";
-  const d = new Date(ts);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return (
-    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
-    `${pad(d.getHours())}:${pad(d.getMinutes())}`
-  );
+  return formatLocalTime(ts, undefined, { seconds: false });
 }
 
 /** Collapse whitespace so one row stays on one line. */
@@ -129,8 +130,16 @@ export function renderFind(result: FindChatsResult, query?: string): string {
 
 /* ------------------------------------------------------------- chat_read */
 
-/** One transcript row as a single grep-shaped line. */
-export function renderRow(row: RawRow): string {
+/** User and assistant prose — what `fullText` prints whole. */
+const PROSE_KINDS = new Set(["user", "assistant"]);
+
+/**
+ * One transcript row as a single grep-shaped line — or, with `fullText`, a
+ * user/assistant row as its head line followed by the whole text, verbatim.
+ * The one-line preview cut at 600 characters, so `full: true` used to fetch an
+ * unclipped row and then print 600 characters of it anyway.
+ */
+export function renderRow(row: RawRow, opts: { fullText?: boolean } = {}): string {
   const label = rowLabel(row);
   const head = [row.kind ?? "?", label].filter(Boolean).join(" ");
   const flags = [
@@ -141,10 +150,13 @@ export function renderRow(row: RawRow): string {
   ].filter(Boolean);
   const meta = flags.length ? ` (${flags.join(", ")})` : "";
   const id = row.id ? ` ${row.id}` : "";
+  if (opts.fullText && PROSE_KINDS.has(row.kind ?? "") && typeof row.text === "string") {
+    return `[${head}${id} ${when(row.ts)}]${meta}\n${row.text.trim()}\n`;
+  }
   return `[${head}${id} ${when(row.ts)}]${meta} ${oneLine(rowText(row), 600)}`;
 }
 
-export function renderRead(result: ReadChatResult): string {
+export function renderRead(result: ReadChatResult, opts: { fullText?: boolean } = {}): string {
   const c = result.chat;
   const lines: string[] = [];
 
@@ -168,7 +180,9 @@ export function renderRead(result: ReadChatResult): string {
     // there is — they're what the whole chat was steered by.
     const asks = result.userMessages ?? [];
     lines.push(`## What was asked (${asks.length} user message(s))`);
-    for (const row of asks) lines.push(`- [${when(row.ts)}] ${oneLine(row.text ?? "", 500)}`);
+    for (const row of asks) {
+      lines.push(opts.fullText ? `- [${when(row.ts)}]\n${(row.text ?? "").trim()}\n` : `- [${when(row.ts)}] ${oneLine(row.text ?? "", 500)}`);
+    }
     lines.push("");
 
     if (result.problems?.length) {
@@ -178,10 +192,10 @@ export function renderRead(result: ReadChatResult): string {
     }
 
     lines.push(`## Latest activity (${result.rows.length} rows)`);
-    for (const row of result.rows) lines.push(renderRow(row));
+    for (const row of result.rows) lines.push(renderRow(row, opts));
   } else {
     lines.push(`## Rows (${result.rows.length})`);
-    for (const row of result.rows) lines.push(renderRow(row));
+    for (const row of result.rows) lines.push(renderRow(row, opts));
   }
 
   if (result.images.length) {

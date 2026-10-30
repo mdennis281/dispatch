@@ -168,6 +168,7 @@ import {
 } from "@dispatch/shared";
 import { classifyActivity } from "../metrics-activity.js";
 import { createChatTreeTools, type ManagerMcpChatTree } from "./chat-tree-tool.js";
+import { createChatArchiveTools, type ManagerMcpChatArchive } from "./chat-archive-tool.js";
 import { createAttentionTools, type ManagerMcpAttention } from "./attention-tools.js";
 import type { EventBus } from "../../bus.js";
 import type { ManagerMcpModes, ModeScope, WritableModeScope } from "./mode-editor.js";
@@ -2229,6 +2230,8 @@ export interface ManagerMcpContext {
   events?: ManagerMcpEvents;
   /** Chat family lookups (omitted → no `chat_tree` tool). See chat-tree-tool.ts. */
   chatTree?: ManagerMcpChatTree;
+  /** Archive/restore without stopping (omitted → no `chat_archive` tool). See chat-archive-tool.ts. */
+  archive?: ManagerMcpChatArchive;
   /** The global attention queue (omitted → no `attention_*` tools). See attention-tools.ts. */
   attention?: ManagerMcpAttention;
   /** Project MCP-config editor for this session (omitted → no `mcp_*` tools). */
@@ -7243,6 +7246,13 @@ ${look}` : "")
         .boolean()
         .optional()
         .describe("Keep tool payloads verbatim instead of clipping them. Expensive."),
+      fullText: z
+        .boolean()
+        .optional()
+        .describe(
+          "Print user and assistant messages WHOLE instead of a 600-character preview — what was " +
+            "actually said. Tool payloads stay clipped, so this is far cheaper than `full`.",
+        ),
       instance: inspectInstance,
     },
     async (args): Promise<CallToolResult> => {
@@ -7262,9 +7272,10 @@ ${look}` : "")
           beforeId: args.beforeId,
           afterId: args.afterId,
           full: args.full,
+          fullText: args.fullText,
           instance: args.instance,
         });
-        return textResult(renderRead(result));
+        return textResult(renderRead(result, { fullText: Boolean(args.fullText || args.full) }));
       } catch (err) {
         return textResult(
           `Could not read that chat: ${err instanceof Error ? err.message : String(err)}`,
@@ -7615,14 +7626,13 @@ ${look}` : "")
       }
       const lines = [
         `${state.title ?? "(untitled)"} — ${state.chatId}`,
-        `  status: ${state.status}${state.dormant ? " (dormant — no live session)" : ""}`,
+        `  status: ${state.status}${state.dormant ? " (dormant — no live session)" : ""}${state.archived ? " · ARCHIVED" : ""}`,
         `  blocked on a human: ${state.blockedOnHuman ? "YES" : "no"}`,
-        `  last user message: ${
-          state.lastUserMessageAt
-            ? new Date(state.lastUserMessageAt).toISOString()
-            : "never"
-        }`,
-        `  last updated: ${new Date(state.updatedAt).toISOString()}`,
+        // Zone-labelled, matching chat_find: this used to print UTC ISO while
+        // chat_find printed unlabelled local time, and a reader of both was
+        // off by the offset in one direction or the other.
+        `  last user message: ${state.lastUserMessageAtLocal ?? "never"}`,
+        `  last updated: ${state.updatedAtLocal}`,
       ];
       if (state.prs.length) {
         lines.push("  PRs:", ...state.prs.map((pr) => `    ${describeChatPr(pr)}`));
@@ -8249,6 +8259,7 @@ ${JSON.stringify(r)}`);
     personaList,
     eventsPoll,
     ...createChatTreeTools(ctx),
+    ...createChatArchiveTools(ctx),
     ...createAttentionTools(ctx),
     chatSetMode,
     chatSetPersona,
@@ -8337,6 +8348,7 @@ const TOOL_WIRE_NAME: Record<ManagerToolKey, ManagerToolName> = {
   personaList: "persona_list",
   eventsPoll: "events_poll",
   chatTree: "chat_tree",
+  chatArchive: "chat_archive",
   attentionList: "attention_list",
   attentionDismiss: "attention_dismiss",
   attentionAnswer: "attention_answer",
@@ -8434,6 +8446,7 @@ const MANAGER_TOOL_GATE: Record<ManagerToolName, ManagerToolBinding | null> = {
   persona_list: "personas",
   events_poll: "events",
   chat_tree: "chatTree",
+  chat_archive: "archive",
   attention_list: "attention",
   attention_dismiss: "attention",
   attention_answer: "attention",
@@ -8472,6 +8485,7 @@ export type ManagerToolBinding =
   | "personas"
   | "events"
   | "chatTree"
+  | "archive"
   | "attention"
   | "secrets"
   | "issues";
@@ -8579,6 +8593,7 @@ function boundTools(ctx: ManagerMcpContext): Record<ManagerToolName, boolean> {
     persona_list: Boolean(ctx.personas),
     events_poll: Boolean(ctx.events),
     chat_tree: Boolean(ctx.chatTree),
+    chat_archive: Boolean(ctx.archive),
     attention_list: Boolean(ctx.attention?.list),
     attention_dismiss: Boolean(ctx.attention?.dismiss),
     attention_answer: Boolean(ctx.attention?.answer),

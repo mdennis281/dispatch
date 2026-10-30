@@ -1175,8 +1175,8 @@ export function createServices(
       await reapChatResidual({ chatProcesses, processes }, chatId).catch(() => {});
       chatProcesses.invalidate();
     },
-    archive: async (chatId) => {
-      const saved = await store.patchChat(chatId, { archived: true });
+    archive: async (chatId, archived = true) => {
+      const saved = await store.patchChat(chatId, { archived });
       if (saved) bus.publish({ type: "chat-update", chat: saved });
     },
   });

@@ -9,6 +9,7 @@ describe("local time", () => {
   it("labels the zone in the human string, across a DST change", () => {
     expect(formatLocalTime(summer, "America/Chicago")).toBe("2026-10-29 14:03:12 CDT");
     expect(formatLocalTime(winter, "America/Chicago")).toBe("2026-11-05 13:03:12 CST");
+    expect(formatLocalTime(winter, "America/Chicago", { seconds: false })).toBe("2026-11-05 13:03 CST");
   });
 
   it("renders ISO with the zone's offset, never a Z-shifted instant", () => {
