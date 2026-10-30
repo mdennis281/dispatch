@@ -230,6 +230,7 @@ const DISPATCH_COPY: Record<string, { title: string; activity: string; category:
   chat_stop: { title: "Stop chat", activity: "Stopping chat", category: "peer" },
   persona_list: { title: "List personas", activity: "Listing personas", category: "peer" },
   events_poll: { title: "Poll events", activity: "Polling events", category: "peer" },
+  chat_tree: { title: "Chat tree", activity: "Reading chat tree", category: "peer" },
   attention_list: { title: "Attention queue", activity: "Reading attention queue", category: "peer" },
   attention_dismiss: { title: "Dismiss attention", activity: "Dismissing attention", category: "peer" },
   attention_answer: { title: "Answer question", activity: "Answering question", category: "peer" },

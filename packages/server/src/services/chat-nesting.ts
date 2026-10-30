@@ -41,7 +41,7 @@ const WALK_LIMIT = 32;
  * for the sidebar. Those chats are on disk, and a walk that can't see their
  * edge counts them a level shallower than the sidebar draws them.
  */
-function reviewTargetKey(chat: Chat): string | null {
+export function reviewTargetKey(chat: Chat): string | null {
   if (chat.reviewOf) return chat.reviewOf;
   if (chat.purpose?.kind !== "pr:review") return null;
   return parseReviewingTarget(chat.purpose.label);
@@ -55,7 +55,7 @@ function reviewTargetKey(chat: Chat): string | null {
  * arrives with no `parentChatId` on purpose, and which `spawnedPurposeLabel`
  * deliberately writes in a shape the parser refuses.
  */
-function spawnParentId(chat: Chat): string | null {
+export function spawnParentId(chat: Chat): string | null {
   if (chat.parentChatId) return chat.parentChatId;
   if (chat.purpose?.kind !== "spawned") return null;
   return parseSpawnedParent(chat.purpose.label);

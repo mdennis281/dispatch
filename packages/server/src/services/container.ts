@@ -92,6 +92,7 @@ import { TrunkSyncService } from "./trunk-sync.js";
 import { PrReviewWatcher } from "./pr-review-watcher.js";
 import { PrRegistry } from "./pr-registry.js";
 import { chatNestingDepth } from "./chat-nesting.js";
+import { chatFamily, memoizedChatLister, chatTree, type ChatTreeDeps } from "./chat-tree.js";
 import { FileIndexService } from "./file-index.js";
 import { MetricsService } from "./metrics.js";
 import { MetricsBackfill } from "./metrics-backfill.js";
@@ -1121,6 +1122,13 @@ export function createServices(
   // assigned here: reaching a chat that has FINISHED means rebuilding its
   // session through the routes' `ensureSession`, which needs the whole
   // container.
+  // The sidebar's two parent edges, as data — chat_tree and chat_state's family.
+  const chatTreeDeps: ChatTreeDeps = {
+    getChat: (chatId) => store.getChat(chatId).catch(() => null),
+    // Memoized: chat_state is polled, and every call needs the project's listing.
+    listChats: memoizedChatLister((projectId) => store.listChats(projectId)),
+    getPrRecord: (key) => store.getPrRecord(key),
+  };
   const chatMessenger =
     overrides.chatMessenger ??
     new ChatMessenger({
@@ -1142,6 +1150,7 @@ export function createServices(
       // manager most needs to know it cannot fix by waiting.
       isBlockedOnHuman: (chatId) => broker.getStatus(chatId) === "awaiting-input",
       getPrRecord: (key) => store.getPrRecord(key),
+      family: (chat) => chatFamily(chat, chatTreeDeps),
     });
   broker.messenger = chatMessenger;
   // The external MCP mount: a category server per integration request, built
@@ -1190,6 +1199,7 @@ export function createServices(
         listProjects: () => store.listProjects(),
         listPersonas: (projectId) => personasFor(store, authored, projectId),
         events: eventFeed,
+        chatTree: (chatId, depth) => chatTree(chatId, chatTreeDeps, depth),
         attention,
         questions: broker,
       },

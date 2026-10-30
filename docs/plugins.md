@@ -1043,7 +1043,7 @@ cross-checked against the factory at compile time like the categories. The
 rule for the flag: a tool that acts on the calling chat's own session, shell or
 tree, or that puts a card in front of the human on the calling chat's behalf,
 is **not** external. So `chat_find`, `chat_read`, `chat_send`, `chat_ask`,
-`chat_reply`, `chat_state`, `chat_summarize`, `chat_stop`, `persona_list`, `events_poll`, `attention_list`, `attention_dismiss`, `attention_answer`, `wait_for_chat`, `project_info`, `project_list`, the
+`chat_reply`, `chat_state`, `chat_summarize`, `chat_stop`, `persona_list`, `events_poll`, `chat_tree`, `attention_list`, `attention_dismiss`, `attention_answer`, `wait_for_chat`, `project_info`, `project_list`, the
 memory tools, the issue tools, `mode_list`, `config_list` and `config_read` are
 external; `wait`, `context_usage`, `compact_context`, the workspace tools, the
 PR tools, the confirm tools, the secrets tools, `chat_set_mode`,
@@ -1064,6 +1064,13 @@ session and archives it — allowed only for a chat that token started, because
 an archived chat leaves the sidebar and the SPA has no control to bring it back.
 `events_poll` reads the integration event feed (`EventFeedService`, below) and
 binds only for a token holding a read scope some event type falls under.
+`chat_tree` (`services/chat-tree.ts`) walks the sidebar's own two parent edges —
+`parentChatId` (and its legacy purpose sentence) and `reviewOf` → the PR's author
+chat — within one project, so its nodes never leave the asked chat's project;
+`chat_state` carries the direct `parent` / `children` from the same code —
+live children only (newest 20, then a count), archived ones as
+`archivedChildren`, with the project listing memoized for 5s because
+`chat_state` is the read connectors poll.
 `attention_list` (binding and tools in `mcp/attention-tools.ts`) binds for
 `attention:read`; it and `GET attention` return the same enriched entries
 (`buildAttentionEntries`): chat title, `createdAtLocal`, `dismissible`, and for

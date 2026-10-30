@@ -79,7 +79,7 @@ The same category servers a session gets, built with an *external* context that 
 self chat. A category is offered only with `tools:<category>`; one with nothing
 external is a 404. The external set:
 
-`chat_find chat_read chat_send chat_ask chat_reply chat_state chat_summarize chat_stop persona_list events_poll attention_list attention_dismiss attention_answer wait_for_chat` ·
+`chat_find chat_read chat_send chat_ask chat_reply chat_state chat_summarize chat_stop persona_list events_poll chat_tree attention_list attention_dismiss attention_answer wait_for_chat` ·
 `project_info project_list` · `remember recall forget memory_list memory_search
 memory_history memory_similar` · `issue_list issue_read issue_create issue_comment
 issue_update` · `config_list config_read mode_list`.

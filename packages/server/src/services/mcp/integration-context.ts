@@ -63,6 +63,7 @@ import type { ChannelChatService } from "../channel-chats.js";
 import { ChannelChatRefusal } from "../channel-chats.js";
 import type { ChatSummaryService } from "../chat-summary.js";
 import { eventReachFor, type EventFeedService } from "../event-feed.js";
+import type { ChatTree } from "../chat-tree.js";
 import type { AttentionQueue } from "../attention.js";
 import { answerAttentionItem, buildAttentionEntries, type ManagerMcpAttention } from "./attention-tools.js";
 import { BUILTIN_MODE_PERMISSION } from "../session-broker.js";
@@ -91,6 +92,8 @@ export interface IntegrationContextDeps {
   listPersonas?: (projectId?: string) => Promise<{ id: string; name: string; scope: string }[]>;
   /** The integration event feed behind `events_poll`. */
   events?: Pick<EventFeedService, "poll">;
+  /** A chat's family (chat-tree.ts). Same-project by construction, so the allowlist holds. */
+  chatTree?: (chatId: string, depth: number) => Promise<ChatTree | null>;
   /** The global attention queue behind the `attention_*` tools. */
   attention?: Pick<AttentionQueue, "list" | "dismiss" | "get">;
   /** Answers a question card — the SPA's own path. Absent → no `attention_answer`. */
@@ -403,6 +406,13 @@ export async function createIntegrationContext(
               : {}),
           }
         : undefined,
+    // Read-only, like chat_state. Every node shares the asked chat's project
+    // (chat-tree.ts keeps to one), so checking that one chat checks them all.
+    chatTree: deps.chatTree
+      ? {
+          tree: async (chatId, depth) => (chatVisible(chatId) ? deps.chatTree!(chatId, depth) : null),
+        }
+      : undefined,
     summary: summaries
       ? {
           summarize: async (chatId, focus) => {

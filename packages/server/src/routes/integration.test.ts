@@ -701,6 +701,41 @@ describe("the external MCP mount", () => {
     }
   });
 
+  it("chat_tree and chat_state show a parent's children, inside the allowlist", async () => {
+    const { instance, store } = await app();
+    const access = await owner(instance);
+    const a = await project(instance, access, "alpha", join(dirs[0]!, "a"));
+    const b = await project(instance, access, "beta", join(dirs[0]!, "b"));
+    const parent = await chat(instance, access, a.id, "the parent");
+    const kids = [await chat(instance, access, a.id, "kid one"), await chat(instance, access, a.id, "kid two")];
+    for (const k of kids) await store.patchChat(k.id, { parentChatId: parent.id });
+    const hidden = await chat(instance, access, b.id, "elsewhere");
+    const { token } = await mint(instance, access, { name: "grok", scopes: ["tools:chat"], projectIds: [a.id] });
+    await instance.listen({ port: 0, host: "127.0.0.1" });
+    const origin = `http://127.0.0.1:${(instance.server.address() as AddressInfo).port}`;
+    const call = async (name: string, args: Record<string, unknown>) =>
+      ((await rpc(origin, token, "chat", "tools/call", { name, arguments: args })).json as {
+        result: { content: { text: string }[]; isError?: boolean };
+      }).result;
+    try {
+      const tree = await call("chat_tree", { chatId: kids[0]!.id });
+      expect(tree.isError ?? false, tree.content[0]!.text).toBe(false);
+      expect(tree.content[0]!.text).toContain(`${parent.id} "the parent"`);
+      expect(tree.content[0]!.text).toContain(`▶ ${kids[0]!.id} "kid one"`);
+      const fromTop = await call("chat_tree", { chatId: parent.id });
+      expect(fromTop.content[0]!.text).toContain("kid two");
+      expect((await call("chat_tree", { chatId: hidden.id })).isError).toBe(true);
+
+      const state = await call("chat_state", { chatId: parent.id });
+      expect(state.content[0]!.text).toContain("children (2):");
+      expect(state.content[0]!.text).toContain(`${kids[1]!.id} "kid two"`);
+      const kidState = await call("chat_state", { chatId: kids[1]!.id });
+      expect(kidState.content[0]!.text).toContain(`parent: ${parent.id} "the parent"`);
+    } finally {
+      await instance.close();
+    }
+  });
+
   it("spawn_chat's unknown-project refusal lists only the projects the token may see", async () => {
     const { instance } = await app();
     const access = await owner(instance);
