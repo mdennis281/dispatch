@@ -64,7 +64,7 @@ import { ChannelChatRefusal } from "../channel-chats.js";
 import type { ChatSummaryService } from "../chat-summary.js";
 import { eventReachFor, type EventFeedService } from "../event-feed.js";
 import type { AttentionQueue } from "../attention.js";
-import { buildAttentionEntries, type ManagerMcpAttention } from "./attention-tools.js";
+import { answerAttentionItem, buildAttentionEntries, type ManagerMcpAttention } from "./attention-tools.js";
 import { BUILTIN_MODE_PERMISSION } from "../session-broker.js";
 import { realProjects } from "@dispatch/shared";
 import { createAuthoringEditor } from "./authoring-editor.js";
@@ -92,7 +92,9 @@ export interface IntegrationContextDeps {
   /** The integration event feed behind `events_poll`. */
   events?: Pick<EventFeedService, "poll">;
   /** The global attention queue behind the `attention_*` tools. */
-  attention?: Pick<AttentionQueue, "list" | "dismiss">;
+  attention?: Pick<AttentionQueue, "list" | "dismiss" | "get">;
+  /** Answers a question card — the SPA's own path. Absent → no `attention_answer`. */
+  questions?: Pick<SessionBroker, "answerQuestion" | "declineQuestion">;
   now?: () => number;
 }
 
@@ -386,6 +388,17 @@ export async function createIntegrationContext(
                       missing,
                     };
                   },
+                  ...(deps.questions
+                    ? {
+                        answer: async (id: string, input: Parameters<typeof answerAttentionItem>[2]) =>
+                          answerAttentionItem(
+                            { attention, broker: deps.questions! },
+                            id,
+                            input,
+                            (i) => projectVisible(i.projectId) && chatVisible(i.chatId),
+                          ),
+                      }
+                    : {}),
                 }
               : {}),
           }

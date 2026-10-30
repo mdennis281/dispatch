@@ -739,7 +739,9 @@ describe("the external MCP mount", () => {
       // `chats:create`: starting an agent is its own grant. `events_poll` is
       // unbound without a read scope any event type falls under.
       expect(names).toEqual(
-        externalManagerTools("chat").filter((n) => !["spawn_chat", "events_poll", "attention_list", "attention_dismiss"].includes(n)).sort(),
+        externalManagerTools("chat")
+          .filter((n) => !["spawn_chat", "events_poll", "attention_list", "attention_dismiss", "attention_answer"].includes(n))
+          .sort(),
       );
       expect(names).toContain("chat_summarize");
       expect(names).toContain("chat_stop");
@@ -872,12 +874,53 @@ describe("the external MCP mount", () => {
       const names = ((await rpc(origin, reader, "chat", "tools/list")).json as { result: { tools: { name: string }[] } }).result.tools.map((t) => t.name);
       expect(names).toContain("attention_list");
       expect(names).not.toContain("attention_dismiss");
+      expect(names).not.toContain("attention_answer");
+
+      // attention_answer refuses a permission card by name, and a non-question.
+      q.add({ id: "perm-a", chatId: ca, projectId: a.id, kind: "permission", summary: "Bash", permissionRequestId: "r1", createdAt: 4 });
+      const answer = async (args: Record<string, unknown>) =>
+        ((await rpc(origin, token, "chat", "tools/call", { name: "attention_answer", arguments: args })).json as {
+          result: { content: { text: string }[]; isError?: boolean };
+        }).result;
+      const perm = await answer({ id: "perm-a", answer: "allow" });
+      expect(perm.isError).toBe(true);
+      expect(perm.content[0]!.text).toContain("Permission items can't be answered");
+      expect((await answer({ id: "done-b", answer: "x" })).content[0]!.text).toContain("No attention item");
+
+      // A question reaches the broker exactly as the SPA's click would; no runtime here, so record it.
+      const broker = instance.services.broker as unknown as {
+        answerQuestion: (requestId: string, a: unknown) => boolean;
+        declineQuestion: (requestId: string) => boolean;
+      };
+      const sent: unknown[] = [];
+      broker.answerQuestion = (requestId, a) => { sent.push([requestId, a]); return true; };
+      broker.declineQuestion = (requestId) => { sent.push([requestId, "declined"]); return requestId !== "gone"; };
+      q.add({ id: "ask-2", chatId: ca, projectId: a.id, kind: "question", summary: "which db?", permissionRequestId: "r2", createdAt: 5 });
+      q.add({ id: "ask-3", chatId: ca, projectId: a.id, kind: "question", summary: "go on?", permissionRequestId: "gone", createdAt: 6 });
+      const ok = await answer({ id: "ask-2", answer: "Postgres", notes: "use v16" });
+      expect(ok.isError ?? false, ok.content[0]!.text).toBe(false);
+      expect(ok.content[0]!.text).toContain(`Answered ask-2 — chat ${ca} continues.`);
+      expect(sent).toEqual([["r2", { optionId: undefined, answer: "Postgres", notes: "use v16", answers: undefined }]]);
+      expect((await answer({ id: "ask-2" })).content[0]!.text).toContain("Give an answer");
+      // Declining a question the turn already moved past is a clear 409, not a silent success.
+      const stale = await answer({ id: "ask-3", decline: true });
+      expect(stale.isError).toBe(true);
+      expect(stale.content[0]!.text).toContain("no longer pending");
+      expect(sent).toHaveLength(2);
 
       // REST twin.
       const rest = await instance.inject({ method: "POST", url: "/api/integration/attention/dismiss", headers: bearer(token), payload: { ids: ["done-b"] } });
       expect(rest.json()).toEqual({ dismissed: [], missing: ["done-b"] });
       expect((await instance.inject({ method: "POST", url: "/api/integration/attention/dismiss", headers: bearer(token), payload: { ids: [] } })).statusCode).toBe(400);
       expect(q.list().map((i) => i.id)).toContain("done-b");
+      // An item outside the allowlist 404s exactly like an unknown id — no `kind` to tell them apart.
+      const answerRest = (id: string) =>
+        instance.inject({ method: "POST", url: `/api/integration/attention/${id}/answer`, headers: bearer(token), payload: { answer: "x" } });
+      const foreign = await answerRest("done-b");
+      const unknown = await answerRest("no-such-item");
+      expect([foreign.statusCode, unknown.statusCode]).toEqual([404, 404]);
+      expect(Object.keys(foreign.json() as object)).toEqual(Object.keys(unknown.json() as object));
+      expect((await answerRest("perm-a")).json()).toMatchObject({ kind: "permission" });
 
       // `attention:answer` alone offers dismiss without list — the REST split.
       const { token: answerOnly } = await mint(instance, access, { name: "answerer", scopes: ["tools:chat", "attention:answer"] });

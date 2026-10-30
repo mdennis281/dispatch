@@ -79,7 +79,7 @@ The same category servers a session gets, built with an *external* context that 
 self chat. A category is offered only with `tools:<category>`; one with nothing
 external is a 404. The external set:
 
-`chat_find chat_read chat_send chat_ask chat_reply chat_state chat_summarize chat_stop persona_list events_poll attention_list attention_dismiss wait_for_chat` ·
+`chat_find chat_read chat_send chat_ask chat_reply chat_state chat_summarize chat_stop persona_list events_poll attention_list attention_dismiss attention_answer wait_for_chat` ·
 `project_info project_list` · `remember recall forget memory_list memory_search
 memory_history memory_similar` · `issue_list issue_read issue_create issue_comment
 issue_update` · `config_list config_read mode_list`.
@@ -98,7 +98,8 @@ started in that project can run as — `id` (spawn_chat's `personaId`) and displ
 project?, chatId? }` pages the event feed (see `GET events` above); it is offered only
 to a token with `chats:read`, `projects:read` or `attention:read`. `attention_list { kinds?,
 project?, chatId? }` (with `attention:read`) returns the same entries as `GET attention`; `attention_dismiss { ids? | kinds?, project?, chatId? }`
-(with `attention:answer`) is `POST attention/dismiss`. Memory and issue tools bind only when the token names
+(with `attention:answer`) is `POST attention/dismiss`, and `attention_answer { id, answer? | answers? | decline?, notes? }`
+is `POST attention/:id/answer` — question items only; a permission item is refused. Memory and issue tools bind only when the token names
 **exactly one** project. An unauthenticated request here gets a `WWW-Authenticate:
 Bearer resource_metadata=…` challenge, which is how an OAuth-capable MCP client
 discovers the authorization server from the refusal alone.
