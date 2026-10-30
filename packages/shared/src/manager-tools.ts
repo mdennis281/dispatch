@@ -138,6 +138,8 @@ export const MANAGER_TOOL_CATEGORY = {
      In `chat` rather than a category of its own because the connector that
      needs it most holds this mount already, and a poll is a read about chats. */
   events_poll: "chat",
+  /* …and a chat's family: parent, spawned children, reviewer chats. */
+  chat_tree: "chat",
   /* …and the global attention queue, read from outside: the first thing a
      connector is asked is "what's waiting on me?". */
   attention_list: "chat",
@@ -272,6 +274,8 @@ export const MANAGER_TOOL_EXTERNAL: Record<ManagerToolName, boolean> = {
   persona_list: true,
   /* …and polling the derived event feed — a read, scoped per event type. */
   events_poll: true,
+  /* …and reading a chat's family — the sidebar's nesting, as data. */
+  chat_tree: true,
   /* …and reading the attention queue, behind `attention:read`. */
   attention_list: true,
   /* …and clearing it, behind `attention:answer`; blocking kinds only by name. */

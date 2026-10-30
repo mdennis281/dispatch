@@ -167,6 +167,7 @@ import {
   type IntegrationEventType,
 } from "@dispatch/shared";
 import { classifyActivity } from "../metrics-activity.js";
+import { createChatTreeTools, type ManagerMcpChatTree } from "./chat-tree-tool.js";
 import { createAttentionTools, type ManagerMcpAttention } from "./attention-tools.js";
 import type { EventBus } from "../../bus.js";
 import type { ManagerMcpModes, ModeScope, WritableModeScope } from "./mode-editor.js";
@@ -2226,6 +2227,8 @@ export interface ManagerMcpContext {
   personas?: ManagerMcpPersonas;
   /** The integration event feed (omitted → no `events_poll` tool). */
   events?: ManagerMcpEvents;
+  /** Chat family lookups (omitted → no `chat_tree` tool). See chat-tree-tool.ts. */
+  chatTree?: ManagerMcpChatTree;
   /** The global attention queue (omitted → no `attention_*` tools). See attention-tools.ts. */
   attention?: ManagerMcpAttention;
   /** Project MCP-config editor for this session (omitted → no `mcp_*` tools). */
@@ -7625,6 +7628,17 @@ ${look}` : "")
         lines.push("  PRs:", ...state.prs.map((pr) => `    ${describeChatPr(pr)}`));
       }
       if (state.reviewOf) lines.push(`  reviewing: ${state.reviewOf}`);
+      if (state.parent) {
+        lines.push(`  parent: ${state.parent.id} "${state.parent.title}"${state.parent.relation === "reviewer" ? " (reviewing its PR)" : ""}`);
+      }
+      if (state.children?.length) {
+        lines.push(
+          `  children (${state.children.length}):`,
+          ...state.children.map(
+            (c) => `    ${c.id} "${c.title}"${c.relation === "reviewer" ? " [reviewer]" : ""}${c.status ? ` · ${c.status}` : ""}`,
+          ),
+        );
+      }
       if (state.contextPercent !== undefined) {
         lines.push(`  context: ${state.contextPercent}% full`);
       }
@@ -8231,6 +8245,7 @@ ${JSON.stringify(r)}`);
     chatStop,
     personaList,
     eventsPoll,
+    ...createChatTreeTools(ctx),
     ...createAttentionTools(ctx),
     chatSetMode,
     chatSetPersona,
@@ -8318,6 +8333,7 @@ const TOOL_WIRE_NAME: Record<ManagerToolKey, ManagerToolName> = {
   chatStop: "chat_stop",
   personaList: "persona_list",
   eventsPoll: "events_poll",
+  chatTree: "chat_tree",
   attentionList: "attention_list",
   attentionDismiss: "attention_dismiss",
   attentionAnswer: "attention_answer",
@@ -8414,6 +8430,7 @@ const MANAGER_TOOL_GATE: Record<ManagerToolName, ManagerToolBinding | null> = {
   chat_stop: "control",
   persona_list: "personas",
   events_poll: "events",
+  chat_tree: "chatTree",
   attention_list: "attention",
   attention_dismiss: "attention",
   attention_answer: "attention",
@@ -8451,6 +8468,7 @@ export type ManagerToolBinding =
   | "control"
   | "personas"
   | "events"
+  | "chatTree"
   | "attention"
   | "secrets"
   | "issues";
@@ -8557,6 +8575,7 @@ function boundTools(ctx: ManagerMcpContext): Record<ManagerToolName, boolean> {
     chat_stop: Boolean(ctx.control),
     persona_list: Boolean(ctx.personas),
     events_poll: Boolean(ctx.events),
+    chat_tree: Boolean(ctx.chatTree),
     attention_list: Boolean(ctx.attention?.list),
     attention_dismiss: Boolean(ctx.attention?.dismiss),
     attention_answer: Boolean(ctx.attention?.answer),

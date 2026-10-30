@@ -31,6 +31,7 @@
 import { chatPrStatuses, prRecordKey } from "@dispatch/shared";
 import type { Chat, ChannelSender, ChatPrStatus, ChatStatus, ContextUsage, PeerSender, PrRecord } from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
+import type { ChatFamily } from "./chat-tree.js";
 
 /* ------------------------------------------------------------ rate limits */
 
@@ -193,6 +194,10 @@ export interface PeerChatState {
   prs: ChatPrStatus[];
   /** The PR this chat exists to review, if it is a reviewer. */
   reviewOf?: string;
+  /** The chat it hangs under in the sidebar — its spawner, or the PR author it reviews for. */
+  parent?: ChatFamily["parent"];
+  /** Its direct children: chats it spawned, and reviewers of its PRs. `chat_tree` for deeper. */
+  children?: ChatFamily["children"];
   /** Percent of the context window used; absent unless a subprocess is live. */
   contextPercent?: number;
   /** Peer messages held for this chat, waiting for its turn to settle. */
@@ -242,6 +247,8 @@ export interface ChatMessengerOpts {
    * PR history rather than with this chat's own PRs.
    */
   getPrRecord?: (key: string) => Promise<PrRecord | null>;
+  /** The chat's direct parent and children (chat-tree.ts). Omitted → `state` reports neither. */
+  family?: (chat: Chat) => Promise<ChatFamily>;
   deps?: ChatMessengerDeps;
 }
 
@@ -312,6 +319,7 @@ export class ChatMessenger {
   private readonly getContextUsage: ChatMessengerOpts["getContextUsage"];
   private readonly isBlockedOnHuman: (chatId: string) => boolean;
   private readonly getPrRecord?: (key: string) => Promise<PrRecord | null>;
+  private readonly family?: (chat: Chat) => Promise<ChatFamily>;
   private readonly now: () => number;
   private readonly genId: () => string;
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
@@ -369,6 +377,7 @@ export class ChatMessenger {
     this.getContextUsage = opts.getContextUsage;
     this.isBlockedOnHuman = opts.isBlockedOnHuman ?? (() => false);
     this.getPrRecord = opts.getPrRecord;
+    this.family = opts.family;
     this.now = opts.deps?.now ?? (() => Date.now());
     this.genId =
       opts.deps?.genId ?? (() => `ask_${Math.random().toString(36).slice(2, 11)}`);
@@ -592,12 +601,20 @@ export class ChatMessenger {
       updatedAt: chat.updatedAt ?? chat.createdAt,
       prs: await this.prStatuses(chat),
       reviewOf: chat.reviewOf,
+      ...(await this.familyOf(chat)),
       contextPercent,
       heldMessages: this.held.get(chatId)?.length ?? 0,
     };
   }
 
   /* ------------------------------------------------------------ internals */
+
+  /** Parent and children, or nothing when no lookup is wired or it fails. */
+  private async familyOf(chat: Chat): Promise<Partial<ChatFamily>> {
+    const f = await this.family?.(chat).catch(() => null);
+    if (!f) return {};
+    return { ...(f.parent ? { parent: f.parent } : {}), children: f.children };
+  }
 
   /** The chat's refs joined to the registry; refs alone when it can't be read. */
   private async prStatuses(chat: Chat): Promise<ChatPrStatus[]> {

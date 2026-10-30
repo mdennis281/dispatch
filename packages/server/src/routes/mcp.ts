@@ -222,6 +222,8 @@ export function registerMcpRoutes(app: FastifyInstance): void {
       // `events_poll` likewise: a session hears about its own children through
       // completion notices, and a cursor would not survive its compaction.
       events: false,
+      // `chat_tree` likewise: a session's sidebar already draws the nesting.
+      chatTree: false,
       // The attention tools likewise: a session's human sees the queue itself.
       attention: false,
       // Same story for cross-chat messaging: one messenger, constructed by the
