@@ -73,7 +73,8 @@ export interface AttentionDismissResult {
 }
 
 export interface ManagerMcpAttention {
-  list(q: AttentionListQuery): Promise<AttentionEntry[]>;
+  /** Present for a token holding `attention:read` (omitted → no `attention_list`). */
+  list?(q: AttentionListQuery): Promise<AttentionEntry[]>;
   /** Present for a token holding `attention:answer` (omitted → no `attention_dismiss`). */
   dismiss?(q: AttentionDismissQuery): Promise<AttentionDismissResult>;
 }
@@ -173,7 +174,7 @@ export function createAttentionTools(ctx: { attention?: ManagerMcpAttention }) {
       chatId: z.string().optional().describe("Only items for this chat."),
     },
     async (args) => {
-      if (!ctx.attention) return textResult("The attention_list tool is not available in this session.", true);
+      if (!ctx.attention?.list) return textResult("The attention_list tool is not available in this session.", true);
       try {
         const items = await ctx.attention.list({
           ...(args.kinds?.length ? { kinds: args.kinds } : {}),
@@ -195,8 +196,8 @@ export function createAttentionTools(ctx: { attention?: ManagerMcpAttention }) {
     "Dismiss items from the ATTENTION QUEUE (see attention_list). With no ids it clears the " +
       "retrospective kinds — idle, done, review — optionally narrowed by chat or project. A " +
       "permission or question item is a blocked agent, not clutter: it is dismissed only when " +
-      "you name it, by id or by passing its kind. Dismissing never answers or denies anything; " +
-      "to answer a question use attention_answer.",
+      "you name it, by id or by passing its kind. Dismissing never answers or denies anything — " +
+      "the agent behind a dismissed question or permission card is still waiting.",
     {
       ids: z.array(z.string().min(1)).optional().describe("Exact item ids from attention_list."),
       kinds: z
@@ -209,6 +210,10 @@ export function createAttentionTools(ctx: { attention?: ManagerMcpAttention }) {
     async (args) => {
       if (!ctx.attention?.dismiss) return textResult("The attention_dismiss tool is not available in this session.", true);
       const ids = (args.ids ?? []).map((i) => i.trim()).filter(Boolean);
+      // Ids given but blank after trimming named nothing — refused, never a sweep.
+      if (args.ids !== undefined && ids.length === 0) {
+        return textResult("ids was given but names no item. Pass item ids from attention_list, or omit ids to sweep.", true);
+      }
       if (ids.length && (args.kinds?.length || args.project || args.chatId)) {
         return textResult("Pass either ids, or kinds/project/chatId to sweep — not both.", true);
       }

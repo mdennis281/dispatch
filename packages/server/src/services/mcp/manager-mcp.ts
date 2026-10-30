@@ -8519,7 +8519,7 @@ function boundTools(ctx: ManagerMcpContext): Record<ManagerToolName, boolean> {
     chat_stop: Boolean(ctx.control),
     persona_list: Boolean(ctx.personas),
     events_poll: Boolean(ctx.events),
-    attention_list: Boolean(ctx.attention),
+    attention_list: Boolean(ctx.attention?.list),
     attention_dismiss: Boolean(ctx.attention?.dismiss),
     // The posture writes ride the same binding: re-pointing a chat's mode or
     // persona is the same kind of reach into another chat as sending to it.

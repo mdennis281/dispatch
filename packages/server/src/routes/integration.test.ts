@@ -807,6 +807,10 @@ describe("the external MCP mount", () => {
       // A question goes when named.
       expect((await call({ ids: ["ask-a"] })).content[0]!.text).toContain("ask-a [question]");
       expect((await call({ ids: ["x"], kinds: ["done"] })).isError).toBe(true);
+      // Named nothing: refused, and nothing was swept.
+      const blank = await call({ ids: [" "] });
+      expect(blank.isError).toBe(true);
+      expect(blank.content[0]!.text).toContain("names no item");
       expect(resolved.sort()).toEqual(["ask-a", "done-a"]);
       const names = ((await rpc(origin, reader, "chat", "tools/list")).json as { result: { tools: { name: string }[] } }).result.tools.map((t) => t.name);
       expect(names).toContain("attention_list");
@@ -815,6 +819,14 @@ describe("the external MCP mount", () => {
       // REST twin.
       const rest = await instance.inject({ method: "POST", url: "/api/integration/attention/dismiss", headers: bearer(token), payload: { ids: ["done-b"] } });
       expect(rest.json()).toEqual({ dismissed: [], missing: ["done-b"] });
+      expect((await instance.inject({ method: "POST", url: "/api/integration/attention/dismiss", headers: bearer(token), payload: { ids: [] } })).statusCode).toBe(400);
+      expect(q.list().map((i) => i.id)).toContain("done-b");
+
+      // `attention:answer` alone offers dismiss without list — the REST split.
+      const { token: answerOnly } = await mint(instance, access, { name: "answerer", scopes: ["tools:chat", "attention:answer"] });
+      const answerNames = ((await rpc(origin, answerOnly, "chat", "tools/list")).json as { result: { tools: { name: string }[] } }).result.tools.map((t) => t.name);
+      expect(answerNames).toContain("attention_dismiss");
+      expect(answerNames).not.toContain("attention_list");
       expect((await instance.inject({ method: "POST", url: "/api/integration/attention/dismiss", headers: bearer(reader), payload: {} })).statusCode).toBe(403);
     } finally {
       await instance.close();

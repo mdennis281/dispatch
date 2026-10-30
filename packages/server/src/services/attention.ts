@@ -142,7 +142,11 @@ export class AttentionQueue {
     const visible = opts.visible ?? (() => true);
     const removed: AttentionItem[] = [];
     const missing: string[] = [];
-    if (opts.ids?.length) {
+    // `!== undefined`, not `.length`: ids that are PRESENT but empty mean the
+    // caller named nothing — a connector that filtered its list down to zero
+    // items. Falling through to the sweep would bulk-dismiss everything in
+    // reach for a call whose whole point was to be precise.
+    if (opts.ids !== undefined) {
       for (const id of new Set(opts.ids)) {
         const item = this.items.get(id);
         if (!item || !visible(item)) {

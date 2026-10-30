@@ -117,7 +117,8 @@ const AnswerBody = z.object({
 });
 
 const DismissBody = z.object({
-  ids: z.array(z.string().min(1)).optional(),
+  /** At least one: an empty list is a caller that named nothing, never a sweep. */
+  ids: z.array(z.string().trim().min(1)).min(1).optional(),
   kinds: z.array(AttentionItemSchema.shape.kind).min(1).optional(),
   chatId: z.string().min(1).optional(),
   projectId: z.string().min(1).optional(),

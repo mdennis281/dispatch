@@ -114,6 +114,12 @@ describe("AttentionQueue — dismiss", () => {
     expect(queue.dismiss({ kinds: ["permission"] }).removed.map((i) => i.id)).toEqual(["p1"]);
   });
 
+  it("treats ids that are present but empty as naming nothing — never as a sweep", () => {
+    queue.add(item("done", { id: "d1" }));
+    expect(queue.dismiss({ ids: [] })).toEqual({ removed: [], missing: [] });
+    expect(queue.size()).toBe(1);
+  });
+
   it("never removes an item outside the caller's reach, and calls it missing", () => {
     queue.add(item("done", { id: "hidden", projectId: "secret" }));
     const visible = (i: { projectId?: string }) => i.projectId !== "secret";
