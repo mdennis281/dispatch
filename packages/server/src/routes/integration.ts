@@ -654,7 +654,7 @@ const OPENAPI = {
           "`gap: true` means events between your cursor and this page were pruned (7-day retention).",
         parameters: [
           { name: "cursor", in: "query", schema: { type: "string" } },
-          { name: "since", in: "query", schema: { type: "string" }, description: "Epoch ms or ISO 8601" },
+          { name: "since", in: "query", schema: { type: "string" }, description: "Epoch ms or ISO 8601. Ignored when `cursor` is given — the cursor is authoritative" },
           { name: "limit", in: "query", schema: { type: "integer", maximum: INTEGRATION_EVENT_PAGE_MAX } },
           { name: "types", in: "query", schema: { type: "string" }, description: `Comma-separated: ${INTEGRATION_EVENT_TYPES.join(", ")}` },
           { name: "projectId", in: "query", schema: { type: "string" } },

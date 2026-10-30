@@ -7711,7 +7711,7 @@ ${JSON.stringify(r)}`);
       since: z
         .string()
         .optional()
-        .describe("Only events at/after this time: epoch ms, or ISO 8601 with an offset. Ignored before a cursor."),
+        .describe("Only events at/after this time: epoch ms, or ISO 8601 with an offset. Ignored when `cursor` is given."),
       limit: z.number().int().min(1).max(INTEGRATION_EVENT_PAGE_MAX).optional().describe(
         `Page size (default ${INTEGRATION_EVENT_PAGE_DEFAULT}, max ${INTEGRATION_EVENT_PAGE_MAX}).`,
       ),

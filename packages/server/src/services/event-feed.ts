@@ -72,7 +72,7 @@ export interface EventFeedDeps {
 export interface EventFeedQuery {
   /** The `id` of the last event already seen. Omitted → the newest page. */
   cursor?: string;
-  /** Only events at or after this epoch ms. */
+  /** Only events at or after this epoch ms. Ignored when `cursor` is given. */
   since?: number;
   limit?: number;
   types?: readonly IntegrationEventType[];
@@ -232,7 +232,11 @@ export class EventFeedService {
       " AND (? IS NULL OR project_id IN (SELECT value FROM json_each(?)))" +
       " AND (? IS NULL OR chat_id = ?)";
     const projectsJson = projects ? JSON.stringify(projects) : null;
-    const args = [after, head, q.since ?? 0, JSON.stringify(types), projectsJson, projectsJson, q.chatId ?? null, q.chatId ?? null];
+    // A cursor is authoritative and `since` is ignored beside it. Applying both
+    // would drop events older than `since` that sit after the cursor — and the
+    // cursor would still jump past them, so they would never be returned.
+    const since = q.cursor === undefined ? (q.since ?? 0) : 0;
+    const args = [after, head, since, JSON.stringify(types), projectsJson, projectsJson, q.chatId ?? null, q.chatId ?? null];
     // No cursor: the NEWEST page, so a first poll answers "what just happened"
     // rather than replaying a week of history from the oldest row.
     const newest = q.cursor === undefined && q.since === undefined;

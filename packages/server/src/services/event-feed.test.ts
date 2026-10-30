@@ -205,6 +205,9 @@ describe("EventFeedService — polling", () => {
     now += 60_000;
     f.append("chat.settled", {}, { i: 1 });
     expect(f.poll({ since: now }, ALL).events.map((e) => e.payload.i)).toEqual([1]);
+    // Beside a cursor `since` is ignored: honouring both would skip event 0
+    // AND move the cursor past it, losing it for good.
+    expect(f.poll({ cursor: "0", since: now }, ALL).events.map((e) => e.payload.i)).toEqual([0, 1]);
   });
 
   it("applies the caller's reach: scopes per type, and the project allowlist", async () => {
