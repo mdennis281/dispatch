@@ -500,6 +500,32 @@ describe("REST", () => {
     await instance.close();
   });
 
+  it("lists chats with strict filters: unknown status is a 400 naming the valid ones, booleans parse", async () => {
+    const { instance, store } = await app();
+    const access = await owner(instance);
+    const a = await project(instance, access, "alpha", join(dirs[0]!, "a"));
+    const live = await chat(instance, access, a.id, "live");
+    const stuck = await chat(instance, access, a.id, "stuck");
+    const gone = await chat(instance, access, a.id, "gone");
+    await store.patchChat(stuck.id, { status: "awaiting-input" });
+    await store.patchChat(gone.id, { archived: true });
+    const { token } = await mint(instance, access, { name: "grok", scopes: ["chats:read"] });
+    const ids = async (qs: string) =>
+      ((await instance.inject({ url: `/api/integration/chats?${qs}`, headers: bearer(token) })).json() as { chats: { id: string }[] }).chats.map((c) => c.id).sort();
+
+    expect(await ids("blockedOnHuman=true")).toEqual([stuck.id]);
+    expect(await ids("blockedOnHuman=false")).toEqual([live.id]);
+    // `?archived=false` used to coerce to TRUE and include archived chats.
+    expect(await ids("archived=false")).toEqual([live.id, stuck.id].sort());
+    expect(await ids("archived=true")).toEqual([live.id, stuck.id, gone.id].sort());
+    const bad = await instance.inject({ url: "/api/integration/chats?status=finished", headers: bearer(token) });
+    expect(bad.statusCode).toBe(400);
+    expect(bad.body).toContain("Valid statuses: idle, queued, running");
+    expect((await instance.inject({ url: "/api/integration/chats?blockedOnHuman=maybe", headers: bearer(token) })).statusCode).toBe(400);
+    expect((await instance.inject({ url: "/api/integration/chats?since=200&before=100", headers: bearer(token) })).statusCode).toBe(400);
+    await instance.close();
+  });
+
   it("summarizes a visible chat, and hides the rest", async () => {
     const { instance } = await app();
     const access = await owner(instance);
@@ -639,6 +665,37 @@ describe("the external MCP mount", () => {
       // …and A's chat still answers.
       const okState = text(await rpc(origin, token, "chat", "tools/call", { name: "chat_state", arguments: { chatId: inA.id } }));
       expect(okState.isError ?? false).toBe(false);
+    } finally {
+      await instance.close();
+    }
+  });
+
+  it("chat_find over the mount: blockedOnHuman filters, bad filter values are errors that say why", async () => {
+    const { instance, store } = await app();
+    const access = await owner(instance);
+    const a = await project(instance, access, "alpha", join(dirs[0]!, "a"));
+    await chat(instance, access, a.id, "calm");
+    const stuck = await chat(instance, access, a.id, "stuck on a question");
+    await store.patchChat(stuck.id, { status: "awaiting-input" });
+    const { token } = await mint(instance, access, { name: "grok", scopes: ["tools:chat"] });
+    await instance.listen({ port: 0, host: "127.0.0.1" });
+    const origin = `http://127.0.0.1:${(instance.server.address() as AddressInfo).port}`;
+    const find = async (args: Record<string, unknown>) =>
+      ((await rpc(origin, token, "chat", "tools/call", { name: "chat_find", arguments: args })).json as {
+        result: { content: { text: string }[]; isError?: boolean };
+      }).result;
+    try {
+      const blocked = await find({ blockedOnHuman: true });
+      expect(blocked.content[0]!.text).toContain("stuck on a question");
+      expect(blocked.content[0]!.text).toContain("waiting on the human");
+      expect(blocked.content[0]!.text).not.toContain("calm");
+      const status = await find({ status: "finished" });
+      expect(status.isError).toBe(true);
+      expect(status.content[0]!.text).toContain("Valid statuses: idle, queued, running, waiting, awaiting-input, done, failed, error.");
+      const since = await find({ since: "yesterday" });
+      expect(since.isError).toBe(true);
+      expect(since.content[0]!.text).toContain(`since "yesterday" is not a time`);
+      expect((await find({ since: "1d", before: "2d" })).content[0]!.text).toContain("`before` is not after `since`");
     } finally {
       await instance.close();
     }

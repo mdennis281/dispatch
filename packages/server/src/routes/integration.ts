@@ -35,7 +35,7 @@ import {
 import { AuthFailure, type RequestIdentity } from "../services/auth.js";
 import { ChannelChatRefusal } from "../services/channel-chats.js";
 import { SummaryRateLimitError } from "../services/chat-summary.js";
-import { FindCursorError } from "../services/inspect.js";
+import { FindCursorError, FindFilterError } from "../services/inspect.js";
 import { personasFor } from "../services/personas.js";
 import { EventCursorError, eventReachFor } from "../services/event-feed.js";
 import { buildAttentionEntries } from "../services/mcp/attention-tools.js";
@@ -56,13 +56,22 @@ function withScope<T>(reply: FastifyReply, fn: () => Promise<T>): Promise<T | Fa
   });
 }
 
+/**
+ * A query-string boolean. Not `z.coerce.boolean()`: that is `Boolean("false")`,
+ * which is `true` — `?archived=false` used to INCLUDE archived chats.
+ */
+const queryBool = z.enum(["true", "false", "1", "0"]).transform((v) => v === "true" || v === "1");
+
 const ListChatsQuery = z.object({
   projectId: z.string().min(1).optional(),
   status: z.string().min(1).optional(),
+  /** `awaiting-input`: a permission prompt or question is waiting on the human. */
+  blockedOnHuman: queryBool.optional(),
   since: z.coerce.number().int().nonnegative().optional(),
+  before: z.coerce.number().int().nonnegative().optional(),
   q: z.string().optional(),
   limit: z.coerce.number().int().positive().max(200).optional(),
-  archived: z.coerce.boolean().optional(),
+  archived: queryBool.optional(),
   /** `nextCursor` from the previous page of the same search. */
   cursor: z.string().min(1).optional(),
 });
@@ -162,16 +171,19 @@ export function registerIntegrationRoutes(app: FastifyInstance): void {
         query: q.q,
         project: q.projectId,
         status: q.status,
+        blockedOnHuman: q.blockedOnHuman,
         since: q.since,
+        before: q.before,
         limit: q.limit,
         archived: q.archived,
         cursor: q.cursor,
       }).catch((err: unknown) => {
-        // A foreign or mangled cursor is the caller's mistake, not a 500.
-        if (err instanceof FindCursorError) return err;
+        // A foreign cursor or a filter nothing could match is the caller's
+        // mistake, not a 500 — and not an empty list that reads as an answer.
+        if (err instanceof FindCursorError || err instanceof FindFilterError) return err;
         throw err;
       });
-      if (result instanceof FindCursorError) return reply.code(400).send({ error: result.message });
+      if (result instanceof Error) return reply.code(400).send({ error: result.message });
       // The allowlist is applied AFTER the search rather than by narrowing the
       // query: a token with two projects and no `projectId` filter needs both.
       const chats = result.chats.filter((c) => projectAllowed(req, c.projectId));
@@ -570,15 +582,19 @@ const OPENAPI = {
         summary: "List chats",
         description: "A search with `q` stops at a scan budget; when it does, `truncated` is true and " +
           "`nextCursor` continues it — repeat the request with the same parameters plus `cursor`.",
-        parameters: ["projectId", "status", "since", "q", "limit", "cursor"].map((name) => ({
-          name, in: "query", schema: { type: name === "since" || name === "limit" ? "integer" : "string" },
-        })),
+        parameters: [
+          ...["projectId", "q", "cursor"].map((name) => ({ name, in: "query", schema: { type: "string" } })),
+          ...["since", "before", "limit"].map((name) => ({ name, in: "query", schema: { type: "integer" } })),
+          { name: "status", in: "query", schema: { type: "string", enum: ["idle", "queued", "running", "waiting", "awaiting-input", "done", "failed", "error"] } },
+          { name: "blockedOnHuman", in: "query", schema: { type: "boolean" }, description: "true: only chats a permission prompt or question is holding" },
+          { name: "archived", in: "query", schema: { type: "boolean" } },
+        ],
         responses: { "200": { description: "Chats", content: { "application/json": { schema: {
           type: "object", properties: {
             chats: { type: "array", items: { $ref: "#/components/schemas/ChatSummary" } },
             truncated: { type: "boolean" }, unscanned: { type: "integer" }, nextCursor: { type: "string" },
           },
-        } } } }, "400": { description: "A cursor from a different search" } },
+        } } } }, "400": { description: "A cursor from a different search, an unknown status, or an empty time window" } },
       },
       post: { ...scoped("chats:create"), summary: "Start a new chat in a project; the first message is attributed to this integration",
         description: "Runs in the project's default mode unless `modeId` names another; a mode that bypasses permission prompts is refused (403).",

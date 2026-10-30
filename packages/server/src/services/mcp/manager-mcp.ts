@@ -7124,7 +7124,19 @@ ${look}` : "")
           "Only chats active since then: a relative age like '6h', '7d', '2w', or a date.",
         ),
       before: z.string().optional().describe("Only chats active BEFORE then (same formats)."),
-      status: z.string().optional().describe("Only chats in this status, e.g. 'running'."),
+      status: z
+        .string()
+        .optional()
+        .describe(
+          "Only chats in this status: idle, queued, running, waiting, awaiting-input, done, failed, error.",
+        ),
+      blockedOnHuman: z
+        .boolean()
+        .optional()
+        .describe(
+          "true: only chats blocked on the human — a permission prompt or a question is waiting " +
+            "(see attention_list for what). false: only chats that are not.",
+        ),
       archived: z.boolean().optional().describe("Include archived chats (default false)."),
       kinds: z
         .array(z.string())
@@ -7150,16 +7162,30 @@ ${look}` : "")
         return textResult("Chat inspection is not available in this session.", true);
       }
       const now = ctx.now?.() ?? Date.now();
+      // A bound that does not parse is an error, not "no bound": silently
+      // dropping `since: "yesterday"` searched ALL history and looked like an answer.
+      const since = parseTimeBound(args.since, now);
+      const before = parseTimeBound(args.before, now);
+      for (const [name, raw, parsed] of [["since", args.since, since], ["before", args.before, before]] as const) {
+        if (raw?.trim() && parsed === undefined) {
+          return textResult(
+            `chat_find: ${name} "${raw}" is not a time. Use a relative age ('30m', '6h', '7d', '2w') ` +
+              "or a date ('2026-10-29', '2026-10-29T14:00:00-05:00').",
+            true,
+          );
+        }
+      }
       try {
         const result = await ctx.inspect.findChats({
           query: args.query,
           match: args.match,
           minScore: args.minScore,
           project: args.project,
-          status: args.status,
+          status: args.status?.trim() || undefined,
+          blockedOnHuman: args.blockedOnHuman,
           archived: args.archived,
-          since: parseTimeBound(args.since, now),
-          before: parseTimeBound(args.before, now),
+          since,
+          before,
           kinds: args.kinds,
           limit: args.limit,
           hitsPerChat: args.hitsPerChat,

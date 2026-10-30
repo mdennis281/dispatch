@@ -38,7 +38,14 @@ import { createInterface } from "node:readline";
 import { basename, isAbsolute, join, resolve } from "node:path";
 
 import type { Chat, ImageRef, Project, TextMatcher } from "@dispatch/shared";
-import { compileQuery, realProjects, resolveWorkflow, withSentContextSummary } from "@dispatch/shared";
+import {
+  ChatMessageSchema,
+  ChatStatusSchema,
+  compileQuery,
+  realProjects,
+  resolveWorkflow,
+  withSentContextSummary,
+} from "@dispatch/shared";
 
 import type { Store } from "../store/index.js";
 
@@ -128,6 +135,11 @@ export interface ChatSummary {
   updatedAt: number;
   /** Bytes of transcript on disk — a cheap stand-in for "how big is this chat". */
   transcriptBytes?: number;
+  /**
+   * A permission prompt or a question is waiting on the human (`awaiting-input`).
+   * Only ever `true`; absent otherwise, so a listing is not padded with falses.
+   */
+  blockedOnHuman?: boolean;
   worktrees?: string[];
   prs?: number[];
   hits?: ChatHit[];
@@ -149,7 +161,10 @@ export interface FindChatsQuery {
   minScore?: number;
   /** Project id, or a case-insensitive substring of a project name. */
   project?: string;
+  /** One of {@link CHAT_STATUSES}; anything else is a {@link FindFilterError}. */
   status?: string;
+  /** true → only chats waiting on the human (`awaiting-input`); false → only the rest. */
+  blockedOnHuman?: boolean;
   /** Include archived chats (default false). */
   archived?: boolean;
   /** Only chats active at/after this time (epoch ms). */
@@ -217,6 +232,7 @@ function findFingerprint(q: FindChatsQuery): string {
     q.query?.trim().toLowerCase() ?? "",
     q.project ?? "",
     q.status ?? "",
+    q.blockedOnHuman ?? null,
     Boolean(q.archived),
     [...(q.kinds ?? [])].sort(),
     q.match ?? "similar",
@@ -227,6 +243,40 @@ function findFingerprint(q: FindChatsQuery): string {
 
 function encodeCursor(c: FindCursor): string {
   return Buffer.from(JSON.stringify(c)).toString("base64url");
+}
+
+/**
+ * A filter value the caller got wrong — an unknown status or row kind, an
+ * empty time window. A 400 on REST, a tool error on MCP.
+ *
+ * Refused rather than ignored: `status: "finished"` used to match nothing and
+ * read as "no chats", and a connector told nothing matched has no way to know
+ * it asked a question with no answer.
+ */
+export class FindFilterError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "FindFilterError";
+  }
+}
+
+/** Every status `status` may name, in lifecycle order. */
+export const CHAT_STATUSES: readonly string[] = ChatStatusSchema.options;
+/** Every transcript row kind `kinds` may name. */
+const ROW_KINDS: readonly string[] = ChatMessageSchema.options.map((o) => o.shape.kind.value);
+
+/** Throws {@link FindFilterError} on a value no chat could ever match. */
+export function assertFindFilters(q: Pick<FindChatsQuery, "status" | "kinds" | "since" | "before">): void {
+  if (q.status !== undefined && !CHAT_STATUSES.includes(q.status)) {
+    throw new FindFilterError(`Unknown status "${q.status}". Valid statuses: ${CHAT_STATUSES.join(", ")}.`);
+  }
+  const badKinds = (q.kinds ?? []).filter((k) => !ROW_KINDS.includes(k));
+  if (badKinds.length) {
+    throw new FindFilterError(`Unknown row kind(s): ${badKinds.join(", ")}. Valid kinds: ${ROW_KINDS.join(", ")}.`);
+  }
+  if (q.since !== undefined && q.before !== undefined && q.before <= q.since) {
+    throw new FindFilterError("`before` is not after `since`, so no chat can match — swap them or widen the window.");
+  }
 }
 
 /** A cursor the caller got wrong — a 400 on REST, not a server fault. */
@@ -659,6 +709,7 @@ export class InspectService {
       model: chat.model,
       createdAt: chat.createdAt,
       updatedAt: chat.updatedAt ?? chat.createdAt,
+      ...(chat.status === "awaiting-input" ? { blockedOnHuman: true } : {}),
       worktrees: chat.worktrees,
       prs: chat.prs?.map((p) => p.number),
     };
@@ -667,6 +718,7 @@ export class InspectService {
   /* --------------------------------------------------------- findChats */
 
   async findChats(q: FindChatsQuery = {}): Promise<FindChatsResult> {
+    assertFindFilters(q);
     const store = this.storeFor(q.instance);
     const projects = await store.listProjects();
     const nameById = new Map(projects.map((p) => [p.id, p.name]));
@@ -699,6 +751,7 @@ export class InspectService {
     const candidates = all
       .filter((c) => (q.archived ? true : !c.archived))
       .filter((c) => (q.status ? c.status === q.status : true))
+      .filter((c) => (q.blockedOnHuman === undefined ? true : (c.status === "awaiting-input") === q.blockedOnHuman))
       .filter((c) => {
         const at = activity(c);
         if (q.since !== undefined && at < q.since) return false;

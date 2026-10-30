@@ -53,7 +53,7 @@ external tool are **offered** (`OFFERABLE_TOOL_SCOPES` in `@dispatch/shared`; to
 
 | route | scope |
 |---|---|
-| `GET chats?projectId&status&since&q&limit&archived&cursor` → `{ chats, truncated, unscanned, nextCursor? }` | `chats:read` |
+| `GET chats?projectId&status&blockedOnHuman&since&before&q&limit&archived&cursor` → `{ chats, truncated, unscanned, nextCursor? }` — `blockedOnHuman=true` is chats a permission prompt or question holds (`awaiting-input`); an unknown status is a 400 that lists the valid ones | `chats:read` |
 | `GET chats/:id` (digest) | `chats:read` |
 | `GET chats/:id/messages?kinds&before&after&limit` | `chats:read` |
 | `POST chats/:id/messages { text, delivery?: "queue"\|"interrupt", sender? }` | `chats:write` |
