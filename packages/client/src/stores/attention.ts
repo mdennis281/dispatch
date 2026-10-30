@@ -36,13 +36,14 @@ interface AttentionStore {
   filter: AttentionFilter;
   /**
    * Replace the list with a REST snapshot, then replay every add/resolve/clear
-   * that arrived over the socket since {@link beginSync} — see `journal`.
+   * that arrived over the socket since that snapshot's {@link beginSync} — see
+   * `journal`. Without a token it is a plain replace (the offline fixture).
    */
-  hydrate: (items: AttentionItem[]) => void;
-  /** Call BEFORE requesting the snapshot `hydrate` will be handed. */
-  beginSync: () => void;
+  hydrate: (items: AttentionItem[], sync?: AttentionSync) => void;
+  /** Call BEFORE requesting the snapshot; hand the token back to `hydrate`. */
+  beginSync: () => AttentionSync;
   /** The snapshot request failed: stop journaling for it. */
-  abortSync: () => void;
+  abortSync: (sync: AttentionSync) => void;
   add: (item: AttentionItem) => void;
   resolve: (id: string) => void;
   clearChat: (chatId: string) => void;
@@ -94,34 +95,42 @@ function apply(items: AttentionItem[], op: Op): AttentionItem[] {
  * reload (2026-10-29). The mirror case is worse — an `attention-add` in the gap
  * was wiped, leaving a blocked chat with no marker anywhere.
  *
- * Replaying the journal over the snapshot is always safe: every op in it is at
- * least as new as the snapshot, because journaling starts before the request.
- * A counter rather than a flag, so overlapping hydrates keep the journal until
- * the LAST of them lands.
+ * Replaying over the snapshot is safe only for ops newer than THAT snapshot's
+ * request, so each sync replays from the index where it began, not from 0. A
+ * shared start was wrong for overlapping hydrates (a second `hello` while the
+ * first is in flight): B would replay an `add` journaled under A over a
+ * snapshot taken after the item was resolved, and resurrect it.
  */
-let syncDepth = 0;
+export interface AttentionSync {
+  readonly start: number;
+}
+const active = new Set<AttentionSync>();
 let journal: Op[] = [];
 
 export const useAttention = create<AttentionStore>((set) => {
   const mutate = (op: Op) => {
-    if (syncDepth > 0) journal.push(op);
+    if (active.size > 0) journal.push(op);
     set((s) => slice(apply(s.items, op), s.filter));
   };
-  const endSync = () => {
-    syncDepth = Math.max(0, syncDepth - 1);
-    if (syncDepth === 0) journal = [];
+  const endSync = (sync: AttentionSync) => {
+    active.delete(sync);
+    // Only trimmed once nothing is in flight, so every live token's index holds.
+    if (active.size === 0) journal = [];
   };
   return {
     items: [],
     visible: [],
     filter: DEFAULT_ATTENTION_FILTER,
-    hydrate: (items) => {
-      const replayed = journal.reduce(apply, items);
-      endSync();
+    hydrate: (items, sync) => {
+      const replayed =
+        sync && active.has(sync) ? journal.slice(sync.start).reduce(apply, items) : items;
+      if (sync) endSync(sync);
       set((s) => slice(replayed, s.filter));
     },
     beginSync: () => {
-      syncDepth += 1;
+      const sync: AttentionSync = { start: journal.length };
+      active.add(sync);
+      return sync;
     },
     abortSync: endSync,
     add: (item) => mutate({ op: "add", item }),

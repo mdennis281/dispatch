@@ -76,52 +76,69 @@ describe("useAttention — queue filter", () => {
 describe("useAttention — hydrate racing the socket", () => {
   // The reconnect hydrate applies its `/api/attention` snapshot only after seven
   // other reads return, and the socket keeps delivering events meanwhile.
+  const att = () => useAttention.getState();
+  const ids = () => att().items.map((i) => i.id).sort();
+
   it("keeps an item resolved while the snapshot was in flight resolved", () => {
     // The 2026-10-29 bug: an answered question came back with the stale
     // snapshot and sat in the queue until a page reload.
     const q = item("question");
-    useAttention.getState().add(q);
-    useAttention.getState().beginSync();
-    useAttention.getState().resolve(q.id);
-    useAttention.getState().hydrate([q]);
-    expect(useAttention.getState().items).toEqual([]);
+    att().add(q);
+    const sync = att().beginSync();
+    att().resolve(q.id);
+    att().hydrate([q], sync);
+    expect(att().items).toEqual([]);
   });
 
   it("keeps an item added while the snapshot was in flight", () => {
-    const p = item("permission");
-    useAttention.getState().beginSync();
-    useAttention.getState().add(p);
-    useAttention.getState().hydrate([item("done")]);
-    expect(useAttention.getState().items.map((i) => i.id).sort()).toEqual(["done-1", "permission-1"]);
+    const sync = att().beginSync();
+    att().add(item("permission"));
+    att().hydrate([item("done")], sync);
+    expect(ids()).toEqual(["done-1", "permission-1"]);
   });
 
   it("replays in arrival order, so a clear then a fresh add both survive", () => {
-    useAttention.getState().beginSync();
-    useAttention.getState().clearChat("c1");
-    useAttention.getState().add(item("question", { id: "fresh" }));
-    useAttention.getState().hydrate([item("idle"), item("done", { chatId: "c2" })]);
-    expect(useAttention.getState().items.map((i) => i.id).sort()).toEqual(["done-1", "fresh"]);
+    const sync = att().beginSync();
+    att().clearChat("c1");
+    att().add(item("question", { id: "fresh" }));
+    att().hydrate([item("idle"), item("done", { chatId: "c2" })], sync);
+    expect(ids()).toEqual(["done-1", "fresh"]);
   });
 
-  it("holds the journal until the LAST overlapping hydrate lands", () => {
+  it("replays to a later overlapping sync only what arrived after IT began", () => {
+    // Review finding on #463: with one shared journal, B replayed A's `add(q)`
+    // over a snapshot taken after `q` was resolved (the resolve itself was
+    // missed while the socket was down), resurrecting it.
     const q = item("question");
-    useAttention.getState().beginSync();
-    useAttention.getState().beginSync();
-    useAttention.getState().resolve(q.id);
-    useAttention.getState().hydrate([q]);
-    useAttention.getState().hydrate([q]);
-    expect(useAttention.getState().items).toEqual([]);
-    // …and stops journaling afterwards: a later plain hydrate is authoritative.
-    useAttention.getState().resolve("gone");
-    useAttention.getState().hydrate([item("question", { id: "gone" })]);
-    expect(useAttention.getState().items.map((i) => i.id)).toEqual(["gone"]);
+    const a = att().beginSync();
+    att().add(q);
+    const b = att().beginSync();
+    att().hydrate([], a);
+    expect(ids()).toEqual(["question-1"]);
+    att().hydrate([], b);
+    expect(att().items).toEqual([]);
+  });
+
+  it("holds the journal for a sync still in flight after another lands", () => {
+    const q = item("question");
+    const a = att().beginSync();
+    const b = att().beginSync();
+    att().resolve(q.id);
+    att().hydrate([q], a);
+    att().hydrate([q], b);
+    expect(att().items).toEqual([]);
+    // …and stops journaling afterwards: an untokened hydrate is authoritative.
+    att().resolve("gone");
+    att().hydrate([item("question", { id: "gone" })]);
+    expect(ids()).toEqual(["gone"]);
   });
 
   it("drops the journal when the snapshot request fails", () => {
-    useAttention.getState().beginSync();
-    useAttention.getState().resolve("q");
-    useAttention.getState().abortSync();
-    useAttention.getState().hydrate([item("question", { id: "q" })]);
-    expect(useAttention.getState().items.map((i) => i.id)).toEqual(["q"]);
+    const failed = att().beginSync();
+    att().resolve("q");
+    att().abortSync(failed);
+    const next = att().beginSync();
+    att().hydrate([item("question", { id: "q" })], next);
+    expect(ids()).toEqual(["q"]);
   });
 });

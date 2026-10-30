@@ -538,7 +538,7 @@ export async function hydrateFromServer(): Promise<boolean> {
   useConnection.getState().noteHydrating(true);
   // Before the request goes out, so nothing the socket delivers while the batch
   // is in flight can be overwritten by the snapshot — see `journal` there.
-  useAttention.getState().beginSync();
+  const attentionSync = useAttention.getState().beginSync();
   try {
     [projects, agents, modes, chats, attention, runners, terminals, prs] = await Promise.all([
       api.projects.list(),
@@ -554,7 +554,7 @@ export async function hydrateFromServer(): Promise<boolean> {
       api.prs.list().catch(() => []),
     ]);
   } catch (err) {
-    useAttention.getState().abortSync();
+    useAttention.getState().abortSync(attentionSync);
     useConnection.getState().noteHydrateFailed(err instanceof Error ? err.message : String(err));
     useConnection.getState().noteHydrating(false);
     return false;
@@ -623,7 +623,7 @@ export async function hydrateFromServer(): Promise<boolean> {
   // Whether a pause is holding everything, and what is running vs queued.
   void useScheduler.getState().load();
   useChats.getState().hydrate(chats);
-  useAttention.getState().hydrate(attention);
+  useAttention.getState().hydrate(attention, attentionSync);
   // The badge is OS state that outlives the page: a launch that found nothing
   // waiting has to actively clear the count a previous session left on the icon.
   void setAttentionBadge(useAttention.getState().visible.length);
