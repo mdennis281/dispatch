@@ -436,7 +436,8 @@ export function registerIntegrationRoutes(app: FastifyInstance): void {
         return { ok: true, ...r };
       } catch (err) {
         if (err instanceof AttentionAnswerError) {
-          return reply.code(err.status).send({ error: err.message, kind: attention.get(req.params.id)?.kind });
+          // The error's own kind, never a fresh lookup: that would name an item outside the allowlist.
+          return reply.code(err.status).send({ error: err.message, ...(err.kind ? { kind: err.kind } : {}) });
         }
         throw err;
       }

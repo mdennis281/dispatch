@@ -913,6 +913,14 @@ describe("the external MCP mount", () => {
       expect(rest.json()).toEqual({ dismissed: [], missing: ["done-b"] });
       expect((await instance.inject({ method: "POST", url: "/api/integration/attention/dismiss", headers: bearer(token), payload: { ids: [] } })).statusCode).toBe(400);
       expect(q.list().map((i) => i.id)).toContain("done-b");
+      // An item outside the allowlist 404s exactly like an unknown id — no `kind` to tell them apart.
+      const answerRest = (id: string) =>
+        instance.inject({ method: "POST", url: `/api/integration/attention/${id}/answer`, headers: bearer(token), payload: { answer: "x" } });
+      const foreign = await answerRest("done-b");
+      const unknown = await answerRest("no-such-item");
+      expect([foreign.statusCode, unknown.statusCode]).toEqual([404, 404]);
+      expect(Object.keys(foreign.json() as object)).toEqual(Object.keys(unknown.json() as object));
+      expect((await answerRest("perm-a")).json()).toMatchObject({ kind: "permission" });
 
       // `attention:answer` alone offers dismiss without list — the REST split.
       const { token: answerOnly } = await mint(instance, access, { name: "answerer", scopes: ["tools:chat", "attention:answer"] });

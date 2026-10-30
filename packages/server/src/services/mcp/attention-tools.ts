@@ -91,11 +91,17 @@ export interface AttentionAnswerResult {
   declined: boolean;
 }
 
-/** A refusal with the HTTP status the REST twin answers with. */
+/**
+ * A refusal with the HTTP status the REST twin answers with. `kind` is set
+ * only once the item has passed the caller's `visible` check — a 404 never
+ * carries it, or "exists in another project, and is a question" would leak
+ * through the difference from a genuinely unknown id.
+ */
 export class AttentionAnswerError extends Error {
   constructor(
     readonly status: 400 | 404 | 409,
     message: string,
+    readonly kind?: AttentionItem["kind"],
   ) {
     super(message);
     this.name = "AttentionAnswerError";
@@ -131,16 +137,17 @@ export function answerAttentionItem(
     throw new AttentionAnswerError(
       409,
       "Permission items can't be answered by an integration — a tool call is waiting on the human's own approval in Dispatch.",
+      item.kind,
     );
   }
   if (item.kind !== "question" || !item.permissionRequestId) {
-    throw new AttentionAnswerError(409, `Only question items can be answered; this one is "${item.kind}". Dismiss it with attention_dismiss.`);
+    throw new AttentionAnswerError(409, `Only question items can be answered; this one is "${item.kind}". Dismiss it with attention_dismiss.`, item.kind);
   }
   const hasAnswer =
     Boolean(input.answer?.trim() || input.optionId?.trim()) ||
     Boolean(input.answers?.some((a) => a.answer?.trim() || a.optionId?.trim()));
   if (!input.decline && !hasAnswer) {
-    throw new AttentionAnswerError(400, "Give an answer (an option label or free text), answers[], or decline: true.");
+    throw new AttentionAnswerError(400, "Give an answer (an option label or free text), answers[], or decline: true.", item.kind);
   }
   const ok = input.decline
     ? deps.broker.declineQuestion(item.permissionRequestId)
@@ -150,7 +157,7 @@ export function answerAttentionItem(
         notes: input.notes,
         answers: input.answers,
       });
-  if (!ok) throw new AttentionAnswerError(409, "That question is no longer pending — it was answered or the turn moved on.");
+  if (!ok) throw new AttentionAnswerError(409, "That question is no longer pending — it was answered or the turn moved on.", item.kind);
   return { id: item.id, chatId: item.chatId, declined: Boolean(input.decline) };
 }
 
