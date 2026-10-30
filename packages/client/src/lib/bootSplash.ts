@@ -309,11 +309,36 @@ export function bootMilestones(s: BootState): number {
   );
 }
 
-export function capExtension(elapsed: number, sinceProgress: number): number | null {
+/**
+ * `snapshotInFlight` — the socket is open and the REST snapshot is outstanding —
+ * is not a stall however long it runs, and is exempt from the stall window.
+ *
+ * It is the LONGEST gap in the whole boot and the one the stall window was
+ * worst at: it is eight requests against a server that has just answered a
+ * `hello`, so it is demonstrably up, and on a loaded machine its event loop
+ * stalls for 4–5s at a stretch (see `TRANSCRIPT_RETRY_ATTEMPTS` in
+ * stores/index.ts). That blew the 5s window on an ordinary busy-box boot and
+ * lifted the splash onto "No project / No chat selected" for as long as the
+ * snapshot took. None of the failing-boot churn the window exists to see
+ * through can produce this state — a dead server never gets a socket open — so
+ * waiting it out is safe, and `HARD_MAX_MS` still bounds it.
+ *
+ * Re-armed for a stall window at a time rather than for everything that is
+ * left, so a snapshot that FAILS is noticed on the next check instead of
+ * holding the splash to the hard ceiling on the strength of a request that is
+ * no longer outstanding.
+ */
+export function capExtension(
+  elapsed: number,
+  sinceProgress: number,
+  snapshotInFlight = false,
+): number | null {
+  const remaining = BOOT_SPLASH_HARD_MAX_MS - elapsed;
+  if (remaining <= 0) return null;
+  if (snapshotInFlight) return Math.min(BOOT_SPLASH_STALL_MS, remaining);
   const stall = BOOT_SPLASH_STALL_MS - sinceProgress;
   if (stall <= 0) return null;
-  const remaining = BOOT_SPLASH_HARD_MAX_MS - elapsed;
-  return remaining > 0 ? Math.min(stall, remaining) : null;
+  return Math.min(stall, remaining);
 }
 
 function readBootState(): BootState {
@@ -485,7 +510,8 @@ export function startBootSplash(): void {
   // judgement and `BOOT_SPLASH_HARD_MAX_MS` bounds it either way.
   let cap = setTimeout(function expire() {
     const now = performance.now();
-    const again = capExtension(now - startedAt, now - progressAt);
+    const state = readBootState();
+    const again = capExtension(now - startedAt, now - progressAt, state.socketOpen && state.hydrating);
     if (again === null) return lift();
     cap = setTimeout(expire, again);
   }, BOOT_SPLASH_MAX_MS);

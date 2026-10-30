@@ -159,7 +159,7 @@ function reduceServerEvent(evt: WsServerEvent): void {
       }
       // (Re)hydrate the authoritative REST snapshot on every connect — the very
       // first one primes the app; a reconnect resyncs after a server restart.
-      void hydrateFromServer();
+      void hydrateUntilLanded();
       return;
 
     case "chat-message":
@@ -481,6 +481,47 @@ function scheduleTurnEndRefresh(chatId: string): void {
     turnEndRefreshProject = null;
     if (pid) void loadProjectPanels(pid);
   }, 400);
+}
+
+/** The pending retry of a failed snapshot, if any. */
+let hydrateRetryTimer: ReturnType<typeof setTimeout> | null = null;
+/** Bumped per `hello`, so a failure from an older connect cannot re-arm a retry. */
+let hydrateGeneration = 0;
+
+/**
+ * `hydrateFromServer`, retried until it lands or the socket drops.
+ *
+ * A failed snapshot used to be final until the NEXT `hello`. With a healthy
+ * socket that may never come, and the app shell is gated on `hydrated` (see
+ * App.tsx) — so one request that lost a race with a server stall would leave a
+ * first boot on the loading screen, and before that gate on an empty shell, for
+ * as long as the socket happened to stay up. Backs off to `HYDRATE_RETRY_MAX_MS`
+ * because the usual cause is a server too busy to answer, and hammering it is
+ * not how that gets better.
+ *
+ * Stops when the socket is no longer open: the reconnect's own `hello` calls
+ * this again, and that one supersedes any retry still pending here.
+ */
+const HYDRATE_RETRY_BASE_MS = 1_000;
+const HYDRATE_RETRY_MAX_MS = 10_000;
+async function hydrateUntilLanded(
+  attempt = 0,
+  generation = ++hydrateGeneration,
+): Promise<void> {
+  if (hydrateRetryTimer) {
+    clearTimeout(hydrateRetryTimer);
+    hydrateRetryTimer = null;
+  }
+  if (await hydrateFromServer()) return;
+  if (generation !== hydrateGeneration) return;
+  if (useConnection.getState().state !== "open") return;
+  hydrateRetryTimer = setTimeout(
+    () => {
+      hydrateRetryTimer = null;
+      void hydrateUntilLanded(attempt + 1, generation);
+    },
+    Math.min(HYDRATE_RETRY_BASE_MS * 2 ** attempt, HYDRATE_RETRY_MAX_MS),
+  );
 }
 
 /**

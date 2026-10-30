@@ -28,6 +28,8 @@ import { ShutdownScreen } from "./components/ShutdownScreen.js";
 import { RestartingScreen } from "./components/RestartingScreen.js";
 import { UpdatingScreen } from "./components/update/UpdatingScreen.js";
 import { ConnectingScreen } from "./components/connection/ConnectingScreen.js";
+import { BootScreen } from "./components/brand/BootScreen.js";
+import { useConnection } from "./stores/connection.js";
 import { useChats } from "./stores/chats.js";
 import { useProjects, useActiveProject } from "./stores/projects.js";
 import { visibleChat } from "./stores/navigation.js";
@@ -192,6 +194,15 @@ export default function App() {
   // only thing to decide is whether it may act as them.
   const consentNonce = useOAuthConsent((s) => s.nonce);
 
+  // Has the shell ever had its rows? The REST snapshot lands a full round trip
+  // after `/api/setup` answers — and on a loaded machine, many seconds after —
+  // so rendering the shell on `setupPending === false` alone put "No project /
+  // No chat selected" on screen as if that were the answer, until the sidebar
+  // filled in around it. The splash waits for this too, but it is capped, and a
+  // PWA opened before its server was up lifts it long before any of this; see
+  // components/brand/BootScreen.tsx. One-way, so a reconnect never lands here.
+  const shellReady = useConnection((s) => s.hydrated || s.mockSeeded);
+
   return (
     <>
       {/* OUTSIDE the auth gate, deliberately. An update restarts the server, so
@@ -239,9 +250,11 @@ export default function App() {
       {consentNonce ? (
         <OAuthConsent nonce={consentNonce} />
       ) : setupPending === null ? (
-        <div className="grid h-screen place-items-center bg-app text-sm text-muted">Starting Dispatch…</div>
+        <BootScreen />
       ) : setupPending ? (
         <SetupWizard />
+      ) : !shellReady ? (
+        <BootScreen caption="Loading projects and chats…" />
       ) : (
       <>
       {/* `100dvh`, not `100vh`. On mobile Safari `vh` is pinned to the LARGEST
