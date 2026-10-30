@@ -28,7 +28,8 @@
  *     burning tokens with nobody watching. Subagents structurally cannot do
  *     this, so it is a genuinely new failure mode and it gets a real guard.
  */
-import type { Chat, ChannelSender, ChatStatus, ContextUsage, PRRef, PeerSender } from "@dispatch/shared";
+import { chatPrStatuses } from "@dispatch/shared";
+import type { Chat, ChannelSender, ChatPrStatus, ChatStatus, ContextUsage, PeerSender, PrRecord } from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
 
 /* ------------------------------------------------------------ rate limits */
@@ -184,8 +185,12 @@ export interface PeerChatState {
    * reporting `0` there would date it to 1970 in every "how stale is this" read.
    */
   updatedAt: number;
-  /** PRs this chat opened. */
-  prs: PRRef[];
+  /**
+   * PRs this chat opened, each joined to the PR registry: open/merged/closed,
+   * the CI rollup and the review state. A superset of the `PRRef` this used to
+   * be, so a reader of `number`/`url`/`branch` sees no change.
+   */
+  prs: ChatPrStatus[];
   /** The PR this chat exists to review, if it is a reviewer. */
   reviewOf?: string;
   /** Percent of the context window used; absent unless a subprocess is live. */
@@ -230,6 +235,8 @@ export interface ChatMessengerOpts {
   getContextUsage?: (chatId: string) => Promise<ContextUsage | null>;
   /** Is this chat blocked on a human right now (open permission/question)? */
   isBlockedOnHuman?: (chatId: string) => boolean;
+  /** The PR registry's rows, by `repo#number` — what `state` reports CI and review from. */
+  listPrRecords?: () => Promise<PrRecord[]>;
   deps?: ChatMessengerDeps;
 }
 
@@ -299,6 +306,7 @@ export class ChatMessenger {
   private readonly sendFn: ChatMessengerOpts["send"];
   private readonly getContextUsage: ChatMessengerOpts["getContextUsage"];
   private readonly isBlockedOnHuman: (chatId: string) => boolean;
+  private readonly listPrRecords?: () => Promise<PrRecord[]>;
   private readonly now: () => number;
   private readonly genId: () => string;
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
@@ -355,6 +363,7 @@ export class ChatMessenger {
     this.sendFn = opts.send;
     this.getContextUsage = opts.getContextUsage;
     this.isBlockedOnHuman = opts.isBlockedOnHuman ?? (() => false);
+    this.listPrRecords = opts.listPrRecords;
     this.now = opts.deps?.now ?? (() => Date.now());
     this.genId =
       opts.deps?.genId ?? (() => `ask_${Math.random().toString(36).slice(2, 11)}`);
@@ -576,7 +585,7 @@ export class ChatMessenger {
       blockedOnHuman: live === "awaiting-input" || this.isBlockedOnHuman(chatId),
       lastUserMessageAt: chat.lastUserMessageAt,
       updatedAt: chat.updatedAt ?? chat.createdAt,
-      prs: chat.prs ?? [],
+      prs: await this.prStatuses(chat),
       reviewOf: chat.reviewOf,
       contextPercent,
       heldMessages: this.held.get(chatId)?.length ?? 0,
@@ -584,6 +593,14 @@ export class ChatMessenger {
   }
 
   /* ------------------------------------------------------------ internals */
+
+  /** The chat's refs joined to the registry; refs alone when it can't be read. */
+  private async prStatuses(chat: Chat): Promise<ChatPrStatus[]> {
+    if (!chat.prs?.length) return [];
+    const records = (await this.listPrRecords?.().catch(() => [])) ?? [];
+    const byKey = new Map(records.map((r) => [r.key, r]));
+    return chatPrStatuses(chat.prs, (key) => byKey.get(key));
+  }
 
   /**
    * Everything that can refuse a send, in the order that gives the most useful

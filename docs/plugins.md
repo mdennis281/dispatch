@@ -1079,7 +1079,7 @@ sprinkled over the SPA's routes:
 
 | route | scope |
 |---|---|
-| `GET chats?projectId&status&blockedOnHuman&since&before&q&limit&archived&cursor` (→ `nextCursor` when the scan budget stops it; an unknown `status`, a bad boolean or `before ≤ since` is a 400 naming the valid values) | `chats:read` |
+| `GET chats?projectId&status&blockedOnHuman&unmerged&since&before&q&limit&archived&cursor` (each chat's `prStatus[]`: state, CI, review — `shared/chat-pr-status.ts`) (→ `nextCursor` when the scan budget stops it; an unknown `status`, a bad boolean or `before ≤ since` is a 400 naming the valid values) | `chats:read` |
 | `GET chats/:id` (digest) · `GET chats/:id/messages?kinds&before&after&limit` | `chats:read` |
 | `POST chats/:id/messages { text, delivery?, sender? }` | `chats:write` |
 | `POST chats { projectId, text, title?, modeId?, provider?, model?, effort? }` → 201 | `chats:create` |

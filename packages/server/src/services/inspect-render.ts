@@ -21,6 +21,7 @@ import type {
   ReadChatResult,
 } from "./inspect.js";
 import { rowLabel, rowText } from "./inspect.js";
+import { isUnmerged } from "@dispatch/shared";
 
 /** Bytes → a short human size. */
 function size(bytes: number | undefined): string {
@@ -58,7 +59,13 @@ function chatHeadline(c: ChatSummary): string {
     c.status,
     c.blockedOnHuman ? "⏸ waiting on the human" : undefined,
     c.archived ? "archived" : undefined,
-    c.prs?.length ? `PR #${c.prs.join(", #")}` : undefined,
+    // With states when the registry knew them: "PR #465 open, CI failing" is
+    // the answer to "what's still unmerged", where "PR #465" was a lookup.
+    c.prStatus?.length
+      ? `PR ${c.prStatus.map((p) => `#${p.number} ${p.state}${isUnmerged(p) && p.ci !== "none" ? ` (CI ${p.ci})` : ""}`).join(", ")}`
+      : c.prs?.length
+        ? `PR #${c.prs.join(", #")}`
+        : undefined,
   ].filter(Boolean);
   const score = c.score !== undefined ? `  (${c.score.toFixed(2)})` : "";
   return `${c.id}  ${when(c.updatedAt)}  ${c.title}${score}\n    ${bits.join(" · ")}`;

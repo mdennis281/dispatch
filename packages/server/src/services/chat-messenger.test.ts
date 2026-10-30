@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import type { Chat, ChatStatus, ContextUsage, ChannelSender, PeerSender } from "@dispatch/shared";
+import { PrRecordSchema, type PrRecord } from "@dispatch/shared";
 import { EventBus } from "../bus.js";
 import {
   ChatMessenger,
@@ -30,6 +31,8 @@ function harness(
     onSend?: () => void;
     /** Park every send until the test releases it, so flushes can overlap. */
     gateSends?: boolean;
+    /** The PR registry `state` joins a chat's refs against. */
+    prRecords?: PrRecord[];
   } = {},
 ) {
   const bus = new EventBus();
@@ -80,6 +83,7 @@ function harness(
       delivered.push({ chatId, text, ...(peer ? { peer } : {}), ...(channel ? { channel } : {}) });
     },
     getContextUsage: async () => opts.contextUsage ?? null,
+    listPrRecords: async () => opts.prRecords ?? [],
     deps: {
       now: () => now,
       genId: () => `ask_${nextAsk++}`,
@@ -816,6 +820,28 @@ describe("ChatMessenger.ask / reply", () => {
     // A blocked chat is told the answer is not coming, rather than hanging on a
     // promise there is no longer anything left to resolve.
     await expect(pending).resolves.toMatchObject({ answered: false, reason: "cancelled" });
+  });
+});
+
+describe("ChatMessenger.state — PRs", () => {
+  it("joins the chat's PR refs to the registry: state, CI and review", async () => {
+    const h = harness({
+      chats: [{ id: "dev", prs: [{ number: 7, url: "u7", branch: "b", repo: "o/r", state: "open" }, { number: 8, url: "u8", branch: "c", repo: "o/r" }] }],
+      prRecords: [
+        PrRecordSchema.parse({
+          key: "o/r#7", repo: "o/r", number: 7, url: "u7", branch: "b", state: "merged", firstSeenAt: 1, lastChangedAt: 1,
+        }),
+        PrRecordSchema.parse({
+          key: "o/r#8", repo: "o/r", number: 8, url: "u8", branch: "c", firstSeenAt: 1, lastChangedAt: 1,
+          checks: [{ name: "ci", status: "completed", conclusion: "failure" }], reviewDecision: "approved",
+        }),
+      ],
+    });
+    const state = await h.messenger.state("dev");
+    expect(state?.prs.map((p) => [p.number, p.state, p.ci, p.review])).toEqual([
+      [7, "merged", "none", "none"],
+      [8, "open", "failing", "approved"],
+    ]);
   });
 });
 
