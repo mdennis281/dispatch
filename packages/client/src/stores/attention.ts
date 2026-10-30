@@ -34,7 +34,16 @@ interface AttentionStore {
   visible: AttentionItem[];
   /** `AppSettings.attentionQueue` — app-wide, so every device agrees. */
   filter: AttentionFilter;
-  hydrate: (items: AttentionItem[]) => void;
+  /**
+   * Replace the list with a REST snapshot, then replay every add/resolve/clear
+   * that arrived over the socket since that snapshot's {@link beginSync} — see
+   * `journal`. Without a token it is a plain replace (the offline fixture).
+   */
+  hydrate: (items: AttentionItem[], sync?: AttentionSync) => void;
+  /** Call BEFORE requesting the snapshot; hand the token back to `hydrate`. */
+  beginSync: () => AttentionSync;
+  /** The snapshot request failed: stop journaling for it. */
+  abortSync: (sync: AttentionSync) => void;
   add: (item: AttentionItem) => void;
   resolve: (id: string) => void;
   clearChat: (chatId: string) => void;
@@ -59,18 +68,77 @@ function slice(
   };
 }
 
-export const useAttention = create<AttentionStore>((set) => ({
-  items: [],
-  visible: [],
-  filter: DEFAULT_ATTENTION_FILTER,
-  hydrate: (items) => set((s) => slice(items, s.filter)),
-  add: (item) =>
-    set((s) => slice([...s.items.filter((i) => i.id !== item.id), item], s.filter)),
-  resolve: (id) => set((s) => slice(s.items.filter((i) => i.id !== id), s.filter)),
-  clearChat: (chatId) =>
-    set((s) => slice(s.items.filter((i) => i.chatId !== chatId), s.filter)),
-  setFilter: (filter) => set((s) => ({ filter, ...slice(s.items, filter) })),
-}));
+type Op =
+  | { op: "add"; item: AttentionItem }
+  | { op: "resolve"; id: string }
+  | { op: "clearChat"; chatId: string };
+
+function apply(items: AttentionItem[], op: Op): AttentionItem[] {
+  switch (op.op) {
+    case "add":
+      return [...items.filter((i) => i.id !== op.item.id), op.item];
+    case "resolve":
+      return items.filter((i) => i.id !== op.id);
+    case "clearChat":
+      return items.filter((i) => i.chatId !== op.chatId);
+  }
+}
+
+/**
+ * Socket events seen while a snapshot is in flight, in arrival order.
+ *
+ * The reconnect hydrate fetches `/api/attention` alongside seven other reads
+ * and applies it only once ALL of them return — 2–18s on a loaded server. The
+ * socket is live the whole time. An `attention-resolve` landing in that gap was
+ * applied, then the stale snapshot put the item straight back, and the server
+ * never re-sends a resolve: an answered question sat in the queue until a page
+ * reload (2026-10-29). The mirror case is worse — an `attention-add` in the gap
+ * was wiped, leaving a blocked chat with no marker anywhere.
+ *
+ * Replaying over the snapshot is safe only for ops newer than THAT snapshot's
+ * request, so each sync replays from the index where it began, not from 0. A
+ * shared start was wrong for overlapping hydrates (a second `hello` while the
+ * first is in flight): B would replay an `add` journaled under A over a
+ * snapshot taken after the item was resolved, and resurrect it.
+ */
+export interface AttentionSync {
+  readonly start: number;
+}
+const active = new Set<AttentionSync>();
+let journal: Op[] = [];
+
+export const useAttention = create<AttentionStore>((set) => {
+  const mutate = (op: Op) => {
+    if (active.size > 0) journal.push(op);
+    set((s) => slice(apply(s.items, op), s.filter));
+  };
+  const endSync = (sync: AttentionSync) => {
+    active.delete(sync);
+    // Only trimmed once nothing is in flight, so every live token's index holds.
+    if (active.size === 0) journal = [];
+  };
+  return {
+    items: [],
+    visible: [],
+    filter: DEFAULT_ATTENTION_FILTER,
+    hydrate: (items, sync) => {
+      const replayed =
+        sync && active.has(sync) ? journal.slice(sync.start).reduce(apply, items) : items;
+      if (sync) endSync(sync);
+      set((s) => slice(replayed, s.filter));
+    },
+    beginSync: () => {
+      const sync: AttentionSync = { start: journal.length };
+      active.add(sync);
+      return sync;
+    },
+    abortSync: endSync,
+    add: (item) => mutate({ op: "add", item }),
+    resolve: (id) => mutate({ op: "resolve", id }),
+    clearChat: (chatId) => mutate({ op: "clearChat", chatId }),
+    setFilter: (filter) => set((s) => ({ filter, ...slice(s.items, filter) })),
+  };
+});
 
 /** Count of visible items that actually block work (permissions + questions). */
 export function useAttentionCount(): number {
