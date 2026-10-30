@@ -92,7 +92,7 @@ import { TrunkSyncService } from "./trunk-sync.js";
 import { PrReviewWatcher } from "./pr-review-watcher.js";
 import { PrRegistry } from "./pr-registry.js";
 import { chatNestingDepth } from "./chat-nesting.js";
-import { chatFamily, chatTree, type ChatTreeDeps } from "./chat-tree.js";
+import { chatFamily, memoizedChatLister, chatTree, type ChatTreeDeps } from "./chat-tree.js";
 import { FileIndexService } from "./file-index.js";
 import { MetricsService } from "./metrics.js";
 import { MetricsBackfill } from "./metrics-backfill.js";
@@ -1125,7 +1125,8 @@ export function createServices(
   // The sidebar's two parent edges, as data — chat_tree and chat_state's family.
   const chatTreeDeps: ChatTreeDeps = {
     getChat: (chatId) => store.getChat(chatId).catch(() => null),
-    listChats: (projectId) => store.listChats(projectId),
+    // Memoized: chat_state is polled, and every call needs the project's listing.
+    listChats: memoizedChatLister((projectId) => store.listChats(projectId)),
     getPrRecord: (key) => store.getPrRecord(key),
   };
   const chatMessenger =

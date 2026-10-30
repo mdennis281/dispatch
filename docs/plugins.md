@@ -1067,7 +1067,10 @@ binds only for a token holding a read scope some event type falls under.
 `chat_tree` (`services/chat-tree.ts`) walks the sidebar's own two parent edges —
 `parentChatId` (and its legacy purpose sentence) and `reviewOf` → the PR's author
 chat — within one project, so its nodes never leave the asked chat's project;
-`chat_state` carries the direct `parent` / `children` from the same code.
+`chat_state` carries the direct `parent` / `children` from the same code —
+live children only (newest 20, then a count), archived ones as
+`archivedChildren`, with the project listing memoized for 5s because
+`chat_state` is the read connectors poll.
 `attention_list` (binding and tools in `mcp/attention-tools.ts`) binds for
 `attention:read`; it and `GET attention` return the same enriched entries
 (`buildAttentionEntries`): chat title, `createdAtLocal`, `dismissible`, and for

@@ -49,8 +49,20 @@ export interface ChatTree {
 /** Direct family, for `chat_state`. */
 export interface ChatFamily {
   parent?: { id: string; title: string; relation: ChatRelation };
+  /** Live children only, newest last, at most {@link FAMILY_CHILD_LIMIT}. */
   children: { id: string; title: string; relation: ChatRelation; status?: string }[];
+  /** Live children past the limit — `chat_tree` lists them all. */
+  moreChildren?: number;
+  /**
+   * Archived children, counted but not listed: the sidebar hides them, and a
+   * parent accrues one archived reviewer per old PR, which buried its live
+   * work in a `children (12):` list nobody could tell apart.
+   */
+  archivedChildren?: number;
 }
+
+/** Most children `chat_state` lists; the rest are a count and `chat_tree`. */
+export const FAMILY_CHILD_LIMIT = 20;
 
 export interface ChatTreeDeps {
   getChat(chatId: string): Promise<Chat | null>;
@@ -174,19 +186,52 @@ export async function chatTree(chatId: string, deps: ChatTreeDeps, depth = 3): P
   return { ancestors, chat: grow(chat, relationToChild, 0) };
 }
 
-/** Direct parent and children only — the cheap read `chat_state` makes. */
+/** Direct parent and live children only — what `chat_state` reports. */
 export async function chatFamily(chat: Chat, deps: ChatTreeDeps): Promise<ChatFamily> {
   const fam = await familyFor(chat, deps);
   const up = fam.parentOf(chat);
   const parent = up ? fam.get(up.id) : undefined;
+  const all = fam.childrenOf(chat.id);
+  const live = all.filter((k) => !k.chat.archived);
+  const shown = live.slice(-FAMILY_CHILD_LIMIT);
+  const archived = all.length - live.length;
   return {
     ...(up && parent ? { parent: { id: parent.id, title: parent.title, relation: up.relation } } : {}),
-    children: fam.childrenOf(chat.id).map((k) => ({
+    children: shown.map((k) => ({
       id: k.chat.id,
       title: k.chat.title,
       relation: k.relation,
       ...(k.chat.status ? { status: k.chat.status } : {}),
     })),
+    ...(live.length > shown.length ? { moreChildren: live.length - shown.length } : {}),
+    ...(archived ? { archivedChildren: archived } : {}),
+  };
+}
+
+/**
+ * `listChats` behind a brief per-project memo. It reads every chat dir and
+ * stats every transcript (~110ms at 353 chats, mostly on the event loop), and
+ * `chat_state` — the read a connector POLLS, several chats every few seconds —
+ * needs a project's listing to find a chat's children. Concurrent callers
+ * share one read; a listing is reused for `ttlMs`, so a child spawned a moment
+ * ago can be that late to appear, never later.
+ */
+export function memoizedChatLister(
+  list: (projectId: string) => Promise<Chat[]>,
+  ttlMs = 5_000,
+  now: () => number = Date.now,
+): (projectId: string) => Promise<Chat[]> {
+  const memo = new Map<string, { at: number; chats: Promise<Chat[]> }>();
+  return (projectId) => {
+    const t = now();
+    for (const [k, v] of memo) if (t - v.at >= ttlMs) memo.delete(k);
+    const hit = memo.get(projectId);
+    if (hit) return hit.chats;
+    const chats = list(projectId);
+    memo.set(projectId, { at: t, chats });
+    // A failed read must not be served for the next five seconds.
+    chats.catch(() => memo.delete(projectId));
+    return chats;
   };
 }
 

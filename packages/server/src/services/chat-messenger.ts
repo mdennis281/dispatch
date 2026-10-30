@@ -198,6 +198,9 @@ export interface PeerChatState {
   parent?: ChatFamily["parent"];
   /** Its direct children: chats it spawned, and reviewers of its PRs. `chat_tree` for deeper. */
   children?: ChatFamily["children"];
+  /** Live children past the listed ones, and archived children (counted, not listed). */
+  moreChildren?: number;
+  archivedChildren?: number;
   /** Percent of the context window used; absent unless a subprocess is live. */
   contextPercent?: number;
   /** Peer messages held for this chat, waiting for its turn to settle. */
@@ -613,7 +616,12 @@ export class ChatMessenger {
   private async familyOf(chat: Chat): Promise<Partial<ChatFamily>> {
     const f = await this.family?.(chat).catch(() => null);
     if (!f) return {};
-    return { ...(f.parent ? { parent: f.parent } : {}), children: f.children };
+    return {
+      ...(f.parent ? { parent: f.parent } : {}),
+      children: f.children,
+      ...(f.moreChildren ? { moreChildren: f.moreChildren } : {}),
+      ...(f.archivedChildren ? { archivedChildren: f.archivedChildren } : {}),
+    };
   }
 
   /** The chat's refs joined to the registry; refs alone when it can't be read. */

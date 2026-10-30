@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { PrRecordSchema, spawnedPurposeLabel, type Chat, type PrRecord } from "@dispatch/shared";
-import { chatFamily, chatTree, renderChatTree, type ChatTreeDeps } from "./chat-tree.js";
+import { FAMILY_CHILD_LIMIT, chatFamily, chatTree, memoizedChatLister, renderChatTree, type ChatTreeDeps } from "./chat-tree.js";
 
 function chat(id: string, over: Partial<Chat> = {}): Chat {
   return {
@@ -102,5 +102,54 @@ describe("chatFamily", () => {
       children: [{ id: "grand5", title: "Chat grand5", relation: "spawned", status: "awaiting-input" }],
     });
     expect((await chatFamily(chats[0]!, deps)).children.map((c) => c.id)).toEqual(["kidA2", "kidB3", "rev4"]);
+  });
+});
+
+describe("chatFamily's children", () => {
+  it("counts archived children instead of listing them, and caps the live list", async () => {
+    const many = [
+      chat("p1"),
+      ...Array.from({ length: FAMILY_CHILD_LIMIT + 2 }, (_, i) => chat(`k${i + 10}`, { parentChatId: "p1" })),
+      chat("old900", { parentChatId: "p1", archived: true }),
+      chat("old901", { reviewOf: "o/r#1", archived: true }),
+    ];
+    many[0] = chat("p1", { prs: [{ number: 1, url: "u", branch: "b", repo: "o/r" }] });
+    const d: ChatTreeDeps = { ...deps, getChat: async (id) => many.find((c) => c.id === id) ?? null, listChats: async () => many };
+    const fam = await chatFamily(many[0]!, d);
+    expect(fam.children).toHaveLength(FAMILY_CHILD_LIMIT);
+    expect(fam.children.some((c) => c.id.startsWith("old"))).toBe(false);
+    // The newest are the ones listed.
+    expect(fam.children.at(-1)!.id).toBe(`k${FAMILY_CHILD_LIMIT + 11}`);
+    expect(fam.moreChildren).toBe(2);
+    expect(fam.archivedChildren).toBe(2);
+    // chat_tree still shows the archived ones, marked.
+    const tree = await chatTree("p1", d, 1);
+    expect(renderChatTree(tree!)).toContain(`old900 "Chat old900" · archived`);
+  });
+});
+
+describe("memoizedChatLister", () => {
+  it("shares a read per project for the ttl, then reads again; a failure is not cached", async () => {
+    let t = 0;
+    let reads = 0;
+    let fail = false;
+    const list = memoizedChatLister(async (p) => {
+      reads++;
+      if (fail) throw new Error("disk");
+      return [chat(`${p}1`)];
+    }, 5_000, () => t);
+    await Promise.all([list("a"), list("a")]);
+    expect(reads).toBe(1);
+    await list("b");
+    expect(reads).toBe(2);
+    t = 4_999;
+    await list("a");
+    expect(reads).toBe(2);
+    t = 5_000;
+    fail = true;
+    await expect(list("a")).rejects.toThrow("disk");
+    fail = false;
+    await list("a");
+    expect(reads).toBe(4);
   });
 });

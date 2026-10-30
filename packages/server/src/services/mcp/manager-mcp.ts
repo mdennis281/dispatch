@@ -7632,13 +7632,16 @@ ${look}` : "")
         lines.push(`  parent: ${state.parent.id} "${state.parent.title}"${state.parent.relation === "reviewer" ? " (reviewing its PR)" : ""}`);
       }
       if (state.children?.length) {
+        const total = state.children.length + (state.moreChildren ?? 0);
         lines.push(
-          `  children (${state.children.length}):`,
+          `  children (${total}):`,
           ...state.children.map(
             (c) => `    ${c.id} "${c.title}"${c.relation === "reviewer" ? " [reviewer]" : ""}${c.status ? ` · ${c.status}` : ""}`,
           ),
+          ...(state.moreChildren ? [`    …and ${state.moreChildren} older — chat_tree lists them all`] : []),
         );
       }
+      if (state.archivedChildren) lines.push(`  archived children: ${state.archivedChildren} (not listed; chat_tree shows them)`);
       if (state.contextPercent !== undefined) {
         lines.push(`  context: ${state.contextPercent}% full`);
       }
