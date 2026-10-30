@@ -53,7 +53,7 @@ external tool are **offered** (`OFFERABLE_TOOL_SCOPES` in `@dispatch/shared`; to
 
 | route | scope |
 |---|---|
-| `GET chats?projectId&status&blockedOnHuman&since&before&q&limit&archived&cursor` → `{ chats, truncated, unscanned, nextCursor? }` — `blockedOnHuman=true` is chats a permission prompt or question holds (`awaiting-input`); an unknown status is a 400 that lists the valid ones | `chats:read` |
+| `GET chats?projectId&status&blockedOnHuman&unmerged&since&before&q&limit&archived&cursor` → `{ chats, truncated, unscanned, nextCursor? }` — each chat carries `prStatus[]` (`state` open/merged/closed/unknown — `unknown` until the registry has seen the PR; `ci` none/running/failing/passing, `review`, `unresolvedThreads`); `unmerged=true` keeps chats with a PR not seen to merge or close (refused for `instance: stable`); `blockedOnHuman=true` is chats a permission prompt or question holds (`awaiting-input`); an unknown status is a 400 that lists the valid ones | `chats:read` |
 | `GET chats/:id` (digest) | `chats:read` |
 | `GET chats/:id/messages?kinds&before&after&limit` | `chats:read` |
 | `POST chats/:id/messages { text, delivery?: "queue"\|"interrupt", sender? }` | `chats:write` |

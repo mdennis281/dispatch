@@ -158,6 +158,7 @@ import {
   providerIds,
   COMPACT_FOCUS_MAX,
   MANAGER_TOOL_EXTERNAL,
+  describeChatPr,
   INTEGRATION_EVENT_PAGE_DEFAULT,
   INTEGRATION_EVENT_PAGE_MAX,
   INTEGRATION_EVENT_TYPES,
@@ -7137,6 +7138,13 @@ ${look}` : "")
           "true: only chats blocked on the human — a permission prompt or a question is waiting " +
             "(see attention_list for what). false: only chats that are not.",
         ),
+      unmerged: z
+        .boolean()
+        .optional()
+        .describe(
+          "true: only chats with at least one PR not seen to merge or close (state open, or unknown before the " +
+            "registry has polled it). Each hit lists its PRs' state and CI.",
+        ),
       archived: z.boolean().optional().describe("Include archived chats (default false)."),
       kinds: z
         .array(z.string())
@@ -7183,6 +7191,7 @@ ${look}` : "")
           project: args.project,
           status: args.status?.trim() || undefined,
           blockedOnHuman: args.blockedOnHuman,
+          unmerged: args.unmerged,
           archived: args.archived,
           since,
           before,
@@ -7579,7 +7588,8 @@ ${look}` : "")
   const chatState = tool(
     "chat_state",
     "One cheap look at what ANOTHER chat is doing: its status, whether it is blocked " +
-      "waiting on a HUMAN, when it was last active, the PRs it opened, and how full its " +
+      "waiting on a HUMAN, when it was last active, the PRs it opened (each with open/merged/" +
+      "closed, CI and review state), and how full its " +
       "context window is. This is the tool to poll when you are coordinating several " +
       "chats — it is a pure read and never wakes or disturbs the chat it describes. Use " +
       "it before chat_send to see whether a chat is mid-turn, and instead of chat_ask " +
@@ -7612,7 +7622,7 @@ ${look}` : "")
         `  last updated: ${new Date(state.updatedAt).toISOString()}`,
       ];
       if (state.prs.length) {
-        lines.push(`  PRs: ${state.prs.map((pr) => `${pr.repo}#${pr.number}`).join(", ")}`);
+        lines.push("  PRs:", ...state.prs.map((pr) => `    ${describeChatPr(pr)}`));
       }
       if (state.reviewOf) lines.push(`  reviewing: ${state.reviewOf}`);
       if (state.contextPercent !== undefined) {

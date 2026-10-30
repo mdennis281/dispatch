@@ -68,6 +68,8 @@ const ListChatsQuery = z.object({
   status: z.string().min(1).optional(),
   /** `awaiting-input`: a permission prompt or question is waiting on the human. */
   blockedOnHuman: queryBool.optional(),
+  /** Only chats with a PR still open. */
+  unmerged: queryBool.optional(),
   since: z.coerce.number().int().nonnegative().optional(),
   before: z.coerce.number().int().nonnegative().optional(),
   q: z.string().optional(),
@@ -181,6 +183,7 @@ export function registerIntegrationRoutes(app: FastifyInstance): void {
         project: q.projectId,
         status: q.status,
         blockedOnHuman: q.blockedOnHuman,
+        unmerged: q.unmerged,
         since: q.since,
         before: q.before,
         limit: q.limit,
@@ -621,6 +624,7 @@ const OPENAPI = {
           ...["since", "before", "limit"].map((name) => ({ name, in: "query", schema: { type: "integer" } })),
           { name: "status", in: "query", schema: { type: "string", enum: ["idle", "queued", "running", "waiting", "awaiting-input", "done", "failed", "error"] } },
           { name: "blockedOnHuman", in: "query", schema: { type: "boolean" }, description: "true: only chats a permission prompt or question is holding" },
+          { name: "unmerged", in: "query", schema: { type: "boolean" }, description: "true: only chats with a PR still open; every chat's `prStatus` carries state, CI and review" },
           { name: "archived", in: "query", schema: { type: "boolean" } },
         ],
         responses: { "200": { description: "Chats", content: { "application/json": { schema: {

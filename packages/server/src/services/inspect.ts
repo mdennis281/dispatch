@@ -37,11 +37,13 @@ import { homedir } from "node:os";
 import { createInterface } from "node:readline";
 import { basename, isAbsolute, join, resolve } from "node:path";
 
-import type { Chat, ImageRef, Project, TextMatcher } from "@dispatch/shared";
+import type { Chat, ChatPrStatus, ImageRef, PrRecord, Project, TextMatcher } from "@dispatch/shared";
 import {
   ChatMessageSchema,
   ChatStatusSchema,
+  chatPrStatuses,
   compileQuery,
+  isUnmerged,
   realProjects,
   resolveWorkflow,
   withSentContextSummary,
@@ -142,6 +144,8 @@ export interface ChatSummary {
   blockedOnHuman?: boolean;
   worktrees?: string[];
   prs?: number[];
+  /** Each of `prs` with its open/merged/closed, CI and review state (see ChatPrStatus). */
+  prStatus?: ChatPrStatus[];
   hits?: ChatHit[];
   /** Best similarity among this chat's hits and its title, when a query ran. */
   score?: number;
@@ -165,6 +169,8 @@ export interface FindChatsQuery {
   status?: string;
   /** true → only chats waiting on the human (`awaiting-input`); false → only the rest. */
   blockedOnHuman?: boolean;
+  /** true → only chats with at least one PR not yet merged or closed. */
+  unmerged?: boolean;
   /** Include archived chats (default false). */
   archived?: boolean;
   /** Only chats active at/after this time (epoch ms). */
@@ -233,6 +239,7 @@ function findFingerprint(q: FindChatsQuery): string {
     q.project ?? "",
     q.status ?? "",
     q.blockedOnHuman ?? null,
+    Boolean(q.unmerged),
     Boolean(q.archived),
     [...(q.kinds ?? [])].sort(),
     q.match ?? "similar",
@@ -697,7 +704,8 @@ export class InspectService {
     );
   }
 
-  private toSummary(chat: Chat, projectName?: string): ChatSummary {
+  private toSummary(chat: Chat, projectName?: string, prs?: ReadonlyMap<string, PrRecord>): ChatSummary {
+    const prStatus = chat.prs?.length && prs ? chatPrStatuses(chat.prs, (key) => prs.get(key)) : undefined;
     return {
       id: chat.id,
       title: chat.title,
@@ -712,6 +720,7 @@ export class InspectService {
       ...(chat.status === "awaiting-input" ? { blockedOnHuman: true } : {}),
       worktrees: chat.worktrees,
       prs: chat.prs?.map((p) => p.number),
+      ...(prStatus?.length ? { prStatus } : {}),
     };
   }
 
@@ -722,6 +731,27 @@ export class InspectService {
     const store = this.storeFor(q.instance);
     const projects = await store.listProjects();
     const nameById = new Map(projects.map((p) => [p.id, p.name]));
+    // One read of the registry per search: every summary's PR states, and the
+    // `unmerged` filter, come from it. A bad row costs that PR its CI line,
+    // never the search.
+    //
+    // OUR store only. The installed instance's registry lives in ITS state.db,
+    // and opening that from here would hold the file for this process's
+    // lifetime — the handle that stops the upgrader moving `data/` aside on
+    // Windows. A foreign read falls back to the refs' own `state`.
+    const foreign = store !== this.store;
+    // Without the registry a ref's state is only what that chat's own watcher
+    // stamped — a PR merged by a human or another chat stays unset and reads
+    // `unknown`, which `isUnmerged` counts as open. Filtering on that would
+    // report merged PRs as unmerged, so the filter refuses rather than guesses.
+    if (q.unmerged && foreign) {
+      throw new FindFilterError(
+        "unmerged needs the PR registry of the instance being searched, which is not readable for instance: 'stable' " +
+          "from here. Search without `instance`, or drop `unmerged` and read each chat's prStatus.",
+      );
+    }
+    const prRecords = new Map((foreign ? [] : await store.listPrRecords().catch(() => [])).map((r) => [r.key, r]));
+    const summarize = (c: Chat): ChatSummary => this.toSummary(c, nameById.get(c.projectId), prRecords);
 
     let projectId: string | undefined;
     if (q.project) {
@@ -752,6 +782,7 @@ export class InspectService {
       .filter((c) => (q.archived ? true : !c.archived))
       .filter((c) => (q.status ? c.status === q.status : true))
       .filter((c) => (q.blockedOnHuman === undefined ? true : (c.status === "awaiting-input") === q.blockedOnHuman))
+      .filter((c) => !q.unmerged || chatPrStatuses(c.prs, (key) => prRecords.get(key)).some(isUnmerged))
       .filter((c) => {
         const at = activity(c);
         if (q.since !== undefined && at < q.since) return false;
@@ -768,7 +799,7 @@ export class InspectService {
       const page = remaining.slice(0, limit);
       const more = remaining.length > page.length;
       return {
-        chats: page.map((c) => this.toSummary(c, nameById.get(c.projectId))),
+        chats: page.map((c) => summarize(c)),
         candidates: candidates.length,
         scanned: 0,
         bytesScanned: 0,
@@ -866,7 +897,7 @@ export class InspectService {
       { kind: "title", snippet: c.title, ...(matcher ? { score: titleScore(c)! } : {}) },
     ];
     const summary = (c: Chat, hits: ChatHit[]): ChatSummary => ({
-      ...this.toSummary(c, nameById.get(c.projectId)),
+      ...summarize(c),
       hits,
       ...(matcher ? { score: Math.max(titleScore(c) ?? 0, ...hits.map((h) => h.score ?? 0)) } : {}),
     });

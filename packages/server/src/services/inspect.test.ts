@@ -32,7 +32,7 @@ const DAY = 86_400_000;
 /** Write a chat record + its transcript rows. */
 async function seedChat(
   id: string,
-  chat: Partial<{ title: string; projectId: string; updatedAt: number; archived: boolean; status: string }>,
+  chat: Partial<{ title: string; projectId: string; updatedAt: number; archived: boolean; status: string; prs: unknown[] }>,
   rows: RawRow[],
 ): Promise<void> {
   const dir = join(root, "chats", id);
@@ -46,7 +46,7 @@ async function seedChat(
       modeId: "default",
       effort: "medium",
       worktrees: [],
-      prs: [],
+      prs: chat.prs ?? [],
       archived: chat.archived,
       status: chat.status,
       createdAt: T0,
@@ -182,6 +182,26 @@ describe("findChats", () => {
     await expect(service().findChats({ since: T0 + DAY, before: T0 })).rejects.toThrow(/`before` is not after `since`/);
     // A valid status still filters.
     expect((await service().findChats({ status: "done" })).chats).toEqual([]);
+  });
+
+  it("reports each chat's PR state, and `unmerged` keeps only chats with one still open", async () => {
+    const pr = (n: number) => ({ number: n, url: `https://x/${n}`, branch: `b${n}`, repo: "o/r" });
+    await seedChat("chat-landed", { title: "landed", updatedAt: T0 + 3 * DAY, prs: [pr(1)] }, []);
+    await seedChat("chat-open", { title: "in review", updatedAt: T0 + 4 * DAY, prs: [pr(1), pr(2)] }, []);
+    const base = { firstSeenAt: 1, lastChangedAt: 1, repo: "o/r" };
+    await store.upsertPrRecord("o/r#1", { ...base, number: 1, url: "https://x/1", state: "merged" } as never);
+    await store.upsertPrRecord("o/r#2", {
+      ...base, number: 2, url: "https://x/2", title: "Still going", state: "open",
+      checks: [{ name: "ci", status: "completed", conclusion: "failure" }],
+    } as never);
+
+    const all = await service().findChats({});
+    const open = all.chats.find((c) => c.id === "chat-open")!;
+    expect(open.prStatus?.map((p) => [p.number, p.state, p.ci])).toEqual([[1, "merged", "none"], [2, "open", "failing"]]);
+    expect(renderFind(all)).toContain("PR #1 merged, #2 open (CI failing)");
+
+    const unmerged = await service().findChats({ unmerged: true });
+    expect(unmerged.chats.map((c) => c.id)).toEqual(["chat-open"]);
   });
 
   it("excludes archived chats unless asked", async () => {
@@ -722,6 +742,8 @@ describe("instance: stable", () => {
 
     const result = await svc.findChats({ instance: "stable", query: "production only" });
     expect(result.chats.map((c) => c.id)).toEqual(["prod-chat"]);
+    // No registry over there: `unmerged` would guess, so it refuses.
+    await expect(svc.findChats({ instance: "stable", unmerged: true })).rejects.toThrow(FindFilterError);
     // …and the caller's own store is untouched by that.
     expect((await svc.findChats({ query: "production only" })).chats).toEqual([]);
     otherStore.close();
