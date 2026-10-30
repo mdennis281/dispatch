@@ -92,7 +92,7 @@ export interface IntegrationContextDeps {
   /** The integration event feed behind `events_poll`. */
   events?: Pick<EventFeedService, "poll">;
   /** The global attention queue behind the `attention_*` tools. */
-  attention?: Pick<AttentionQueue, "list">;
+  attention?: Pick<AttentionQueue, "list" | "dismiss">;
   now?: () => number;
 }
 
@@ -357,6 +357,30 @@ export async function createIntegrationContext(
                 chatTitle: async (id) => (await store.getChat(id).catch(() => null))?.title,
               });
             },
+            // A write to the queue: `attention:answer`, the scope that already
+            // lets this token resolve a question item.
+            ...(identity.scopes.includes("attention:answer")
+              ? {
+                  dismiss: async ({ ids, kinds, project, chatId }) => {
+                    if (project !== undefined && !projectVisible(project)) {
+                      throw new Error(`No project "${project}". Find ids with project_list.`);
+                    }
+                    const { removed, missing } = attention.dismiss({
+                      ...(ids ? { ids } : {}),
+                      ...(kinds ? { kinds } : {}),
+                      ...(chatId ? { chatId } : {}),
+                      ...(project ? { projectId: project } : {}),
+                      visible: (i) => projectVisible(i.projectId) && chatVisible(i.chatId),
+                    });
+                    // Same broadcast as the SPA's clear: every client holds these.
+                    for (const i of removed) deps.bus.publish({ type: "attention-resolve", id: i.id, chatId: i.chatId });
+                    return {
+                      dismissed: removed.map((i) => ({ id: i.id, kind: i.kind, chatId: i.chatId, summary: i.summary })),
+                      missing,
+                    };
+                  },
+                }
+              : {}),
           }
         : undefined,
     summary: summaries

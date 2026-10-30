@@ -93,3 +93,32 @@ describe("AttentionQueue — clear", () => {
     expect(queue.list().map((i) => i.id)).toEqual(["theirs"]);
   });
 });
+
+describe("AttentionQueue — dismiss", () => {
+  it("removes named ids whatever their kind, and reports the ones it could not find", () => {
+    queue.add(item("question", { id: "q1" }));
+    queue.add(item("done", { id: "d1" }));
+    const r = queue.dismiss({ ids: ["q1", "gone", "q1"] });
+    expect(r.removed.map((i) => i.id)).toEqual(["q1"]);
+    expect(r.missing).toEqual(["gone"]);
+    expect(queue.list().map((i) => i.id)).toEqual(["d1"]);
+  });
+
+  it("sweeps only the retrospective kinds by default, narrowed by chat and project", () => {
+    queue.add(item("permission", { id: "p1" }));
+    queue.add(item("review", { id: "r1", projectId: "pA" }));
+    queue.add(item("done", { id: "d1", projectId: "pB" }));
+    expect(queue.dismiss({ projectId: "pA" }).removed.map((i) => i.id)).toEqual(["r1"]);
+    expect(queue.dismiss({}).removed.map((i) => i.id)).toEqual(["d1"]);
+    expect(queue.list().map((i) => i.id)).toEqual(["p1"]);
+    expect(queue.dismiss({ kinds: ["permission"] }).removed.map((i) => i.id)).toEqual(["p1"]);
+  });
+
+  it("never removes an item outside the caller's reach, and calls it missing", () => {
+    queue.add(item("done", { id: "hidden", projectId: "secret" }));
+    const visible = (i: { projectId?: string }) => i.projectId !== "secret";
+    expect(queue.dismiss({ ids: ["hidden"], visible })).toEqual({ removed: [], missing: ["hidden"] });
+    expect(queue.dismiss({ visible }).removed).toEqual([]);
+    expect(queue.size()).toBe(1);
+  });
+});

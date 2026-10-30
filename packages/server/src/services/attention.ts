@@ -120,6 +120,52 @@ export class AttentionQueue {
   }
 
   /**
+   * Dismiss by NAME as well as by kind — what an integration's
+   * `attention_dismiss` needs. Returns the removed items (the caller broadcasts
+   * an `attention-resolve` for each, as with `clear`) and the ids it could not
+   * find, so a caller is told which of its ids were stale rather than getting
+   * a bare count.
+   *
+   * The blocking kinds follow the same rule as `clear`: never by default. An id
+   * named explicitly IS explicit, so it is removed whatever its kind; without
+   * ids, only `kinds` (default {@link DISMISSIBLE_ATTENTION_KINDS}) is swept.
+   * `visible` is the caller's reach — an item outside it is reported missing,
+   * never removed, so a restricted token cannot probe for others' items.
+   */
+  dismiss(opts: {
+    ids?: readonly string[];
+    kinds?: ReadonlyArray<AttentionItem["kind"]>;
+    chatId?: string;
+    projectId?: string;
+    visible?: (item: AttentionItem) => boolean;
+  }): { removed: AttentionItem[]; missing: string[] } {
+    const visible = opts.visible ?? (() => true);
+    const removed: AttentionItem[] = [];
+    const missing: string[] = [];
+    if (opts.ids?.length) {
+      for (const id of new Set(opts.ids)) {
+        const item = this.items.get(id);
+        if (!item || !visible(item)) {
+          missing.push(id);
+          continue;
+        }
+        this.items.delete(id);
+        removed.push(item);
+      }
+      return { removed, missing };
+    }
+    const kinds = new Set<AttentionItem["kind"]>(opts.kinds?.length ? opts.kinds : DISMISSIBLE_ATTENTION_KINDS);
+    for (const [id, item] of this.items) {
+      if (!kinds.has(item.kind) || !visible(item)) continue;
+      if (opts.chatId && item.chatId !== opts.chatId) continue;
+      if (opts.projectId && item.projectId !== opts.projectId) continue;
+      this.items.delete(id);
+      removed.push(item);
+    }
+    return { removed, missing };
+  }
+
+  /**
    * Drop every item for a chat (used when a chat is deleted). Returns the ids it
    * removed so the caller can broadcast an authoritative `attention-resolve` per
    * id — otherwise a client that already received the item's `attention-add`

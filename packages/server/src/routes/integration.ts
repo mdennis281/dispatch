@@ -29,6 +29,7 @@ import {
   isIntegrationEventType,
   INTEGRATION_TRUST_LEVELS,
   QuestionAnswerSchema,
+  AttentionItemSchema,
   type AttentionItem,
   type IntegrationTokenCreateRequest,
 } from "@dispatch/shared";
@@ -113,6 +114,13 @@ const AnswerBody = z.object({
   notes: z.string().optional(),
   answers: z.array(QuestionAnswerSchema).optional(),
   decline: z.boolean().optional(),
+});
+
+const DismissBody = z.object({
+  ids: z.array(z.string().min(1)).optional(),
+  kinds: z.array(AttentionItemSchema.shape.kind).min(1).optional(),
+  chatId: z.string().min(1).optional(),
+  projectId: z.string().min(1).optional(),
 });
 
 const CreateTokenBody = z.object({
@@ -370,6 +378,31 @@ export function registerIntegrationRoutes(app: FastifyInstance): void {
           chatTitle: async (id) => (await store.getChat(id).catch(() => null))?.title,
         }),
       };
+    }),
+  );
+
+  /**
+   * Dismiss items — the REST twin of `attention_dismiss`. Named ids go
+   * whatever their kind; without ids the sweep defaults to the retrospective
+   * kinds, exactly as the SPA's `DELETE /api/attention`. Never answers or
+   * denies: a dismissed permission card's tool call is still waiting.
+   */
+  app.post("/api/integration/attention/dismiss", (req, reply) =>
+    withScope(reply, async () => {
+      requireScope(req, "attention:answer");
+      const parsed = DismissBody.safeParse(req.body ?? {});
+      if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+      const body = parsed.data;
+      if (body.ids?.length && (body.kinds || body.chatId || body.projectId)) {
+        return reply.code(400).send({ error: "Pass either ids, or kinds/chatId/projectId to sweep — not both." });
+      }
+      if (body.projectId && !projectAllowed(req, body.projectId)) return reply.code(404).send({ error: `No project "${body.projectId}".` });
+      const { removed, missing } = attention.dismiss({
+        ...body,
+        visible: (i) => projectAllowed(req, i.projectId),
+      });
+      for (const i of removed) app.cm.bus.publish({ type: "attention-resolve", id: i.id, chatId: i.chatId });
+      return { dismissed: removed.map((i) => ({ id: i.id, kind: i.kind, chatId: i.chatId, summary: i.summary })), missing };
     }),
   );
 
@@ -637,6 +670,19 @@ const OPENAPI = {
         responses: { "200": { description: "Items", content: { "application/json": { schema: {
           type: "object", properties: { items: { type: "array", items: { $ref: "#/components/schemas/AttentionItem" } } },
         } } } } } },
+    },
+    "/api/integration/attention/dismiss": {
+      post: { ...scoped("attention:answer"), summary: "Dismiss items: named ids whatever their kind, or a sweep of kinds (default idle, done, review)",
+        description: "Pass `ids`, or `kinds`/`chatId`/`projectId` — not both. Dismissing never answers or denies; a permission card's tool call keeps waiting.",
+        requestBody: { content: { "application/json": { schema: {
+          type: "object",
+          properties: {
+            ids: { type: "array", items: { type: "string" } },
+            kinds: { type: "array", items: { type: "string", enum: ["permission", "question", "idle", "done", "review"] } },
+            chatId: { type: "string" }, projectId: { type: "string" },
+          },
+        } } } },
+        responses: { "200": { description: "`{ dismissed: [{ id, kind, chatId, summary }], missing: [id] }`" }, "400": { description: "Both ids and a sweep" } } },
     },
     "/api/integration/attention/{id}/answer": {
       post: { ...scoped("attention:answer"), summary: "Answer or decline a question card",

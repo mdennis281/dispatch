@@ -57,8 +57,25 @@ export interface AttentionListQuery {
  * The queue (omitted → no attention tools). Integration-only, bound for a
  * token holding `attention:read`. Applies the token's project allowlist itself.
  */
+export interface AttentionDismissQuery {
+  /** Named items — removed whatever their kind. */
+  ids?: string[];
+  /** Without ids: the kinds to sweep (default idle/done/review). */
+  kinds?: AttentionItem["kind"][];
+  project?: string;
+  chatId?: string;
+}
+
+export interface AttentionDismissResult {
+  dismissed: { id: string; kind: AttentionItem["kind"]; chatId: string; summary: string }[];
+  /** Ids named that are not (or no longer) in the queue. */
+  missing: string[];
+}
+
 export interface ManagerMcpAttention {
   list(q: AttentionListQuery): Promise<AttentionEntry[]>;
+  /** Present for a token holding `attention:answer` (omitted → no `attention_dismiss`). */
+  dismiss?(q: AttentionDismissQuery): Promise<AttentionDismissResult>;
 }
 
 /**
@@ -173,5 +190,46 @@ export function createAttentionTools(ctx: { attention?: ManagerMcpAttention }) {
       }
     },
   );
-  return { attentionList };
+  const attentionDismiss = tool(
+    "attention_dismiss",
+    "Dismiss items from the ATTENTION QUEUE (see attention_list). With no ids it clears the " +
+      "retrospective kinds — idle, done, review — optionally narrowed by chat or project. A " +
+      "permission or question item is a blocked agent, not clutter: it is dismissed only when " +
+      "you name it, by id or by passing its kind. Dismissing never answers or denies anything; " +
+      "to answer a question use attention_answer.",
+    {
+      ids: z.array(z.string().min(1)).optional().describe("Exact item ids from attention_list."),
+      kinds: z
+        .array(AttentionItemSchema.shape.kind)
+        .optional()
+        .describe("Without ids: kinds to clear (default idle, done, review)."),
+      project: z.string().optional().describe("Without ids: only this project (id)."),
+      chatId: z.string().optional().describe("Without ids: only this chat."),
+    },
+    async (args) => {
+      if (!ctx.attention?.dismiss) return textResult("The attention_dismiss tool is not available in this session.", true);
+      const ids = (args.ids ?? []).map((i) => i.trim()).filter(Boolean);
+      if (ids.length && (args.kinds?.length || args.project || args.chatId)) {
+        return textResult("Pass either ids, or kinds/project/chatId to sweep — not both.", true);
+      }
+      try {
+        const r = await ctx.attention.dismiss({
+          ...(ids.length ? { ids } : {}),
+          ...(args.kinds?.length ? { kinds: args.kinds } : {}),
+          ...(args.project?.trim() ? { project: args.project.trim() } : {}),
+          ...(args.chatId?.trim() ? { chatId: args.chatId.trim() } : {}),
+        });
+        const lines = r.dismissed.map((d) => `  • ${d.id} [${d.kind}] chat=${d.chatId} — ${d.summary}`);
+        return textResult(
+          `Dismissed ${r.dismissed.length} item${r.dismissed.length === 1 ? "" : "s"}.` +
+            (lines.length ? `\n${lines.join("\n")}` : "") +
+            (r.missing.length ? `\nNot in the queue (already resolved, or unknown): ${r.missing.join(", ")}` : "") +
+            `\n${JSON.stringify(r)}`,
+        );
+      } catch (err) {
+        return textResult(`Could not dismiss: ${err instanceof Error ? err.message : String(err)}`, true);
+      }
+    },
+  );
+  return { attentionList, attentionDismiss };
 }

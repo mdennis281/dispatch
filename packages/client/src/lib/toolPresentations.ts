@@ -231,6 +231,7 @@ const DISPATCH_COPY: Record<string, { title: string; activity: string; category:
   persona_list: { title: "List personas", activity: "Listing personas", category: "peer" },
   events_poll: { title: "Poll events", activity: "Polling events", category: "peer" },
   attention_list: { title: "Attention queue", activity: "Reading attention queue", category: "peer" },
+  attention_dismiss: { title: "Dismiss attention", activity: "Dismissing attention", category: "peer" },
   terminal_output: { title: "Terminal output", activity: "Reading terminal", category: "terminal" },
   create_pr: { title: "Open pull request", activity: "Opening pull request", category: "pr" },
   watch_pr: { title: "Watch pull request", activity: "Watching pull request", category: "pr" },

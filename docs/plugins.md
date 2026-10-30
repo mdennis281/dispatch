@@ -1043,7 +1043,7 @@ cross-checked against the factory at compile time like the categories. The
 rule for the flag: a tool that acts on the calling chat's own session, shell or
 tree, or that puts a card in front of the human on the calling chat's behalf,
 is **not** external. So `chat_find`, `chat_read`, `chat_send`, `chat_ask`,
-`chat_reply`, `chat_state`, `chat_summarize`, `chat_stop`, `persona_list`, `events_poll`, `attention_list`, `wait_for_chat`, `project_info`, `project_list`, the
+`chat_reply`, `chat_state`, `chat_summarize`, `chat_stop`, `persona_list`, `events_poll`, `attention_list`, `attention_dismiss`, `wait_for_chat`, `project_info`, `project_list`, the
 memory tools, the issue tools, `mode_list`, `config_list` and `config_read` are
 external; `wait`, `context_usage`, `compact_context`, the workspace tools, the
 PR tools, the confirm tools, the secrets tools, `chat_set_mode`,
@@ -1068,7 +1068,11 @@ binds only for a token holding a read scope some event type falls under.
 `attention:read`; it and `GET attention` return the same enriched entries
 (`buildAttentionEntries`): chat title, `createdAtLocal`, `dismissible`, and for
 a pending question its `questions[]` (text, header, multiSelect, option labels)
-read off the broker's permission snapshot. Memory and issue tools bind
+read off the broker's permission snapshot. `attention_dismiss` (and
+`POST attention/dismiss`) needs `attention:answer`: named ids go whatever their
+kind, a sweep defaults to idle/done/review (`AttentionQueue.dismiss`), anything
+outside the allowlist is reported `missing`, and each removal is broadcast as
+`attention-resolve`. Dismissing never answers or denies. Memory and issue tools bind
 only when the token names exactly one project. A category is offered only when
 the token holds `tools:<category>`; the mount is authenticated by the gate (it
 does NOT ride the per-chat bridge's gate exemption), and the external context
@@ -1086,6 +1090,7 @@ sprinkled over the SPA's routes:
 | `GET chats/:id/summary?focus` (429 + `Retry-After` past the limit) | `chats:read` |
 | `POST chats/:id/stop { archive? }` (archive: own chats only, else 403) | `chats:write` |
 | `GET attention` · `POST attention/:id/answer { optionId \| answer \| answers \| decline }` | `attention:read` / `attention:answer` |
+| `POST attention/dismiss { ids? \| kinds?, chatId?, projectId? }` → `{ dismissed, missing }` | `attention:answer` |
 | `GET projects` | `projects:read` |
 | `GET projects/:id/personas` → `{ personas: [{ id, name, scope }] }` | `projects:read` |
 | `GET events?cursor&since&limit&types&projectId&chatId` → `{ events, nextCursor, hasMore, gap? }` | per event type (below) |
