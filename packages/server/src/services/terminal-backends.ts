@@ -46,8 +46,13 @@ import type { TerminalBackendResolution, TerminalBackendSource } from "./termina
 
 export interface TerminalBackendRegistryOptions {
   bus: EventBus;
-  /** The chat's own pin and project, or null when there is no such chat. */
-  chat: (chatId: string) => Promise<{ terminalBackend?: string; projectId?: string } | null>;
+  /**
+   * The chat's own pin and project, or null when there is no such chat.
+   * `worktreePath` is the worktree it works in, when it has one.
+   */
+  chat: (
+    chatId: string,
+  ) => Promise<{ terminalBackend?: string; projectId?: string; worktreePath?: string } | null>;
   /** The project's `defaults.terminalBackend` (from the loaded config, never the row). */
   projectDefault: (projectId: string) => string | undefined;
   /**
@@ -59,6 +64,8 @@ export interface TerminalBackendRegistryOptions {
   ) => Promise<{ project?: string[]; app?: string[] }> | { project?: string[]; app?: string[] };
   /** The project's primary checkout. */
   repoPath?: (projectId: string) => Promise<string | undefined>;
+  /** The branch checked out in a directory, for a backend's spawn info. */
+  branchOf?: (dir: string) => Promise<string | undefined>;
   /**
    * Resolves once installed plugins have finished activating. A chat pinned to
    * a backend whose plugin simply has not activated YET (boot runs plugin
@@ -243,10 +250,17 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
     const entry = this.entries.get(choice.id);
     if (!entry) return { requested: choice.id, missing: true };
     const repoPath = projectId ? await this.opts.repoPath?.(projectId).catch(() => undefined) : undefined;
+    // Read only for a shell actually headed to a backend: a local shell has no
+    // use for either, and the branch costs a git spawn.
+    const worktreePath = chat?.worktreePath || undefined;
+    const root = worktreePath ?? repoPath;
+    const branch = root ? await this.opts.branchOf?.(root).catch(() => undefined) : undefined;
     return {
       requested: choice.id,
       backend: entry.backend,
       ...(repoPath ? { repoPath } : {}),
+      ...(worktreePath ? { worktreePath } : {}),
+      ...(branch ? { branch } : {}),
       note: this.noteFor(entry.backend, { chatId: ident.chatId, projectId }),
     };
   }

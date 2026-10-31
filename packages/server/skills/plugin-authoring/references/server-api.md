@@ -131,7 +131,13 @@ ctx.providers.register(harness, descriptor)
 // backend's shells, withdraws its ports and calls dispose().
 ctx.terminals.registerBackend({
   id: "box", label: "My box", shell: "bash",
-  spawn: async ({ chatId, projectId, name, cwd, repoPath, signal }) => handle,
+  spawn: async ({ chatId, projectId, name, cwd, repoPath, worktreePath, branch, signal }) => handle,
+  // Optional, per command, only on shells you serve. Awaited BEFORE the write and NOT
+  // charged to the command's timeout (own bound: runHookTimeoutMs, default 10 min).
+  beforeRun: async ({ chatId, terminal, command, cwd, background, signal }) =>
+    ({ notices: ["Synced 2 changes."] }),       // or { refuse: "why" } / throw → never written
+  afterRun: async ({ command, exitCode, durationMs, outcome }) =>
+    ({ notices: ["Brought back: x"] }),         // a throw is a notice, not a failed run
   agentNote: ({ chatId }) => "what the agent can't infer (how code gets there, what isn't shared)",
   onChatIdle: ({ chatId }) => {},     // session retired by the idle sweep — shells are NOT killed by core
   onChatDeleted: ({ chatId }) => {},  // shells already gone — destroy what you made. AWAITED (60 s):
@@ -148,8 +154,13 @@ Gotchas for a terminal backend:
   → local). Lifecycle hooks fan out to EVERY backend, so keep your own chatId → resource map.
 - Tell the agent what only you know in `agentNote`. Core already says: run builds, tests
   and servers through the terminal tool, keep git local, open the forwarded URLs.
+- Sync in `beforeRun`, not by sniffing stdin for the command vs core's probe: a refusal
+  there means the command never runs (fail closed), and the sync's time is not the
+  command's. Its signal aborts on a session interrupt or a closed terminal, and core
+  does not wait after that — serialize your own sync if runs could overlap.
 - Test with `createTestContext`: `t.terminals.spawn("box", { chatId })`, `t.terminals.chatIdle(...)`,
-  `t.terminals.chatDeleted(...)`, and `t.terminalPorts`.
+  `t.terminals.chatDeleted(...)`, `t.terminals.beforeRun("box", { chatId, command })`
+  (→ `{ ran, refusal?, notices }`), `t.terminals.afterRun(...)`, and `t.terminalPorts`.
 
 Working examples of `providers`: the built-in Claude, Codex and goose plugins,
 `packages/plugins/{claude,codex,goose}` (`src/main.ts` is the whole entry;

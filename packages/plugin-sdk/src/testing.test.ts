@@ -187,6 +187,53 @@ describe("createTestContext terminals", () => {
     await t.terminals.chatDeleted("c1");
     expect(calls).toEqual(["spawn:c1:main", "idle:c1", "deleted:c1"]);
   });
+
+  it("plays beforeRun / afterRun as core would: a refusal or a throw means not run", async () => {
+    const t = createTestContext();
+    const seen: string[] = [];
+    const handle = { stdin: { write: () => {} }, stdout: { on: () => {} }, stderr: { on: () => {} }, kill: () => {}, on: () => {} };
+    t.ctx.terminals!.registerBackend({
+      id: "box",
+      label: "Box",
+      shell: "bash",
+      spawn: async () => handle,
+      beforeRun: (info) => {
+        seen.push(`before:${info.terminal}:${info.cwd}:${info.command}`);
+        if (info.command === "conflict") return { refuse: "a.txt changed on both sides", notices: ["a.txt"] };
+        if (info.command === "offline") throw new Error("host unreachable");
+        return { notices: ["synced"] };
+      },
+      afterRun: (info) => {
+        seen.push(`after:${info.outcome}:${info.exitCode}`);
+        return { notices: ["brought back b.txt"] };
+      },
+    });
+    t.ctx.terminals!.registerBackend({ id: "plain", label: "Plain", shell: "bash", spawn: async () => handle });
+
+    expect(await t.terminals.beforeRun("box", { chatId: "c1", command: "make" })).toEqual({ ran: true, notices: ["synced"] });
+    expect(await t.terminals.beforeRun("box", { chatId: "c1", command: "conflict" })).toEqual({
+      ran: false,
+      refusal: "a.txt changed on both sides",
+      notices: ["a.txt"],
+    });
+    expect(await t.terminals.beforeRun("box", { chatId: "c1", command: "offline" })).toEqual({
+      ran: false,
+      refusal: "host unreachable",
+      notices: [],
+    });
+    expect(await t.terminals.afterRun("box", { chatId: "c1", command: "make", exitCode: 2 })).toEqual({
+      notices: ["brought back b.txt"],
+    });
+    expect(seen).toEqual([
+      "before:main:/repo:make",
+      "before:main:/repo:conflict",
+      "before:main:/repo:offline",
+      "after:finished:2",
+    ]);
+    // A backend with no hooks: the command simply runs.
+    expect(await t.terminals.beforeRun("plain", { chatId: "c1", command: "make" })).toEqual({ ran: true, notices: [] });
+    expect(await t.terminals.afterRun("plain", { chatId: "c1", command: "make" })).toEqual({ notices: [] });
+  });
 });
 
 describe("lifecycle", () => {

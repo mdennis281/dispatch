@@ -3901,6 +3901,55 @@ describe("manager-mcp — terminal", () => {
     expect(resultText(res)).toContain("cap reached");
   });
 
+  it("says a command the backend refused was NOT RUN, with its notices, as an error", async () => {
+    const { terminal } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      terminals: {
+        run: async () => ({
+          output: "",
+          exitCode: null,
+          cwd: "/srv/repo",
+          error: "a.txt was edited on both sides",
+          refused: true,
+          notices: ["Conflicting: a.txt"],
+          ranOn: { id: "box", label: "Test box" },
+        }),
+        tail: async () => ({ output: "", found: false }),
+        list: () => [],
+      },
+    });
+    const res = await terminal.handler({ name: "build", command: "make", timeoutMs: undefined, background: undefined }, {});
+    expect(res.isError).toBe(true);
+    expect(resultText(res)).toBe(
+      "[build] on Test box (`box`) cwd=/srv/repo NOT RUN: a.txt was edited on both sides\nConflicting: a.txt",
+    );
+  });
+
+  it("puts a backend's notices after the output, and on a background start", async () => {
+    let background = false;
+    const { terminal } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      terminals: {
+        run: async () =>
+          background
+            ? { output: "", exitCode: null, cwd: "/srv", backgrounded: true, notices: ["Synced 2 files."] }
+            : { output: "ok", exitCode: 0, cwd: "/srv", notices: ["Synced 2 files.", "Brought back: pnpm-lock.yaml"] },
+        tail: async () => ({ output: "", found: false }),
+        list: () => [],
+      },
+    });
+    const res = await terminal.handler({ name: "i", command: "pnpm i", timeoutMs: undefined, background: undefined }, {});
+    expect(res.isError).toBeFalsy();
+    expect(resultText(res)).toBe("[i] cwd=/srv exit=0\nok\nSynced 2 files.\nBrought back: pnpm-lock.yaml");
+    background = true;
+    const bg = await terminal.handler({ name: "dev", command: "vite", timeoutMs: undefined, background: true }, {});
+    expect(resultText(bg)).toContain("stops when the chat is torn down.\nSynced 2 files.");
+  });
+
   it("reports unavailable when no TerminalService is wired", async () => {
     const { terminal } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}) });
     const res = await terminal.handler({ name: "x", command: "ls", timeoutMs: undefined, background: undefined }, {});
