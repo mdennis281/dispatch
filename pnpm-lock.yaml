@@ -72,8 +72,8 @@ importers:
         specifier: ^2.9.0
         version: 2.9.0
       zod:
-        specifier: ^4.4.3
-        version: 4.4.3
+        specifier: ^4.6.6
+        version: 4.6.6
     devDependencies:
       '@types/node':
         specifier: ^26.1.0
@@ -223,19 +223,19 @@ importers:
     dependencies:
       '@anthropic-ai/claude-agent-sdk':
         specifier: 0.3.222
-        version: 0.3.222(@anthropic-ai/sdk@0.109.1(zod@4.4.3))(@modelcontextprotocol/sdk@1.32.1(zod@4.4.3))(zod@4.4.3)
+        version: 0.3.222(@anthropic-ai/sdk@0.109.1(zod@4.6.6))(@modelcontextprotocol/sdk@1.32.1(zod@4.6.6))(zod@4.6.6)
       '@anthropic-ai/sdk':
         specifier: ^0.109.1
-        version: 0.109.1(zod@4.4.3)
+        version: 0.109.1(zod@4.6.6)
       '@dispatch/shared':
         specifier: workspace:*
         version: link:../../shared
       '@modelcontextprotocol/sdk':
         specifier: ^1.32.1
-        version: 1.32.1(zod@4.4.3)
+        version: 1.32.1(zod@4.6.6)
       zod:
-        specifier: ^4.4.3
-        version: 4.4.3
+        specifier: ^4.6.6
+        version: 4.6.6
     devDependencies:
       '@types/node':
         specifier: ^26.1.0
@@ -295,7 +295,7 @@ importers:
         version: 11.2.0
       '@modelcontextprotocol/sdk':
         specifier: ^1.32.1
-        version: 1.32.1(zod@4.4.3)
+        version: 1.32.1(zod@4.6.6)
       '@node-rs/argon2':
         specifier: ^2.1.0
         version: 2.1.0
@@ -336,8 +336,8 @@ importers:
         specifier: ^2.9.0
         version: 2.9.0
       zod:
-        specifier: ^4.4.3
-        version: 4.4.3
+        specifier: ^4.6.6
+        version: 4.6.6
     devDependencies:
       '@dispatch/plugin-claude':
         specifier: workspace:*
@@ -376,8 +376,8 @@ importers:
         specifier: ^2.9.0
         version: 2.9.0
       zod:
-        specifier: ^4.4.3
-        version: 4.4.3
+        specifier: ^4.6.6
+        version: 4.6.6
     devDependencies:
       '@types/react':
         specifier: ^18.3.18
@@ -3577,8 +3577,8 @@ packages:
     peerDependencies:
       zod: ^3.25.28 || ^4
 
-  zod@4.4.3:
-    resolution: {integrity: sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ==}
+  zod@4.6.6:
+    resolution: {integrity: sha512-4UmzQUF5fxvfcYHlbjBmejU+w+hbDnWFx4aS8kBx7nPBHcO2SqPbpAG8snbdg+Xse4pRefR98hgjFgIMCI/UhA==}
 
   zustand@5.0.14:
     resolution: {integrity: sha512-/8tAspM5LMPr28b3fwLYrtdj77ECpfZviaP75CMTnwO8ISyaE4GDIG/9rDDYq/cH9D2Xw2A2RXglLInmVBQB/g==}
@@ -3627,11 +3627,11 @@ snapshots:
   '@anthropic-ai/claude-agent-sdk-win32-x64@0.3.222':
     optional: true
 
-  '@anthropic-ai/claude-agent-sdk@0.3.222(@anthropic-ai/sdk@0.109.1(zod@4.4.3))(@modelcontextprotocol/sdk@1.32.1(zod@4.4.3))(zod@4.4.3)':
+  '@anthropic-ai/claude-agent-sdk@0.3.222(@anthropic-ai/sdk@0.109.1(zod@4.6.6))(@modelcontextprotocol/sdk@1.32.1(zod@4.6.6))(zod@4.6.6)':
     dependencies:
-      '@anthropic-ai/sdk': 0.109.1(zod@4.4.3)
-      '@modelcontextprotocol/sdk': 1.32.1(zod@4.4.3)
-      zod: 4.4.3
+      '@anthropic-ai/sdk': 0.109.1(zod@4.6.6)
+      '@modelcontextprotocol/sdk': 1.32.1(zod@4.6.6)
+      zod: 4.6.6
     optionalDependencies:
       '@anthropic-ai/claude-agent-sdk-darwin-arm64': 0.3.222
       '@anthropic-ai/claude-agent-sdk-darwin-x64': 0.3.222
@@ -3642,12 +3642,12 @@ snapshots:
       '@anthropic-ai/claude-agent-sdk-win32-arm64': 0.3.222
       '@anthropic-ai/claude-agent-sdk-win32-x64': 0.3.222
 
-  '@anthropic-ai/sdk@0.109.1(zod@4.4.3)':
+  '@anthropic-ai/sdk@0.109.1(zod@4.6.6)':
     dependencies:
       json-schema-to-ts: 3.1.1
       standardwebhooks: 1.0.0
     optionalDependencies:
-      zod: 4.4.3
+      zod: 4.6.6
 
   '@babel/code-frame@7.29.7':
     dependencies:
@@ -4008,7 +4008,7 @@ snapshots:
 
   '@lukeed/ms@2.0.2': {}
 
-  '@modelcontextprotocol/sdk@1.32.1(zod@4.4.3)':
+  '@modelcontextprotocol/sdk@1.32.1(zod@4.6.6)':
     dependencies:
       '@hono/node-server': 1.19.14(hono@4.13.12)
       ajv: 8.20.0
@@ -4025,8 +4025,8 @@ snapshots:
       json-schema-typed: 8.0.2
       pkce-challenge: 5.0.1
       raw-body: 3.0.2
-      zod: 4.4.3
-      zod-to-json-schema: 3.25.2(zod@4.4.3)
+      zod: 4.6.6
+      zod-to-json-schema: 3.25.2(zod@4.6.6)
     transitivePeerDependencies:
       - supports-color
 
@@ -6899,11 +6899,11 @@ snapshots:
 
   yoctocolors@2.1.2: {}
 
-  zod-to-json-schema@3.25.2(zod@4.4.3):
+  zod-to-json-schema@3.25.2(zod@4.6.6):
     dependencies:
-      zod: 4.4.3
+      zod: 4.6.6
 
-  zod@4.4.3: {}
+  zod@4.6.6: {}
 
   zustand@5.0.14(@types/react@18.3.31)(immer@11.1.17)(react@18.3.1)(use-sync-external-store@1.6.0(react@18.3.1)):
     optionalDependencies:
