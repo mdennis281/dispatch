@@ -786,8 +786,10 @@ A chat's managed terminals — `mcp__dispatch-workspace__terminal` and the
 Terminals panel — are local `powershell`/`bash` children of the server. A
 plugin declaring `terminals` can supply somewhere else for them to run (a
 container, a VM, another machine) without core knowing what that is. The first
-one is `mdennis281/dispatch-proxmox-terminal`, a per-chat Proxmox LXC; it is
-optional and lives in its own repo.
+one is `proxmox-terminal`, a per-chat Proxmox LXC. It is optional and lives
+outside this repo, at `plugins/proxmox-terminal` in the
+[`mdennis281/dispatch-plugins`](https://github.com/mdennis281/dispatch-plugins)
+collection (see "Several plugins in one repository").
 
 ```ts
 ctx.terminals.registerBackend({
