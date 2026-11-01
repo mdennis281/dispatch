@@ -348,6 +348,37 @@ describe("declared vs used", () => {
     expect(labels(r)).not.toContain("attention.answer");
   });
 
+  it("tells a secret write from a read, and checks written names against prefix entries", async () => {
+    const plugin = (caps: string) =>
+      writeDir({
+        "plugin.yaml": `id: w\nname: W\nversion: 1.0.0\ndispatch: '>=1'\nserver: ./server/index.js\ncapabilities: [${caps}]\nsecrets: [API_KEY, HOST_KEY_*]\n`,
+        "server/index.js": [
+          "export async function activate(ctx) {",
+          "  await ctx.secrets.get('API_KEY');",
+          "  await ctx.secrets.set(`HOST_KEY_${slug}`, pem);",
+          // Optional call — how a TS author calls a method typed `set?(…)`, kept by esbuild.
+          "  await ctx.secrets.delete?.('HOST_KEY_old');",
+          "  await ctx.secrets.set('ROGUE', 'x');",
+          "  await ctx.secrets.set(`${computed}`, 'x');",
+          "}",
+        ].join("\n"),
+      });
+    const readOnly = await inspectPluginDir(await plugin("secrets"), { source: SOURCE, fetched: FETCHED });
+    expect(readOnly.mismatches.undeclared.map((u) => u.capability)).toEqual(["secrets:write"]);
+    expect([...readOnly.mismatches.undeclared[0]!.because].sort()).toEqual(
+      ['secrets.delete("HOST_KEY_old")', 'secrets.set("${computed}")', 'secrets.set("HOST_KEY_${slug}")', 'secrets.set("ROGUE")'].sort(),
+    );
+    const w = readOnly.warnings.join("\n");
+    // The template literal's head is covered by the prefix; the literal ROGUE is not; a fully computed name is not judged.
+    expect(w).toMatch(/writes secret\(s\) not listed under secrets: ROGUE —/);
+    expect(w).toMatch(/HOST_KEY_\* is a prefix — the plugin may read any global secret whose name starts with HOST_KEY_/);
+
+    const writer = await inspectPluginDir(await plugin("secrets, secrets:write"), { source: SOURCE, fetched: FETCHED });
+    expect(writer.mismatches).toEqual({ undeclared: [], unused: [] });
+    expect(writer.capabilities.map((c) => c.name)).toEqual(["secrets", "secrets:write"]);
+    expect(writer.warnings.join("\n")).toMatch(/may read, create, replace and delete any global secret/);
+  });
+
   it("flags a client without `ui`, contributions without their capability, and a server bundle with npm imports", async () => {
     const dir = await writeDir({
       "plugin.yaml": [

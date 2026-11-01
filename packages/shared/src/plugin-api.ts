@@ -295,11 +295,26 @@ export interface PluginContext<Req = unknown, Reply = unknown> {
     onChange(fn: (next: unknown) => void): () => void;
   };
 
-  /** `secrets` — only the names the manifest lists under `secrets:`. */
+  /**
+   * `secrets` — only the names the manifest lists under `secrets:`, where an
+   * entry ending in `*` covers every name with that prefix. Values live in the
+   * GLOBAL store (`<configDir>/secrets.json`, encrypted), so both instances on
+   * the machine see them and a plugin update leaves them alone.
+   */
   secrets?: {
     get(name: string): Promise<string | undefined>;
-    /** The listed names that currently have a value. */
+    /** The covered names that currently have a value, sorted. */
     list(): Promise<string[]>;
+    /**
+     * `secrets:write` — store `value` under `name`, replacing any value it had.
+     * Throws when the manifest does not cover `name`, the name is not a valid
+     * secret name, or `value` is empty or over 64 KiB. Resolves after every MCP
+     * server and sub-app that references `${secret:name}` has been refreshed,
+     * as a save from the Secrets pane does.
+     */
+    set?(name: string, value: string): Promise<void>;
+    /** `secrets:write` — remove `name`. True when there was a value. Same refusals and refresh as `set`. */
+    delete?(name: string): Promise<boolean>;
   };
 
   /** `kv` — a per-plugin key/value table in the instance's state database. */

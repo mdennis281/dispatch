@@ -23,6 +23,7 @@ import { createHash, randomBytes } from "node:crypto";
 import {
   OAUTH_PLUGIN_STATE_MS,
   PLUGIN_OAUTH_CLIENT_NAME_PATTERN,
+  pluginSecretAllowed,
   type PluginManifest,
   type PluginOAuthClient,
   type PluginOAuthStatus,
@@ -146,7 +147,7 @@ export class PluginOAuthService {
     const ref = SECRET_REF.exec(value);
     if (!ref) return value;
     const secretName = ref[1]!;
-    if (!secretNames.includes(secretName)) {
+    if (!pluginSecretAllowed(secretNames, secretName)) {
       throw new PluginOAuthError(400, `${what} refers to secret "${secretName}", which plugin.yaml does not list under secrets:`);
     }
     await this.secrets.list();
@@ -422,7 +423,7 @@ export class PluginOAuthService {
       const ref = SECRET_REF.exec(value);
       if (!ref) continue;
       const secretName = ref[1]!;
-      if (!secretNames.includes(secretName)) return `${what} refers to secret "${secretName}", which plugin.yaml does not list under secrets:`;
+      if (!pluginSecretAllowed(secretNames, secretName)) return `${what} refers to secret "${secretName}", which plugin.yaml does not list under secrets:`;
       const resolved = this.secrets.resolve(undefined, secretName);
       if (resolved === undefined || resolved === "") return `Secret "${secretName}" is not set (Settings → Secrets).`;
     }

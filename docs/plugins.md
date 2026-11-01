@@ -86,6 +86,7 @@ server: ./server/index.js       # optional
 client: ./client/index.js       # optional; its directory is served under /plugins/<id>/
 settings: ./settings.schema.json
 secrets: [WHISPER_URL]          # names the plugin may read; requested through the secret card
+                                # an entry ending in * is a prefix: VOICE_KEY_* covers VOICE_KEY_<anything>
 capabilities:                   # declared for the consent card; see "Capabilities"
   - events
   - routes
@@ -125,7 +126,8 @@ and a manifest whose range excludes it — or cannot be parsed — is listed as
 | `chats:read` | `ctx.chats.list/find/read/state`, `ctx.attention.list` |
 | `chats:write` | `ctx.chats.send/ask/reply`, `ctx.attention.answer` |
 | `memory` | `ctx.memory` |
-| `secrets` | `ctx.secrets` (only names listed under `secrets:`) |
+| `secrets` | `ctx.secrets.get/list` (only names listed under `secrets:`) |
+| `secrets:write` | `ctx.secrets.set/delete` for the same names — see "Secrets a plugin writes"; requires `secrets` |
 | `kv` | `ctx.kv` |
 | `mcp` | `contributes.mcpServers` |
 | `process` | `contributes.processes`, `ctx.processes` |
@@ -349,8 +351,9 @@ scan, no model.
   follow or a name built at runtime, and the card says so.
 - **Mismatches**: a capability the scan (or a contribution) needs that the manifest
   does not declare — absent from `ctx` at runtime, or the contribution ignored —
-  and a declared capability nothing uses. A literal `ctx.secrets.get("X")` for an
-  unlisted `X`, and a bare npm import in a built entry, are warnings.
+  and a declared capability nothing uses. A literal `ctx.secrets.get("X")` (or
+  `set`/`delete`) for an unlisted `X`, a `secrets:` prefix entry, and a bare npm
+  import in a built entry, are warnings.
 
 `POST /api/plugins/install { url, sha, replace? }` re-fetches **that sha** (never the
 ref's current tip), re-runs the same report, refuses unless it is installable, and
@@ -507,8 +510,8 @@ then deletes the directory, or for a **linked** plugin removes only the junction
 never touches the directory it points at. The recorded source always goes. The
 "Also delete its data" box (default off; `--purge` in the CLI) also removes the
 `plugins.<id>` entry, this instance's `plugin_kv` rows and `plugin_oauth_token` rows,
-and the global secrets its manifest lists — except any another installed plugin also
-lists, which are kept and named. kv rows and OAuth tokens are per instance (they
+and the global secrets its manifest lists — a `PREFIX*` entry expanded against what
+is stored — except any another installed plugin also covers, which are kept and named. kv rows and OAuth tokens are per instance (they
 live in `state.db`); the CLI reaches them only with `--data-dir`. A browser bundle an
 open tab already imported has no unload hook, so the result says those tabs keep it
 until they reload.
@@ -551,7 +554,12 @@ export interface PluginContext<Req = unknown, Reply = unknown> {
   /** Add handlers under /api/plugins/<id>/ — a TABLE the host's wildcard consults; see the rules below. */
   routes?(define: (r: PluginRouter<Req, Reply>) => void): void;
   settings: { get<T = Record<string, unknown>>(): T; onChange(fn: (next: unknown) => void): () => void };
-  secrets?: { get(name: string): Promise<string | undefined>; list(): Promise<string[]> };
+  secrets?: {
+    get(name: string): Promise<string | undefined>;
+    list(): Promise<string[]>;                         // covered names that have a value, sorted
+    set?(name: string, value: string): Promise<void>;  // secrets:write
+    delete?(name: string): Promise<boolean>;           // secrets:write; true when there was a value
+  };
   kv?: {
     get<T = unknown>(key: string): Promise<T | undefined>;
     set(key: string, value: unknown): Promise<void>;
@@ -618,6 +626,43 @@ Rules the implementation keeps:
   the host also records it; deactivate removes everything the plugin left.
 - **Secrets never reach the client half.** `ctx.secrets` exists on the server
   context only; the client host has no equivalent and must not grow one.
+
+#### Secrets a plugin writes
+
+Some credentials are not typed in by the owner but MINTED by the plugin — an SSH
+keypair per paired machine, say. Nothing else a plugin can write is all three of
+shared by both instances, encrypted at rest, and untouched by an update: `kv` is
+per-instance plaintext in `state.db`, and the plugin directory is replaced
+wholesale by an update. So `secrets:write` adds `ctx.secrets.set(name, value)` and
+`ctx.secrets.delete(name)` to `ctx.secrets`:
+
+- **Same names as reading.** Only what `secrets:` covers. An entry ending in `*`
+  is a **prefix** (`REMOTE_HOST_KEY_*` covers `REMOTE_HOST_KEY_cvx_mac`), for a
+  plugin that mints one secret per thing it manages and cannot list the names up
+  front. The part before the `*` is required — a bare `*` is refused. A prefix
+  works for every reader of the list: `ctx.secrets`, `${secret:…}` in `mcp.yaml`
+  and in `oauth.clients`, the inspector and uninstall.
+- **Global scope, the one store.** `<configDir>/secrets.json`, AES-GCM under the
+  DPAPI-wrapped key, exactly what the Secrets pane writes. The other instance sees
+  the value on its next read and refreshes its own consumers.
+- **Refusals throw**: a name `secrets:` does not cover, a name the store would
+  refuse (`[A-Za-z_][A-Za-z0-9_]{0,63}`), an empty value (use `delete`), a value
+  over 64 KiB. (`get` of an uncovered name still warns and returns `undefined`.)
+- **Consumers refresh.** `set`/`delete` resolve after every MCP server and
+  sub-app that references `${secret:NAME}` has been refreshed — the same
+  `SecretRefresher` pass a save from the Secrets pane runs. That covers project
+  config servers and sub-apps, and plugin-contributed servers (including the
+  plugin's own) in every live chat; a runtime that can't swap servers
+  mid-session picks the value up on its next session. A refresh failure is
+  logged, not thrown: the value is stored.
+- **Consent.** `secrets:write` is its own capability with its own line on the
+  consent card, and it requires `secrets` (a manifest declaring only
+  `secrets:write` is invalid). Adding it in an update is an escalation, as is a
+  new `secrets:` entry; a new prefix entry is shown as the family it covers. The
+  inspector flags a literal `ctx.secrets.set("X")` for an uncovered `X`.
+- **Uninstall with purge** expands a prefix against what is stored, so the keys a
+  plugin minted go with it — unless another installed plugin's `secrets:` also
+  covers them.
 - **`kv` is a table** (`plugin_kv(plugin, key, value, updated_at)`) in the
   per-instance state database, not a JSON file. Same reason runner state moved.
   Values are JSON; `set(key, undefined)` deletes.

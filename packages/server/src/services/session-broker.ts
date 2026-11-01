@@ -6957,6 +6957,15 @@ export class SessionBroker {
    * rather than restarted: interrupting someone's turn to rotate a key is not a
    * trade to make on their behalf.
    */
+  /**
+   * Projects that have a live session right now. A plugin MCP server is not
+   * any project's config, so a change to the secret it expands is routed to
+   * these — the only places it can currently be held.
+   */
+  liveProjectIds(): string[] {
+    return [...new Set([...this.sessions.values()].map((s) => s.projectId))];
+  }
+
   async refreshMcpServers(
     projectId: string,
     serverNames: string[],

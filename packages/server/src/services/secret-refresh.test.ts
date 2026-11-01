@@ -60,6 +60,21 @@ describe("SecretRefresher", () => {
     expect(deps.broker.refreshMcpServers).not.toHaveBeenCalled();
   });
 
+  it("reconnects plugin MCP servers that expand a GLOBAL secret, in every project with a live session", async () => {
+    const { deps, order } = harness();
+    deps.broker.liveProjectIds = () => ["p1", "p3"];
+    deps.pluginMcpServersUsing = (n) => (n === "HOST_KEY_mac" ? ["remote-browser"] : []);
+    const report = await new SecretRefresher(deps).refresh([{ name: "HOST_KEY_mac", scope: "global" }]);
+    // No project references it, so no config reload — the plugin servers are reconnected directly.
+    expect(order).toEqual(["mcp:p1:remote-browser", "mcp:p3:remote-browser"]);
+    expect(report.mcpServers).toEqual(["p1/remote-browser", "p3/remote-browser"]);
+    expect(report.chatsRefreshed).toEqual(["chat-p1", "chat-p3"]);
+    // A project secret never reaches a plugin server: they expand from the global store only.
+    order.length = 0;
+    await new SecretRefresher(deps).refresh([{ name: "HOST_KEY_mac", scope: "project", projectId: "p1" }]);
+    expect(order).toEqual([]);
+  });
+
   it("touches nothing for a secret nobody references, and remembers the report", async () => {
     const { deps } = harness();
     const refresher = new SecretRefresher(deps);

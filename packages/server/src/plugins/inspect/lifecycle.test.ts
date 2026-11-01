@@ -255,6 +255,20 @@ describe("diffPluginSurfaces", () => {
     };
     expect(diffPluginSurfaces(from, to).escalations.map((c) => `${c.change} ${c.label}`)).toEqual(["changed oauth:gh", "changed mcp:s"]);
   });
+
+  it("escalates an update that starts writing secrets, or covers a new prefix of them", () => {
+    const from = { ...empty, secrets: ["API_KEY"], capabilities: [{ name: "secrets" as const, line: "", used: true }] };
+    const to = {
+      ...from,
+      secrets: ["API_KEY", "HOST_KEY_*"],
+      capabilities: [...from.capabilities, { name: "secrets:write" as const, line: "", used: true }],
+    };
+    const d = diffPluginSurfaces(from, to);
+    expect(d.escalations.map((c) => c.label)).toEqual(["secrets:write", "secret:HOST_KEY_*"]);
+    expect(d.escalations[0]!.detail).toMatch(/Creates, replaces and deletes/);
+    // A prefix is a family of names, and the card says so.
+    expect(d.escalations[1]!.detail).toBe("any secret whose name starts with HOST_KEY_");
+  });
 });
 
 /* ------------------------------------------------------------- the routes */
@@ -440,6 +454,26 @@ describe("uninstall", () => {
     expect(db.prepare("SELECT COUNT(*) AS n FROM plugin_kv WHERE plugin = 'hello'").get()).toEqual({ n: 0 });
     expect(db.prepare("SELECT COUNT(*) AS n FROM plugin_oauth_token WHERE plugin = 'hello'").get()).toEqual({ n: 0 });
     expect((await instance.services.secrets.list()).map((s) => s.name).sort()).toEqual(["SHARED"]);
+  });
+
+  it("expands a prefix entry against the store, keeping what another plugin covers", async () => {
+    const { json, instance } = await app(deps(), async (c) => {
+      await writePlugin(join(c, "plugins", "other"), { "plugin.yaml": "id: other\nname: O\nversion: 1.0.0\ndispatch: '>=1'\nsecrets: [HOST_KEY_shared]\n" });
+    });
+    await json("POST", "/api/plugins/install", { url: URL_MAIN, sha: SHA_NEW });
+    const yaml = join((instance.services.plugins.get("hello") as PluginInfo).dir, "plugin.yaml");
+    await writeFile(yaml, (await readFile(yaml, "utf8")).replace("secrets: [API_KEY]", "secrets: [API_KEY, HOST_KEY_*]"));
+    await instance.services.plugins.load();
+    for (const name of ["HOST_KEY_b", "HOST_KEY_a", "HOST_KEY_shared", "HOSTKEY_x", "UNRELATED"]) {
+      await instance.services.secrets.set({ scope: "global", name }, "v");
+    }
+    // The prefix names nothing by itself: the keys it covers are the ones minted.
+    const preview = (await json<PluginUninstallPreview>("GET", "/api/plugins/hello/uninstall")).body;
+    expect(preview.data.secrets).toEqual(["HOST_KEY_a", "HOST_KEY_b"]);
+    expect(preview.data.sharedSecrets).toEqual([{ name: "HOST_KEY_shared", alsoUsedBy: ["other"] }]);
+
+    await json("POST", "/api/plugins/hello/uninstall", { purge: true });
+    expect((await instance.services.secrets.list()).map((s) => s.name)).toEqual(["HOST_KEY_shared", "HOSTKEY_x", "UNRELATED"]);
   });
 
   it("only unlinks a linked plugin — the author's directory is untouched", async () => {

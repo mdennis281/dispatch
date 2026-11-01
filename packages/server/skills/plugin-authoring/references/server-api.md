@@ -92,8 +92,11 @@ ctx.routes((r) => {
 // kv — a per-plugin key/value table in the instance's state.db (JSON values; set(undefined) deletes)
 await ctx.kv.get<T>(key); await ctx.kv.set(key, value); await ctx.kv.delete(key); await ctx.kv.list(prefix?)
 
-// secrets — only names listed under secrets:; unlisted → undefined + a warning in the log
-await ctx.secrets.get("NAME"); await ctx.secrets.list()   // list() = the listed names that have a value
+// secrets — only names listed under secrets: (FOO_* = any name starting FOO_); unlisted → undefined + a warning in the log
+await ctx.secrets.get("NAME"); await ctx.secrets.list()   // list() = the covered names that have a value, sorted
+// secrets:write (declare secrets too) — GLOBAL store, encrypted, shared by both instances, survives updates.
+// Throws for an uncovered/invalid name or an empty/>64 KiB value; resolves after consumers of ${secret:NAME} refreshed.
+await ctx.secrets.set(`MY_PLUGIN_KEY_${slug}`, pem); await ctx.secrets.delete(`MY_PLUGIN_KEY_${slug}`)  // delete → boolean
 
 // chats:read
 await ctx.chats.list({ projectId?, status?, since?, archived?, limit? })   // PluginChatSummary[]
@@ -219,7 +222,10 @@ contract with yourself; keep it small (it crosses the WebSocket for every tab).
   events in one tick would otherwise both read the old value (see hello-server).
 - **Configuration the owner edits** → `settings.schema.json`; **credentials** →
   `secrets:` + the secret card; **tokens from a provider** → `oauth.clients` and
-  `ctx.oauth.token()` (the host refreshes them).
+  `ctx.oauth.token()` (the host refreshes them); **credentials the plugin MINTS**
+  (a keypair per paired machine) → `secrets:write` + a `PREFIX_*` entry. Not kv:
+  kv is per-instance plaintext; the secret store is encrypted and shared by both.
+  Not a file in `ctx.dir`: an update replaces the directory.
 - **Calling out**: use the global `fetch`. For durable delivery with retries, create a
   host webhook subscription (external-api.md) rather than re-implementing a retry loop
   (`examples/plugins/event-forwarder` shows the plugin side and says why it stops there).

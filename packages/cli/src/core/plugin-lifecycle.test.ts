@@ -173,6 +173,25 @@ describe("remove --purge", () => {
     check.close();
   });
 
+  it("expands a prefix entry against the stored names, keeping what another plugin covers", async () => {
+    await writeFile(join(work, "plugin.yaml"), V1);
+    await addPlugin(configDir, work);
+    const other = join(root, "other");
+    await mkdir(other);
+    await writeFile(join(other, "plugin.yaml"), "id: other\nname: O\nversion: 1.0.0\ndispatch: '>=1'\nsecrets: [HOST_KEY_sh*]\n");
+    await addPlugin(configDir, other);
+    const entry = (name: string, scope = "global") => ({ name, scope, ...(scope === "project" ? { projectId: "p" } : {}), iv: "", tag: "", data: "", updatedAt: 1 });
+    await writeFile(
+      join(configDir, "secrets.json"),
+      JSON.stringify({ version: 1, entries: [entry("HOST_KEY_a"), entry("HOST_KEY_shared"), entry("HOST_KEY_b", "project"), entry("UNRELATED")] }),
+    );
+    await removePlugin(configDir, "hello");
+    const purged = await purgePluginData(configDir, "hello", { manifestSecrets: ["HOST_KEY_*"] });
+    expect(purged).toMatchObject({ secrets: ["HOST_KEY_a"], sharedSecrets: ["HOST_KEY_shared"] });
+    const left = JSON.parse(await readFile(join(configDir, "secrets.json"), "utf8")) as { entries: Array<{ name: string; scope: string }> };
+    expect(left.entries.map((e) => `${e.scope}:${e.name}`)).toEqual(["global:HOST_KEY_shared", "project:HOST_KEY_b", "global:UNRELATED"]);
+  });
+
   it("says what it could not reach without a data dir", async () => {
     await writeFile(join(work, "plugin.yaml"), V1);
     await addPlugin(configDir, work);

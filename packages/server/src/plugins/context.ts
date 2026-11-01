@@ -22,6 +22,9 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 import Router from "find-my-way";
 import {
   realProjects,
+  pluginSecretAllowed,
+  SECRET_NAME_RE,
+  SECRET_VALUE_MAX,
   type ChannelSender,
   type Harness,
   type ProviderDescriptor,
@@ -39,7 +42,7 @@ import {
 } from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
 import type { Store } from "../store/index.js";
-import type { SecretsService } from "../services/secrets.js";
+import type { SecretKey, SecretsService } from "../services/secrets.js";
 import type { InspectService } from "../services/inspect.js";
 import { renderRead } from "../services/inspect-render.js";
 import type { MemoryService } from "../services/memory.js";
@@ -99,6 +102,13 @@ export interface PluginContextDeps {
   log: PluginLog;
   /** The plugin's cached settings — read live so `onChange` and `get` agree. */
   settings: () => Record<string, unknown>;
+  /**
+   * Push a secret change to everything that expanded it — the
+   * `SecretRefresher` the Secrets pane's save goes through. Optional so a unit
+   * test can build a context without one; then a plugin's write is stored and
+   * nothing is refreshed.
+   */
+  refreshSecrets?: (changed: SecretKey[]) => Promise<unknown>;
   /** The host-run OAuth client flow (`ctx.oauth`). Optional so a unit test can build a context without it. */
   pluginOAuth?: PluginOAuthService;
   /**
@@ -219,10 +229,11 @@ export function buildPluginContext(
   }
 
   if (has("secrets")) {
-    const allowed = new Set(manifest.secrets ?? []);
-    ctx.secrets = {
+    const declared = manifest.secrets ?? [];
+    const covered = (name: string) => pluginSecretAllowed(declared, name);
+    const secrets: NonNullable<ServerPluginContext["secrets"]> = {
       get: async (name) => {
-        if (!allowed.has(name)) {
+        if (!covered(name)) {
           deps.log.warn(`secret "${name}" is not listed under secrets: in plugin.yaml`);
           return undefined;
         }
@@ -231,11 +242,48 @@ export function buildPluginContext(
         await deps.secrets.list();
         return deps.secrets.resolve(undefined, name);
       },
-      list: async () => {
-        const stored = new Set((await deps.secrets.list()).filter((s) => s.scope === "global").map((s) => s.name));
-        return [...allowed].filter((n) => stored.has(n));
-      },
+      list: async () =>
+        (await deps.secrets.list()).filter((s) => s.scope === "global" && covered(s.name)).map((s) => s.name),
     };
+    if (has("secrets:write")) {
+      // A write the manifest does not cover THROWS rather than warning like
+      // `get`: a pairing flow that believes it saved a key and finds nothing
+      // on the next boot is a worse failure than an error at the call.
+      const writable = (name: string): SecretKey => {
+        if (!SECRET_NAME_RE.test(name)) throw new Error(`"${name}" is not a valid secret name`);
+        if (!covered(name)) throw new Error(`secret "${name}" is not listed under secrets: in plugin.yaml`);
+        // GLOBAL only: plugins are global, and a project secret is the
+        // project's — the same reason `get` resolves without a project.
+        return { name, scope: "global" };
+      };
+      // Awaited so the caller's next step sees the new value everywhere, but
+      // never fatal: the value IS stored, and a sub-app that failed to restart
+      // is the refresher's to report, not a reason to tell the plugin its
+      // write failed.
+      const refresh = async (key: SecretKey) => {
+        await deps.refreshSecrets?.([key]).catch((err: unknown) => {
+          deps.log.warn(`secret "${key.name}" was saved but its consumers were not all refreshed: ${String(err)}`);
+        });
+      };
+      secrets.set = async (name, value) => {
+        const key = writable(name);
+        if (typeof value !== "string" || !value) throw new Error(`secret "${name}" needs a non-empty string value — use delete() to remove it`);
+        if (value.length > SECRET_VALUE_MAX) throw new Error(`secret "${name}" is over ${SECRET_VALUE_MAX / 1024} KiB`);
+        await deps.secrets.set(key, value);
+        deps.log.info(`stored secret ${name}`);
+        await refresh(key);
+      };
+      secrets.delete = async (name) => {
+        const key = writable(name);
+        const removed = await deps.secrets.delete(key);
+        if (removed) {
+          deps.log.info(`deleted secret ${name}`);
+          await refresh(key);
+        }
+        return removed;
+      };
+    }
+    ctx.secrets = secrets;
   }
 
   if (has("kv")) {

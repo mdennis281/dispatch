@@ -116,6 +116,28 @@ describe("the members no example reaches", () => {
     expect(await t.ctx.kv!.list()).toEqual(["b"]);
   });
 
+  it("writes secrets with secrets:write, enforcing the manifest's list as the host does", async () => {
+    const t = createTestContext({
+      capabilities: ["secrets", "secrets:write"],
+      secrets: { GITHUB_TOKEN: "ghp" },
+      manifestSecrets: ["HOST_KEY_*"],
+    });
+    await t.ctx.secrets!.set!("HOST_KEY_mac", "pem");
+    expect(t.secrets.get("HOST_KEY_mac")).toBe("pem");
+    expect(await t.ctx.secrets!.list()).toEqual(["HOST_KEY_mac"]);
+    // Uncovered: invisible to read, refused on write — as on the host.
+    expect(await t.ctx.secrets!.get("GITHUB_TOKEN")).toBeUndefined();
+    await expect(t.ctx.secrets!.set!("GITHUB_TOKEN", "x")).rejects.toThrow(/not listed under secrets:/);
+    await expect(t.ctx.secrets!.set!("HOST_KEY_a-b", "x")).rejects.toThrow(/not a valid secret name/);
+    await expect(t.ctx.secrets!.set!("HOST_KEY_mac", "")).rejects.toThrow(/non-empty/);
+    expect(await t.ctx.secrets!.delete!("HOST_KEY_mac")).toBe(true);
+    expect(await t.ctx.secrets!.delete!("HOST_KEY_mac")).toBe(false);
+    expect([...t.secrets.keys()]).toEqual(["GITHUB_TOKEN"]);
+
+    const readOnly = createTestContext({ capabilities: ["secrets"] });
+    expect(readOnly.ctx.secrets!.set).toBeUndefined();
+  });
+
   it("flips process status and answers oauth tokens from the map", async () => {
     const t = createTestContext();
     t.processes.set("whisper", { id: "whisper", status: "stopped", ports: [9000] });

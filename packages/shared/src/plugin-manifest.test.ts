@@ -7,6 +7,7 @@ import {
   PluginProcessesFileSchema,
   manifestPathDir,
   pluginRangeAccepts,
+  pluginSecretAllowed,
 } from "./plugin-manifest.js";
 
 const base = { id: "voice", name: "Voice", version: "0.1.0", dispatch: ">=1" };
@@ -59,6 +60,40 @@ describe("PluginManifestSchema", () => {
   it("requires a dispatch range", () => {
     const { dispatch: _d, ...noRange } = base;
     expect(PluginManifestSchema.safeParse(noRange).success).toBe(false);
+  });
+
+  it("accepts secrets:write only alongside secrets", () => {
+    const write = (capabilities: string[]) => PluginManifestSchema.safeParse({ ...base, secrets: ["K"], capabilities });
+    expect(write(["secrets", "secrets:write"]).success).toBe(true);
+    const alone = write(["secrets:write"]);
+    expect(alone.success).toBe(false);
+    expect(alone.error?.issues[0]?.message).toMatch(/declare both/);
+  });
+
+  it("accepts a trailing-* prefix under secrets:, and nothing else with a *", () => {
+    const secrets = (list: string[]) => PluginManifestSchema.safeParse({ ...base, secrets: list }).success;
+    expect(secrets(["REMOTE_HOST_KEY_*", "PLAIN"])).toBe(true);
+    expect(secrets(["K*"])).toBe(true);
+    // A bare `*` would be every secret in the store.
+    expect(secrets(["*"])).toBe(false);
+    expect(secrets(["A*B"])).toBe(false);
+    expect(secrets(["A**"])).toBe(false);
+    expect(secrets(["MY-KEY_*"])).toBe(false);
+    // Exact entries keep the old, lenient rule: a manifest that loaded before still loads.
+    expect(secrets(["lower-case-name"])).toBe(true);
+  });
+});
+
+describe("pluginSecretAllowed", () => {
+  it("matches exact entries exactly and prefix entries by prefix", () => {
+    const declared = ["API_KEY", "REMOTE_HOST_KEY_*"];
+    expect(pluginSecretAllowed(declared, "API_KEY")).toBe(true);
+    expect(pluginSecretAllowed(declared, "API_KEY_2")).toBe(false);
+    expect(pluginSecretAllowed(declared, "REMOTE_HOST_KEY_cvx_mac")).toBe(true);
+    expect(pluginSecretAllowed(declared, "REMOTE_HOST_KEY_")).toBe(true);
+    expect(pluginSecretAllowed(declared, "REMOTE_HOST_KE")).toBe(false);
+    expect(pluginSecretAllowed(declared, "GITHUB_TOKEN")).toBe(false);
+    expect(pluginSecretAllowed(undefined, "API_KEY")).toBe(false);
   });
 });
 

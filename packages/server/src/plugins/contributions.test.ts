@@ -22,6 +22,7 @@ import { PluginProcessHost, toSubApp, type PluginProcessRunner } from "./process
 import {
   expandPluginSecrets,
   mergeDeclaredMcpServers,
+  pluginMcpServersUsingSecret,
   readPluginContributions,
   selectPluginMcpServers,
   type PluginMcpDeclaration,
@@ -203,6 +204,29 @@ describe("selectPluginMcpServers", () => {
     );
     expect(out.a!.env).toEqual({ T: "tok", U: "" });
     expect(refused).toEqual(["UNLISTED"]);
+  });
+
+  it("names the servers a secret change must reconnect: referenced AND covered by the manifest", () => {
+    const decls = [
+      decl({ name: "uses", secrets: ["HOST_KEY_*"], config: { type: "stdio", command: "node", args: ["--key=${secret:HOST_KEY_mac}"] } }),
+      // References it, but its manifest does not cover it — it expands to "" either way.
+      decl({ name: "uncovered", secrets: ["OTHER"], config: { type: "stdio", command: "node", env: { K: "${secret:HOST_KEY_mac}" } } }),
+      decl({ name: "unrelated", secrets: ["HOST_KEY_*"], config: { type: "stdio", command: "node" } }),
+    ];
+    expect(pluginMcpServersUsingSecret(decls, "HOST_KEY_mac")).toEqual(["uses"]);
+    expect(pluginMcpServersUsingSecret(decls, "HOST_KEY_other")).toEqual([]);
+  });
+
+  it("expands a name a prefix entry covers, and nothing outside the prefix", () => {
+    const refused: string[] = [];
+    const out = selectPluginMcpServers(
+      [decl({ name: "a", secrets: ["HOST_KEY_*"], config: { type: "stdio", command: "node", env: { K: "${secret:HOST_KEY_mac}", G: "${secret:HOSTKEY}" } } })],
+      undefined,
+      (n) => (n === "HOST_KEY_mac" ? "pem" : "LEAK"),
+      (_p, _s, n) => refused.push(n),
+    );
+    expect(out.a!.env).toEqual({ K: "pem", G: "" });
+    expect(refused).toEqual(["HOSTKEY"]);
   });
 
   it("covers cwd and prewarm too — the fields the project resolver would otherwise fill from undeclared secrets", () => {

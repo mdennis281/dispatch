@@ -25,6 +25,7 @@ import {
   PluginProcessesFileSchema,
   manifestPathDir,
   pluginRangeAccepts,
+  pluginSecretAllowed,
   referencedSecrets,
   type PluginCapability,
   type PluginInspection,
@@ -357,7 +358,7 @@ export async function inspectPluginDir(dir: string, opts: InspectDirOptions): Pr
               });
               if (t.type === "stdio") contributionCode.push(...codePathsIn(t.command as string | undefined, args));
               const strings = [t.command, t.url, t.cwd, ...(args ?? []), ...Object.values(env ?? {})].filter((v): v is string => typeof v === "string");
-              const undeclared = [...new Set(strings.flatMap((v) => referencedSecrets(v)))].filter((n) => !declaredSecrets.includes(n));
+              const undeclared = [...new Set(strings.flatMap((v) => referencedSecrets(v)))].filter((n) => !pluginSecretAllowed(declaredSecrets, n));
               if (undeclared.length) {
                 warnings.push(`MCP server "${s.name}" references secret(s) not listed under secrets: ${undeclared.join(", ")} — they would expand to an empty string`);
               }
@@ -473,13 +474,16 @@ export async function inspectPluginDir(dir: string, opts: InspectDirOptions): Pr
   // `const { chats } = ctx` hides which half is used; count it as both so
   // neither is reported unused on a guess.
   const destructuredChats = hooks.some((h) => /^(chats|attention) \(destructured/.test(h.label));
+  // Likewise `const { secrets } = ctx` hides whether it writes.
+  const destructuredSecrets = hooks.some((h) => /^secrets \(destructured/.test(h.label));
 
   const clientDir = m?.client ? manifestPathDir(m.client) : undefined;
   const serverCodeScanned = scanned.some((f) => !clientDir || !f.path.startsWith(`${clientDir}/`));
-  const CODE_CAPS: PluginCapability[] = ["events", "routes", "chats:read", "chats:write", "memory", "secrets", "kv"];
+  const CODE_CAPS: PluginCapability[] = ["events", "routes", "chats:read", "chats:write", "memory", "secrets", "secrets:write", "kv"];
   const usedOf = (cap: PluginCapability): boolean | null => {
     if (reasons.has(cap)) return true;
     if (destructuredChats && (cap === "chats:read" || cap === "chats:write")) return true;
+    if (destructuredSecrets && cap === "secrets:write") return true;
     if (cap === "ui") return !!m?.client;
     if (cap === "mcp") return false;
     if (cap === "process" || cap === "oauth" || CODE_CAPS.includes(cap)) {
@@ -499,12 +503,39 @@ export async function inspectPluginDir(dir: string, opts: InspectDirOptions): Pr
   const unused = capabilities.filter((x) => x.used === false).map((x) => x.name);
 
   // `ctx.secrets.get("X")` for an X the manifest does not list returns
-  // undefined at runtime — the plugin will look broken, not refused.
-  const literalSecrets = hooks
-    .map((h) => /^secrets\.get\("([^"]+)"\)$/.exec(h.label)?.[1])
-    .filter((n): n is string => !!n && !declaredSecrets.includes(n));
-  if (literalSecrets.length) {
-    warnings.push(`The code reads secret(s) not listed under secrets: ${literalSecrets.join(", ")} — ctx.secrets.get would return undefined for them`);
+  // undefined at runtime — the plugin will look broken, not refused. A
+  // template literal (`KEY_${slug}`) is checked by its literal head, which is
+  // what a prefix entry has to cover.
+  const literalSecrets = (...verbs: string[]) => [
+    ...new Set(
+      hooks
+        .map((h) => /^secrets\.(get|set|delete)\("([^"]+)"\)$/.exec(h.label))
+        .filter((m): m is RegExpExecArray => !!m && verbs.includes(m[1]!))
+        .map((m) => m[2]!)
+        .map((n) => (n.includes("${") ? `${n.slice(0, n.indexOf("${"))}*` : n))
+        // A name with no literal head is computed — nothing to check it against.
+        .filter((n) => n !== "*")
+        .filter((n) =>
+          n.endsWith("*")
+            ? !declaredSecrets.includes(n) && !pluginSecretAllowed(declaredSecrets, n.slice(0, -1))
+            : !pluginSecretAllowed(declaredSecrets, n),
+        ),
+    ),
+  ];
+  const unreadable = literalSecrets("get");
+  if (unreadable.length) {
+    warnings.push(`The code reads secret(s) not listed under secrets: ${unreadable.join(", ")} — ctx.secrets.get would return undefined for them`);
+  }
+  const unwritable = literalSecrets("set", "delete");
+  if (unwritable.length) {
+    warnings.push(`The code writes secret(s) not listed under secrets: ${unwritable.join(", ")} — ctx.secrets.set/delete would throw for them`);
+  }
+  // A prefix covers names that do not exist yet — say which family, so the
+  // owner is not reading `FOO_*` as one key.
+  for (const p of declaredSecrets.filter((s) => s.endsWith("*"))) {
+    warnings.push(
+      `secrets: ${p} is a prefix — the plugin may read${caps.has("secrets:write") ? ", create, replace and delete" : ""} any global secret whose name starts with ${p.slice(0, -1)}`,
+    );
   }
   if (opts.fetched.skipped.length) {
     warnings.push(
