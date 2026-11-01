@@ -371,6 +371,9 @@ describe("WorktreeService on a real temp repo", () => {
 
   it("finishes the delete itself when git destroys the tree's identity and then gives up", async () => {
     const info = await svc.create(project(), "feat/husk", { base: "main", noFetch: true });
+    // Ignored, as in any real repo: untracked, it would make an unforced
+    // removal a refusal, which `remove()` now asks about before git runs.
+    await writeFile(join(repo, ".git", "info", "exclude"), "node_modules/\n");
     // The thing git trips over, standing in for 200MB of pnpm junctions.
     await mkdir(join(info.path, "node_modules", "dep"), { recursive: true });
     await writeFile(join(info.path, "node_modules", "dep", "index.js"), "");

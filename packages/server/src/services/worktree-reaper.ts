@@ -641,7 +641,7 @@ export class WorktreeReaper {
    * git identity of their own.
    *
    * These exist because `git worktree remove` on Windows destroys a tree's
-   * `.git` file and then dies on the first junction in `node_modules` (see
+   * `.git` file and then fails part-way through the walk (see
    * `WorktreeService.remove`). Once git's admin record is pruned the directory
    * is invisible to `plan()` — which enumerates through git — so a reaper that
    * only judged worktrees would leave every one of them forever, at 200MB+
@@ -649,6 +649,10 @@ export class WorktreeReaper {
    * probe: without a `.git` there is no index to compare against, and git's
    * own refusal gate already ran, and passed, before it unlinked that file.
    * The one check that matters — no `.git` — is re-done at deletion time.
+   *
+   * A husk is whatever a dead removal left, links included, so its delete
+   * unlinks those first (`removeOrphanDirectory`). The 2026-11-01 incident was
+   * a removal deleting through a junction into another checkout.
    */
   private async sweepOrphans(projectId?: string): Promise<ReapResult> {
     const outcomes: ReapOutcome[] = [];
