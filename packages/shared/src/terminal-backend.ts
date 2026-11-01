@@ -26,8 +26,37 @@ import { resolveLayered, type Layered } from "./layered.js";
 /** The id that always means "a local shell on the Dispatch host". Never registrable. */
 export const LOCAL_TERMINAL_BACKEND = "local";
 
-/** `[a-z0-9][a-z0-9-]{0,47}` — a backend id is persisted on chats and in `project.yaml`. */
+/** `[a-z0-9][a-z0-9-]{0,47}` — the ids THIS version registers, and so the only ones it can resolve. */
 export const TERMINAL_BACKEND_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,47}$/;
+
+/**
+ * What a PERSISTED backend id may look like — a chat's pin, app settings'
+ * `terminalLocations`, project.yaml `defaults` — deliberately looser than
+ * {@link TERMINAL_BACKEND_ID_PATTERN}.
+ *
+ * `config/` is shared by the stable and dev instances, and either may be the
+ * newer. Read against the strict pattern, an id in a format the reader had
+ * never heard of failed the WHOLE file: every app-settings read threw, a
+ * project.yaml went invalid. Dropping the id instead would erase it on the
+ * older instance's next save (`PUT /api/settings` replaces the file). So any
+ * id-shaped string is KEPT, and one this version cannot read
+ * ({@link isReadableTerminalBackendId}) is unavailable, fails closed, and is
+ * flagged where a human looks. No whitespace or backtick: ids are quoted into
+ * agent prompts.
+ */
+export const TERMINAL_BACKEND_REF_PATTERN = /^[^\s`]{1,128}$/;
+
+/** A persisted backend id — see {@link TERMINAL_BACKEND_REF_PATTERN}. */
+export const TerminalBackendRefSchema = z.string().regex(TERMINAL_BACKEND_REF_PATTERN);
+
+/** Whether this version can use a persisted backend id: `local`, or an id it could register. */
+export function isReadableTerminalBackendId(id: string): boolean {
+  return id === LOCAL_TERMINAL_BACKEND || TERMINAL_BACKEND_ID_PATTERN.test(id);
+}
+
+/** Why a persisted id this version cannot read is unavailable — refusals, the agent note, config warnings. */
+export const UNREADABLE_TERMINAL_BACKEND_REASON =
+  "this version of Dispatch cannot read the id (a newer version probably wrote it)";
 
 /**
  * Which dialect the shell on the far end speaks. It picks the sentinel probe
@@ -466,8 +495,11 @@ export type TerminalLocation = z.infer<typeof TerminalLocationSchema>;
 /** Where the chosen backend id came from. `terminal` = the agent named it for that one shell. */
 export type TerminalBackendSource = "terminal" | "chat" | "project" | "default";
 
-/** The allowed-locations list: backend ids (`local` included) an agent may pick per terminal. */
-export const TerminalLocationsSchema = z.array(z.string().regex(TERMINAL_BACKEND_ID_PATTERN));
+/**
+ * The allowed-locations list: backend ids (`local` included) an agent may pick
+ * per terminal. Persisted, so read loosely — see {@link TERMINAL_BACKEND_REF_PATTERN}.
+ */
+export const TerminalLocationsSchema = z.array(TerminalBackendRefSchema);
 
 /**
  * Which locations the AGENT may choose between, per terminal — app setting

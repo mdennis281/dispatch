@@ -46,6 +46,8 @@ import {
   TERMINAL_BACKEND_ID_PATTERN,
   TERMINAL_BACKEND_STATES,
   TERMINAL_CHAT_HOOK_TIMEOUT_MS,
+  UNREADABLE_TERMINAL_BACKEND_REASON,
+  isReadableTerminalBackendId,
   resolveTerminalBackend,
   resolveTerminalLocations,
   type TerminalBackend,
@@ -433,6 +435,11 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
    * when it was last registered here, else the default.
    */
   fallbackOf(id: string): TerminalBackendFallback {
+    // An id in a format this version cannot read came from a NEWER one — whose
+    // backends postdate the fallback policy, and whose policy this instance
+    // never saw. Guessing `local` would run a command meant for that machine
+    // on this one.
+    if (!isReadableTerminalBackendId(id)) return "refuse";
     const entry = this.entries.get(id);
     if (entry) return entry.backend.fallback ?? "local";
     return this.recall(id)?.fallback ?? "local";
@@ -518,6 +525,7 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
    * that can only hang until `spawnTimeoutMs`: two minutes by default.
    */
   private cannotServe(id: string): TerminalBackendResolution | undefined {
+    if (!isReadableTerminalBackendId(id)) return { requested: id, missing: true, unreadable: true, fallback: "refuse" };
     const entry = this.entries.get(id);
     if (!entry) {
       const known = this.recall(id);
@@ -569,6 +577,12 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
     const reasons: Record<string, string> = {};
     const named: TerminalLocationOption[] = [];
     for (const id of new Set([def.id, ...allowed])) {
+      if (!isReadableTerminalBackendId(id)) {
+        named.push({ id, label: id, isDefault: id === def.id });
+        unavailable.push(id);
+        reasons[id] = UNREADABLE_TERMINAL_BACKEND_REASON;
+        continue;
+      }
       const label = this.labelOf(id);
       named.push({ id, label: label ?? this.recall(id)?.label ?? id, isDefault: id === def.id });
       // An unregistered or offline DEFAULT is listed too: a terminal sent there

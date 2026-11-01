@@ -756,6 +756,41 @@ describe("lifecycle hooks and ports", () => {
   });
 });
 
+describe("persisted ids this version cannot read (E12a)", () => {
+  // `future:box` stands for an id a NEWER instance sharing config/ wrote.
+
+  it("a chat pinned to one is refused — never run here — though this instance never saw it", async () => {
+    const h = setup();
+    h.registry.register(fakeBackend(), "plug");
+    h.chats.set("c1", { terminalBackend: "future:box" });
+    h.registry.notePin("c1", "future:box");
+    expect(h.registry.fallbackOf("future:box")).toBe("refuse");
+
+    const res = await h.svc.run({ chatId: "c1", name: "build", command: "say x", cwd: "/w" });
+    expect(res.error).toMatch(
+      /did not start on future:box \(`future:box`\): the terminal backend "future:box" is not one this version can use: this version of Dispatch cannot read the id/,
+    );
+    expect(h.local).toHaveLength(0);
+  });
+
+  it("an allowed one is unavailable with that reason, and a pick of it is refused saying so", async () => {
+    const h = setup();
+    h.registry.register(fakeBackend(), "plug");
+    h.chats.set("c1", { projectId: "p1" });
+    h.allowed.app = ["local", "box", "future:box"];
+
+    const choices = await h.registry.locations({ chatId: "c1" });
+    expect(choices.options.map((o) => o.id)).toEqual(["local", "box"]);
+    expect(choices.unavailable).toEqual(["future:box"]);
+    expect(choices.reasons?.["future:box"]).toMatch(/^this version of Dispatch cannot read the id/);
+    const refused = await h.registry.checkLocation({ chatId: "c1" }, "future:box");
+    expect((refused as { error: string }).error).toMatch(
+      /"future:box" is allowed but not available right now — this version of Dispatch cannot read the id/,
+    );
+    expect((await h.registry.agentNote("c1"))!).toContain("- `future:box` — future:box. UNAVAILABLE right now: this version");
+  });
+});
+
 describe("per-terminal location (the agent's choice)", () => {
   // ONE registered backend throughout, on purpose: the old pin-cache bug hid
   // behind a second backend keeping `size > 0`, and so would a per-terminal

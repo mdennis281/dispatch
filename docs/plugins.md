@@ -1201,6 +1201,19 @@ keeps today's behaviour for a project default naming a plugin that never ran
 here. `data/` is per instance, so the dev instance learns the policy the first
 time the plugin activates there.
 
+**Ids from a newer version.** A backend registers with an id matching
+`TERMINAL_BACKEND_ID_PATTERN`. Places that store an id (a chat's pin, app
+settings' `terminalLocations`, project.yaml `defaults`) accept any id-shaped
+string (`TERMINAL_BACKEND_REF_PATTERN`). That is because `config/` is shared by
+the stable and dev instances, and either may be the newer. A strict read made an
+older instance fail the whole file when it met an id format it had never seen:
+every settings read threw, or the project manifest went invalid. Dropping the id
+instead would have erased it on that instance's next save. So an id this version
+cannot read (`isReadableTerminalBackendId`) is kept as written. It is listed as
+unavailable, and a terminal sent there is **refused**, never run locally, because
+its policy cannot be known. It is also flagged where a human looks: "needs a
+newer Dispatch" in the location pickers, and a load error in Project config.
+
 **Status.** A backend that lives on a machine that can be asleep, unplugged or
 off the network says so, so nobody waits two minutes to find out:
 

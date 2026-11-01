@@ -366,6 +366,21 @@ describe("ProjectConfigService — resilience (structured errors, never a throw)
     expect(result.errors.some((e) => e.scope === "manifest")).toBe(true);
   });
 
+  it("keeps a terminal backend id it cannot read and says so in the load errors — the rest still loads (E12a)", async () => {
+    const project = await seedProject();
+    await writeConfig(
+      "project.yaml",
+      'name: X\ndefaults:\n  terminalBackend: "future:box"\n  terminalLocations: ["local", "future:box"]\n',
+    );
+    const result = await new ProjectConfigService({ store, bus }).load(project);
+    expect(result.config).not.toBeNull();
+    expect(result.config!.defaults).toMatchObject({ terminalBackend: "future:box", terminalLocations: ["local", "future:box"] });
+    expect(result.errors.filter((e) => e.scope === "manifest").map((e) => e.message)).toEqual([
+      expect.stringMatching(/^defaults\.terminalBackend: "future:box" — this version of Dispatch cannot read the id .*refused rather than run here\.$/),
+      expect.stringMatching(/^defaults\.terminalLocations\[1\]: "future:box" — /),
+    ]);
+  });
+
   it("manifest missing required `name` → manifest schema error", async () => {
     const project = await seedProject();
     await writeConfig("project.yaml", "worktree: pnpm worktree");

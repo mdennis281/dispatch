@@ -1,6 +1,11 @@
 import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
-import type { TerminalBackendInfo, TerminalInfo, TerminalPortForward } from "@dispatch/shared";
+import {
+  isReadableTerminalBackendId,
+  type TerminalBackendInfo,
+  type TerminalInfo,
+  type TerminalPortForward,
+} from "@dispatch/shared";
 
 /** One line of terminal I/O for the read-only view. */
 export interface TerminalLine {
@@ -88,6 +93,16 @@ export function backendHint(b: TerminalBackendInfo): string | undefined {
   const st = b.status;
   if (st && st.state !== "online") return st.detail ? `${st.state} · ${st.detail}` : st.state;
   return b.pluginId;
+}
+
+/**
+ * What a picker row says under an id that config names but no plugin has
+ * registered. An id this version cannot even read — a newer instance sharing
+ * `config/` wrote it — says so, rather than "not installed", which sends
+ * someone looking for a plugin that installing would not help.
+ */
+export function missingBackendHint(id: string): string {
+  return isReadableTerminalBackendId(id) ? "not installed" : "needs a newer Dispatch";
 }
 
 /** One chat's shells that still have a process behind them. */

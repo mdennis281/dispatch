@@ -71,6 +71,8 @@ import {
   isManagerServer,
   MANAGER_SERVER_PREFIX,
   realProjects,
+  isReadableTerminalBackendId,
+  UNREADABLE_TERMINAL_BACKEND_REASON,
 } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
@@ -691,6 +693,24 @@ export class ProjectConfigService {
       return ProjectConfigResultSchema.parse({ sourceDir, config: null, errors });
     }
     const manifest = parsed.data;
+
+    // A backend id this version cannot read is KEPT — a newer instance sharing
+    // this config wrote it, and failing the manifest over it took the whole
+    // project's config down with it. A human still needs to hear that terminals
+    // sent there are refused here; the load errors are where they look.
+    const terminalIds: [path: string, id: string][] = [];
+    if (manifest.defaults?.terminalBackend) terminalIds.push(["defaults.terminalBackend", manifest.defaults.terminalBackend]);
+    manifest.defaults?.terminalLocations?.forEach((id, i) => terminalIds.push([`defaults.terminalLocations[${i}]`, id]));
+    for (const [path, id] of terminalIds) {
+      if (isReadableTerminalBackendId(id)) continue;
+      errors.push({
+        scope: "manifest",
+        file: MANIFEST_FILE,
+        message:
+          `${path}: "${id}" — ${UNREADABLE_TERMINAL_BACKEND_REASON}. Kept as written; until this ` +
+          `instance is upgraded, a terminal sent there is refused rather than run here.`,
+      });
+    }
 
     // --- resolved dirs ---
     const instructionsDir = join(sourceDir, manifest.instructionsDir ?? DEFAULT_INSTRUCTIONS_DIR);

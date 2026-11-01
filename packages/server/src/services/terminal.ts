@@ -81,6 +81,7 @@ import {
   LOCAL_TERMINAL_BACKEND,
   TERMINAL_RUN_HOOK_MAX_TIMEOUT_MS,
   TERMINAL_RUN_HOOK_TIMEOUT_MS,
+  UNREADABLE_TERMINAL_BACKEND_REASON,
   type RegistryQuery,
   type TerminalAfterRunInfo,
   type TerminalBackend,
@@ -341,6 +342,11 @@ export interface TerminalBackendResolution {
   backend?: TerminalBackend;
   /** `requested` names no registered backend (its plugin is uninstalled or off). */
   missing?: boolean;
+  /**
+   * Set with `missing` when `requested` is not even an id THIS version can
+   * read — a newer one wrote it to shared config. Fails closed.
+   */
+  unreadable?: boolean;
   /**
    * What to do when `requested` cannot supply a shell — the backend's own
    * policy, or for a missing one what it declared when last registered.
@@ -1059,7 +1065,9 @@ export class TerminalService {
           res.fallback,
           res.requested,
           label,
-          `the terminal backend ${named} is not installed, or its plugin is switched off`,
+          res.unreadable
+            ? `the terminal backend ${named} is not one this version can use: ${UNREADABLE_TERMINAL_BACKEND_REASON}`
+            : `the terminal backend ${named} is not installed, or its plugin is switched off`,
         );
       } else {
         this.attach(term, this.spawn(cwd));

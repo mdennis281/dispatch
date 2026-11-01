@@ -32,7 +32,7 @@ import { harnessLabel } from "../../lib/harness.js";
 import { useProviderCatalogs } from "../../lib/useProviderCatalogs.js";
 import { useProjects } from "../../stores/projects.js";
 import { useSettings } from "../../stores/settings.js";
-import { backendHint, isBackendOffline, useTerminals } from "../../stores/terminals.js";
+import { backendHint, isBackendOffline, missingBackendHint, useTerminals } from "../../stores/terminals.js";
 import type { ChatDefaultsDraft } from "../../stores/settingsDraft.js";
 import { modeLabel } from "../chat/ModeControl.js";
 import { Select, type SelectOption } from "../ui/Select.js";
@@ -309,7 +309,7 @@ export function ChatDefaultsSection({
                   ...(value.terminalBackend &&
                   value.terminalBackend !== "local" &&
                   !terminalBackends.some((b) => b.id === value.terminalBackend)
-                    ? [{ value: value.terminalBackend, label: value.terminalBackend, hint: "not installed" }]
+                    ? [{ value: value.terminalBackend, label: value.terminalBackend, hint: missingBackendHint(value.terminalBackend) }]
                     : []),
                 ]}
                 inherit={{
