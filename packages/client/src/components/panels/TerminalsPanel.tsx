@@ -28,6 +28,7 @@ import {
   nextShellName,
   backendHint,
   isBackendOffline,
+  missingBackendHint,
   type TerminalLine,
 } from "../../stores/terminals.js";
 import { api } from "../../lib/api.js";
@@ -243,7 +244,7 @@ function TerminalBackendPicker({ chat }: { chat: Chat }) {
   // A pin to a backend whose plugin is gone is still the answer; show it
   // rather than a blank chip — its shells come up local and say why.
   if (!options.some((o) => o.value === effective.id)) {
-    options.push({ value: effective.id, label: effective.id, icon: <TriangleAlert />, hint: "not installed" });
+    options.push({ value: effective.id, label: effective.id, icon: <TriangleAlert />, hint: missingBackendHint(effective.id) });
   }
   const pin = (next: string | null) => {
     useChats.getState().upsertChat({ ...chat, terminalBackend: next ?? undefined });

@@ -15,7 +15,7 @@
  */
 import { Check, RotateCcw } from "lucide-react";
 import { LOCAL_TERMINAL_BACKEND, type TerminalBackendInfo } from "@dispatch/shared";
-import { backendHint, useTerminals } from "../../stores/terminals.js";
+import { backendHint, missingBackendHint, useTerminals } from "../../stores/terminals.js";
 import { Button } from "../ui/Button.js";
 import { cn } from "../../lib/cn.js";
 
@@ -47,14 +47,14 @@ export function TerminalLocationsPicker({
   const backends = useTerminals((s) => s.backends);
   const effective = value ?? inherited;
   const enabled = new Set(effective);
-  const rows: { id: string; label: string; hint?: string }[] = [
+  const rows: { id: string; label: string; hint?: string; missing?: boolean }[] = [
     { id: LOCAL_TERMINAL_BACKEND, label: "This machine", hint: "the Dispatch host" },
     ...backends.map((b) => ({ id: b.id, label: b.label, hint: backendHint(b) })),
     // Named but not registered: still part of the answer, and the only place
     // to see it and untick it.
     ...effective
       .filter((id) => id !== LOCAL_TERMINAL_BACKEND && !backends.some((b) => b.id === id))
-      .map((id) => ({ id, label: id, hint: "not installed" })),
+      .map((id) => ({ id, label: id, hint: missingBackendHint(id), missing: true })),
   ];
   const toggle = (id: string) => {
     const next = new Set(effective);
@@ -69,7 +69,7 @@ export function TerminalLocationsPicker({
   // lone `local` in a chat that defaults to local — is truly none. Counting
   // ticked rows and calling one "no choice" contradicted the Terminals panel
   // for the same config (review on #452).
-  const offered = rows.filter((r) => enabled.has(r.id) && r.hint !== "not installed").map((r) => r.label);
+  const offered = rows.filter((r) => enabled.has(r.id) && !r.missing).map((r) => r.label);
   const reading =
     offered.length === 0
       ? "no choice — every terminal goes where the chat's default sends it"

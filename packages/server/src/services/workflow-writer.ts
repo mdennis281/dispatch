@@ -25,7 +25,7 @@ import {
   EffortSchema,
   HarnessKindSchema,
   ShellTranscriptFilterSchema,
-  TERMINAL_BACKEND_ID_PATTERN,
+  TerminalBackendRefSchema,
   TerminalLocationsSchema,
   WorkflowConfigSchema,
   type Project,
@@ -278,7 +278,7 @@ export const ProjectDefaultsPatchSchema = z.object({
       model: z.string().trim().min(1).nullable().optional(),
       showInjectedContext: z.boolean().nullable().optional(),
       shellFilter: ShellTranscriptFilterSchema.nullable().optional(),
-      terminalBackend: z.string().regex(TERMINAL_BACKEND_ID_PATTERN).nullable().optional(),
+      terminalBackend: TerminalBackendRefSchema.nullable().optional(),
       terminalLocations: TerminalLocationsSchema.nullable().optional(),
     })
     .optional(),

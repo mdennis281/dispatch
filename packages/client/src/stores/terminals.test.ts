@@ -6,7 +6,7 @@
  */
 import { describe, it, expect } from "vitest";
 import type { TerminalInfo } from "@dispatch/shared";
-import { isActiveTerminal, isLiveChatTerminal, nextShellName } from "./terminals.js";
+import { isActiveTerminal, isLiveChatTerminal, missingBackendHint, nextShellName } from "./terminals.js";
 
 const terminal = (over: Partial<TerminalInfo> = {}): TerminalInfo => ({
   id: "chat-1::qa",
@@ -16,6 +16,13 @@ const terminal = (over: Partial<TerminalInfo> = {}): TerminalInfo => ({
   status: "live",
   createdAt: 1,
   ...over,
+});
+
+describe("missingBackendHint", () => {
+  it("says an id this version cannot read needs a newer Dispatch, not a plugin install", () => {
+    expect(missingBackendHint("box")).toBe("not installed");
+    expect(missingBackendHint("future:box")).toBe("needs a newer Dispatch");
+  });
 });
 
 describe("nextShellName", () => {

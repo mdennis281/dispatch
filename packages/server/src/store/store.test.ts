@@ -511,6 +511,16 @@ describe("Store runners + checkpoints + settings", () => {
     expect(await store.getSettings()).toMatchObject({ theme: "dim", defaultModeId: "plan" });
   });
 
+  it("reads a terminal location id it cannot use rather than throwing, and keeps it through a save (E12a)", async () => {
+    // config.json is shared with the other instance, which may be newer. A
+    // strict read threw on every getSettings(); dropping the id would let the
+    // full-replace save below erase the newer instance's setting.
+    await writeFile(join(dir, "config.json"), JSON.stringify({ theme: "dark", terminalLocations: ["local", "future:box"] }));
+    expect((await store.getSettings()).terminalLocations).toEqual(["local", "future:box"]);
+    await store.saveSettings({ ...(await store.getSettings()), theme: "dim" });
+    expect(await store.getSettings()).toMatchObject({ theme: "dim", terminalLocations: ["local", "future:box"] });
+  });
+
   it("leaves updateChannel unset, which every pre-channel install reads as stable", async () => {
     // Deliberately not `.default("stable")`: a default would make the field
     // REQUIRED in the inferred type and invalidate every existing AppSettings

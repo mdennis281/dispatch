@@ -20,7 +20,7 @@ import { TokenFiguresSchema } from "./metrics-tokens.js";
 import { WorkflowConfigSchema } from "./workflow.js";
 import { ChatWorktreeRecordSchema } from "./worktree-history.js";
 import {
-  TERMINAL_BACKEND_ID_PATTERN,
+  TerminalBackendRefSchema,
   TerminalExitReasonSchema,
   TerminalLocationSchema,
 } from "./terminal-backend.js";
@@ -977,9 +977,11 @@ export const ChatSchema = z.object({
    * chat (`local`, or a plugin backend's id). Unset inherits the project's
    * `defaults.terminalBackend`, then local — see `resolveTerminalBackend`.
    * Read when a shell is OPENED, so changing it moves the next new shell, not
-   * one already running.
+   * one already running. Read loosely, like every persisted backend id: a pin
+   * in a newer format must not make this chat unreadable (see
+   * `TERMINAL_BACKEND_REF_PATTERN`).
    */
-  terminalBackend: z.string().regex(TERMINAL_BACKEND_ID_PATTERN).optional(),
+  terminalBackend: TerminalBackendRefSchema.optional(),
   /** Transcript-shell categories shown for this chat; unset inherits the project. */
   shellFilter: ShellTranscriptFilterSchema.optional(),
   /**

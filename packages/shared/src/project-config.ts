@@ -26,7 +26,7 @@ import {
 } from "./common.js";
 import { SubAppSchema, AgentConfigSchema } from "./domain.js";
 import { WorkflowConfigSchema } from "./workflow.js";
-import { TERMINAL_BACKEND_ID_PATTERN, TerminalLocationsSchema } from "./terminal-backend.js";
+import { TerminalBackendRefSchema, TerminalLocationsSchema } from "./terminal-backend.js";
 import { IssueConfigSchema } from "./issues.js";
 import { ProjectAgentContextSchema } from "./agent-context.js";
 import { ProjectRetentionSchema } from "./retention.js";
@@ -311,7 +311,7 @@ export const ManifestDefaultsSchema = z.object({
    * own (`Chat.terminalBackend`). Naming a backend that is not installed is
    * not an error here — the shell comes up local and says why.
    */
-  terminalBackend: z.string().regex(TERMINAL_BACKEND_ID_PATTERN).optional(),
+  terminalBackend: TerminalBackendRefSchema.optional(),
   /**
    * Locations the agent may pick PER TERMINAL (`local` and/or backend ids),
    * overriding the app's `terminalLocations` whole. `[]` switches the choice
@@ -469,7 +469,7 @@ export const ProjectConfigDefaultsSchema = z.object({
   showInjectedContext: z.boolean().optional(),
   shellFilter: ShellTranscriptFilterSchema.optional(),
   /** Project default terminal backend (`ManifestDefaultsSchema.terminalBackend`). */
-  terminalBackend: z.string().regex(TERMINAL_BACKEND_ID_PATTERN).optional(),
+  terminalBackend: TerminalBackendRefSchema.optional(),
   /** Per-terminal locations the agent may pick (`ManifestDefaultsSchema.terminalLocations`). */
   terminalLocations: TerminalLocationsSchema.optional(),
 });
