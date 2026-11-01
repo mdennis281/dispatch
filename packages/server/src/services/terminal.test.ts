@@ -72,7 +72,9 @@ class FakeShell extends EventEmitter implements ShellProcess {
 
   private handle(chunk: string): void {
     for (const raw of chunk.split("\n")) {
-      const line = raw.replace(/\r$/, "");
+      // `commandWrite` opens a posix command's stdin-isolating group on the
+      // command's own line; its closer and PowerShell's detach line match nothing.
+      const line = raw.replace(/\r$/, "").replace(/^\{ :; /, "");
       if (!line.trim()) continue;
 
       const cd =

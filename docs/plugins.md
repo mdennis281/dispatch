@@ -961,9 +961,30 @@ local shell, and never for a shell opened with no command.
 
 Before these hooks existed a backend had to sniff stdin to tell the command
 from core's probe (the probe line starts `__cm_ec=` for bash). That still
-works, since core writes the command and the probe as two writes exactly as
-before, but a sync done that way eats the command's own timeout and can only
-warn when it fails.
+works, since core still sends the command and the probe as two separate writes,
+but a sync done that way eats the command's own timeout and can only warn when
+it fails. Don't parse the command out of the write either (see "Stdin" below):
+`beforeRun` has it verbatim as `command`.
+
+**Stdin.** Every command runs with its standard input at EOF, on every shell,
+local or yours, background runs included. Core writes the command, its probe
+and the next command down the one pipe the shell reads. Anything the command
+started used to inherit that pipe, so a command that read stdin (`cat`, `ssh`,
+a credential prompt, bash's `read`) ate the probe and the line after it. The
+run sat out its timeout and the next command became that program's input.
+Nothing in Dispatch feeds a running command, so the write now cuts it off:
+
+- bash/sh: `{ :; <command>\n\n} </dev/null\n` — a brace group, so `cd` and
+  `export` still persist and `$?` is the command's;
+- PowerShell: a line before the command points the process's stdin handle at
+  `NUL` (a small `Add-Type` helper, compiled on the shell's first command), and
+  the probe restores it. Where the helper can't compile (constrained language
+  mode) or doesn't apply (PowerShell on Linux), the command runs as before.
+
+Two consequences. A tool that quits when its stdin closes now quits at once:
+esbuild's `--watch` does, and `--watch=forever` is its fix. And PowerShell's
+own `Read-Host` still reads from the shell's pipe; nothing a piped shell
+offers can isolate it.
 
 **Selection** is `resolveTerminalBackend` (shared): the chat's
 `terminalBackend` pin, else the project's `defaults.terminalBackend` in

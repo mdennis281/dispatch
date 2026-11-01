@@ -250,7 +250,8 @@ class FakeShell extends EventEmitter implements ShellProcess {
 
   private handle(chunk: string): void {
     for (const raw of chunk.split("\n")) {
-      const line = raw.replace(/\r$/, "");
+      // Unwrap `commandWrite`'s posix stdin group (see terminal.test.ts).
+      const line = raw.replace(/\r$/, "").replace(/^\{ :; /, "");
       if (!line.trim()) continue;
       const cd = line.match(/^cd\s+(.+)$/);
       if (cd) {

@@ -35,7 +35,10 @@ class FakeShell extends EventEmitter implements ShellProcess {
     super();
     this.stdin = {
       write: (chunk) => {
-        for (const line of chunk.split("\n")) {
+        for (const raw of chunk.split("\n")) {
+          // `commandWrite`'s stdin isolation is not the command: unwrap it.
+          const line = raw.replace(/^\{ :; /, "");
+          if (/^\} <\/dev\/null$|::Detach\(\)/.test(line)) continue;
           const marker = line.match(/CMTERM[A-Za-z0-9_-]+/);
           if (marker) {
             this.stdout.emit("data", Buffer.from(`${marker[0]}|0|True|${this.cwd}\n`));

@@ -241,6 +241,7 @@ jobs:
           src/services/runtime.test.ts
           src/services/processes.test.ts
           src/services/terminal.test.ts
+          src/services/terminal.stdin.test.ts
           src/services/file-index.test.ts
           src/services/runner.test.ts
           src/routes/fs.test.ts
