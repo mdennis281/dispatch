@@ -692,7 +692,10 @@ export function consentLines(m: PluginManifest): string[] {
   lines.push(`${m.name} v${m.version} (${m.id})${m.description ? ` — ${m.description}` : ""}`);
   lines.push(`  runs: ${[m.server && "server code (in-process)", m.client && "client code (in your browser)"].filter(Boolean).join(", ") || "nothing (contributions only)"}`);
   if (m.capabilities?.length) lines.push(`  capabilities: ${m.capabilities.join(", ")}`);
-  if (m.secrets?.length) lines.push(`  secrets it may read: ${m.secrets.join(", ")}`);
+  if (m.secrets?.length) {
+    const verb = m.capabilities?.includes("secrets:write") ? "read and write" : "read";
+    lines.push(`  secrets it may ${verb}: ${m.secrets.join(", ")}${m.secrets.some((s) => s.endsWith("*")) ? " (* = any name with that prefix)" : ""}`);
+  }
   const contributes = Object.keys(m.contributes ?? {});
   if (contributes.length) lines.push(`  contributes: ${contributes.join(", ")}`);
   if (m.oauth?.clients) lines.push(`  oauth clients: ${Object.keys(m.oauth.clients).join(", ")}`);

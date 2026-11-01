@@ -26,6 +26,8 @@ export const PLUGIN_CAPABILITY_LINES: Record<z.infer<typeof PluginCapabilitySche
   "chats:write": "Sends messages and questions into your chats, and answers question cards.",
   memory: "Reads and writes projects' durable memory.",
   secrets: "Reads the secret values it lists under secrets: from the global store.",
+  "secrets:write":
+    "Creates, replaces and deletes the secrets it lists under secrets: in the global store — shared by every Dispatch instance on this machine.",
   kv: "Keeps its own key/value data in this instance's database.",
   mcp: "Adds MCP servers (tools) to your agents' sessions.",
   process: "Starts and stops long-running processes on this machine.",

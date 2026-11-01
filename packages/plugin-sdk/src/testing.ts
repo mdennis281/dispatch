@@ -35,7 +35,14 @@ import type {
   WsServerEvent,
   WsServerEventType,
 } from "@dispatch/shared";
-import { PLUGIN_CAPABILITIES, PLUGIN_RECONCILE_BUDGET_MS, PLUGIN_SHUTDOWN_BUDGET_MS } from "@dispatch/shared";
+import {
+  PLUGIN_CAPABILITIES,
+  PLUGIN_RECONCILE_BUDGET_MS,
+  PLUGIN_SHUTDOWN_BUDGET_MS,
+  SECRET_NAME_RE,
+  SECRET_VALUE_MAX,
+  pluginSecretAllowed,
+} from "@dispatch/shared";
 import type { PluginContext, PluginReply, PluginRequest } from "./index.js";
 
 export interface TestContextOptions {
@@ -51,8 +58,16 @@ export interface TestContextOptions {
   capabilities?: readonly PluginCapability[];
   /** Initial `ctx.settings.get()`. */
   settings?: Record<string, unknown>;
-  /** Names → values for `ctx.secrets`. Unlisted names read as undefined, as on the host. */
+  /** Initial names → values for `ctx.secrets` — the store as the plugin finds it. */
   secrets?: Record<string, string>;
+  /**
+   * The manifest's `secrets:` list, `PREFIX*` entries included. Given, the
+   * fake enforces it as the host does: an uncovered name reads as undefined,
+   * is absent from `list()`, and THROWS on `set`/`delete`. Omitted, every
+   * name is covered — convenient, but it cannot catch a key the manifest
+   * forgot to declare.
+   */
+  manifestSecrets?: readonly string[];
   projects?: PluginProjectSummary[];
   chats?: PluginChatSummary[];
   /** Pre-seeded kv rows. */
@@ -94,6 +109,8 @@ export interface TestContext {
   emitted: Array<{ payload: unknown; chatId?: string }>;
   /** The kv table. Mutate it to simulate state from an earlier run. */
   kv: Map<string, unknown>;
+  /** The global secret store as the plugin sees it — what `ctx.secrets.set/delete` wrote. Mutate it to simulate the owner saving one. */
+  secrets: Map<string, string>;
   settings: {
     /** Replace the settings and fire every `onChange` listener — what `PUT /api/plugins/:id/settings` does. */
     set(next: Record<string, unknown>): void;
@@ -255,6 +272,7 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
   const log: TestLogLine[] = [];
   const emitted: TestContext["emitted"] = [];
   const kv = new Map<string, unknown>(Object.entries(opts.kv ?? {}));
+  const secrets = new Map<string, string>(Object.entries(opts.secrets ?? {}));
   let settings: Record<string, unknown> = { ...(opts.settings ?? {}) };
   const settingsListeners = new Set<(next: unknown) => void>();
   const listeners = new Set<(evt: WsServerEvent) => void>();
@@ -323,11 +341,30 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
   }
 
   if (has("secrets")) {
-    const values = opts.secrets ?? {};
-    ctx.secrets = {
-      get: async (name) => values[name],
-      list: async () => Object.keys(values).filter((n) => values[n] !== undefined),
+    const covered = (name: string) => !opts.manifestSecrets || pluginSecretAllowed(opts.manifestSecrets, name);
+    const s: NonNullable<PluginContext["secrets"]> = {
+      get: async (name) => (covered(name) ? secrets.get(name) : undefined),
+      list: async () => [...secrets.keys()].filter(covered).sort(),
     };
+    if (has("secrets:write")) {
+      // The host's refusals, word for word where it matters: a test that
+      // passes here must not be one that throws on the real store.
+      const writable = (name: string) => {
+        if (!SECRET_NAME_RE.test(name)) throw new Error(`"${name}" is not a valid secret name`);
+        if (!covered(name)) throw new Error(`secret "${name}" is not listed under secrets: in plugin.yaml`);
+      };
+      s.set = async (name, value) => {
+        writable(name);
+        if (typeof value !== "string" || !value) throw new Error(`secret "${name}" needs a non-empty string value — use delete() to remove it`);
+        if (value.length > SECRET_VALUE_MAX) throw new Error(`secret "${name}" is over ${SECRET_VALUE_MAX / 1024} KiB`);
+        secrets.set(name, value);
+      };
+      s.delete = async (name) => {
+        writable(name);
+        return secrets.delete(name);
+      };
+    }
+    ctx.secrets = s;
   }
 
   if (has("kv")) {
@@ -512,6 +549,7 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
     },
     emitted,
     kv,
+    secrets,
     settings: {
       set: (next) => {
         settings = { ...next };

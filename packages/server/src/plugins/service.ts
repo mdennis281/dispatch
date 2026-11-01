@@ -42,6 +42,7 @@ import {
   PLUGIN_RECONCILE_BUDGET_MS,
   PLUGIN_SHUTDOWN_BUDGET_MS,
   manifestPathDir,
+  pluginSecretAllowed,
   type ModeConfig,
   type PluginInfo,
   type PluginLiveChat,
@@ -1010,14 +1011,17 @@ export class PluginService implements PluginContributionSource {
     // Secrets are named by the manifest and live in the GLOBAL store, where
     // nothing records who wrote them. One that another installed plugin also
     // lists is kept: deleting it would break that plugin, and the owner asked
-    // to remove this one.
-    const stored = new Set((await this.ctxDeps.secrets.list()).filter((s) => s.scope === "global").map((s) => s.name));
+    // to remove this one. A prefix entry names nothing by itself, so it is
+    // expanded against what is stored — the keys `ctx.secrets.set` minted.
+    const stored = (await this.ctxDeps.secrets.list()).filter((s) => s.scope === "global").map((s) => s.name);
+    const declared = rec.manifest?.secrets ?? [];
+    const exact = declared.filter((n) => !n.endsWith("*"));
+    const minted = stored.filter((n) => !exact.includes(n) && pluginSecretAllowed(declared, n));
     const secrets: string[] = [];
     const sharedSecrets: PluginUninstallPreview["data"]["sharedSecrets"] = [];
-    for (const name of rec.manifest?.secrets ?? []) {
-      if (!stored.has(name)) continue;
+    for (const name of [...exact.filter((n) => stored.includes(n)), ...minted]) {
       const alsoUsedBy = [...this.records.values()]
-        .filter((r) => r.id !== id && r.manifest?.secrets?.includes(name))
+        .filter((r) => r.id !== id && pluginSecretAllowed(r.manifest?.secrets, name))
         .map((r) => r.id);
       if (alsoUsedBy.length) sharedSecrets.push({ name, alsoUsedBy });
       else secrets.push(name);

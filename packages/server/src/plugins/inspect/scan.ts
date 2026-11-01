@@ -112,7 +112,9 @@ const SERVER_MEMBERS: Record<string, { capability?: PluginCapability; methods?: 
   },
   attention: { methods: { list: "chats:read", answer: "chats:write" } },
   memory: { capability: "memory" },
-  secrets: { capability: "secrets" },
+  // `capability` is what a destructured `const { secrets } = ctx` counts as;
+  // a traced call picks the finer one from `methods`.
+  secrets: { capability: "secrets", methods: { get: "secrets", list: "secrets", set: "secrets:write", delete: "secrets:write" } },
   kv: { capability: "kv" },
   processes: { capability: "process" },
   oauth: { capability: "oauth" },

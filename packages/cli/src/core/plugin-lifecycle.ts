@@ -21,6 +21,7 @@ import {
   PluginProcessesFileSchema,
   diffPluginSurfaces,
   parseLsRemote,
+  pluginSecretAllowed,
   resolveUpdateTarget,
   type PluginGitSource,
   type PluginOrigin,
@@ -362,18 +363,29 @@ export async function purgePluginData(
   const settings = !!entries[id];
   await updatePluginEntry(configDir, id, () => undefined);
 
-  const others = new Set(
-    (await discoverPlugins(configDir)).filter((p) => p.id !== id).flatMap((p) => p.manifest?.secrets ?? []),
-  );
-  const sharedSecrets = opts.manifestSecrets.filter((n) => others.has(n));
-  const doomed = new Set(opts.manifestSecrets.filter((n) => !others.has(n)));
-  const secrets: string[] = [];
+  // Every other plugin's entries, prefixes included: a name any of them
+  // covers is theirs too and is kept.
+  const others = (await discoverPlugins(configDir)).filter((p) => p.id !== id).flatMap((p) => p.manifest?.secrets ?? []);
   const file = join(configDir, "secrets.json");
-  if (doomed.size && existsSync(file)) {
-    // Names are stored in clear beside each encrypted value, so a delete
-    // needs no key. Same tmp + rename the server's store writes with; the
-    // server re-checks the file's mtime on every read and picks this up.
-    const doc = JSON.parse(await readFile(file, "utf8")) as { version: number; entries: Array<{ name: string; scope: string }> };
+  // Names are stored in clear beside each encrypted value, so neither this
+  // read nor the delete below needs the key.
+  const doc =
+    opts.manifestSecrets.length && existsSync(file)
+      ? (JSON.parse(await readFile(file, "utf8")) as { version: number; entries: Array<{ name: string; scope: string }> })
+    : undefined;
+  // A prefix entry names nothing by itself — it is expanded against what is
+  // stored, which is every key the plugin's `ctx.secrets.set` minted.
+  const exact = opts.manifestSecrets.filter((n) => !n.endsWith("*"));
+  const minted = (doc?.entries ?? [])
+    .filter((e) => e.scope === "global" && !exact.includes(e.name) && pluginSecretAllowed(opts.manifestSecrets, e.name))
+    .map((e) => e.name);
+  const candidates = [...exact, ...minted];
+  const sharedSecrets = candidates.filter((n) => pluginSecretAllowed(others, n));
+  const doomed = new Set(candidates.filter((n) => !pluginSecretAllowed(others, n)));
+  const secrets: string[] = [];
+  if (doomed.size && doc) {
+    // Same tmp + rename the server's store writes with; the server re-checks
+    // the file's mtime on every read and picks this up.
     const kept = doc.entries.filter((e) => {
       const drop = e.scope === "global" && doomed.has(e.name);
       if (drop) secrets.push(e.name);

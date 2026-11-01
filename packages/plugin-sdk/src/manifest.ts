@@ -18,6 +18,7 @@ export {
   PLUGIN_ID_PATTERN,
   PLUGIN_OAUTH_CLIENT_NAME_PATTERN,
   PLUGIN_PROCESS_ID_PATTERN,
+  PLUGIN_SECRET_PREFIX_PATTERN,
   RESERVED_PLUGIN_ID_PREFIX,
   PluginManifestSchema,
   PluginIdSchema,
@@ -29,5 +30,6 @@ export {
   PluginInfoSchema,
   PluginStatusSchema,
   pluginRangeAccepts,
+  pluginSecretAllowed,
   manifestPathDir,
 } from "@dispatch/shared";

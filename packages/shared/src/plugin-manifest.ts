@@ -61,6 +61,7 @@ export const PLUGIN_CAPABILITIES = [
   "chats:write",
   "memory",
   "secrets",
+  "secrets:write",
   "kv",
   "mcp",
   "process",
@@ -83,6 +84,31 @@ const RelativePathSchema = z
   .min(1)
   .refine((p) => !/^([a-zA-Z]:)?[\\/]/.test(p), { message: "must be relative to the plugin directory" })
   .refine((p) => !p.split(/[\\/]/).includes(".."), { message: "must not leave the plugin directory" });
+
+/**
+ * A `secrets:` entry that ends in `*` is a PREFIX: `REMOTE_HOST_KEY_*` covers
+ * every global secret whose name starts with `REMOTE_HOST_KEY_`. It exists for
+ * a plugin that mints one secret per thing it manages (a key per paired
+ * machine) and so cannot list the names up front. The part before the `*` is a
+ * secret-name prefix — at least one character, so a bare `*` (every secret in
+ * the store) is not expressible. The consent card and the inspector show the
+ * pattern verbatim.
+ */
+export const PLUGIN_SECRET_PREFIX_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,62}\*$/;
+
+/**
+ * Does a manifest's `secrets:` list cover `name`? An exact entry matches
+ * itself; a `PREFIX*` entry matches every name starting with `PREFIX`. The ONE
+ * test every reader of that list goes through — `ctx.secrets`, a plugin MCP
+ * server's `${secret:NAME}`, an OAuth client's `${secret:NAME}`, the
+ * inspector and uninstall — so a prefix grants the same thing everywhere.
+ */
+export function pluginSecretAllowed(declared: readonly string[] | undefined, name: string): boolean {
+  for (const entry of declared ?? []) {
+    if (entry.endsWith("*") ? name.startsWith(entry.slice(0, -1)) : entry === name) return true;
+  }
+  return false;
+}
 
 /** `[a-z0-9][a-z0-9-]{0,31}` — an `oauth.clients` key is a URL path segment of the callback and a column value, so it is kept this strict. */
 export const PLUGIN_OAUTH_CLIENT_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/;
@@ -137,8 +163,23 @@ const PluginManifestObjectSchema = z.object({
   client: RelativePathSchema.optional(),
   /** JSON Schema for `AppSettings.plugins[id].settings`, rendered as a generic form. */
   settings: RelativePathSchema.optional(),
-  /** Secret names the plugin may read through `ctx.secrets`. Anything else is invisible to it. */
-  secrets: z.array(z.string().min(1)).optional(),
+  /**
+   * Secret names the plugin may read through `ctx.secrets` (and write, with
+   * `secrets:write`). Anything else is invisible to it. An entry ending in `*`
+   * is a prefix — see {@link PLUGIN_SECRET_PREFIX_PATTERN}. Exact entries are
+   * not re-validated as secret names: older manifests were accepted with any
+   * non-empty string, and an entry the store would refuse simply never matches.
+   */
+  secrets: z
+    .array(
+      z
+        .string()
+        .min(1)
+        .refine((s) => !s.includes("*") || PLUGIN_SECRET_PREFIX_PATTERN.test(s), {
+          message: "a secrets: pattern is a name prefix followed by a single trailing * (e.g. MY_PLUGIN_KEY_*)",
+        }),
+    )
+    .optional(),
   capabilities: z.array(PluginCapabilitySchema).optional(),
   /** Contribution roots — consumed by workstream D; validated here so the shape is settled. */
   contributes: z
@@ -167,6 +208,16 @@ const PluginManifestObjectSchema = z.object({
  * refuses the layout before it is ever on disk.
  */
 export const PluginManifestSchema = PluginManifestObjectSchema.superRefine((m, ctx) => {
+  // `secrets:write` widens `ctx.secrets`; it is not a second, write-only
+  // object. Requiring both keeps the consent card honest: the owner sees the
+  // read line AND the write line, never a write that silently implies a read.
+  if (m.capabilities?.includes("secrets:write") && !m.capabilities.includes("secrets")) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["capabilities"],
+      message: "secrets:write extends secrets — declare both",
+    });
+  }
   if (!m.client) return;
   const clientDir = manifestPathDir(m.client);
   if (clientDir === "") {

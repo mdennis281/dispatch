@@ -33,6 +33,7 @@ import {
   expandEnvList,
   expandEnvRecord,
   expandEnvVars,
+  pluginSecretAllowed,
   referencedSecrets,
   resolveMcpEnablement,
   type McpEnablementLayers,
@@ -222,7 +223,7 @@ function readMcpServersFile(
     // reads a project secret it never declared.
     const refs = new Set<string>();
     for (const v of secretBearingStrings(config)) for (const n of referencedSecrets(v)) refs.add(n);
-    const undeclared = [...refs].filter((n) => !secrets.includes(n));
+    const undeclared = [...refs].filter((n) => !pluginSecretAllowed(secrets, n));
     if (undeclared.length) {
       warnings.push(
         `MCP server "${server.name}" references secret(s) the manifest does not list under secrets: ` +
@@ -318,7 +319,7 @@ export function expandPluginSecrets(
   onRefused?: (name: string) => void,
 ): string {
   return value.replace(/\$\{secret:([A-Za-z_][A-Za-z0-9_]{0,63})\}/g, (_m, name: string) => {
-    if (!allowed.includes(name)) {
+    if (!pluginSecretAllowed(allowed, name)) {
       onRefused?.(name);
       return "";
     }

@@ -17,7 +17,8 @@ it("counts and answers", async () => {
     id: "my-plugin",
     capabilities: ["routes", "events", "kv", "secrets"],   // the manifest's list → the shape the host delivers
     settings: { greeting: "hi" },
-    secrets: { API_KEY: "k" },
+    secrets: { API_KEY: "k" },                              // the store; t.secrets is the live Map
+    manifestSecrets: ["API_KEY"],                           // the manifest's secrets: — enforced as on the host
     kv: { seen: 4 },                                        // state from an "earlier run"
     chats: [{ id: "c1", title: "Fix build", projectId: "p1", createdAt: 1, updatedAt: 2 }],
     answerAsk: (chatId, q) => "yes",                        // what chats.ask resolves with

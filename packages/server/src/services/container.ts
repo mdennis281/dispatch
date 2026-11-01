@@ -1234,6 +1234,10 @@ export function createServices(
       context: {
         bus,
         secrets,
+        // A plugin's `ctx.secrets.set/delete` refreshes consumers exactly as a
+        // save from the Secrets pane does. A thunk: the refresher is built
+        // further down, once the runner and broker it drives exist.
+        refreshSecrets: (keys) => secretRefresher.refresh(keys),
         inspect,
         memory,
         attention,

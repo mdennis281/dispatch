@@ -71,7 +71,8 @@ satisfied, the two Vite presets wired, and a passing test.
   There is no other way to write into a chat, by design.
 - **Secrets stay on the server half.** `ctx.secrets.get(name)` only for names under
   `secrets:`; the client host has no secrets API. Values arrive through
-  `mcp__dispatch-secrets__secret_request`, never through chat text or the manifest.
+  `mcp__dispatch-secrets__secret_request`, never through chat text or the manifest —
+  or, for a credential the plugin generates itself, `ctx.secrets.set` (`secrets:write`).
 - **The `dispatch-` prefix is reserved** for plugin ids and for contributed MCP server
   names.
 - **Comments say why.** Name the failure a line prevents, like the host does.

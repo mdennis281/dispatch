@@ -14,7 +14,7 @@ description: Talk to a chat; hear replies.
 server: ./server/index.js       # optional: ESM module exporting activate / deactivate
 client: ./client/index.js       # optional: ESM module exporting activate(host); its DIRECTORY is served publicly
 settings: ./settings.schema.json # optional: JSON Schema → generic form in Settings → Plugins
-secrets: [WHISPER_URL]          # names the plugin may read through ctx.secrets (and in mcp.yaml / oauth)
+secrets: [WHISPER_URL]          # names the plugin may read through ctx.secrets (and in mcp.yaml / oauth); KEY_* = a prefix
 capabilities:                   # what the plugin touches; gates members of ctx; shown on the consent card
   - events
   - routes
@@ -72,7 +72,8 @@ oauth:                          # see external-api.md → "OAuth client flow"
 | `chats:read` | `ctx.chats.list/find/read/state`, `ctx.attention.list` |
 | `chats:write` | `ctx.chats.send/ask/reply`, `ctx.attention.answer` |
 | `memory` | `ctx.memory` |
-| `secrets` | `ctx.secrets` (only names listed under `secrets:`) |
+| `secrets` | `ctx.secrets.get/list` (only names listed under `secrets:`; `PREFIX_*` covers a family) |
+| `secrets:write` | `ctx.secrets.set/delete` for the same names — requires `secrets` too |
 | `kv` | `ctx.kv` |
 | `mcp` | `contributes.mcpServers` is honoured (without it: a row warning, no server) |
 | `process` | `contributes.processes` is honoured, `ctx.processes` |

@@ -246,7 +246,12 @@ export function diffPluginSurfaces(from: PluginSurface, to: PluginSurface): Plug
 
   const fromSecrets = new Set(from.secrets);
   const toSecrets = new Set(to.secrets);
-  for (const s of toSecrets) if (!fromSecrets.has(s)) push({ kind: "secret", change: "added", label: `secret:${s}`, escalation: true });
+  for (const s of toSecrets) {
+    if (fromSecrets.has(s)) continue;
+    // A prefix is a whole family of names; say so, or `secret:FOO_*` reads like one key.
+    const detail = s.endsWith("*") ? `any secret whose name starts with ${s.slice(0, -1)}` : undefined;
+    push({ kind: "secret", change: "added", label: `secret:${s}`, ...(detail ? { detail } : {}), escalation: true });
+  }
   for (const s of fromSecrets) if (!toSecrets.has(s)) push({ kind: "secret", change: "removed", label: `secret:${s}`, escalation: false });
 
   const fromOAuth = new Map(from.oauth.map((o) => [o.name, o]));

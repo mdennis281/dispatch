@@ -205,6 +205,18 @@ describe("selectPluginMcpServers", () => {
     expect(refused).toEqual(["UNLISTED"]);
   });
 
+  it("expands a name a prefix entry covers, and nothing outside the prefix", () => {
+    const refused: string[] = [];
+    const out = selectPluginMcpServers(
+      [decl({ name: "a", secrets: ["HOST_KEY_*"], config: { type: "stdio", command: "node", env: { K: "${secret:HOST_KEY_mac}", G: "${secret:HOSTKEY}" } } })],
+      undefined,
+      (n) => (n === "HOST_KEY_mac" ? "pem" : "LEAK"),
+      (_p, _s, n) => refused.push(n),
+    );
+    expect(out.a!.env).toEqual({ K: "pem", G: "" });
+    expect(refused).toEqual(["HOSTKEY"]);
+  });
+
   it("covers cwd and prewarm too — the fields the project resolver would otherwise fill from undeclared secrets", () => {
     const refused: string[] = [];
     const out = selectPluginMcpServers(
