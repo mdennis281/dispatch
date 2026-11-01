@@ -553,6 +553,24 @@ const MIGRATIONS: ReadonlyArray<string> = [
   );
   CREATE INDEX integration_event_ts ON integration_event(ts);
   `,
+  // 16 — what this instance last knew about each terminal backend a plugin
+  // registered: its label, owner and `fallback` policy.
+  //
+  // A chat pinned to a backend whose plugin is switched off or uninstalled
+  // resolves to NOTHING registered — and the policy was only ever on the
+  // registration. A backend that refuses a local fallback (a Mac, whose
+  // commands must never reach PowerShell here) would then have been read as
+  // the default and handed a local shell at exactly the moment it was gone.
+  // Rows outlive the plugin on purpose; nothing deletes them.
+  `
+  CREATE TABLE terminal_backend (
+    id        TEXT    PRIMARY KEY,
+    label     TEXT    NOT NULL,
+    plugin    TEXT,
+    fallback  TEXT    NOT NULL,
+    seen_at   INTEGER NOT NULL
+  );
+  `,
 ];
 
 /** Schema version a database must be at for this build to use it. */

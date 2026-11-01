@@ -85,6 +85,7 @@ import {
   type TerminalAfterRunInfo,
   type TerminalBackend,
   type TerminalExitReason,
+  type TerminalBackendFallback,
   type TerminalLocation,
   type TerminalInfo,
   type TerminalLineRecord,
@@ -310,6 +311,14 @@ export interface TerminalBackendResolution {
   backend?: TerminalBackend;
   /** `requested` names no registered backend (its plugin is uninstalled or off). */
   missing?: boolean;
+  /**
+   * What to do when `requested` cannot supply a shell — the backend's own
+   * policy, or for a missing one what it declared when last registered.
+   * Absent ⇒ `local`.
+   */
+  fallback?: TerminalBackendFallback;
+  /** A missing backend's last-known label, for the messages; absent when it was never seen. */
+  label?: string;
   /** The project's primary checkout, handed to the backend's spawn. */
   repoPath?: string;
   /** The chat's worktree, when it has one, handed to the backend's spawn. */
@@ -604,6 +613,11 @@ interface Terminal {
   placement?: string;
   /** Delivered with the next run result, then cleared. */
   notice?: string;
+  /**
+   * Why this shell never started: its backend could not supply one and
+   * refuses a local fallback. Every run queued on it fails with this.
+   */
+  failure?: string;
 }
 
 /**
@@ -717,8 +731,12 @@ export class TerminalService {
       // said, a shell that died between calls (a dropped connection, above all)
       // came back silently and the agent's next relative path ran in the wrong
       // directory.
+      // A shell its backend refused never started, so there was no cwd or env
+      // to lose, and its own error already said so.
       const replaced = term
-        ? this.endedHow(term)
+        ? term.failure
+          ? undefined
+          : this.endedHow(term)
         : this.archived.has(key)
           ? "was closed, or Dispatch restarted"
           : undefined;
@@ -986,12 +1004,15 @@ export class TerminalService {
 
     if (!res.backend) {
       if (res.missing) {
-        this.fallBack(
+        const label = res.label ?? res.requested;
+        const named = label === res.requested ? `"${res.requested}"` : `"${res.requested}" (${label})`;
+        this.cannotStart(
           term,
           cwd,
+          res.fallback,
           res.requested,
-          res.requested,
-          `the terminal backend "${res.requested}" is not installed, or its plugin is switched off`,
+          label,
+          `the terminal backend ${named} is not installed, or its plugin is switched off`,
         );
       } else {
         this.attach(term, this.spawn(cwd));
@@ -1031,7 +1052,14 @@ export class TerminalService {
     } catch (err) {
       if (abandoned()) return;
       const why = err instanceof Error ? err.message : String(err);
-      this.fallBack(term, cwd, backend.id, backend.label, `${backend.label} could not start a shell: ${why}`);
+      this.cannotStart(
+        term,
+        cwd,
+        res.fallback ?? backend.fallback,
+        backend.id,
+        backend.label,
+        `${backend.label} could not start a shell: ${why}`,
+      );
       return;
     }
     if (abandoned()) {
@@ -1050,6 +1078,42 @@ export class TerminalService {
     term.notice = res.note;
     this.attach(term, handle);
     this.publishUpdate(term);
+  }
+
+  /** The backend could not supply a shell: fall back or refuse, as its policy says. */
+  private cannotStart(
+    term: Terminal,
+    cwd: string,
+    policy: TerminalBackendFallback | undefined,
+    backendId: string,
+    label: string,
+    reason: string,
+  ): void {
+    if (policy === "refuse") this.refuse(term, backendId, label, reason);
+    else this.fallBack(term, cwd, backendId, label, reason);
+  }
+
+  /**
+   * Start NOTHING in place of a backend that refuses a local fallback, end the
+   * terminal, and say why everywhere {@link fallBack} would. A Mac's
+   * `xcodebuild` or a POSIX `rm -rf` handed to PowerShell on this host is what
+   * it prevents; a refused run costs only a retry. The terminal ends EXITED, so
+   * the next command on its name opens a fresh one and asks the backend again.
+   */
+  private refuse(term: Terminal, backendId: string, label: string, reason: string): void {
+    const text = `${capitalize(reason)}. Nothing was run: ${label} never falls back to a shell on the Dispatch host.`;
+    term.location = { backend: backendId, label, state: "failed", error: reason };
+    term.failure =
+      `Terminal '${term.name}' did not start on ${label} (\`${backendId}\`): ${reason}. Nothing ran — ` +
+      `${label} does not fall back to a local shell. Run the command again to retry ${label}.`;
+    this.record(term, "stderr", `[dispatch] ${text}`);
+    this.bus.publish({
+      type: "notice",
+      chatId: term.chatId,
+      level: "error",
+      text: `Terminal '${term.name}': ${text}`,
+    });
+    this.onExit(term);
   }
 
   /** Bring up a LOCAL shell in place of the backend the chat asked for, and say so everywhere. */
@@ -1114,6 +1178,10 @@ export class TerminalService {
     const notice = [term.notice, term.respawnNotice].filter(Boolean).join("\n\n") || undefined;
     term.notice = undefined;
     term.respawnNotice = undefined;
+    // No `ranOn`: it ran nowhere, and naming the backend would say it had.
+    if (term.failure) {
+      return Promise.resolve({ output: "", exitCode: null, cwd: term.cwd, error: term.failure });
+    }
     const run = this.execInner(term, args);
     const ranOn = this.ranOn(term);
     return notice || ranOn
@@ -2228,8 +2296,12 @@ function filterLines(
 }
 
 /** First letter up — reasons are phrased to sit mid-sentence elsewhere. */
+/**
+ * Start a reason as a sentence — unless it starts with a backend's label,
+ * which is a name: a host called `cvx-mac` was being printed as "Cvx-mac".
+ */
 function capitalize(s: string): string {
-  return s ? s[0]!.toUpperCase() + s.slice(1) : s;
+  return s.startsWith("the ") ? `T${s.slice(1)}` : s;
 }
 
 /**

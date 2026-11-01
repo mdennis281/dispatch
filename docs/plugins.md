@@ -842,6 +842,7 @@ ctx.terminals.registerBackend({
   label: "Proxmox container",
   shell: "bash",            // the dialect of the sentinel probe core appends
   spawnTimeoutMs: 180_000,  // default 120 s, capped at 10 min
+  fallback: "local",        // or "refuse" — see "Failure" below; default "local"
   async spawn({ chatId, projectId, name, cwd, repoPath, worktreePath, branch, signal }) {
     // provision, connect, then hand back stdio
     return handle;          // TerminalBackendHandle — see below
@@ -1005,14 +1006,44 @@ do: a chat pinned to the only backend plugin, while that plugin is off or still
 activating, sees an empty registry, and must still get the warning (or the
 boot wait) rather than a plain local shell.
 
-**Failure is loud and falls back.** A spawn that rejects, or does not settle
-within `spawnTimeoutMs`, brings up a LOCAL shell instead. The reason lands in
-three places: a `[dispatch]` line in the terminal, a `notice` in the chat, and
-the next tool result. The row's location badge turns amber, with the reason in
-its tooltip. A pin to a backend that is not registered (plugin uninstalled or
-switched off) falls back the same way rather than quietly reading as local.
-During boot, a chat pinned to an installed plugin's backend waits for that
-plugin to activate before deciding it is missing.
+**Failure is loud, and the backend decides what happens next.** A spawn that
+rejects or does not settle within `spawnTimeoutMs` fails. So does a pin to a
+backend that is not registered because its plugin is uninstalled or switched
+off; that pin is never quietly read as local. During boot, a chat pinned to an
+installed plugin's backend waits for that plugin to activate before deciding it
+is missing. What happens next is the backend's `fallback`:
+
+- **`"local"`, the default, falls back.** A LOCAL shell comes up instead. The
+  reason lands in three places: a `[dispatch]` line in the terminal, a `notice`
+  in the chat, and the next tool result. The row's location badge turns amber,
+  with the reason in its tooltip. This suits a Linux container standing in for
+  a Linux-ish host, where the command still means the same thing.
+- **`"refuse"` starts nothing.** Use it when the far side is a different OS or
+  toolchain: a Mac's `xcodebuild`, or a POSIX `rm -rf`, must never reach
+  PowerShell on the Dispatch host.
+  - The run fails with `isError`. Its error names the backend and the reason,
+    and says nothing ran. Every run queued behind the failed spawn fails the
+    same way.
+  - The terminal ends as exited, with `location.state: "failed"` and the reason
+    in `location.error`. The same `[dispatch]` line and chat notice appear, at
+    error level.
+  - The Terminals panel keeps the shell listed, with a red "not started" chip,
+    the reason, and a Retry button.
+  - The next command on that name opens a fresh shell, which asks the backend
+    again. The agent note tells the agent that commands here fail rather than
+    run locally.
+
+**The policy outlives the plugin.** A pin to a missing backend is the case
+`fallback` matters most for, and in that case nothing is registered to ask. So
+the registry remembers what each backend declared, along with its label and
+owning plugin, in the instance's `terminal_backend` table (state.db migration
+16). That row is written on every registration. Nothing deletes it: uninstalling
+the plugin does not make its pinned chats run locally. Clear the pin, in the
+Terminals panel or Settings → Chat defaults, to move them. An id this instance
+has never seen registered has no remembered policy and reads as `"local"`. That
+keeps today's behaviour for a project default naming a plugin that never ran
+here. `data/` is per instance, so the dev instance learns the policy the first
+time the plugin activates there.
 
 **Telling the agent.** The agent's own Bash tool stays local while its terminal
 does not, so core says so, only to chats on a backend and never as a global
@@ -1050,7 +1081,8 @@ the entry, and a stale `withdraw` does not remove its replacement.
 **Deactivation** unregisters every backend the plugin registered. Its shells
 end with a `[dispatch]` line saying why, its ports are withdrawn, and
 `dispose()` is called. The next command on one of those names re-resolves.
-The pin still names the gone backend, so it comes up local, with a warning.
+The pin still names the gone backend, so it comes up local, with a warning, or
+under `fallback: "refuse"` it fails.
 
 **What does not change with no backend plugin in use** (none registered, and
 no chat or project naming one): TerminalService takes its original synchronous

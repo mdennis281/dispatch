@@ -9,6 +9,9 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { EventEmitter } from "node:events";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type {
   TerminalAfterRunInfo,
   TerminalBackend,
@@ -17,9 +20,15 @@ import type {
   WsServerEvent,
 } from "@dispatch/shared";
 import { EventBus } from "../bus.js";
+import { StateDb } from "../store/db.js";
 import { TerminalService, type ShellProcess } from "./terminal.js";
 import { unwrapCommandWrite } from "./terminal.testkit.js";
-import { TerminalBackendRegistry } from "./terminal-backends.js";
+import {
+  TerminalBackendRegistry,
+  stateDbBackendMemory,
+  type KnownTerminalBackend,
+  type TerminalBackendMemory,
+} from "./terminal-backends.js";
 
 /**
  * A scripted shell. `say X` prints X; every write carrying a sentinel marker
@@ -86,7 +95,8 @@ interface Harness {
   branchAsked: string[];
 }
 
-function setup(opts: { stallPauseMaxMs?: number } = {}): Harness {
+function setup(opts: { stallPauseMaxMs?: number; memory?: TerminalBackendMemory } = {}): Harness {
+  const { memory, ...svcOpts } = opts;
   const chats = new Map<string, { terminalBackend?: string; projectId?: string; worktreePath?: string }>();
   const projectDefaults = new Map<string, string>();
   const allowed: { project?: string[]; app?: string[] } = {};
@@ -101,13 +111,14 @@ function setup(opts: { stallPauseMaxMs?: number } = {}): Harness {
       branchAsked.push(dir);
       return dir === "/wt/feat-x" ? "feat/x" : "main";
     },
+    ...(memory ? { memory } : {}),
   });
   const local: FakeShell[] = [];
   let n = 0;
   const svc = new TerminalService({
     bus,
     backends: registry,
-    ...opts,
+    ...svcOpts,
     deps: {
       spawn: (cwd) => {
         const s = new FakeShell(cwd);
@@ -195,7 +206,7 @@ describe("selection", () => {
     const h = setup();
     h.registry.register(fakeBackend(), "plug");
     h.chats.set("c1", { terminalBackend: "gone" });
-    expect(await h.registry.resolve({ chatId: "c1" })).toEqual({ requested: "gone", missing: true });
+    expect(await h.registry.resolve({ chatId: "c1" })).toEqual({ requested: "gone", missing: true, fallback: "local" });
   });
 
   it("waits for plugin activation before calling a backend missing", async () => {
@@ -348,6 +359,199 @@ describe("fallback", () => {
   });
 });
 
+/** A {@link TerminalBackendMemory} that outlives the registry it is handed to — a restart. */
+function mapMemory(): TerminalBackendMemory & { rows: Map<string, KnownTerminalBackend> } {
+  const rows = new Map<string, KnownTerminalBackend>();
+  return { rows, remember: (b) => void rows.set(b.id, b), recall: (id) => rows.get(id) };
+}
+
+describe("fallback: refuse", () => {
+  // A backend whose far side is a different OS (a Mac) must never have its
+  // commands handed to PowerShell on the Dispatch host.
+  const mac = (over: Partial<TerminalBackend> = {}) =>
+    fakeBackend({ id: "mac", label: "cvx-mac", fallback: "refuse", ...over });
+
+  it("a rejecting spawn starts NO local shell: the run fails naming the backend and the reason", async () => {
+    const h = setup();
+    h.registry.register(mac({ spawn: async () => Promise.reject(new Error("host unreachable")) }), "remote-host");
+    h.chats.set("c1", { terminalBackend: "mac" });
+
+    const res = await h.svc.run({ chatId: "c1", name: "build", command: "say rm -rf dist", cwd: "/w" });
+    expect(h.local).toHaveLength(0);
+    expect(res.output).toBe("");
+    expect(res.exitCode).toBeNull();
+    expect(res.error).toMatch(/did not start on cvx-mac \(`mac`\): cvx-mac could not start a shell: host unreachable/);
+    expect(res.error).toMatch(/Nothing ran/);
+    // It ran nowhere, so it must not claim a place.
+    expect(res.ranOn).toBeUndefined();
+
+    const info = h.svc.listChat("c1")[0]!;
+    expect(info.status).toBe("exited");
+    expect(info.location).toMatchObject({ backend: "mac", label: "cvx-mac", state: "failed" });
+    expect(info.location?.error).toContain("host unreachable");
+    expect(info.location?.fallback).toBeUndefined();
+    expect(events.find((e) => e.type === "notice")).toMatchObject({ chatId: "c1", level: "error" });
+    const lines = (await h.svc.scrollback(info.id)).map((l) => l.chunk);
+    expect(lines.some((l) => l.includes("[dispatch]") && l.includes("never falls back"))).toBe(true);
+  });
+
+  it("every run queued behind the failed spawn fails too, and the next one retries the backend", async () => {
+    const h = setup();
+    let attempts = 0;
+    const backend = mac({
+      spawn: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("asleep");
+        const s = new FakeShell("/Users/dispatch/w");
+        backend.spawned.push(s);
+        return s;
+      },
+    });
+    h.registry.register(backend, "remote-host");
+    h.chats.set("c1", { terminalBackend: "mac" });
+    const [a, b] = await Promise.all([
+      h.svc.run({ chatId: "c1", name: "build", command: "say one", cwd: "/w" }),
+      h.svc.run({ chatId: "c1", name: "build", command: "say two", cwd: "/w" }),
+    ]);
+    expect(a.error).toMatch(/asleep/);
+    expect(b.error).toMatch(/asleep/);
+    const again = await h.svc.run({ chatId: "c1", name: "build", command: "say three", cwd: "/w" });
+    expect(again.error).toBeUndefined();
+    expect(again.output).toBe("three");
+    expect(again.ranOn).toEqual({ id: "mac", label: "cvx-mac" });
+    // The refused one never started: there was no cwd or env to lose.
+    expect(again.notice ?? "").not.toMatch(/is a NEW shell/);
+    expect(attempts).toBe(2);
+    expect(h.local).toHaveLength(0);
+  });
+
+  it("a spawn that overruns spawnTimeoutMs is refused, not run locally", async () => {
+    const h = setup();
+    h.registry.register(mac({ spawnTimeoutMs: 1_000, spawn: () => new Promise(() => {}) }), "remote-host");
+    h.chats.set("c1", { terminalBackend: "mac" });
+    const res = await h.svc.run({ chatId: "c1", name: "main", command: "say ok", cwd: "/w" });
+    expect(res.error).toMatch(/no shell after 1s/);
+    expect(h.local).toHaveLength(0);
+  });
+
+  it("an explicit `location` to a refusing backend fails the same way", async () => {
+    const h = setup();
+    h.registry.register(mac({ spawn: async () => Promise.reject(new Error("offline")) }), "remote-host");
+    h.chats.set("c1", {});
+    const res = await h.svc.run({ chatId: "c1", name: "ios", command: "say x", cwd: "/w", location: "mac" });
+    expect(res.error).toMatch(/did not start on cvx-mac/);
+    expect(h.local).toHaveLength(0);
+  });
+
+  it("a chat pinned to it while its plugin is switched off is refused — the policy was remembered", async () => {
+    // Exactly ONE backend, as on a real install: once it unregisters, the
+    // registry is empty and nothing registered can say what it wanted.
+    const h = setup();
+    h.registry.register(mac(), "remote-host");
+    h.chats.set("c1", { terminalBackend: "mac" });
+    h.registry.notePin("c1", "mac");
+    await h.registry.unregister("mac");
+    expect(h.registry.size).toBe(0);
+
+    const res = await h.svc.run({ chatId: "c1", name: "main", command: "say x", cwd: "/w" });
+    expect(h.local).toHaveLength(0);
+    expect(res.error).toMatch(/the terminal backend "mac" \(cvx-mac\) is not installed, or its plugin is switched off/);
+    expect(h.svc.listChat("c1")[0]!.location).toMatchObject({ backend: "mac", label: "cvx-mac", state: "failed" });
+  });
+
+  it("the policy survives a restart through the backend memory", async () => {
+    const memory = mapMemory();
+    const before = setup({ memory });
+    before.registry.register(mac(), "remote-host");
+    expect(memory.rows.get("mac")).toMatchObject({ label: "cvx-mac", pluginId: "remote-host", fallback: "refuse" });
+
+    // The next boot: the plugin is off, so nothing ever registers "mac".
+    const after = setup({ memory });
+    after.chats.set("c1", { terminalBackend: "mac" });
+    after.registry.notePin("c1", "mac");
+    const res = await after.svc.run({ chatId: "c1", name: "main", command: "say x", cwd: "/w" });
+    expect(res.error).toMatch(/Nothing ran/);
+    expect(after.local).toHaveLength(0);
+  });
+
+  it("an id never seen registered still falls back locally (today's behaviour, and proxmox's)", async () => {
+    const h = setup({ memory: mapMemory() });
+    h.chats.set("c1", { terminalBackend: "proxmox" });
+    h.registry.notePin("c1", "proxmox");
+    const res = await h.svc.run({ chatId: "c1", name: "main", command: "say x", cwd: "/w" });
+    expect(res.output).toBe("x");
+    expect(res.notice).toMatch(/"proxmox" is not installed/);
+  });
+
+  it("a backend that declares nothing keeps the loud local fallback", async () => {
+    const h = setup();
+    h.registry.register(fakeBackend({ spawn: async () => Promise.reject(new Error("down")) }), "proxmox-terminal");
+    h.chats.set("c1", { terminalBackend: "box" });
+    const res = await h.svc.run({ chatId: "c1", name: "main", command: "say here", cwd: "/w" });
+    expect(res.output).toBe("here");
+    expect(res.notice).toMatch(/running LOCALLY/);
+    expect(h.registry.list()[0]).toMatchObject({ id: "box", fallback: "local" });
+  });
+
+  it("register refuses a policy it does not know, and lists the one it does", () => {
+    const h = setup();
+    expect(() => h.registry.register(mac({ fallback: "sometimes" as never }))).toThrow(/fallback must be "local" or "refuse"/);
+    h.registry.register(mac(), "remote-host");
+    expect(h.registry.list()).toEqual([
+      { id: "mac", label: "cvx-mac", shell: "bash", pluginId: "remote-host", fallback: "refuse" },
+    ]);
+  });
+
+  it("the agent is told a refusing backend's commands FAIL rather than run here", async () => {
+    const h = setup();
+    h.registry.register(mac(), "remote-host");
+    h.chats.set("c1", { terminalBackend: "mac" });
+    expect(await h.registry.agentNote("c1")).toContain("When cvx-mac cannot start a shell, the command FAILS");
+    h.allowed.app = ["local", "mac"];
+    const choice = (await h.registry.agentNote("c1"))!;
+    expect(choice).toContain("- `mac` — cvx-mac (the default).\n  When cvx-mac cannot start a shell, the command FAILS");
+  });
+
+  it("a memory that cannot be written does not stop the backend registering", () => {
+    const h = setup({
+      memory: {
+        remember: () => {
+          throw new Error("disk full");
+        },
+        recall: () => undefined,
+      },
+    });
+    h.registry.register(mac(), "remote-host");
+    expect(h.registry.has("mac")).toBe(true);
+    expect(h.registry.fallbackOf("mac")).toBe("refuse");
+  });
+});
+
+describe("stateDbBackendMemory", () => {
+  let dir: string;
+  let db: StateDb;
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "cm-term-backends-"));
+    db = new StateDb(dir);
+  });
+  afterEach(async () => {
+    db.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("round-trips a backend, updates it in place, and reads an unknown policy as refuse", () => {
+    const memory = stateDbBackendMemory(db);
+    expect(memory.recall("mac")).toBeUndefined();
+    memory.remember({ id: "mac", label: "Mac", pluginId: "remote-host", fallback: "refuse", seenAt: 1 });
+    memory.remember({ id: "mac", label: "cvx-mac", pluginId: "remote-host", fallback: "refuse", seenAt: 2 });
+    memory.remember({ id: "proxmox", label: "Proxmox", fallback: "local", seenAt: 3 });
+    expect(memory.recall("mac")).toEqual({ id: "mac", label: "cvx-mac", pluginId: "remote-host", fallback: "refuse", seenAt: 2 });
+    expect(memory.recall("proxmox")).toEqual({ id: "proxmox", label: "Proxmox", fallback: "local", seenAt: 3 });
+    db.prepare("UPDATE terminal_backend SET fallback = 'later-policy' WHERE id = 'proxmox'").run();
+    expect(memory.recall("proxmox")?.fallback).toBe("refuse");
+  });
+});
+
 describe("a backend going away mid-session", () => {
   it("ends its shells with a message; the next command re-resolves", async () => {
     const h = setup();
@@ -375,7 +579,8 @@ describe("a backend going away mid-session", () => {
     // The pin still names "box", which is gone now: local, loudly.
     const next = await h.svc.run({ chatId: "c1", name: "main", command: "say back", cwd: "/w" });
     expect(next.output).toBe("back");
-    expect(next.notice).toMatch(/"box" is not installed/);
+    // Named with the label it was last registered under, not just the bare id.
+    expect(next.notice).toMatch(/"box" \(Test box\) is not installed/);
   });
 
   it("a shell still connecting when its backend goes away ends as exited", async () => {
@@ -474,7 +679,7 @@ describe("with exactly one backend plugin (the real case)", () => {
     expect(h.svc.listChat("c1")[0]!.status).toBe("exited");
     const next = await h.svc.run({ chatId: "c1", name: "main", command: "say back", cwd: "/w" });
     expect(next.output).toBe("back");
-    expect(next.notice).toMatch(/"proxmox" is not installed/);
+    expect(next.notice).toMatch(/"proxmox" \(Proxmox\) is not installed/);
   });
 });
 
@@ -523,7 +728,7 @@ describe("lifecycle hooks and ports", () => {
     const last = events.filter((e) => e.type === "terminal-backends").at(-1);
     expect(last).toEqual({
       type: "terminal-backends",
-      backends: [{ id: "box", label: "Test box", shell: "bash", pluginId: "plug" }],
+      backends: [{ id: "box", label: "Test box", shell: "bash", pluginId: "plug", fallback: "local" }],
       ports: [{ chatId: "c1", backend: "box", remotePort: 8080, url: "http://127.0.0.1:9" }],
     });
   });

@@ -45,7 +45,7 @@ import { ChatSummaryService } from "./chat-summary.js";
 import { ChatCompletionNotices } from "./chat-completion-notice.js";
 import { SessionBroker } from "./session-broker.js";
 import { TerminalService } from "./terminal.js";
-import { TerminalBackendRegistry } from "./terminal-backends.js";
+import { TerminalBackendRegistry, stateDbBackendMemory } from "./terminal-backends.js";
 import { MemoryService } from "./memory.js";
 import { AuthoredConfigService } from "./authored-config.js";
 import { HouseRulesService, houseRulesDirFor } from "./house-rules.js";
@@ -381,6 +381,10 @@ export function createServices(
     overrides.terminalBackends ??
     new TerminalBackendRegistry({
       cleanups: pluginCleanups,
+      // Each backend's fallback policy outlives its plugin: a chat pinned to a
+      // backend that refuses a local shell must still be refused one while
+      // that plugin is off.
+      memory: stateDbBackendMemory(store.stateDb),
       bus,
       chat: async (chatId) => {
         const chat = await store.getChat(chatId).catch(() => null);
@@ -1520,14 +1524,6 @@ export function createServices(
     // Adopt the persisted terminal roster (as archived — this process owns no
     // shells yet) and start the retention sweep. `unref` so a timer can never
     // be the reason the process won't exit.
-    // Before anything can open a shell: which chats are pinned to a terminal
-    // backend, so one pinned to a plugin that has not activated yet still
-    // resolves (and waits for it) instead of quietly coming up local.
-    try {
-      terminalBackends.seed(await store.listChats());
-    } catch {
-      /* an unreadable chat list costs the warning, never the boot */
-    }
     try {
       await terminals.reconcile();
       await terminals.sweep();
@@ -1659,6 +1655,19 @@ export function createServices(
       await recoverInterruptedChatStatuses(store).catch((err) => {
         console.error("[Dispatch] chat status recovery failed (continuing):", err);
       });
+
+      // Before the port opens, so before anything can open a shell: which chats
+      // are pinned to a terminal backend, so one pinned to a plugin that is off
+      // or has not activated yet still resolves — waits for it, falls back
+      // loudly, or is refused — instead of quietly coming up local. This used
+      // to run in `warm()`, AFTER `listen`: a shell opened in that window for a
+      // chat pinned to a Mac whose plugin was off ran in PowerShell with no
+      // word at all. The listing is the one recovery just read, so it is cached.
+      try {
+        terminalBackends.seed(await store.listChats());
+      } catch {
+        /* an unreadable chat list costs the warning, never the boot */
+      }
 
       // Before anything can send: `restartResume.restore()` (start.ts) and the
       // usage-limit resumes would otherwise start turns the pause was holding.

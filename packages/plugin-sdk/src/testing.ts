@@ -541,6 +541,9 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
         if (terminalBackends.has(backend.id)) {
           throw new Error(`terminal backend "${backend.id}" is already registered`);
         }
+        if (backend.fallback !== undefined && backend.fallback !== "local" && backend.fallback !== "refuse") {
+          throw new Error(`terminal backend "${backend.id}": fallback must be "local" or "refuse"`);
+        }
         terminalBackends.set(backend.id, backend);
       },
       publishPort: (backendId, port) => {

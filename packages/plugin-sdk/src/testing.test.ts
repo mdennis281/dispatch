@@ -198,6 +198,11 @@ describe("createTestContext terminals", () => {
     expect([...t.terminalBackends.keys()]).toEqual(["box"]);
     expect(() => t.ctx.terminals!.registerBackend({ ...t.terminalBackends.get("box")! })).toThrow(/already registered/);
     expect(() => t.ctx.terminals!.registerBackend({ ...t.terminalBackends.get("box")!, id: "local" })).toThrow(/reserved/);
+    expect(() =>
+      t.ctx.terminals!.registerBackend({ ...t.terminalBackends.get("box")!, id: "mac", fallback: "never" as never }),
+    ).toThrow(/fallback must be "local" or "refuse"/);
+    t.ctx.terminals!.registerBackend({ id: "mac", label: "Mac", shell: "bash", spawn: t.terminalBackends.get("box")!.spawn, fallback: "refuse" });
+    expect(t.terminalBackends.get("mac")?.fallback).toBe("refuse");
 
     await t.terminals.spawn("box", { chatId: "c1" });
     const withdraw = t.ctx.terminals!.publishPort("box", { chatId: "c1", remotePort: 5173, url: "http://127.0.0.1:1" });

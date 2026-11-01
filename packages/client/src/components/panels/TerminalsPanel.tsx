@@ -7,6 +7,7 @@ import {
   CornerDownLeft,
   Activity,
   ChevronRight,
+  CircleSlash,
   Container,
   ExternalLink,
   Monitor,
@@ -172,6 +173,20 @@ function LocationChip({ terminal }: { terminal: TerminalInfo }) {
       </Chip>
     );
   }
+  if (loc.state === "failed") {
+    // Red, not amber: nothing is running at all. The backend refuses a local
+    // fallback, so the shell ended rather than quietly becoming one here.
+    return (
+      <Chip
+        tone="danger"
+        icon={<CircleSlash />}
+        className="shrink-0"
+        title={`Not started — ${loc.label}: ${loc.error ?? "unavailable"}`}
+      >
+        not started
+      </Chip>
+    );
+  }
   if (loc.state === "connecting") {
     return (
       <Chip tone="neutral" icon={<Container />} className="max-w-[45%] shrink-0 truncate" title={`Starting a shell on ${loc.label}`}>
@@ -321,6 +336,9 @@ function TerminalCard({
 
   const live = terminal.status === "live";
   const active = isActiveTerminal(terminal);
+  // A shell its backend refused to start: exited, but kept in the list and
+  // opened, because the reason is the one thing here a human must read.
+  const failed = terminal.location?.state === "failed";
   const ports = useTerminalPorts(projectId, terminal.id);
   const killPort = async (pid: number) => {
     await api.processes.kill(projectId, [pid]).catch(() => []);
@@ -341,7 +359,7 @@ function TerminalCard({
   // on its own, and one that finishes tucks itself away again.
   const [override, setOverride] = useState<boolean | null>(null);
   useEffect(() => setOverride(null), [active]);
-  const open = override ?? active;
+  const open = override ?? (active || failed);
 
   // Follow the tail as output streams in.
   const logRef = useRef<HTMLDivElement>(null);
@@ -458,6 +476,25 @@ function TerminalCard({
         </div>
       )}
 
+      {terminal.location?.state === "failed" && (
+        <div className="flex items-start gap-1.5 border-t border-line-soft bg-danger-ghost px-3 py-1.5 text-2xs text-danger">
+          <CircleSlash className="mt-px size-3 shrink-0" />
+          <span>
+            Did not start on {terminal.location.label}: {terminal.location.error}. Nothing ran on this
+            machine instead.
+          </span>
+          <span className="flex-1" />
+          <Button
+            size="sm"
+            variant="ghost"
+            className="!h-5 shrink-0 !px-1.5 !text-2xs"
+            onClick={() => void api.terminals.create(terminal.chatId, terminal.name).catch(() => {})}
+          >
+            Retry
+          </Button>
+        </div>
+      )}
+
       <div className="flex items-center gap-1.5 border-t border-line-soft px-3 py-1.5 text-2xs text-faint">
         <FolderClosed className="size-3 shrink-0" />
         <span className="cm-mono !text-2xs truncate" title={terminal.cwd}>
@@ -521,7 +558,10 @@ export function TerminalsPanel({ chat }: { chat: Chat }) {
   const byId = useTerminals((s) => s.byId);
   const order = useTerminals((s) => s.order);
   const mine = order.map((id) => byId[id]!).filter((t) => t && t.chatId === chat.id);
-  const live = mine.filter((t) => isLiveChatTerminal(t, chat.id));
+  // A shell whose backend refused to start it has exited, but stays listed with
+  // its reason until closed or retried — otherwise "New shell" on an offline
+  // host would flash "connecting" and vanish without a word.
+  const live = mine.filter((t) => isLiveChatTerminal(t, chat.id) || t.location?.state === "failed");
   const [opening, setOpening] = useState(false);
 
   // Open a shell the way the agent's `terminal` tool does — same service, same
