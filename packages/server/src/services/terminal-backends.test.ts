@@ -966,6 +966,29 @@ describe("per-terminal location (the agent's choice)", () => {
     expect(note).toContain("When Test box cannot start a shell, the command FAILS");
   });
 
+  it("a pinned default whose plugin is off is refused as unavailable — what the prompt says — not as not allowed", async () => {
+    const h = setup();
+    h.registry.register(fakeBackend(), "plug");
+    await h.registry.unregister("box");
+    h.chats.set("c1", { projectId: "p1", terminalBackend: "box" });
+    h.allowed.app = ["local"];
+
+    const choices = await h.registry.locations({ chatId: "c1" });
+    expect(choices.offered).toBe(true);
+    expect(choices.unavailable).toEqual(["box"]);
+    expect(choices.reasons).toEqual({ box: "its plugin is switched off or not installed" });
+
+    const note = (await h.registry.agentNote("c1"))!;
+    expect(note).toContain(
+      "- `box` — Test box (the default). UNAVAILABLE right now: its plugin is switched off or not installed.",
+    );
+    const refused = await h.registry.checkLocation({ chatId: "c1" }, "box");
+    expect(refused).toMatchObject({ ok: false });
+    expect((refused as { error: string }).error).toMatch(
+      /^"box" is allowed but not available right now — its plugin is switched off or not installed\. Allowed: `local`\./,
+    );
+  });
+
   it("keeps two backends' forwards of the same port in one chat apart", () => {
     const h = setup();
     h.registry.register(fakeBackend(), "plug");

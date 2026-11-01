@@ -514,8 +514,9 @@ export interface TerminalLocationChoices {
   options: TerminalLocationOption[];
   /**
    * Allowed by config but not selectable right now: not registered (plugin off
-   * or uninstalled), or registered and reporting `offline`. An offline DEFAULT
-   * is listed here too, since a terminal sent there would fail.
+   * or uninstalled), or registered and reporting `offline`. The DEFAULT is
+   * listed here too when it is either, since a terminal sent there cannot run
+   * there — so every `allowed` id is in exactly one of `options` and this.
    */
   unavailable: string[];
   /** Why each `unavailable` id is unavailable, for the refusal and the agent note. */

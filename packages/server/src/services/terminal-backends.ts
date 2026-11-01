@@ -571,16 +571,17 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
     for (const id of new Set([def.id, ...allowed])) {
       const label = this.labelOf(id);
       named.push({ id, label: label ?? this.recall(id)?.label ?? id, isDefault: id === def.id });
+      // An unregistered or offline DEFAULT is listed too: a terminal sent there
+      // cannot run there, and the agent should hear that before it tries. It
+      // was once left out, and since `offered` puts it in the prompt as
+      // UNAVAILABLE, naming it got "not an allowed terminal location" back —
+      // the prompt and the refusal disagreed (review on #483).
       if (label === undefined) {
-        if (id !== def.id) {
-          unavailable.push(id);
-          reasons[id] = "its plugin is switched off or not installed";
-        }
+        unavailable.push(id);
+        reasons[id] = "its plugin is switched off or not installed";
         continue;
       }
       const entry = this.entries.get(id);
-      // An offline DEFAULT is listed too: a terminal sent there would fail, and
-      // the agent should hear that before it tries, not after.
       const offline = entry && this.offlineReason(entry);
       if (offline) {
         unavailable.push(id);
@@ -669,9 +670,7 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
     const info = { chatId, projectId: chat?.projectId };
     const rows = choices.allowed.map((o) => {
       const now = choices.options.find((x) => x.id === o.id);
-      // An unregistered DEFAULT is in neither list (a shell sent there falls
-      // back), but it cannot run there either.
-      const down = now ? undefined : (choices.reasons?.[o.id] ?? "its plugin is switched off or not installed");
+      const down = now ? undefined : (choices.reasons?.[o.id] ?? "it cannot take a shell");
       const head =
         `- \`${o.id}\` — ${o.label}${o.isDefault ? " (the default)" : ""}.` +
         (now?.degraded ? ` Degraded right now: ${now.degraded}.` : "") +
