@@ -8266,8 +8266,11 @@ export class SessionBroker {
     // in-flight wait on stop/fork.
     const terminals = this.terminals;
     // Where this chat's agent may put each terminal. Read once per session
-    // build: it decides whether the tool offers `location` at all. Each pick is
-    // still re-checked against the LIVE config when it is made.
+    // build, because it decides whether the tool offers `location` at all and a
+    // tool's schema cannot change mid-session — so it is decided on what the
+    // CONFIG allows (`offered`), never on what is up right now (`enabled`): a
+    // host asleep at session build stayed unpickable after it woke. Each pick is
+    // checked against the LIVE registry and config when it is made.
     const terminalBackends = this.terminalBackends;
     const terminalChoices = terminals
       ? await terminalBackends
@@ -8436,7 +8439,7 @@ export class SessionBroker {
       // worktree, else the repo root), so the agent just picks a name.
       terminals: terminals
         ? {
-            ...(terminalChoices?.enabled ? { locations: terminalChoices.options } : {}),
+            ...(terminalChoices?.offered ? { locations: terminalChoices.allowed } : {}),
             run: async (a) => {
               if (a.location) {
                 const ok = await terminalBackends?.checkLocation?.(

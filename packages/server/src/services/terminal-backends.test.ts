@@ -770,6 +770,8 @@ describe("per-terminal location (the agent's choice)", () => {
       defaultId: "local",
       options: [{ id: "local", label: "this machine (the Dispatch host)", isDefault: true }],
       unavailable: [],
+      allowed: [{ id: "local", label: "this machine (the Dispatch host)", isDefault: true }],
+      offered: false,
       enabled: false,
     });
     expect(await h.registry.agentNote("c1")).toBeUndefined();
@@ -909,8 +911,82 @@ describe("per-terminal location (the agent's choice)", () => {
     expect(note).toContain("pass `location` the FIRST time");
     expect(note).toContain("- `local` — this machine (the Dispatch host) (the default).");
     expect(note).toContain("- `box` — Test box.\n  Your code reaches the box by magic.");
-    expect(note).toContain("Allowed but unavailable right now: `gone`");
+    expect(note).toContain("- `gone` — gone. UNAVAILABLE right now: its plugin is switched off or not installed.");
+    expect(note).toContain("as of the start of this session");
     expect(note).toContain("keep git local");
+  });
+
+  // E29: the session's tool schema is fixed at build, so whether the agent is
+  // OFFERED a choice must come from config — not from what is up at that moment.
+  it("offers the choice the config gives while the only other location is offline, and tells the agent what it is for", async () => {
+    const h = setup();
+    h.registry.register(fakeBackend(), "plug");
+    h.chats.set("c1", { projectId: "p1" });
+    h.allowed.app = ["local", "box"];
+    h.registry.setStatus("box", { state: "offline", detail: "asleep" });
+
+    const choices = await h.registry.locations({ chatId: "c1" });
+    expect(choices.enabled).toBe(false);
+    expect(choices.offered).toBe(true);
+    expect(choices.allowed).toEqual([
+      { id: "local", label: "this machine (the Dispatch host)", isDefault: true },
+      { id: "box", label: "Test box", isDefault: false },
+    ]);
+
+    const note = (await h.registry.agentNote("c1"))!;
+    expect(note).toContain("pass `location` the FIRST time");
+    expect(note).toContain(
+      "- `box` — Test box. UNAVAILABLE right now: Test box is offline (asleep).\n  Your code reaches the box by magic.",
+    );
+    expect(note).toContain("Each call is checked when you make it");
+
+    // Each pick is judged on the registry as it is NOW.
+    expect(await h.registry.checkLocation({ chatId: "c1" }, "box")).toMatchObject({ ok: false });
+    h.registry.setStatus("box", { state: "online" });
+    expect(await h.registry.checkLocation({ chatId: "c1" }, "box")).toEqual({ ok: true, label: "Test box" });
+  });
+
+  it("offers a location whose plugin is off, under its remembered label — even with no backend registered at all", async () => {
+    const h = setup();
+    h.registry.register(fakeBackend({ fallback: "refuse" }), "plug");
+    await h.registry.unregister("box");
+    h.chats.set("c1", { projectId: "p1" });
+    h.allowed.app = ["local", "box"];
+
+    const choices = await h.registry.locations({ chatId: "c1" });
+    expect(choices.offered).toBe(true);
+    expect(choices.allowed.map((o) => [o.id, o.label])).toEqual([
+      ["local", "this machine (the Dispatch host)"],
+      ["box", "Test box"],
+    ]);
+    // The note used to short-circuit on an empty registry, leaving the tool's
+    // `location` param unexplained.
+    const note = (await h.registry.agentNote("c1"))!;
+    expect(note).toContain("- `box` — Test box. UNAVAILABLE right now: its plugin is switched off or not installed.");
+    expect(note).toContain("When Test box cannot start a shell, the command FAILS");
+  });
+
+  it("a pinned default whose plugin is off is refused as unavailable — what the prompt says — not as not allowed", async () => {
+    const h = setup();
+    h.registry.register(fakeBackend(), "plug");
+    await h.registry.unregister("box");
+    h.chats.set("c1", { projectId: "p1", terminalBackend: "box" });
+    h.allowed.app = ["local"];
+
+    const choices = await h.registry.locations({ chatId: "c1" });
+    expect(choices.offered).toBe(true);
+    expect(choices.unavailable).toEqual(["box"]);
+    expect(choices.reasons).toEqual({ box: "its plugin is switched off or not installed" });
+
+    const note = (await h.registry.agentNote("c1"))!;
+    expect(note).toContain(
+      "- `box` — Test box (the default). UNAVAILABLE right now: its plugin is switched off or not installed.",
+    );
+    const refused = await h.registry.checkLocation({ chatId: "c1" }, "box");
+    expect(refused).toMatchObject({ ok: false });
+    expect((refused as { error: string }).error).toMatch(
+      /^"box" is allowed but not available right now — its plugin is switched off or not installed\. Allowed: `local`\./,
+    );
   });
 
   it("keeps two backends' forwards of the same port in one chat apart", () => {
@@ -1701,7 +1777,7 @@ describe("backend status and in-place updates (E1/E21)", () => {
 
     const note = (await h.registry.agentNote("c1"))!;
     expect(note).toContain("- `box` — Test box. Degraded right now: disk 95% full.");
-    expect(note).toContain("`mac` — cvx-mac is offline (asleep)");
+    expect(note).toContain("- `mac` — cvx-mac (the default). UNAVAILABLE right now: cvx-mac is offline (asleep).");
   });
 
   it("setStatus validates, moves `since` only on a state change, and broadcasts only real changes", () => {

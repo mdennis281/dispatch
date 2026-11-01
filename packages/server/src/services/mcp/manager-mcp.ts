@@ -416,10 +416,11 @@ function ranOnText(r: { id: string; label: string; fallbackFrom?: string }): str
  */
 export interface ManagerMcpTerminals {
   /**
-   * The locations this session's agent may pick per terminal, as of session
-   * start — present only when there is a real choice (two or more). Decides
-   * whether the tool offers `location` at all, so a chat with no choice sees
-   * the same tool it always did.
+   * The locations this session's agent may name per terminal, as CONFIGURED at
+   * session start — up or not — and present only when that is two or more.
+   * Decides whether the tool offers `location` at all, so a chat with no choice
+   * sees the same tool it always did. Whether a location can take a shell is
+   * `run`'s question, asked per call against the live registry.
    */
   locations?: { id: string; label: string; isDefault: boolean }[];
   run(args: {
@@ -5259,8 +5260,9 @@ export function createManagerTools(ctx: ManagerMcpContext) {
     },
   );
 
-  // `location` is offered only when this session really has a choice — a chat
-  // with one place to run sees the tool exactly as it always was.
+  // `location` is offered only when this session's config gives a choice — a
+  // chat with one place to run sees the tool exactly as it always was. The list
+  // is what may be NAMED, not what is up: availability is checked per call.
   const locationChoices = ctx.terminals?.locations && ctx.terminals.locations.length > 1
     ? ctx.terminals.locations
     : undefined;
@@ -5274,7 +5276,9 @@ export function createManagerTools(ctx: ManagerMcpContext) {
               locationChoices
                 .map((o) => `\`${o.id}\` (${o.label}${o.isDefault ? ", the default" : ""})`)
                 .join(", ") +
-              ". Omit for the default. A different location for an existing terminal is refused — use a new name.",
+              ". Omit for the default. Availability is checked when you call: a location that is offline or " +
+              "switched off right now is refused with the reason, and may be back later. " +
+              "A different location for an existing terminal is refused — use a new name.",
           ),
       }
     : {};
