@@ -131,28 +131,51 @@ async function severOne(path: string): Promise<SeveredLink> {
  * Returns the paths it could not restore. A directory link comes back as a
  * junction on Windows: creating one needs no privilege, and a symlink made by
  * someone who had that privilege may not be re-creatable by us.
+ *
+ * Windows needs the link's type up front, read off its target, and a link
+ * aimed at ANOTHER severed link has no target until that one is back. Sever
+ * order is walk order, so `node_modules/x -> deep/y -> outside` can come up
+ * first and would be guessed a file symlink, which fails without privilege.
+ * So a link whose target is not there yet waits for a later pass, and only
+ * links that will never resolve (dangling before the sever) get a guess.
  */
 export async function restoreLinks(links: SeveredLink[]): Promise<string[]> {
   const failed: string[] = [];
-  for (const { path, target } of links) {
-    if (target === null) {
-      failed.push(path);
-      continue;
+  let pending = links.filter((l) => {
+    if (l.target === null) failed.push(l.path);
+    return l.target !== null;
+  });
+  for (;;) {
+    const waiting: SeveredLink[] = [];
+    for (const link of pending) {
+      const isDir = await stat(resolve(dirname(link.path), link.target!))
+        .then((s) => s.isDirectory())
+        .catch(() => null);
+      if (isDir === null) waiting.push(link);
+      else if (!(await relink(link, isDir))) failed.push(link.path);
     }
-    try {
-      let type: "junction" | "file" | undefined;
-      if (process.platform === "win32") {
-        const isDir = await stat(resolve(dirname(path), target))
-          .then((s) => s.isDirectory())
-          .catch(() => false);
-        type = isDir ? "junction" : "file";
+    if (waiting.length === 0) break;
+    if (waiting.length === pending.length) {
+      // Nothing more resolves: these dangled before the sever. Same guess
+      // either way on POSIX, where the type is ignored.
+      for (const link of waiting) {
+        if (!(await relink(link, true)) && !(await relink(link, false))) failed.push(link.path);
       }
-      await symlink(target, path, type);
-    } catch {
-      failed.push(path);
+      break;
     }
+    pending = waiting;
   }
   return failed;
+}
+
+async function relink({ path, target }: SeveredLink, isDir: boolean): Promise<boolean> {
+  const type = process.platform === "win32" ? (isDir ? "junction" : "file") : undefined;
+  try {
+    await symlink(target!, path, type);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function isGone(err: unknown): boolean {

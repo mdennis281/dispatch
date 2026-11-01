@@ -314,5 +314,21 @@ describe("worktree removal never deletes through a link", () => {
       for (const l of severed) expect(await isLink(l.path)).toBe(true);
       expect(await readFile(join(tree, ".dispatch-sdk", "SENTINEL"), "utf8")).toBe("keep me\n");
     });
+
+    it("restores a link aimed at a deeper link, whichever was severed first", async () => {
+      // The shallow link is severed (and listed) first, while its target is a
+      // link that does not exist again until later in the restore.
+      const tree = join(root, "tree");
+      const deep = join(tree, "a", "b", "c");
+      await mkdir(deep, { recursive: true });
+      await symlink(join(outside, "plugin-sdk"), join(deep, "sdk"), "junction");
+      await symlink(join(deep, "sdk"), join(tree, "via"), "junction");
+      const severed = await severLinks(tree);
+      expect(severed.map((l) => l.path)).toEqual([join(tree, "via"), join(deep, "sdk")]);
+
+      expect(await restoreLinks(severed)).toEqual([]);
+
+      expect(await readFile(join(tree, "via", "SENTINEL"), "utf8")).toBe("keep me\n");
+    });
   });
 });
