@@ -1031,13 +1031,15 @@ but a sync done that way eats the command's own timeout and can only warn when
 it fails. Don't parse the command out of the write either (see "Stdin" below):
 `beforeRun` has it verbatim as `command`.
 
-**Stdin.** Every command runs with its standard input at EOF, on every shell,
-local or yours, background runs included. Core writes the command, its probe
-and the next command down the one pipe the shell reads. Anything the command
-started used to inherit that pipe, so a command that read stdin (`cat`, `ssh`,
-a credential prompt, bash's `read`) ate the probe and the line after it. The
-run sat out its timeout and the next command became that program's input.
-Nothing in Dispatch feeds a running command, so the write now cuts it off:
+**Stdin.** A command never reads the shell's own input, on every shell, local
+or yours. Core writes the command, its probe and the next command down the one
+pipe the shell reads. Anything the command started used to inherit that pipe,
+so a command that read stdin (`cat`, `ssh`, a credential prompt, bash's `read`)
+ate the probe and the line after it. The run sat out its timeout and the next
+command became that program's input. Nothing in Dispatch feeds a running
+command, so the write cuts it off.
+
+A foreground command reads EOF:
 
 - bash/sh: `eval '<command>\n' </dev/null\n`, with each `'` in the command
   written `'\''`. `eval` is a builtin, so `cd` and `export` persist and `$?`
@@ -1049,10 +1051,20 @@ Nothing in Dispatch feeds a running command, so the write now cuts it off:
   the probe restores it. Where the helper can't compile (constrained language
   mode) or doesn't apply (PowerShell on Linux), the command runs as before.
 
-Two consequences. A tool that quits when its stdin closes now quits at once:
-esbuild's `--watch` does, and `--watch=forever` is its fix. And PowerShell's
-own `Read-Host` still reads from the shell's pipe; nothing a piped shell
-offers can isolate it.
+A `background` command reads a stdin that never ends and never carries
+anything. EOF is what tells a watcher like `esbuild --watch` to quit, so
+giving it EOF killed the dev loop `background` exists for.
+
+- bash/sh: `eval '<command>\n' ; ` with **no trailing newline** and no
+  redirect. The probe, the next write, finishes that line. bash reads a whole
+  line before running any of it, so the probe is out of the pipe before the
+  command starts, and core writes nothing more while the run holds the shell.
+  A transport that forwards each write in order needs nothing new;
+- PowerShell: the line before the command points stdin at a pipe whose write
+  end the shell holds and never writes to.
+
+PowerShell's own `Read-Host` still reads from the shell's pipe; nothing a piped
+shell offers can isolate it.
 
 **Selection** is `resolveTerminalBackend` (shared): the chat's
 `terminalBackend` pin, else the project's `defaults.terminalBackend` in

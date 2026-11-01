@@ -208,9 +208,14 @@ export function probeLine(marker: string, flavour: ShellFlavour = shellFlavour):
 
 /**
  * The PowerShell half of {@link commandWrite}: a kernel32 helper that points
- * the process's standard-input handle at NUL and back. One line of C# inside a
- * single-quoted PowerShell string, so it may contain no `'`. Every call is
- * caught, because a stdin that cannot be detached must never fail the command.
+ * the process's standard-input handle somewhere else and back. One line of C#
+ * inside a single-quoted PowerShell string, so it may contain no `'`. Every
+ * call is caught, because a stdin that cannot be moved must never fail the
+ * command.
+ *
+ * `Detach` → NUL: the command reads EOF. `Hold` → a pipe nobody ever writes
+ * to, whose write end this process keeps: the command reads nothing and never
+ * EOF (see `commandWrite` on background runs). `Restore` closes whichever it was.
  */
 const PS_STDIN_TYPE = "DispatchTerminal.Stdin";
 const PS_STDIN_CS = [
@@ -219,16 +224,25 @@ const PS_STDIN_CS = [
   '[DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int n);',
   '[DllImport("kernel32.dll")] static extern bool SetStdHandle(int n, IntPtr h);',
   '[DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);',
+  '[DllImport("kernel32.dll")] static extern bool CreatePipe(out IntPtr r, out IntPtr w, ref SA sa, int size);',
+  '[DllImport("kernel32.dll")] static extern bool SetHandleInformation(IntPtr h, int mask, int flags);',
   "[StructLayout(LayoutKind.Sequential)] struct SA { public int n; public IntPtr d; public int inherit; }",
   '[DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr CreateFileW(string f, uint a, uint s, ref SA sa, uint c, uint fl, IntPtr t);',
-  "static bool swapped; static IntPtr saved, nul;",
-  // An INHERITABLE handle to NUL (GENERIC_READ, share read|write,
-  // OPEN_EXISTING): a child inherits the process's std handles, not .NET's.
-  "public static void Detach() { Restore(); try { var sa = new SA(); sa.n = Marshal.SizeOf(sa); sa.inherit = 1;",
+  "static bool swapped; static IntPtr saved, mine, held;",
+  // INHERITABLE: a child inherits the process's std handles, not .NET's.
+  "static SA Inheritable() { var sa = new SA(); sa.n = Marshal.SizeOf(sa); sa.inherit = 1; return sa; }",
+  "static void Swap(IntPtr h) { mine = h; saved = GetStdHandle(-10); swapped = SetStdHandle(-10, h); }",
+  // NUL: GENERIC_READ, share read|write, OPEN_EXISTING.
+  "public static void Detach() { Restore(); try { var sa = Inheritable();",
   ' var h = CreateFileW("NUL", 0x80000000, 3, ref sa, 3, 0, IntPtr.Zero); if (h == IntPtr.Zero || h == new IntPtr(-1)) return;',
-  " nul = h; saved = GetStdHandle(-10); swapped = SetStdHandle(-10, h); } catch { } }",
-  "public static void Restore() { try { if (swapped) SetStdHandle(-10, saved); if (nul != IntPtr.Zero) CloseHandle(nul); } catch { }",
-  " swapped = false; saved = IntPtr.Zero; nul = IntPtr.Zero; }",
+  " Swap(h); } catch { } }",
+  // The write end stays here and out of the child (HANDLE_FLAG_INHERIT off):
+  // while this process holds it, a read on the other end waits, never EOF.
+  "public static void Hold() { Restore(); try { var sa = Inheritable(); IntPtr r, w;",
+  " if (!CreatePipe(out r, out w, ref sa, 0)) return; SetHandleInformation(w, 1, 0); held = w; Swap(r); } catch { } }",
+  "public static void Restore() { try { if (swapped) SetStdHandle(-10, saved);",
+  " if (mine != IntPtr.Zero) CloseHandle(mine); if (held != IntPtr.Zero) CloseHandle(held); } catch { }",
+  " swapped = false; saved = IntPtr.Zero; mine = IntPtr.Zero; held = IntPtr.Zero; }",
   "} }",
 ].join(" ");
 /** Compiles the helper — once per shell, and only on Windows. A failure (constrained language mode) is silent. */
@@ -237,7 +251,8 @@ const PS_STDIN_SETUP =
   `{ Add-Type -TypeDefinition '${PS_STDIN_CS}' -ErrorAction Stop } } catch { }`;
 // `try` because a locked-down shell may refuse even the type lookup, and that
 // must not print an error on every command.
-const PS_STDIN_DETACH = `try { if ('${PS_STDIN_TYPE}' -as [type]) { [${PS_STDIN_TYPE}]::Detach() } } catch { }`;
+const psStdin = (call: "Detach" | "Hold"): string =>
+  `try { if ('${PS_STDIN_TYPE}' -as [type]) { [${PS_STDIN_TYPE}]::${call}() } } catch { }`;
 const PS_STDIN_RESTORE = `try { if ('${PS_STDIN_TYPE}' -as [type]) { [${PS_STDIN_TYPE}]::Restore() } } catch { }`;
 
 /**
@@ -252,9 +267,17 @@ const PS_STDIN_RESTORE = `try { if ('${PS_STDIN_TYPE}' -as [type]) { [${PS_STDIN
  * whole timeout, and the agent's NEXT command arrived as that program's input
  * instead of the shell's. Nothing in Dispatch feeds a running command (a run
  * holds its shell until the marker lands, and a backgrounded shell refuses new
- * runs), so every command gets EOF instead. Background runs too: a dev server
- * that read stdin would swallow its probe, and the shell would stay wedged
- * after the server exited.
+ * runs), so a command gets EOF instead.
+ *
+ * NOT a `background` one. EOF is the signal a watcher like `esbuild --watch`
+ * takes to quit, so the dev loop `background: true` exists for died on the
+ * spot. A background command gets a stdin that never ends and never carries
+ * anything instead — and its probe still has to get past it:
+ * - posix: no redirect. The write ends WITHOUT a newline, so the probe (the
+ *   next write) finishes the same line. bash reads a whole line before it runs
+ *   any of it, so the probe is out of the pipe before the command starts, and
+ *   core writes nothing more while the run holds the shell.
+ * - PowerShell: `Hold` instead of `Detach` (see {@link PS_STDIN_CS}).
  *
  * - posix: `eval '<command>' </dev/null`. `eval` is a builtin, so `cd` and
  *   `export` persist and `$?` is the command's, and the redirect holds for
@@ -275,12 +298,19 @@ const PS_STDIN_RESTORE = `try { if ('${PS_STDIN_TYPE}' -as [type]) { [${PS_STDIN
  * The probe stays a SEPARATE write after this one: backend plugins have told
  * the two apart by the probe's prefix since before `beforeRun` existed.
  */
-export function commandWrite(command: string, flavour: ShellFlavour, firstOnShell: boolean): string {
+export function commandWrite(
+  command: string,
+  flavour: ShellFlavour,
+  firstOnShell: boolean,
+  background = false,
+): string {
   if (flavour === "powershell") {
-    return `${firstOnShell ? `${PS_STDIN_SETUP}; ` : ""}${PS_STDIN_DETACH}\n${command}\n`;
+    const stdin = psStdin(background ? "Hold" : "Detach");
+    return `${firstOnShell ? `${PS_STDIN_SETUP}; ` : ""}${stdin}\n${command}\n`;
   }
   // Single-quoted, so nothing in it expands early; a `'` closes, escapes, reopens.
-  return `eval '${command.replace(/'/g, "'\\''")}\n' </dev/null\n`;
+  const quoted = `'${command.replace(/'/g, "'\\''")}\n'`;
+  return background ? `eval ${quoted} ; ` : `eval ${quoted} </dev/null\n`;
 }
 
 /* ---------------------------------------------------------------------- deps */
@@ -1502,7 +1532,7 @@ export class TerminalService {
       const probe = probeLine(marker, term.flavour);
       writtenAt = this.now();
       try {
-        term.proc.stdin.write(commandWrite(command, term.flavour, !term.wroteCommand));
+        term.proc.stdin.write(commandWrite(command, term.flavour, !term.wroteCommand, Boolean(args.background)));
         term.wroteCommand = true;
         term.proc.stdin.write(probe + "\n");
       } catch (err) {

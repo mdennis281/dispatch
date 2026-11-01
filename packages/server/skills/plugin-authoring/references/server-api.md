@@ -162,10 +162,11 @@ Gotchas for a terminal backend:
   there means the command never runs (fail closed), and the sync's time is not the
   command's. Its signal aborts on a session interrupt or a closed terminal, and core
   does not wait after that — serialize your own sync if runs could overlap.
-- The command write is WRAPPED so the command reads EOF, not the shell's pipe:
-  bash gets `eval '<command>\n' </dev/null` (`'` → `'\''`), PowerShell a stdin-detach line before
-  it. Take the command from `beforeRun`'s `command`, never from the write. The probe
-  is still a separate write after it (`__cm_ec=` for bash).
+- The command write is WRAPPED so the command can't read the shell's pipe: bash gets
+  `eval '<command>\n' </dev/null` (`'` → `'\''`), PowerShell a stdin-detach line before it.
+  A `background` command gets a stdin that never ends instead (bash: `eval '…\n' ; ` with
+  NO trailing newline — the probe finishes the line). Take the command from `beforeRun`'s
+  `command`, never from the write. The probe is still a separate write (`__cm_ec=` for bash).
 - Emit `exit` WITH a reason: `handle.emit("exit", null, { kind: "transport-lost", detail })`
   for a dropped connection (the in-flight command becomes an "outcome unknown" error),
   `kind: "killed"` for an idle stop. With no reason a lost connection reads as success.
