@@ -404,8 +404,8 @@ describe("manager-mcp integration — terminal over a real TerminalService", () 
       backends: registry,
       deps: { spawn: (cwd) => new FakeShell(cwd), genId: () => `t${++ids}`, now: () => 1000 },
     });
-    // Mirrors SessionBroker.buildOptions' binding: the choices decide the
-    // schema, and every pick is checked against the live config.
+    // Mirrors SessionBroker.buildOptions' binding: the config decides the
+    // schema, and every pick is checked against the live registry and config.
     const tools = async () => {
       const choices = await registry.locations({ chatId: "c1", projectId: "p1" });
       return createManagerTools({
@@ -413,7 +413,7 @@ describe("manager-mcp integration — terminal over a real TerminalService", () 
         bus,
         broker: nullBroker,
         terminals: {
-          ...(choices.enabled ? { locations: choices.options } : {}),
+          ...(choices.offered ? { locations: choices.allowed } : {}),
           run: async (a) => {
             if (a.location) {
               const ok = await registry.checkLocation({ chatId: "c1", projectId: "p1" }, a.location);
@@ -449,6 +449,22 @@ describe("manager-mcp integration — terminal over a real TerminalService", () 
     const moved = await call({ name: "build", command: "printout again", location: "local" });
     expect(moved.isError).toBe(true);
     expect(resultText(moved)).toMatch(/already runs on Test box.*fixed for its life/);
+
+    // E29: a session built while `box` is down still offers it, and a pick is
+    // judged when it is made — refused while down, run once it is back.
+    registry.setStatus("box", { state: "offline", detail: "asleep" });
+    const built2 = await tools();
+    expect(Object.keys(built2.terminal.inputSchema)).toContain("location");
+    expect(String((built2.terminal.inputSchema as Record<string, { description?: string }>).location?.description))
+      .toContain("`box` (Test box)");
+    const call2 = (a: Record<string, unknown>) =>
+      built2.terminal.handler({ timeoutMs: undefined, background: undefined, ...a } as never, {});
+    const asleep = await call2({ name: "later", command: "printout zzz", location: "box" });
+    expect(asleep.isError).toBe(true);
+    expect(resultText(asleep)).toMatch(/"box" is allowed but not available right now — Test box is offline \(asleep\)/);
+    registry.setStatus("box", { state: "online" });
+    const woke = resultText(await call2({ name: "later", command: "printout awake", location: "box" }));
+    expect(woke).toMatch(/^\[later\] on Test box \(`box`\) cwd=\/srv exit=0\nawake/m);
     svc.dispose();
   });
 });

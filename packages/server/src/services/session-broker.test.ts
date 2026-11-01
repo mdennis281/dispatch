@@ -10,7 +10,7 @@ import { EventBus } from "../bus.js";
 import type { WsServerEvent, Chat, Project } from "@dispatch/shared";
 import { EMPTY_REFRESH_REPORT, HUMAN_REVIEW_ANSWERS, SECRET_ANSWERS, isPrSettledIdle, readSentContext } from "@dispatch/shared";
 import { SecretsService, plainKeyProtector } from "./secrets.js";
-import { EXEMPTION_ANSWERS, type ManagerMcpContext } from "./mcp/manager-mcp.js";
+import { EXEMPTION_ANSWERS, createManagerTools, type ManagerMcpContext } from "./mcp/manager-mcp.js";
 import {
   buildManagerToolsDirective,
   SessionBroker,
@@ -3645,6 +3645,58 @@ describe("SessionBroker — terminal location choice reaches the prompt", () => 
     expect(append).toContain("- `box` — Test box.");
     expect(append).toContain("BOX NOTE: code syncs before each command.");
     terminals.dispose();
+  });
+
+  it("offers `location` when the only other location is offline at session build, and checks each pick live (E29)", async () => {
+    const { TerminalBackendRegistry } = await import("./terminal-backends.js");
+    const registry = new TerminalBackendRegistry({
+      bus,
+      chat: async (id) => {
+        const c = await store.getChat(id).catch(() => null);
+        return c ? { terminalBackend: c.terminalBackend, projectId: c.projectId } : null;
+      },
+      projectDefault: () => undefined,
+      allowedLocations: () => ({ app: ["local", "box"] }),
+    });
+    registry.register(
+      { id: "box", label: "Test box", shell: "bash", spawn: async () => { throw new Error("not under test"); } },
+      "plug",
+    );
+    registry.setStatus("box", { state: "offline", detail: "asleep" });
+    // Records what got past the binding's check; nothing here spawns a shell.
+    const ran: { name: string; location?: string }[] = [];
+    const terminals = {
+      run: async (a: { name: string; location?: string }) => {
+        ran.push({ name: a.name, ...(a.location ? { location: a.location } : {}) });
+        return { output: "ok", exitCode: 0, cwd: "/w" };
+      },
+      tail: async () => ({ output: "", found: false }),
+      catalog: () => [],
+      killChat: () => {},
+    };
+    const { fn, controllers } = makeFakeQuery((t) => [assistantText(t), resultMsg()]);
+    const broker = makeBroker(fn, 6, { terminals: terminals as never, terminalBackends: registry });
+    await store.saveChat(chatFor("c9", "p1"));
+    broker.create(chatFor("c9", "p1"));
+    const idleP = broker.waitFor("c9", "idle");
+    await broker.sendMessage("c9", "hi");
+    await idleP;
+
+    const ctx = (
+      broker as unknown as { sessions: Map<string, { managerMcp?: { context: ManagerMcpContext } }> }
+    ).sessions.get("c9")!.managerMcp!.context;
+    expect(ctx.terminals?.locations?.map((o) => o.id)).toEqual(["local", "box"]);
+    expect(Object.keys(createManagerTools(ctx).terminal.inputSchema)).toContain("location");
+    const append =
+      (controllers[0]!.options as { systemPrompt?: { append?: string } }).systemPrompt?.append ?? "";
+    expect(append).toContain("- `box` — Test box. UNAVAILABLE right now: Test box is offline (asleep).");
+
+    const asleep = await ctx.terminals!.run({ name: "b", command: "make", location: "box" });
+    expect(asleep.error).toMatch(/"box" is allowed but not available right now — Test box is offline \(asleep\)/);
+    expect(ran).toEqual([]);
+    registry.setStatus("box", { state: "online" });
+    expect((await ctx.terminals!.run({ name: "b", command: "make", location: "box" })).error).toBeUndefined();
+    expect(ran).toEqual([{ name: "b", location: "box" }]);
   });
 });
 

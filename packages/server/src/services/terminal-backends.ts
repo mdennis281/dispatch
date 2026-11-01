@@ -539,9 +539,11 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
   /**
    * Where this chat's agent may send a NEW terminal: its default (the chat →
    * project → local rule) plus every allowed id that can run right now. An
-   * allowed id whose plugin is off is listed under `unavailable` rather than
-   * offered — picking it could only fall back. Choice is `enabled` only with
-   * two or more real options, so an unset list (the default) offers nothing.
+   * allowed id whose plugin is off, or whose backend is offline, is listed
+   * under `unavailable` rather than in `options` — picking it could only fall
+   * back or fail. `allowed` keeps every id regardless, and `offered` says
+   * whether the config gives a choice at all; `enabled` whether one can be made
+   * now. An unset list (the default) offers nothing.
    */
   async locations(ident: { chatId: string; projectId?: string }): Promise<TerminalLocationChoices> {
     const chat = await this.opts.chat(ident.chatId).catch(() => null);
@@ -565,8 +567,10 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
     const options: TerminalLocationOption[] = [];
     const unavailable: string[] = [];
     const reasons: Record<string, string> = {};
+    const named: TerminalLocationOption[] = [];
     for (const id of new Set([def.id, ...allowed])) {
       const label = this.labelOf(id);
+      named.push({ id, label: label ?? this.recall(id)?.label ?? id, isDefault: id === def.id });
       if (label === undefined) {
         if (id !== def.id) {
           unavailable.push(id);
@@ -591,6 +595,8 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
       options,
       unavailable,
       ...(unavailable.length ? { reasons } : {}),
+      allowed: named,
+      offered: named.length > 1,
       enabled: options.length > 1,
     };
   }
@@ -637,10 +643,14 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
    * was never told the container existed.
    */
   async agentNote(chatId: string): Promise<string | undefined> {
-    if (this.entries.size === 0) return undefined;
     try {
+      // Asked before the no-backends shortcut, and on `offered`, not
+      // `enabled`: the session's tool offers `location` whenever the config
+      // gives a choice, so the prompt must explain it even when the only other
+      // location's plugin is off or its host is asleep at session build.
       const choices = await this.locations({ chatId });
-      if (choices.enabled) return await this.choiceNote(chatId, choices);
+      if (choices.offered) return await this.choiceNote(chatId, choices);
+      if (this.entries.size === 0) return undefined;
       const res = await this.resolve({ chatId });
       return res.note;
     } catch {
@@ -648,14 +658,24 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
     }
   }
 
-  /** The note for a chat whose agent picks each terminal's location. */
+  /**
+   * The note for a chat whose agent picks each terminal's location. Lists
+   * every location it may name, the ones down right now included: the prompt
+   * is written once per session, and a host that is asleep at the start may
+   * wake halfway through — the agent should already know what it is for.
+   */
   private async choiceNote(chatId: string, choices: TerminalLocationChoices): Promise<string> {
     const chat = await this.opts.chat(chatId).catch(() => null);
     const info = { chatId, projectId: chat?.projectId };
-    const rows = choices.options.map((o) => {
+    const rows = choices.allowed.map((o) => {
+      const now = choices.options.find((x) => x.id === o.id);
+      // An unregistered DEFAULT is in neither list (a shell sent there falls
+      // back), but it cannot run there either.
+      const down = now ? undefined : (choices.reasons?.[o.id] ?? "its plugin is switched off or not installed");
       const head =
         `- \`${o.id}\` — ${o.label}${o.isDefault ? " (the default)" : ""}.` +
-        (o.degraded ? ` Degraded right now: ${o.degraded}.` : "");
+        (now?.degraded ? ` Degraded right now: ${now.degraded}.` : "") +
+        (down ? ` UNAVAILABLE right now: ${down}.` : "");
       if (o.id === LOCAL_TERMINAL_BACKEND) {
         return `${head} The same machine as your Bash/PowerShell tool and your files.`;
       }
@@ -675,11 +695,10 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
       "",
       "Locations:",
       ...rows,
-      ...(choices.unavailable.length
+      ...(choices.allowed.length > choices.options.length
         ? [
-            `(Allowed but unavailable right now: ${choices.unavailable
-              .map((id) => `\`${id}\`${choices.reasons?.[id] ? ` — ${choices.reasons[id]}` : ""}`)
-              .join("; ")}.)`,
+            `(What is unavailable is as of the start of this session. Each call is checked when you ` +
+              `make it: a location that is back is accepted, one that is still down is refused with the reason.)`,
           ]
         : []),
       "",

@@ -479,8 +479,9 @@ export const TerminalLocationsSchema = z.array(z.string().regex(TERMINAL_BACKEND
  * local rule sends it, exactly as before the list existed.
  *
  * The chat's own default location is always pickable on top of this list (it
- * is what the agent gets by saying nothing), so choice is only REAL when the
- * list adds a second registered location — see the registry's `locations()`.
+ * is what the agent gets by saying nothing), so there is a choice only when the
+ * list adds a second location — see the registry's `locations()`, which tells
+ * a choice the config OFFERS from one that can be made right now.
  */
 export function resolveTerminalLocations(layers: {
   project?: readonly string[] | null;
@@ -519,7 +520,22 @@ export interface TerminalLocationChoices {
   unavailable: string[];
   /** Why each `unavailable` id is unavailable, for the refusal and the agent note. */
   reasons?: Record<string, string>;
-  /** True when there is a real choice — two or more options. */
+  /**
+   * Every id the agent may NAME: the default plus the configured list, in that
+   * order, whether or not it can take a shell right now. An unregistered id
+   * carries its remembered label, else its id. Unlike `options`, this moves
+   * only when the config does.
+   */
+  allowed: TerminalLocationOption[];
+  /**
+   * True when the CONFIG gives the agent a choice — `allowed` has two or more
+   * ids — however many of them can run right now. This decides whether a
+   * session's terminal tool offers `location` at all: a tool's schema is fixed
+   * for the session's life, so deciding on what is up at session build left a
+   * host that was asleep then unpickable once it woke.
+   */
+  offered: boolean;
+  /** True when there is a real choice RIGHT NOW — two or more `options`. */
   enabled: boolean;
 }
 

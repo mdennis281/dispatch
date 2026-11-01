@@ -1212,8 +1212,11 @@ ctx.terminals.setStatus("cvx-mac", {
 });
 ```
 
-- **`offline`.** The backend is NOT offered: it leaves the agent's `location`
-  choices and is listed as unavailable with the reason, and the pickers mark it.
+- **`offline`.** The backend cannot be picked right now. An agent allowed to
+  choose it still sees it in the terminal tool's `location` and in its prompt,
+  marked unavailable with the reason. A pick of it is refused with that reason
+  until it is back, and accepted after that, in a session that was already
+  running. The pickers mark it too.
   It can still be pinned, since a pin is a preference. A shell asked of it fails
   at once under its `fallback` policy ("cvx-mac is offline (asleep), last seen
   4m ago"). `spawn` is never called. A spawn already waiting on it when it goes

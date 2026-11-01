@@ -196,7 +196,8 @@ Gotchas for a terminal backend:
   `"resumed"` on the handle: core pauses the command's timeout and shows the shell stalled.
 - Report `setStatus("offline")` as soon as you know the far side is unreachable: core then
   fails a new shell at once (no 120 s spawn wait), cuts short a spawn already waiting,
-  and drops the backend from the agent's `location` choices. Running shells are untouched.
+  and refuses an agent's `location` pick of it with your detail. Running shells are untouched.
+  Report `online` again when it is back: sessions already running accept picks of it from then on.
 - Rename with `updateBackend`, never unregister + register: that ends every shell on it.
 - Test with `createTestContext`: `t.terminals.spawn("box", { chatId })`, `t.terminals.chatIdle(...)`,
   `t.terminals.chatDeleted(...)`, `t.terminals.beforeRun("box", { chatId, command })`
