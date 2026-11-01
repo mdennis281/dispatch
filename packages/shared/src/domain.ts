@@ -19,7 +19,11 @@ import { PeerSenderSchema, ChannelSenderSchema } from "./messages.js";
 import { TokenFiguresSchema } from "./metrics-tokens.js";
 import { WorkflowConfigSchema } from "./workflow.js";
 import { ChatWorktreeRecordSchema } from "./worktree-history.js";
-import { TERMINAL_BACKEND_ID_PATTERN, TerminalLocationSchema } from "./terminal-backend.js";
+import {
+  TERMINAL_BACKEND_ID_PATTERN,
+  TerminalExitReasonSchema,
+  TerminalLocationSchema,
+} from "./terminal-backend.js";
 
 /* ------------------------------------------------------------------ subApps */
 
@@ -1283,6 +1287,11 @@ export const TerminalInfoSchema = z.object({
    * which is every terminal on an install with no backend plugin.
    */
   location: TerminalLocationSchema.optional(),
+  /**
+   * Why an exited shell ended, when its backend said: a lost connection reads
+   * very differently from a shell that ran `exit`. Absent for a local shell.
+   */
+  exitReason: TerminalExitReasonSchema.optional(),
 });
 export type TerminalInfo = z.infer<typeof TerminalInfoSchema>;
 

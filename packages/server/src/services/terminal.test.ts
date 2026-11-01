@@ -756,6 +756,20 @@ describe("TerminalService — durable roster and transcripts", () => {
     expect(chunks).toContain("after");
   });
 
+  it("re-opening an archived name — after a restart — tells the agent it is a NEW shell", async () => {
+    const { svc } = makeService({ store });
+    await svc.run({ chatId: "c1", name: "build", command: "printout before", cwd: "C:\\repo" });
+    await svc.flush();
+    // A restart: a new service adopts the row as archived; the old shell is gone.
+    const { svc: restarted } = makeService({ store });
+    await restarted.reconcile();
+    const res = await restarted.run({ chatId: "c1", name: "build", command: "printout after", cwd: "C:\\repo" });
+    expect(res.output).toBe("after");
+    expect(res.notice).toMatch(/^Terminal 'build' is a NEW shell: the one before it under this name was closed, or Dispatch restarted\./);
+    // Said once.
+    expect((await restarted.run({ chatId: "c1", name: "build", command: "printout x" })).notice).toBeUndefined();
+  });
+
   it("the sweep prunes aged output and drops rows nothing is left of", async () => {
     let clock = 1_000;
     const { svc } = makeService({
