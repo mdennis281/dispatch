@@ -984,6 +984,12 @@ export class PluginService implements PluginContributionSource {
     compute: (stored: Record<string, unknown>) => Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
     return this.settingsLock.run("settings", async () => {
+      // `ctx.settings.set` is bound to the record it was activated with and
+      // outlives an uninstall: a fetch in flight when the owner removes the
+      // plugin with "also delete its data" resolves, calls `set`, and would
+      // write the purged entry back — for a reinstall to pick up. Disabled or
+      // deactivated is harmless (same record); gone is not.
+      if (this.records.get(rec.id) !== rec) throw new PluginNotFound(rec.id);
       let next: Record<string, unknown> = {};
       await this.store.updateSettings((current) => {
         const stored = current.plugins?.[rec.id]?.settings ?? {};

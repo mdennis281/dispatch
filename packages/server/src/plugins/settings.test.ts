@@ -44,6 +44,8 @@ const SCHEMA = {
 /** Stores what its route is given, and records every `onChange`. */
 const KEEPER_SERVER = `
 export function activate(ctx) {
+  // Kept so a test can play a late callback — work still in flight after the plugin went away.
+  (globalThis.__keeperCtx ??= []).push(ctx);
   const seen = [];
   ctx.settings.onChange((next) => seen.push(next));
   ctx.routes((r) => {
@@ -158,6 +160,20 @@ describe("ctx.settings.set and PATCH", () => {
     const fixed = await a.call<PluginInfo>("PATCH", "/api/plugins/keeper/settings", { patch: { port: 8080 } });
     expect(fixed.body.settings).toEqual({ port: 8080, label: "ok2" });
     expect(fixed.body.settingsErrors).toBeUndefined();
+  });
+
+  it("refuses a late write from a plugin that was uninstalled, so a purge stays purged", async () => {
+    const configDir = await configRoot();
+    const a = await instance(configDir);
+    await a.call("POST", "/api/plugins/keeper/store", { hosts: [MAC] });
+    const ctx = (globalThis as { __keeperCtx?: Array<{ settings: { set(p: object): Promise<unknown> } }> }).__keeperCtx!.at(-1)!;
+    await a.app.services.plugins.uninstall("keeper", { purge: true });
+    const before = a.events.length;
+
+    // A fetch that was in flight resolves and stores what it learned.
+    await expect(ctx.settings.set({ hosts: [MAC, { id: "late", address: "x" }] })).rejects.toThrow(/no plugin "keeper"/);
+    expect((await a.app.services.store.getSettings()).plugins?.keeper).toBeUndefined();
+    expect(a.events).toHaveLength(before);
   });
 
   it("does not enforce a schema it cannot compile, and says so on the row", async () => {
