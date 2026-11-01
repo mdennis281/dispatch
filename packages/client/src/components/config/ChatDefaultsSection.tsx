@@ -15,7 +15,7 @@
  * a config dir has nowhere to keep them and the pane says so instead of
  * offering controls whose save would fail.
  */
-import { Container, Cpu, MessagesSquare, Monitor, TerminalSquare } from "lucide-react";
+import { Container, Cpu, MessagesSquare, Monitor, TerminalSquare, Unplug } from "lucide-react";
 import {
   listProviders,
   projectHarnessOf,
@@ -32,7 +32,7 @@ import { harnessLabel } from "../../lib/harness.js";
 import { useProviderCatalogs } from "../../lib/useProviderCatalogs.js";
 import { useProjects } from "../../stores/projects.js";
 import { useSettings } from "../../stores/settings.js";
-import { useTerminals } from "../../stores/terminals.js";
+import { backendHint, isBackendOffline, useTerminals } from "../../stores/terminals.js";
 import type { ChatDefaultsDraft } from "../../stores/settingsDraft.js";
 import { modeLabel } from "../chat/ModeControl.js";
 import { Select, type SelectOption } from "../ui/Select.js";
@@ -303,8 +303,8 @@ export function ChatDefaultsSection({
                   ...terminalBackends.map((b) => ({
                     value: b.id,
                     label: b.label,
-                    icon: <Container />,
-                    hint: b.pluginId,
+                    icon: isBackendOffline(b) ? <Unplug /> : <Container />,
+                    hint: backendHint(b),
                   })),
                   ...(value.terminalBackend &&
                   value.terminalBackend !== "local" &&

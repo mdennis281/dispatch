@@ -347,8 +347,17 @@ export interface TerminalBackendResolution {
    * Absent ⇒ `local`.
    */
   fallback?: TerminalBackendFallback;
-  /** A missing backend's last-known label, for the messages; absent when it was never seen. */
+  /**
+   * The backend's label in force (an `updateBackend` may have changed it), or
+   * a missing backend's last-known one; absent when it was never seen.
+   */
   label?: string;
+  /**
+   * Set when `requested` is registered but reports `offline`: the reason. No
+   * `backend` comes with it, so nothing is spawned — the shell fails now,
+   * under `fallback`, instead of after the spawn timeout.
+   */
+  offline?: string;
   /** The project's primary checkout, handed to the backend's spawn. */
   repoPath?: string;
   /** The chat's worktree, when it has one, handed to the backend's spawn. */
@@ -648,6 +657,12 @@ interface Terminal {
    * refuses a local fallback. Every run queued on it fails with this.
    */
   failure?: string;
+  /**
+   * While a backend spawn is in flight: gives up on it now, with this reason
+   * — its backend just reported `offline`, so waiting out the timeout could
+   * only end the same way two minutes later.
+   */
+  cutConnect?: (why: string) => void;
 }
 
 /**
@@ -1033,7 +1048,9 @@ export class TerminalService {
     term.placement = res.requested;
 
     if (!res.backend) {
-      if (res.missing) {
+      if (res.offline) {
+        this.cannotStart(term, cwd, res.fallback, res.requested, res.label ?? res.requested, res.offline);
+      } else if (res.missing) {
         const label = res.label ?? res.requested;
         const named = label === res.requested ? `"${res.requested}"` : `"${res.requested}" (${label})`;
         this.cannotStart(
@@ -1051,8 +1068,10 @@ export class TerminalService {
     }
 
     const backend = res.backend;
-    term.location = { backend: backend.id, label: backend.label, state: "connecting" };
-    this.record(term, "stderr", `[dispatch] Starting a shell on ${backend.label}…`);
+    // The label in force, not the registration's: `updateBackend` renames in place.
+    const label = res.label ?? backend.label;
+    term.location = { backend: backend.id, label, state: "connecting" };
+    this.record(term, "stderr", `[dispatch] Starting a shell on ${label}…`);
     this.publishUpdate(term);
 
     const timeoutMs = Math.min(
@@ -1075,23 +1094,29 @@ export class TerminalService {
             signal: placeholder.abort.signal,
           }) as Promise<ShellProcess>,
       );
-      const raw = await settleWithin(spawned, timeoutMs, placeholder.abort);
+      const raw = await settleWithin(spawned, timeoutMs, placeholder.abort, (cut) => {
+        term.cutConnect = cut;
+      });
       const declared = (raw as { cwd?: unknown }).cwd;
       remoteCwd = typeof declared === "string" && declared ? declared : undefined;
       handle = withoutPid(raw);
     } catch (err) {
+      term.cutConnect = undefined;
       if (abandoned()) return;
       const why = err instanceof Error ? err.message : String(err);
+      // Relabelled while connecting? Say the name the human sees now.
+      const current = term.location?.label ?? label;
       this.cannotStart(
         term,
         cwd,
         res.fallback ?? backend.fallback,
         backend.id,
-        backend.label,
-        `${backend.label} could not start a shell: ${why}`,
+        current,
+        `${current} could not start a shell: ${why}`,
       );
       return;
     }
+    term.cutConnect = undefined;
     if (abandoned()) {
       try {
         handle.kill();
@@ -1104,7 +1129,7 @@ export class TerminalService {
     term.backendId = backend.id;
     term.backend = backend;
     if (remoteCwd) term.cwd = remoteCwd;
-    term.location = { backend: backend.id, label: backend.label, state: "ready" };
+    term.location = { backend: backend.id, label: term.location?.label ?? label, state: "ready" };
     term.notice = res.note;
     this.attach(term, handle);
     this.publishUpdate(term);
@@ -1172,6 +1197,28 @@ export class TerminalService {
    * or wherever the chat points now) instead of writing into a dead channel.
    * Returns how many it ended.
    */
+  /**
+   * A registered backend's label or status changed. Its shells' rows take the
+   * new label — a renamed machine is the same machine, so nothing is
+   * restarted. And a spawn still waiting on a backend that just went OFFLINE
+   * is cut short now, under its fallback policy, rather than left to time out.
+   * A shell already running there is left alone: its own transport reports
+   * trouble (`stalled`, `exit`), and an offline flag may be wrong about it.
+   */
+  backendChanged(backendId: string, change: { label: string; status?: { state: string; detail?: string } }): void {
+    for (const term of this.terminals.values()) {
+      if (term.status !== "live" || term.location?.backend !== backendId) continue;
+      if (term.location.label !== change.label) {
+        term.location = { ...term.location, label: change.label };
+        this.publishUpdate(term);
+      }
+      if (change.status?.state === "offline" && term.location.state === "connecting" && term.cutConnect) {
+        const detail = change.status.detail ? ` (${change.status.detail})` : "";
+        term.cutConnect(`it went offline${detail} while the shell was starting`);
+      }
+    }
+  }
+
   detachBackend(backendId: string, reason = "its plugin was switched off"): number {
     let n = 0;
     for (const term of [...this.terminals.values()]) {
@@ -1276,7 +1323,7 @@ export class TerminalService {
    */
   private async execHooked(term: Terminal, args: RunTerminalArgs, backend: TerminalBackend): Promise<RunTerminalResult> {
     const command = args.command;
-    const label = backend.label;
+    const label = labelOf(term);
     const hookMs = Math.min(
       TERMINAL_RUN_HOOK_MAX_TIMEOUT_MS,
       Math.max(1_000, backend.runHookTimeoutMs ?? TERMINAL_RUN_HOOK_TIMEOUT_MS),
@@ -2432,6 +2479,8 @@ function settleWithin(
   p: Promise<ShellProcess>,
   ms: number,
   abort: AbortController,
+  /** Handed a way to give up early, with a reason — the backend went offline. */
+  onCut?: (cut: (why: string) => void) => void,
 ): Promise<ShellProcess> {
   return new Promise<ShellProcess>((resolve, reject) => {
     let done = false;
@@ -2447,6 +2496,8 @@ function settleWithin(
     const timer = setTimeout(() => giveUp(`no shell after ${Math.round(ms / 1000)}s`), ms);
     timer.unref?.();
     abort.signal.addEventListener("abort", onAbort);
+    // A handle that lands after a cut is killed below, like one after the timeout.
+    onCut?.(giveUp);
     p.then(
       (h) => {
         if (done) {

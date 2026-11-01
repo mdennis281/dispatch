@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { EventBus } from "../bus.js";
 import { Store } from "../store/index.js";
 import { TerminalBackendRegistry } from "../services/terminal-backends.js";
+import type { PluginContext } from "@dispatch/shared";
 import { PluginService } from "./service.js";
 
 const dirs: string[] = [];
@@ -28,6 +29,8 @@ export function activate(ctx) {
   globalThis.__terminalsTest ??= {};
   globalThis.__terminalsTest[meta.id] = { hasTerminals: Boolean(ctx.terminals) };
   if (!ctx.terminals) return;
+  // Handed to the test, which drives the rest of the surface through the host.
+  Object.defineProperty(globalThis.__terminalsTest[meta.id], "ctx", { value: ctx.terminals });
   ctx.terminals.registerBackend({
     id: meta.backend, label: "Box", shell: "bash",
     spawn: async () => { throw new Error("not in this test"); },
@@ -88,6 +91,7 @@ async function host() {
 }
 
 const seen = () => (globalThis as unknown as { __terminalsTest: Record<string, Record<string, unknown>> }).__terminalsTest;
+const ctxOf = (id: string) => seen()[id]!.ctx as NonNullable<PluginContext["terminals"]>;
 
 describe("the terminals capability", () => {
   it("registers a backend, scopes ports to the plugin's own backends, and tears both down on disable", async () => {
@@ -112,6 +116,43 @@ describe("the terminals capability", () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(h.registry.size).toBe(0);
     expect(h.registry.ports("c1")).toEqual([]);
+    await h.svc.dispose();
+    h.store.close();
+  });
+
+  it("setStatus / updateBackend / unregisterBackend act only on the plugin's own backends", async () => {
+    const h = await host();
+    await writePlugin(join(h.configDir, "plugins"), "termy", ["terminals"]);
+    await writePlugin(join(h.configDir, "plugins"), "other", ["terminals"], "box2");
+    await h.svc.load();
+    await h.svc.activateAll();
+    const termy = ctxOf("termy");
+    const other = ctxOf("other");
+
+    termy.setStatus("box", { state: "offline", detail: "asleep" });
+    termy.updateBackend("box", { label: "Renamed" });
+    expect(h.registry.list().find((b) => b.id === "box")).toMatchObject({
+      label: "Renamed",
+      status: { state: "offline", detail: "asleep" },
+    });
+    for (const call of [
+      () => termy.setStatus("box2", { state: "online" }),
+      () => termy.updateBackend("box2", { label: "Mine now" }),
+      () => termy.unregisterBackend("box2"),
+    ]) {
+      expect(call).toThrow(/not registered by plugin "termy"/);
+    }
+
+    await termy.unregisterBackend("box");
+    expect(h.registry.has("box")).toBe(false);
+    expect(h.registry.ports("c1").map((p) => p.backend)).toEqual(["box2"]);
+
+    // The id is free again — and once another plugin holds it, the first
+    // plugin's teardown must not take it down with its own.
+    other.registerBackend({ id: "box", label: "Other's box", shell: "bash", spawn: async () => Promise.reject(new Error("x")) });
+    await h.svc.setEnabled("termy", false);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(h.registry.list().map((b) => `${b.id}:${b.pluginId}`).sort()).toEqual(["box2:other", "box:other"]);
     await h.svc.dispose();
     h.store.close();
   });

@@ -32,6 +32,8 @@ import {
   type TerminalBackend,
   type TerminalPortForward,
   type TerminalPortForwardInput,
+  type TerminalBackendStatusInput,
+  type TerminalBackendUpdate,
   type PluginContext,
   type PluginInstance,
   type PluginLog,
@@ -148,6 +150,8 @@ export interface PluginContextDeps {
     has(id: string): boolean;
     publishPort(backendId: string, port: TerminalPortForwardInput): () => void;
     ports(chatId?: string): TerminalPortForward[];
+    setStatus(id: string, status: TerminalBackendStatusInput): void;
+    update(id: string, patch: TerminalBackendUpdate): void;
   };
 }
 
@@ -426,6 +430,11 @@ export function buildPluginContext(
     // Bound to this plugin: it may publish ports only for backends IT
     // registered, so one plugin cannot advertise a URL as another's.
     const mine = new Set<string>();
+    const own = (backendId: string): void => {
+      if (!mine.has(backendId)) {
+        throw new Error(`terminal backend "${backendId}" was not registered by plugin "${id}"`);
+      }
+    };
     ctx.terminals = {
       registerBackend: (backend) => {
         terminals.register(backend, id);
@@ -433,19 +442,37 @@ export function buildPluginContext(
         // Torn down with the plugin, like a provider: the shells on it are
         // ended (each says so), its ports withdrawn, its `dispose()` called.
         owned.offs.push(() => {
-          mine.delete(backend.id);
+          // Only if it is still OURS: after `unregisterBackend`, the id may
+          // have been claimed by another plugin, whose backend this teardown
+          // must not take down.
+          if (!mine.delete(backend.id)) return;
           terminals.unregister(backend.id).catch((err: unknown) => {
             deps.log.error(`terminal backend "${backend.id}" failed to unregister`, err);
           });
         });
       },
       publishPort: (backendId, port) => {
-        if (!mine.has(backendId)) {
-          throw new Error(`terminal backend "${backendId}" was not registered by plugin "${id}"`);
-        }
+        own(backendId);
         return terminals.publishPort(backendId, port);
       },
       ports: (chatId) => terminals.ports(chatId),
+      setStatus: (backendId, status) => {
+        own(backendId);
+        terminals.setStatus(backendId, status);
+      },
+      updateBackend: (backendId, update) => {
+        own(backendId);
+        terminals.update(backendId, update);
+      },
+      // Not `async`: a foreign id throws like the calls above, rather than
+      // rejecting a promise a caller may never await.
+      unregisterBackend: (backendId) => {
+        own(backendId);
+        // Forgotten first, so the teardown `off` above skips it — by then the
+        // id may belong to another plugin.
+        mine.delete(backendId);
+        return terminals.unregister(backendId);
+      },
     };
   }
 

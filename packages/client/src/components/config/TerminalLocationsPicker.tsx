@@ -15,7 +15,7 @@
  */
 import { Check, RotateCcw } from "lucide-react";
 import { LOCAL_TERMINAL_BACKEND, type TerminalBackendInfo } from "@dispatch/shared";
-import { useTerminals } from "../../stores/terminals.js";
+import { backendHint, useTerminals } from "../../stores/terminals.js";
 import { Button } from "../ui/Button.js";
 import { cn } from "../../lib/cn.js";
 
@@ -49,7 +49,7 @@ export function TerminalLocationsPicker({
   const enabled = new Set(effective);
   const rows: { id: string; label: string; hint?: string }[] = [
     { id: LOCAL_TERMINAL_BACKEND, label: "This machine", hint: "the Dispatch host" },
-    ...backends.map((b) => ({ id: b.id, label: b.label, hint: b.pluginId })),
+    ...backends.map((b) => ({ id: b.id, label: b.label, hint: backendHint(b) })),
     // Named but not registered: still part of the answer, and the only place
     // to see it and untick it.
     ...effective

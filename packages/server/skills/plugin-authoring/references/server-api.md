@@ -147,8 +147,9 @@ ctx.providers.register(harness, descriptor)
 // terminals — somewhere else for chats' managed shells to run (docs/plugins.md →
 // "Terminal backends"). spawn is async and resolves to stdio (stdin/stdout/stderr,
 // kill, on exit|error) with NO pid; reject or overrun spawnTimeoutMs and core brings
-// up a LOCAL shell and says why. Throws on "local" or a taken id; the toggle ends the
-// backend's shells, withdraws its ports and calls dispose().
+// up a LOCAL shell and says why — or, with fallback: "refuse", starts nothing and fails
+// the run. Throws on "local" or a taken id; the toggle ends the backend's shells,
+// withdraws its ports and calls dispose().
 ctx.terminals.registerBackend({
   id: "box", label: "My box", shell: "bash",
   spawn: async ({ chatId, projectId, name, cwd, repoPath, worktreePath, branch, signal }) => handle,
@@ -166,6 +167,10 @@ ctx.terminals.registerBackend({
 })
 const withdraw = ctx.terminals.publishPort("box", { chatId, remotePort: 5173, url: "http://127.0.0.1:53211" })
 ctx.terminals.ports(chatId)
+// Your OWN backends only (throws otherwise):
+ctx.terminals.setStatus("box", { state: "offline", detail: "asleep", lastSeenAt })  // online|offline|degraded
+ctx.terminals.updateBackend("box", { label: "Garage Mac" })  // in place: shells keep running
+await ctx.terminals.unregisterBackend("box")                 // one backend, as deactivation does
 ```
 
 Gotchas for a terminal backend:
@@ -189,9 +194,14 @@ Gotchas for a terminal backend:
   `kind: "killed"` for an idle stop. With no reason a lost connection reads as success.
 - If your transport can tell "quiet" from "gone", emit `"stalled"` (`{ detail }`) and
   `"resumed"` on the handle: core pauses the command's timeout and shows the shell stalled.
+- Report `setStatus("offline")` as soon as you know the far side is unreachable: core then
+  fails a new shell at once (no 120 s spawn wait), cuts short a spawn already waiting,
+  and drops the backend from the agent's `location` choices. Running shells are untouched.
+- Rename with `updateBackend`, never unregister + register: that ends every shell on it.
 - Test with `createTestContext`: `t.terminals.spawn("box", { chatId })`, `t.terminals.chatIdle(...)`,
   `t.terminals.chatDeleted(...)`, `t.terminals.beforeRun("box", { chatId, command })`
-  (→ `{ ran, refusal?, notices }`), `t.terminals.afterRun(...)`, and `t.terminalPorts`.
+  (→ `{ ran, refusal?, notices }`), `t.terminals.afterRun(...)`, `t.terminalPorts`,
+  `t.terminalStatus` and `t.terminalUpdates`.
 
 Working examples of `providers`: the built-in Claude, Codex and goose plugins,
 `packages/plugins/{claude,codex,goose}` (`src/main.ts` is the whole entry;

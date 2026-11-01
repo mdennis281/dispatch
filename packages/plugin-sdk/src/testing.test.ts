@@ -250,6 +250,37 @@ describe("createTestContext terminals", () => {
     expect(calls).toEqual(["spawn:c1:main", "idle:c1", "deleted:c1"]);
   });
 
+  it("records setStatus / updateBackend and tears one backend down with unregisterBackend", async () => {
+    const t = createTestContext({ capabilities: ["terminals"] });
+    let disposed = 0;
+    const spawn = async () => ({ stdin: { write: () => {} }, stdout: { on: () => {} }, stderr: { on: () => {} }, kill: () => {}, on: () => {} });
+    t.ctx.terminals!.registerBackend({ id: "mac", label: "Mac", shell: "bash", spawn, dispose: () => void disposed++ });
+    t.ctx.terminals!.publishPort("mac", { chatId: "c1", remotePort: 3000, url: "http://127.0.0.1:1" });
+
+    t.ctx.terminals!.setStatus("mac", { state: "offline", detail: "asleep" });
+    expect(t.terminalStatus.get("mac")).toEqual({ state: "offline", detail: "asleep" });
+    expect(() => t.ctx.terminals!.setStatus("mac", { state: "napping" as never })).toThrow(/state must be/);
+    t.ctx.terminals!.updateBackend("mac", { label: "Garage Mac" });
+    expect(t.terminalUpdates.get("mac")).toEqual({ label: "Garage Mac" });
+    // The registered object is left as it was, as the host leaves it.
+    expect(t.terminalBackends.get("mac")?.label).toBe("Mac");
+    for (const call of [
+      () => t.ctx.terminals!.setStatus("other", { state: "online" }),
+      () => t.ctx.terminals!.updateBackend("other", { label: "x" }),
+      () => t.ctx.terminals!.unregisterBackend("other"),
+    ]) {
+      expect(call).toThrow(/not registered by plugin/);
+    }
+
+    await t.ctx.terminals!.unregisterBackend("mac");
+    expect(disposed).toBe(1);
+    expect(t.terminalBackends.has("mac")).toBe(false);
+    expect(t.terminalStatus.has("mac")).toBe(false);
+    expect(t.terminalPorts).toEqual([]);
+    // Free to register again.
+    t.ctx.terminals!.registerBackend({ id: "mac", label: "Mac", shell: "bash", spawn });
+  });
+
   it("plays beforeRun / afterRun as core would: a refusal or a throw means not run", async () => {
     const t = createTestContext();
     const seen: string[] = [];
