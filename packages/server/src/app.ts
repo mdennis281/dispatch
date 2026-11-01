@@ -121,7 +121,7 @@ export async function buildApp(
   await store.init();
 
   const services =
-    opts.services ?? createServices({ config, store, bus }, opts.serviceOverrides);
+    opts.services ?? createServices({ config, store, bus, ...(opts.dev ? { dev: true } : {}) }, opts.serviceOverrides);
   // Before Fastify, because `trustProxy` is a constructor option: changing the
   // setting therefore needs a restart, and the session panel says so.
   const settings = await store.getSettings();

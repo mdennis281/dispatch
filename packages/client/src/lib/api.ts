@@ -8,6 +8,7 @@ import type {
   CommitMessageAvailability,
   Persona,
   PluginInfo,
+  PluginInstance,
   PluginInspectResult,
   PluginAutoUpdate,
   PluginUpdateStatus,
@@ -1551,6 +1552,8 @@ export const api = {
   /* plugins — Settings → Plugins. Targeted patches; never a settings-draft write. */
   plugins: {
     list: () => get<PluginInfo[]>("/api/plugins"),
+    /** Which instance this is, the one `ctx.instance` describes. */
+    instance: () => get<PluginInstance>("/api/plugins/instance"),
     setEnabled: (id: string, enabled: boolean) =>
       put<PluginInfo>(`/api/plugins/${encodeURIComponent(id)}/enabled`, { enabled }),
     setSettings: (id: string, settings: Record<string, unknown>) =>

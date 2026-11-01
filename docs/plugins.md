@@ -246,6 +246,73 @@ the owning authority") and the form neither renders it nor lists it under "not
 editable here". Your `settingsSection` owns it, editing through
 `host.settings.get()/set()`, and the schema still validates it.
 
+### Instance identity
+
+Stable and dev run side by side on one machine. They share `config/`, so they
+share every plugin's settings, secrets and code, but each has its own data dir.
+A plugin that leaves work outside Dispatch, such as sessions on a remote
+machine or files in a shared directory, has to know which instance owns it.
+Otherwise dev's orphan sweep reaps stable's live work. That knowledge is
+`ctx.instance`. It needs no capability, and the browser half gets the same
+object as `host.instance`.
+
+```ts
+interface PluginInstance {
+  readonly id: string;                  // namespace remote work by this
+  readonly role: "stable" | "dev" | "other";
+  readonly dataDirFingerprint: string;  // opaque; equality only
+  readonly previousId?: string;         // the id before the last re-mint
+  readonly reminted?: { at: string; reason: "copied" | "moved" | "hostname" };
+}
+```
+
+- **`id`** stays the same for a data dir across restarts, and no two data dirs
+  share it. It lives in `<dataDir>/instance.json`, next to a description of
+  the directory it was minted for: the machine's hostname, the canonical path,
+  and the volume and file id.
+  - **A copy gets a new id.** At boot, the record is checked against the
+    directory it is found in, so seeding dev's data by copying stable's, files
+    and all, cannot make two instances answer to one id. A copy can never pass
+    that check: it exists alongside its original, and two live directories on
+    one volume never share a file id.
+  - **These keep the id:**
+    - a rename or move within the volume (same file id);
+    - a restore in place (same path; two live directories can't share a path,
+      so it isn't a copy).
+  - **These re-mint it:**
+    - a move to another volume;
+    - a copy;
+    - carrying the data to a machine with a different hostname, or renaming
+      the machine.
+- **`previousId` and `reminted`** say what the id was before and why it
+  changed.
+  - `copied`: the directory the id was minted for still holds that id. So
+    `previousId` is the id of a running sibling, typically stable.
+  - `moved`: that directory no longer holds it.
+  - `hostname`: the record names another machine.
+
+  Use `previousId` to show "work left by instance X" and let the owner adopt it
+  or clean it up after checking it isn't live. **Never adopt it
+  automatically**: for a copy, that hands dev stable's work.
+- **`role`** is a label for display and policy, never a namespace, because two
+  `dev` instances can run at once.
+  - `stable`: this process serves the installed deployment's data dir, the line
+    `installedRoots` draws.
+  - `dev`: the server was started by `pnpm dev`.
+  - `other`: anything else (a throwaway instance, a test, a payload launched
+    against another root).
+- **`dataDirFingerprint`** hashes the hostname, path, volume and file id. It
+  changes on every copy, move, restore or rename, including the ones that keep
+  `id`. Store it beside work you leave elsewhere to tell "my id, where I left
+  it" from "my id, but the directory moved".
+
+`ctx.instance` is read once per process, on first use. If it can't be read
+(an unreadable data dir), the member is absent rather than invented. A plugin
+that namespaces by it should refuse to clean anything up rather than fall back
+to a guess. It is typed optional for hosts before it. The browser half's copy
+is read once by the plugin loader (`GET /api/plugins/instance`), in parallel
+with the plugin list.
+
 ### Cleanup lifecycle
 
 A plugin that makes things **outside** the Dispatch process (a container per
@@ -597,6 +664,7 @@ export interface PluginContext<Req = unknown, Reply = unknown> {
   readonly dir: string;                 // absolute path of the plugin directory
   readonly version: string;             // the plugin's own
   readonly log: { info(m: string): void; warn(m: string): void; error(m: string, err?: unknown): void };
+  readonly instance?: PluginInstance;   // which instance this is; see "Instance identity"
 
   bus?: {
     on<T extends WsServerEventType>(type: T, fn: (evt: Extract<WsServerEvent, { type: T }>) => void): () => void;
@@ -1163,6 +1231,7 @@ host and declared as peer dependencies by the SDK.
 ```ts
 export interface ClientHost {
   readonly pluginId: string;
+  readonly instance?: PluginInstance;   // the server half's ctx.instance; read once by the loader
   readonly React: typeof React;
   ui: ClientHostKit;   // Button, IconButton, Select, MenuItem, Dialog, Tooltip, Toggle, Field — call signatures, no raw <button>
   slots: {

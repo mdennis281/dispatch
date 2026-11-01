@@ -21,6 +21,7 @@ it("counts and answers", async () => {
     settingsSchema: JSON.parse(readFileSync("settings.schema.json", "utf8")),  // ctx.settings.set enforces it as the host does
     secrets: { API_KEY: "k" },                              // the store; t.secrets is the live Map
     manifestSecrets: ["API_KEY"],                           // the manifest's secrets: — enforced as on the host
+    instance: { id: "dev-2", role: "dev", previousId: "stable-1" },  // ctx.instance; default TEST_INSTANCE, null = absent
     kv: { seen: 4 },                                        // state from an "earlier run"
     chats: [{ id: "c1", title: "Fix build", projectId: "p1", createdAt: 1, updatedAt: 2 }],
     answerAsk: (chatId, q) => "yes",                        // what chats.ask resolves with

@@ -50,6 +50,7 @@ import {
   pluginSecretAllowed,
   type ModeConfig,
   type PluginInfo,
+  type PluginInstance,
   type PluginLiveChat,
   type PluginLog,
   type PluginModule,
@@ -810,6 +811,11 @@ export class PluginService implements PluginContributionSource {
   get(id: string): PluginInfo | undefined {
     const rec = this.records.get(id);
     return rec && this.info(rec);
+  }
+
+  /** What every plugin's `ctx.instance` is; `host.instance` reads it over HTTP. */
+  instance(): PluginInstance | undefined {
+    return this.ctxDeps.instance?.();
   }
 
   /* -------------------------------------------------------- contributions */

@@ -100,4 +100,8 @@ export const STATE_ENTRIES = [
   // `<dataDir>/crash.log`, plus the one rotated generation — see crash-log.ts.
   "crash.log",
   "crash.log.1",
+  // `ctx.instance`'s record (services/instance.ts). Safe to carry anywhere: a
+  // copy is recognised at boot and given its own id, so the far side never
+  // answers to the original's.
+  "instance.json",
 ];

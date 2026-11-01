@@ -474,16 +474,23 @@ export function installedRoots(
   env: NodeJS.ProcessEnv = process.env,
   home = homedir(),
 ): { dataDir: string; configDir: string } | null {
+  const roots = installedRootPaths(env, home);
+  // Already pointed at it → `self` is the same store.
+  if (env.DISPATCH_DATA_DIR && resolve(env.DISPATCH_DATA_DIR) === resolve(roots.dataDir)) return null;
+  return roots;
+}
+
+/** The installed deployment's two roots, whoever is asking. See {@link installedRoots}. */
+export function installedRootPaths(
+  env: NodeJS.ProcessEnv = process.env,
+  home = homedir(),
+): { dataDir: string; configDir: string } {
   const local =
     env.LOCALAPPDATA ??
     env.XDG_DATA_HOME ??
     join(home, process.platform === "darwin" ? "Library/Application Support" : ".local/share");
   const root = env.DISPATCH_HOME ? resolve(env.DISPATCH_HOME) : join(local, "dispatch");
-  const dataDir = join(root, "data");
-  const configDir = join(root, "config");
-  // Already pointed at it → `self` is the same store.
-  if (env.DISPATCH_DATA_DIR && resolve(env.DISPATCH_DATA_DIR) === resolve(dataDir)) return null;
-  return { dataDir, configDir };
+  return { dataDir: join(root, "data"), configDir: join(root, "config") };
 }
 
 /* ----------------------------------------------------------------- helpers */

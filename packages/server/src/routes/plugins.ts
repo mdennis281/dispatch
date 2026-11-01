@@ -1,6 +1,7 @@
 /**
  * REST for the plugin host.
  *   GET  /api/plugins                  → PluginInfo[] (status, error, settings schema, client URL)
+ *   GET  /api/plugins/instance         → PluginInstance — what `ctx.instance` is; the client loader hands it to `host.instance`
  *   PUT  /api/plugins/:id/enabled      → { enabled }  — targeted patch, not a settings-draft write
  *   PUT  /api/plugins/:id/settings     → { settings } — whole-blob replace, schema-checked on the keys it changes
  *   PATCH /api/plugins/:id/settings    → { patch } — merge patch (null removes a key); what the form and host.settings use
@@ -100,6 +101,11 @@ export function registerPluginRoutes(app: FastifyInstance): void {
   const { plugins } = app.services;
 
   app.get("/api/plugins", async () => plugins.list());
+
+  app.get("/api/plugins/instance", async (_req, reply) => {
+    const instance = plugins.instance();
+    return instance ?? reply.code(404).send({ error: "this instance has no identity (see the server log)" });
+  });
 
   app.put<{ Params: { id: string } }>("/api/plugins/:id/enabled", async (req, reply) => {
     const parsed = EnabledBody.safeParse(req.body ?? {});

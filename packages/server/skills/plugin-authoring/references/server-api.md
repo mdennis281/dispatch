@@ -69,12 +69,28 @@ ctx.id        // the plugin id
 ctx.dir       // absolute path of the plugin directory
 ctx.version   // from the manifest
 ctx.log.info(m) / warn(m) / error(m, err?)   // error() also files to the crash log
+ctx.instance  // { id, role: "stable"|"dev"|"other", dataDirFingerprint, previousId?, reminted? } — see below
 ctx.settings.get<T>()          // AppSettings.plugins[id].settings, or {}; synchronous (cached)
 ctx.settings.onChange(fn)      // fires on every change — pane, your own set, the other instance (~2 s); returns unsubscribe
 await ctx.settings.set(patch)  // merge patch: keys replace wholesale, null removes; schema-checked on the keys it changes (throws, stores nothing)
 ctx.projects.list() / get(id)  // { id, name, repoPath, worktreeRoot?, defaultBranch? }
 ctx.emit(payload, chatId?)     // publishes { type: "plugin-event", plugin: id, chatId?, payload } to every client
 ```
+
+**Work you leave outside Dispatch is namespaced by `ctx.instance.id`.** That covers
+sessions on a remote machine, files in a shared directory, and anything else an orphan
+sweep might reap. Stable and dev share your settings and secrets, so nothing else tells
+them apart.
+- The id is re-minted when the data dir turns out to be a copy, so dev seeded from
+  stable's data never answers to stable's id.
+- The old id comes back as `previousId`, with `reminted.reason` set to `copied`, `moved`
+  or `hostname`. Offer its leftovers to the owner, but **never adopt them
+  automatically**: for a `copied` dir, `previousId` is a live instance.
+- `role` is a label, not a namespace.
+- If the member is absent (an older host, or an unreadable data dir), don't clean up
+  at all. Never fall back to a guessed namespace.
+
+docs/plugins.md → "Instance identity" has the full rules.
 
 Gated by a capability (absent otherwise — optional on the type):
 

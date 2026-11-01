@@ -14,6 +14,7 @@
  */
 import type { ComponentType, MouseEvent, ReactNode } from "react";
 import type { ChatStatus } from "./common.js";
+import type { PluginInstance } from "./plugin-api.js";
 import type { WsServerEvent, WsServerEventType } from "./wire.js";
 
 /* ------------------------------------------------------------- the chat */
@@ -312,6 +313,12 @@ export type PluginFetch = [GlobalFetch] extends [never]
  */
 export interface ClientHost {
   readonly pluginId: string;
+  /**
+   * The instance this page is served by, the same object as the server half's
+   * `ctx.instance`. Read once, before any plugin activates. Absent when that
+   * read failed, or on a host before it.
+   */
+  readonly instance?: PluginInstance;
   /** The host's React. Plugins never bundle their own; see `window.__dispatch.deps`. */
   readonly React: typeof import("react");
   ui: ClientHostKit;

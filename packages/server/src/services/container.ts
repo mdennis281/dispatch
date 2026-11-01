@@ -111,12 +111,15 @@ import { PluginUpdateWatcher, pluginUpdateHours } from "../plugins/inspect/watch
 import { PluginOAuthService } from "../plugins/oauth.js";
 import { PluginCleanupQueue } from "../plugins/cleanup.js";
 import { pluginMcpServersUsingSecret } from "../plugins/contributions.js";
+import { resolveInstance } from "./instance.js";
 
 /** The shared base every service hangs off. */
 export interface ServiceBase {
   config: ServerConfig;
   store: Store;
   bus: EventBus;
+  /** Started by `pnpm dev`. Only `ctx.instance.role` reads it. */
+  dev?: boolean;
 }
 
 /** Injectable service overrides (tests supply fakes; prod omits them). */
@@ -1228,6 +1231,21 @@ export function createServices(
       resolve: (id) => plugins.oauthView(id),
       canonicalUrl: async () => (await store.getSettings()).auth?.canonicalUrl,
     });
+  // `ctx.instance`. Read once, on first use rather than at construction, so a
+  // test container that never activates a plugin writes no instance.json. A
+  // failure leaves `ctx.instance` absent rather than failing the activation.
+  let instance: ReturnType<typeof resolveInstance> | null | undefined;
+  const currentInstance = () => {
+    if (instance === undefined) {
+      try {
+        instance = resolveInstance({ dataDir: config.dataDir, ...(base.dev ? { dev: true } : {}) });
+      } catch (err) {
+        console.error("[Dispatch] instance identity unavailable; plugins get no ctx.instance:", err);
+        instance = null;
+      }
+    }
+    return instance ?? undefined;
+  };
   const plugins: PluginService =
     overrides.plugins ??
     new PluginService({
@@ -1243,6 +1261,7 @@ export function createServices(
         // save from the Secrets pane does. A thunk: the refresher is built
         // further down, once the runner and broker it drives exist.
         refreshSecrets: (keys) => secretRefresher.refresh(keys),
+        instance: currentInstance,
         inspect,
         memory,
         attention,

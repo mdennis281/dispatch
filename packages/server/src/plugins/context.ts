@@ -33,6 +33,7 @@ import {
   type TerminalPortForward,
   type TerminalPortForwardInput,
   type PluginContext,
+  type PluginInstance,
   type PluginLog,
   type PluginManifest,
   type PluginRouteHandler,
@@ -115,6 +116,12 @@ export interface PluginContextDeps {
    * nothing is refreshed.
    */
   refreshSecrets?: (changed: SecretKey[]) => Promise<unknown>;
+  /**
+   * `ctx.instance`, read once per process by the container. Undefined when it
+   * couldn't be read, and then the member is absent: a plugin that namespaces
+   * by it must not get a made-up one.
+   */
+  instance?: () => PluginInstance | undefined;
   /** The host-run OAuth client flow (`ctx.oauth`). Optional so a unit test can build a context without it. */
   pluginOAuth?: PluginOAuthService;
   /**
@@ -172,12 +179,14 @@ export function buildPluginContext(
   // The messenger's channel sender for this plugin: rate limits key on the
   // name, and the row is stamped `origin: "channel"` with it.
   const channel = (sender?: string): ChannelSender => ({ name: sender?.trim() || id });
+  const instance = deps.instance?.();
 
   const ctx: ServerPluginContext = {
     id,
     dir,
     version: manifest.version,
     log: deps.log,
+    ...(instance ? { instance } : {}),
 
     settings: {
       get: <T = Record<string, unknown>>() => deps.settings() as T,
