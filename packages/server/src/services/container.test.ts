@@ -287,6 +287,25 @@ describe("the boot split: start() vs warm()", () => {
     ]);
   });
 
+  it("knows every chat's terminal-backend pin before the port opens — in start(), not warm()", async () => {
+    // Seeded in warm() (after `listen`), a shell opened in between for a chat
+    // pinned to a backend whose plugin was off took the plain local path with
+    // no warning — and ignored a `fallback: "refuse"` policy entirely.
+    const services = createServices(
+      {
+        config: { maxActiveSessions: 4 } as unknown as ServerConfig,
+        store: stub<Store>({
+          listChats: async () => [{ id: "pinned", terminalBackend: "cvx-mac" }, { id: "plain" }],
+        }),
+        bus: new EventBus(),
+      },
+      overridesRecording([]),
+    );
+    await services.start();
+    expect(services.terminalBackends.wantsResolve({ chatId: "pinned" })).toBe(true);
+    expect(services.terminalBackends.wantsResolve({ chatId: "plain" })).toBe(false);
+  });
+
   it("runs the warm pass once however many callers ask for it", async () => {
     const order: string[] = [];
     const services = build(order);

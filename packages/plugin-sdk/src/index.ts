@@ -68,6 +68,7 @@ export type {
   // terminal backends — implement `TerminalBackend`, hand it to
   // `ctx.terminals.registerBackend` (docs/plugins.md → "Terminal backends")
   TerminalBackend,
+  TerminalBackendFallback,
   TerminalBackendHandle,
   TerminalBackendReadable,
   TerminalBackendShell,

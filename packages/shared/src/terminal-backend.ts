@@ -36,6 +36,21 @@ export const TERMINAL_BACKEND_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,47}$/;
  */
 export type TerminalBackendShell = "bash" | "powershell";
 
+/**
+ * What core does when a backend cannot supply a shell — its spawn rejected or
+ * overran, or its plugin is off.
+ *
+ * - `local` (the default): start a LOCAL shell instead, and say so loudly. Right
+ *   for a Linux container standing in for a Linux-ish host: the command still
+ *   means the same thing.
+ * - `refuse`: start nothing. The run fails with the backend and the reason, and
+ *   the terminal ends. Right when the far side is a different OS or toolchain —
+ *   a Mac's `xcodebuild`, or a POSIX `rm -rf`, must never reach PowerShell on
+ *   the Dispatch host.
+ */
+export type TerminalBackendFallback = "local" | "refuse";
+export const TERMINAL_BACKEND_FALLBACKS = ["local", "refuse"] as const satisfies readonly TerminalBackendFallback[];
+
 /** What a backend is told when core needs a shell from it. */
 export interface TerminalSpawnInfo {
   chatId: string;
@@ -250,11 +265,21 @@ export interface TerminalBackend {
    * Start one shell. Async because provisioning takes time (cloning a
    * container, waiting for its address). Rejecting — or not settling within
    * {@link spawnTimeoutMs} — makes core start a LOCAL shell instead and say why,
-   * in the terminal, in the chat, and in the next tool result.
+   * in the terminal, in the chat, and in the next tool result. With
+   * `fallback: "refuse"` it starts nothing, and the run fails instead.
    */
   spawn(info: TerminalSpawnInfo): Promise<TerminalBackendHandle>;
-  /** How long core waits on `spawn` before falling back. Default 120 s, capped at 10 min. */
+  /** How long core waits on `spawn` before giving up on it. Default 120 s, capped at 10 min. */
   spawnTimeoutMs?: number;
+  /**
+   * What happens when this backend cannot supply a shell — see
+   * {@link TerminalBackendFallback}. Default `local`.
+   *
+   * Core remembers it per backend id (in the instance's state database), so
+   * it still applies to a chat pinned here while the plugin is switched off or
+   * uninstalled — exactly when nothing is registered to ask.
+   */
+  fallback?: TerminalBackendFallback;
   /**
    * Backend-specific lines for the agent, appended to core's own note about
    * where its terminal runs. Say what the agent cannot infer: how its local
@@ -343,6 +368,8 @@ export const TerminalBackendInfoSchema = z.object({
   shell: z.enum(["bash", "powershell"]),
   /** The plugin that registered it. */
   pluginId: z.string().optional(),
+  /** Its {@link TerminalBackendFallback} policy; absent on a server that predates it (read as `local`). */
+  fallback: z.enum(TERMINAL_BACKEND_FALLBACKS).optional(),
 });
 export type TerminalBackendInfo = z.infer<typeof TerminalBackendInfoSchema>;
 
@@ -358,9 +385,11 @@ export const TerminalLocationSchema = z.object({
   /**
    * `connecting` while `spawn` is in flight; `ready` once the shell is up;
    * `stalled` while its transport has gone quiet (the handle's `stalled`
-   * event) — back to `ready` on `resumed`.
+   * event) — back to `ready` on `resumed`. `fallback`: it is running locally
+   * instead. `failed`: the backend refuses a local fallback, so nothing is
+   * running — the terminal has exited.
    */
-  state: z.enum(["connecting", "ready", "fallback", "stalled"]),
+  state: z.enum(["connecting", "ready", "fallback", "stalled", "failed"]),
   /**
    * Set when the requested backend could not supply a shell and this one is
    * running LOCALLY instead — the reason, verbatim, for the badge's tooltip.
@@ -369,6 +398,8 @@ export const TerminalLocationSchema = z.object({
   /** While `stalled`: since when (epoch ms), and the backend's detail if it gave one. */
   stalledSince: z.number().int().optional(),
   stalled: z.string().optional(),
+  /** Set with `failed`: why the backend could not supply a shell. */
+  error: z.string().optional(),
 });
 export type TerminalLocation = z.infer<typeof TerminalLocationSchema>;
 

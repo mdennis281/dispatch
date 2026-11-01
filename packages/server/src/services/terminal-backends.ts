@@ -25,14 +25,23 @@
  * With nothing registered, `size` is 0, TerminalService never asks, no event
  * is published and no prompt section is written: the install behaves exactly
  * as it did before this file existed.
+ *
+ * A backend's `fallback` policy is REMEMBERED per id ({@link TerminalBackendMemory},
+ * the `terminal_backend` table), because the case it matters most for is the
+ * one with nothing registered to ask: a chat pinned to a Mac whose plugin was
+ * just switched off must not get a PowerShell on this host. An id this
+ * instance has never seen registered has no policy to remember and reads as
+ * the default, `local`.
  */
 import {
   LOCAL_TERMINAL_BACKEND,
+  TERMINAL_BACKEND_FALLBACKS,
   TERMINAL_BACKEND_ID_PATTERN,
   TERMINAL_CHAT_HOOK_TIMEOUT_MS,
   resolveTerminalBackend,
   resolveTerminalLocations,
   type TerminalBackend,
+  type TerminalBackendFallback,
   type TerminalBackendInfo,
   type TerminalChatEvent,
   type TerminalLocationChoices,
@@ -42,6 +51,7 @@ import {
 } from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
 import type { CleanupKey, CleanupOutcome } from "../plugins/cleanup.js";
+import type { StateDb } from "../store/db.js";
 import type { TerminalBackendResolution, TerminalBackendSource } from "./terminal.js";
 
 export interface TerminalBackendRegistryOptions {
@@ -81,9 +91,58 @@ export interface TerminalBackendRegistryOptions {
     failed(key: CleanupKey, error: string, projectId?: string): void;
     succeeded(key: CleanupKey): void;
   };
+  /**
+   * Where what each registered backend declared is kept once its plugin is
+   * gone. Absent = this registry's lifetime only (tests).
+   */
+  memory?: TerminalBackendMemory;
   /** Override of {@link TERMINAL_CHAT_HOOK_TIMEOUT_MS}, for tests. */
   hookTimeoutMs?: number;
   log?: (message: string, err?: unknown) => void;
+  now?: () => number;
+}
+
+/** What the registry knows about a backend it has seen registered — kept after the plugin goes. */
+export interface KnownTerminalBackend {
+  id: string;
+  label: string;
+  pluginId?: string;
+  fallback: TerminalBackendFallback;
+  /** When it was last registered. */
+  seenAt: number;
+}
+
+/** Durable {@link KnownTerminalBackend}s. Synchronous, because the state database is. */
+export interface TerminalBackendMemory {
+  remember(b: KnownTerminalBackend): void;
+  recall(id: string): KnownTerminalBackend | undefined;
+}
+
+/** {@link TerminalBackendMemory} over the instance's `terminal_backend` table. */
+export function stateDbBackendMemory(db: StateDb): TerminalBackendMemory {
+  return {
+    remember: (b) => {
+      db.prepare(
+        "INSERT INTO terminal_backend (id, label, plugin, fallback, seen_at) VALUES (?, ?, ?, ?, ?) " +
+          "ON CONFLICT(id) DO UPDATE SET label = excluded.label, plugin = excluded.plugin, " +
+          "fallback = excluded.fallback, seen_at = excluded.seen_at",
+      ).run(b.id, b.label, b.pluginId ?? null, b.fallback, b.seenAt);
+    },
+    recall: (id) => {
+      const r = db.prepare("SELECT * FROM terminal_backend WHERE id = ?").get(id) as
+        | { id: string; label: string; plugin: string | null; fallback: string; seen_at: number }
+        | undefined;
+      if (!r) return undefined;
+      return {
+        id: r.id,
+        label: r.label,
+        ...(r.plugin ? { pluginId: r.plugin } : {}),
+        // A value this build does not know is read as the safer one.
+        fallback: r.fallback === "local" ? "local" : "refuse",
+        seenAt: r.seen_at,
+      };
+    },
+  };
 }
 
 interface Entry {
@@ -97,6 +156,11 @@ type DetachListener = (backendId: string) => void;
 
 /** What the agent note and refusals call the built-in location. */
 const LOCAL_LABEL = "this machine (the Dispatch host)";
+
+/** The agent-note line for a backend that never falls back to a local shell. */
+const refuseNote = (label: string) =>
+  `When ${label} cannot start a shell, the command FAILS — it is never run on the Dispatch host ` +
+  `instead. Retry it, or tell the user ${label} is unavailable; do not re-run it through Bash.`;
 
 function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -123,6 +187,8 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
    */
   private readonly forwards = new Map<string, TerminalPortForward>();
   private readonly detachListeners = new Set<DetachListener>();
+  /** Read-through cache of {@link TerminalBackendMemory} — and the whole memory when none is given. */
+  private readonly known = new Map<string, KnownTerminalBackend | null>();
 
   constructor(private readonly opts: TerminalBackendRegistryOptions) {
     opts.bus.on("chat-update", (e) => this.notePin(e.chat.id, e.chat.terminalBackend));
@@ -167,6 +233,7 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
       label: backend.label,
       shell: backend.shell,
       ...(owner ? { pluginId: owner } : {}),
+      fallback: backend.fallback ?? "local",
     }));
   }
 
@@ -199,8 +266,61 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
     if (typeof backend.label !== "string" || !backend.label.trim()) {
       throw new Error(`terminal backend "${id}": label is required`);
     }
+    if (backend.fallback !== undefined && !TERMINAL_BACKEND_FALLBACKS.includes(backend.fallback)) {
+      throw new Error(
+        `terminal backend "${id}": fallback must be ${TERMINAL_BACKEND_FALLBACKS.map((f) => `"${f}"`).join(" or ")}`,
+      );
+    }
     this.entries.set(id, { backend, owner });
+    this.rememberBackend(backend, owner);
     this.broadcast();
+  }
+
+  /**
+   * Record what this backend declared, for when it is no longer registered.
+   * Never throws: a state database that cannot be written must not stop a
+   * plugin from activating — the cache still holds it for this process.
+   */
+  private rememberBackend(backend: TerminalBackend, owner: string | undefined): void {
+    const known: KnownTerminalBackend = {
+      id: backend.id,
+      label: backend.label,
+      ...(owner ? { pluginId: owner } : {}),
+      fallback: backend.fallback ?? "local",
+      seenAt: (this.opts.now ?? Date.now)(),
+    };
+    this.known.set(backend.id, known);
+    try {
+      this.opts.memory?.remember(known);
+    } catch (err) {
+      this.opts.log?.(`terminal backend "${backend.id}": could not remember its fallback policy`, err);
+    }
+  }
+
+  /** What this instance last knew about a backend id, registered now or not. */
+  recall(id: string): KnownTerminalBackend | undefined {
+    if (!this.known.has(id)) {
+      let hit: KnownTerminalBackend | undefined;
+      try {
+        hit = this.opts.memory?.recall(id);
+      } catch (err) {
+        this.opts.log?.(`terminal backend "${id}": could not read what was remembered about it`, err);
+        // Not cached: the next shell asks again rather than settling on a guess.
+        return undefined;
+      }
+      this.known.set(id, hit ?? null);
+    }
+    return this.known.get(id) ?? undefined;
+  }
+
+  /**
+   * The policy for an id: the registered backend's own, else what it declared
+   * when it was last registered here, else the default.
+   */
+  fallbackOf(id: string): TerminalBackendFallback {
+    const entry = this.entries.get(id);
+    if (entry) return entry.backend.fallback ?? "local";
+    return this.recall(id)?.fallback ?? "local";
   }
 
   /**
@@ -248,7 +368,15 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
     if (choice.id === LOCAL_TERMINAL_BACKEND) return { requested: choice.id };
     if (!this.entries.has(choice.id)) await this.opts.settled?.().catch(() => {});
     const entry = this.entries.get(choice.id);
-    if (!entry) return { requested: choice.id, missing: true };
+    if (!entry) {
+      const known = this.recall(choice.id);
+      return {
+        requested: choice.id,
+        missing: true,
+        fallback: this.fallbackOf(choice.id),
+        ...(known ? { label: known.label } : {}),
+      };
+    }
     const repoPath = projectId ? await this.opts.repoPath?.(projectId).catch(() => undefined) : undefined;
     // Read only for a shell actually headed to a backend: a local shell has no
     // use for either, and the branch costs a git spawn.
@@ -258,6 +386,7 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
     return {
       requested: choice.id,
       backend: entry.backend,
+      fallback: this.fallbackOf(choice.id),
       ...(repoPath ? { repoPath } : {}),
       ...(worktreePath ? { worktreePath } : {}),
       ...(branch ? { branch } : {}),
@@ -365,8 +494,11 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
         return `${head} The same machine as your Bash/PowerShell tool and your files.`;
       }
       const entry = this.entries.get(o.id);
-      const extra = entry ? this.backendExtra(entry.backend, info) : undefined;
-      return extra ? `${head}\n  ${extra.replace(/\n/g, "\n  ")}` : head;
+      const lines = [
+        ...(this.fallbackOf(o.id) === "refuse" ? [refuseNote(o.label)] : []),
+        ...(entry ? [this.backendExtra(entry.backend, info)] : []),
+      ].filter((l): l is string => Boolean(l));
+      return lines.length ? `${head}\n  ${lines.join("\n").replace(/\n/g, "\n  ")}` : head;
     });
     const defaultLabel = this.labelOf(choices.defaultId) ?? choices.defaultId;
     return [
@@ -417,6 +549,7 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
       `- Keep git local — commit, branch and push from Bash as usual.`,
       `- A server the terminal starts listens over there. Use the forwarded local URL the terminal ` +
         `results list ("Forwarded ports"), not localhost:<port>.`,
+      ...(backend.fallback === "refuse" ? [`- ${refuseNote(backend.label)}`] : []),
       ...(extra ? [extra] : []),
     ].join("\n");
   }
