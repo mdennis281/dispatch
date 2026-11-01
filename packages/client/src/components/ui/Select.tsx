@@ -1,5 +1,5 @@
 import { ChevronsUpDown, Check, RotateCcw } from "lucide-react";
-import type { ReactNode } from "react";
+import { Fragment, type ReactNode } from "react";
 import { cn } from "../../lib/cn.js";
 import { Popover, MenuItem } from "./Popover.js";
 import { Tooltip } from "./Tooltip.js";
@@ -9,6 +9,12 @@ export interface SelectOption<T extends string> {
   label: string;
   icon?: ReactNode;
   hint?: string;
+  /**
+   * A heading to list this option under, drawn where the group changes — so
+   * options sharing one must be contiguous. Ungrouped options above the first
+   * heading stay headless.
+   */
+  group?: string;
 }
 
 /**
@@ -142,24 +148,30 @@ export function Select<T extends string>({
               <div className="my-1 h-px bg-line" />
             </>
           )}
-          {options.map((o) => (
-            <MenuItem
-              key={o.value}
-              icon={o.icon}
-              hint={o.hint}
-              // With an inherit row, only a PIN is "active": the inherited value
-              // is marked on its own row, so the list never shows two checks.
-              active={o.value === value && !inherit?.active}
-              onClick={() => {
-                onChange(o.value);
-                close();
-              }}
-            >
-              <span className="flex items-center gap-2">
-                {o.label}
-                {o.value === value && !inherit?.active && <Check className="size-3 text-accent" />}
-              </span>
-            </MenuItem>
+          {options.map((o, i) => (
+            <Fragment key={o.value}>
+              {o.group && o.group !== options[i - 1]?.group && (
+                <div role="presentation" className="px-2 pb-0.5 pt-1.5 text-2xs font-medium text-faint">
+                  {o.group}
+                </div>
+              )}
+              <MenuItem
+                icon={o.icon}
+                hint={o.hint}
+                // With an inherit row, only a PIN is "active": the inherited value
+                // is marked on its own row, so the list never shows two checks.
+                active={o.value === value && !inherit?.active}
+                onClick={() => {
+                  onChange(o.value);
+                  close();
+                }}
+              >
+                <span className="flex items-center gap-2">
+                  {o.label}
+                  {o.value === value && !inherit?.active && <Check className="size-3 text-accent" />}
+                </span>
+              </MenuItem>
+            </Fragment>
           ))}
         </div>
       )}

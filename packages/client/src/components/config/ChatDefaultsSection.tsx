@@ -32,7 +32,15 @@ import { harnessLabel } from "../../lib/harness.js";
 import { useProviderCatalogs } from "../../lib/useProviderCatalogs.js";
 import { useProjects } from "../../stores/projects.js";
 import { useSettings } from "../../stores/settings.js";
-import { backendHint, isBackendOffline, missingBackendHint, useTerminals } from "../../stores/terminals.js";
+import {
+  backendGroup,
+  backendHint,
+  isBackendOffline,
+  missingBackendHint,
+  sortBackendsForPicker,
+  UNAVAILABLE_BACKENDS_GROUP,
+  useTerminals,
+} from "../../stores/terminals.js";
 import type { ChatDefaultsDraft } from "../../stores/settingsDraft.js";
 import { modeLabel } from "../chat/ModeControl.js";
 import { Select, type SelectOption } from "../ui/Select.js";
@@ -300,16 +308,24 @@ export function ChatDefaultsSection({
                 onChange={(terminalBackend) => patch({ terminalBackend })}
                 options={[
                   { value: "local", label: "This machine", icon: <Monitor /> },
-                  ...terminalBackends.map((b) => ({
+                  ...sortBackendsForPicker(terminalBackends).map((b) => ({
                     value: b.id,
                     label: b.label,
                     icon: isBackendOffline(b) ? <Unplug /> : <Container />,
                     hint: backendHint(b),
+                    group: backendGroup(b),
                   })),
                   ...(value.terminalBackend &&
                   value.terminalBackend !== "local" &&
                   !terminalBackends.some((b) => b.id === value.terminalBackend)
-                    ? [{ value: value.terminalBackend, label: value.terminalBackend, hint: missingBackendHint(value.terminalBackend) }]
+                    ? [
+                        {
+                          value: value.terminalBackend,
+                          label: value.terminalBackend,
+                          hint: missingBackendHint(value.terminalBackend),
+                          group: UNAVAILABLE_BACKENDS_GROUP,
+                        },
+                      ]
                     : []),
                 ]}
                 inherit={{

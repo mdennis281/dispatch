@@ -978,7 +978,7 @@ collection (see "Several plugins in one repository").
 
 ```ts
 ctx.terminals.registerBackend({
-  id: "proxmox",            // ^[a-z0-9][a-z0-9-]{0,47}$, never "local"
+  id: "proxmox",            // or qualified, "<your plugin id>/<name>" — see "Ids" below
   label: "Proxmox container",
   shell: "bash",            // the dialect of the sentinel probe core appends
   spawnTimeoutMs: 180_000,  // default 120 s, capped at 10 min
@@ -1001,6 +1001,21 @@ ctx.terminals.registerBackend({
   dispose: () => { /* close connections */ },
 });
 ```
+
+**Ids.** A backend id is `[a-z0-9][a-z0-9-]{0,47}`, never `local`, and may be
+**qualified** by your plugin's id: `<pluginId>/<name>`, e.g.
+`remote-host/cvx-mac` (`TERMINAL_BACKEND_ID_PATTERN`). Prefer the qualified
+form, above all for a plugin that registers one backend per thing the human
+adds, like a machine they pair. A bare id is first come, first served across
+every plugin, while a qualified one cannot collide. The host refuses a prefix
+that is not the registering plugin's own id, so no plugin can claim another's
+namespace and capture the chats pinned to it. Bare ids stay valid, and the
+published `proxmox-terminal` registers `proxmox`. Ids are persisted on chats,
+in app settings and in project.yaml, so keep one stable for the life of the
+thing it names. Rename with `label` or `updateBackend`, never by changing the
+id. A qualified id this instance has never seen registered fails closed (see
+"The policy outlives the plugin" below). The location pickers list backends
+under the plugin that registered them.
 
 **The handle** is the stdio shape TerminalService already drives: `stdin`
 (`write`, optional `end`/`on("error")`), `stdout` and `stderr` emitting
@@ -1196,10 +1211,18 @@ owning plugin, in the instance's `terminal_backend` table (state.db migration
 16). That row is written on every registration. Nothing deletes it: uninstalling
 the plugin does not make its pinned chats run locally. Clear the pin, in the
 Terminals panel or Settings → Chat defaults, to move them. An id this instance
-has never seen registered has no remembered policy and reads as `"local"`. That
-keeps today's behaviour for a project default naming a plugin that never ran
-here. `data/` is per instance, so the dev instance learns the policy the first
-time the plugin activates there.
+has never seen registered has no remembered policy. A bare one reads as
+`"local"`, which keeps today's behaviour for a project default naming a plugin
+that never ran here. A **qualified** one reads as `"refuse"`. Qualified ids
+postdate the policy, and the plugin that introduced them refuses, so guessing
+`local` would run a command meant for that machine on this one. `data/` is per
+instance, so the dev instance learns the policy the first time the plugin
+activates there.
+
+Qualified ids need the other instance to have "Ids from a newer version" (next
+paragraph). One that predates it fails the whole settings file or project.yaml
+on reading one. Run a build with it on both instances before a qualified id
+reaches shared config.
 
 **Ids from a newer version.** A backend registers with an id matching
 `TERMINAL_BACKEND_ID_PATTERN`. Places that store an id (a chat's pin, app

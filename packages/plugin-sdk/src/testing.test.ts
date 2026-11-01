@@ -216,6 +216,18 @@ describe("createTestContext providers", () => {
 });
 
 describe("createTestContext terminals", () => {
+  it("accepts a backend id qualified by the plugin's own id, as the host does, and refuses another plugin's (E12)", () => {
+    const t = createTestContext({ id: "remote-host", capabilities: ["terminals"] });
+    const spawn = async () => ({ stdin: { write: () => {} }, stdout: { on: () => {} }, stderr: { on: () => {} }, kill: () => {}, on: () => {} });
+    t.ctx.terminals!.registerBackend({ id: "remote-host/cvx-mac", label: "cvx-mac", shell: "bash", spawn, fallback: "refuse" });
+    expect([...t.terminalBackends.keys()]).toEqual(["remote-host/cvx-mac"]);
+    expect(() =>
+      t.ctx.terminals!.registerBackend({ id: "proxmox-terminal/box", label: "Box", shell: "bash", spawn }),
+    ).toThrow(/must start with the registering plugin's id \("remote-host\/…"\)/);
+    t.ctx.terminals!.setStatus("remote-host/cvx-mac", { state: "offline" });
+    expect(t.terminalStatus.get("remote-host/cvx-mac")).toEqual({ state: "offline" });
+  });
+
   it("records a backend, plays the host's spawn and hooks, and scopes ports", async () => {
     const t = createTestContext();
     const calls: string[] = [];

@@ -87,12 +87,33 @@ export function isBackendOffline(b: TerminalBackendInfo | undefined): boolean {
 /**
  * What a picker row says under a backend's name: its status when it is not
  * plainly online — an asleep Mac is still pinnable, but nobody should pin it
- * thinking it is up — else the plugin it came from.
+ * thinking it is up. The plugin it came from is the heading it is listed under
+ * ({@link backendGroup}), so the row does not repeat it.
  */
 export function backendHint(b: TerminalBackendInfo): string | undefined {
   const st = b.status;
   if (st && st.state !== "online") return st.detail ? `${st.state} · ${st.detail}` : st.state;
-  return b.pluginId;
+  return undefined;
+}
+
+/** The heading a picker lists a backend under: the plugin that registered it. */
+export function backendGroup(b: TerminalBackendInfo): string {
+  return b.pluginId ?? "plugins";
+}
+
+/** The heading for ids that config names but nothing here has registered. */
+export const UNAVAILABLE_BACKENDS_GROUP = "not available here";
+
+/**
+ * Backends in picker order: by plugin, then by name, so each plugin's sit
+ * together under one heading. A plugin like remote-host registers a backend
+ * per paired machine; in registration order they interleaved with every other
+ * plugin's, and three Macs read as unrelated rows.
+ */
+export function sortBackendsForPicker(backends: readonly TerminalBackendInfo[]): TerminalBackendInfo[] {
+  return [...backends].sort(
+    (a, b) => backendGroup(a).localeCompare(backendGroup(b)) || a.label.localeCompare(b.label),
+  );
 }
 
 /**

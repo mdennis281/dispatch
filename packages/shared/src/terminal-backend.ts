@@ -26,8 +26,24 @@ import { resolveLayered, type Layered } from "./layered.js";
 /** The id that always means "a local shell on the Dispatch host". Never registrable. */
 export const LOCAL_TERMINAL_BACKEND = "local";
 
-/** `[a-z0-9][a-z0-9-]{0,47}` — the ids THIS version registers, and so the only ones it can resolve. */
-export const TERMINAL_BACKEND_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,47}$/;
+/**
+ * The ids THIS version registers, and so the only ones it can resolve:
+ * `[a-z0-9][a-z0-9-]{0,47}`, optionally QUALIFIED by the registering plugin's
+ * id — `<pluginId>/<name>`, e.g. `remote-host/cvx-mac`.
+ *
+ * A qualified id cannot collide with another plugin's backend: one plugin
+ * that registers a backend per machine the human pairs would otherwise race
+ * every other plugin for bare names like `mac`. The registry refuses a prefix
+ * that is not the registering plugin's id. Unqualified ids stay valid — the
+ * published proxmox-terminal plugin registers `proxmox`.
+ */
+export const TERMINAL_BACKEND_ID_PATTERN = /^(?:[a-z0-9][a-z0-9-]{0,39}\/)?[a-z0-9][a-z0-9-]{0,47}$/;
+
+/** The plugin a QUALIFIED backend id names (`remote-host` for `remote-host/cvx-mac`); undefined for a bare id. */
+export function terminalBackendPluginOf(id: string): string | undefined {
+  const slash = id.indexOf("/");
+  return slash > 0 ? id.slice(0, slash) : undefined;
+}
 
 /**
  * What a PERSISTED backend id may look like — a chat's pin, app settings'
@@ -296,7 +312,12 @@ export interface TerminalChatEvent {
  * what it owns, and a no-op for a chat it has never seen is the common case.
  */
 export interface TerminalBackend {
-  /** Matches {@link TERMINAL_BACKEND_ID_PATTERN}; never `local`. */
+  /**
+   * Matches {@link TERMINAL_BACKEND_ID_PATTERN}; never `local`. Prefer the
+   * qualified form, `<your plugin id>/<name>` — any other prefix is refused.
+   * It is persisted on chats and in config, so keep it stable: rename with
+   * `label`, never by changing the id.
+   */
   id: string;
   /** What the picker, the location badge and the agent note call it. */
   label: string;

@@ -756,6 +756,50 @@ describe("lifecycle hooks and ports", () => {
   });
 });
 
+describe("qualified backend ids `<pluginId>/<name>` (E12)", () => {
+  it("are registered only by the plugin they name", () => {
+    const h = setup();
+    h.registry.register(fakeBackend({ id: "remote-host/cvx-mac", label: "cvx-mac" }), "remote-host");
+    expect(h.registry.list().map((b) => [b.id, b.pluginId])).toEqual([["remote-host/cvx-mac", "remote-host"]]);
+    // Another plugin cannot claim that namespace — and with it the chats pinned there.
+    expect(() => h.registry.register(fakeBackend({ id: "remote-host/other" }), "impostor")).toThrow(
+      /a qualified id must start with the registering plugin's id \("impostor\/…"\)/,
+    );
+    expect(() => h.registry.register(fakeBackend({ id: "remote-host/x" }))).toThrow(/has no plugin/);
+    // Bare ids are unchanged: proxmox-terminal registers `proxmox`.
+    h.registry.register(fakeBackend({ id: "proxmox" }), "proxmox-terminal");
+    expect(h.registry.has("proxmox")).toBe(true);
+  });
+
+  it("a chat pinned to one runs there, and the agent's `location` can name it", async () => {
+    const h = setup();
+    const mac = fakeBackend({ id: "remote-host/cvx-mac", label: "cvx-mac" });
+    h.registry.register(mac, "remote-host");
+    h.chats.set("c1", { terminalBackend: "remote-host/cvx-mac" });
+    h.registry.notePin("c1", "remote-host/cvx-mac");
+    const res = await h.svc.run({ chatId: "c1", name: "build", command: "say there", cwd: "/w" });
+    expect(res.output).toBe("there");
+    expect(res.ranOn).toEqual({ id: "remote-host/cvx-mac", label: "cvx-mac" });
+
+    h.chats.set("c2", { projectId: "p1" });
+    h.allowed.app = ["local", "remote-host/cvx-mac"];
+    expect(await h.registry.checkLocation({ chatId: "c2" }, "remote-host/cvx-mac")).toEqual({ ok: true, label: "cvx-mac" });
+  });
+
+  it("a qualified id this instance never saw fails closed; a bare one keeps the old local default", async () => {
+    const h = setup();
+    h.registry.register(fakeBackend(), "plug");
+    expect(h.registry.fallbackOf("remote-host/cvx-mac")).toBe("refuse");
+    expect(h.registry.fallbackOf("proxmox")).toBe("local");
+
+    h.chats.set("c1", { terminalBackend: "remote-host/cvx-mac" });
+    h.registry.notePin("c1", "remote-host/cvx-mac");
+    const res = await h.svc.run({ chatId: "c1", name: "build", command: "say x", cwd: "/w" });
+    expect(res.error).toMatch(/did not start on remote-host\/cvx-mac .*not installed, or its plugin is switched off/);
+    expect(h.local).toHaveLength(0);
+  });
+});
+
 describe("persisted ids this version cannot read (E12a)", () => {
   // `future:box` stands for an id a NEWER instance sharing config/ wrote.
 

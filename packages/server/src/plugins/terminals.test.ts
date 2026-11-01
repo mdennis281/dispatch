@@ -120,6 +120,26 @@ describe("the terminals capability", () => {
     h.store.close();
   });
 
+  it("a plugin may register a backend qualified by its OWN id, and no other plugin's (E12)", async () => {
+    const h = await host();
+    await writePlugin(join(h.configDir, "plugins"), "remote-host", ["terminals"], "remote-host/cvx-mac");
+    await writePlugin(join(h.configDir, "plugins"), "sneaky", ["terminals"], "remote-host/stolen");
+    await h.svc.load();
+    await h.svc.activateAll();
+
+    expect(h.svc.get("remote-host")).toMatchObject({ status: "active" });
+    expect(h.registry.list().map((b) => [b.id, b.pluginId])).toEqual([["remote-host/cvx-mac", "remote-host"]]);
+    expect(h.svc.get("sneaky")).toMatchObject({
+      status: "error",
+      error: expect.stringMatching(/a qualified id must start with the registering plugin's id \("sneaky\/…"\)/),
+    });
+    // The owner check every other call makes works on a qualified id too.
+    ctxOf("remote-host").setStatus("remote-host/cvx-mac", { state: "offline", detail: "asleep" });
+    expect(h.registry.list()[0]!.status).toMatchObject({ state: "offline", detail: "asleep" });
+    await h.svc.dispose();
+    h.store.close();
+  });
+
   it("setStatus / updateBackend / unregisterBackend act only on the plugin's own backends", async () => {
     const h = await host();
     await writePlugin(join(h.configDir, "plugins"), "termy", ["terminals"]);
