@@ -28,9 +28,13 @@ import type {
   PluginSendResult,
   ProviderDescriptor,
   QuestionAnswer,
+  TerminalAfterRunInfo,
+  TerminalAfterRunResult,
   TerminalBackend,
   TerminalBackendHandle,
+  TerminalBeforeRunResult,
   TerminalPortForward,
+  TerminalRunInfo,
   TerminalSpawnInfo,
   WsServerEvent,
   WsServerEventType,
@@ -145,6 +149,26 @@ export interface TestContext {
      * "recorded and retried later". Call it twice to check it is idempotent.
      */
     chatDeleted(chatId: string, projectId?: string): Promise<void>;
+    /**
+     * Call a backend's `beforeRun` as core would before writing `command`,
+     * and report what core would do: `ran: false` with `refusal` when the
+     * hook refused or threw (core never writes the command then). Fills
+     * `terminal` ("main"), `cwd` ("/repo"), `background` and `signal`. No
+     * `beforeRun` at all is `ran: true` — the command just runs.
+     */
+    beforeRun(
+      backendId: string,
+      info: Partial<TerminalRunInfo> & { chatId: string; command: string },
+    ): Promise<{ ran: boolean; refusal?: string; notices: string[] }>;
+    /**
+     * Call a backend's `afterRun` as core would once it stops waiting on a
+     * command. Defaults: `exitCode` 0, `outcome` "finished", `durationMs` 0.
+     * Rejects when the hook throws — which core turns into a notice.
+     */
+    afterRun(
+      backendId: string,
+      info: Partial<TerminalAfterRunInfo> & { chatId: string; command: string },
+    ): Promise<{ notices: string[] }>;
   };
   /**
    * Play the HOST's side of the cleanup lifecycle (docs/plugins.md → "Cleanup
@@ -499,6 +523,13 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
     };
   }
 
+  const runDefaults = () => ({
+    terminal: "main",
+    cwd: "/repo",
+    background: false,
+    signal: new AbortController().signal,
+  });
+
   const backendOf = (backendId: string): TerminalBackend => {
     const b = terminalBackends.get(backendId);
     if (!b) throw new Error(`no terminal backend "${backendId}" registered — have: ${[...terminalBackends.keys()].join(", ") || "(none)"}`);
@@ -574,6 +605,31 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
       chatDeleted: async (chatId, projectId) => {
         for (const p of terminalPorts.filter((f) => f.chatId === chatId)) terminalPorts.splice(terminalPorts.indexOf(p), 1);
         for (const b of terminalBackends.values()) await b.onChatDeleted?.({ chatId, projectId });
+      },
+      beforeRun: async (backendId, info) => {
+        const b = backendOf(backendId);
+        if (!b.beforeRun) return { ran: true, notices: [] };
+        let verdict: TerminalBeforeRunResult | void;
+        try {
+          verdict = await b.beforeRun({ ...runDefaults(), ...info });
+        } catch (err) {
+          return { ran: false, refusal: err instanceof Error ? err.message : String(err), notices: [] };
+        }
+        const notices = verdict?.notices ?? [];
+        return typeof verdict?.refuse === "string"
+          ? { ran: false, refusal: verdict.refuse, notices }
+          : { ran: true, notices };
+      },
+      afterRun: async (backendId, info) => {
+        const b = backendOf(backendId);
+        const r: TerminalAfterRunResult | void = await b.afterRun?.({
+          ...runDefaults(),
+          exitCode: 0,
+          durationMs: 0,
+          outcome: "finished",
+          ...info,
+        });
+        return { notices: r?.notices ?? [] };
       },
     },
     lifecycle: {

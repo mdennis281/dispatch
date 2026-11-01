@@ -7,9 +7,15 @@
  * Everything runs against a fake backend whose shell is a scripted
  * EventEmitter, the same way terminal.test.ts drives a fake PowerShell.
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { EventEmitter } from "node:events";
-import type { TerminalBackend, TerminalSpawnInfo, WsServerEvent } from "@dispatch/shared";
+import type {
+  TerminalAfterRunInfo,
+  TerminalBackend,
+  TerminalRunInfo,
+  TerminalSpawnInfo,
+  WsServerEvent,
+} from "@dispatch/shared";
 import { EventBus } from "../bus.js";
 import { TerminalService, type ShellProcess } from "./terminal.js";
 import { TerminalBackendRegistry } from "./terminal-backends.js";
@@ -68,22 +74,29 @@ interface Harness {
   svc: TerminalService;
   /** Local shells the service spawned. */
   local: FakeShell[];
-  chats: Map<string, { terminalBackend?: string; projectId?: string }>;
+  chats: Map<string, { terminalBackend?: string; projectId?: string; worktreePath?: string }>;
   projectDefaults: Map<string, string>;
   /** The allowed-locations layers, mutable per test. Empty ⇒ no choice (the default). */
   allowed: { project?: string[]; app?: string[] };
+  /** Directories the registry asked for a branch, in order. */
+  branchAsked: string[];
 }
 
 function setup(): Harness {
-  const chats = new Map<string, { terminalBackend?: string; projectId?: string }>();
+  const chats = new Map<string, { terminalBackend?: string; projectId?: string; worktreePath?: string }>();
   const projectDefaults = new Map<string, string>();
   const allowed: { project?: string[]; app?: string[] } = {};
+  const branchAsked: string[] = [];
   const registry = new TerminalBackendRegistry({
     bus,
     chat: async (id) => chats.get(id) ?? null,
     projectDefault: (pid) => projectDefaults.get(pid),
     allowedLocations: () => allowed,
     repoPath: async () => "/repo",
+    branchOf: async (dir) => {
+      branchAsked.push(dir);
+      return dir === "/wt/feat-x" ? "feat/x" : "main";
+    },
   });
   const local: FakeShell[] = [];
   let n = 0;
@@ -102,7 +115,7 @@ function setup(): Harness {
   });
   registry.onDetach((id) => svc.detachBackend(id));
   services.push(svc);
-  return { registry, svc, local, chats, projectDefaults, allowed };
+  return { registry, svc, local, chats, projectDefaults, allowed, branchAsked };
 }
 
 /** A backend whose spawn the test controls. */
@@ -690,5 +703,309 @@ describe("per-terminal location (the agent's choice)", () => {
       "b:http://127.0.0.1:2",
       "box:http://127.0.0.1:1",
     ]);
+  });
+});
+
+describe("per-run hooks (beforeRun / afterRun)", () => {
+  /** A backend with hooks, its shell answering every probe. */
+  function hooked(over: Partial<TerminalBackend> = {}) {
+    const before: TerminalRunInfo[] = [];
+    const after: TerminalAfterRunInfo[] = [];
+    const backend = fakeBackend({
+      beforeRun: (info) => {
+        before.push(info);
+        return { notices: [`synced for: ${info.command}`] };
+      },
+      afterRun: (info) => {
+        after.push(info);
+        return { notices: [`brought back after: ${info.command}`] };
+      },
+      ...over,
+    });
+    return { backend, before, after };
+  }
+  const commandsWritten = (s: FakeShell) => s.writes.filter((w) => !w.includes("CMTERMSENTINEL_"));
+
+  it("a backend with no hooks writes command + probe exactly as before, and the result gains nothing", async () => {
+    const h = setup();
+    const backend = fakeBackend();
+    h.registry.register(backend, "plug");
+    h.chats.set("c1", { terminalBackend: "box" });
+    const res = await h.svc.run({ chatId: "c1", name: "main", command: "say hi", cwd: "/w" });
+    expect(backend.spawned[0]!.writes).toEqual(["say hi\n", expect.stringMatching(/^__cm_ec=\$\?; printf .*CMTERMSENTINEL_/)]);
+    expect(res).not.toHaveProperty("notices");
+    expect(res).not.toHaveProperty("refused");
+    expect(res.output).toBe("hi");
+  });
+
+  it("awaits beforeRun before writing the command, then runs it and reports both hooks' notices in order", async () => {
+    const h = setup();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const { backend, before, after } = hooked({
+      beforeRun: async (info) => {
+        before.push(info);
+        await gate;
+        return { notices: ["Synced 2 local changes."] };
+      },
+    });
+    h.registry.register(backend, "plug");
+    h.chats.set("c1", { terminalBackend: "box", projectId: "p1" });
+
+    const running = h.svc.run({ chatId: "c1", projectId: "p1", name: "build", command: "say built", cwd: "/w" });
+    await vi.waitFor(() => expect(before).toHaveLength(1));
+    // Held at the hook: nothing reached the shell, and the shell reads busy.
+    expect(backend.spawned[0]!.writes).toEqual([]);
+    expect(h.svc.listChat("c1")[0]!.busy).toBe(true);
+    expect(before[0]).toMatchObject({
+      chatId: "c1",
+      projectId: "p1",
+      terminal: "build",
+      command: "say built",
+      cwd: "/srv/repo",
+      background: false,
+    });
+    expect(before[0]!.signal.aborted).toBe(false);
+
+    release();
+    const res = await running;
+    expect(res.output).toBe("built");
+    expect(res.exitCode).toBe(0);
+    expect(res.notices).toEqual(["Synced 2 local changes.", "brought back after: say built"]);
+    expect(after).toHaveLength(1);
+    expect(after[0]).toMatchObject({ terminal: "build", command: "say built", exitCode: 0, outcome: "finished" });
+    expect(after[0]!.durationMs).toBeGreaterThanOrEqual(0);
+    expect(h.svc.listChat("c1")[0]!.busy).toBe(false);
+    // The human reading the panel sees the same lines, attributed.
+    const lines = (await h.svc.scrollback(h.svc.listChat("c1")[0]!.id)).map((l) => l.chunk);
+    expect(lines).toContain("[Test box] Synced 2 local changes.");
+    expect(lines).toContain("[Test box] brought back after: say built");
+  });
+
+  it("a refusal never writes the command: an error result, marked refused, said in the transcript", async () => {
+    const h = setup();
+    const { backend, after } = hooked({
+      beforeRun: () => ({ refuse: "a.txt was edited here and on the box.", notices: ["Conflicting: a.txt"] }),
+    });
+    h.registry.register(backend, "plug");
+    h.chats.set("c1", { terminalBackend: "box" });
+
+    const res = await h.svc.run({ chatId: "c1", name: "main", command: "say nope", cwd: "/w" });
+    expect(res).toMatchObject({
+      output: "",
+      exitCode: null,
+      refused: true,
+      error: "a.txt was edited here and on the box.",
+      notices: ["Conflicting: a.txt"],
+    });
+    expect(commandsWritten(backend.spawned[0]!)).toEqual([]);
+    expect(after).toHaveLength(0);
+    const term = h.svc.listChat("c1")[0]!;
+    expect(term.busy).toBe(false);
+    expect(term.lastExitCode).toBeNull();
+    const lines = (await h.svc.scrollback(term.id)).map((l) => l.chunk);
+    expect(lines).toContain("[dispatch] Not run: a.txt was edited here and on the box.");
+  });
+
+  it("a beforeRun that throws refuses too, naming the backend", async () => {
+    const h = setup();
+    const { backend } = hooked({
+      beforeRun: () => {
+        throw new Error("ssh: connection refused");
+      },
+    });
+    h.registry.register(backend, "plug");
+    h.chats.set("c1", { terminalBackend: "box" });
+    const res = await h.svc.run({ chatId: "c1", name: "main", command: "say x", cwd: "/w" });
+    expect(res.refused).toBe(true);
+    expect(res.error).toBe("Test box could not prepare this command, so it was not run: ssh: connection refused");
+    expect(commandsWritten(backend.spawned[0]!)).toEqual([]);
+    // The shell is not wedged by it.
+    backend.beforeRun = undefined;
+    expect((await h.svc.run({ chatId: "c1", name: "main", command: "say again" })).output).toBe("again");
+  });
+
+  it("time in beforeRun is not charged to the command's timeout", async () => {
+    const h = setup();
+    const { backend } = hooked({
+      beforeRun: () => new Promise((r) => setTimeout(() => r({}), 250)),
+    });
+    h.registry.register(backend, "plug");
+    h.chats.set("c1", { terminalBackend: "box" });
+    const started = Date.now();
+    const res = await h.svc.run({ chatId: "c1", name: "main", command: "say slow-sync", cwd: "/w", timeoutMs: 100 });
+    // The sync really did take longer than the command's whole deadline…
+    expect(Date.now() - started).toBeGreaterThanOrEqual(240);
+    // …and the command still got all of its own.
+    expect(res.timedOut).toBeUndefined();
+    expect(res.error).toBeUndefined();
+    expect(res.output).toBe("slow-sync");
+  });
+
+  it("a beforeRun that overruns runHookTimeoutMs refuses the command and aborts its signal", async () => {
+    const h = setup();
+    let seen: AbortSignal | undefined;
+    const { backend } = hooked({
+      runHookTimeoutMs: 1_000,
+      beforeRun: ({ signal }) => {
+        seen = signal as AbortSignal;
+        return new Promise(() => {});
+      },
+    });
+    h.registry.register(backend, "plug");
+    h.chats.set("c1", { terminalBackend: "box" });
+    const res = await h.svc.run({ chatId: "c1", name: "main", command: "say x", cwd: "/w" });
+    expect(res.refused).toBe(true);
+    expect(res.error).toMatch(/did not finish preparing this command within 1s/);
+    expect(seen?.aborted).toBe(true);
+    expect(commandsWritten(backend.spawned[0]!)).toEqual([]);
+  });
+
+  it("a session interrupt during beforeRun cancels without writing, and aborts the hook", async () => {
+    const h = setup();
+    let seen: AbortSignal | undefined;
+    const { backend, after } = hooked({
+      beforeRun: ({ signal }) => {
+        seen = signal as AbortSignal;
+        return new Promise(() => {});
+      },
+    });
+    h.registry.register(backend, "plug");
+    h.chats.set("c1", { terminalBackend: "box" });
+    const ctl = new AbortController();
+    const running = h.svc.run({ chatId: "c1", name: "main", command: "say x", cwd: "/w", signal: ctl.signal });
+    await vi.waitFor(() => expect(seen).toBeDefined());
+    ctl.abort();
+    const res = await running;
+    expect(res.error).toBe("Cancelled (session interrupted).");
+    expect(res.refused).toBeUndefined();
+    expect(seen!.aborted).toBe(true);
+    expect(commandsWritten(backend.spawned[0]!)).toEqual([]);
+    expect(after).toHaveLength(0);
+    expect(h.svc.listChat("c1")[0]!.busy).toBe(false);
+  });
+
+  it("closing the terminal during beforeRun answers at once and writes nothing", async () => {
+    const h = setup();
+    let seen: AbortSignal | undefined;
+    const { backend } = hooked({
+      beforeRun: ({ signal }) => {
+        seen = signal as AbortSignal;
+        return new Promise(() => {});
+      },
+    });
+    h.registry.register(backend, "plug");
+    h.chats.set("c1", { terminalBackend: "box" });
+    const running = h.svc.run({ chatId: "c1", name: "main", command: "say x", cwd: "/w" });
+    await vi.waitFor(() => expect(seen).toBeDefined());
+    h.svc.kill(h.svc.listChat("c1")[0]!.id);
+    const res = await running;
+    expect(res.error).toBe("Terminal has exited.");
+    expect(seen!.aborted).toBe(true);
+    expect(commandsWritten(backend.spawned[0]!)).toEqual([]);
+  });
+
+  it("afterRun failing is a notice, not a failed run — the command already ran", async () => {
+    const h = setup();
+    const { backend } = hooked({
+      afterRun: () => {
+        throw new Error("pull-back failed");
+      },
+    });
+    h.registry.register(backend, "plug");
+    h.chats.set("c1", { terminalBackend: "box" });
+    const res = await h.svc.run({ chatId: "c1", name: "main", command: "say ran", cwd: "/w" });
+    expect(res.error).toBeUndefined();
+    expect(res.output).toBe("ran");
+    expect(res.notices).toEqual(["synced for: say ran", "Test box failed after the command ran: pull-back failed"]);
+  });
+
+  it("the shell stays busy until afterRun settles", async () => {
+    const h = setup();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const after: TerminalAfterRunInfo[] = [];
+    const { backend } = hooked({
+      beforeRun: undefined,
+      afterRun: async (info) => {
+        after.push(info);
+        await gate;
+      },
+    });
+    h.registry.register(backend, "plug");
+    h.chats.set("c1", { terminalBackend: "box" });
+    const running = h.svc.run({ chatId: "c1", name: "main", command: "say x", cwd: "/w" });
+    await vi.waitFor(() => expect(after).toHaveLength(1));
+    expect(h.svc.listChat("c1")[0]!.busy).toBe(true);
+    release();
+    const res = await running;
+    expect(res.output).toBe("x");
+    expect(res).not.toHaveProperty("notices");
+    expect(h.svc.listChat("c1")[0]!.busy).toBe(false);
+  });
+
+  it("a timed-out command still gets afterRun, told it may still be running", async () => {
+    const h = setup();
+    const { backend, after } = hooked();
+    h.registry.register(backend, "plug");
+    h.chats.set("c1", { terminalBackend: "box" });
+    const res = await h.svc.run({ chatId: "c1", name: "main", command: "hang", cwd: "/w", timeoutMs: 50 });
+    expect(res.timedOut).toBe(true);
+    expect(after[0]).toMatchObject({ outcome: "timed-out", exitCode: null });
+    expect(res.notices).toEqual(["synced for: hang", "brought back after: hang"]);
+  });
+
+  it("a background command: beforeRun gates the start, afterRun reports to the transcript when it ends", async () => {
+    const h = setup();
+    const { backend, before, after } = hooked();
+    h.registry.register(backend, "plug");
+    h.chats.set("c1", { terminalBackend: "box" });
+
+    const res = await h.svc.run({ chatId: "c1", name: "dev", command: "hang", cwd: "/w", background: true });
+    expect(res.backgrounded).toBe(true);
+    expect(res.notices).toEqual(["synced for: hang"]);
+    expect(before[0]!.background).toBe(true);
+    expect(after).toHaveLength(0);
+
+    // The dev server exits: its marker finally lands.
+    const shell = backend.spawned[0]!;
+    const marker = shell.writes.join("").match(/CMTERMSENTINEL_[A-Za-z0-9_-]+/)![0];
+    shell.stdout.emit("data", Buffer.from(`${marker}|3|False|/srv/repo\n`));
+    await vi.waitFor(() => expect(after).toHaveLength(1));
+    expect(after[0]).toMatchObject({ background: true, outcome: "finished", exitCode: 3 });
+    await vi.waitFor(async () => {
+      const lines = (await h.svc.scrollback(h.svc.listChat("c1")[0]!.id)).map((l) => l.chunk);
+      expect(lines).toContain("[Test box] brought back after: hang");
+    });
+  });
+
+  it("is never called for a shell that fell back to local", async () => {
+    const h = setup();
+    const { backend, before, after } = hooked({ spawn: async () => Promise.reject(new Error("offline")) });
+    h.registry.register(backend, "plug");
+    h.chats.set("c1", { terminalBackend: "box" });
+    const res = await h.svc.run({ chatId: "c1", name: "main", command: "say local", cwd: "/w" });
+    expect(res.output).toBe("local");
+    expect(res).not.toHaveProperty("notices");
+    expect(before).toHaveLength(0);
+    expect(after).toHaveLength(0);
+  });
+
+  it("spawn is told the chat's worktree and the branch checked out there", async () => {
+    const h = setup();
+    const backend = fakeBackend();
+    h.registry.register(backend, "plug");
+    h.chats.set("c1", { terminalBackend: "box", projectId: "p1", worktreePath: "/wt/feat-x" });
+    h.chats.set("c2", { terminalBackend: "box", projectId: "p1" });
+    await h.svc.run({ chatId: "c1", name: "main", command: "say a", cwd: "/wt/feat-x" });
+    await h.svc.run({ chatId: "c2", name: "main", command: "say b", cwd: "/repo" });
+    expect(backend.infos[0]).toMatchObject({ worktreePath: "/wt/feat-x", branch: "feat/x", repoPath: "/repo" });
+    // No worktree: the branch is the primary checkout's.
+    expect(backend.infos[1]).toMatchObject({ branch: "main", repoPath: "/repo" });
+    expect(backend.infos[1]).not.toHaveProperty("worktreePath");
+    // A local shell never pays for the git call.
+    h.chats.set("c3", {});
+    await h.svc.run({ chatId: "c3", name: "main", command: "say c", cwd: "/w" });
+    expect(h.branchAsked).toEqual(["/wt/feat-x", "/repo"]);
   });
 });

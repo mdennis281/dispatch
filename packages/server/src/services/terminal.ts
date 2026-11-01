@@ -77,7 +77,10 @@ import { nanoid } from "nanoid";
 import {
   applyRegistryQuery,
   LOCAL_TERMINAL_BACKEND,
+  TERMINAL_RUN_HOOK_MAX_TIMEOUT_MS,
+  TERMINAL_RUN_HOOK_TIMEOUT_MS,
   type RegistryQuery,
+  type TerminalAfterRunInfo,
   type TerminalBackend,
   type TerminalLocation,
   type TerminalInfo,
@@ -219,6 +222,10 @@ export interface TerminalBackendResolution {
   missing?: boolean;
   /** The project's primary checkout, handed to the backend's spawn. */
   repoPath?: string;
+  /** The chat's worktree, when it has one, handed to the backend's spawn. */
+  worktreePath?: string;
+  /** The branch checked out at the chat's root, handed to the backend's spawn. */
+  branch?: string;
   /** Core's agent-facing note for this backend (where the shell runs, what that means). */
   note?: string;
 }
@@ -338,6 +345,13 @@ export interface RunTerminalResult {
    * backend plugin a result is exactly what it always was.
    */
   ranOn?: TerminalRanOn;
+  /**
+   * The serving backend's `beforeRun` refused the command, so it was never
+   * written to the shell; `error` says why.
+   */
+  refused?: boolean;
+  /** Lines the serving backend's `beforeRun` / `afterRun` had for the agent, in that order. */
+  notices?: string[];
 }
 
 /* ------------------------------------------------------------------- markers */
@@ -352,6 +366,49 @@ const DEFAULT_TIMEOUT_MS = 600_000;
 
 /** How long a terminal's transcript is kept before the sweep drops it. */
 export const DEFAULT_RETENTION_MS = 7 * 24 * 60 * 60_000;
+
+/**
+ * How core stopped waiting on a command it meant to write. `backgrounded` is
+ * the early return; `not-written` never reached the shell (a dead stdin, a
+ * caller that had already cancelled).
+ */
+interface RunEnd {
+  result: RunTerminalResult;
+  outcome: TerminalAfterRunInfo["outcome"] | "backgrounded" | "not-written";
+  durationMs: number;
+}
+
+/** How a run hook ended, as {@link TerminalService.callHook} reports it. */
+type HookOutcome<T> =
+  | { kind: "done"; value: T }
+  | { kind: "threw"; message: string }
+  | { kind: "timeout" }
+  | { kind: "cancelled" }
+  | { kind: "exited" };
+
+/** A hook's notices, minus anything that is not a non-empty string. */
+function cleanNotices(lines: unknown): string[] {
+  if (!Array.isArray(lines)) return [];
+  return lines.filter((l): l is string => typeof l === "string" && l.trim() !== "").map((l) => l.trimEnd());
+}
+
+/**
+ * What `afterRun` leaves for the result. The command already ran, so a hook
+ * that fails is a NOTICE, never a failed run — but it is said, because it
+ * usually means changes the command made over there did not come back.
+ */
+function afterNotices(o: HookOutcome<unknown>, label: string, ms: number): string[] {
+  switch (o.kind) {
+    case "done":
+      return cleanNotices((o.value as { notices?: unknown } | undefined)?.notices);
+    case "threw":
+      return [`${label} failed after the command ran: ${o.message}`];
+    case "timeout":
+      return [`${label} did not finish its after-run step within ${Math.round(ms / 1000)}s.`];
+    default:
+      return [];
+  }
+}
 
 /** Shorten a command for a one-line error message. */
 function truncate(s: string, max: number): string {
@@ -390,12 +447,14 @@ interface Terminal {
   scrollback: TerminalLine[];
   /** Serializes runs on this terminal (each waits for the previous marker). */
   queue: Promise<unknown>;
-  /** The in-flight run's marker resolver, if any. */
+  /** The in-flight run's marker resolver, if any. `exited`: the shell died under it. */
   pending?: {
     marker: string;
-    resolve: (r: { exitCode: number | null; cwd: string }) => void;
+    resolve: (r: { exitCode: number | null; cwd: string; exited?: boolean }) => void;
     output: string[];
   };
+  /** Stops waiting on an in-flight `beforeRun` when the shell goes away under it. */
+  hookStop?: () => void;
   /** Set while a `background` command holds this shell (see `run`). */
   background?: { command: string; since: number };
   /** The probe dialect THIS shell speaks — a backend's bash under a Windows host. */
@@ -404,6 +463,8 @@ interface Terminal {
   location?: TerminalLocation;
   /** The registered backend actually serving this shell (not set on a fallback). */
   backendId?: string;
+  /** That backend, for its per-run hooks. */
+  backend?: TerminalBackend;
   /**
    * The location this shell was opened FOR — the agent's `location`, else what
    * the chat → project → local rule resolved to. Unset only while a shell with
@@ -799,6 +860,8 @@ export class TerminalService {
             name: term.name,
             cwd,
             repoPath: res.repoPath,
+            ...(res.worktreePath ? { worktreePath: res.worktreePath } : {}),
+            ...(res.branch ? { branch: res.branch } : {}),
             signal: placeholder.abort.signal,
           }) as Promise<ShellProcess>,
       );
@@ -822,6 +885,7 @@ export class TerminalService {
     }
     term.flavour = backend.shell === "powershell" ? "powershell" : "posix";
     term.backendId = backend.id;
+    term.backend = backend;
     if (remoteCwd) term.cwd = remoteCwd;
     term.location = { backend: backend.id, label: backend.label, state: "ready" };
     term.notice = res.note;
@@ -919,42 +983,234 @@ export class TerminalService {
         error: "Terminal has exited.",
       });
     }
+    // Only a shell a backend is SERVING has hooks — never a fallback, never a
+    // local shell — and a backend that declares neither takes the very path
+    // every shell took before hooks existed.
+    const backend = term.backend;
+    if (backend?.beforeRun || backend?.afterRun) return this.execHooked(term, args, backend);
+    this.beginRun(term, args.command);
+    return this.writeAndWait(term, args).then((end) => end.result);
+  }
 
-    const command = args.command;
-    const marker = `${SENTINEL_PREFIX}${this.genId()}`;
+  /** Mark the shell busy with `command` and echo it into the read-only stream. */
+  private beginRun(term: Terminal, command: string): void {
     term.busy = true;
     term.lastCommand = command;
     term.updatedAt = this.now();
     this.publishUpdate(term);
-
     // Echo the command into the read-only stream (piped shells don't echo input).
     this.record(term, "command", command);
+  }
 
-    return new Promise<RunTerminalResult>((resolve) => {
+  /**
+   * A run on a shell whose backend has `beforeRun` / `afterRun`.
+   *
+   * `beforeRun` is awaited BEFORE the command is written and its time is not
+   * charged to the command's timeout — the timer in `writeAndWait` only starts
+   * at the write. That is the whole point of the hook over the stdin sniffing a
+   * backend had to do before it existed: a sync that takes a minute used to eat
+   * the command's own deadline, and a sync that FAILED could only print a
+   * warning and let the command run against a stale checkout. Here a refusal
+   * means the command never reaches the shell.
+   */
+  private async execHooked(term: Terminal, args: RunTerminalArgs, backend: TerminalBackend): Promise<RunTerminalResult> {
+    const command = args.command;
+    const label = backend.label;
+    const hookMs = Math.min(
+      TERMINAL_RUN_HOOK_MAX_TIMEOUT_MS,
+      Math.max(1_000, backend.runHookTimeoutMs ?? TERMINAL_RUN_HOOK_TIMEOUT_MS),
+    );
+    const base = {
+      chatId: term.chatId,
+      ...(term.projectId ? { projectId: term.projectId } : {}),
+      terminal: term.name,
+      command,
+      cwd: term.cwd,
+      background: Boolean(args.background),
+    };
+    const notices: string[] = [];
+    const withNotices = (r: RunTerminalResult): RunTerminalResult =>
+      notices.length ? { ...r, notices: [...notices] } : r;
+    this.beginRun(term, command);
+
+    if (backend.beforeRun) {
+      const before = await this.callHook(term, args.signal, hookMs, true, (signal) =>
+        backend.beforeRun!({ ...base, signal }),
+      );
+      let refusal: string | undefined;
+      if (before.kind === "done") {
+        notices.push(...cleanNotices(before.value?.notices));
+        if (typeof before.value?.refuse === "string") {
+          refusal = before.value.refuse.trim() || `${label} refused to run this command.`;
+        }
+      } else if (before.kind === "threw") {
+        refusal = `${label} could not prepare this command, so it was not run: ${before.message}`;
+      } else if (before.kind === "timeout") {
+        refusal = `${label} did not finish preparing this command within ${Math.round(hookMs / 1000)}s, so it was not run.`;
+      } else {
+        // Nobody is waiting (a session interrupt) or there is no shell left to
+        // write to — the same answers a run gives for those without a hook.
+        this.endRun(term, null);
+        return withNotices({
+          output: "",
+          exitCode: null,
+          cwd: term.cwd,
+          error: before.kind === "cancelled" ? "Cancelled (session interrupted)." : "Terminal has exited.",
+        });
+      }
+      this.recordNotices(term, label, notices);
+      if (refusal !== undefined) {
+        this.record(term, "stderr", `[dispatch] Not run: ${refusal}`);
+        this.endRun(term, null);
+        return withNotices({ output: "", exitCode: null, cwd: term.cwd, error: refusal, refused: true });
+      }
+    }
+
+    const after = backend.afterRun
+      ? (end: RunEnd, callerSignal: AbortSignal | undefined): Promise<string[]> =>
+          this.callHook(term, callerSignal, hookMs, false, (signal) =>
+            backend.afterRun!({
+              ...base,
+              exitCode: end.result.exitCode,
+              durationMs: end.durationMs,
+              outcome: end.outcome as TerminalAfterRunInfo["outcome"],
+              signal,
+            }),
+          ).then((o) => afterNotices(o, label, hookMs))
+      : undefined;
+    // The tail of a run nobody is waiting on any more — a backgrounded command
+    // ending long after its result went back, or a cancelled one. Its notices
+    // can only go to the transcript.
+    const detached = (end: RunEnd): void => {
+      if (!after) return;
+      void after(end, undefined).then((lines) => this.recordNotices(term, label, lines));
+    };
+
+    const end = await this.writeAndWait(term, args, { holdBusy: Boolean(after), onLateEnd: detached });
+    if (!after || end.outcome === "backgrounded" || end.outcome === "not-written") return withNotices(end.result);
+    if (end.outcome === "cancelled") {
+      detached(end);
+      return withNotices(end.result);
+    }
+    const lines = await after(end, args.signal);
+    this.recordNotices(term, label, lines);
+    notices.push(...lines);
+    if (term.status === "live") this.endRun(term, end.result.exitCode);
+    return withNotices(end.result);
+  }
+
+  /** Free the shell after a hooked run that `writeAndWait` did not free itself. */
+  private endRun(term: Terminal, exitCode: number | null): void {
+    term.busy = false;
+    term.lastExitCode = exitCode;
+    term.updatedAt = this.now();
+    // A shell closed while its hook ran has already told the panel it is gone;
+    // an update now would bring the row back.
+    if (this.terminals.get(term.id) === term) this.publishUpdate(term);
+  }
+
+  /** A backend's notices, into the transcript a human reads in the Terminals panel. */
+  private recordNotices(term: Terminal, label: string, lines: readonly string[]): void {
+    for (const line of lines) this.record(term, "stderr", `[${label}] ${line}`);
+  }
+
+  /**
+   * Call a run hook and wait for it — but never past `ms`, a cancelled caller,
+   * or (with `stopOnExit`) the shell dying under it. Never rejects. The hook's
+   * signal is aborted whenever core stops waiting for any reason but the hook
+   * settling, so a well-behaved hook stops too.
+   */
+  private callHook<T>(
+    term: Terminal,
+    callerSignal: AbortSignal | undefined,
+    ms: number,
+    stopOnExit: boolean,
+    fn: (signal: AbortSignal) => T | Promise<T>,
+  ): Promise<HookOutcome<T>> {
+    const ctl = new AbortController();
+    return new Promise<HookOutcome<T>>((resolve) => {
+      let done = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const onCancel = (): void => settle({ kind: "cancelled" });
+      const stop = (): void => settle({ kind: "exited" });
+      const settle = (o: HookOutcome<T>): void => {
+        if (done) return;
+        done = true;
+        if (timer) clearTimeout(timer);
+        callerSignal?.removeEventListener("abort", onCancel);
+        if (term.hookStop === stop) term.hookStop = undefined;
+        if (o.kind !== "done" && o.kind !== "threw") ctl.abort();
+        resolve(o);
+      };
+      if (callerSignal?.aborted) return settle({ kind: "cancelled" });
+      if (stopOnExit && term.status === "exited") return settle({ kind: "exited" });
+      timer = setTimeout(() => settle({ kind: "timeout" }), ms);
+      timer.unref?.();
+      callerSignal?.addEventListener("abort", onCancel);
+      if (stopOnExit) term.hookStop = stop;
+      Promise.resolve()
+        .then(() => fn(ctl.signal))
+        .then(
+          (value) => settle({ kind: "done", value }),
+          (err: unknown) => settle({ kind: "threw", message: err instanceof Error ? err.message : String(err) }),
+        );
+    });
+  }
+
+  /**
+   * Write one command + its sentinel probe, and settle when the marker lands
+   * (or the deadline, a cancel, or the shell's exit says to stop waiting).
+   *
+   * The deadline starts HERE, at the write — anything that ran before it (a
+   * backend's `beforeRun`) is not the command's time. `hooked` is only passed
+   * for a shell whose backend has run hooks: `holdBusy` keeps the shell busy
+   * past the marker while `afterRun` is still to come, and `onLateEnd` hears
+   * when a BACKGROUNDED command finally ends.
+   */
+  private writeAndWait(
+    term: Terminal,
+    args: RunTerminalArgs,
+    hooked?: { holdBusy: boolean; onLateEnd: (end: RunEnd) => void },
+  ): Promise<RunEnd> {
+    const command = args.command;
+    const marker = `${SENTINEL_PREFIX}${this.genId()}`;
+    let writtenAt = this.now();
+
+    return new Promise<RunEnd>((resolve) => {
       let settled = false;
+      let returnedEarly = false;
       const cleanups: (() => void)[] = [];
-      const finish = (r: RunTerminalResult): void => {
+      const finish = (r: RunTerminalResult, outcome: RunEnd["outcome"]): void => {
         if (settled) return;
         settled = true;
         for (const c of cleanups) c();
         term.pending = undefined;
         term.background = undefined;
-        term.busy = false;
+        // Still busy while `afterRun` has yet to report on a command that is
+        // over (or overran) — the caller frees it once that hook settles.
+        term.busy = Boolean(
+          hooked?.holdBusy && !returnedEarly && (outcome === "finished" || outcome === "timed-out"),
+        );
         if (typeof r.exitCode === "number" || r.exitCode === null) {
           term.lastExitCode = r.exitCode;
         }
         term.updatedAt = this.now();
         this.publishUpdate(term);
-        resolve(r);
+        const end: RunEnd = { result: r, outcome, durationMs: this.now() - writtenAt };
+        if (returnedEarly) {
+          if (outcome !== "not-written") hooked?.onLateEnd(end);
+          return;
+        }
+        resolve(end);
       };
 
       const output: string[] = [];
       term.pending = {
         marker,
         output,
-        resolve: ({ exitCode, cwd }) => {
+        resolve: ({ exitCode, cwd, exited }) => {
           term.cwd = cwd || term.cwd;
-          finish({ output: output.join("\n"), exitCode, cwd: term.cwd });
+          finish({ output: output.join("\n"), exitCode, cwd: term.cwd }, exited ? "shell-exited" : "finished");
         },
       };
 
@@ -965,13 +1221,16 @@ export class TerminalService {
       const timeoutMs = args.timeoutMs && args.timeoutMs > 0 ? args.timeoutMs : DEFAULT_TIMEOUT_MS;
       if (!args.background) {
         const timer = setTimeout(() => {
-          finish({
-            output: output.join("\n"),
-            exitCode: null,
-            cwd: term.cwd,
-            timedOut: true,
-            error: `Command timed out after ${timeoutMs}ms (still running in the background).`,
-          });
+          finish(
+            {
+              output: output.join("\n"),
+              exitCode: null,
+              cwd: term.cwd,
+              timedOut: true,
+              error: `Command timed out after ${timeoutMs}ms (still running in the background).`,
+            },
+            "timed-out",
+          );
         }, timeoutMs);
         cleanups.push(() => clearTimeout(timer));
       }
@@ -979,22 +1238,17 @@ export class TerminalService {
       // Session abort → stop waiting (shell survives for the next turn).
       const sig = args.background ? undefined : args.signal;
       if (sig) {
+        const cancelled = (): RunTerminalResult => ({
+          output: output.join("\n"),
+          exitCode: null,
+          cwd: term.cwd,
+          error: "Cancelled (session interrupted).",
+        });
         if (sig.aborted) {
-          finish({
-            output: output.join("\n"),
-            exitCode: null,
-            cwd: term.cwd,
-            error: "Cancelled (session interrupted).",
-          });
+          finish(cancelled(), "not-written");
           return;
         }
-        const onAbort = (): void =>
-          finish({
-            output: output.join("\n"),
-            exitCode: null,
-            cwd: term.cwd,
-            error: "Cancelled (session interrupted).",
-          });
+        const onAbort = (): void => finish(cancelled(), "cancelled");
         sig.addEventListener("abort", onAbort);
         cleanups.push(() => sig.removeEventListener("abort", onAbort));
       }
@@ -1002,16 +1256,20 @@ export class TerminalService {
       // The probe: the marker line `<marker>|<exit>|<ok>|<cwd>`, in whichever
       // dialect the shell under this terminal speaks.
       const probe = probeLine(marker, term.flavour);
+      writtenAt = this.now();
       try {
         term.proc.stdin.write(command + "\n");
         term.proc.stdin.write(probe + "\n");
       } catch (err) {
-        finish({
-          output: output.join("\n"),
-          exitCode: null,
-          cwd: term.cwd,
-          error: err instanceof Error ? err.message : String(err),
-        });
+        finish(
+          {
+            output: output.join("\n"),
+            exitCode: null,
+            cwd: term.cwd,
+            error: err instanceof Error ? err.message : String(err),
+          },
+          "not-written",
+        );
         return;
       }
 
@@ -1021,11 +1279,11 @@ export class TerminalService {
       if (args.background) {
         term.background = { command, since: this.now() };
         this.publishUpdate(term);
+        returnedEarly = true;
         resolve({
-          output: "",
-          exitCode: null,
-          cwd: term.cwd,
-          backgrounded: true,
+          result: { output: "", exitCode: null, cwd: term.cwd, backgrounded: true },
+          outcome: "backgrounded",
+          durationMs: 0,
         });
       }
     });
@@ -1256,10 +1514,12 @@ export class TerminalService {
     term.status = "exited";
     term.busy = false;
     term.updatedAt = this.now();
-    // Resolve any in-flight run so a caller never hangs on a dead shell.
+    // Resolve any in-flight run so a caller never hangs on a dead shell — or on
+    // a `beforeRun` preparing a command for a shell that is no longer there.
     if (term.pending) {
-      term.pending.resolve({ exitCode: null, cwd: term.cwd });
+      term.pending.resolve({ exitCode: null, cwd: term.cwd, exited: true });
     }
+    term.hookStop?.();
     this.publishUpdate(term);
     void this.flush().catch(() => {});
   }
@@ -1276,6 +1536,9 @@ export class TerminalService {
     const term = this.terminals.get(terminalId);
     if (!term) return false;
     this.terminals.delete(terminalId);
+    // A command still in `beforeRun` must not be written to a shell being
+    // closed; its caller hears "Terminal has exited." now, not after the kill.
+    term.hookStop?.();
     // Killing the shell does NOT discard what it printed. The row moves to the
     // archive and the transcript stays readable until retention takes it —
     // "close the terminal" and "forget what the build said" are different asks,

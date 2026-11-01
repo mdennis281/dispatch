@@ -383,7 +383,9 @@ export function createServices(
       bus,
       chat: async (chatId) => {
         const chat = await store.getChat(chatId).catch(() => null);
-        return chat ? { terminalBackend: chat.terminalBackend, projectId: chat.projectId } : null;
+        return chat
+          ? { terminalBackend: chat.terminalBackend, projectId: chat.projectId, worktreePath: chat.worktrees[0] }
+          : null;
       },
       projectDefault: (projectId) => projectConfig.getDefaults(projectId)?.terminalBackend,
       // Both layers raw; `resolveTerminalLocations` decides which one speaks.
@@ -392,6 +394,8 @@ export function createServices(
         app: (await store.getSettings().catch(() => null))?.terminalLocations,
       }),
       repoPath: async (projectId) => (await store.getProject(projectId).catch(() => null))?.repoPath,
+      // `git` is assigned further down; only called once a backend shell opens.
+      branchOf: async (dir) => git.currentBranch(dir),
       log: (message, err) => console.warn(`[terminals] ${message}`, err ?? ""),
       // `plugins` is assigned further down; only called once a chat opens a shell.
       settled: () => plugins.activationSettled(),

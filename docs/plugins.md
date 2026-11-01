@@ -797,9 +797,17 @@ ctx.terminals.registerBackend({
   label: "Proxmox container",
   shell: "bash",            // the dialect of the sentinel probe core appends
   spawnTimeoutMs: 180_000,  // default 120 s, capped at 10 min
-  async spawn({ chatId, projectId, name, cwd, repoPath, signal }) {
+  async spawn({ chatId, projectId, name, cwd, repoPath, worktreePath, branch, signal }) {
     // provision, connect, then hand back stdio
     return handle;          // TerminalBackendHandle — see below
+  },
+  // Optional, per command — see "Run hooks" below.
+  async beforeRun({ chatId, terminal, command, cwd, background, signal }) {
+    // bring the far side up to date; fail closed when it can't be
+    return { notices: ["Synced 2 local changes."] };   // or { refuse: "why" }
+  },
+  async afterRun({ chatId, terminal, command, exitCode, durationMs, outcome }) {
+    return { notices: ["Brought back: pnpm-lock.yaml"] };
   },
   agentNote: ({ chatId }) => "How your local edits reach the container: …",
   onChatIdle: ({ chatId }) => { /* stop what you made, maybe */ },
@@ -817,6 +825,52 @@ unchanged over any transport that carries a line each way. It has **no
 `pid`**: core reads a pid as a local process it may tree-kill and walk the
 process table under, so it strips one if present. `kill()` must take down the
 remote shell *and what it started* — it is the only teardown core can ask for.
+
+**Spawn info.** Besides the chat, the terminal's `name` and the LOCAL `cwd` it
+would have started in, `spawn` gets `repoPath` (the project's primary
+checkout), `worktreePath` (the chat's own worktree, absent for a chat in the
+primary checkout) and `branch` (what git has checked out at the chat's root
+when the shell is asked for; absent on a detached HEAD). Both new fields are
+read only for a shell headed to a backend.
+
+**Run hooks.** `beforeRun` and `afterRun` are optional, and called only for
+shells this backend is actually serving: never for a fallback, never for a
+local shell, and never for a shell opened with no command.
+
+- `beforeRun` is **awaited before the command is written**. Answer `{ refuse }`
+  (or throw) and core never writes it: the run's result is an error carrying
+  your text verbatim (the agent sees it as `NOT RUN: …`), and the terminal's
+  transcript says `[dispatch] Not run: …`. Answer `{ notices }` to tell the
+  agent something with the result. This is where a sync belongs, and where a
+  sync that fails or a conflict refuses the run instead of letting it execute
+  against a stale tree.
+- `afterRun` is called once core stops waiting on a command it wrote, with
+  `exitCode`, `durationMs` (from the write; `beforeRun` is not in it) and
+  `outcome`: `finished`, `timed-out` or `shell-exited`. Only `finished` means
+  the command is over. Core awaits it before returning the result, keeps the
+  shell busy meanwhile, and appends its notices. A throw or overrun becomes a
+  notice, never a failed run: the command already ran.
+- **Timing.** Neither hook's time is charged to the command's timeout. Both
+  share their own bound, `runHookTimeoutMs` (default 10 min, capped at 1 h).
+  A `beforeRun` that overruns refuses the command.
+- **Cancellation.** Each hook gets a `signal`, aborted when core stops waiting:
+  a session interrupt, the terminal closed or its shell gone (`beforeRun`
+  only), or the bound. Core does not wait for a hook that ignores it, so a hook
+  that keeps working may overlap the next run's. Serialize your own sync if
+  that matters.
+- **Fire-and-forget cases.** For a `background` command, `beforeRun` gates the
+  start as usual, but `afterRun` comes when the command finally ends, long
+  after its result went back. For a run cancelled mid-command, `afterRun` is
+  still called with `outcome: "cancelled"`. In both cases its notices go only
+  to the transcript.
+- Notices also land in the transcript as `[<label>] …` lines, so the human
+  watching the Terminals panel reads what the agent reads.
+
+Before these hooks existed a backend had to sniff stdin to tell the command
+from core's probe (the probe line starts `__cm_ec=` for bash). That still
+works, since core writes the command and the probe as two writes exactly as
+before, but a sync done that way eats the command's own timeout and can only
+warn when it fails.
 
 **Selection** is `resolveTerminalBackend` (shared): the chat's
 `terminalBackend` pin, else the project's `defaults.terminalBackend` in
@@ -890,6 +944,9 @@ badge.
 `createTestContext` records `terminalBackends` and `terminalPorts`, and
 `t.terminals.spawn(id, { chatId })` / `chatIdle` / `chatDeleted` play the
 host's side, so a backend can be unit-tested with no server.
+`t.terminals.beforeRun(id, { chatId, command })` reports what core would do
+(`{ ran, refusal?, notices }`, a throw counted as a refusal), and
+`t.terminals.afterRun(id, { chatId, command, exitCode? })` returns the notices.
 
 ## Client host
 

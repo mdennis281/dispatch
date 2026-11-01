@@ -735,6 +735,16 @@ export class GitService {
     return out.length > maxChars ? `${out.slice(0, maxChars)}\n…(truncated)` : out;
   }
 
+  /**
+   * The branch checked out at `dir`, or undefined on a detached HEAD or
+   * outside a repository. Never throws: callers want it as a label.
+   */
+  async currentBranch(dir: string): Promise<string | undefined> {
+    const r = await this.exec("git", ["symbolic-ref", "--short", "-q", "HEAD"], { cwd: dir }).catch(() => null);
+    const name = r?.exitCode === 0 ? r.stdout.trim() : "";
+    return name || undefined;
+  }
+
   /** True when HEAD resolves — false on a fresh repo with no commits yet. */
   private async hasHead(repoPath: string): Promise<boolean> {
     const r = await this.exec(

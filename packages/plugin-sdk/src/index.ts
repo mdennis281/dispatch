@@ -76,6 +76,10 @@ export type {
   TerminalPortForward,
   TerminalPortForwardInput,
   TerminalSpawnInfo,
+  TerminalRunInfo,
+  TerminalBeforeRunResult,
+  TerminalAfterRunInfo,
+  TerminalAfterRunResult,
   // client host
   ClientHost,
   ClientHostKit,

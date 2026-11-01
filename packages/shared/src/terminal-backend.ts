@@ -49,8 +49,85 @@ export interface TerminalSpawnInfo {
   cwd: string;
   /** The project's primary checkout, when the chat belongs to one. */
   repoPath?: string;
+  /**
+   * The chat's own git worktree, when it works in one — absent for a chat in
+   * the primary checkout. The root a backend snapshots, which `cwd` is not
+   * guaranteed to stay: it is where the shell STARTS.
+   */
+  worktreePath?: string;
+  /**
+   * The branch checked out at the chat's root (its worktree, else the primary
+   * checkout) when the shell was asked for, read from git. Absent on a
+   * detached HEAD or outside a repository.
+   */
+  branch?: string;
   /** Aborted when the terminal is closed (or the spawn timed out) while still connecting. */
   signal: HostAbortSignal;
+}
+
+/**
+ * How long core waits on `beforeRun` or `afterRun` by default. A sync can be
+ * slow (the first one seeds a checkout), so the bound is generous, and it is
+ * spent OUTSIDE the command's own timeout.
+ */
+export const TERMINAL_RUN_HOOK_TIMEOUT_MS = 600_000;
+/** The most a backend may ask for with `runHookTimeoutMs`. */
+export const TERMINAL_RUN_HOOK_MAX_TIMEOUT_MS = 3_600_000;
+
+/** What `beforeRun` is told about one command on a shell the backend serves. */
+export interface TerminalRunInfo {
+  chatId: string;
+  projectId?: string;
+  /** The terminal's name within the chat — the same `name` its spawn was given. */
+  terminal: string;
+  /** Exactly what core is about to write to the shell. */
+  command: string;
+  /** The shell's cwd ON THE FAR SIDE as core last saw it — where the command starts. */
+  cwd: string;
+  /** The command returns as soon as it is written (a dev server, a watcher). */
+  background: boolean;
+  /**
+   * Aborted when core stops waiting for the hook: the caller cancelled (a
+   * session interrupt), the terminal closed or its shell exited, or the hook
+   * overran its bound. Core does NOT wait for a hook that ignores it — so a
+   * hook that keeps working after an abort may overlap the next run's.
+   */
+  signal: HostAbortSignal;
+}
+
+/**
+ * What `beforeRun` may answer. Nothing (or `{}`) runs the command as usual.
+ */
+export interface TerminalBeforeRunResult {
+  /**
+   * Do NOT run the command. Core never writes it; the run's result is an error
+   * carrying this text verbatim, and the terminal's transcript says so too.
+   * For a sync that failed, a conflict with a local edit, a checkout that is
+   * not where it should be — anything that would make the command's outcome a
+   * lie. Throwing does the same, with the error's message.
+   */
+  refuse?: string;
+  /** Lines for the agent, delivered with this command's result (and in the transcript). */
+  notices?: string[];
+}
+
+/** What `afterRun` is told: the same run, plus how it ended. */
+export interface TerminalAfterRunInfo extends TerminalRunInfo {
+  /** The command's exit code, or null when core never learned it (see `outcome`). */
+  exitCode: number | null;
+  /** From the write to when core stopped waiting. `beforeRun`'s time is not in it. */
+  durationMs: number;
+  /**
+   * Why core stopped waiting. Only `finished` means the command is over:
+   * after `timed-out` or `cancelled` it may still be running in the shell.
+   */
+  outcome: "finished" | "timed-out" | "cancelled" | "shell-exited";
+}
+
+/** What `afterRun` may answer. */
+export interface TerminalAfterRunResult {
+  /** Lines for the agent, appended to this command's result (and in the transcript). */
+  notices?: string[];
 }
 
 /**
@@ -136,6 +213,38 @@ export interface TerminalBackend {
    * output), how to reach a server it starts there.
    */
   agentNote?(info: { chatId: string; projectId?: string }): string | undefined;
+  /**
+   * Called before EVERY command on a shell this backend serves, and awaited
+   * before the command is written — the place to bring the far side up to date
+   * with the local worktree, and to refuse when it cannot be (fail closed).
+   * Resolve `{ refuse }` (or throw) to stop the command; `{ notices }` to tell
+   * the agent something with its result.
+   *
+   * Its time is NOT charged to the command's timeout; it has its own bound,
+   * {@link runHookTimeoutMs}, and overrunning it refuses the command. Runs on
+   * one terminal are serialized, so two calls for the same terminal never
+   * overlap unless one ignored its abort signal. Not called for a shell that
+   * fell back to local, nor for a shell opened with no command.
+   */
+  beforeRun?(info: TerminalRunInfo): TerminalBeforeRunResult | void | Promise<TerminalBeforeRunResult | void>;
+  /**
+   * Called once core stops waiting on a command it wrote — the place to bring
+   * changes the command made on the far side back, and say so. Awaited (on
+   * the same bound as `beforeRun`) before the result is returned, and its
+   * notices are appended to it; a throw or overrun becomes a notice, never a
+   * failed run, because the command already ran.
+   *
+   * Two exceptions, both fire-and-forget with notices going only to the
+   * transcript: a `cancelled` run (the caller has stopped listening), and a
+   * `background` command, which is reported when the command finally ends —
+   * long after its result went back.
+   */
+  afterRun?(info: TerminalAfterRunInfo): TerminalAfterRunResult | void | Promise<TerminalAfterRunResult | void>;
+  /**
+   * How long core waits on `beforeRun` / `afterRun`. Default
+   * {@link TERMINAL_RUN_HOOK_TIMEOUT_MS}, capped at {@link TERMINAL_RUN_HOOK_MAX_TIMEOUT_MS}.
+   */
+  runHookTimeoutMs?: number;
   /**
    * The chat went idle — its session was retired by the idle sweep. Shells on
    * the backend are NOT killed by core; stopping (and later restarting on the

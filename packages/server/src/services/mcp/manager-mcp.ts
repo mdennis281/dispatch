@@ -441,6 +441,10 @@ export interface ManagerMcpTerminals {
     notice?: string;
     /** Where this run happened. Absent on an install with no terminal backend in play. */
     ranOn?: { id: string; label: string; fallbackFrom?: string };
+    /** The terminal backend refused to run it (its `beforeRun`); `error` says why. */
+    refused?: boolean;
+    /** What the terminal backend had to say before and after this command. */
+    notices?: string[];
     /** Remote listeners a terminal backend forwards for this chat. Absent with no backend. */
     ports?: ForwardedPort[];
   }>;
@@ -5332,12 +5336,25 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       // Where the shell runs — or why it is not where the chat asked — leads
       // the result: it changes how everything after it should be read.
       const notice = res.notice ? `${res.notice}\n\n` : "";
+      // The backend's own lines (a sync it did, changes it brought back) follow
+      // the output they are about.
+      const notes = res.notices?.length ? `\n${res.notices.join("\n")}` : "";
       if (res.backgrounded) {
         return textResult(
           `${notice}[${name}] started in the background${where} (cwd=${res.cwd}). ` +
             `Read its output with terminal_output({ name: "${name}" }). ` +
             `It is tracked against this chat and stops when the chat is torn down.` +
+            notes +
             portsNote(res.ports),
+        );
+      }
+      // Said as NOT RUN, not as `exit=n/a`: an agent reading a missing exit
+      // code assumes the command may have done something.
+      if (res.refused) {
+        return textResult(
+          `${notice}[${name}]${where} cwd=${res.cwd} NOT RUN: ${res.error ?? "refused by the terminal backend"}` +
+            `${notes}${portsNote(res.ports)}`,
+          true,
         );
       }
 
@@ -5345,7 +5362,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       const body = res.output ? `\n${res.output}` : "";
       const note = res.error ? `\n(${res.error})` : "";
       return textResult(
-        `${notice}${header}${body}${note}${portsNote(res.ports)}`,
+        `${notice}${header}${body}${note}${notes}${portsNote(res.ports)}`,
         !!res.error && !res.timedOut,
       );
     },
