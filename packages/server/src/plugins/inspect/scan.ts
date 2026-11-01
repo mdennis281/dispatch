@@ -213,7 +213,11 @@ export function scanText(src: string): Array<Omit<Hit, "index"> & { line: number
   for (const [member, spec] of Object.entries(SERVER_MEMBERS)) {
     if (member === "bus" || member === "routes") continue;
     // `(?:<…>)?` — a TypeScript type argument between name and call: `ctx.kv!.get<Stats>("stats")`.
-    const re = new RegExp(`${A}${DOT}${member}${DOT}([A-Za-z_$][\\w$]*)\\s*(?:<[^<>()]{0,80}>)?\\s*\\(\\s*(?:${str(2)})?`, "g");
+    // `(?:\?\.)?` — an optional call, `ctx.secrets.set?.("K", v)`: the natural
+    // form for a method typed optional, and esbuild keeps the `?.` in the
+    // built entry this scans (it strips a `!`). Missing it hid exactly the
+    // undeclared-capability case the report exists for.
+    const re = new RegExp(`${A}${DOT}${member}${DOT}([A-Za-z_$][\\w$]*)\\s*(?:<[^<>()]{0,80}>)?\\s*(?:\\?\\.)?\\s*\\(\\s*(?:${str(2)})?`, "g");
     for (const m of text.matchAll(re)) {
       const method = m[1]!;
       const capability = spec.methods ? spec.methods[method] : spec.capability;

@@ -110,6 +110,7 @@ import { PluginInspector } from "../plugins/inspect/index.js";
 import { PluginUpdateWatcher, pluginUpdateHours } from "../plugins/inspect/watcher.js";
 import { PluginOAuthService } from "../plugins/oauth.js";
 import { PluginCleanupQueue } from "../plugins/cleanup.js";
+import { pluginMcpServersUsingSecret } from "../plugins/contributions.js";
 
 /** The shared base every service hangs off. */
 export interface ServiceBase {
@@ -1459,7 +1460,12 @@ export function createServices(
     };
   };
 
-  const secretRefresher: SecretRefresher = new SecretRefresher({ projectConfig, broker, runner });
+  const secretRefresher: SecretRefresher = new SecretRefresher({
+    projectConfig,
+    broker,
+    runner,
+    pluginMcpServersUsing: (name) => pluginMcpServersUsingSecret(plugins.mcpServers(), name),
+  });
   // A secret saved by the OTHER instance (they share config/) refreshes this
   // one's consumers too; our own saves are refreshed by whoever made them.
   secrets.onExternalChange((keys) => void secretRefresher.refresh(keys).catch(() => {}));

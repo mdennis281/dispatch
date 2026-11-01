@@ -22,8 +22,19 @@ export interface SecretRefresherDeps {
     ProjectConfigService,
     "reload" | "secretConsumers" | "projectsReferencingSecret" | "getSubApps"
   >;
-  broker: { refreshMcpServers(projectId: string, names: string[]): Promise<{ refreshed: string[]; nextSession: string[] }> };
+  broker: {
+    refreshMcpServers(projectId: string, names: string[]): Promise<{ refreshed: string[]; nextSession: string[] }>;
+    /** Projects with a live session. Absent: plugin servers are not refreshed. */
+    liveProjectIds?(): string[];
+  };
   runner: Pick<RunnerService, "runningFor" | "restart">;
+  /**
+   * Plugin-contributed MCP servers that expand `${secret:name}`. They are in
+   * no project's config, so the project walk below never finds them — and a
+   * plugin rotating its own credential with `ctx.secrets.set` is exactly the
+   * change that must reach them. Absent: none are refreshed.
+   */
+  pluginMcpServersUsing?: (name: string) => string[];
 }
 
 export class SecretRefresher {
@@ -88,6 +99,25 @@ export class SecretRefresher {
         }
       }
     }
+    // Plugin servers expand from the GLOBAL store only (plugins are global), so
+    // a project secret never reaches one. Nothing to reload first: their
+    // definitions are read from the plugin, not from a project's config.
+    const pluginServers = [
+      ...new Set(changed.filter((k) => k.scope === "global").flatMap((k) => this.deps.pluginMcpServersUsing?.(k.name) ?? [])),
+    ];
+    if (pluginServers.length && broker.liveProjectIds) {
+      for (const projectId of broker.liveProjectIds()) {
+        const live = await broker.refreshMcpServers(projectId, pluginServers);
+        if (!live.refreshed.length && !live.nextSession.length) continue;
+        report.mcpServers.push(...pluginServers.map((m) => `${projectId}/${m}`));
+        report.chatsRefreshed.push(...live.refreshed);
+        report.chatsOnNextSession.push(...live.nextSession);
+      }
+    }
+    // A chat holding a project server AND a plugin server is refreshed once per pass.
+    report.mcpServers = [...new Set(report.mcpServers)];
+    report.chatsRefreshed = [...new Set(report.chatsRefreshed)];
+    report.chatsOnNextSession = [...new Set(report.chatsOnNextSession)];
     for (const key of changed) this.last.set(reportKey(key), report);
     return report;
   }

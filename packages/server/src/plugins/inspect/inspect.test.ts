@@ -356,7 +356,8 @@ describe("declared vs used", () => {
           "export async function activate(ctx) {",
           "  await ctx.secrets.get('API_KEY');",
           "  await ctx.secrets.set(`HOST_KEY_${slug}`, pem);",
-          "  await ctx.secrets.delete('HOST_KEY_old');",
+          // Optional call — how a TS author calls a method typed `set?(…)`, kept by esbuild.
+          "  await ctx.secrets.delete?.('HOST_KEY_old');",
           "  await ctx.secrets.set('ROGUE', 'x');",
           "  await ctx.secrets.set(`${computed}`, 'x');",
           "}",

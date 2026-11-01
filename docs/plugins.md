@@ -650,7 +650,10 @@ wholesale by an update. So `secrets:write` adds `ctx.secrets.set(name, value)` a
   over 64 KiB. (`get` of an uncovered name still warns and returns `undefined`.)
 - **Consumers refresh.** `set`/`delete` resolve after every MCP server and
   sub-app that references `${secret:NAME}` has been refreshed — the same
-  `SecretRefresher` pass a save from the Secrets pane runs. A refresh failure is
+  `SecretRefresher` pass a save from the Secrets pane runs. That covers project
+  config servers and sub-apps, and plugin-contributed servers (including the
+  plugin's own) in every live chat; a runtime that can't swap servers
+  mid-session picks the value up on its next session. A refresh failure is
   logged, not thrown: the value is stored.
 - **Consent.** `secrets:write` is its own capability with its own line on the
   consent card, and it requires `secrets` (a manifest declaring only

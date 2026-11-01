@@ -327,6 +327,21 @@ export function expandPluginSecrets(
   });
 }
 
+/**
+ * The plugin MCP servers whose definition expands `${secret:name}` — what a
+ * change to that GLOBAL secret has to reconnect. Only servers whose manifest
+ * covers the name: an uncovered reference expands to "" whatever the value,
+ * so reconnecting it would change nothing.
+ */
+export function pluginMcpServersUsingSecret(declarations: readonly PluginMcpDeclaration[], name: string): string[] {
+  const out = new Set<string>();
+  for (const d of declarations) {
+    if (!pluginSecretAllowed(d.secrets, name)) continue;
+    if (secretBearingStrings(d.config).some((v) => referencedSecrets(v).includes(name))) out.add(d.name);
+  }
+  return [...out];
+}
+
 /** The string fields of a server config a `${secret:…}` can hide in — the same set `expandSecretsInMcpServers` expands. */
 const SECRET_STRING_KEYS = ["command", "url", "cwd", "prewarm"] as const;
 const SECRET_RECORD_KEYS = ["env", "headers"] as const;
