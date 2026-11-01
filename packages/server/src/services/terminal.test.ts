@@ -11,6 +11,7 @@ import {
   type ShellProcess,
   type SpawnShell,
 } from "./terminal.js";
+import { unwrapCommandWrite } from "./terminal.testkit.js";
 
 /* ------------------------------------------------------------------ fixtures */
 
@@ -71,7 +72,8 @@ class FakeShell extends EventEmitter implements ShellProcess {
   }
 
   private handle(chunk: string): void {
-    for (const raw of chunk.split("\n")) {
+    // Runs what the agent typed, not `commandWrite`'s stdin isolation around it.
+    for (const raw of unwrapCommandWrite(chunk).split("\n")) {
       const line = raw.replace(/\r$/, "");
       if (!line.trim()) continue;
 

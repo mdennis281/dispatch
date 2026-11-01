@@ -18,15 +18,18 @@ import type {
 } from "@dispatch/shared";
 import { EventBus } from "../bus.js";
 import { TerminalService, type ShellProcess } from "./terminal.js";
+import { unwrapCommandWrite } from "./terminal.testkit.js";
 import { TerminalBackendRegistry } from "./terminal-backends.js";
 
 /**
  * A scripted shell. `say X` prints X; every write carrying a sentinel marker
  * prints the marker line back. Records what was written, so a test can tell
- * which probe dialect reached it.
+ * which probe dialect reached it, and the commands it ran with
+ * `commandWrite`'s stdin isolation taken off.
  */
 class FakeShell extends EventEmitter implements ShellProcess {
   readonly writes: string[] = [];
+  readonly ran: string[] = [];
   readonly stdout = new EventEmitter();
   readonly stderr = new EventEmitter();
   killed = false;
@@ -34,7 +37,8 @@ class FakeShell extends EventEmitter implements ShellProcess {
   readonly stdin = {
     write: (chunk: string): void => {
       this.writes.push(chunk);
-      for (const line of chunk.split("\n")) {
+      for (const line of unwrapCommandWrite(chunk).split("\n")) {
+        if (line && !line.includes("CMTERMSENTINEL_")) this.ran.push(line);
         const say = line.match(/^say\s+(.+)$/);
         if (say) this.stdout.emit("data", Buffer.from(`${say[1]}\n`));
         // `hang` never returns, like a dev server: its marker never prints.
@@ -727,13 +731,19 @@ describe("per-run hooks (beforeRun / afterRun)", () => {
   }
   const commandsWritten = (s: FakeShell) => s.writes.filter((w) => !w.includes("CMTERMSENTINEL_"));
 
-  it("a backend with no hooks writes command + probe exactly as before, and the result gains nothing", async () => {
+  it("a backend with no hooks gets the command, then the probe, as two writes, and the result gains nothing", async () => {
     const h = setup();
     const backend = fakeBackend();
     h.registry.register(backend, "plug");
     h.chats.set("c1", { terminalBackend: "box" });
     const res = await h.svc.run({ chatId: "c1", name: "main", command: "say hi", cwd: "/w" });
-    expect(backend.spawned[0]!.writes).toEqual(["say hi\n", expect.stringMatching(/^__cm_ec=\$\?; printf .*CMTERMSENTINEL_/)]);
+    // The published proxmox-terminal plugin syncs before any write that does
+    // not start `__cm_ec=`: the probe must stay a write of its own, with that
+    // prefix, after a command write that never has it.
+    expect(backend.spawned[0]!.writes).toEqual([
+      "eval 'say hi\n' </dev/null\n",
+      expect.stringMatching(/^__cm_ec=\$\?; printf .*CMTERMSENTINEL_/),
+    ]);
     expect(res).not.toHaveProperty("notices");
     expect(res).not.toHaveProperty("refused");
     expect(res.output).toBe("hi");
@@ -1024,7 +1034,7 @@ describe("why a shell ended (exit reasons) and respawn notices", () => {
     await h.svc.run({ chatId: "c1", name: "build", command: "say up", cwd: "/w" });
 
     const running = h.svc.run({ chatId: "c1", name: "build", command: "hang" });
-    await vi.waitFor(() => expect(backend.spawned[0]!.writes.some((w) => w.startsWith("hang"))).toBe(true));
+    await vi.waitFor(() => expect(backend.spawned[0]!.ran.includes("hang")).toBe(true));
     backend.spawned[0]!.stdout.emit("data", Buffer.from("migrating 3 of 7\n"));
     backend.spawned[0]!.emit("exit", null, lostReason);
     const res = await running;
@@ -1069,7 +1079,7 @@ describe("why a shell ended (exit reasons) and respawn notices", () => {
     h.chats.set("c1", { terminalBackend: "box" });
     await h.svc.run({ chatId: "c1", name: "main", command: "say up", cwd: "/w" });
     const running = h.svc.run({ chatId: "c1", name: "main", command: "hang" });
-    await vi.waitFor(() => expect(backend.spawned[0]!.writes.some((w) => w.startsWith("hang"))).toBe(true));
+    await vi.waitFor(() => expect(backend.spawned[0]!.ran.includes("hang")).toBe(true));
     backend.spawned[0]!.emit("exit", null, { kind: "killed", detail: "idle stop" });
     const res = await running;
     expect(res.error).toMatch(/was stopped on Test box \(idle stop\) while the command was running, so the command did not finish/);
@@ -1083,7 +1093,7 @@ describe("why a shell ended (exit reasons) and respawn notices", () => {
     h.chats.set("c1", { terminalBackend: "box" });
     await h.svc.run({ chatId: "c1", name: "main", command: "say up", cwd: "/w" });
     const running = h.svc.run({ chatId: "c1", name: "main", command: "hang" });
-    await vi.waitFor(() => expect(backend.spawned[0]!.writes.some((w) => w.startsWith("hang"))).toBe(true));
+    await vi.waitFor(() => expect(backend.spawned[0]!.ran.includes("hang")).toBe(true));
     backend.spawned[0]!.emit("exit", 0, { kind: "exited" });
     const res = await running;
     expect(res.error).toBeUndefined();
@@ -1093,7 +1103,7 @@ describe("why a shell ended (exit reasons) and respawn notices", () => {
     h.chats.set("c2", {});
     await h.svc.run({ chatId: "c2", name: "main", command: "say up", cwd: "/w" });
     const local = h.svc.run({ chatId: "c2", name: "main", command: "hang" });
-    await vi.waitFor(() => expect(h.local[0]!.writes.some((w) => w.startsWith("hang"))).toBe(true));
+    await vi.waitFor(() => expect(h.local[0]!.ran.includes("hang")).toBe(true));
     h.local[0]!.emit("exit", null, "SIGTERM");
     const l = await local;
     expect(l.error).toBeUndefined();
@@ -1131,7 +1141,7 @@ describe("why a shell ended (exit reasons) and respawn notices", () => {
     h.chats.set("c1", { terminalBackend: "box" });
     await h.svc.run({ chatId: "c1", name: "main", command: "say up", cwd: "/w" });
     const running = h.svc.run({ chatId: "c1", name: "main", command: "hang" });
-    await vi.waitFor(() => expect(backend.spawned[0]!.writes.some((w) => w.startsWith("hang"))).toBe(true));
+    await vi.waitFor(() => expect(backend.spawned[0]!.ran.includes("hang")).toBe(true));
     backend.spawned[0]!.emit("exit", null, lostReason);
     await running;
     expect(seen.at(-1)).toMatchObject({ outcome: "shell-exited", exitReason: lostReason });
@@ -1145,7 +1155,7 @@ describe("why a shell ended (exit reasons) and respawn notices", () => {
     h.chats.set("c1", { terminalBackend: "box" });
     await h.svc.run({ chatId: "c1", name: "main", command: "say up", cwd: "/w" });
     const running = h.svc.run({ chatId: "c1", name: "main", command: "hang" });
-    await vi.waitFor(() => expect(backend.spawned[0]!.writes.some((w) => w.startsWith("hang"))).toBe(true));
+    await vi.waitFor(() => expect(backend.spawned[0]!.ran.includes("hang")).toBe(true));
     await h.registry.unregister("box");
     const res = await running;
     expect(res.shellExit?.kind).toBe("transport-lost");
@@ -1163,7 +1173,7 @@ describe("stalled / resumed transports", () => {
     const shell = backend.spawned[0]!;
 
     const running = h.svc.run({ chatId: "c1", name: "main", command: "hang", timeoutMs: 300 });
-    await vi.waitFor(() => expect(shell.writes.some((w) => w.startsWith("hang"))).toBe(true));
+    await vi.waitFor(() => expect(shell.ran.includes("hang")).toBe(true));
     shell.emit("stalled", { detail: "no keepalive answer for 15 s" });
     let info = h.svc.listChat("c1")[0]!;
     expect(info.location).toMatchObject({ state: "stalled", stalled: "no keepalive answer for 15 s" });
@@ -1197,7 +1207,7 @@ describe("stalled / resumed transports", () => {
     const shell = backend.spawned[0]!;
     const started = Date.now();
     const running = h.svc.run({ chatId: "c1", name: "main", command: "hang", timeoutMs: 200 });
-    await vi.waitFor(() => expect(shell.writes.some((w) => w.startsWith("hang"))).toBe(true));
+    await vi.waitFor(() => expect(shell.ran.includes("hang")).toBe(true));
     shell.emit("stalled");
     await new Promise((r) => setTimeout(r, 300));
     shell.emit("resumed");
@@ -1248,7 +1258,7 @@ describe("review fixes on #476", () => {
     h.chats.set("c1", { terminalBackend: "box" });
     await h.svc.run({ chatId: "c1", name: "main", command: "say up", cwd: "/w" });
     const running = h.svc.run({ chatId: "c1", name: "main", command: "hang" });
-    await vi.waitFor(() => expect(backend.spawned[0]!.writes.some((w) => w.startsWith("hang"))).toBe(true));
+    await vi.waitFor(() => expect(backend.spawned[0]!.ran.includes("hang")).toBe(true));
     backend.spawned[0]!.emit("error", new Error("read ECONNRESET"));
     backend.spawned[0]!.emit("exit", null, { kind: "transport-lost", detail: "ssh: closed" });
     const res = await running;
@@ -1301,7 +1311,7 @@ describe("review fixes on #476", () => {
     const shell = backend.spawned[0]!;
     const started = Date.now();
     const running = h.svc.run({ chatId: "c1", name: "main", command: "hang", timeoutMs: 100 });
-    await vi.waitFor(() => expect(shell.writes.some((w) => w.startsWith("hang"))).toBe(true));
+    await vi.waitFor(() => expect(shell.ran.includes("hang")).toBe(true));
     // Stalled, and the backend never says another word.
     shell.emit("stalled");
     const res = await running;

@@ -21,6 +21,7 @@ import { loadConfig } from "../config.js";
 import { EventBus } from "../bus.js";
 import { Store } from "../store/index.js";
 import { TerminalService, type ShellProcess, type SpawnShell } from "../services/terminal.js";
+import { unwrapCommandWrite } from "../services/terminal.testkit.js";
 import { GLOBAL_PROJECT_ID } from "@dispatch/shared";
 import { seedDefaultProvider } from "../harness/registry.testkit.js";
 
@@ -35,7 +36,8 @@ class FakeShell extends EventEmitter implements ShellProcess {
     super();
     this.stdin = {
       write: (chunk) => {
-        for (const line of chunk.split("\n")) {
+        // `commandWrite`'s stdin isolation is not the command: unwrap it.
+        for (const line of unwrapCommandWrite(chunk).split("\n")) {
           const marker = line.match(/CMTERM[A-Za-z0-9_-]+/);
           if (marker) {
             this.stdout.emit("data", Buffer.from(`${marker[0]}|0|True|${this.cwd}\n`));

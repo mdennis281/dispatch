@@ -5286,6 +5286,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       "Reuse the same `name` to keep a cwd (e.g. `cd` once, then run builds from " +
       "there) or an env var across commands. Returns the command output, its exit " +
       "code, and the terminal's current working directory. " +
+      "Stdin is closed: a command that prompts reads EOF, so pass answers as flags or pipe them in. " +
       "For anything that does NOT return on its own — a dev server, a watcher — pass " +
       "`background: true` and give it its own `name`: the call returns immediately, " +
       "the process is tracked against this chat (visible and killable in Ports & " +

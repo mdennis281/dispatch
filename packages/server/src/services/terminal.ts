@@ -31,7 +31,9 @@
  * Per command we append a unique SENTINEL probe line that prints the exit code,
  * `$?`, and `$PWD.Path`; when we see that marker on stdout the command is done
  * and we can report `{ output, exitCode, cwd }`. Runs on one terminal are
- * serialized so output attribution stays clean.
+ * serialized so output attribution stays clean. The command itself runs with
+ * its stdin cut off from that pipe (`commandWrite`), or a command that reads
+ * stdin would eat the probe.
  *
  * The shell spawn is injected (`deps.spawn`) so tests drive a scripted fake
  * process — no real PowerShell, fully deterministic.
@@ -186,11 +188,12 @@ function posixShell(): string {
  */
 export function probeLine(marker: string, flavour: ShellFlavour = shellFlavour): string {
   if (flavour === "powershell") {
-    // Capture $?/$LASTEXITCODE before anything else can change them.
+    // Capture $?/$LASTEXITCODE before anything else can change them — the
+    // stdin restore included (see `commandWrite`).
     // `[Console]::Out.Flush` is implicit for Write-Output; the piped shell
     // flushes per line.
     return (
-      `$__cm_ok = $?; $__cm_ec = $LASTEXITCODE; ` +
+      `$__cm_ok = $?; $__cm_ec = $LASTEXITCODE; ${PS_STDIN_RESTORE}; ` +
       `Write-Output ("${marker}|" + $(if ($null -ne $__cm_ec) { $__cm_ec } ` +
       `elseif ($__cm_ok) { 0 } else { 1 }) + "|" + $__cm_ok + "|" + $PWD.Path)`
     );
@@ -201,6 +204,83 @@ export function probeLine(marker: string, flavour: ShellFlavour = shellFlavour):
     `__cm_ec=$?; printf '%s|%s|%s|%s\\n' '${marker}' "$__cm_ec" ` +
     `"$([ "$__cm_ec" -eq 0 ] && echo True || echo False)" "$PWD"`
   );
+}
+
+/**
+ * The PowerShell half of {@link commandWrite}: a kernel32 helper that points
+ * the process's standard-input handle at NUL and back. One line of C# inside a
+ * single-quoted PowerShell string, so it may contain no `'`. Every call is
+ * caught, because a stdin that cannot be detached must never fail the command.
+ */
+const PS_STDIN_TYPE = "DispatchTerminal.Stdin";
+const PS_STDIN_CS = [
+  "using System; using System.Runtime.InteropServices;",
+  "namespace DispatchTerminal { public static class Stdin {",
+  '[DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int n);',
+  '[DllImport("kernel32.dll")] static extern bool SetStdHandle(int n, IntPtr h);',
+  '[DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);',
+  "[StructLayout(LayoutKind.Sequential)] struct SA { public int n; public IntPtr d; public int inherit; }",
+  '[DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr CreateFileW(string f, uint a, uint s, ref SA sa, uint c, uint fl, IntPtr t);',
+  "static bool swapped; static IntPtr saved, nul;",
+  // An INHERITABLE handle to NUL (GENERIC_READ, share read|write,
+  // OPEN_EXISTING): a child inherits the process's std handles, not .NET's.
+  "public static void Detach() { Restore(); try { var sa = new SA(); sa.n = Marshal.SizeOf(sa); sa.inherit = 1;",
+  ' var h = CreateFileW("NUL", 0x80000000, 3, ref sa, 3, 0, IntPtr.Zero); if (h == IntPtr.Zero || h == new IntPtr(-1)) return;',
+  " nul = h; saved = GetStdHandle(-10); swapped = SetStdHandle(-10, h); } catch { } }",
+  "public static void Restore() { try { if (swapped) SetStdHandle(-10, saved); if (nul != IntPtr.Zero) CloseHandle(nul); } catch { }",
+  " swapped = false; saved = IntPtr.Zero; nul = IntPtr.Zero; }",
+  "} }",
+].join(" ");
+/** Compiles the helper — once per shell, and only on Windows. A failure (constrained language mode) is silent. */
+const PS_STDIN_SETUP =
+  `try { if (-not ('${PS_STDIN_TYPE}' -as [type]) -and [Environment]::OSVersion.Platform -eq 'Win32NT') ` +
+  `{ Add-Type -TypeDefinition '${PS_STDIN_CS}' -ErrorAction Stop } } catch { }`;
+// `try` because a locked-down shell may refuse even the type lookup, and that
+// must not print an error on every command.
+const PS_STDIN_DETACH = `try { if ('${PS_STDIN_TYPE}' -as [type]) { [${PS_STDIN_TYPE}]::Detach() } } catch { }`;
+const PS_STDIN_RESTORE = `try { if ('${PS_STDIN_TYPE}' -as [type]) { [${PS_STDIN_TYPE}]::Restore() } } catch { }`;
+
+/**
+ * The command as written to the shell, with its stdin cut off from the
+ * shell's own.
+ *
+ * Everything core writes goes down ONE pipe: the command, its probe, then the
+ * next command. A program the command started inherited that pipe as its
+ * stdin, so anything that reads stdin — `cat` with no file, `ssh`, a `git`
+ * credential prompt, `python` with no script, bash's `read` — ate the probe
+ * and whatever came after it. The marker never printed, the run sat out its
+ * whole timeout, and the agent's NEXT command arrived as that program's input
+ * instead of the shell's. Nothing in Dispatch feeds a running command (a run
+ * holds its shell until the marker lands, and a backgrounded shell refuses new
+ * runs), so every command gets EOF instead. Background runs too: a dev server
+ * that read stdin would swallow its probe, and the shell would stay wedged
+ * after the server exited.
+ *
+ * - posix: `eval '<command>' </dev/null`. `eval` is a builtin, so `cd` and
+ *   `export` persist and `$?` is the command's, and the redirect holds for
+ *   everything it runs. It is `eval` and not a `{ …; }` group because a group
+ *   is PARSED whole before any of it runs: `shopt -s extglob` on one line and
+ *   `ls !(x)` on the next was a syntax error, and a top-level syntax error ends
+ *   a non-interactive bash — the shell died with the run. `eval` parses one
+ *   command at a time, as the shell reading lines did, and a syntax error in
+ *   it (an unclosed quote included) is exit 2 with the shell still alive. The
+ *   newline before the closing quote lets a command end in a comment or a `\`.
+ * - PowerShell has no redirection for that: a native child inherits the
+ *   PROCESS's standard-input handle. So the line before the command points
+ *   that handle at NUL, and the probe puts it back once it has read `$?`.
+ *   PowerShell's own reading of the pipe is unaffected; it keeps the reader
+ *   it opened at start-up. `firstOnShell` adds the helper's compile (~250 ms,
+ *   once). Where it can't compile, commands run as they always did.
+ *
+ * The probe stays a SEPARATE write after this one: backend plugins have told
+ * the two apart by the probe's prefix since before `beforeRun` existed.
+ */
+export function commandWrite(command: string, flavour: ShellFlavour, firstOnShell: boolean): string {
+  if (flavour === "powershell") {
+    return `${firstOnShell ? `${PS_STDIN_SETUP}; ` : ""}${PS_STDIN_DETACH}\n${command}\n`;
+  }
+  // Single-quoted, so nothing in it expands early; a `'` closes, escapes, reopens.
+  return `eval '${command.replace(/'/g, "'\\''")}\n' </dev/null\n`;
 }
 
 /* ---------------------------------------------------------------------- deps */
@@ -506,6 +586,8 @@ interface Terminal {
   background?: { command: string; since: number };
   /** The probe dialect THIS shell speaks — a backend's bash under a Windows host. */
   flavour: ShellFlavour;
+  /** A command has been written, so a PowerShell has compiled its stdin helper (see `commandWrite`). */
+  wroteCommand?: boolean;
   /** Where it runs, when a backend was involved (see {@link TerminalLocation}). */
   location?: TerminalLocation;
   /** The registered backend actually serving this shell (not set on a fallback). */
@@ -1420,7 +1502,8 @@ export class TerminalService {
       const probe = probeLine(marker, term.flavour);
       writtenAt = this.now();
       try {
-        term.proc.stdin.write(command + "\n");
+        term.proc.stdin.write(commandWrite(command, term.flavour, !term.wroteCommand));
+        term.wroteCommand = true;
         term.proc.stdin.write(probe + "\n");
       } catch (err) {
         finish(
