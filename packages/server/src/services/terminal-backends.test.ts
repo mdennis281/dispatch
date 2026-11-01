@@ -82,7 +82,7 @@ interface Harness {
   branchAsked: string[];
 }
 
-function setup(): Harness {
+function setup(opts: { stallPauseMaxMs?: number } = {}): Harness {
   const chats = new Map<string, { terminalBackend?: string; projectId?: string; worktreePath?: string }>();
   const projectDefaults = new Map<string, string>();
   const allowed: { project?: string[]; app?: string[] } = {};
@@ -103,6 +103,7 @@ function setup(): Harness {
   const svc = new TerminalService({
     bus,
     backends: registry,
+    ...opts,
     deps: {
       spawn: (cwd) => {
         const s = new FakeShell(cwd);
@@ -1236,5 +1237,77 @@ describe("stalled / resumed transports", () => {
     const info = h.svc.listChat("c1")[0]!;
     expect(info.status).toBe("exited");
     expect(info.location?.state).toBe("ready");
+  });
+});
+
+describe("review fixes on #476", () => {
+  it("a backend handle that ERRORS before its exit still reads as a lost transport", async () => {
+    const h = setup();
+    const backend = fakeBackend();
+    h.registry.register(backend, "plug");
+    h.chats.set("c1", { terminalBackend: "box" });
+    await h.svc.run({ chatId: "c1", name: "main", command: "say up", cwd: "/w" });
+    const running = h.svc.run({ chatId: "c1", name: "main", command: "hang" });
+    await vi.waitFor(() => expect(backend.spawned[0]!.writes.some((w) => w.startsWith("hang"))).toBe(true));
+    backend.spawned[0]!.emit("error", new Error("read ECONNRESET"));
+    backend.spawned[0]!.emit("exit", null, { kind: "transport-lost", detail: "ssh: closed" });
+    const res = await running;
+    expect(res.shellExit).toEqual({ kind: "transport-lost", detail: "read ECONNRESET" });
+    expect(res.error).toMatch(/lost its connection to Test box \(read ECONNRESET\).*is unknown/);
+  });
+
+  it("a stdin EPIPE on a backend shell is a lost transport too; on a local shell it is not", async () => {
+    const h = setup();
+    const backend = fakeBackend({
+      spawn: async () => {
+        const s = new FakeShell("/srv/repo");
+        Object.assign(s.stdin, { on: (_e: string, l: (err: Error) => void) => s.on("stdin-error", l) });
+        backend.spawned.push(s);
+        return s;
+      },
+    });
+    h.registry.register(backend, "plug");
+    h.chats.set("c1", { terminalBackend: "box" });
+    await h.svc.run({ chatId: "c1", name: "main", command: "say up", cwd: "/w" });
+    backend.spawned[0]!.emit("stdin-error", new Error("write EPIPE"));
+    expect(h.svc.listChat("c1")[0]!.exitReason).toEqual({ kind: "transport-lost", detail: "write EPIPE" });
+
+    h.chats.set("c2", {});
+    await h.svc.run({ chatId: "c2", name: "main", command: "say up", cwd: "/w" });
+    h.local[0]!.emit("error", new Error("spawn EPERM"));
+    expect(h.svc.listChat("c2")[0]!.status).toBe("exited");
+    expect(h.svc.listChat("c2")[0]).not.toHaveProperty("exitReason");
+  });
+
+  it("a reason that arrives after a reasonless exit still reaches the respawn notice", async () => {
+    const h = setup();
+    const backend = fakeBackend();
+    h.registry.register(backend, "plug");
+    h.chats.set("c1", { terminalBackend: "box" });
+    await h.svc.run({ chatId: "c1", name: "main", command: "say up", cwd: "/w" });
+    backend.spawned[0]!.emit("exit", null);
+    backend.spawned[0]!.emit("exit", null, { kind: "killed", detail: "idle stop" });
+    expect(h.svc.listChat("c1")[0]!.exitReason).toEqual({ kind: "killed", detail: "idle stop" });
+    const next = await h.svc.run({ chatId: "c1", name: "main", command: "say back", cwd: "/w" });
+    expect(next.notice).toContain("the one before it under this name was stopped on Test box (idle stop)");
+  });
+
+  it("a stall that never ends cannot hang the call: past the pause budget the deadline runs again", async () => {
+    const h = setup({ stallPauseMaxMs: 200 });
+    const backend = fakeBackend();
+    h.registry.register(backend, "plug");
+    h.chats.set("c1", { terminalBackend: "box" });
+    await h.svc.run({ chatId: "c1", name: "main", command: "say up", cwd: "/w" });
+    const shell = backend.spawned[0]!;
+    const started = Date.now();
+    const running = h.svc.run({ chatId: "c1", name: "main", command: "hang", timeoutMs: 100 });
+    await vi.waitFor(() => expect(shell.writes.some((w) => w.startsWith("hang"))).toBe(true));
+    // Stalled, and the backend never says another word.
+    shell.emit("stalled");
+    const res = await running;
+    expect(res.timedOut).toBe(true);
+    // ~200 ms of paused budget + the 100 ms deadline (less whatever ran before the stall).
+    expect(Date.now() - started).toBeGreaterThanOrEqual(250);
+    expect(res.notices?.at(-1)).toMatch(/up to the limit, after which the clock ran again\.$/);
   });
 });

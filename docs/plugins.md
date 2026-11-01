@@ -837,11 +837,18 @@ of `exit`, `{ kind, detail? }`:
 
 With no reason, core can only assume `exited`, so a dropped SSH session reads
 as a command that finished without an exit code, and the agent believes it.
-`detail` is one short line ("ssh: connection reset") shown in the result, as a
-`[dispatch]` line in the transcript, and as `TerminalInfo.exitReason` in the
-panel ("exited · connection lost"). `afterRun` gets it as `exitReason`. Only an
-object with a `kind` counts: a real `ChildProcess` passes its signal name there,
-which core ignores.
+`detail` is one short line ("ssh: connection reset"). It shows up in the
+result, as a `[dispatch]` line in the transcript, and as `TerminalInfo.exitReason`.
+The Workspace view labels the exited row "connection lost" or "stopped"; the
+Terminals panel lists only live shells, so it never shows an exited one.
+`afterRun` gets the reason as `exitReason`. Only an object with a `kind`
+counts: a real `ChildProcess` passes its signal name there, which core ignores.
+
+An `error` from a backend's handle, or from its `stdin` (an EPIPE), is read as
+`transport-lost` with the error's message. Transports usually error BEFORE
+they exit, and the first event ends the shell. A reason that only arrives
+after the shell has already ended can't change a result that has already
+been returned, but it is still recorded for the panel and the respawn notice.
 
 Whenever a name is reopened because its shell ended (whatever the reason), or
 because it was closed or Dispatch restarted, the first result from the new shell
@@ -852,7 +859,12 @@ local shells too.
 unanswered, but not yet given up), have the handle emit `"stalled"` (optionally
 with `{ detail }`) and later `"resumed"`, through the same `on` core already
 listens on. While stalled:
-- the running command's timeout is PAUSED, and resumes with whatever was left;
+- the running command's timeout is PAUSED, and resumes with whatever was left.
+  The pause is capped at 10 min of stall per command, in total. After that the
+  clock runs again even while stalled, so a backend that says `stalled` and
+  never follows with `resumed` or `exit` cannot hang a call. Still emit `exit`
+  (`transport-lost`) once you give up: that is what tells the agent the
+  outcome is unknown;
 - `TerminalInfo.location.state` is `stalled` (an amber chip and strip in the
   panel), with `stalledSince` and `stalled` (the detail);
 - the transcript gets a `[dispatch]` line for each change.

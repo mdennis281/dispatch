@@ -282,6 +282,13 @@ export interface TerminalServiceOptions {
   retentionMs?: number;
   /** Write-behind flush cadence for output lines (default 1s). */
   flushIntervalMs?: number;
+  /**
+   * The most one command's deadline may be paused by transport stalls, in
+   * total (default {@link DEFAULT_STALL_PAUSE_MAX_MS}). Past it the clock runs
+   * again even while stalled, so a backend that says `stalled` and then never
+   * `resumed` nor `exit` cannot hang a call forever.
+   */
+  stallPauseMaxMs?: number;
   /** Plugin terminal backends. Absent (or empty) ⇒ every shell is local. */
   backends?: TerminalBackendSource;
   deps?: TerminalServiceDeps;
@@ -380,6 +387,13 @@ export interface RunTerminalResult {
  *  real command output. The marker line the shell prints after each command is
  *  `<prefix><nonce>|<exit>|<ok>|<cwd>` (cwd last; a path may itself contain `|`). */
 const SENTINEL_PREFIX = "CMTERMSENTINEL_";
+
+/**
+ * How long, in total, transport stalls may pause one command's deadline. A
+ * stall is "not given up yet", and a backend whose half-open connection never
+ * resolves would otherwise leave the call waiting forever (review on #476).
+ */
+export const DEFAULT_STALL_PAUSE_MAX_MS = 600_000;
 
 /** Default per-command timeout (10 min) — a runaway build shouldn't wedge a run. */
 const DEFAULT_TIMEOUT_MS = 600_000;
@@ -548,6 +562,7 @@ export class TerminalService {
   private readonly backends?: TerminalBackendSource;
   private readonly retentionMs: number;
   private readonly flushIntervalMs: number;
+  private readonly stallPauseMaxMs: number;
 
   private readonly terminals = new Map<string, Terminal>();
   /**
@@ -582,6 +597,7 @@ export class TerminalService {
     this.backends = opts.backends;
     this.retentionMs = Math.max(60_000, opts.retentionMs ?? DEFAULT_RETENTION_MS);
     this.flushIntervalMs = Math.max(100, opts.flushIntervalMs ?? 1_000);
+    this.stallPauseMaxMs = Math.max(0, opts.stallPauseMaxMs ?? DEFAULT_STALL_PAUSE_MAX_MS);
   }
 
   private static key(chatId: string, name: string): string {
@@ -832,7 +848,15 @@ export class TerminalService {
     term.proc = proc;
     proc.stdout.on("data", (c) => this.onData(term, "stdout", c.toString()));
     proc.stderr.on("data", (c) => this.onData(term, "stderr", c.toString()));
-    proc.on("error", () => this.onExit(term));
+    // On a BACKEND's handle an error is the transport failing, and it usually
+    // arrives BEFORE the `exit` that would have said so — first one wins in
+    // `onExit`, so without a reason here a dropped connection still read as a
+    // quiet `exit=n/a` (review on #476). A local shell keeps the old meaning.
+    const lost = (err: unknown): TerminalExitReason | undefined =>
+      term.backend
+        ? { kind: "transport-lost", detail: err instanceof Error && err.message ? err.message : "the connection failed" }
+        : undefined;
+    proc.on("error", (err) => this.onExit(term, lost(err)));
     proc.on("exit", (_code, reason) => this.onExit(term, exitReasonOf(reason)));
     // Only a backend handle emits these; a local child never does, so a local
     // shell's behaviour is untouched by listening.
@@ -842,7 +866,7 @@ export class TerminalService {
     // EPIPE/ERR_STREAM_DESTROYED ASYNCHRONOUSLY, which the try/catch around the
     // `.write()` calls in `run` cannot see. Unlistened, that 'error' event is an
     // uncaught exception — a dead terminal would have taken the server with it.
-    proc.stdin.on?.("error", () => this.onExit(term));
+    proc.stdin.on?.("error", (err) => this.onExit(term, lost(err)));
   }
 
   /**
@@ -1249,6 +1273,9 @@ export class TerminalService {
       // its deadline, and said in the result so a slow run is explained.
       let stalledMs = 0;
       let stalledFrom: number | undefined;
+      // Fires when the pause budget runs out mid-stall: the clock restarts.
+      let stallCap: ReturnType<typeof setTimeout> | undefined;
+      let capped = false;
       const finish = (res: RunTerminalResult, outcome: RunEnd["outcome"]): void => {
         if (settled) return;
         settled = true;
@@ -1257,7 +1284,7 @@ export class TerminalService {
         stalledFrom = undefined;
         const r =
           stalledMs > 0 && outcome !== "not-written"
-            ? { ...res, notices: [...(res.notices ?? []), stallNotice(term, stalledMs)] }
+            ? { ...res, notices: [...(res.notices ?? []), stallNotice(term, stalledMs, capped)] }
             : res;
         term.pending = undefined;
         term.background = undefined;
@@ -1301,16 +1328,30 @@ export class TerminalService {
           );
         },
         pause: () => {
-          if (stalledFrom !== undefined || settled) return;
+          if (stalledFrom !== undefined || settled || capped) return;
           stalledFrom = Date.now();
           disarm();
+          stallCap = setTimeout(spendBudget, Math.max(0, this.stallPauseMaxMs - stalledMs));
+          stallCap.unref?.();
         },
         resume: () => {
           if (stalledFrom === undefined || settled) return;
+          if (stallCap) clearTimeout(stallCap);
+          stallCap = undefined;
           stalledMs += Date.now() - stalledFrom;
           stalledFrom = undefined;
           arm();
         },
+      };
+      // The pause budget is spent while still stalled: count the stall up to
+      // here and let the deadline run again. Any later stall no longer pauses.
+      const spendBudget = (): void => {
+        stallCap = undefined;
+        if (stalledFrom === undefined || settled) return;
+        stalledMs += Date.now() - stalledFrom;
+        stalledFrom = undefined;
+        capped = true;
+        arm();
       };
 
       // Timeout: report partial output but keep the shell alive. A background
@@ -1348,9 +1389,12 @@ export class TerminalService {
         timer = undefined;
         remaining = Math.max(0, remaining - (Date.now() - armedAt));
       };
-      cleanups.push(disarm);
-      // Already stalled when it starts: the clock waits for `resumed`.
-      if (term.stall) stalledFrom = Date.now();
+      cleanups.push(disarm, () => {
+        if (stallCap) clearTimeout(stallCap);
+      });
+      // Already stalled when it starts: the clock waits for `resumed` (or the
+      // pause budget).
+      if (term.stall) term.pending?.pause?.();
       else arm();
 
       // Session abort → stop waiting (shell survives for the next turn).
@@ -1675,7 +1719,17 @@ export class TerminalService {
   }
 
   private onExit(term: Terminal, reason?: TerminalExitReason): void {
-    if (term.status === "exited") return;
+    if (term.status === "exited") {
+      // A reason that arrives after something else already ended the shell
+      // (a handle that errors, THEN exits with why) can no longer change a
+      // result that has resolved, but the respawn notice and the panel should
+      // still tell the truth.
+      if (reason && !term.exitReason) {
+        term.exitReason = reason;
+        if (this.terminals.get(term.id) === term) this.publishUpdate(term);
+      }
+      return;
+    }
     term.status = "exited";
     term.busy = false;
     term.updatedAt = this.now();
@@ -2142,8 +2196,11 @@ function lostRunText(term: Terminal, reason: TerminalExitReason): string {
 }
 
 /** Core's line for a run that waited out a stalled transport. */
-function stallNotice(term: Terminal, ms: number): string {
-  return `The connection to ${labelOf(term)} stalled for ${seconds(ms)} during this command; its timeout was paused meanwhile.`;
+function stallNotice(term: Terminal, ms: number, capped: boolean): string {
+  return (
+    `The connection to ${labelOf(term)} stalled for ${seconds(ms)} during this command; its timeout was paused meanwhile` +
+    (capped ? ` — up to the limit, after which the clock ran again.` : `.`)
+  );
 }
 
 function seconds(ms: number): string {

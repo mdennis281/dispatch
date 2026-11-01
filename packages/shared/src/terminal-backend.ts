@@ -179,6 +179,8 @@ export interface TerminalBackendHandle {
    *   running command's timeout and shows the shell as stalled until
    *   `"resumed"` (or `exit`), so a Wi-Fi blip neither eats a build's deadline
    *   nor looks like a hung command. Emitting it again updates the detail.
+   *   The pause is capped (10 min of stall per command): still emit `exit`
+   *   with `transport-lost` once you give up.
    * - `"resumed"`, no arguments: the transport answers again.
    *
    * They are deliberately not overloads here: a typed `"stalled"` overload
