@@ -35,6 +35,8 @@ import type {
   TerminalBackendHandle,
   TerminalBeforeRunResult,
   TerminalPortForward,
+  TerminalBackendStatusInput,
+  TerminalBackendUpdate,
   TerminalRunInfo,
   TerminalSpawnInfo,
   WsServerEvent,
@@ -170,6 +172,14 @@ export interface TestContext {
   terminalBackends: Map<string, TerminalBackend>;
   /** Ports currently published through `ctx.terminals.publishPort` (withdrawn ones removed). */
   terminalPorts: TerminalPortForward[];
+  /** The latest `ctx.terminals.setStatus` per backend id. Cleared by `unregisterBackend`. */
+  terminalStatus: Map<string, TerminalBackendStatusInput>;
+  /**
+   * Every `ctx.terminals.updateBackend` per backend id, merged in call order.
+   * The backend object in `terminalBackends` is left as registered — the host
+   * never writes to it either.
+   */
+  terminalUpdates: Map<string, TerminalBackendUpdate>;
   /**
    * Play the HOST's side of a terminal backend — the calls core makes — so a
    * plugin's test can drive spawn and the lifecycle hooks without a server.
@@ -342,6 +352,8 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
   const providers: TestContext["providers"] = [];
   const terminalBackends = new Map<string, TerminalBackend>();
   const terminalPorts: TerminalPortForward[] = [];
+  const terminalStatus = new Map<string, TerminalBackendStatusInput>();
+  const terminalUpdates = new Map<string, TerminalBackendUpdate>();
   const projects = opts.projects ?? [];
   const chats = opts.chats ?? [];
 
@@ -603,6 +615,36 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
         };
       },
       ports: (chatId) => terminalPorts.filter((p) => p.chatId === chatId),
+      setStatus: (backendId, status) => {
+        if (!terminalBackends.has(backendId)) {
+          throw new Error(`terminal backend "${backendId}" was not registered by plugin "${id}"`);
+        }
+        if (!status || !["online", "offline", "degraded"].includes(status.state)) {
+          throw new Error(`terminal backend "${backendId}": status.state must be "online", "offline" or "degraded"`);
+        }
+        terminalStatus.set(backendId, { ...status });
+      },
+      updateBackend: (backendId, update) => {
+        if (!terminalBackends.has(backendId)) {
+          throw new Error(`terminal backend "${backendId}" was not registered by plugin "${id}"`);
+        }
+        if ("label" in update && (typeof update.label !== "string" || !update.label.trim())) {
+          throw new Error(`terminal backend "${backendId}": label must be a non-empty string`);
+        }
+        terminalUpdates.set(backendId, { ...terminalUpdates.get(backendId), ...update });
+      },
+      // Throws (not rejects) for a foreign id, as the host does.
+      unregisterBackend: (backendId) => {
+        const b = terminalBackends.get(backendId);
+        if (!b) throw new Error(`terminal backend "${backendId}" was not registered by plugin "${id}"`);
+        terminalBackends.delete(backendId);
+        terminalStatus.delete(backendId);
+        terminalUpdates.delete(backendId);
+        for (const f of terminalPorts.filter((p) => p.backend === backendId)) {
+          terminalPorts.splice(terminalPorts.indexOf(f), 1);
+        }
+        return Promise.resolve(b.dispose?.()).then(() => undefined);
+      },
     };
   }
 
@@ -679,6 +721,8 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
     providers,
     terminalBackends,
     terminalPorts,
+    terminalStatus,
+    terminalUpdates,
     terminals: {
       spawn: (backendId, info) =>
         backendOf(backendId).spawn({

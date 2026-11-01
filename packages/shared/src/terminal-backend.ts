@@ -372,6 +372,53 @@ export type TerminalPortForward = z.infer<typeof TerminalPortForwardSchema>;
 /** What a backend passes to `ctx.terminals.publishPort` — `backend` is filled in by the host. */
 export type TerminalPortForwardInput = Omit<TerminalPortForward, "backend">;
 
+/**
+ * Whether a backend can take a shell right now, as its plugin reports it with
+ * `ctx.terminals.setStatus`.
+ *
+ * - `online`: it can.
+ * - `degraded`: it can, but something is off ("disk 95% full"). Offered as
+ *   usual, labelled.
+ * - `offline`: it cannot. It is not offered as a location. A shell asked of it
+ *   fails AT ONCE under its `fallback` policy instead of waiting out
+ *   `spawnTimeoutMs`, and a spawn already in flight is cut short.
+ *
+ * A backend whose plugin never reports a status is treated as online, exactly
+ * as before statuses existed.
+ */
+export const TERMINAL_BACKEND_STATES = ["online", "offline", "degraded"] as const;
+export type TerminalBackendState = (typeof TERMINAL_BACKEND_STATES)[number];
+
+/** What a plugin passes to `ctx.terminals.setStatus`. */
+export interface TerminalBackendStatusInput {
+  state: TerminalBackendState;
+  /** One short line for the picker and the refusal: "asleep", "ssh: connection refused". */
+  detail?: string;
+  /** When the backend last heard from the far side (epoch ms), if it tracks that. */
+  lastSeenAt?: number;
+}
+
+/** A backend's status, as the host keeps and broadcasts it. */
+export const TerminalBackendStatusSchema = z.object({
+  state: z.enum(TERMINAL_BACKEND_STATES),
+  detail: z.string().optional(),
+  lastSeenAt: z.number().int().optional(),
+  /** When `state` last CHANGED (epoch ms) — stamped by the host, not the plugin. */
+  since: z.number().int(),
+});
+export type TerminalBackendStatus = z.infer<typeof TerminalBackendStatusSchema>;
+
+/**
+ * What `ctx.terminals.updateBackend` may change on a registered backend
+ * without re-registering it, so the shells running on it are left alone. A
+ * key you pass replaces that field; `agentNote: undefined` removes the note.
+ * The id, shell, spawn and `fallback` policy are fixed for the registration.
+ */
+export interface TerminalBackendUpdate {
+  label?: string;
+  agentNote?: TerminalBackend["agentNote"];
+}
+
 /** A registered backend, as the REST surface and the SPA see it. */
 export const TerminalBackendInfoSchema = z.object({
   id: z.string(),
@@ -381,6 +428,8 @@ export const TerminalBackendInfoSchema = z.object({
   pluginId: z.string().optional(),
   /** Its {@link TerminalBackendFallback} policy; absent on a server that predates it (read as `local`). */
   fallback: z.enum(TERMINAL_BACKEND_FALLBACKS).optional(),
+  /** Absent until its plugin reports one — read as online. */
+  status: TerminalBackendStatusSchema.optional(),
 });
 export type TerminalBackendInfo = z.infer<typeof TerminalBackendInfoSchema>;
 
@@ -452,16 +501,24 @@ export interface TerminalLocationOption {
   label: string;
   /** The chat's default — where a terminal goes when `location` is omitted. */
   isDefault: boolean;
+  /** Set when its backend reports `degraded`: the detail, or "degraded". It is still selectable. */
+  degraded?: string;
 }
 
 /** The agent's choice for one chat, resolved against what is actually registered. */
 export interface TerminalLocationChoices {
   /** Where a terminal goes without `location` (may be an unregistered pin — it falls back). */
   defaultId: string;
-  /** Selectable now: the default (when it can run) plus every allowed AND registered id. */
+  /** Selectable now: the default (when it can run) plus every allowed, registered and not-offline id. */
   options: TerminalLocationOption[];
-  /** Allowed by config but not registered right now (plugin off or uninstalled). */
+  /**
+   * Allowed by config but not selectable right now: not registered (plugin off
+   * or uninstalled), or registered and reporting `offline`. An offline DEFAULT
+   * is listed here too, since a terminal sent there would fail.
+   */
   unavailable: string[];
+  /** Why each `unavailable` id is unavailable, for the refusal and the agent note. */
+  reasons?: Record<string, string>;
   /** True when there is a real choice — two or more options. */
   enabled: boolean;
 }

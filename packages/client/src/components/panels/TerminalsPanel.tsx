@@ -26,6 +26,8 @@ import {
   isLiveChatTerminal,
   useTerminals,
   nextShellName,
+  backendHint,
+  isBackendOffline,
   type TerminalLine,
 } from "../../stores/terminals.js";
 import { api } from "../../lib/api.js";
@@ -231,7 +233,12 @@ function TerminalBackendPicker({ chat }: { chat: Chat }) {
     id === LOCAL_TERMINAL_BACKEND ? "This machine" : (backends.find((b) => b.id === id)?.label ?? id);
   const options: SelectOption<string>[] = [
     { value: LOCAL_TERMINAL_BACKEND, label: "This machine", icon: <Monitor /> },
-    ...backends.map((b) => ({ value: b.id, label: b.label, icon: <Container />, hint: b.pluginId })),
+    ...backends.map((b) => ({
+      value: b.id,
+      label: b.label,
+      icon: isBackendOffline(b) ? <Unplug /> : <Container />,
+      hint: backendHint(b),
+    })),
   ];
   // A pin to a backend whose plugin is gone is still the answer; show it
   // rather than a blank chip — its shells come up local and say why.
@@ -249,7 +256,8 @@ function TerminalBackendPicker({ chat }: { chat: Chat }) {
     app: appLocations,
   }).effective;
   const choice = [...new Set([effective.id, ...allowed])].filter(
-    (id) => id === LOCAL_TERMINAL_BACKEND || backends.some((b) => b.id === id),
+    // Offline ones are allowed but not offered: the server leaves them out too.
+    (id) => id === LOCAL_TERMINAL_BACKEND || backends.some((b) => b.id === id && !isBackendOffline(b)),
   );
 
   return (

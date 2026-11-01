@@ -414,6 +414,9 @@ export function createServices(
   // with it; end them now so the next command re-resolves instead of writing
   // into a dead channel.
   terminalBackends.onDetach((id) => terminals.detachBackend(id));
+  // A rename relabels the shells on it in place; going offline cuts short a
+  // spawn still waiting on it. Neither ends a running shell.
+  terminalBackends.onChange((id, change) => terminals.backendChanged(id, change));
   // Self-contained project config: discovers + validates the authored config for
   // a managed project — the repo's committed `.dispatch/` or the install-owned
   // dir, resolved per project by `config-location.ts` — syncs it into the

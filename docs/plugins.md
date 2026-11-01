@@ -1201,6 +1201,54 @@ keeps today's behaviour for a project default naming a plugin that never ran
 here. `data/` is per instance, so the dev instance learns the policy the first
 time the plugin activates there.
 
+**Status.** A backend that lives on a machine that can be asleep, unplugged or
+off the network says so, so nobody waits two minutes to find out:
+
+```ts
+ctx.terminals.setStatus("cvx-mac", {
+  state: "offline",             // "online" | "offline" | "degraded"
+  detail: "asleep",             // one short line for pickers and refusals
+  lastSeenAt: Date.now() - 4 * 60_000,
+});
+```
+
+- **`offline`.** The backend is NOT offered: it leaves the agent's `location`
+  choices and is listed as unavailable with the reason, and the pickers mark it.
+  It can still be pinned, since a pin is a preference. A shell asked of it fails
+  at once under its `fallback` policy ("cvx-mac is offline (asleep), last seen
+  4m ago"). `spawn` is never called. A spawn already waiting on it when it goes
+  offline is cut short, its `signal` aborts, and a handle that lands late is
+  killed. Shells already RUNNING there are left alone; their own transport
+  reports trouble (`stalled`, `exit`).
+- **`degraded`.** The backend is still offered, and its picker row and the
+  agent's options carry the detail.
+- **`online`, or no status ever reported.** This is how a backend behaved before
+  statuses existed.
+
+The host stamps `since` when the state changes. A report that changes only
+`lastSeenAt` is kept but broadcasts nothing, so a heartbeat does not wake every
+client. Status is runtime-only and resets when the backend registers again.
+
+**Renaming, in place.** `ctx.terminals.updateBackend(id, { label?, agentNote? })`
+changes a registered backend without re-registering it. Re-registering would end
+every shell on it, and a renamed machine is the same machine. Shells on it keep
+running, and their panel rows and later results take the new label. The new
+label is remembered for when the plugin is off (see above). A key you pass
+replaces that field, and `agentNote: undefined` removes the note. The id, shell,
+spawn and `fallback` are fixed for the registration. The host never writes to
+the object you registered: overrides live on the registry entry, so a
+class-based backend keeps its prototype methods. A replaced `agentNote` is still
+called with your backend as `this`.
+
+**Removing one.** `await ctx.terminals.unregisterBackend(id)` does for one
+backend what deactivation does for all of them: its shells end, its ports are
+withdrawn, and `dispose()` runs. Pinned chats then fall back or are refused, per
+`fallback`. The id is free to register again. Like `publishPort`, all three
+calls throw for a backend this plugin did not register. After
+`unregisterBackend`, the plugin's own teardown no longer touches that id, so a
+backend another plugin registers there later survives the first plugin
+switching off.
+
 **Telling the agent.** The agent's own Bash tool stays local while its terminal
 does not, so core says so, only to chats on a backend and never as a global
 instruction. A session prompt section, "Where your terminal runs", is written
@@ -1246,7 +1294,9 @@ spawn path, `TerminalInfo` has no `location`, no `terminal-backends` event is
 ever published, no prompt section is written, and the panel shows no picker or
 badge.
 
-`createTestContext` records `terminalBackends` and `terminalPorts`, and
+`createTestContext` records `terminalBackends`, `terminalPorts`,
+`terminalStatus` (the latest `setStatus` per id) and `terminalUpdates` (the
+merged `updateBackend` patches; the registered object is left as is), and
 `t.terminals.spawn(id, { chatId })` / `chatIdle` / `chatDeleted` play the
 host's side, so a backend can be unit-tested with no server.
 `t.terminals.beforeRun(id, { chatId, command })` reports what core would do

@@ -74,6 +74,22 @@ export const useTerminals = create<TerminalsStore>((set) => ({
   setBackends: (backends, forwards) => set({ backends, forwards }),
 }));
 
+/** True when a backend's plugin reports it cannot take a shell — not offered to the agent, still pinnable. */
+export function isBackendOffline(b: TerminalBackendInfo | undefined): boolean {
+  return b?.status?.state === "offline";
+}
+
+/**
+ * What a picker row says under a backend's name: its status when it is not
+ * plainly online — an asleep Mac is still pinnable, but nobody should pin it
+ * thinking it is up — else the plugin it came from.
+ */
+export function backendHint(b: TerminalBackendInfo): string | undefined {
+  const st = b.status;
+  if (st && st.state !== "online") return st.detail ? `${st.state} · ${st.detail}` : st.state;
+  return b.pluginId;
+}
+
 /** One chat's shells that still have a process behind them. */
 export function isLiveChatTerminal(
   terminal: TerminalInfo | undefined,

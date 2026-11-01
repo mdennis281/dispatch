@@ -72,6 +72,9 @@ export type {
   // `ctx.terminals.registerBackend` (docs/plugins.md → "Terminal backends")
   TerminalBackend,
   TerminalBackendFallback,
+  TerminalBackendState,
+  TerminalBackendStatusInput,
+  TerminalBackendUpdate,
   TerminalBackendHandle,
   TerminalBackendReadable,
   TerminalBackendShell,

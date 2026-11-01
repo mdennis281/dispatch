@@ -32,17 +32,28 @@
  * just switched off must not get a PowerShell on this host. An id this
  * instance has never seen registered has no policy to remember and reads as
  * the default, `local`.
+ *
+ * A registered backend also carries a STATUS its plugin reports
+ * (`ctx.terminals.setStatus`): an `offline` one is not offered anywhere, and a
+ * shell asked of it fails at once under its policy rather than after a two-
+ * minute spawn timeout. Label and agent note can change in place
+ * (`updateBackend`) — re-registering to rename a machine would have ended
+ * every shell running on it.
  */
 import {
   LOCAL_TERMINAL_BACKEND,
   TERMINAL_BACKEND_FALLBACKS,
   TERMINAL_BACKEND_ID_PATTERN,
+  TERMINAL_BACKEND_STATES,
   TERMINAL_CHAT_HOOK_TIMEOUT_MS,
   resolveTerminalBackend,
   resolveTerminalLocations,
   type TerminalBackend,
   type TerminalBackendFallback,
   type TerminalBackendInfo,
+  type TerminalBackendStatus,
+  type TerminalBackendStatusInput,
+  type TerminalBackendUpdate,
   type TerminalChatEvent,
   type TerminalLocationChoices,
   type TerminalLocationOption,
@@ -149,10 +160,36 @@ interface Entry {
   backend: TerminalBackend;
   /** The plugin that registered it. */
   owner?: string;
+  /** The label in force: the registration's, until `update` changes it. */
+  label: string;
+  /**
+   * Set once `update` replaced the agent note (`fn` undefined = removed). The
+   * plugin's own object is never written to: a class-based backend's methods
+   * live on its prototype, and a copy or a write would lose or shadow them.
+   */
+  agentNote?: { fn: TerminalBackend["agentNote"] };
+  /** Absent until its plugin reports one — read as online. */
+  status?: TerminalBackendStatus;
 }
 
 /** Called with a backend id as it is unregistered — TerminalService ends its shells. */
 type DetachListener = (backendId: string) => void;
+
+/** Called when a registered backend's label or status changes — TerminalService relabels and cuts. */
+type ChangeListener = (backendId: string, change: { label: string; status?: TerminalBackendStatus }) => void;
+
+/** How long a status detail may be: it is one line in a picker and a refusal. */
+const STATUS_DETAIL_MAX = 200;
+
+/** "4m", "2h", "3d" — how long ago, for a refusal naming when a host was last seen. */
+function ago(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 90) return `${s}s`;
+  const m = Math.round(s / 60);
+  if (m < 90) return `${m}m`;
+  const h = Math.round(m / 60);
+  return h < 48 ? `${h}h` : `${Math.round(h / 24)}d`;
+}
 
 /** What the agent note and refusals call the built-in location. */
 const LOCAL_LABEL = "this machine (the Dispatch host)";
@@ -187,6 +224,7 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
    */
   private readonly forwards = new Map<string, TerminalPortForward>();
   private readonly detachListeners = new Set<DetachListener>();
+  private readonly changeListeners = new Set<ChangeListener>();
   /** Read-through cache of {@link TerminalBackendMemory} — and the whole memory when none is given. */
   private readonly known = new Map<string, KnownTerminalBackend | null>();
 
@@ -228,12 +266,13 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
   }
 
   list(): TerminalBackendInfo[] {
-    return [...this.entries.values()].map(({ backend, owner }) => ({
+    return [...this.entries.values()].map(({ backend, owner, label, status }) => ({
       id: backend.id,
-      label: backend.label,
+      label,
       shell: backend.shell,
       ...(owner ? { pluginId: owner } : {}),
       fallback: backend.fallback ?? "local",
+      ...(status ? { status } : {}),
     }));
   }
 
@@ -241,6 +280,81 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
   onDetach(fn: DetachListener): () => void {
     this.detachListeners.add(fn);
     return () => this.detachListeners.delete(fn);
+  }
+
+  /** Subscribe to label and status changes of registered backends. Returns the unsubscribe. */
+  onChange(fn: ChangeListener): () => void {
+    this.changeListeners.add(fn);
+    return () => this.changeListeners.delete(fn);
+  }
+
+  private changed(entry: Entry): void {
+    for (const fn of this.changeListeners) {
+      try {
+        fn(entry.backend.id, { label: entry.label, ...(entry.status ? { status: entry.status } : {}) });
+      } catch (err) {
+        this.opts.log?.(`terminal backend "${entry.backend.id}": change listener failed`, err);
+      }
+    }
+    this.broadcast();
+  }
+
+  /**
+   * Record whether a backend can take a shell. `since` moves only when the
+   * STATE changes, so "offline since 14:02" survives a plugin that re-reports
+   * the same state with a fresher detail. A report that changes nothing
+   * broadcasts nothing — a heartbeat that only advances `lastSeenAt` is kept
+   * (and served by `list()`) without waking every client.
+   */
+  setStatus(id: string, input: TerminalBackendStatusInput): void {
+    const entry = this.entries.get(id);
+    if (!entry) throw new Error(`terminal backend "${id}" is not registered`);
+    if (!input || typeof input !== "object" || !TERMINAL_BACKEND_STATES.includes(input.state)) {
+      throw new Error(
+        `terminal backend "${id}": status.state must be ${TERMINAL_BACKEND_STATES.map((st) => `"${st}"`).join(", ")}`,
+      );
+    }
+    if (input.detail !== undefined && typeof input.detail !== "string") {
+      throw new Error(`terminal backend "${id}": status.detail must be a string`);
+    }
+    if (input.lastSeenAt !== undefined && !Number.isFinite(input.lastSeenAt)) {
+      throw new Error(`terminal backend "${id}": status.lastSeenAt must be epoch milliseconds`);
+    }
+    const prev = entry.status;
+    const detail = input.detail?.replace(/\s+/g, " ").trim().slice(0, STATUS_DETAIL_MAX) || undefined;
+    const next: TerminalBackendStatus = {
+      state: input.state,
+      ...(detail ? { detail } : {}),
+      ...(input.lastSeenAt !== undefined ? { lastSeenAt: Math.round(input.lastSeenAt) } : {}),
+      since: prev && prev.state === input.state ? prev.since : (this.opts.now ?? Date.now)(),
+    };
+    entry.status = next;
+    if (prev && prev.state === next.state && prev.detail === next.detail) return;
+    this.changed(entry);
+  }
+
+  /**
+   * Change a registered backend's label or agent note in place. Its shells are
+   * left alone — TerminalService only relabels their rows — and the new label
+   * is remembered for when the plugin is gone.
+   */
+  update(id: string, patch: TerminalBackendUpdate): void {
+    const entry = this.entries.get(id);
+    if (!entry) throw new Error(`terminal backend "${id}" is not registered`);
+    if (!patch || typeof patch !== "object") throw new Error(`updateBackend("${id}") needs an object`);
+    const has = (k: keyof TerminalBackendUpdate) => Object.prototype.hasOwnProperty.call(patch, k);
+    if (has("label") && (typeof patch.label !== "string" || !patch.label.trim())) {
+      throw new Error(`terminal backend "${id}": label must be a non-empty string`);
+    }
+    if (has("agentNote") && patch.agentNote !== undefined && typeof patch.agentNote !== "function") {
+      throw new Error(`terminal backend "${id}": agentNote must be a function`);
+    }
+    if (has("agentNote")) entry.agentNote = { fn: patch.agentNote };
+    if (has("label") && patch.label !== entry.label) {
+      entry.label = patch.label!;
+      this.rememberBackend(entry);
+      this.changed(entry);
+    }
   }
 
   /**
@@ -271,8 +385,9 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
         `terminal backend "${id}": fallback must be ${TERMINAL_BACKEND_FALLBACKS.map((f) => `"${f}"`).join(" or ")}`,
       );
     }
-    this.entries.set(id, { backend, owner });
-    this.rememberBackend(backend, owner);
+    const entry: Entry = { backend, owner, label: backend.label };
+    this.entries.set(id, entry);
+    this.rememberBackend(entry);
     this.broadcast();
   }
 
@@ -281,10 +396,10 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
    * Never throws: a state database that cannot be written must not stop a
    * plugin from activating — the cache still holds it for this process.
    */
-  private rememberBackend(backend: TerminalBackend, owner: string | undefined): void {
+  private rememberBackend({ backend, owner, label }: Entry): void {
     const known: KnownTerminalBackend = {
       id: backend.id,
-      label: backend.label,
+      label,
       ...(owner ? { pluginId: owner } : {}),
       fallback: backend.fallback ?? "local",
       seenAt: (this.opts.now ?? Date.now)(),
@@ -377,6 +492,12 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
         ...(known ? { label: known.label } : {}),
       };
     }
+    // Offline: fail now, under the backend's policy, instead of calling a
+    // spawn that can only hang until `spawnTimeoutMs` — two minutes by default.
+    const offline = this.offlineReason(entry);
+    if (offline) {
+      return { requested: choice.id, offline, fallback: this.fallbackOf(choice.id), label: entry.label };
+    }
     const repoPath = projectId ? await this.opts.repoPath?.(projectId).catch(() => undefined) : undefined;
     // Read only for a shell actually headed to a backend: a local shell has no
     // use for either, and the branch costs a git spawn.
@@ -387,11 +508,20 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
       requested: choice.id,
       backend: entry.backend,
       fallback: this.fallbackOf(choice.id),
+      label: entry.label,
       ...(repoPath ? { repoPath } : {}),
       ...(worktreePath ? { worktreePath } : {}),
       ...(branch ? { branch } : {}),
-      note: this.noteFor(entry.backend, { chatId: ident.chatId, projectId }),
+      note: this.noteFor(entry, { chatId: ident.chatId, projectId }),
     };
+  }
+
+  /** Why a registered backend cannot take a shell now, or undefined when it can. */
+  private offlineReason(entry: Entry): string | undefined {
+    const st = entry.status;
+    if (st?.state !== "offline") return undefined;
+    const seen = st.lastSeenAt ? `, last seen ${ago((this.opts.now ?? Date.now)() - st.lastSeenAt)} ago` : "";
+    return `${entry.label} is offline${st.detail ? ` (${st.detail})` : ""}${seen}`;
   }
 
   /**
@@ -422,15 +552,35 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
     }
     const options: TerminalLocationOption[] = [];
     const unavailable: string[] = [];
+    const reasons: Record<string, string> = {};
     for (const id of new Set([def.id, ...allowed])) {
       const label = this.labelOf(id);
       if (label === undefined) {
-        if (id !== def.id) unavailable.push(id);
+        if (id !== def.id) {
+          unavailable.push(id);
+          reasons[id] = "its plugin is switched off or not installed";
+        }
         continue;
       }
-      options.push({ id, label, isDefault: id === def.id });
+      const entry = this.entries.get(id);
+      // An offline DEFAULT is listed too: a terminal sent there would fail, and
+      // the agent should hear that before it tries, not after.
+      const offline = entry && this.offlineReason(entry);
+      if (offline) {
+        unavailable.push(id);
+        reasons[id] = offline;
+        continue;
+      }
+      const degraded = entry?.status?.state === "degraded" ? (entry.status.detail ?? "degraded") : undefined;
+      options.push({ id, label, isDefault: id === def.id, ...(degraded ? { degraded } : {}) });
     }
-    return { defaultId: def.id, options, unavailable, enabled: options.length > 1 };
+    return {
+      defaultId: def.id,
+      options,
+      unavailable,
+      ...(unavailable.length ? { reasons } : {}),
+      enabled: options.length > 1,
+    };
   }
 
   /**
@@ -447,7 +597,9 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
     if (hit) return { ok: true, label: hit.label };
     const list = choices.options.map((o) => `\`${o.id}\``).join(", ") || `\`${choices.defaultId}\``;
     const why = choices.unavailable.includes(location)
-      ? `"${location}" is allowed but not available right now — its plugin is switched off or not installed`
+      ? `"${location}" is allowed but not available right now — ${
+          choices.reasons?.[location] ?? "its plugin is switched off or not installed"
+        }`
       : `"${location}" is not an allowed terminal location for this chat`;
     return {
       ok: false,
@@ -458,7 +610,7 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
   /** What a location is called — undefined for a backend that is not registered. */
   labelOf(id: string): string | undefined {
     if (id === LOCAL_TERMINAL_BACKEND) return LOCAL_LABEL;
-    return this.entries.get(id)?.backend.label;
+    return this.entries.get(id)?.label;
   }
 
   /**
@@ -489,14 +641,16 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
     const chat = await this.opts.chat(chatId).catch(() => null);
     const info = { chatId, projectId: chat?.projectId };
     const rows = choices.options.map((o) => {
-      const head = `- \`${o.id}\` — ${o.label}${o.isDefault ? " (the default)" : ""}.`;
+      const head =
+        `- \`${o.id}\` — ${o.label}${o.isDefault ? " (the default)" : ""}.` +
+        (o.degraded ? ` Degraded right now: ${o.degraded}.` : "");
       if (o.id === LOCAL_TERMINAL_BACKEND) {
         return `${head} The same machine as your Bash/PowerShell tool and your files.`;
       }
       const entry = this.entries.get(o.id);
       const lines = [
         ...(this.fallbackOf(o.id) === "refuse" ? [refuseNote(o.label)] : []),
-        ...(entry ? [this.backendExtra(entry.backend, info)] : []),
+        ...(entry ? [this.backendExtra(entry, info)] : []),
       ].filter((l): l is string => Boolean(l));
       return lines.length ? `${head}\n  ${lines.join("\n").replace(/\n/g, "\n  ")}` : head;
     });
@@ -510,7 +664,11 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
       "Locations:",
       ...rows,
       ...(choices.unavailable.length
-        ? [`(Allowed but unavailable right now: ${choices.unavailable.map((id) => `\`${id}\``).join(", ")}.)`]
+        ? [
+            `(Allowed but unavailable right now: ${choices.unavailable
+              .map((id) => `\`${id}\`${choices.reasons?.[id] ? ` — ${choices.reasons[id]}` : ""}`)
+              .join("; ")}.)`,
+          ]
         : []),
       "",
       `Only the terminal moves. Your own Bash/PowerShell tool, file reads and edits, and git always ` +
@@ -522,12 +680,13 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
   }
 
   /** A backend's own lines for the agent, contained if it throws. */
-  private backendExtra(
-    backend: TerminalBackend,
-    info: { chatId: string; projectId?: string },
-  ): string | undefined {
+  private backendExtra(entry: Entry, info: { chatId: string; projectId?: string }): string | undefined {
+    const { backend } = entry;
+    // An `update`d note replaces the registration's; called with the backend
+    // as `this` either way, so a class method can still reach its own state.
+    const fn = entry.agentNote ? entry.agentNote.fn : backend.agentNote;
     try {
-      return backend.agentNote?.(info)?.trim() || undefined;
+      return fn?.call(backend, info)?.trim() || undefined;
     } catch (err) {
       this.opts.log?.(`terminal backend "${backend.id}": agentNote threw`, err);
       return undefined;
@@ -538,18 +697,19 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
    * What every backend's note starts with. Generic on purpose: the backend
    * appends what only it knows (how code reaches it, what is not shared).
    */
-  private noteFor(backend: TerminalBackend, info: { chatId: string; projectId?: string }): string {
-    const extra = this.backendExtra(backend, info);
+  private noteFor(entry: Entry, info: { chatId: string; projectId?: string }): string {
+    const { backend, label } = entry;
+    const extra = this.backendExtra(entry, info);
     return [
       `This chat's managed terminals (\`mcp__dispatch-workspace__terminal\` and the Terminals panel) run on ` +
-        `${backend.label}, NOT on the Dispatch host. Everything else you do stays local: your own ` +
+        `${label}, NOT on the Dispatch host. Everything else you do stays local: your own ` +
         `Bash/PowerShell tool, file reads and edits, and git.`,
       `- Run builds, tests, installs and dev servers through the terminal tool. Running them with Bash ` +
         `would run them on the host instead, against a different environment.`,
       `- Keep git local — commit, branch and push from Bash as usual.`,
       `- A server the terminal starts listens over there. Use the forwarded local URL the terminal ` +
         `results list ("Forwarded ports"), not localhost:<port>.`,
-      ...(backend.fallback === "refuse" ? [`- ${refuseNote(backend.label)}`] : []),
+      ...(backend.fallback === "refuse" ? [`- ${refuseNote(label)}`] : []),
       ...(extra ? [extra] : []),
     ].join("\n");
   }

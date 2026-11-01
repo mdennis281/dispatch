@@ -130,6 +130,8 @@ function setup(opts: { stallPauseMaxMs?: number; memory?: TerminalBackendMemory 
     },
   });
   registry.onDetach((id) => svc.detachBackend(id));
+  // As container.ts wires it.
+  registry.onChange((id, change) => svc.backendChanged(id, change));
   services.push(svc);
   return { registry, svc, local, chats, projectDefaults, allowed, branchAsked };
 }
@@ -1548,5 +1550,202 @@ describe("review fixes on #476", () => {
     // ~200 ms of paused budget + the 100 ms deadline (less whatever ran before the stall).
     expect(Date.now() - started).toBeGreaterThanOrEqual(250);
     expect(res.notices?.at(-1)).toMatch(/up to the limit, after which the clock ran again\.$/);
+  });
+});
+
+describe("backend status and in-place updates (E1/E21)", () => {
+  const mac = (over: Partial<TerminalBackend> = {}) =>
+    fakeBackend({ id: "mac", label: "cvx-mac", fallback: "refuse", ...over });
+
+  it("an offline backend fails a new shell AT ONCE under refuse — spawn is never called", async () => {
+    const h = setup();
+    const backend = mac();
+    h.registry.register(backend, "remote-host");
+    h.chats.set("c1", { terminalBackend: "mac" });
+    h.registry.setStatus("mac", { state: "offline", detail: "asleep", lastSeenAt: Date.now() - 4 * 60_000 });
+
+    const started = Date.now();
+    const res = await h.svc.run({ chatId: "c1", name: "build", command: "say x", cwd: "/w" });
+    // Not the 120 s spawn timeout: nothing was asked of the backend at all.
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(backend.infos).toHaveLength(0);
+    expect(h.local).toHaveLength(0);
+    expect(res.error).toMatch(/did not start on cvx-mac \(`mac`\): cvx-mac is offline \(asleep\), last seen 4m ago/);
+    expect(h.svc.listChat("c1")[0]!.location).toMatchObject({ state: "failed", label: "cvx-mac" });
+  });
+
+  it("an offline backend under the default policy falls back locally at once, saying why", async () => {
+    const h = setup();
+    const backend = fakeBackend();
+    h.registry.register(backend, "plug");
+    h.chats.set("c1", { terminalBackend: "box" });
+    h.registry.setStatus("box", { state: "offline" });
+    const res = await h.svc.run({ chatId: "c1", name: "main", command: "say here", cwd: "/w" });
+    expect(backend.infos).toHaveLength(0);
+    expect(res.output).toBe("here");
+    expect(res.notice).toMatch(/Test box is offline\. This shell is running LOCALLY/);
+  });
+
+  it("going offline cuts short a spawn that is already waiting, and kills a handle that lands late", async () => {
+    const h = setup();
+    let land!: (s: FakeShell) => void;
+    const late = new FakeShell("/Users/dispatch/w");
+    const backend = mac({ spawn: (info) => (backend.infos.push(info), new Promise<FakeShell>((r) => (land = r))) });
+    h.registry.register(backend, "remote-host");
+    h.chats.set("c1", { terminalBackend: "mac" });
+
+    const running = h.svc.run({ chatId: "c1", name: "build", command: "say x", cwd: "/w" });
+    await flush();
+    await flush();
+    expect(h.svc.listChat("c1")[0]!.location?.state).toBe("connecting");
+    const started = Date.now();
+    h.registry.setStatus("mac", { state: "offline", detail: "lid closed" });
+    const res = await running;
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(res.error).toMatch(/cvx-mac could not start a shell: it went offline \(lid closed\) while the shell was starting/);
+    expect(backend.infos[0]!.signal.aborted).toBe(true);
+    expect(h.local).toHaveLength(0);
+    land(late);
+    await flush();
+    expect(late.killed).toBe(true);
+  });
+
+  it("does not touch a shell already running there when the backend reports offline", async () => {
+    const h = setup();
+    const backend = mac();
+    h.registry.register(backend, "remote-host");
+    h.chats.set("c1", { terminalBackend: "mac" });
+    await h.svc.run({ chatId: "c1", name: "build", command: "say up", cwd: "/w" });
+    h.registry.setStatus("mac", { state: "offline" });
+    const info = h.svc.listChat("c1")[0]!;
+    expect(info.status).toBe("live");
+    expect(backend.spawned[0]!.killed).toBe(false);
+    // Its own transport is what says whether it still works.
+    expect((await h.svc.run({ chatId: "c1", name: "build", command: "say still" })).output).toBe("still");
+  });
+
+  it("back online, the next shell spawns there again", async () => {
+    const h = setup();
+    const backend = mac();
+    h.registry.register(backend, "remote-host");
+    h.chats.set("c1", { terminalBackend: "mac" });
+    h.registry.setStatus("mac", { state: "offline" });
+    expect((await h.svc.run({ chatId: "c1", name: "build", command: "say x", cwd: "/w" })).error).toMatch(/offline/);
+    h.registry.setStatus("mac", { state: "online" });
+    const res = await h.svc.run({ chatId: "c1", name: "build", command: "say back", cwd: "/w" });
+    expect(res.output).toBe("back");
+    expect(backend.spawned).toHaveLength(1);
+  });
+
+  it("locations: offline is unavailable with its reason — the default too; degraded stays offered and says so", async () => {
+    const h = setup();
+    h.registry.register(mac(), "remote-host");
+    h.registry.register(fakeBackend(), "plug");
+    h.chats.set("c1", { terminalBackend: "mac" });
+    h.allowed.app = ["local", "box", "mac", "gone"];
+    h.registry.setStatus("mac", { state: "offline", detail: "asleep" });
+    h.registry.setStatus("box", { state: "degraded", detail: "disk 95% full" });
+
+    const choices = await h.registry.locations({ chatId: "c1" });
+    expect(choices.defaultId).toBe("mac");
+    expect(choices.options.map((o) => o.id)).toEqual(["local", "box"]);
+    expect(choices.options.find((o) => o.id === "box")?.degraded).toBe("disk 95% full");
+    expect(choices.unavailable).toEqual(["mac", "gone"]);
+    expect(choices.reasons).toEqual({
+      mac: "cvx-mac is offline (asleep)",
+      gone: "its plugin is switched off or not installed",
+    });
+
+    const refused = await h.registry.checkLocation({ chatId: "c1" }, "mac");
+    expect(refused).toMatchObject({ ok: false });
+    expect((refused as { error: string }).error).toMatch(/"mac" is allowed but not available right now — cvx-mac is offline \(asleep\)/);
+
+    const note = (await h.registry.agentNote("c1"))!;
+    expect(note).toContain("- `box` — Test box. Degraded right now: disk 95% full.");
+    expect(note).toContain("`mac` — cvx-mac is offline (asleep)");
+  });
+
+  it("setStatus validates, moves `since` only on a state change, and broadcasts only real changes", () => {
+    let now = 1_000;
+    const registry = new TerminalBackendRegistry({
+      bus,
+      chat: async () => null,
+      projectDefault: () => undefined,
+      now: () => now,
+    });
+    registry.register(mac(), "remote-host");
+    expect(() => registry.setStatus("nope", { state: "online" })).toThrow(/not registered/);
+    expect(() => registry.setStatus("mac", { state: "asleep" as never })).toThrow(/state must be/);
+    expect(() => registry.setStatus("mac", { state: "online", lastSeenAt: Number.NaN })).toThrow(/lastSeenAt/);
+
+    const broadcasts = () => events.filter((e) => e.type === "terminal-backends").length;
+    const before = broadcasts();
+    registry.setStatus("mac", { state: "offline", detail: "  asleep\n since   noon " });
+    expect(registry.list()[0]!.status).toEqual({ state: "offline", detail: "asleep since noon", since: 1_000 });
+    now = 5_000;
+    registry.setStatus("mac", { state: "offline", detail: "asleep since noon", lastSeenAt: 4_000 });
+    expect(registry.list()[0]!.status).toEqual({ state: "offline", detail: "asleep since noon", lastSeenAt: 4_000, since: 1_000 });
+    // Only the first of those two changed what a client shows.
+    expect(broadcasts() - before).toBe(1);
+    registry.setStatus("mac", { state: "online" });
+    expect(registry.list()[0]!.status).toEqual({ state: "online", since: 5_000 });
+    expect(broadcasts() - before).toBe(2);
+  });
+
+  it("updateBackend relabels live shells without ending them, replaces the note, and never writes the plugin's object", async () => {
+    const memory = mapMemory();
+    const h = setup({ memory });
+    const backend = mac({ agentNote: () => "Old note." });
+    h.registry.register(backend, "remote-host");
+    h.chats.set("c1", { terminalBackend: "mac" });
+    await h.svc.run({ chatId: "c1", name: "build", command: "say up", cwd: "/w" });
+
+    h.registry.update("mac", { label: "Garage Mac", agentNote: () => "New note." });
+    expect(backend.label).toBe("cvx-mac");
+    expect(h.registry.list()[0]!.label).toBe("Garage Mac");
+    expect(memory.rows.get("mac")?.label).toBe("Garage Mac");
+    const info = h.svc.listChat("c1")[0]!;
+    expect(info.status).toBe("live");
+    expect(info.location).toMatchObject({ backend: "mac", label: "Garage Mac", state: "ready" });
+    expect(backend.spawned[0]!.killed).toBe(false);
+    expect((await h.svc.run({ chatId: "c1", name: "build", command: "say same" })).ranOn).toEqual({
+      id: "mac",
+      label: "Garage Mac",
+    });
+
+    let note = (await h.registry.agentNote("c1"))!;
+    expect(note).toContain("run on Garage Mac, NOT on the Dispatch host");
+    expect(note).toContain("New note.");
+    expect(note).not.toContain("Old note.");
+    h.registry.update("mac", { agentNote: undefined });
+    note = (await h.registry.agentNote("c1"))!;
+    expect(note).not.toContain("New note.");
+
+    expect(() => h.registry.update("mac", { label: "  " })).toThrow(/label must be a non-empty string/);
+    expect(() => h.registry.update("mac", { agentNote: "text" as never })).toThrow(/agentNote must be a function/);
+    expect(() => h.registry.update("nope", { label: "x" })).toThrow(/not registered/);
+  });
+
+  it("a class-based backend's updated note still runs with the backend as `this`", async () => {
+    class Box {
+      readonly id = "cls";
+      readonly label = "Class box";
+      readonly shell = "bash" as const;
+      private readonly host = "cls.lan";
+      async spawn(): Promise<FakeShell> {
+        return new FakeShell("/srv");
+      }
+      note(): string {
+        return `Reached at ${this.host}.`;
+      }
+    }
+    const h = setup();
+    const box = new Box();
+    h.registry.register(box as unknown as TerminalBackend, "plug");
+    h.chats.set("c1", { terminalBackend: "cls" });
+    h.registry.update("cls", { agentNote: Box.prototype.note as TerminalBackend["agentNote"] });
+    expect(await h.registry.agentNote("c1")).toContain("Reached at cls.lan.");
+    // And the registration still spawns through its prototype method.
+    expect((await h.svc.run({ chatId: "c1", name: "t", command: "say ok", cwd: "/w" })).output).toBe("ok");
   });
 });

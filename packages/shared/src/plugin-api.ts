@@ -17,7 +17,13 @@ import type { MemoryType } from "./domain.js";
 import type { QuestionAnswer, WsServerEvent, WsServerEventType } from "./wire.js";
 import type { Harness, HostAbortSignal } from "./harness.js";
 import type { ProviderDescriptor } from "./providers.js";
-import type { TerminalBackend, TerminalPortForward, TerminalPortForwardInput } from "./terminal-backend.js";
+import type {
+  TerminalBackend,
+  TerminalBackendStatusInput,
+  TerminalBackendUpdate,
+  TerminalPortForward,
+  TerminalPortForwardInput,
+} from "./terminal-backend.js";
 
 export interface PluginModule {
   activate(ctx: PluginContext): Promise<void> | void;
@@ -505,5 +511,28 @@ export interface PluginContext<Req = unknown, Reply = unknown> {
     publishPort(backendId: string, port: TerminalPortForwardInput): () => void;
     /** Ports currently published for a chat, by any backend. */
     ports(chatId: string): TerminalPortForward[];
+    /**
+     * Report whether one of this plugin's backends can take a shell. `offline`
+     * takes it out of every picker and the agent's choices, makes a shell asked
+     * of it fail AT ONCE under its `fallback` policy, and cuts short a spawn
+     * already waiting on it. Shells already running on it are NOT touched —
+     * their transport reports its own trouble (`stalled`, `exit`). Throws for a
+     * backend this plugin did not register.
+     */
+    setStatus(backendId: string, status: TerminalBackendStatusInput): void;
+    /**
+     * Change a backend's label or agent note in place. Unlike unregistering and
+     * registering again, the shells running on it are left alone; their panel
+     * rows take the new label. Throws for a backend this plugin did not register.
+     */
+    updateBackend(backendId: string, update: TerminalBackendUpdate): void;
+    /**
+     * Remove ONE backend, as deactivation does for all of them: its shells end
+     * (each says why), its ports are withdrawn and its `dispose()` is called.
+     * Chats pinned to it then fall back or are refused, per its `fallback`.
+     * The id may be registered again afterwards. Throws for a backend this
+     * plugin did not register.
+     */
+    unregisterBackend(backendId: string): Promise<void>;
   };
 }
