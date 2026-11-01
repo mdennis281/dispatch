@@ -184,7 +184,8 @@ export interface TestContext {
      * Call a backend's `beforeRun` as core would before writing `command`,
      * and report what core would do: `ran: false` with `refusal` when the
      * hook refused or threw (core never writes the command then). Fills
-     * `terminal` ("main"), `cwd` ("/repo"), `background` and `signal`. No
+     * `terminal` ("main"), `cwd` ("/repo"), `background`, `signal` and a fresh
+     * `runId` — pass your own to pair this call with an `afterRun`. No
      * `beforeRun` at all is `ran: true` — the command just runs.
      */
     beforeRun(
@@ -587,7 +588,11 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
     };
   }
 
+  // A fresh `runId` per call, as core gives each run its own. A test pairing a
+  // `beforeRun` with its `afterRun` passes the same `runId` to both.
+  let runSeq = 0;
   const runDefaults = () => ({
+    runId: `test-run-${++runSeq}`,
     terminal: "main",
     cwd: "/repo",
     background: false,

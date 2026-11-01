@@ -138,9 +138,10 @@ ctx.terminals.registerBackend({
   spawn: async ({ chatId, projectId, name, cwd, repoPath, worktreePath, branch, signal }) => handle,
   // Optional, per command, only on shells you serve. Awaited BEFORE the write and NOT
   // charged to the command's timeout (own bound: runHookTimeoutMs, default 10 min).
-  beforeRun: async ({ chatId, terminal, command, cwd, background, signal }) =>
+  // runId: one per run, the same in its beforeRun and afterRun — key per-run state by it.
+  beforeRun: async ({ runId, chatId, terminal, command, cwd, background, signal }) =>
     ({ notices: ["Synced 2 changes."] }),       // or { refuse: "why" } / throw → never written
-  afterRun: async ({ command, exitCode, durationMs, outcome }) =>
+  afterRun: async ({ runId, command, exitCode, durationMs, outcome }) =>
     ({ notices: ["Brought back: x"] }),         // a throw is a notice, not a failed run
   agentNote: ({ chatId }) => "what the agent can't infer (how code gets there, what isn't shared)",
   onChatIdle: ({ chatId }) => {},     // session retired by the idle sweep — shells are NOT killed by core

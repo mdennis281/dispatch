@@ -276,6 +276,27 @@ describe("createTestContext terminals", () => {
     expect(await t.terminals.beforeRun("plain", { chatId: "c1", command: "make" })).toEqual({ ran: true, notices: [] });
     expect(await t.terminals.afterRun("plain", { chatId: "c1", command: "make" })).toEqual({ notices: [] });
   });
+
+  it("gives each call a fresh runId unless the test pairs two by passing one", async () => {
+    const t = createTestContext();
+    const ids: string[] = [];
+    const handle = { stdin: { write: () => {} }, stdout: { on: () => {} }, stderr: { on: () => {} }, kill: () => {}, on: () => {} };
+    t.ctx.terminals!.registerBackend({
+      id: "box",
+      label: "Box",
+      shell: "bash",
+      spawn: async () => handle,
+      beforeRun: (info) => void ids.push(`before:${info.runId}`),
+      afterRun: (info) => void ids.push(`after:${info.runId}`),
+    });
+    await t.terminals.beforeRun("box", { chatId: "c1", command: "a" });
+    await t.terminals.beforeRun("box", { chatId: "c1", command: "b" });
+    await t.terminals.beforeRun("box", { chatId: "c1", command: "c", runId: "mine" });
+    await t.terminals.afterRun("box", { chatId: "c1", command: "c", runId: "mine" });
+    expect(ids[0]).not.toBe(ids[1]);
+    expect(ids[0]).toMatch(/^before:\S+$/);
+    expect(ids.slice(2)).toEqual(["before:mine", "after:mine"]);
+  });
 });
 
 describe("lifecycle", () => {

@@ -990,6 +990,30 @@ describe("per-run hooks (beforeRun / afterRun)", () => {
     });
   });
 
+  // A plugin holds a lock and attributes host-side edits per run, from
+  // `beforeRun` to `afterRun`. A background run's `afterRun` lands after
+  // other runs in the same chat have come and gone, so only an id pairs them.
+  it("gives each run one runId, shared by its beforeRun and its afterRun", async () => {
+    const h = setup();
+    const { backend, before, after } = hooked();
+    h.registry.register(backend, "plug");
+    h.chats.set("c1", { terminalBackend: "box" });
+
+    await h.svc.run({ chatId: "c1", name: "dev", command: "hang", cwd: "/w", background: true });
+    await h.svc.run({ chatId: "c1", name: "build", command: "say one", cwd: "/w" });
+    await h.svc.run({ chatId: "c1", name: "build", command: "say two", cwd: "/w" });
+    const dev = backend.spawned[0]!;
+    const marker = dev.writes.join("").match(/CMTERMSENTINEL_[A-Za-z0-9_-]+/)![0];
+    dev.stdout.emit("data", Buffer.from(`${marker}|0|True|/srv/repo\n`));
+    await vi.waitFor(() => expect(after).toHaveLength(3));
+
+    const ids = before.map((b) => b.runId);
+    expect(ids.every((id) => typeof id === "string" && id.length > 0)).toBe(true);
+    expect(new Set(ids).size).toBe(3);
+    expect(after.map((a) => a.command)).toEqual(["say one", "say two", "hang"]);
+    for (const a of after) expect(a.runId).toBe(before.find((b) => b.command === a.command)!.runId);
+  });
+
   it("is never called for a shell that fell back to local", async () => {
     const h = setup();
     const { backend, before, after } = hooked({ spawn: async () => Promise.reject(new Error("offline")) });
