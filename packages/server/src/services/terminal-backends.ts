@@ -482,28 +482,23 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
     });
     if (choice.id === LOCAL_TERMINAL_BACKEND) return { requested: choice.id };
     if (!this.entries.has(choice.id)) await this.opts.settled?.().catch(() => {});
-    const entry = this.entries.get(choice.id);
-    if (!entry) {
-      const known = this.recall(choice.id);
-      return {
-        requested: choice.id,
-        missing: true,
-        fallback: this.fallbackOf(choice.id),
-        ...(known ? { label: known.label } : {}),
-      };
-    }
-    // Offline: fail now, under the backend's policy, instead of calling a
-    // spawn that can only hang until `spawnTimeoutMs` — two minutes by default.
-    const offline = this.offlineReason(entry);
-    if (offline) {
-      return { requested: choice.id, offline, fallback: this.fallbackOf(choice.id), label: entry.label };
-    }
+    const early = this.cannotServe(choice.id);
+    if (early) return early;
     const repoPath = projectId ? await this.opts.repoPath?.(projectId).catch(() => undefined) : undefined;
     // Read only for a shell actually headed to a backend: a local shell has no
     // use for either, and the branch costs a git spawn.
     const worktreePath = chat?.worktreePath || undefined;
     const root = worktreePath ?? repoPath;
     const branch = root ? await this.opts.branchOf?.(root).catch(() => undefined) : undefined;
+    // Asked AGAIN after the awaits, and the entry re-read: a backend that went
+    // offline, was renamed or was unregistered while git answered must not be
+    // served from what was true before. TerminalService can only cut a spawn it
+    // already marked `connecting`, which it does once this returns — so an
+    // offline flip in this window found nothing to cut, and the stale online
+    // answer waited out the whole spawn timeout (review on #482).
+    const late = this.cannotServe(choice.id);
+    if (late) return late;
+    const entry = this.entries.get(choice.id)!;
     return {
       requested: choice.id,
       backend: entry.backend,
@@ -514,6 +509,23 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
       ...(branch ? { branch } : {}),
       note: this.noteFor(entry, { chatId: ident.chatId, projectId }),
     };
+  }
+
+  /**
+   * The resolution for an id that cannot take a shell right now — not
+   * registered, or registered and offline — or undefined when it can.
+   * Offline fails now, under the backend's policy, instead of calling a spawn
+   * that can only hang until `spawnTimeoutMs`: two minutes by default.
+   */
+  private cannotServe(id: string): TerminalBackendResolution | undefined {
+    const entry = this.entries.get(id);
+    if (!entry) {
+      const known = this.recall(id);
+      return { requested: id, missing: true, fallback: this.fallbackOf(id), ...(known ? { label: known.label } : {}) };
+    }
+    const offline = this.offlineReason(entry);
+    if (offline) return { requested: id, offline, fallback: this.fallbackOf(id), label: entry.label };
+    return undefined;
   }
 
   /** Why a registered backend cannot take a shell now, or undefined when it can. */

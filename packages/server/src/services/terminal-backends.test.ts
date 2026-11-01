@@ -95,8 +95,15 @@ interface Harness {
   branchAsked: string[];
 }
 
-function setup(opts: { stallPauseMaxMs?: number; memory?: TerminalBackendMemory } = {}): Harness {
-  const { memory, ...svcOpts } = opts;
+function setup(
+  opts: {
+    stallPauseMaxMs?: number;
+    memory?: TerminalBackendMemory;
+    /** Wraps the harness's branch lookup — to hold `resolve` inside its awaits. */
+    gateBranch?: () => Promise<void>;
+  } = {},
+): Harness {
+  const { memory, gateBranch, ...svcOpts } = opts;
   const chats = new Map<string, { terminalBackend?: string; projectId?: string; worktreePath?: string }>();
   const projectDefaults = new Map<string, string>();
   const allowed: { project?: string[]; app?: string[] } = {};
@@ -108,6 +115,7 @@ function setup(opts: { stallPauseMaxMs?: number; memory?: TerminalBackendMemory 
     allowedLocations: () => allowed,
     repoPath: async () => "/repo",
     branchOf: async (dir) => {
+      await gateBranch?.();
       branchAsked.push(dir);
       return dir === "/wt/feat-x" ? "feat/x" : "main";
     },
@@ -1608,6 +1616,37 @@ describe("backend status and in-place updates (E1/E21)", () => {
     land(late);
     await flush();
     expect(late.killed).toBe(true);
+  });
+
+  it("re-checks after resolve's awaits: an offline flip or a rename while git answers is not missed", async () => {
+    // TerminalService cuts only a spawn it has marked `connecting`, which it
+    // does once `resolve` returns. Checked only BEFORE the branch lookup, an
+    // offline flip during it found nothing to cut, and the stale online answer
+    // waited out the whole spawn timeout (review on #482).
+    let release!: () => void;
+    let entered!: () => void;
+    const inBranch = new Promise<void>((r) => (entered = r));
+    const h = setup({
+      gateBranch: () => {
+        entered();
+        return new Promise<void>((r) => (release = r));
+      },
+    });
+    const backend = mac({ spawnTimeoutMs: 30_000, spawn: () => new Promise(() => {}) });
+    h.registry.register(backend, "remote-host");
+    // A worktree, so `resolve` has a root to ask git about.
+    h.chats.set("c1", { terminalBackend: "mac", worktreePath: "/wt/feat-x" });
+
+    const running = h.svc.run({ chatId: "c1", name: "build", command: "say x", cwd: "/w" });
+    await inBranch;
+    h.registry.update("mac", { label: "Garage Mac" });
+    h.registry.setStatus("mac", { state: "offline", detail: "asleep" });
+    const started = Date.now();
+    release();
+    const res = await running;
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(backend.infos).toHaveLength(0);
+    expect(res.error).toMatch(/did not start on Garage Mac \(`mac`\): Garage Mac is offline \(asleep\)/);
   });
 
   it("does not touch a shell already running there when the backend reports offline", async () => {
