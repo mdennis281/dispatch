@@ -1282,6 +1282,7 @@ export class TerminalService {
       Math.max(1_000, backend.runHookTimeoutMs ?? TERMINAL_RUN_HOOK_TIMEOUT_MS),
     );
     const base = {
+      runId: nanoid(),
       chatId: term.chatId,
       ...(term.projectId ? { projectId: term.projectId } : {}),
       terminal: term.name,

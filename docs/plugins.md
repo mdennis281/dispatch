@@ -988,11 +988,11 @@ ctx.terminals.registerBackend({
     return handle;          // TerminalBackendHandle — see below
   },
   // Optional, per command — see "Run hooks" below.
-  async beforeRun({ chatId, terminal, command, cwd, background, signal }) {
+  async beforeRun({ runId, chatId, terminal, command, cwd, background, signal }) {
     // bring the far side up to date; fail closed when it can't be
     return { notices: ["Synced 2 local changes."] };   // or { refuse: "why" }
   },
-  async afterRun({ chatId, terminal, command, exitCode, durationMs, outcome }) {
+  async afterRun({ runId, chatId, terminal, command, exitCode, durationMs, outcome }) {
     return { notices: ["Brought back: pnpm-lock.yaml"] };
   },
   agentNote: ({ chatId }) => "How your local edits reach the container: …",
@@ -1084,6 +1084,10 @@ local shell, and never for a shell opened with no command.
   the command is over. Core awaits it before returning the result, keeps the
   shell busy meanwhile, and appends its notices. A throw or overrun becomes a
   notice, never a failed run: the command already ran.
+- **Pairing.** Every run has a `runId`, the same in its `beforeRun` and its
+  `afterRun` and never reused. Key per-run state by it (a lock, the files a
+  run touched): `chatId` + `terminal` is not unique, because a background
+  run's `afterRun` arrives after other runs in the chat have come and gone.
 - **Timing.** Neither hook's time is charged to the command's timeout. Both
   share their own bound, `runHookTimeoutMs` (default 10 min, capped at 1 h).
   A `beforeRun` that overruns refuses the command.

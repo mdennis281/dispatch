@@ -91,11 +91,22 @@ export const TERMINAL_RUN_HOOK_MAX_TIMEOUT_MS = 3_600_000;
 
 /** What `beforeRun` is told about one command on a shell the backend serves. */
 export interface TerminalRunInfo {
+  /**
+   * This run, and no other: the same value in its `beforeRun` and its
+   * `afterRun`, never reused. Pair the two hooks by it. `chatId` + `terminal`
+   * can't do that — a background run's `afterRun` arrives long after, and a
+   * timed-out run's command may still be going when the next one starts.
+   */
+  runId: string;
   chatId: string;
   projectId?: string;
   /** The terminal's name within the chat — the same `name` its spawn was given. */
   terminal: string;
-  /** Exactly what core is about to write to the shell. */
+  /**
+   * The command as the agent gave it. Core writes it to the shell WRAPPED, so
+   * that it reads EOF and not the shell's own input (docs/plugins.md, "Stdin");
+   * take the command from here, not from the write.
+   */
   command: string;
   /** The shell's cwd ON THE FAR SIDE as core last saw it — where the command starts. */
   cwd: string;
