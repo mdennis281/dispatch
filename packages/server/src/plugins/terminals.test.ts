@@ -103,7 +103,7 @@ describe("the terminals capability", () => {
     await h.svc.activateAll();
 
     expect(h.svc.get("termy")).toMatchObject({ status: "active" });
-    expect(h.registry.list()).toEqual([{ id: "box", label: "Box", shell: "bash", pluginId: "termy" }]);
+    expect(h.registry.list()).toEqual([{ id: "box", label: "Box", shell: "bash", pluginId: "termy", fallback: "local" }]);
     expect(h.registry.ports("c1")).toHaveLength(1);
     expect(seen().termy!.foreign).toMatch(/not registered by plugin "termy"/);
 
