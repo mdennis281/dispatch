@@ -8,6 +8,7 @@ chats runs through.
 ## 1. Unit: `createTestContext`
 
 ```ts
+import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { createTestContext } from "@dispatch/plugin-sdk/testing";
 import plugin from "../src/server.js";
@@ -17,6 +18,7 @@ it("counts and answers", async () => {
     id: "my-plugin",
     capabilities: ["routes", "events", "kv", "secrets"],   // the manifest's list → the shape the host delivers
     settings: { greeting: "hi" },
+    settingsSchema: JSON.parse(readFileSync("settings.schema.json", "utf8")),  // ctx.settings.set enforces it as the host does
     secrets: { API_KEY: "k" },                              // the store; t.secrets is the live Map
     manifestSecrets: ["API_KEY"],                           // the manifest's secrets: — enforced as on the host
     kv: { seen: 4 },                                        // state from an "earlier run"

@@ -1772,6 +1772,9 @@ export function createServices(
       await plugins.load().catch((err: unknown) => {
         console.error("[Dispatch] plugin discovery failed (continuing):", err);
       });
+      // The other instance shares config/: a plugin setting it stores must
+      // reach this one's `ctx.settings.get()` without a restart.
+      safeStart("pluginSettingsWatch", () => plugins.watchSettings());
       // The built-in providers (Claude, Codex, goose) register HERE, before listen —
       // see the header of plugins/service.ts. A failure is the plugin's row,
       // not the boot's: chats on it show "provider unavailable", the pane says why.

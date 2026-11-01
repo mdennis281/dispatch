@@ -351,6 +351,24 @@ export interface ClientHost {
     /** `sessionFetch` under `/api/plugins/<pluginId>/` — the plugin's own route table, authenticated. */
     fetch: PluginFetch;
   };
+  /**
+   * This plugin's own settings — the blob its server half reads with
+   * `ctx.settings.get()`. What a plugin `settingsSection` edits a key the
+   * generic form can't render (a list of objects) through. Optional only
+   * because hosts before it lack it; every current host has it.
+   */
+  settings?: {
+    /** The stored settings, kept current by the `plugin-settings` event. Synchronous. */
+    get<T = Record<string, unknown>>(): T;
+    /**
+     * Write some keys, exactly as `ctx.settings.set` does: each key replaces
+     * the stored value, `null` removes it, the schema is enforced on the keys
+     * written. Rejects with the server's reason; resolves to the stored settings.
+     */
+    set(patch: Record<string, unknown>): Promise<Record<string, unknown>>;
+    /** Fires when the stored settings change — from any writer, in any tab or instance. */
+    onChange(fn: (next: Record<string, unknown>) => void): () => void;
+  };
 }
 
 /** What `client/index.js` exports. */

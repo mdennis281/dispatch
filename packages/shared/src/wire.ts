@@ -558,6 +558,20 @@ export const PluginEventSchema = z.object({
   payload: z.unknown(),
 });
 
+/**
+ * A plugin's stored settings changed — saved from the Settings pane, written
+ * by the plugin itself (`ctx.settings.set` / `host.settings.set`), or noticed
+ * on disk after the OTHER instance wrote them (both share config/). Carries
+ * the whole blob, which every signed-in client can already read from
+ * `GET /api/plugins`; it is how `host.settings.get()` stays current without a
+ * poll, and how an open Settings pane sees a key the plugin just wrote.
+ */
+export const PluginSettingsEventSchema = z.object({
+  type: z.literal("plugin-settings"),
+  plugin: z.string(),
+  settings: z.record(z.string(), z.unknown()),
+});
+
 /** An error surfaced to the client. */
 export const ErrorEventSchema = z.object({
   type: z.literal("error"),
@@ -648,6 +662,7 @@ export const WsServerEventSchema = z.discriminatedUnion("type", [
   ServerShutdownEventSchema,
   SchedulerEventSchema,
   PluginEventSchema,
+  PluginSettingsEventSchema,
   ProvidersChangedEventSchema,
 ]);
 export type WsServerEvent = z.infer<typeof WsServerEventSchema>;

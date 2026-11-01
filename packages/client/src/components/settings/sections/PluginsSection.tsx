@@ -17,7 +17,9 @@ import { Select } from "../../ui/Select.js";
 import { Spinner } from "../../ui/Spinner.js";
 import { StatusDot, type DotTone } from "../../ui/StatusDot.js";
 import { Switch } from "../../ui/Switch.js";
+import { sameSettingsValue } from "@dispatch/shared";
 import { api } from "../../../lib/api.js";
+import { onServerEvent } from "../../../lib/eventTap.js";
 import { useCopyId } from "../../../lib/useCopyId.js";
 import { useNotices } from "../../../stores/notices.js";
 import { coerceNumber, displayValue, fieldsFromSchema, type SettingsField } from "./pluginSettingsForm.js";
@@ -57,6 +59,15 @@ export function PluginsSection() {
       .catch(() => setBackground(null));
   }, []);
   useEffect(load, [load]);
+  // A plugin writes its own settings too (`ctx.settings.set`), and so does the
+  // other instance; the row follows, so the form shows what is stored now.
+  useEffect(
+    () =>
+      onServerEvent("plugin-settings", (evt) =>
+        setPlugins((rows) => rows?.map((p) => (p.id === evt.plugin ? { ...p, settings: evt.settings } : p)) ?? rows),
+      ),
+    [],
+  );
 
   // A background answer is shown only while it still describes what is
   // installed: one checked against an older commit (updated or reinstalled
@@ -579,24 +590,23 @@ function PluginOAuthRow({
  * The generic settings form. Local edits, one Save: a plugin's `onChange`
  * fires per save, and a plugin that reconnects to a service on every
  * keystroke of its URL field is nobody's idea of a good time.
+ *
+ * It holds only the keys the owner TOUCHED and saves them as a PATCH. Every
+ * other key is read live from `plugin.settings`, so one the plugin writes
+ * while this is open (a paired machine, from its own settings section) shows
+ * up and is never sent back. The form used to PUT its whole draft, which
+ * erased exactly that write.
  */
 function PluginSettingsForm({ plugin, onChange }: { plugin: PluginInfo; onChange: (next: PluginInfo) => void }) {
   const { fields, unsupported } = fieldsFromSchema(plugin.settingsSchema);
-  const [draft, setDraft] = useState<Record<string, unknown>>(plugin.settings);
+  const [edits, setEdits] = useState<Record<string, unknown>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // A save that lands replaces `plugin.settings`; re-seed so the form shows
-  // what was actually stored (the server may have normalised it).
-  useEffect(() => setDraft(plugin.settings), [plugin.settings]);
-  const dirty = JSON.stringify(draft) !== JSON.stringify(plugin.settings);
+  const valueOf = (key: string) => (key in edits ? edits[key] : plugin.settings[key]);
+  const dirty = Object.keys(edits).some((k) => !sameSettingsValue(edits[k], plugin.settings[k]));
 
-  const set = (key: string, value: unknown) =>
-    setDraft((d) => {
-      const next = { ...d };
-      if (value === undefined) delete next[key];
-      else next[key] = value;
-      return next;
-    });
+  // `undefined` is kept as an edit: it means "clear this key", sent as `null`.
+  const set = (key: string, value: unknown) => setEdits((e) => ({ ...e, [key]: value }));
 
   const save = async () => {
     setBusy(true);
@@ -604,12 +614,13 @@ function PluginSettingsForm({ plugin, onChange }: { plugin: PluginInfo; onChange
     try {
       // A half-typed number is still a string in the draft; it does not get saved as one.
       const clean = Object.fromEntries(
-        Object.entries(draft).filter(([k, v]) => {
+        Object.entries(edits).filter(([k, v]) => {
           const f = fields.find((x) => x.key === k);
           return !(f && (f.kind === "number" || f.kind === "integer") && typeof v === "string");
         }),
       );
-      onChange(await api.plugins.setSettings(plugin.id, clean));
+      onChange(await api.plugins.patchSettings(plugin.id, clean));
+      setEdits({});
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -617,12 +628,12 @@ function PluginSettingsForm({ plugin, onChange }: { plugin: PluginInfo; onChange
     }
   };
 
-  if (!fields.length && !unsupported.length) return null;
+  if (!fields.length && !unsupported.length && !plugin.settingsErrors?.length) return null;
 
   return (
     <div className="space-y-2 rounded-md bg-inset/40 px-2.5 py-2">
       {fields.map((f) => (
-        <FieldControl key={f.key} field={f} value={draft[f.key]} onChange={(v) => set(f.key, v)} />
+        <FieldControl key={f.key} field={f} value={valueOf(f.key)} onChange={(v) => set(f.key, v)} />
       ))}
       {unsupported.length > 0 && (
         <p className="text-2xs text-faint">
@@ -630,10 +641,15 @@ function PluginSettingsForm({ plugin, onChange }: { plugin: PluginInfo; onChange
           config.json.
         </p>
       )}
+      {plugin.settingsErrors?.length ? (
+        <p className="text-2xs text-warn">
+          Stored values the plugin's schema refuses — saving other keys still works: {plugin.settingsErrors.join("; ")}
+        </p>
+      ) : null}
       <InlineError message={error} />
       {dirty && (
         <div className="flex justify-end gap-1.5">
-          <Button variant="ghost" size="sm" disabled={busy} onClick={() => setDraft(plugin.settings)}>
+          <Button variant="ghost" size="sm" disabled={busy} onClick={() => setEdits({})}>
             Discard
           </Button>
           <Button variant="primary" size="sm" leftIcon={busy ? <Spinner size={12} /> : <Save />} disabled={busy} onClick={() => void save()}>

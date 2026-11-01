@@ -45,6 +45,18 @@ describe("fieldsFromSchema", () => {
     expect(unsupported).toEqual(["nested", "list", "mixedEnum", "untyped"]);
   });
 
+  it("leaves a readOnly property to the plugin — neither rendered nor sent to config.json", () => {
+    const { fields, unsupported } = fieldsFromSchema({
+      properties: {
+        label: { type: "string" },
+        hosts: { type: "array", readOnly: true, items: { type: "object" } },
+        token: { type: "string", readOnly: true },
+      },
+    });
+    expect(fields.map((f) => f.key)).toEqual(["label"]);
+    expect(unsupported).toEqual([]);
+  });
+
   it("is empty, not a crash, for a schema that is not an object schema", () => {
     expect(fieldsFromSchema(undefined)).toEqual({ fields: [], unsupported: [] });
     expect(fieldsFromSchema({ type: "string" })).toEqual({ fields: [], unsupported: [] });

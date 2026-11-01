@@ -184,16 +184,67 @@ service container.
 `status` (`active | disabled | error | invalid | incompatible`), `error`,
 `enabled`, `needsRestart`, `capabilities`, `hasServer`, `clientUrl` (the entry
 **module's** URL, `/plugins/<id>/<file>`, which the SPA imports as-is),
-`settingsSchema`, `settings`, the declared `secrets` names, `oauth[]` (per
+`settingsSchema`, `settings`, `settingsErrors` (stored values the schema
+refuses — see "Plugin settings"), the declared `secrets` names, `oauth[]` (per
 client: `connected`, `expiresAt`, `scopes`, `configError`), `warnings[]`
 (non-fatal contribution problems, on the row rather than only in a server log),
 `pendingCleanups` (failed per-chat cleanups still being retried — see "Cleanup
 lifecycle"), `origin` (`url | local | linked | builtin | unknown`) and the
 recorded `source` — see "Updating and uninstalling".
-`PUT /api/plugins/:id/enabled` and `PUT /api/plugins/:id/settings` are targeted
-patches, not settings-draft writes; `POST /api/plugins/:id/reveal` opens the
-directory on the machine Dispatch runs on (from a remote browser the pane also
-shows and copies the path).
+`PUT /api/plugins/:id/enabled` and the settings writes (`PATCH` / `PUT
+/api/plugins/:id/settings`) are targeted, not settings-draft writes;
+`POST /api/plugins/:id/reveal` opens the directory on the machine Dispatch runs
+on (from a remote browser the pane also shows and copies the path).
+
+### Plugin settings
+
+`AppSettings.plugins[<id>].settings` lives in `<configDir>/config.json`, so both
+instances share it and an update or reinstall keeps it. Three writers share it:
+
+| writer | how |
+|---|---|
+| the generic form on the plugin's row | `PATCH /api/plugins/:id/settings { patch }` |
+| the plugin's server half | `ctx.settings.set(patch)` |
+| the plugin's browser half (its own `settingsSection`) | `host.settings.set(patch)` |
+
+Every one is a **top-level merge patch**: each key replaces the stored value
+wholesale (arrays and objects are not merged into), and `null` removes the key
+(`undefined` too, in-process). Nothing writes a whole blob built from a copy
+that may be stale. The form used to `PUT` its whole draft, and that erased
+any key the plugin stored while the form was open. `PUT /api/plugins/:id/settings
+{ settings }` still replaces the blob, for callers that predate PATCH.
+
+**Validation.** The manifest's `settings` schema is compiled once at discovery
+(zod's `fromJSONSchema`: types, enums, ranges, patterns, arrays of objects,
+`required`, `additionalProperties`, `$ref`/`$defs`/draft-07 `definitions`). On
+every write:
+
+- an error on a key the write **changed** refuses the write — 400 `{ error,
+  errors[] }` from the routes, a throw from `ctx.settings.set`, a rejection from
+  `host.settings.set` — and nothing is stored;
+- an error on a key the write left alone is **standing**: shown on the row as
+  `settingsErrors` and never a reason to refuse. Settings stored before a
+  plugin grew (or tightened) its schema keep working; the owner fixes them when
+  they next touch them.
+
+A schema the converter can't compile (`if`/`then`, for one) is not enforced at
+all. The row's warnings say so, and writes are stored unchecked, as they were
+before validation existed.
+
+**Who hears a change.** Every change, from any writer, fires the plugin's
+`ctx.settings.onChange` listeners and publishes `plugin-settings { plugin,
+settings }` to every client. That event keeps `host.settings.get()` current and
+updates an open Settings pane. A write that changes nothing fires nothing, so a
+listener that writes back the same value does not loop. The OTHER instance's
+writes are picked up by polling `config.json` every 2 s (`watchFile`, as the
+secret store does), so `ctx.settings.get()` in stable sees a host list the dev
+instance's plugin stored without a restart.
+
+**A key the form can't render.** The generic form handles flat strings, numbers,
+booleans and enums. Mark a property `readOnly: true` (JSON Schema's "managed by
+the owning authority") and the form neither renders it nor lists it under "not
+editable here". Your `settingsSection` owns it, editing through
+`host.settings.get()/set()`, and the schema still validates it.
 
 ### Cleanup lifecycle
 
@@ -553,7 +604,11 @@ export interface PluginContext<Req = unknown, Reply = unknown> {
   };
   /** Add handlers under /api/plugins/<id>/ — a TABLE the host's wildcard consults; see the rules below. */
   routes?(define: (r: PluginRouter<Req, Reply>) => void): void;
-  settings: { get<T = Record<string, unknown>>(): T; onChange(fn: (next: unknown) => void): () => void };
+  settings: {
+    get<T = Record<string, unknown>>(): T;
+    onChange(fn: (next: unknown) => void): () => void;   // every change, from any writer or instance
+    set?(patch: Record<string, unknown>): Promise<Record<string, unknown>>;   // merge patch; schema-checked; see "Plugin settings"
+  };
   secrets?: {
     get(name: string): Promise<string | undefined>;
     list(): Promise<string[]>;                         // covered names that have a value, sorted
@@ -683,6 +738,16 @@ The server publishes it from `ctx.emit`; the client host delivers it to the
 owning plugin's `host.events.onPlugin`. One generic event instead of a schema
 per plugin keeps the wire closed and typed; what a plugin puts in `payload` is
 its own contract with its client half.
+
+A second, host-owned member carries settings changes:
+
+```ts
+{ type: "plugin-settings", plugin: string, settings: Record<string, unknown> }
+```
+
+It is published after every change to a plugin's stored settings (see "Plugin
+settings") and feeds `host.settings`. The payload is the whole blob, which any
+signed-in client can already read from `GET /api/plugins`.
 
 ## Contributions
 
@@ -1122,8 +1187,17 @@ export interface ClientHost {
     send(chatId: string, text: string): Promise<void>;
   };
   api: { fetch: PluginFetch };  // sessionFetch under /api/plugins/<id>/, authenticated
+  settings?: {                  // this plugin's own settings — see "Plugin settings"
+    get<T = Record<string, unknown>>(): T;                                   // synchronous; kept current by plugin-settings
+    set(patch: Record<string, unknown>): Promise<Record<string, unknown>>;  // PATCH …/settings; rejects with the schema's reasons
+    onChange(fn: (next: Record<string, unknown>) => void): () => void;
+  };
 }
 ```
+
+`host.settings` replaces the undocumented `host.api.fetch("settings", { method:
+"PUT" })`. That path resolves to the host's own settings route, so it worked by
+accident, and it replaced the whole blob.
 
 The kit is typed as **call signatures**, not `ComponentType` (the host's
 `forwardRef` components carry invariant `propTypes`), and assigned from the real

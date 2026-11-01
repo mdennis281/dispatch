@@ -13,6 +13,7 @@
  *   events.onPlugin       → the same tap, filtered to this plugin's `plugin-event`
  *   chat.*                → the chats store, the WS actions and `PUT /api/chats/:id`
  *   api.fetch             → `sessionFetch` under `/api/plugins/<id>/`
+ *   settings.*            → plugins/settings (fed by `plugin-settings`) and `PATCH …/settings`
  *
  * The REGISTRATION functions throw on a duplicate id rather than replacing —
  * `activate` is wrapped by the loader, so a throw shows as a toast naming
@@ -36,6 +37,7 @@ import { useChats } from "../stores/chats.js";
 import { useNotices } from "../stores/notices.js";
 import { sessionFetch } from "../stores/auth.js";
 import { registerChatBadge, registerPanelTab, registerSettingsSection } from "./slots.js";
+import { adoptPluginSettings, onPluginSettings, pluginSettings } from "./settings.js";
 
 /**
  * The kit, typed by the HOST's guarantee (`ClientHostKit`) and assigned from
@@ -75,8 +77,9 @@ export function chatRefOf(id: string): PluginChatRef | undefined {
   };
 }
 
-export function createClientHost(pluginId: string): ClientHost {
+export function createClientHost(pluginId: string, settings: Record<string, unknown> = {}): ClientHost {
   const prefix = `/api/plugins/${pluginId}/`;
+  adoptPluginSettings(pluginId, settings);
   return {
     pluginId,
     React,
@@ -137,6 +140,17 @@ export function createClientHost(pluginId: string): ClientHost {
     },
     api: {
       fetch: (path, init) => sessionFetch(prefix + path.replace(/^\/+/, ""), init),
+    },
+    settings: {
+      get: <T = Record<string, unknown>>() => pluginSettings(pluginId) as T,
+      set: async (patch) => {
+        const info = await api.plugins.patchSettings(pluginId, patch);
+        // Adopted now rather than on the event, so a `get()` straight after
+        // the await already sees the write.
+        adoptPluginSettings(pluginId, info.settings);
+        return info.settings;
+      },
+      onChange: (fn) => onPluginSettings(pluginId, fn),
     },
   };
 }

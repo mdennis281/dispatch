@@ -825,6 +825,10 @@ export class Store {
   private settingsFile() {
     return join(this.configDir, "config.json");
   }
+  /** `<configDir>/config.json` — for a watcher that must see the OTHER instance's writes. */
+  settingsFilePath(): string {
+    return this.settingsFile();
+  }
   /**
    * Root for the operator's OWN global skills + instructions — the guidance that
    * applies to every project on this machine.

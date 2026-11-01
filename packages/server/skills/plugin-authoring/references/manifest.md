@@ -95,10 +95,15 @@ privileges.
 stored as `AppSettings.plugins[<id>].settings`. Supported property types: `string`
 (with `enum` → a select), `number`, `integer`, `boolean`; `title`, `description`,
 `default`, `minimum`/`maximum` are honoured. Unsupported keys are named on the row
-rather than silently dropped. The plugin reads them with `ctx.settings.get()` and gets
-every change through `ctx.settings.onChange` — the form saves on every edit through
-`PUT /api/plugins/:id/settings`, not through the app settings draft. A schema that
-fails to read costs the plugin its form, not its activation.
+rather than silently dropped. A property marked `readOnly: true` is the plugin's own
+(its `settingsSection` edits it via `host.settings`): the form skips it entirely. The
+plugin reads settings with `ctx.settings.get()`, writes with `ctx.settings.set(patch)`,
+and gets every change through `ctx.settings.onChange`. The form saves only the keys
+the owner touched, as `PATCH /api/plugins/:id/settings`. The schema is ENFORCED on
+every write, but only for the keys the write changes. A stored value that predates
+the schema is listed as `settingsErrors` on the row and never blocks a save. A schema
+that fails to read costs the plugin its form, not its activation. One zod can't
+compile (`if`/`then`) is not enforced, and the row says so.
 
 ## What the host reports — `GET /api/plugins`
 

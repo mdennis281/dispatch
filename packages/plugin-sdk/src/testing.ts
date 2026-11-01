@@ -45,7 +45,11 @@ import {
   PLUGIN_SHUTDOWN_BUDGET_MS,
   SECRET_NAME_RE,
   SECRET_VALUE_MAX,
+  applySettingsPatch,
+  checkPluginSettings,
+  compilePluginSettingsSchema,
   pluginSecretAllowed,
+  sameSettingsValue,
 } from "@dispatch/shared";
 import type { PluginContext, PluginReply, PluginRequest } from "./index.js";
 
@@ -62,6 +66,12 @@ export interface TestContextOptions {
   capabilities?: readonly PluginCapability[];
   /** Initial `ctx.settings.get()`. */
   settings?: Record<string, unknown>;
+  /**
+   * The parsed `settings.schema.json`. Given, `ctx.settings.set` enforces it
+   * exactly as the host does — a key the write changes into something the
+   * schema refuses throws; keys it leaves alone are never judged.
+   */
+  settingsSchema?: unknown;
   /** Initial names → values for `ctx.secrets` — the store as the plugin finds it. */
   secrets?: Record<string, string>;
   /**
@@ -116,7 +126,11 @@ export interface TestContext {
   /** The global secret store as the plugin sees it — what `ctx.secrets.set/delete` wrote. Mutate it to simulate the owner saving one. */
   secrets: Map<string, string>;
   settings: {
-    /** Replace the settings and fire every `onChange` listener — what `PUT /api/plugins/:id/settings` does. */
+    /**
+     * Replace the settings and fire every `onChange` listener — the owner
+     * saving from the Settings pane (or the other instance writing). Not
+     * schema-checked: it simulates what is stored, not a write the plugin made.
+     */
     set(next: Record<string, unknown>): void;
     get(): Record<string, unknown>;
   };
@@ -299,6 +313,7 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
   const secrets = new Map<string, string>(Object.entries(opts.secrets ?? {}));
   let settings: Record<string, unknown> = { ...(opts.settings ?? {}) };
   const settingsListeners = new Set<(next: unknown) => void>();
+  const settingsCheck = opts.settingsSchema === undefined ? undefined : compilePluginSettingsSchema(opts.settingsSchema);
   const listeners = new Set<(evt: WsServerEvent) => void>();
   const routes: Route[] = [];
   const sent: TestContext["sent"] = [];
@@ -329,6 +344,18 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
       onChange: (fn) => {
         settingsListeners.add(fn);
         return () => settingsListeners.delete(fn);
+      },
+      // The host's rule: a top-level merge patch, the schema judged only on
+      // the keys it changes, listeners told only when something changed.
+      set: async (patch) => {
+        const next = applySettingsPatch(settings, patch);
+        const { refused } = checkPluginSettings(settingsCheck, settings, next);
+        if (refused.length) throw new Error(`settings for "${id}" do not match its schema — ${refused.join("; ")}`);
+        if (!sameSettingsValue(settings, next)) {
+          settings = next;
+          for (const fn of [...settingsListeners]) fn(settings);
+        }
+        return settings;
       },
     },
     projects: {
