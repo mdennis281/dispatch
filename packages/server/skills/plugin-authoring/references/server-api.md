@@ -70,7 +70,8 @@ ctx.dir       // absolute path of the plugin directory
 ctx.version   // from the manifest
 ctx.log.info(m) / warn(m) / error(m, err?)   // error() also files to the crash log
 ctx.settings.get<T>()          // AppSettings.plugins[id].settings, or {}; synchronous (cached)
-ctx.settings.onChange(fn)      // fires on every PUT /api/plugins/:id/settings; returns unsubscribe
+ctx.settings.onChange(fn)      // fires on every change — pane, your own set, the other instance (~2 s); returns unsubscribe
+await ctx.settings.set(patch)  // merge patch: keys replace wholesale, null removes; schema-checked on the keys it changes (throws, stores nothing)
 ctx.projects.list() / get(id)  // { id, name, repoPath, worktreeRoot?, defaultBranch? }
 ctx.emit(payload, chatId?)     // publishes { type: "plugin-event", plugin: id, chatId?, payload } to every client
 ```

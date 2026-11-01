@@ -2,7 +2,8 @@
  * REST for the plugin host.
  *   GET  /api/plugins                  → PluginInfo[] (status, error, settings schema, client URL)
  *   PUT  /api/plugins/:id/enabled      → { enabled }  — targeted patch, not a settings-draft write
- *   PUT  /api/plugins/:id/settings     → { settings } — same
+ *   PUT  /api/plugins/:id/settings     → { settings } — whole-blob replace, schema-checked on the keys it changes
+ *   PATCH /api/plugins/:id/settings    → { patch } — merge patch (null removes a key); what the form and host.settings use
  *   POST /api/plugins/:id/reveal       → open the plugin directory on the HOST machine
  *   POST /api/plugins/inspect          → { url } → PluginInspection, or a PluginCollectionInspection when the URL holds several (owner only)
  *   POST /api/plugins/install          → { url, sha, replace?, subdir? } → install exactly that sha; subdir picks a collection member (owner only)
@@ -35,11 +36,19 @@ import {
   PluginUninstallRequestSchema,
   PluginUpdateRequestSchema,
 } from "@dispatch/shared";
-import { PluginLifecycleError, PluginNotFound } from "../plugins/service.js";
+import { PluginLifecycleError, PluginNotFound, PluginSettingsInvalid } from "../plugins/service.js";
 import { PluginInspectError } from "../plugins/inspect/index.js";
 
 const EnabledBody = z.object({ enabled: z.boolean() });
 const SettingsBody = z.object({ settings: z.record(z.string(), z.unknown()) });
+const SettingsPatchBody = z.object({ patch: z.record(z.string(), z.unknown()) });
+
+/** A settings write's failure as a status: 404 for an unknown plugin, 400 with every schema reason. */
+function settingsFailure(reply: FastifyReply, err: unknown): FastifyReply {
+  if (err instanceof PluginNotFound) return reply.code(404).send({ error: err.message });
+  if (err instanceof PluginSettingsInvalid) return reply.code(400).send({ error: err.message, errors: err.errors });
+  throw err;
+}
 const InstallBody = PluginInstallRequestSchema.extend({
   /** The owner confirmed replacing the installed copy ("Update to x.y.z"). */
   replace: z.boolean().optional(),
@@ -109,8 +118,17 @@ export function registerPluginRoutes(app: FastifyInstance): void {
     try {
       return await plugins.setSettings(req.params.id, parsed.data.settings);
     } catch (err) {
-      if (err instanceof PluginNotFound) return reply.code(404).send({ error: err.message });
-      throw err;
+      return settingsFailure(reply, err);
+    }
+  });
+
+  app.patch<{ Params: { id: string } }>("/api/plugins/:id/settings", async (req, reply) => {
+    const parsed = SettingsPatchBody.safeParse(req.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+    try {
+      return await plugins.patchSettings(req.params.id, parsed.data.patch);
+    } catch (err) {
+      return settingsFailure(reply, err);
     }
   });
 

@@ -32,7 +32,7 @@
  *   consults the plugin's own find-my-way table (`OwnedResources.routes`),
  *   which deactivate empties. See `routes/plugins.ts` for the wildcard.
  */
-import { existsSync } from "node:fs";
+import { existsSync, unwatchFile, watchFile } from "node:fs";
 import { realpath } from "node:fs/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { basename, resolve, sep } from "node:path";
@@ -41,7 +41,12 @@ import {
   PLUGIN_API_VERSION,
   PLUGIN_RECONCILE_BUDGET_MS,
   PLUGIN_SHUTDOWN_BUDGET_MS,
+  applySettingsPatch,
+  checkPluginSettings,
+  compilePluginSettingsSchema,
   manifestPathDir,
+  sameSettingsValue,
+  type CompiledSettingsSchema,
   pluginSecretAllowed,
   type ModeConfig,
   type PluginInfo,
@@ -59,6 +64,7 @@ import {
   type SkillConfig,
 } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
+import { KeyedMutex } from "../store/fsq.js";
 import { recordFault } from "../crash-log.js";
 import type { InstructionFile, PluginContributionSource } from "../services/authored-config.js";
 import {
@@ -121,6 +127,8 @@ interface PluginRecord extends DiscoveredPlugin {
    */
   filesReplaced?: boolean;
   settings: Record<string, unknown>;
+  /** The manifest's settings schema, compiled once at discovery; absent when it declares none. */
+  settingsCheck?: CompiledSettingsSchema;
   /** `AppSettings.plugins[id].source` — what install recorded; absent for hand-installed plugins. */
   source?: PluginSource;
   /** `AppSettings.plugins[id].autoUpdate`, as stored (unset = the default). */
@@ -185,6 +193,19 @@ function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** A settings write refused by the plugin's schema — every reason, for the 400 and for `ctx.settings.set`'s throw. */
+export class PluginSettingsInvalid extends Error {
+  constructor(
+    readonly pluginId: string,
+    readonly errors: string[],
+  ) {
+    super(`settings for "${pluginId}" do not match its schema — ${errors.join("; ")}`);
+  }
+}
+
+/** How often the shared config.json is polled for the other instance's writes — the secrets watcher's interval. */
+const SETTINGS_WATCH_MS = 2_000;
+
 /** What {@link withBudget} rejects with on a timeout — so a caller can tell "too slow" from "threw". */
 class BudgetExceeded extends Error {}
 
@@ -240,6 +261,12 @@ export class PluginService implements PluginContributionSource {
    */
   private readonly providersSettled: { promise: Promise<void>; resolve: () => void };
   private disposed = false;
+  /**
+   * Serialises every plugin-settings write AND the on-disk reconcile, so the
+   * watcher can never adopt a file read from before a write that is landing.
+   */
+  private readonly settingsLock = new KeyedMutex();
+  private stopSettingsWatch: (() => void) | undefined;
 
   constructor(opts: PluginServiceOptions) {
     let settle!: () => void;
@@ -328,6 +355,7 @@ export class PluginService implements PluginContributionSource {
         phase: eligible ? "pending" : "inactive",
         needsRestart: false,
         settings: entry?.settings ?? {},
+        ...(found.settingsSchema !== undefined ? { settingsCheck: compilePluginSettingsSchema(found.settingsSchema) } : {}),
         ...(entry?.source ? { source: entry.source } : {}),
         ...(entry?.autoUpdate ? { autoUpdate: entry.autoUpdate } : {}),
         contributions,
@@ -427,6 +455,7 @@ export class PluginService implements PluginContributionSource {
           store: this.store,
           log,
           settings: () => rec.settings,
+          setSettings: (patch) => this.writeSettings(rec, (stored) => applySettingsPatch(stored, patch)),
           processes: this.processHost?.for(rec.id),
         },
         owned,
@@ -673,6 +702,7 @@ export class PluginService implements PluginContributionSource {
    */
   async dispose(): Promise<void> {
     this.disposed = true;
+    this.stopSettingsWatch?.();
     // Nothing more will activate; release anything still waiting on it.
     this.providersSettled.resolve();
     // Joins the pass `installShutdown` already started with the real reason;
@@ -724,6 +754,13 @@ export class PluginService implements PluginContributionSource {
     const oauthView = m ? pluginOAuthManifestView(m) : undefined;
     const oauth = oauthView && this.ctxDeps.pluginOAuth ? this.ctxDeps.pluginOAuth.status(rec.id, oauthView) : undefined;
     const pendingCleanups = this.cleanups?.summary(rec.id);
+    const check = rec.settingsCheck;
+    const settingsErrors = check?.ok ? check.check(rec.settings).map((e) => e.message) : [];
+    const warnings = [
+      ...rec.contributions.warnings,
+      // Said on the row, because the alternative is a schema that looks enforced and is not.
+      ...(check && !check.ok ? [`settings schema is not enforced (${check.reason}) — saves are stored unchecked`] : []),
+    ];
     return {
       id: rec.id,
       name: m?.name ?? rec.id,
@@ -745,9 +782,10 @@ export class PluginService implements PluginContributionSource {
       ...(m?.client && !rec.filesReplaced ? { clientUrl: `/plugins/${rec.id}/${basename(m.client)}` } : {}),
       ...(rec.settingsSchema !== undefined ? { settingsSchema: rec.settingsSchema } : {}),
       settings: rec.settings,
+      ...(settingsErrors.length ? { settingsErrors } : {}),
       ...(m?.secrets ? { secrets: m.secrets } : {}),
       ...(oauth?.length ? { oauth } : {}),
-      ...(rec.contributions.warnings.length ? { warnings: rec.contributions.warnings } : {}),
+      ...(warnings.length ? { warnings } : {}),
       ...(pendingCleanups ? { pendingCleanups } : {}),
       origin: this.originOf(rec),
       // Served to every signed-in user and drawn on the row, so a token
@@ -912,22 +950,103 @@ export class PluginService implements PluginContributionSource {
   }
 
   /** Replace the plugin's settings and tell its `onChange` listeners. */
+  /**
+   * Replace a plugin's settings wholesale — `PUT /api/plugins/:id/settings`,
+   * kept for callers that predate PATCH. Validated by the rule in
+   * `checkPluginSettings`: refused only for a key this write changes.
+   */
   async setSettings(id: string, settings: Record<string, unknown>): Promise<PluginInfo> {
     const rec = this.records.get(id);
     if (!rec) throw new PluginNotFound(id);
-    await this.store.updateSettings((current) => ({
-      ...current,
-      plugins: { ...current.plugins, [id]: { ...current.plugins?.[id], settings } },
-    }));
-    rec.settings = settings;
+    await this.writeSettings(rec, () => settings);
+    return this.info(rec);
+  }
+
+  /**
+   * Merge-patch a plugin's settings — `PATCH /api/plugins/:id/settings`, the
+   * pane's form and `host.settings.set`. Only the keys in `patch` move, so a
+   * form opened before the plugin stored something cannot erase it on save.
+   */
+  async patchSettings(id: string, patch: Record<string, unknown>): Promise<PluginInfo> {
+    const rec = this.records.get(id);
+    if (!rec) throw new PluginNotFound(id);
+    await this.writeSettings(rec, (stored) => applySettingsPatch(stored, patch));
+    return this.info(rec);
+  }
+
+  /**
+   * The one settings write path. `compute` runs against what is ON DISK under
+   * the store's lock — not this instance's cached copy, which may predate a
+   * write the other instance made — and the schema is enforced against that.
+   */
+  private async writeSettings(
+    rec: PluginRecord,
+    compute: (stored: Record<string, unknown>) => Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return this.settingsLock.run("settings", async () => {
+      let next: Record<string, unknown> = {};
+      await this.store.updateSettings((current) => {
+        const stored = current.plugins?.[rec.id]?.settings ?? {};
+        next = compute(stored);
+        const { refused } = checkPluginSettings(rec.settingsCheck, stored, next);
+        if (refused.length) throw new PluginSettingsInvalid(rec.id, refused);
+        if (sameSettingsValue(stored, next)) return null;
+        return { ...current, plugins: { ...current.plugins, [rec.id]: { ...current.plugins?.[rec.id], settings: next } } };
+      });
+      this.adoptSettings(rec, next);
+      return next;
+    });
+  }
+
+  /**
+   * Take `next` as the plugin's settings and tell everyone — its `onChange`
+   * listeners and every client (`plugin-settings`). A no-op when nothing
+   * changed, which is also what stops a listener that writes back the same
+   * value from looping.
+   */
+  private adoptSettings(rec: PluginRecord, next: Record<string, unknown>): void {
+    if (sameSettingsValue(rec.settings, next)) return;
+    rec.settings = next;
     for (const fn of rec.owned?.settingsListeners ?? []) {
       try {
-        fn(settings);
+        fn(next);
       } catch (err) {
-        this.fault(`plugin "${id}" settings listener threw`, err);
+        this.fault(`plugin "${rec.id}" settings listener threw`, err);
       }
     }
-    return this.info(rec);
+    this.ctxDeps.bus.publish({ type: "plugin-settings", plugin: rec.id, settings: next });
+  }
+
+  /**
+   * Re-read every plugin's settings from config.json and adopt what changed.
+   * Both instances share config/, and each caches settings for the
+   * synchronous `ctx.settings.get()`; without this, a host list the dev
+   * instance's plugin stored stayed invisible to the stable one until it
+   * restarted.
+   */
+  async reconcileSettings(): Promise<void> {
+    await this.settingsLock.run("settings", async () => {
+      const entries = (await this.store.getSettings()).plugins ?? {};
+      for (const rec of this.records.values()) this.adoptSettings(rec, entries[rec.id]?.settings ?? {});
+    });
+  }
+
+  /**
+   * Poll config.json for the other instance's writes (`watchFile`, as the
+   * secret store does: the file is replaced by rename on every save, which
+   * `fs.watch` loses track of on Windows). Stopped by `dispose()`.
+   */
+  watchSettings(): void {
+    if (this.stopSettingsWatch) return;
+    const file = this.store.settingsFilePath();
+    const onChange = () => {
+      void this.reconcileSettings().catch((err: unknown) => this.log(`[dispatch] plugin settings reload failed: ${describe(err)}`));
+    };
+    watchFile(file, { interval: SETTINGS_WATCH_MS, persistent: false }, onChange);
+    this.stopSettingsWatch = () => {
+      unwatchFile(file, onChange);
+      this.stopSettingsWatch = undefined;
+    };
   }
 
   /**

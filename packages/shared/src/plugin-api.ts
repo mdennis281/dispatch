@@ -292,7 +292,23 @@ export interface PluginContext<Req = unknown, Reply = unknown> {
   settings: {
     /** `AppSettings.plugins[id].settings`, or `{}`. Synchronous: it is cached. */
     get<T = Record<string, unknown>>(): T;
+    /**
+     * Fires whenever the stored settings change, whoever changed them: the
+     * Settings pane, this plugin (`set` here or `host.settings.set` in its
+     * browser half), or the OTHER instance, noticed on disk within a few
+     * seconds. A listener that calls `set` must not do so unconditionally.
+     */
     onChange(fn: (next: unknown) => void): () => void;
+    /**
+     * Write some keys: each key in `patch` replaces the stored value wholesale
+     * (arrays and objects are not merged into); `null` or `undefined` removes
+     * the key. The blob lives in `<configDir>/config.json`, so both instances
+     * see it and a plugin update keeps it. Validated against the manifest's
+     * `settings` schema: a key this write changes into something the schema
+     * refuses throws, and nothing is stored. Resolves to the stored settings.
+     * Optional only because hosts before it lack it; every current host has it.
+     */
+    set?(patch: Record<string, unknown>): Promise<Record<string, unknown>>;
   };
 
   /**

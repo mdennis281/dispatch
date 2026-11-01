@@ -441,6 +441,11 @@ function reduceServerEvent(evt: WsServerEvent): void {
     case "plugin-event":
       return;
 
+    // Same route: `plugins/settings.ts` (host.settings) and the Settings pane
+    // each tap it; no store holds plugin settings.
+    case "plugin-settings":
+      return;
+
     case "error":
       useNotices.getState().push({
         level: "error",

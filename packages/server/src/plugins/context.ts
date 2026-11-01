@@ -103,6 +103,12 @@ export interface PluginContextDeps {
   /** The plugin's cached settings — read live so `onChange` and `get` agree. */
   settings: () => Record<string, unknown>;
   /**
+   * Merge-patch the plugin's settings (`ctx.settings.set`), bound to its id by
+   * the service, which owns the write path. Absent in a context built without
+   * one; then the member is absent too.
+   */
+  setSettings?: (patch: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  /**
    * Push a secret change to everything that expanded it — the
    * `SecretRefresher` the Secrets pane's save goes through. Optional so a unit
    * test can build a context without one; then a plugin's write is stored and
@@ -179,6 +185,7 @@ export function buildPluginContext(
         owned.settingsListeners.add(fn);
         return () => owned.settingsListeners.delete(fn);
       },
+      ...(deps.setSettings ? { set: deps.setSettings } : {}),
     },
 
     projects: {

@@ -7,6 +7,13 @@
  * property the subset cannot express is listed by name rather than dropped
  * silently, so the owner knows to edit it in config.json instead of concluding
  * the plugin has no such setting. Pure, so it is testable without the DOM.
+ *
+ * A property marked `readOnly: true` is the PLUGIN's: its own settings section
+ * (or its server half) writes it through `host.settings.set` /
+ * `ctx.settings.set`, so the generic form neither renders it nor lists it as
+ * "not editable here" — that note would send the owner to config.json for a
+ * key the plugin has a real UI for. JSON Schema's own meaning fits: the value
+ * is managed by the owning authority.
  */
 
 export type SettingsFieldKind = "string" | "number" | "integer" | "boolean" | "enum";
@@ -41,6 +48,7 @@ interface SchemaProperty {
   maximum?: number;
   maxLength?: number;
   format?: string;
+  readOnly?: boolean;
 }
 
 function scalarType(p: SchemaProperty): string | undefined {
@@ -57,6 +65,7 @@ export function fieldsFromSchema(schema: unknown): SettingsForm {
   if (!props || typeof props !== "object") return out;
   for (const [key, raw] of Object.entries(props)) {
     const p = (raw && typeof raw === "object" ? raw : {}) as SchemaProperty;
+    if (p.readOnly === true) continue;
     const base = {
       key,
       label: p.title ?? key,

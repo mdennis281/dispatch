@@ -653,6 +653,7 @@ async function stream<T>(
 }
 const post = <T>(path: string, body?: unknown) => request<T>("POST", path, body);
 const put = <T>(path: string, body?: unknown) => request<T>("PUT", path, body);
+const patch = <T>(path: string, body?: unknown) => request<T>("PATCH", path, body);
 const del = <T>(path: string, body?: unknown) => request<T>("DELETE", path, body);
 
 // `boolean` is in the union for the registry's facet flags: `false` is a real
@@ -1554,6 +1555,15 @@ export const api = {
       put<PluginInfo>(`/api/plugins/${encodeURIComponent(id)}/enabled`, { enabled }),
     setSettings: (id: string, settings: Record<string, unknown>) =>
       put<PluginInfo>(`/api/plugins/${encodeURIComponent(id)}/settings`, { settings }),
+    /**
+     * Merge-patch: only these keys move; `null` (or `undefined`, which JSON
+     * cannot carry, so it is sent as `null`) removes one. What the form saves
+     * with, so a key the plugin wrote while the form was open survives.
+     */
+    patchSettings: (id: string, changes: Record<string, unknown>) =>
+      patch<PluginInfo>(`/api/plugins/${encodeURIComponent(id)}/settings`, {
+        patch: Object.fromEntries(Object.entries(changes).map(([k, v]) => [k, v === undefined ? null : v])),
+      }),
     /** Open the plugin's directory in the file manager of the machine Dispatch runs on. */
     reveal: (id: string) => post<{ ok: boolean; dir: string }>(`/api/plugins/${encodeURIComponent(id)}/reveal`),
     retryCleanups: (id: string) => post<PluginInfo>(`/api/plugins/${encodeURIComponent(id)}/cleanups/retry`),

@@ -51,6 +51,26 @@ describe("createTestContext with examples/plugins/hello-server", () => {
     expect(t.listenerCount()).toBe(0);
   });
 
+  it("lets a plugin write its own settings with the host's patch and schema rules", async () => {
+    const t = createTestContext({
+      settings: { label: "x", port: "eighty" },
+      settingsSchema: { type: "object", properties: { label: { type: "string" }, port: { type: "integer" }, hosts: { type: "array" } } },
+    });
+    const heard: unknown[] = [];
+    t.ctx.settings.onChange((next) => heard.push(next));
+
+    // A key stored before the schema said otherwise does not block a write that leaves it alone.
+    await expect(t.ctx.settings.set!({ hosts: [{ id: "cvx-mac" }] })).resolves.toEqual({ label: "x", port: "eighty", hosts: [{ id: "cvx-mac" }] });
+    // Changing it into something else the schema refuses does — and stores nothing.
+    await expect(t.ctx.settings.set!({ port: "ninety", label: "y" })).rejects.toThrow(/port/);
+    await t.ctx.settings.set!({ label: null });
+    // An unchanged write is not a change.
+    await t.ctx.settings.set!({ hosts: [{ id: "cvx-mac" }] });
+
+    expect(t.settings.get()).toEqual({ port: "eighty", hosts: [{ id: "cvx-mac" }] });
+    expect(heard).toHaveLength(2);
+  });
+
   it("hands a plugin exactly the members its capabilities name", async () => {
     const t = createTestContext({ capabilities: ["routes"] });
     expect(t.ctx.routes).toBeDefined();

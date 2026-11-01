@@ -71,7 +71,7 @@ export async function loadClientPlugins(deps: LoadDeps): Promise<{ loaded: strin
       const ns = await deps.importModule(entryUrl(p));
       const mod = clientModuleOf(ns);
       if (!mod) throw new Error("the client entry does not export activate()");
-      await mod.activate(deps.makeHost(p.id));
+      await mod.activate(deps.makeHost(p.id, p.settings));
       loaded.push(p.id);
     } catch (err) {
       failed.push(p.id);

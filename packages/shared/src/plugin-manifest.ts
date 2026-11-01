@@ -508,6 +508,12 @@ export const PluginInfoSchema = z.object({
   settingsSchema: z.unknown().optional(),
   /** The stored `AppSettings.plugins[id].settings`, or `{}`. */
   settings: z.record(z.string(), z.unknown()),
+  /**
+   * Where the STORED settings fail the schema — values saved before the schema
+   * said otherwise. Shown on the row; never a reason to refuse a write that
+   * leaves those keys alone (see `checkPluginSettings`).
+   */
+  settingsErrors: z.array(z.string()).optional(),
   /** Secret names the manifest lists — the pane shows which are set. */
   secrets: z.array(z.string()).optional(),
   /**
