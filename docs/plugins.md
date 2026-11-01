@@ -306,6 +306,13 @@ interface PluginInstance {
   `id`. Store it beside work you leave elsewhere to tell "my id, where I left
   it" from "my id, but the directory moved".
 
+**Known limit:** "same host and same path" means "same directory" only within
+one filesystem namespace. Suppose two containers share a hostname (host
+networking) and each mounts a different directory at the same path. Copying
+one directory into the other keeps the original's id. Dispatch ships no
+container deployment. One that adds it should give each container its own
+hostname.
+
 `ctx.instance` is read once per process, on first use. If it can't be read
 (an unreadable data dir), the member is absent rather than invented. A plugin
 that namespaces by it should refuse to clean anything up rather than fall back

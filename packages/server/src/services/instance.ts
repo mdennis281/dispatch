@@ -112,7 +112,10 @@ function sameDir(recorded: DirIdentity, here: DirIdentity): boolean {
   if (fold(recorded.host) !== fold(here.host)) return false;
   // The same place. A copy can never land here: two live directories can't
   // share a path, so this is the directory itself, restored in place or on a
-  // filesystem whose file ids don't survive a remount.
+  // filesystem whose file ids don't survive a remount. That holds within one
+  // filesystem namespace. Two containers sharing a hostname (host networking)
+  // that each mount a different directory at the same path break it: a copy
+  // between them keeps its id. Dispatch ships no container deployment.
   if (samePath(recorded.path, here.path)) return true;
   // The same directory under a new name: renamed, or moved within the volume.
   // A copy never matches, because it exists alongside its original, and two
