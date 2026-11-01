@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { EventBus } from "../bus.js";
 import {
   TerminalService,
@@ -31,6 +31,16 @@ import { unwrapCommandWrite } from "./terminal.testkit.js";
 
 /** Reads stdin to EOF, then says how much it got. Valid in bash and PowerShell. */
 const READ_STDIN = `node -e "let n=0;process.stdin.on('data',d=>n+=d.length);process.stdin.on('end',()=>console.log('STDIN-BYTES='+n))"`;
+
+/**
+ * A watcher in miniature: quits the moment stdin ends, as `esbuild --watch`
+ * does, says so if anything arrives on it, and otherwise stops itself after
+ * 3 s so the test can see how it ended.
+ */
+const WATCHER =
+  `node -e "process.stdin.on('data',d=>console.log('WATCHER-GOT '+JSON.stringify(String(d))));` +
+  `process.stdin.on('end',()=>{console.log('WATCHER-EOF');process.exit(0)});` +
+  `setTimeout(()=>{console.log('WATCHER-TIMER');process.exit(0)},3000)"`;
 
 interface Shell {
   label: string;
@@ -117,6 +127,35 @@ describe.each(shells)("a command that reads stdin, under $label", (shell) => {
       // If the restore broke the next detach, this one would hang.
       const again = await t.run({ chatId: "c", name: "t", command: READ_STDIN, cwd: root, timeoutMs });
       expect(again.output).toContain("STDIN-BYTES=0");
+    } finally {
+      await t.reap();
+      t.dispose();
+    }
+  }, 60_000);
+
+  // Foreground EOF killed the dev loop `background: true` exists for: a
+  // watcher that quits on EOF died the moment it started (#478).
+  it("a background command's stdin never ends and never carries the probe", async () => {
+    const t = service();
+    try {
+      const started = await t.run({ chatId: "c", name: "bg", command: WATCHER, cwd: root, background: true });
+      expect(started.backgrounded).toBe(true);
+      // Its own timer ends it, and then its probe lands and frees the shell.
+      await vi.waitFor(
+        () => {
+          const info = t.listChat("c").find((x) => x.name === "bg");
+          expect(info && !info.busy && !info.background).toBe(true);
+        },
+        { timeout: 30_000, interval: 200 },
+      );
+      const { output } = await t.tail("c", "bg");
+      expect(output).toContain("WATCHER-TIMER");
+      expect(output).not.toContain("WATCHER-EOF");
+      expect(output).not.toContain("WATCHER-GOT");
+
+      // The next command still gets EOF, and the shell is fine.
+      const read = await t.run({ chatId: "c", name: "bg", command: READ_STDIN, cwd: root, timeoutMs });
+      expect(read.output).toContain("STDIN-BYTES=0");
     } finally {
       await t.reap();
       t.dispose();
@@ -210,11 +249,27 @@ describe("commandWrite", () => {
     expect(commandWrite("echo 'a'", "posix", true)).toBe("eval 'echo '\\''a'\\''\n' </dev/null\n");
   });
 
+  it("leaves a background posix command's line open for the probe to finish", () => {
+    // No redirect and NO newline: bash reads the probe with the command's line.
+    expect(commandWrite("vite", "posix", false, true)).toBe("eval 'vite\n' ; ");
+  });
+
+  it("holds a background PowerShell command's stdin on a pipe instead of NUL", () => {
+    const fg = commandWrite("vite", "powershell", false);
+    const bg = commandWrite("vite", "powershell", false, true);
+    expect(fg).toContain("::Detach()");
+    expect(bg).toContain("::Hold()");
+    expect(bg).not.toContain("::Detach()");
+    expect(bg.endsWith("\nvite\n")).toBe(true);
+  });
+
   it("is what the test fakes unwrap back to the command", () => {
     for (const flavour of ["posix", "powershell"] as const) {
       for (const cmd of ["say hi", "echo 'a' \"b\"\nsecond line"]) {
-        expect(unwrapCommandWrite(commandWrite(cmd, flavour, true))).toBe(cmd + "\n");
-        expect(unwrapCommandWrite(commandWrite(cmd, flavour, false))).toBe(cmd + "\n");
+        for (const background of [false, true]) {
+          expect(unwrapCommandWrite(commandWrite(cmd, flavour, true, background))).toBe(cmd + "\n");
+          expect(unwrapCommandWrite(commandWrite(cmd, flavour, false, background))).toBe(cmd + "\n");
+        }
       }
     }
   });
