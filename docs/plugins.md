@@ -974,8 +974,11 @@ a credential prompt, bash's `read`) ate the probe and the line after it. The
 run sat out its timeout and the next command became that program's input.
 Nothing in Dispatch feeds a running command, so the write now cuts it off:
 
-- bash/sh: `{ :; <command>\n\n} </dev/null\n` — a brace group, so `cd` and
-  `export` still persist and `$?` is the command's;
+- bash/sh: `eval '<command>\n' </dev/null\n`, with each `'` in the command
+  written `'\''`. `eval` is a builtin, so `cd` and `export` persist and `$?`
+  is the command's. It parses one command at a time, as the shell reading
+  lines did, so a `shopt` on one line still governs the next. A syntax error
+  is exit 2 rather than the end of the shell;
 - PowerShell: a line before the command points the process's stdin handle at
   `NUL` (a small `Add-Type` helper, compiled on the shell's first command), and
   the probe restores it. Where the helper can't compile (constrained language

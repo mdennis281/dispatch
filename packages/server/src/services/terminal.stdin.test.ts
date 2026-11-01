@@ -14,6 +14,7 @@ import {
   type ShellProcess,
   type SpawnShell,
 } from "./terminal.js";
+import { unwrapCommandWrite } from "./terminal.testkit.js";
 
 /**
  * A command that reads stdin, over the REAL shells.
@@ -156,6 +157,42 @@ describe.each(shells)("a command that reads stdin, under $label", (shell) => {
         const split = await t.run({ chatId: "c", name: "t", command: "echo split \\", cwd: root, timeoutMs });
         expect(split.timedOut).toBeFalsy();
         expect(split.output.trim()).toBe("split");
+        const quoted = await t.run({ chatId: "c", name: "t", command: `echo "it's" 'single'`, cwd: root, timeoutMs });
+        expect(quoted.output.trim()).toBe("it's single");
+      } finally {
+        await t.reap();
+        t.dispose();
+      }
+    },
+    60_000,
+  );
+
+  // The first cut wrapped the command in `{ …; } </dev/null`. bash parses a
+  // group whole before running any of it, so a line that changes how the next
+  // one PARSES stopped working, and the syntax error that followed ended the
+  // shell. Review caught it on #478.
+  it.runIf(shell.flavour === "posix")(
+    "runs a multi-line command line by line, and outlives a syntax error",
+    async () => {
+      const t = service();
+      try {
+        const glob = await t.run({
+          chatId: "c",
+          name: "t",
+          command: "shopt -s extglob\nls -d !(zzz-no-such) >/dev/null && echo extglob-ok",
+          cwd: root,
+          timeoutMs,
+        });
+        expect(glob.output).toContain("extglob-ok");
+        expect(glob.exitCode).toBe(0);
+
+        // A syntax error at the top level ends a non-interactive bash; inside
+        // `eval` it is just exit 2.
+        const broken = await t.run({ chatId: "c", name: "t", command: "echo (", cwd: root, timeoutMs });
+        expect(broken.timedOut).toBeFalsy();
+        expect(broken.exitCode).toBe(2);
+        const after = await t.run({ chatId: "c", name: "t", command: "echo still-here", cwd: root, timeoutMs });
+        expect(after.output.trim()).toBe("still-here");
       } finally {
         await t.reap();
         t.dispose();
@@ -166,9 +203,20 @@ describe.each(shells)("a command that reads stdin, under $label", (shell) => {
 });
 
 describe("commandWrite", () => {
-  it("puts a posix command in a brace group fed from /dev/null, its text untouched", () => {
-    expect(commandWrite("echo hi", "posix", true)).toBe("{ :; echo hi\n\n} </dev/null\n");
-    expect(commandWrite("echo hi", "posix", false)).toBe("{ :; echo hi\n\n} </dev/null\n");
+  it("hands a posix command to `eval` single-quoted, with stdin from /dev/null", () => {
+    expect(commandWrite("echo hi", "posix", true)).toBe("eval 'echo hi\n' </dev/null\n");
+    expect(commandWrite("echo hi", "posix", false)).toBe("eval 'echo hi\n' </dev/null\n");
+    // A `'` closes the quote, adds an escaped one, and reopens.
+    expect(commandWrite("echo 'a'", "posix", true)).toBe("eval 'echo '\\''a'\\''\n' </dev/null\n");
+  });
+
+  it("is what the test fakes unwrap back to the command", () => {
+    for (const flavour of ["posix", "powershell"] as const) {
+      for (const cmd of ["say hi", "echo 'a' \"b\"\nsecond line"]) {
+        expect(unwrapCommandWrite(commandWrite(cmd, flavour, true))).toBe(cmd + "\n");
+        expect(unwrapCommandWrite(commandWrite(cmd, flavour, false))).toBe(cmd + "\n");
+      }
+    }
   });
 
   it("detaches PowerShell's stdin on the line before the command, compiling the helper only once", () => {

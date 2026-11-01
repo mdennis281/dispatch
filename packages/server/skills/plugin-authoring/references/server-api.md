@@ -162,7 +162,7 @@ Gotchas for a terminal backend:
   command's. Its signal aborts on a session interrupt or a closed terminal, and core
   does not wait after that — serialize your own sync if runs could overlap.
 - The command write is WRAPPED so the command reads EOF, not the shell's pipe:
-  bash gets `{ :; <command>\n\n} </dev/null`, PowerShell a stdin-detach line before
+  bash gets `eval '<command>\n' </dev/null` (`'` → `'\''`), PowerShell a stdin-detach line before
   it. Take the command from `beforeRun`'s `command`, never from the write. The probe
   is still a separate write after it (`__cm_ec=` for bash).
 - Emit `exit` WITH a reason: `handle.emit("exit", null, { kind: "transport-lost", detail })`

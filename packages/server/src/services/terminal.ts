@@ -256,11 +256,15 @@ const PS_STDIN_RESTORE = `try { if ('${PS_STDIN_TYPE}' -as [type]) { [${PS_STDIN
  * that read stdin would swallow its probe, and the shell would stay wedged
  * after the server exited.
  *
- * - posix: a brace group redirected from /dev/null. Braces, not a subshell, so
- *   `cd` and `export` still persist, and `$?` after it is the command's. `:`
- *   keeps a comment-only command from being an empty group (a syntax error),
- *   the newlines before `}` let the command end in a comment or in a `\`
- *   continuation.
+ * - posix: `eval '<command>' </dev/null`. `eval` is a builtin, so `cd` and
+ *   `export` persist and `$?` is the command's, and the redirect holds for
+ *   everything it runs. It is `eval` and not a `{ …; }` group because a group
+ *   is PARSED whole before any of it runs: `shopt -s extglob` on one line and
+ *   `ls !(x)` on the next was a syntax error, and a top-level syntax error ends
+ *   a non-interactive bash — the shell died with the run. `eval` parses one
+ *   command at a time, as the shell reading lines did, and a syntax error in
+ *   it (an unclosed quote included) is exit 2 with the shell still alive. The
+ *   newline before the closing quote lets a command end in a comment or a `\`.
  * - PowerShell has no redirection for that: a native child inherits the
  *   PROCESS's standard-input handle. So the line before the command points
  *   that handle at NUL, and the probe puts it back once it has read `$?`.
@@ -275,7 +279,8 @@ export function commandWrite(command: string, flavour: ShellFlavour, firstOnShel
   if (flavour === "powershell") {
     return `${firstOnShell ? `${PS_STDIN_SETUP}; ` : ""}${PS_STDIN_DETACH}\n${command}\n`;
   }
-  return `{ :; ${command}\n\n} </dev/null\n`;
+  // Single-quoted, so nothing in it expands early; a `'` closes, escapes, reopens.
+  return `eval '${command.replace(/'/g, "'\\''")}\n' </dev/null\n`;
 }
 
 /* ---------------------------------------------------------------------- deps */

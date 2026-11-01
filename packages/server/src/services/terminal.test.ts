@@ -11,6 +11,7 @@ import {
   type ShellProcess,
   type SpawnShell,
 } from "./terminal.js";
+import { unwrapCommandWrite } from "./terminal.testkit.js";
 
 /* ------------------------------------------------------------------ fixtures */
 
@@ -71,10 +72,9 @@ class FakeShell extends EventEmitter implements ShellProcess {
   }
 
   private handle(chunk: string): void {
-    for (const raw of chunk.split("\n")) {
-      // `commandWrite` opens a posix command's stdin-isolating group on the
-      // command's own line; its closer and PowerShell's detach line match nothing.
-      const line = raw.replace(/\r$/, "").replace(/^\{ :; /, "");
+    // Runs what the agent typed, not `commandWrite`'s stdin isolation around it.
+    for (const raw of unwrapCommandWrite(chunk).split("\n")) {
+      const line = raw.replace(/\r$/, "");
       if (!line.trim()) continue;
 
       const cd =

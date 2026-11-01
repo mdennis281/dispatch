@@ -32,6 +32,7 @@ import { Store } from "../../store/index.js";
 import { SessionBroker } from "../session-broker.js";
 import type { QueryFn } from "@dispatch/plugin-claude/harness";
 import { TerminalService, type ShellProcess, type SpawnShell } from "../terminal.js";
+import { unwrapCommandWrite } from "../terminal.testkit.js";
 import { MemoryService } from "../memory.js";
 import { GitHubService, type ExecResult } from "../github.js";
 import {
@@ -249,9 +250,8 @@ class FakeShell extends EventEmitter implements ShellProcess {
   }
 
   private handle(chunk: string): void {
-    for (const raw of chunk.split("\n")) {
-      // Unwrap `commandWrite`'s posix stdin group (see terminal.test.ts).
-      const line = raw.replace(/\r$/, "").replace(/^\{ :; /, "");
+    for (const raw of unwrapCommandWrite(chunk).split("\n")) {
+      const line = raw.replace(/\r$/, "");
       if (!line.trim()) continue;
       const cd = line.match(/^cd\s+(.+)$/);
       if (cd) {

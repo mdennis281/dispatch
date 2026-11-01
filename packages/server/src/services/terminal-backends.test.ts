@@ -18,6 +18,7 @@ import type {
 } from "@dispatch/shared";
 import { EventBus } from "../bus.js";
 import { TerminalService, type ShellProcess } from "./terminal.js";
+import { unwrapCommandWrite } from "./terminal.testkit.js";
 import { TerminalBackendRegistry } from "./terminal-backends.js";
 
 /**
@@ -36,9 +37,8 @@ class FakeShell extends EventEmitter implements ShellProcess {
   readonly stdin = {
     write: (chunk: string): void => {
       this.writes.push(chunk);
-      for (const raw of chunk.split("\n")) {
-        const line = raw.replace(/^\{ :; /, "");
-        if (line && !/^\} <\/dev\/null$|::Detach\(\)|CMTERMSENTINEL_/.test(line)) this.ran.push(line);
+      for (const line of unwrapCommandWrite(chunk).split("\n")) {
+        if (line && !line.includes("CMTERMSENTINEL_")) this.ran.push(line);
         const say = line.match(/^say\s+(.+)$/);
         if (say) this.stdout.emit("data", Buffer.from(`${say[1]}\n`));
         // `hang` never returns, like a dev server: its marker never prints.
@@ -741,7 +741,7 @@ describe("per-run hooks (beforeRun / afterRun)", () => {
     // not start `__cm_ec=`: the probe must stay a write of its own, with that
     // prefix, after a command write that never has it.
     expect(backend.spawned[0]!.writes).toEqual([
-      "{ :; say hi\n\n} </dev/null\n",
+      "eval 'say hi\n' </dev/null\n",
       expect.stringMatching(/^__cm_ec=\$\?; printf .*CMTERMSENTINEL_/),
     ]);
     expect(res).not.toHaveProperty("notices");
