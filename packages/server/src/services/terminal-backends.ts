@@ -49,6 +49,7 @@ import {
   UNREADABLE_TERMINAL_BACKEND_REASON,
   isReadableTerminalBackendId,
   resolveTerminalBackend,
+  terminalBackendPluginOf,
   resolveTerminalLocations,
   type TerminalBackend,
   type TerminalBackendFallback,
@@ -371,6 +372,16 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
       throw new Error(`terminal backend id "${String(id)}" must match ${TERMINAL_BACKEND_ID_PATTERN}`);
     }
     if (id === LOCAL_TERMINAL_BACKEND) throw new Error(`"${LOCAL_TERMINAL_BACKEND}" is reserved for the built-in local shell`);
+    // A qualified id is a namespace claim: honoured only for the plugin it
+    // names, or one plugin could register `remote-host/cvx-mac` and capture
+    // every chat pinned to the other's machine.
+    const prefix = terminalBackendPluginOf(id);
+    if (prefix !== undefined && prefix !== owner) {
+      throw new Error(
+        `terminal backend id "${id}": a qualified id must start with the registering plugin's id` +
+          (owner ? ` ("${owner}/…")` : ", and this registration has no plugin"),
+      );
+    }
     if (this.entries.has(id)) {
       const by = this.entries.get(id)?.owner;
       throw new Error(`terminal backend "${id}" is already registered${by ? ` by plugin "${by}"` : ""}`);
@@ -432,7 +443,8 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
 
   /**
    * The policy for an id: the registered backend's own, else what it declared
-   * when it was last registered here, else the default.
+   * when it was last registered here, else the default — `local` for a bare
+   * id, `refuse` for a qualified one or one this version cannot read.
    */
   fallbackOf(id: string): TerminalBackendFallback {
     // An id in a format this version cannot read came from a NEWER one — whose
@@ -442,7 +454,14 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
     if (!isReadableTerminalBackendId(id)) return "refuse";
     const entry = this.entries.get(id);
     if (entry) return entry.backend.fallback ?? "local";
-    return this.recall(id)?.fallback ?? "local";
+    const known = this.recall(id);
+    if (known) return known.fallback;
+    // Never seen here. A bare id keeps the pre-policy default — a project
+    // naming proxmox before it ever ran on this instance still gets a shell. A
+    // QUALIFIED id only exists since backends could declare a policy, and the
+    // plugin that coined the scheme (remote-host) refuses: guessing `local`
+    // would run a command meant for that machine on this one.
+    return terminalBackendPluginOf(id) ? "refuse" : "local";
   }
 
   /**

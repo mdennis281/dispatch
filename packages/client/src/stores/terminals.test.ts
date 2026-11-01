@@ -5,8 +5,15 @@
  * new shell; two clicks that both produced "shell" would look like a no-op.
  */
 import { describe, it, expect } from "vitest";
-import type { TerminalInfo } from "@dispatch/shared";
-import { isActiveTerminal, isLiveChatTerminal, missingBackendHint, nextShellName } from "./terminals.js";
+import type { TerminalBackendInfo, TerminalInfo } from "@dispatch/shared";
+import {
+  backendHint,
+  isActiveTerminal,
+  isLiveChatTerminal,
+  missingBackendHint,
+  nextShellName,
+  sortBackendsForPicker,
+} from "./terminals.js";
 
 const terminal = (over: Partial<TerminalInfo> = {}): TerminalInfo => ({
   id: "chat-1::qa",
@@ -16,6 +23,32 @@ const terminal = (over: Partial<TerminalInfo> = {}): TerminalInfo => ({
   status: "live",
   createdAt: 1,
   ...over,
+});
+
+describe("pickers group backends by plugin (E12)", () => {
+  const b = (id: string, label: string, pluginId?: string): TerminalBackendInfo => ({
+    id,
+    label,
+    shell: "bash",
+    fallback: "local",
+    ...(pluginId ? { pluginId } : {}),
+  });
+
+  it("keeps each plugin's backends together, plugins and names in order", () => {
+    const sorted = sortBackendsForPicker([
+      b("remote-host/mini", "mini", "remote-host"),
+      b("proxmox", "Proxmox container", "proxmox-terminal"),
+      b("remote-host/cvx-mac", "cvx-mac", "remote-host"),
+    ]);
+    expect(sorted.map((x) => x.id)).toEqual(["proxmox", "remote-host/cvx-mac", "remote-host/mini"]);
+  });
+
+  it("leaves the plugin to the heading: a row's hint is only its status", () => {
+    expect(backendHint(b("proxmox", "Proxmox", "proxmox-terminal"))).toBeUndefined();
+    expect(backendHint({ ...b("remote-host/cvx-mac", "cvx-mac", "remote-host"), status: { state: "offline", detail: "asleep", since: 1 } })).toBe(
+      "offline · asleep",
+    );
+  });
 });
 
 describe("missingBackendHint", () => {

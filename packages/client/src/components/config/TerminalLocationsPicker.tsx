@@ -13,9 +13,17 @@
  * whose plugin is gone keeps showing, so the stale entry can be seen and
  * cleared.
  */
+import { Fragment } from "react";
 import { Check, RotateCcw } from "lucide-react";
 import { LOCAL_TERMINAL_BACKEND, type TerminalBackendInfo } from "@dispatch/shared";
-import { backendHint, missingBackendHint, useTerminals } from "../../stores/terminals.js";
+import {
+  backendGroup,
+  backendHint,
+  missingBackendHint,
+  sortBackendsForPicker,
+  UNAVAILABLE_BACKENDS_GROUP,
+  useTerminals,
+} from "../../stores/terminals.js";
 import { Button } from "../ui/Button.js";
 import { cn } from "../../lib/cn.js";
 
@@ -47,14 +55,19 @@ export function TerminalLocationsPicker({
   const backends = useTerminals((s) => s.backends);
   const effective = value ?? inherited;
   const enabled = new Set(effective);
-  const rows: { id: string; label: string; hint?: string; missing?: boolean }[] = [
+  const rows: { id: string; label: string; hint?: string; missing?: boolean; group?: string }[] = [
     { id: LOCAL_TERMINAL_BACKEND, label: "This machine", hint: "the Dispatch host" },
-    ...backends.map((b) => ({ id: b.id, label: b.label, hint: backendHint(b) })),
+    ...sortBackendsForPicker(backends).map((b) => ({
+      id: b.id,
+      label: b.label,
+      hint: backendHint(b),
+      group: backendGroup(b),
+    })),
     // Named but not registered: still part of the answer, and the only place
     // to see it and untick it.
     ...effective
       .filter((id) => id !== LOCAL_TERMINAL_BACKEND && !backends.some((b) => b.id === id))
-      .map((id) => ({ id, label: id, hint: missingBackendHint(id), missing: true })),
+      .map((id) => ({ id, label: id, hint: missingBackendHint(id), missing: true, group: UNAVAILABLE_BACKENDS_GROUP })),
   ];
   const toggle = (id: string) => {
     const next = new Set(effective);
@@ -108,37 +121,43 @@ export function TerminalLocationsPicker({
         </Button>
       </div>
       <div className="overflow-hidden rounded-md border border-line bg-inset/45">
-        {rows.map((row) => {
+        {rows.map((row, i) => {
           const checked = enabled.has(row.id);
           return (
-            <Button
-              key={row.id}
-              type="button"
-              variant="ghost"
-              role="checkbox"
-              aria-checked={checked}
-              disabled={disabled}
-              onClick={() => toggle(row.id)}
-              className="!flex !h-auto w-full justify-start gap-2.5 !whitespace-normal !rounded-none border-x-0 border-t-0 border-b border-line-soft px-2.5 py-2 text-left !font-normal last:border-b-0 hover:bg-hover/35 active:translate-y-0"
-            >
-              <span
-                className={cn(
-                  "flex size-4 shrink-0 items-center justify-center rounded border transition-colors [&_svg]:size-3",
-                  checked ? "border-accent-line bg-accent-dim text-accent-hi" : "border-line-strong bg-panel text-transparent",
-                )}
+            <Fragment key={row.id}>
+              {row.group && row.group !== rows[i - 1]?.group && (
+                <div className="border-b border-line-soft bg-panel-2/40 px-2.5 py-1 text-2xs font-medium text-faint">
+                  {row.group}
+                </div>
+              )}
+              <Button
+                type="button"
+                variant="ghost"
+                role="checkbox"
+                aria-checked={checked}
+                disabled={disabled}
+                onClick={() => toggle(row.id)}
+                className="!flex !h-auto w-full justify-start gap-2.5 !whitespace-normal !rounded-none border-x-0 border-t-0 border-b border-line-soft px-2.5 py-2 text-left !font-normal last:border-b-0 hover:bg-hover/35 active:translate-y-0"
               >
-                <Check />
-              </span>
-              <span className="min-w-0 flex-1">
-                <span className={cn("block text-xs font-medium", checked ? "text-secondary" : "text-muted")}>
-                  {row.label}
+                <span
+                  className={cn(
+                    "flex size-4 shrink-0 items-center justify-center rounded border transition-colors [&_svg]:size-3",
+                    checked ? "border-accent-line bg-accent-dim text-accent-hi" : "border-line-strong bg-panel text-transparent",
+                  )}
+                >
+                  <Check />
                 </span>
-                <span className="block truncate text-2xs text-faint">
-                  <span className="cm-mono">{row.id}</span>
-                  {row.hint ? ` · ${row.hint}` : ""}
+                <span className="min-w-0 flex-1">
+                  <span className={cn("block text-xs font-medium", checked ? "text-secondary" : "text-muted")}>
+                    {row.label}
+                  </span>
+                  <span className="block truncate text-2xs text-faint">
+                    <span className="cm-mono">{row.id}</span>
+                    {row.hint ? ` · ${row.hint}` : ""}
+                  </span>
                 </span>
-              </span>
-            </Button>
+              </Button>
+            </Fragment>
           );
         })}
       </div>

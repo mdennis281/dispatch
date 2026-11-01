@@ -6,7 +6,22 @@ import {
   TerminalBackendRefSchema,
   TerminalLocationsSchema,
   isReadableTerminalBackendId,
+  terminalBackendPluginOf,
 } from "./terminal-backend.js";
+
+describe("qualified terminal backend ids (E12)", () => {
+  it("accept `<pluginId>/<name>` beside bare ids, and name the plugin", () => {
+    for (const ok of ["proxmox", "remote-host/cvx-mac", "a/b", `${"p".repeat(40)}/${"n".repeat(48)}`]) {
+      expect(TERMINAL_BACKEND_ID_PATTERN.test(ok), ok).toBe(true);
+      expect(isReadableTerminalBackendId(ok), ok).toBe(true);
+    }
+    for (const bad of ["/x", "x/", "a/b/c", "Remote/x", "remote host/x", `${"p".repeat(41)}/x`]) {
+      expect(TERMINAL_BACKEND_ID_PATTERN.test(bad), bad).toBe(false);
+    }
+    expect(terminalBackendPluginOf("remote-host/cvx-mac")).toBe("remote-host");
+    expect(terminalBackendPluginOf("proxmox")).toBeUndefined();
+  });
+});
 
 // `future:box` stands for an id format a NEWER version writes to the config
 // this one shares. Before E12a, reading one failed the whole file.

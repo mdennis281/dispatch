@@ -151,6 +151,8 @@ ctx.providers.register(harness, descriptor)
 // the run. Throws on "local" or a taken id; the toggle ends the backend's shells,
 // withdraws its ports and calls dispose().
 ctx.terminals.registerBackend({
+  // "<your plugin id>/<name>" (qualified: can't collide, any other prefix throws) or a bare
+  // "[a-z0-9][a-z0-9-]{0,47}". Persisted on chats/config — never change it; rename via label.
   id: "box", label: "My box", shell: "bash",
   spawn: async ({ chatId, projectId, name, cwd, repoPath, worktreePath, branch, signal }) => handle,
   // Optional, per command, only on shells you serve. Awaited BEFORE the write and NOT
@@ -174,6 +176,8 @@ await ctx.terminals.unregisterBackend("box")                 // one backend, as 
 ```
 
 Gotchas for a terminal backend:
+- One backend per thing the human adds (a paired machine)? Qualify the id, `my-plugin/<slug>`.
+  A qualified id this instance never saw registered is refused rather than run locally.
 - Never put a `pid` on the handle — core strips it, because a remote pid names some
   unrelated local process. `kill()` has to end the remote shell AND its children.
 - The selection is read when a shell OPENS (chat pin → project `defaults.terminalBackend`

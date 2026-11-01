@@ -590,8 +590,16 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
     ctx.terminals = {
       // The host's refusals, so a plugin's test sees them before a real host does.
       registerBackend: (backend) => {
-        if (!/^[a-z0-9][a-z0-9-]{0,47}$/.test(backend.id) || backend.id === "local") {
+        // Mirrors TERMINAL_BACKEND_ID_PATTERN (the SDK takes no values from
+        // shared): a bare name, or one qualified by this plugin's own id.
+        if (!/^(?:[a-z0-9][a-z0-9-]{0,39}\/)?[a-z0-9][a-z0-9-]{0,47}$/.test(backend.id) || backend.id === "local") {
           throw new Error(`terminal backend id "${backend.id}" is invalid or reserved`);
+        }
+        const slash = backend.id.indexOf("/");
+        if (slash > 0 && backend.id.slice(0, slash) !== id) {
+          throw new Error(
+            `terminal backend id "${backend.id}": a qualified id must start with the registering plugin's id ("${id}/…")`,
+          );
         }
         if (terminalBackends.has(backend.id)) {
           throw new Error(`terminal backend "${backend.id}" is already registered`);
