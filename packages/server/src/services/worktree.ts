@@ -9,7 +9,8 @@
  *     base defaults to `origin/<defaultBranch|main>`. Honors project.worktreeCmd
  *     (e.g. Hivebreak's "pnpm worktree") when set.
  *   - list(project): parse `git worktree list --porcelain`.
- *   - remove(path, force?): `git worktree remove [--force] <path>`.
+ *   - remove(path, force?): `git worktree remove [--force] <path>`, after every
+ *     link inside the tree has been unlinked (see `tree-links.ts`).
  *   - diffVsMain(worktreePath, base='main'): structured per-file diffs from the
  *     MERGE-BASE of the branch and its base ref (`git diff --merge-base <base>`),
  *     so a freshly-cut branch shows an empty diff instead of the delta a stale
@@ -21,8 +22,10 @@
  * `worktree-update` / `chat-update` / `notice` events on the EventBus.
  */
 import { execBinary } from "./exec-binary.js";
+import { restoreLinks, severLinks, type SeveredLink } from "./tree-links.js";
 import { existsSync } from "node:fs";
 import {
+  lstat,
   mkdir,
   readdir,
   readFile as fsReadFile,
@@ -632,21 +635,31 @@ export class WorktreeService {
   /**
    * Remove a worktree. Runs from the primary checkout so the target can go away.
    *
-   * Git is asked first because it is the only thing that can REFUSE — a dirty
+   * Git is asked because it is the only thing that can REFUSE — a dirty
    * tree, a locked one, a path that isn't a worktree at all — but on Windows it
-   * cannot be trusted to FINISH. `git worktree remove` unlinks the tree's `.git`
-   * file first and only then walks the directory, and that walk dies on the
-   * first pnpm junction in `node_modules` (git `unlink()`s a directory symlink;
-   * Windows refuses). It exits 128 having already destroyed the tree's identity,
-   * and the next `worktree prune` drops the admin record. What is left is a
-   * directory with no `.git`, invisible to `git worktree list` and therefore to
-   * every reaper built on it, still holding 200MB+ of `node_modules`. On this
-   * machine that was ~100 such directories.
+   * cannot be trusted with the DELETE. Git for Windows walks a junction as if
+   * it were a plain directory and deletes what it points at. On 2026-11-01
+   * that cost the Dispatch checkout `packages/shared`, `packages/plugin-sdk`
+   * and 11 `.pnpm` packages, reached through a dispatch-plugins worktree's
+   * `.dispatch-sdk` junction and the pnpm `link:` dependencies behind it. So
+   * every link in the tree is unlinked BEFORE git runs (`severLinks`), and git
+   * deletes a tree with no way out of it. Severing is the one step here that
+   * changes a tree git may still refuse, so the refusals git would make are
+   * asked first, without touching anything (`refusalFor`); one that slips past
+   * those gets its links put back.
+   *
+   * Nor can git be trusted to FINISH. It unlinks the tree's `.git` file first
+   * and only then walks the directory; when that walk fails, it exits having
+   * already destroyed the tree's identity, and the next `worktree prune` drops
+   * the admin record. What is left is a directory with no `.git`, invisible to
+   * `git worktree list` and therefore to every reaper built on it, still
+   * holding 200MB+ of `node_modules`. On this machine that was ~100 such
+   * directories.
    *
    * So a failure is read by what git left behind, not by its exit code: a tree
    * that still has its `.git` was genuinely refused and the error propagates;
    * one that has lost it is past the point of no return, and the delete is
-   * finished here, with Node's `rm` — which handles junctions.
+   * finished here, with the same sever-then-`rm`.
    */
   async remove(
     worktreePath: string,
@@ -669,14 +682,33 @@ export class WorktreeService {
     // `DELETE /api/worktrees` and the `remove-worktree` action pass the path
     // straight through from the caller, so that is not a hypothetical.
     const hadIdentity = hasGitIdentity(worktreePath);
+    // Without an identity git refuses on its own ("not a working tree", or a
+    // failed validation for a registered tree whose `.git` is gone) before it
+    // deletes anything, so there is nothing to sever and nothing to ask first.
+    const severed: SeveredLink[] = [];
+    if (hadIdentity) {
+      const refusal = await this.refusalFor(worktreePath, opts.force === true);
+      if (refusal) throw new Error(`worktree remove ${worktreePath} refused: ${refusal}`);
+      try {
+        await severLinks(worktreePath, severed);
+      } catch (err) {
+        const lost = await restoreLinks(severed);
+        throw new Error(
+          `worktree remove ${worktreePath} stopped before deleting anything: ${
+            err instanceof Error ? err.message : String(err)
+          }${unrestoredNote(lost)}`,
+        );
+      }
+    }
     const r = await this.exec("git", args, { cwd });
     const gitDiedMidRemoval =
       r.exitCode !== 0 && hadIdentity && !hasGitIdentity(worktreePath);
     if (r.exitCode !== 0 && !gitDiedMidRemoval) {
+      const lost = await restoreLinks(severed);
       throw new Error(
         `git ${args.join(" ")} failed (exit ${r.exitCode}): ${
           r.stderr.trim() || r.stdout.trim()
-        }`,
+        }${unrestoredNote(lost)}`,
       );
     }
     const leftover = await finishDirectoryRemoval(worktreePath);
@@ -1093,6 +1125,40 @@ export class WorktreeService {
     } satisfies WorktreeInfo);
   }
 
+  /**
+   * Why `git worktree remove` would refuse this tree, answered without
+   * changing anything in it, or null when it would go ahead.
+   *
+   * `remove()` severs the tree's links before git runs, so a refusal git
+   * discovers only afterwards costs a tree that is staying its `node_modules`
+   * (put back, but a running dev server sees them vanish). These are git's
+   * own checks, read from the same places it reads them: the admin dir's
+   * `locked` file, which one `--force` does not override, and, unforced, the
+   * exact status git runs. Erring stricter than git is safe; this throws and
+   * git never runs. Erring looser is caught by git and the links come back.
+   */
+  private async refusalFor(path: string, force: boolean): Promise<string | null> {
+    // Git would follow a link root into whatever it points at.
+    if ((await lstat(path)).isSymbolicLink()) {
+      return "the path is a link, not a worktree; removing it would delete what it points at";
+    }
+    const gitDir = await linkedGitDir(path);
+    if (!gitDir) return "not a linked worktree (a main checkout, a clone or a submodule)";
+    if (existsSync(join(gitDir, "locked"))) return "the worktree is locked";
+    if (!force) {
+      const r = await this.exec(
+        "git",
+        ["status", "--porcelain", "--ignore-submodules=none"],
+        { cwd: path },
+      );
+      if (r.exitCode !== 0) {
+        return `git status failed (exit ${r.exitCode}): ${r.stderr.trim() || r.stdout.trim()}`;
+      }
+      if (r.stdout.trim()) return "it contains modified or untracked files, use --force to delete it";
+    }
+    return null;
+  }
+
   /** The main worktree for the repo containing `fromPath` (first porcelain entry). */
   private async primaryRepo(fromPath: string): Promise<string> {
     try {
@@ -1315,6 +1381,34 @@ function hasGitIdentity(dir: string): boolean {
   return existsSync(join(dir, ".git"));
 }
 
+/**
+ * The admin dir (`<repo>/.git/worktrees/<id>`) a linked worktree's `.git` file
+ * points at, or null for anything else. A main checkout's `.git` is a
+ * directory, and a submodule's `.git` file points at a dir with no
+ * `commondir`. Relative `gitdir:` lines (`worktree.useRelativePaths`) resolve
+ * against the tree.
+ */
+async function linkedGitDir(tree: string): Promise<string | null> {
+  let text: string;
+  try {
+    text = await fsReadFile(join(tree, ".git"), "utf8");
+  } catch {
+    return null;
+  }
+  const m = /^gitdir:\s*(.+?)\s*$/m.exec(text);
+  if (!m) return null;
+  const gitDir = resolve(tree, m[1]!);
+  return existsSync(join(gitDir, "commondir")) ? gitDir : null;
+}
+
+function unrestoredNote(lost: string[]): string {
+  if (lost.length === 0) return "";
+  const shown = lost.slice(0, 5).join(", ");
+  return `; ${lost.length} link(s) severed before the refusal could not be put back (${shown}${
+    lost.length > 5 ? ", …" : ""
+  }), so reinstall dependencies in that tree`;
+}
+
 function isAncestorOf(ancestor: string, path: string): boolean {
   const rel = relative(ancestor, path);
   return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
@@ -1356,6 +1450,12 @@ async function isWorktreeHusk(dir: string): Promise<boolean> {
 async function finishDirectoryRemoval(dir: string): Promise<Error | null> {
   if (!existsSync(dir)) return null;
   try {
+    // Node's `rm` does not follow junctions today, but the 2026-11-01 incident
+    // (see `remove()`) is what trusting a deleter's link handling costs. This
+    // is also the orphan sweep's only door, and a husk is whatever a dead
+    // removal left, links and all. A sever failure throws, so `rm` never runs
+    // on a tree that still has a way out of it.
+    await severLinks(dir);
     await rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 250 });
     return null;
   } catch (err) {

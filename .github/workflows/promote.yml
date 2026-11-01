@@ -246,6 +246,7 @@ jobs:
           src/services/runner.test.ts
           src/routes/fs.test.ts
           src/services/fs-explorer.test.ts
+          src/services/worktree-links.test.ts
           src/services/mcp/manager-mcp.integration.test.ts
           src/harness/acp/index.test.ts
 
