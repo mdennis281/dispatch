@@ -32,6 +32,9 @@ export type {
   // server context
   PluginModule,
   PluginLog,
+  // `ctx.instance` / `host.instance` (docs/plugins.md → "Instance identity")
+  PluginInstance,
+  PluginInstanceRemintReason,
   // cleanup lifecycle — `onShutdown` / `reconcile` on the module
   // (docs/plugins.md → "Cleanup lifecycle")
   PluginShutdownEvent,

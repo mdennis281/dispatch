@@ -9,7 +9,7 @@ import { describe, it, expect } from "vitest";
 import { pathToFileURL } from "node:url";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createTestContext } from "./testing.js";
+import { TEST_INSTANCE, createTestContext } from "./testing.js";
 import { definePlugin } from "./index.js";
 import { PLUGIN_RECONCILE_BUDGET_MS, PLUGIN_SHUTDOWN_BUDGET_MS } from "./manifest.js";
 import type { Harness, ProviderDescriptor } from "./index.js";
@@ -170,6 +170,21 @@ describe("the members no example reaches", () => {
     expect(await t.ctx.oauth!.token("xai")).toBe("access-1");
     await t.ctx.oauth!.disconnect("xai");
     expect(await t.ctx.oauth!.token("xai")).toBeUndefined();
+  });
+
+  it("hands every plugin an instance, a copied one on request, or none as an older host does", () => {
+    expect(createTestContext({ capabilities: [] }).ctx.instance).toEqual(TEST_INSTANCE);
+    const copied = createTestContext({
+      instance: { id: "dev-2", role: "dev", previousId: "stable-1", reminted: { at: "2026-11-01T00:00:00.000Z", reason: "copied" } },
+    }).ctx.instance;
+    expect(copied).toEqual({
+      id: "dev-2",
+      role: "dev",
+      dataDirFingerprint: TEST_INSTANCE.dataDirFingerprint,
+      previousId: "stable-1",
+      reminted: { at: "2026-11-01T00:00:00.000Z", reason: "copied" },
+    });
+    expect("instance" in createTestContext({ instance: null }).ctx).toBe(false);
   });
 
   it("lets a handler set status and headers through the reply", async () => {

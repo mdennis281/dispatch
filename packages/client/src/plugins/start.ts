@@ -16,6 +16,7 @@ export function startClientPlugins(): void {
   started = true;
   void loadClientPlugins({
     list: () => api.plugins.list(),
+    instance: () => api.plugins.instance(),
     importModule: (url) => import(/* @vite-ignore */ url),
     installDeps: async () => {
       const { installPluginDeps } = await import("./deps.js");

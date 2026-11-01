@@ -68,6 +68,7 @@ host.api.fetch(path, init?)                  // sessionFetch under /api/plugins/
 host.settings.get()                          // your plugin's settings, synchronous, kept current by the plugin-settings event
 await host.settings.set(patch)               // PATCH: keys replace wholesale, null removes; rejects with the schema's reasons
 host.settings.onChange((next) => …) → unsubscribe
+host.instance                                // the server half's ctx.instance (id, role, …); absent if it couldn't be read
 ```
 
 A settings key the generic form can't render (a list of objects) belongs in your own

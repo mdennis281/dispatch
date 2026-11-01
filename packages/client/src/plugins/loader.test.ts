@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
-import type { ClientHost, PluginInfo } from "@dispatch/shared";
+import type { ClientHost, PluginInfo, PluginInstance } from "@dispatch/shared";
+import { createClientHost } from "./host.js";
 import { clientModuleOf, loadClientPlugins, loadable, type LoadDeps } from "./loader.js";
 
 function row(id: string, extra: Partial<PluginInfo> = {}): PluginInfo {
@@ -107,6 +108,44 @@ describe("loadClientPlugins", () => {
       throw new Error("401");
     };
     expect(await loadClientPlugins(d)).toEqual({ loaded: [], failed: [] });
+    expect(d.toasts).toEqual([]);
+    warn.mockRestore();
+  });
+});
+
+describe("host.instance", () => {
+  const me: PluginInstance = { id: "inst-1", role: "dev", dataDirFingerprint: "fp", previousId: "inst-0" };
+
+  it("is read once, alongside the list, and every host carries it", async () => {
+    const seen: Array<[string, PluginInstance | undefined]> = [];
+    const activate = (h: ClientHost) => {
+      seen.push([h.pluginId, h.instance]);
+    };
+    const d = deps([row("a"), row("b")], { "/plugins/a/index.js": { activate }, "/plugins/b/index.js": { activate } });
+    d.makeHost = createClientHost;
+    let reads = 0;
+    d.instance = async () => {
+      reads++;
+      return me;
+    };
+    expect(await loadClientPlugins(d)).toEqual({ loaded: ["a", "b"], failed: [] });
+    expect(seen).toEqual([
+      ["a", me],
+      ["b", me],
+    ]);
+    expect(reads).toBe(1);
+  });
+
+  it("a failed read leaves it absent and loads every plugin anyway", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const hosts: ClientHost[] = [];
+    const d = deps([row("a")], { "/plugins/a/index.js": { activate: (h: ClientHost) => hosts.push(h) } });
+    d.makeHost = createClientHost;
+    d.instance = async () => {
+      throw new Error("500");
+    };
+    expect(await loadClientPlugins(d)).toEqual({ loaded: ["a"], failed: [] });
+    expect("instance" in hosts[0]!).toBe(false);
     expect(d.toasts).toEqual([]);
     warn.mockRestore();
   });

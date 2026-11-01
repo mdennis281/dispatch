@@ -259,6 +259,64 @@ export interface PluginRouter<Req = unknown, Reply = unknown> {
   delete(path: string, handler: PluginRouteHandler<Req, Reply>): void;
 }
 
+/** Why an instance's id was re-minted. See {@link PluginInstance.reminted}. */
+export type PluginInstanceRemintReason = "copied" | "moved" | "hostname";
+
+/**
+ * Which Dispatch instance a plugin is running in: `ctx.instance` and
+ * `host.instance`. Stable and dev run side by side on one machine and share
+ * `config/`, so they share settings and secrets, but each has its own data
+ * dir. A plugin that leaves work OUTSIDE Dispatch (sessions on a remote
+ * machine, files in a shared directory) namespaces it by `id`. That way one
+ * instance's cleanup never reaps the other's work.
+ */
+export interface PluginInstance {
+  /**
+   * Opaque. It stays the same for a data dir across restarts, and no two data
+   * dirs share it. It is kept in `<dataDir>/instance.json` together with a
+   * description of the directory it was minted for: the machine, the path and
+   * the file id. Finding that file in a directory it doesn't describe means the
+   * data dir was copied (dev seeded from stable), moved to another volume, or
+   * carried to a machine with a different name. The host then mints a new id
+   * and keeps the old one as {@link previousId}. So two live instances never
+   * share an id, even when dev's data started as a copy of stable's.
+   */
+  readonly id: string;
+  /**
+   * `stable` is the installed deployment, serving its own data dir. `dev` is a
+   * source checkout's `pnpm dev` server. `other` is anything else: a throwaway
+   * instance, a test, or a payload launched against another root. Use it as a
+   * label for display or policy, never as a namespace, because two `dev`
+   * instances can run at once.
+   */
+  readonly role: "stable" | "dev" | "other";
+  /**
+   * A hash of the physical data dir: machine, path, volume and file id. Opaque,
+   * so compare it only for equality. It changes whenever the directory is
+   * copied, moved, restored or renamed, or the machine is renamed. `id` survives
+   * some of those: a rename on the same volume, or a restore in place. Store it
+   * beside work you leave elsewhere to tell "my id, in a different directory"
+   * apart from "my id, where I left it".
+   */
+  readonly dataDirFingerprint: string;
+  /**
+   * The id this data dir carried before it was last re-minted. Work namespaced
+   * under it may be abandoned (the data dir moved, or the machine was renamed),
+   * or it may still be in use: when this data dir is a COPY, `previousId` is
+   * the id of the original, which may still be running. Offer it to the owner
+   * to adopt or clean up, after checking it is not live. Never adopt it
+   * automatically.
+   */
+  readonly previousId?: string;
+  /**
+   * When and why the id was last re-minted (`at` is ISO 8601). Absent while the
+   * data dir still carries the id it was first given. `copied`: the directory
+   * the id was minted for still holds it. `moved`: that directory no longer
+   * holds it. `hostname`: the record names another machine.
+   */
+  readonly reminted?: { readonly at: string; readonly reason: PluginInstanceRemintReason };
+}
+
 /**
  * The context. Members gated by a capability (see docs/plugins.md →
  * "Capabilities") are OPTIONAL here because they are genuinely absent from the
@@ -272,6 +330,12 @@ export interface PluginContext<Req = unknown, Reply = unknown> {
   /** The plugin's own version, from its manifest. */
   readonly version: string;
   readonly log: PluginLog;
+  /**
+   * Which instance this is. Namespace work left outside Dispatch by
+   * `instance.id`. Needs no capability. Optional only because hosts before it
+   * lack it; every current host has it.
+   */
+  readonly instance?: PluginInstance;
 
   /** `events` */
   bus?: {

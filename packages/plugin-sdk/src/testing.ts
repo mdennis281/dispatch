@@ -20,6 +20,7 @@ import type {
   PluginCapability,
   PluginChatState,
   PluginChatSummary,
+  PluginInstance,
   PluginLiveChat,
   PluginModule,
   PluginShutdownReason,
@@ -82,6 +83,12 @@ export interface TestContextOptions {
    * forgot to declare.
    */
   manifestSecrets?: readonly string[];
+  /**
+   * `ctx.instance`. Given fields override {@link TEST_INSTANCE}. Pass a
+   * `previousId` and `reminted` to test the copied-data-dir path. `null`
+   * leaves the member absent, as an older host does.
+   */
+  instance?: Partial<PluginInstance> | null;
   projects?: PluginProjectSummary[];
   chats?: PluginChatSummary[];
   /** Pre-seeded kv rows. */
@@ -301,6 +308,13 @@ async function withHostBudget(
   }
 }
 
+/** The default `ctx.instance`: a test, in nobody's data dir. */
+export const TEST_INSTANCE: PluginInstance = Object.freeze({
+  id: "test-instance",
+  role: "other",
+  dataDirFingerprint: "test-data-dir",
+});
+
 /** Build a fake context. See the module comment for what it is and is not. */
 export function createTestContext(opts: TestContextOptions = {}): TestContext {
   const id = opts.id ?? "test-plugin";
@@ -334,6 +348,7 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
     id,
     dir: opts.dir ?? `/plugins/${id}`,
     version: opts.version ?? "0.0.0",
+    ...(opts.instance === null ? {} : { instance: { ...TEST_INSTANCE, ...opts.instance } }),
     log: {
       info: (message) => log.push({ level: "info", message }),
       warn: (message) => log.push({ level: "warn", message }),

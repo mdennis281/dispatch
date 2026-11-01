@@ -17,7 +17,7 @@
  * activate (`error`). Loading its client half would hand the user a control
  * whose every request 404s, so only `active` plugins load.
  */
-import type { ClientPluginModule, PluginInfo } from "@dispatch/shared";
+import type { ClientPluginModule, PluginInfo, PluginInstance } from "@dispatch/shared";
 import type { createClientHost } from "./host.js";
 
 /** The `activate` export, from the namespace, a default export, or a `plugin` export. Mirrors the server's `moduleOf`. */
@@ -33,6 +33,8 @@ export function clientModuleOf(ns: unknown): ClientPluginModule | undefined {
 
 export interface LoadDeps {
   list(): Promise<PluginInfo[]>;
+  /** `host.instance`, read once alongside the list. A failure leaves it absent and loads the plugins anyway. */
+  instance?(): Promise<PluginInstance>;
   importModule(url: string): Promise<unknown>;
   /** Install the globals shim before the first import. Called at most once. */
   installDeps(): Promise<void>;
@@ -55,6 +57,11 @@ export function entryUrl(p: PluginInfo): string {
 export async function loadClientPlugins(deps: LoadDeps): Promise<{ loaded: string[]; failed: string[] }> {
   const loaded: string[] = [];
   const failed: string[] = [];
+  // In parallel with the list, so it costs no extra round trip before the first plugin activates.
+  const instanceRead = deps.instance?.().catch((err: unknown) => {
+    console.warn("[dispatch] could not read the instance identity; host.instance is absent:", err);
+    return undefined;
+  });
   let plugins: PluginInfo[];
   try {
     plugins = loadable(await deps.list());
@@ -66,12 +73,13 @@ export async function loadClientPlugins(deps: LoadDeps): Promise<{ loaded: strin
   }
   if (plugins.length === 0) return { loaded, failed };
   await deps.installDeps();
+  const instance = await instanceRead;
   for (const p of plugins) {
     try {
       const ns = await deps.importModule(entryUrl(p));
       const mod = clientModuleOf(ns);
       if (!mod) throw new Error("the client entry does not export activate()");
-      await mod.activate(deps.makeHost(p.id, p.settings));
+      await mod.activate(deps.makeHost(p.id, p.settings, instance));
       loaded.push(p.id);
     } catch (err) {
       failed.push(p.id);

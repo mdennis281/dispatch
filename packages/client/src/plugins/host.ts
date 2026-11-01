@@ -14,13 +14,14 @@
  *   chat.*                → the chats store, the WS actions and `PUT /api/chats/:id`
  *   api.fetch             → `sessionFetch` under `/api/plugins/<id>/`
  *   settings.*            → plugins/settings (fed by `plugin-settings`) and `PATCH …/settings`
+ *   instance              → `GET /api/plugins/instance`, read once by the loader
  *
  * The REGISTRATION functions throw on a duplicate id rather than replacing —
  * `activate` is wrapped by the loader, so a throw shows as a toast naming
  * the plugin, which is the right place for "two plugins want the same key".
  */
 import * as React from "react";
-import type { ClientHost, ClientHostKit, PluginChatRef, WsServerEvent } from "@dispatch/shared";
+import type { ClientHost, ClientHostKit, PluginChatRef, PluginInstance, WsServerEvent } from "@dispatch/shared";
 import { Button } from "../components/ui/Button.js";
 import { IconButton } from "../components/ui/IconButton.js";
 import { Select } from "../components/ui/Select.js";
@@ -77,11 +78,16 @@ export function chatRefOf(id: string): PluginChatRef | undefined {
   };
 }
 
-export function createClientHost(pluginId: string, settings: Record<string, unknown> = {}): ClientHost {
+export function createClientHost(
+  pluginId: string,
+  settings: Record<string, unknown> = {},
+  instance?: PluginInstance,
+): ClientHost {
   const prefix = `/api/plugins/${pluginId}/`;
   adoptPluginSettings(pluginId, settings);
   return {
     pluginId,
+    ...(instance ? { instance } : {}),
     React,
     ui: KIT,
     slots: {
