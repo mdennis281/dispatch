@@ -122,6 +122,8 @@ export interface TerminalAfterRunInfo extends TerminalRunInfo {
    * after `timed-out` or `cancelled` it may still be running in the shell.
    */
   outcome: "finished" | "timed-out" | "cancelled" | "shell-exited";
+  /** With `shell-exited`: the reason the handle gave, when it gave one. */
+  exitReason?: TerminalExitReason;
 }
 
 /** What `afterRun` may answer. */
@@ -161,7 +163,30 @@ export interface TerminalBackendHandle {
   stdout: TerminalBackendReadable;
   stderr: TerminalBackendReadable;
   kill(signal?: string): void;
-  on(event: "exit", listener: (code: number | null) => void): unknown;
+  /**
+   * The shell ended. Pass a {@link TerminalExitReason} as the second argument
+   * whenever you know WHY: without one core can only assume the shell ended on
+   * its own, so a dropped connection reads as a command that finished with no
+   * exit code — and the agent believes it.
+   */
+  on(event: "exit", listener: (code: number | null, reason?: TerminalExitReason) => void): unknown;
+  /**
+   * Core ALSO subscribes, through this same `on`, to two optional events — so
+   * an EventEmitter-based handle just emits them:
+   *
+   * - `"stalled"`, with an optional {@link TerminalStallInfo}: the transport
+   *   went quiet (keepalives unanswered) but is not given up on. Core pauses the
+   *   running command's timeout and shows the shell as stalled until
+   *   `"resumed"` (or `exit`), so a Wi-Fi blip neither eats a build's deadline
+   *   nor looks like a hung command. Emitting it again updates the detail.
+   *   The pause is capped (10 min of stall per command): still emit `exit`
+   *   with `transport-lost` once you give up.
+   * - `"resumed"`, no arguments: the transport answers again.
+   *
+   * They are deliberately not overloads here: a typed `"stalled"` overload
+   * would break every handle adapter that casts an `"exit" | "error"` function
+   * to this type, which is how published backends are written.
+   */
   on(event: "error", listener: (err: Error) => void): unknown;
   /**
    * The directory the shell starts in ON THE FAR SIDE, when the backend knows
@@ -170,6 +195,30 @@ export interface TerminalBackendHandle {
    * for — wrong for a background first command, which never reports back.
    */
   cwd?: string;
+}
+
+/**
+ * Why a backend's shell ended — the second argument of its handle's `exit`.
+ *
+ * - `exited`: the shell itself ended (it ran `exit`, or died on its own).
+ *   Treated exactly like an `exit` with no reason.
+ * - `transport-lost`: the connection carrying it dropped. The far side may
+ *   even still be running it, so a command in flight has an UNKNOWN outcome,
+ *   and its result is an error that says so.
+ * - `killed`: it was stopped on purpose — an idle stop, a container shut down,
+ *   a supervisor's dead-man switch. A command in flight did not finish.
+ */
+export const TerminalExitReasonSchema = z.object({
+  kind: z.enum(["exited", "transport-lost", "killed"]),
+  /** One short line, shown to the agent and in the panel: "ssh: connection reset". */
+  detail: z.string().optional(),
+});
+export type TerminalExitReason = z.infer<typeof TerminalExitReasonSchema>;
+
+/** What a handle's `stalled` event may carry. */
+export interface TerminalStallInfo {
+  /** One short line for the panel: "no keepalive answer for 15 s". */
+  detail?: string;
 }
 
 /**
@@ -306,13 +355,20 @@ export const TerminalLocationSchema = z.object({
   /** The backend that was asked for. */
   backend: z.string(),
   label: z.string(),
-  /** `connecting` while `spawn` is in flight; `ready` once the shell is up. */
-  state: z.enum(["connecting", "ready", "fallback"]),
+  /**
+   * `connecting` while `spawn` is in flight; `ready` once the shell is up;
+   * `stalled` while its transport has gone quiet (the handle's `stalled`
+   * event) — back to `ready` on `resumed`.
+   */
+  state: z.enum(["connecting", "ready", "fallback", "stalled"]),
   /**
    * Set when the requested backend could not supply a shell and this one is
    * running LOCALLY instead — the reason, verbatim, for the badge's tooltip.
    */
   fallback: z.string().optional(),
+  /** While `stalled`: since when (epoch ms), and the backend's detail if it gave one. */
+  stalledSince: z.number().int().optional(),
+  stalled: z.string().optional(),
 });
 export type TerminalLocation = z.infer<typeof TerminalLocationSchema>;
 

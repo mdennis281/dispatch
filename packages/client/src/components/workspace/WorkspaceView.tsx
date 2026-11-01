@@ -262,14 +262,22 @@ function TerminalRow({
   showProject: boolean;
   onPurge: (id: string) => void;
 }) {
-  const tone: Tone = term.background ? "warn" : term.status === "live" ? "success" : "neutral";
+  // A dropped connection and a shell that ran `exit` are both "exited", but
+  // only one of them leaves the last command's outcome unknown.
+  const ended = term.status === "exited" && !term.archived ? term.exitReason : undefined;
+  const lost = ended?.kind === "transport-lost";
+  const tone: Tone = term.background || lost ? "warn" : term.status === "live" ? "success" : "neutral";
   const state = term.background
     ? "background"
     : term.busy
       ? "running"
       : term.archived
         ? "archived"
-        : term.status;
+        : lost
+          ? "connection lost"
+          : ended?.kind === "killed"
+            ? "stopped"
+            : term.status;
   return (
     <Row
       muted={term.status !== "live"}
@@ -279,7 +287,9 @@ function TerminalRow({
         <>
           <ProjectChip projectId={term.projectId} show={showProject} />
           <ChatChip chatId={term.chatId} />
-          <Chip tone={tone}>{state}</Chip>
+          <Chip tone={tone} title={ended?.detail}>
+            {state}
+          </Chip>
           {term.origin && <Chip tone="neutral">{term.origin}</Chip>}
           {!!term.lines && <Chip tone="neutral">{term.lines} lines</Chip>}
         </>

@@ -871,6 +871,54 @@ unchanged over any transport that carries a line each way. It has **no
 process table under, so it strips one if present. `kill()` must take down the
 remote shell *and what it started* — it is the only teardown core can ask for.
 
+**Say why a shell ended.** Pass a `TerminalExitReason` as the second argument
+of `exit`, `{ kind, detail? }`:
+
+| `kind` | Use it when | A command in flight gets |
+| --- | --- | --- |
+| `exited` | the shell ended on its own (`exit`, a crash) | what it always got: `exit=n/a`, not an error |
+| `transport-lost` | the connection carrying it dropped | an **error**: the outcome is unknown, so check before re-running |
+| `killed` | you stopped it on purpose (idle stop, shutdown) | an **error**: it did not finish |
+
+With no reason, core can only assume `exited`, so a dropped SSH session reads
+as a command that finished without an exit code, and the agent believes it.
+`detail` is one short line ("ssh: connection reset"). It shows up in the
+result, as a `[dispatch]` line in the transcript, and as `TerminalInfo.exitReason`.
+The Workspace view labels the exited row "connection lost" or "stopped"; the
+Terminals panel lists only live shells, so it never shows an exited one.
+`afterRun` gets the reason as `exitReason`. Only an object with a `kind`
+counts: a real `ChildProcess` passes its signal name there, which core ignores.
+
+An `error` from a backend's handle, or from its `stdin` (an EPIPE), is read as
+`transport-lost` with the error's message. Transports usually error BEFORE
+they exit, and the first event ends the shell. A reason that only arrives
+after the shell has already ended can't change a result that has already
+been returned, but it is still recorded for the panel and the respawn notice.
+
+Whenever a name is reopened because its shell ended (whatever the reason), or
+because it was closed or Dispatch restarted, the first result from the new shell
+says it is a NEW shell whose cwd and environment started over. That applies to
+local shells too.
+
+**Stalls.** If your transport can tell "quiet" from "gone" (keepalives
+unanswered, but not yet given up), have the handle emit `"stalled"` (optionally
+with `{ detail }`) and later `"resumed"`, through the same `on` core already
+listens on. While stalled:
+- the running command's timeout is PAUSED, and resumes with whatever was left.
+  The pause is capped at 10 min of stall per command, in total. After that the
+  clock runs again even while stalled, so a backend that says `stalled` and
+  never follows with `resumed` or `exit` cannot hang a call. Still emit `exit`
+  (`transport-lost`) once you give up: that is what tells the agent the
+  outcome is unknown;
+- `TerminalInfo.location.state` is `stalled` (an amber chip and strip in the
+  panel), with `stalledSince` and `stalled` (the detail);
+- the transcript gets a `[dispatch]` line for each change.
+
+A command that waited one out says so in its result's `notices`. `exit` while
+stalled ends the stall. The events are not typed as `on` overloads on purpose:
+an added overload would break handle adapters that cast an `"exit" | "error"`
+function to `TerminalBackendHandle["on"]`, which is how backends are written.
+
 **Spawn info.** Besides the chat, the terminal's `name` and the LOCAL `cwd` it
 would have started in, `spawn` gets `repoPath` (the project's primary
 checkout), `worktreePath` (the chat's own worktree, absent for a chat in the

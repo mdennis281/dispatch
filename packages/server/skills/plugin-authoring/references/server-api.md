@@ -161,6 +161,11 @@ Gotchas for a terminal backend:
   there means the command never runs (fail closed), and the sync's time is not the
   command's. Its signal aborts on a session interrupt or a closed terminal, and core
   does not wait after that — serialize your own sync if runs could overlap.
+- Emit `exit` WITH a reason: `handle.emit("exit", null, { kind: "transport-lost", detail })`
+  for a dropped connection (the in-flight command becomes an "outcome unknown" error),
+  `kind: "killed"` for an idle stop. With no reason a lost connection reads as success.
+- If your transport can tell "quiet" from "gone", emit `"stalled"` (`{ detail }`) and
+  `"resumed"` on the handle: core pauses the command's timeout and shows the shell stalled.
 - Test with `createTestContext`: `t.terminals.spawn("box", { chatId })`, `t.terminals.chatIdle(...)`,
   `t.terminals.chatDeleted(...)`, `t.terminals.beforeRun("box", { chatId, command })`
   (→ `{ ran, refusal?, notices }`), `t.terminals.afterRun(...)`, and `t.terminalPorts`.

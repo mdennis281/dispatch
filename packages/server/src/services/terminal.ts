@@ -82,11 +82,13 @@ import {
   type RegistryQuery,
   type TerminalAfterRunInfo,
   type TerminalBackend,
+  type TerminalExitReason,
   type TerminalLocation,
   type TerminalInfo,
   type TerminalLineRecord,
   type TerminalOrigin,
   type TerminalRecord,
+  type TerminalStallInfo,
 } from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
 import type { Store } from "../store/index.js";
@@ -116,8 +118,16 @@ export interface ShellProcess {
   stdout: ShellReadable;
   stderr: ShellReadable;
   kill(signal?: string): void;
-  on(event: "exit", listener: (code: number | null) => void): void;
+  /**
+   * `reason` is a {@link TerminalExitReason} from a backend handle — or, from a
+   * real ChildProcess, the signal NAME string Node passes there. Only an
+   * object with a `kind` counts (see `exitReasonOf`).
+   */
+  on(event: "exit", listener: (code: number | null, reason?: unknown) => void): void;
   on(event: "error", listener: (err: Error) => void): void;
+  /** Backend handles only (see `TerminalBackendHandle`); a local shell never emits them. */
+  on(event: "stalled", listener: (info?: TerminalStallInfo) => void): void;
+  on(event: "resumed", listener: () => void): void;
   /**
    * Present on a real child process; absent on the test fakes. It is the handle
    * everything downstream hangs off — `ProcessService` walks the process table
@@ -272,6 +282,13 @@ export interface TerminalServiceOptions {
   retentionMs?: number;
   /** Write-behind flush cadence for output lines (default 1s). */
   flushIntervalMs?: number;
+  /**
+   * The most one command's deadline may be paused by transport stalls, in
+   * total (default {@link DEFAULT_STALL_PAUSE_MAX_MS}). Past it the clock runs
+   * again even while stalled, so a backend that says `stalled` and then never
+   * `resumed` nor `exit` cannot hang a call forever.
+   */
+  stallPauseMaxMs?: number;
   /** Plugin terminal backends. Absent (or empty) ⇒ every shell is local. */
   backends?: TerminalBackendSource;
   deps?: TerminalServiceDeps;
@@ -336,9 +353,16 @@ export interface RunTerminalResult {
   /**
    * Said ONCE per shell, on the first result after it opened: where it runs
    * (a backend's note) or why it is not running where the chat asked (a
-   * fallback). The agent's only window onto a location it cannot otherwise see.
+   * fallback) — and, when it replaced a shell of the same name that ended,
+   * that its cwd and environment started over.
    */
   notice?: string;
+  /**
+   * The shell ended under this command, with the reason its backend gave. A
+   * `transport-lost` or `killed` reason also sets `error`: the command's
+   * outcome is unknown, or it did not finish.
+   */
+  shellExit?: TerminalExitReason;
   /**
    * Where this run happened. Set whenever a backend is in play for the chat
    * (one is registered, or the shell asked for one), so on an install with no
@@ -350,7 +374,10 @@ export interface RunTerminalResult {
    * written to the shell; `error` says why.
    */
   refused?: boolean;
-  /** Lines the serving backend's `beforeRun` / `afterRun` had for the agent, in that order. */
+  /**
+   * Lines about this run for the agent: the serving backend's `beforeRun` /
+   * `afterRun` notices in that order, and core's own (a stall it waited out).
+   */
   notices?: string[];
 }
 
@@ -360,6 +387,13 @@ export interface RunTerminalResult {
  *  real command output. The marker line the shell prints after each command is
  *  `<prefix><nonce>|<exit>|<ok>|<cwd>` (cwd last; a path may itself contain `|`). */
 const SENTINEL_PREFIX = "CMTERMSENTINEL_";
+
+/**
+ * How long, in total, transport stalls may pause one command's deadline. A
+ * stall is "not given up yet", and a backend whose half-open connection never
+ * resolves would otherwise leave the call waiting forever (review on #476).
+ */
+export const DEFAULT_STALL_PAUSE_MAX_MS = 600_000;
 
 /** Default per-command timeout (10 min) — a runaway build shouldn't wedge a run. */
 const DEFAULT_TIMEOUT_MS = 600_000;
@@ -452,7 +486,20 @@ interface Terminal {
     marker: string;
     resolve: (r: { exitCode: number | null; cwd: string; exited?: boolean }) => void;
     output: string[];
+    /** Stop / restart the command's deadline while the transport is stalled. */
+    pause?: () => void;
+    resume?: () => void;
   };
+  /** Set while the backend's transport is stalled (its handle's `stalled` event). */
+  stall?: { since: number; detail?: string };
+  /** Why the shell ended, when its backend said. */
+  exitReason?: TerminalExitReason;
+  /**
+   * Set on a shell opened in place of one of the same name that had ENDED —
+   * the agent's cwd and env did not survive, and nothing else tells it.
+   * Delivered (with `notice`) on the next result, then cleared.
+   */
+  respawnNotice?: string;
   /** Stops waiting on an in-flight `beforeRun` when the shell goes away under it. */
   hookStop?: () => void;
   /** Set while a `background` command holds this shell (see `run`). */
@@ -515,6 +562,7 @@ export class TerminalService {
   private readonly backends?: TerminalBackendSource;
   private readonly retentionMs: number;
   private readonly flushIntervalMs: number;
+  private readonly stallPauseMaxMs: number;
 
   private readonly terminals = new Map<string, Terminal>();
   /**
@@ -549,6 +597,7 @@ export class TerminalService {
     this.backends = opts.backends;
     this.retentionMs = Math.max(60_000, opts.retentionMs ?? DEFAULT_RETENTION_MS);
     this.flushIntervalMs = Math.max(100, opts.flushIntervalMs ?? 1_000);
+    this.stallPauseMaxMs = Math.max(0, opts.stallPauseMaxMs ?? DEFAULT_STALL_PAUSE_MAX_MS);
   }
 
   private static key(chatId: string, name: string): string {
@@ -581,7 +630,23 @@ export class TerminalService {
           error: this.capMessage(),
         };
       }
+      // Reopening a name is NOT carrying on in the same shell: whatever the
+      // agent `cd`'d into and exported went with the old one. Until this was
+      // said, a shell that died between calls (a dropped connection, above all)
+      // came back silently and the agent's next relative path ran in the wrong
+      // directory.
+      const replaced = term
+        ? this.endedHow(term)
+        : this.archived.has(key)
+          ? "was closed, or Dispatch restarted"
+          : undefined;
       term = this.open(key, name, args.cwd ?? process.cwd(), args);
+      if (replaced) {
+        term.respawnNotice =
+          `Terminal '${name}' is a NEW shell: the one before it under this name ${replaced}. ` +
+          `Nothing carried over — it starts in its default directory with a fresh environment, ` +
+          `so \`cd\` and set any variables again.`;
+      }
     } else {
       const moved = this.locationConflict(term, name, args.location);
       if (moved) return moved;
@@ -783,13 +848,25 @@ export class TerminalService {
     term.proc = proc;
     proc.stdout.on("data", (c) => this.onData(term, "stdout", c.toString()));
     proc.stderr.on("data", (c) => this.onData(term, "stderr", c.toString()));
-    proc.on("error", () => this.onExit(term));
-    proc.on("exit", () => this.onExit(term));
+    // On a BACKEND's handle an error is the transport failing, and it usually
+    // arrives BEFORE the `exit` that would have said so — first one wins in
+    // `onExit`, so without a reason here a dropped connection still read as a
+    // quiet `exit=n/a` (review on #476). A local shell keeps the old meaning.
+    const lost = (err: unknown): TerminalExitReason | undefined =>
+      term.backend
+        ? { kind: "transport-lost", detail: err instanceof Error && err.message ? err.message : "the connection failed" }
+        : undefined;
+    proc.on("error", (err) => this.onExit(term, lost(err)));
+    proc.on("exit", (_code, reason) => this.onExit(term, exitReasonOf(reason)));
+    // Only a backend handle emits these; a local child never does, so a local
+    // shell's behaviour is untouched by listening.
+    proc.on("stalled", (info) => this.onStall(term, info));
+    proc.on("resumed", () => this.onResume(term));
     // stdin is its own emitter: writing to a shell that has already died raises
     // EPIPE/ERR_STREAM_DESTROYED ASYNCHRONOUSLY, which the try/catch around the
     // `.write()` calls in `run` cannot see. Unlistened, that 'error' event is an
     // uncaught exception — a dead terminal would have taken the server with it.
-    proc.stdin.on?.("error", () => this.onExit(term));
+    proc.stdin.on?.("error", (err) => this.onExit(term, lost(err)));
   }
 
   /**
@@ -927,19 +1004,22 @@ export class TerminalService {
         term.location?.backend === backendId && term.location.state === "connecting";
       if (term.backendId !== backendId && !connectingThere) continue;
       n += 1;
-      this.record(
-        term,
-        "stderr",
-        `[dispatch] The terminal backend "${backendId}" went away (${reason}); this shell has ended.`,
-      );
+      // A placeholder's kill only flags it — `connect` ends it. A live handle
+      // whose plugin is gone may never emit `exit`, so end it here, and FIRST:
+      // a handle that does emit on `kill()` would otherwise end it with no
+      // reason. Whatever was running went with the transport, so its outcome
+      // is unknown.
+      const proc = term.proc;
+      if (proc instanceof ConnectingShell) {
+        this.record(term, "stderr", `[dispatch] The terminal backend "${backendId}" went away (${reason}); this shell has ended.`);
+      } else {
+        this.onExit(term, { kind: "transport-lost", detail: `the terminal backend "${backendId}" went away: ${reason}` });
+      }
       try {
-        term.proc.kill();
+        proc.kill();
       } catch {
         /* the backend may already have torn its transport down */
       }
-      // A placeholder's kill only flags it — `connect` ends it. A live handle
-      // whose plugin is gone may never emit `exit`, so end it here.
-      if (!(term.proc instanceof ConnectingShell)) this.onExit(term);
     }
     return n;
   }
@@ -949,8 +1029,9 @@ export class TerminalService {
     // Taken here, at the run that will actually report back — not when the
     // shell opened, which for a UI-opened terminal may be long before any
     // agent ran anything in it.
-    const notice = term.notice;
+    const notice = [term.notice, term.respawnNotice].filter(Boolean).join("\n\n") || undefined;
     term.notice = undefined;
+    term.respawnNotice = undefined;
     const run = this.execInner(term, args);
     const ranOn = this.ranOn(term);
     return notice || ranOn
@@ -1028,9 +1109,14 @@ export class TerminalService {
       cwd: term.cwd,
       background: Boolean(args.background),
     };
+    // Before-hook lines, then whatever core said about the run itself (a
+    // stall), then after-hook lines — the order things happened in.
     const notices: string[] = [];
-    const withNotices = (r: RunTerminalResult): RunTerminalResult =>
-      notices.length ? { ...r, notices: [...notices] } : r;
+    const afterLines: string[] = [];
+    const withNotices = (r: RunTerminalResult): RunTerminalResult => {
+      const all = [...notices, ...(r.notices ?? []), ...afterLines];
+      return all.length ? { ...r, notices: all } : r;
+    };
     this.beginRun(term, command);
 
     if (backend.beforeRun) {
@@ -1074,6 +1160,9 @@ export class TerminalService {
               exitCode: end.result.exitCode,
               durationMs: end.durationMs,
               outcome: end.outcome as TerminalAfterRunInfo["outcome"],
+              ...(end.outcome === "shell-exited" && end.result.shellExit
+                ? { exitReason: end.result.shellExit }
+                : {}),
               signal,
             }),
           ).then((o) => afterNotices(o, label, hookMs))
@@ -1094,7 +1183,7 @@ export class TerminalService {
     }
     const lines = await after(end, args.signal);
     this.recordNotices(term, label, lines);
-    notices.push(...lines);
+    afterLines.push(...lines);
     if (term.status === "live") this.endRun(term, end.result.exitCode);
     return withNotices(end.result);
   }
@@ -1180,10 +1269,23 @@ export class TerminalService {
       let settled = false;
       let returnedEarly = false;
       const cleanups: (() => void)[] = [];
-      const finish = (r: RunTerminalResult, outcome: RunEnd["outcome"]): void => {
+      // Time this command spent with its transport stalled — paused out of
+      // its deadline, and said in the result so a slow run is explained.
+      let stalledMs = 0;
+      let stalledFrom: number | undefined;
+      // Fires when the pause budget runs out mid-stall: the clock restarts.
+      let stallCap: ReturnType<typeof setTimeout> | undefined;
+      let capped = false;
+      const finish = (res: RunTerminalResult, outcome: RunEnd["outcome"]): void => {
         if (settled) return;
         settled = true;
         for (const c of cleanups) c();
+        if (stalledFrom !== undefined) stalledMs += Date.now() - stalledFrom;
+        stalledFrom = undefined;
+        const r =
+          stalledMs > 0 && outcome !== "not-written"
+            ? { ...res, notices: [...(res.notices ?? []), stallNotice(term, stalledMs, capped)] }
+            : res;
         term.pending = undefined;
         term.background = undefined;
         // Still busy while `afterRun` has yet to report on a command that is
@@ -1210,17 +1312,65 @@ export class TerminalService {
         output,
         resolve: ({ exitCode, cwd, exited }) => {
           term.cwd = cwd || term.cwd;
-          finish({ output: output.join("\n"), exitCode, cwd: term.cwd }, exited ? "shell-exited" : "finished");
+          // A shell that ended under the command, with the reason its backend
+          // gave. Without one this is what it always was — no exit code, no
+          // error — because a local shell that ran `exit` is not a failure.
+          const reason = exited ? term.exitReason : undefined;
+          finish(
+            {
+              output: output.join("\n"),
+              exitCode,
+              cwd: term.cwd,
+              ...(reason ? { shellExit: reason } : {}),
+              ...(reason && reason.kind !== "exited" ? { error: lostRunText(term, reason) } : {}),
+            },
+            exited ? "shell-exited" : "finished",
+          );
         },
+        pause: () => {
+          if (stalledFrom !== undefined || settled || capped) return;
+          stalledFrom = Date.now();
+          disarm();
+          stallCap = setTimeout(spendBudget, Math.max(0, this.stallPauseMaxMs - stalledMs));
+          stallCap.unref?.();
+        },
+        resume: () => {
+          if (stalledFrom === undefined || settled) return;
+          if (stallCap) clearTimeout(stallCap);
+          stallCap = undefined;
+          stalledMs += Date.now() - stalledFrom;
+          stalledFrom = undefined;
+          arm();
+        },
+      };
+      // The pause budget is spent while still stalled: count the stall up to
+      // here and let the deadline run again. Any later stall no longer pauses.
+      const spendBudget = (): void => {
+        stallCap = undefined;
+        if (stalledFrom === undefined || settled) return;
+        stalledMs += Date.now() - stalledFrom;
+        stalledFrom = undefined;
+        capped = true;
+        arm();
       };
 
       // Timeout: report partial output but keep the shell alive. A background
       // command has no deadline — never finishing is the point — and both the
       // timeout and the abort path below would clear `pending`/`background`,
       // marking the shell free while a dev server is still holding it.
+      //
+      // The deadline PAUSES while the backend's transport is stalled: a remote
+      // blip is not the command being slow, and spending its deadline on one
+      // turned a Wi-Fi hiccup into a "timed out" build that was still fine.
       const timeoutMs = args.timeoutMs && args.timeoutMs > 0 ? args.timeoutMs : DEFAULT_TIMEOUT_MS;
-      if (!args.background) {
-        const timer = setTimeout(() => {
+      let remaining = timeoutMs;
+      let armedAt = 0;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const arm = (): void => {
+        if (args.background || timer || settled) return;
+        armedAt = Date.now();
+        timer = setTimeout(() => {
+          timer = undefined;
           finish(
             {
               output: output.join("\n"),
@@ -1231,9 +1381,21 @@ export class TerminalService {
             },
             "timed-out",
           );
-        }, timeoutMs);
-        cleanups.push(() => clearTimeout(timer));
-      }
+        }, remaining);
+      };
+      const disarm = (): void => {
+        if (!timer) return;
+        clearTimeout(timer);
+        timer = undefined;
+        remaining = Math.max(0, remaining - (Date.now() - armedAt));
+      };
+      cleanups.push(disarm, () => {
+        if (stallCap) clearTimeout(stallCap);
+      });
+      // Already stalled when it starts: the clock waits for `resumed` (or the
+      // pause budget).
+      if (term.stall) term.pending?.pause?.();
+      else arm();
 
       // Session abort → stop waiting (shell survives for the next turn).
       const sig = args.background ? undefined : args.signal;
@@ -1509,11 +1671,79 @@ export class TerminalService {
     return { pruned, dropped };
   }
 
-  private onExit(term: Terminal): void {
-    if (term.status === "exited") return;
+  /**
+   * The backend's transport went quiet. The shell is NOT ended — the command
+   * may well still be running over there — so core waits, with the running
+   * command's deadline paused, and shows the shell as stalled.
+   */
+  private onStall(term: Terminal, info?: TerminalStallInfo): void {
+    if (term.status !== "live") return;
+    const raw = (info as { detail?: unknown } | undefined)?.detail;
+    const detail = typeof raw === "string" && raw.trim() ? raw.trim() : term.stall?.detail;
+    const first = !term.stall;
+    term.stall = { since: term.stall?.since ?? this.now(), ...(detail ? { detail } : {}) };
+    if (term.location && (term.location.state === "ready" || term.location.state === "stalled")) {
+      term.location = {
+        ...unstalled(term.location),
+        state: "stalled",
+        stalledSince: term.stall.since,
+        ...(detail ? { stalled: detail } : {}),
+      };
+    }
+    if (first) {
+      this.record(
+        term,
+        "stderr",
+        `[dispatch] ${labelOf(term)} stopped answering${detail ? ` (${detail})` : ""}; waiting for it. ` +
+          `A running command's timeout is paused meanwhile.`,
+      );
+      term.pending?.pause?.();
+    }
+    this.publishUpdate(term);
+  }
+
+  /** The transport answers again after a stall. */
+  private onResume(term: Terminal): void {
+    const stall = term.stall;
+    if (!stall || term.status !== "live") return;
+    term.stall = undefined;
+    if (term.location?.state === "stalled") term.location = unstalled(term.location);
+    this.record(term, "stderr", `[dispatch] ${labelOf(term)} is answering again, after ${seconds(this.now() - stall.since)}.`);
+    term.pending?.resume?.();
+    this.publishUpdate(term);
+  }
+
+  /** How the shell a reopened name replaces ended, for the respawn notice. */
+  private endedHow(term: Terminal): string {
+    return term.exitReason ? endedPhrase(term, term.exitReason) : "exited";
+  }
+
+  private onExit(term: Terminal, reason?: TerminalExitReason): void {
+    if (term.status === "exited") {
+      // A reason that arrives after something else already ended the shell
+      // (a handle that errors, THEN exits with why) can no longer change a
+      // result that has resolved, but the respawn notice and the panel should
+      // still tell the truth.
+      if (reason && !term.exitReason) {
+        term.exitReason = reason;
+        if (this.terminals.get(term.id) === term) this.publishUpdate(term);
+      }
+      return;
+    }
     term.status = "exited";
     term.busy = false;
     term.updatedAt = this.now();
+    if (reason) term.exitReason = reason;
+    // An exited shell is not "stalled" any more, whatever it was a moment ago.
+    if (term.stall) {
+      term.stall = undefined;
+      if (term.location?.state === "stalled") term.location = unstalled(term.location);
+    }
+    // Said in the transcript too: the human watching the panel otherwise sees
+    // a shell that simply stopped.
+    if (reason && reason.kind !== "exited") {
+      this.record(term, "stderr", `[dispatch] This shell ${endedPhrase(term, reason)}. The next command starts a new one.`);
+    }
     // Resolve any in-flight run so a caller never hangs on a dead shell — or on
     // a `beforeRun` preparing a command for a shell that is no longer there.
     if (term.pending) {
@@ -1869,6 +2099,7 @@ export class TerminalService {
       ...(t.background ? { background: t.background } : {}),
       ...(typeof t.proc.pid === "number" ? { pid: t.proc.pid } : {}),
       ...(t.location ? { location: t.location } : {}),
+      ...(t.exitReason ? { exitReason: t.exitReason } : {}),
     };
   }
 
@@ -1919,6 +2150,74 @@ function capitalize(s: string): string {
 }
 
 /**
+ * The handle's `exit` reason, if it gave one. Only an object with a known
+ * `kind` counts: a real ChildProcess passes the SIGNAL NAME there ("SIGTERM"),
+ * and reading that as a reason would turn every local shell's death into a
+ * failed command.
+ */
+function exitReasonOf(raw: unknown): TerminalExitReason | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const { kind, detail } = raw as { kind?: unknown; detail?: unknown };
+  if (kind !== "exited" && kind !== "transport-lost" && kind !== "killed") return undefined;
+  return typeof detail === "string" && detail.trim() ? { kind, detail: detail.trim() } : { kind };
+}
+
+/** What core's own lines call the place a shell runs. */
+function labelOf(term: Terminal): string {
+  return term.location?.label ?? "this machine";
+}
+
+/** How a shell ended, to sit after "This shell …" / "the one before it …". */
+function endedPhrase(term: Terminal, reason: TerminalExitReason): string {
+  const detail = reason.detail ? ` (${reason.detail})` : "";
+  if (reason.kind === "transport-lost") return `lost its connection to ${labelOf(term)}${detail}`;
+  if (reason.kind === "killed") return `was stopped on ${labelOf(term)}${detail}`;
+  return `exited${detail}`;
+}
+
+/**
+ * The error for a command whose shell ended under it with a reason that
+ * matters. "Outcome unknown" is the whole point for a lost transport: the
+ * command may have finished, half-finished or still be running over there,
+ * and an agent told nothing re-runs a migration twice.
+ */
+function lostRunText(term: Terminal, reason: TerminalExitReason): string {
+  if (reason.kind === "transport-lost") {
+    return (
+      `This shell ${endedPhrase(term, reason)} while the command was running. Whether it finished — ` +
+      `and what it changed there — is unknown: check before repeating anything that is not safe to ` +
+      `run twice. The next command starts a new shell.`
+    );
+  }
+  return (
+    `This shell ${endedPhrase(term, reason)} while the command was running, so the command did not ` +
+    `finish. The next command starts a new shell.`
+  );
+}
+
+/** Core's line for a run that waited out a stalled transport. */
+function stallNotice(term: Terminal, ms: number, capped: boolean): string {
+  return (
+    `The connection to ${labelOf(term)} stalled for ${seconds(ms)} during this command; its timeout was paused meanwhile` +
+    (capped ? ` — up to the limit, after which the clock ran again.` : `.`)
+  );
+}
+
+function seconds(ms: number): string {
+  return `${Math.max(1, Math.round(ms / 1000))}s`;
+}
+
+/** A location with its stall cleared — back to `ready`. */
+function unstalled(loc: TerminalLocation): TerminalLocation {
+  return {
+    backend: loc.backend,
+    label: loc.label,
+    state: loc.state === "stalled" ? "ready" : loc.state,
+    ...(loc.fallback ? { fallback: loc.fallback } : {}),
+  };
+}
+
+/**
  * A backend handle re-shaped so it CANNOT carry a pid. Core reads `pid` as a
  * local process it may tree-kill and walk the process table under; a remote
  * shell's number would name some unrelated process on this machine.
@@ -1929,7 +2228,9 @@ function withoutPid(h: ShellProcess): ShellProcess {
     stdout: h.stdout,
     stderr: h.stderr,
     kill: (signal?: string) => h.kill(signal),
-    on: ((event: "exit" | "error", listener: (arg: never) => void) => {
+    // Every event passes through — `stalled` / `resumed` included, which a
+    // backend's handle emits through this same `on`.
+    on: ((event: "exit" | "error" | "stalled" | "resumed", listener: (...args: never[]) => void) => {
       h.on(event as "exit", listener as (code: number | null) => void);
     }) as ShellProcess["on"],
   };

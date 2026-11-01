@@ -82,7 +82,7 @@ interface Harness {
   branchAsked: string[];
 }
 
-function setup(): Harness {
+function setup(opts: { stallPauseMaxMs?: number } = {}): Harness {
   const chats = new Map<string, { terminalBackend?: string; projectId?: string; worktreePath?: string }>();
   const projectDefaults = new Map<string, string>();
   const allowed: { project?: string[]; app?: string[] } = {};
@@ -103,6 +103,7 @@ function setup(): Harness {
   const svc = new TerminalService({
     bus,
     backends: registry,
+    ...opts,
     deps: {
       spawn: (cwd) => {
         const s = new FakeShell(cwd);
@@ -1007,5 +1008,306 @@ describe("per-run hooks (beforeRun / afterRun)", () => {
     h.chats.set("c3", {});
     await h.svc.run({ chatId: "c3", name: "main", command: "say c", cwd: "/w" });
     expect(h.branchAsked).toEqual(["/wt/feat-x", "/repo"]);
+  });
+});
+
+describe("why a shell ended (exit reasons) and respawn notices", () => {
+  const lostReason = { kind: "transport-lost" as const, detail: "ssh: connection reset" };
+  const transcript = async (h: Harness, chatId = "c1") =>
+    (await h.svc.scrollback(h.svc.listChat(chatId)[0]!.id)).map((l) => l.chunk);
+
+  it("a lost transport mid-command is an ERROR whose outcome is unknown, said in the result and the panel", async () => {
+    const h = setup();
+    const backend = fakeBackend();
+    h.registry.register(backend, "plug");
+    h.chats.set("c1", { terminalBackend: "box" });
+    await h.svc.run({ chatId: "c1", name: "build", command: "say up", cwd: "/w" });
+
+    const running = h.svc.run({ chatId: "c1", name: "build", command: "hang" });
+    await vi.waitFor(() => expect(backend.spawned[0]!.writes.some((w) => w.startsWith("hang"))).toBe(true));
+    backend.spawned[0]!.stdout.emit("data", Buffer.from("migrating 3 of 7\n"));
+    backend.spawned[0]!.emit("exit", null, lostReason);
+    const res = await running;
+
+    expect(res.exitCode).toBeNull();
+    expect(res.output).toBe("migrating 3 of 7");
+    expect(res.shellExit).toEqual(lostReason);
+    expect(res.error).toMatch(/lost its connection to Test box \(ssh: connection reset\) while the command was running/);
+    expect(res.error).toMatch(/is unknown/);
+    const info = h.svc.listChat("c1")[0]!;
+    expect(info.status).toBe("exited");
+    expect(info.exitReason).toEqual(lostReason);
+    expect(await transcript(h)).toContain(
+      "[dispatch] This shell lost its connection to Test box (ssh: connection reset). The next command starts a new one.",
+    );
+  });
+
+  it("the next command on that name gets a NEW shell, and is told its cwd/env started over — once", async () => {
+    const h = setup();
+    const backend = fakeBackend();
+    h.registry.register(backend, "plug");
+    h.chats.set("c1", { terminalBackend: "box" });
+    await h.svc.run({ chatId: "c1", name: "build", command: "say up", cwd: "/w" });
+    backend.spawned[0]!.emit("exit", null, lostReason);
+
+    const next = await h.svc.run({ chatId: "c1", name: "build", command: "say again", cwd: "/w" });
+    expect(next.output).toBe("again");
+    expect(backend.spawned).toHaveLength(2);
+    expect(next.notice).toContain(
+      "Terminal 'build' is a NEW shell: the one before it under this name lost its connection to Test box (ssh: connection reset).",
+    );
+    expect(next.notice).toMatch(/starts in its default directory with a fresh environment/);
+    // The backend's own note is still there too.
+    expect(next.notice).toContain("Your code reaches the box by magic.");
+    expect((await h.svc.run({ chatId: "c1", name: "build", command: "say third" })).notice).toBeUndefined();
+  });
+
+  it("a killed shell's in-flight command did not finish, and says so", async () => {
+    const h = setup();
+    const backend = fakeBackend();
+    h.registry.register(backend, "plug");
+    h.chats.set("c1", { terminalBackend: "box" });
+    await h.svc.run({ chatId: "c1", name: "main", command: "say up", cwd: "/w" });
+    const running = h.svc.run({ chatId: "c1", name: "main", command: "hang" });
+    await vi.waitFor(() => expect(backend.spawned[0]!.writes.some((w) => w.startsWith("hang"))).toBe(true));
+    backend.spawned[0]!.emit("exit", null, { kind: "killed", detail: "idle stop" });
+    const res = await running;
+    expect(res.error).toMatch(/was stopped on Test box \(idle stop\) while the command was running, so the command did not finish/);
+    expect(res.shellExit).toEqual({ kind: "killed", detail: "idle stop" });
+  });
+
+  it("an `exited` reason — or a ChildProcess's signal string — reads exactly like no reason: not an error", async () => {
+    const h = setup();
+    const backend = fakeBackend();
+    h.registry.register(backend, "plug");
+    h.chats.set("c1", { terminalBackend: "box" });
+    await h.svc.run({ chatId: "c1", name: "main", command: "say up", cwd: "/w" });
+    const running = h.svc.run({ chatId: "c1", name: "main", command: "hang" });
+    await vi.waitFor(() => expect(backend.spawned[0]!.writes.some((w) => w.startsWith("hang"))).toBe(true));
+    backend.spawned[0]!.emit("exit", 0, { kind: "exited" });
+    const res = await running;
+    expect(res.error).toBeUndefined();
+    expect(res.shellExit).toEqual({ kind: "exited" });
+
+    // A local shell: Node hands the exit listener the SIGNAL NAME second.
+    h.chats.set("c2", {});
+    await h.svc.run({ chatId: "c2", name: "main", command: "say up", cwd: "/w" });
+    const local = h.svc.run({ chatId: "c2", name: "main", command: "hang" });
+    await vi.waitFor(() => expect(h.local[0]!.writes.some((w) => w.startsWith("hang"))).toBe(true));
+    h.local[0]!.emit("exit", null, "SIGTERM");
+    const l = await local;
+    expect(l.error).toBeUndefined();
+    expect(l).not.toHaveProperty("shellExit");
+    expect(h.svc.listChat("c2")[0]).not.toHaveProperty("exitReason");
+  });
+
+  it("a local shell that died between calls is reopened with the same notice", async () => {
+    const h = setup();
+    h.chats.set("c1", {});
+    await h.svc.run({ chatId: "c1", name: "main", command: "say up", cwd: "/w" });
+    h.local[0]!.emit("exit", 1);
+    const next = await h.svc.run({ chatId: "c1", name: "main", command: "say back", cwd: "/w" });
+    expect(next.output).toBe("back");
+    expect(next.notice).toBe(
+      "Terminal 'main' is a NEW shell: the one before it under this name exited. Nothing carried over — it " +
+        "starts in its default directory with a fresh environment, so `cd` and set any variables again.",
+    );
+  });
+
+  it("a brand-new name gets no respawn notice", async () => {
+    const h = setup();
+    h.chats.set("c1", {});
+    await h.svc.run({ chatId: "c1", name: "main", command: "say up", cwd: "/w" });
+    h.local[0]!.emit("exit", 1);
+    const fresh = await h.svc.run({ chatId: "c1", name: "other", command: "say hi", cwd: "/w" });
+    expect(fresh.notice).toBeUndefined();
+  });
+
+  it("afterRun hears the reason a shell ended under the command", async () => {
+    const h = setup();
+    const seen: TerminalAfterRunInfo[] = [];
+    const backend = fakeBackend({ afterRun: (info) => void seen.push(info) });
+    h.registry.register(backend, "plug");
+    h.chats.set("c1", { terminalBackend: "box" });
+    await h.svc.run({ chatId: "c1", name: "main", command: "say up", cwd: "/w" });
+    const running = h.svc.run({ chatId: "c1", name: "main", command: "hang" });
+    await vi.waitFor(() => expect(backend.spawned[0]!.writes.some((w) => w.startsWith("hang"))).toBe(true));
+    backend.spawned[0]!.emit("exit", null, lostReason);
+    await running;
+    expect(seen.at(-1)).toMatchObject({ outcome: "shell-exited", exitReason: lostReason });
+  });
+
+  it("a backend going away mid-command loses the transport: an error, not a quiet exit=n/a", async () => {
+    const h = setup();
+    const backend = fakeBackend();
+    h.registry.register(backend, "plug");
+    h.registry.register(fakeBackend({ id: "keep", label: "Keep" }), "plug");
+    h.chats.set("c1", { terminalBackend: "box" });
+    await h.svc.run({ chatId: "c1", name: "main", command: "say up", cwd: "/w" });
+    const running = h.svc.run({ chatId: "c1", name: "main", command: "hang" });
+    await vi.waitFor(() => expect(backend.spawned[0]!.writes.some((w) => w.startsWith("hang"))).toBe(true));
+    await h.registry.unregister("box");
+    const res = await running;
+    expect(res.shellExit?.kind).toBe("transport-lost");
+    expect(res.error).toMatch(/backend "box" went away/);
+  });
+});
+
+describe("stalled / resumed transports", () => {
+  it("a stall pauses the command's timeout: a run that outlives its deadline only by the stall still finishes", async () => {
+    const h = setup();
+    const backend = fakeBackend();
+    h.registry.register(backend, "plug");
+    h.chats.set("c1", { terminalBackend: "box" });
+    await h.svc.run({ chatId: "c1", name: "main", command: "say up", cwd: "/w" });
+    const shell = backend.spawned[0]!;
+
+    const running = h.svc.run({ chatId: "c1", name: "main", command: "hang", timeoutMs: 300 });
+    await vi.waitFor(() => expect(shell.writes.some((w) => w.startsWith("hang"))).toBe(true));
+    shell.emit("stalled", { detail: "no keepalive answer for 15 s" });
+    let info = h.svc.listChat("c1")[0]!;
+    expect(info.location).toMatchObject({ state: "stalled", stalled: "no keepalive answer for 15 s" });
+    expect(typeof info.location?.stalledSince).toBe("number");
+
+    // Well past the 300 ms deadline, but all of it stalled.
+    await new Promise((r) => setTimeout(r, 500));
+    shell.emit("resumed");
+    info = h.svc.listChat("c1")[0]!;
+    expect(info.location?.state).toBe("ready");
+    expect(info.location).not.toHaveProperty("stalled");
+
+    const marker = shell.writes.join("").match(/CMTERMSENTINEL_[A-Za-z0-9_-]+/g)!.at(-1)!;
+    shell.stdout.emit("data", Buffer.from(`done\n${marker}|0|True|/srv/repo\n`));
+    const res = await running;
+    expect(res.timedOut).toBeUndefined();
+    expect(res.exitCode).toBe(0);
+    expect(res.output).toBe("done");
+    expect(res.notices?.[0]).toMatch(/^The connection to Test box stalled for \d+s during this command; its timeout was paused meanwhile\.$/);
+    const lines = (await h.svc.scrollback(info.id)).map((l) => l.chunk);
+    expect(lines.some((l) => l.startsWith("[dispatch] Test box stopped answering (no keepalive answer for 15 s)"))).toBe(true);
+    expect(lines.some((l) => l.startsWith("[dispatch] Test box is answering again"))).toBe(true);
+  });
+
+  it("the deadline is paused, not cancelled: what is left of it still runs out after the resume", async () => {
+    const h = setup();
+    const backend = fakeBackend();
+    h.registry.register(backend, "plug");
+    h.chats.set("c1", { terminalBackend: "box" });
+    await h.svc.run({ chatId: "c1", name: "main", command: "say up", cwd: "/w" });
+    const shell = backend.spawned[0]!;
+    const started = Date.now();
+    const running = h.svc.run({ chatId: "c1", name: "main", command: "hang", timeoutMs: 200 });
+    await vi.waitFor(() => expect(shell.writes.some((w) => w.startsWith("hang"))).toBe(true));
+    shell.emit("stalled");
+    await new Promise((r) => setTimeout(r, 300));
+    shell.emit("resumed");
+    const res = await running;
+    expect(res.timedOut).toBe(true);
+    // 200 ms of deadline + ~300 ms stalled.
+    expect(Date.now() - started).toBeGreaterThanOrEqual(450);
+  });
+
+  it("a command started while stalled waits for the resume before its clock starts", async () => {
+    const h = setup();
+    const backend = fakeBackend();
+    h.registry.register(backend, "plug");
+    h.chats.set("c1", { terminalBackend: "box" });
+    await h.svc.run({ chatId: "c1", name: "main", command: "say up", cwd: "/w" });
+    const shell = backend.spawned[0]!;
+    shell.emit("stalled");
+    const running = h.svc.run({ chatId: "c1", name: "main", command: "hang", timeoutMs: 100 });
+    await new Promise((r) => setTimeout(r, 250));
+    const marker = shell.writes.join("").match(/CMTERMSENTINEL_[A-Za-z0-9_-]+/g)!.at(-1)!;
+    shell.emit("resumed");
+    shell.stdout.emit("data", Buffer.from(`${marker}|0|True|/srv/repo\n`));
+    const res = await running;
+    expect(res.timedOut).toBeUndefined();
+    expect(res.exitCode).toBe(0);
+  });
+
+  it("an exit while stalled clears the stalled state", async () => {
+    const h = setup();
+    const backend = fakeBackend();
+    h.registry.register(backend, "plug");
+    h.chats.set("c1", { terminalBackend: "box" });
+    await h.svc.run({ chatId: "c1", name: "main", command: "say up", cwd: "/w" });
+    backend.spawned[0]!.emit("stalled");
+    expect(h.svc.listChat("c1")[0]!.location?.state).toBe("stalled");
+    backend.spawned[0]!.emit("exit", null, { kind: "transport-lost" });
+    const info = h.svc.listChat("c1")[0]!;
+    expect(info.status).toBe("exited");
+    expect(info.location?.state).toBe("ready");
+  });
+});
+
+describe("review fixes on #476", () => {
+  it("a backend handle that ERRORS before its exit still reads as a lost transport", async () => {
+    const h = setup();
+    const backend = fakeBackend();
+    h.registry.register(backend, "plug");
+    h.chats.set("c1", { terminalBackend: "box" });
+    await h.svc.run({ chatId: "c1", name: "main", command: "say up", cwd: "/w" });
+    const running = h.svc.run({ chatId: "c1", name: "main", command: "hang" });
+    await vi.waitFor(() => expect(backend.spawned[0]!.writes.some((w) => w.startsWith("hang"))).toBe(true));
+    backend.spawned[0]!.emit("error", new Error("read ECONNRESET"));
+    backend.spawned[0]!.emit("exit", null, { kind: "transport-lost", detail: "ssh: closed" });
+    const res = await running;
+    expect(res.shellExit).toEqual({ kind: "transport-lost", detail: "read ECONNRESET" });
+    expect(res.error).toMatch(/lost its connection to Test box \(read ECONNRESET\).*is unknown/);
+  });
+
+  it("a stdin EPIPE on a backend shell is a lost transport too; on a local shell it is not", async () => {
+    const h = setup();
+    const backend = fakeBackend({
+      spawn: async () => {
+        const s = new FakeShell("/srv/repo");
+        Object.assign(s.stdin, { on: (_e: string, l: (err: Error) => void) => s.on("stdin-error", l) });
+        backend.spawned.push(s);
+        return s;
+      },
+    });
+    h.registry.register(backend, "plug");
+    h.chats.set("c1", { terminalBackend: "box" });
+    await h.svc.run({ chatId: "c1", name: "main", command: "say up", cwd: "/w" });
+    backend.spawned[0]!.emit("stdin-error", new Error("write EPIPE"));
+    expect(h.svc.listChat("c1")[0]!.exitReason).toEqual({ kind: "transport-lost", detail: "write EPIPE" });
+
+    h.chats.set("c2", {});
+    await h.svc.run({ chatId: "c2", name: "main", command: "say up", cwd: "/w" });
+    h.local[0]!.emit("error", new Error("spawn EPERM"));
+    expect(h.svc.listChat("c2")[0]!.status).toBe("exited");
+    expect(h.svc.listChat("c2")[0]).not.toHaveProperty("exitReason");
+  });
+
+  it("a reason that arrives after a reasonless exit still reaches the respawn notice", async () => {
+    const h = setup();
+    const backend = fakeBackend();
+    h.registry.register(backend, "plug");
+    h.chats.set("c1", { terminalBackend: "box" });
+    await h.svc.run({ chatId: "c1", name: "main", command: "say up", cwd: "/w" });
+    backend.spawned[0]!.emit("exit", null);
+    backend.spawned[0]!.emit("exit", null, { kind: "killed", detail: "idle stop" });
+    expect(h.svc.listChat("c1")[0]!.exitReason).toEqual({ kind: "killed", detail: "idle stop" });
+    const next = await h.svc.run({ chatId: "c1", name: "main", command: "say back", cwd: "/w" });
+    expect(next.notice).toContain("the one before it under this name was stopped on Test box (idle stop)");
+  });
+
+  it("a stall that never ends cannot hang the call: past the pause budget the deadline runs again", async () => {
+    const h = setup({ stallPauseMaxMs: 200 });
+    const backend = fakeBackend();
+    h.registry.register(backend, "plug");
+    h.chats.set("c1", { terminalBackend: "box" });
+    await h.svc.run({ chatId: "c1", name: "main", command: "say up", cwd: "/w" });
+    const shell = backend.spawned[0]!;
+    const started = Date.now();
+    const running = h.svc.run({ chatId: "c1", name: "main", command: "hang", timeoutMs: 100 });
+    await vi.waitFor(() => expect(shell.writes.some((w) => w.startsWith("hang"))).toBe(true));
+    // Stalled, and the backend never says another word.
+    shell.emit("stalled");
+    const res = await running;
+    expect(res.timedOut).toBe(true);
+    // ~200 ms of paused budget + the 100 ms deadline (less whatever ran before the stall).
+    expect(Date.now() - started).toBeGreaterThanOrEqual(250);
+    expect(res.notices?.at(-1)).toMatch(/up to the limit, after which the clock ran again\.$/);
   });
 });

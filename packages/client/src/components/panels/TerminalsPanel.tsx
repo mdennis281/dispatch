@@ -11,6 +11,7 @@ import {
   ExternalLink,
   Monitor,
   TriangleAlert,
+  Unplug,
 } from "lucide-react";
 import {
   LOCAL_TERMINAL_BACKEND,
@@ -154,6 +155,20 @@ function LocationChip({ terminal }: { terminal: TerminalInfo }) {
         title={`Running locally — ${loc.label}: ${loc.fallback ?? "unavailable"}`}
       >
         local · fallback
+      </Chip>
+    );
+  }
+  if (loc.state === "stalled") {
+    // Not "exited" and not "running": the far side stopped answering and core
+    // is waiting it out. Amber, because the output below may simply be late.
+    return (
+      <Chip
+        tone="warn"
+        icon={<Unplug />}
+        className="max-w-[45%] shrink-0 truncate"
+        title={`${loc.label} stopped answering${loc.stalled ? ` — ${loc.stalled}` : ""}`}
+      >
+        stalled · {loc.label}
       </Chip>
     );
   }
@@ -428,6 +443,17 @@ function TerminalCard({
           <span>
             Running on this machine: {terminal.location.fallback}. Close this shell and open a new
             one to retry {terminal.location.label}.
+          </span>
+        </div>
+      )}
+
+      {terminal.location?.state === "stalled" && (
+        <div className="flex items-start gap-1.5 border-t border-line-soft bg-warn-ghost px-3 py-1.5 text-2xs text-warn">
+          <Unplug className="mt-px size-3 shrink-0" />
+          <span>
+            {terminal.location.label} stopped answering
+            {terminal.location.stalled ? ` (${terminal.location.stalled})` : ""}. Waiting for it to come
+            back; the timeout of a running command is paused.
           </span>
         </div>
       )}

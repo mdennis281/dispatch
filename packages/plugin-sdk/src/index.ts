@@ -80,6 +80,8 @@ export type {
   TerminalBeforeRunResult,
   TerminalAfterRunInfo,
   TerminalAfterRunResult,
+  TerminalExitReason,
+  TerminalStallInfo,
   // client host
   ClientHost,
   ClientHostKit,
