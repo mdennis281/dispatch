@@ -1347,7 +1347,8 @@ export function createServices(
       inspector: pluginInspector,
       settings: { get: () => store.getSettings(), update: (fn) => store.updateSettings(fn) },
       // Per-instance: a cache, and the data dir is the one that is ours alone.
-      cacheFile: join(config.dataDir, "plugin-catalogs.json"),
+      // Memory-only when there is none (container.test boots without one).
+      ...(config.dataDir ? { cacheFile: join(config.dataDir, "plugin-catalogs.json") } : {}),
       // Same cadence as update checks — one knob for "how often may Dispatch
       // fetch from plugin hosts".
       intervalHours: pluginUpdateHours(),
