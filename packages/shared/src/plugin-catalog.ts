@@ -118,20 +118,43 @@ export type PluginCatalogAddRequest = z.infer<typeof PluginCatalogAddRequestSche
 
 export const PluginCatalogEnabledRequestSchema = z.object({ enabled: z.boolean() });
 
+/*
+ * The URL helpers below are plain string work, not regexes: the input is a
+ * pasted URL, and patterns like a trailing-run strip backtrack polynomially
+ * on a crafted one (CodeQL js/polynomial-redos).
+ */
+
+/** `s` without any leading or trailing `ch`. */
+function trimRuns(s: string, ch: string): string {
+  let a = 0;
+  let b = s.length;
+  while (a < b && s[a] === ch) a++;
+  while (b > a && s[b - 1] === ch) b--;
+  return s.slice(a, b);
+}
+
+function stripSuffix(s: string, suffix: string): string {
+  return s.endsWith(suffix) ? s.slice(0, -suffix.length) : s;
+}
+
+/** `owner/repo` of a URL, dropping scheme, host, a `/tree/…` or `/blob/…` tail and `.git`. */
+function repoPathOf(url: string): string {
+  let s = url.trim().toLowerCase();
+  const scheme = s.indexOf("://");
+  if (scheme >= 0) s = s.slice(scheme + 3);
+  else if (s.startsWith("git@")) s = s.slice(s.indexOf(":") + 1);
+  if (scheme >= 0) s = s.slice(s.indexOf("/") + 1);
+  for (const marker of ["/tree/", "/blob/"]) {
+    const at = s.indexOf(marker);
+    if (at >= 0) s = s.slice(0, at);
+  }
+  return stripSuffix(trimRuns(s, "/"), ".git");
+}
+
 /** A catalog id from a URL: `github.com/acme/dispatch-extras` → `acme-dispatch-extras`, unique against `taken`. */
 export function catalogIdFor(url: string, taken: Iterable<string>): string {
   const used = new Set(taken);
-  const path = url
-    .replace(/^[a-z]+:\/\//i, "")
-    .replace(/^[^/]*\//, "")
-    .replace(/\.git$/i, "")
-    .replace(/\/(?:tree|blob)\/.*$/, "");
-  const base =
-    path
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .slice(0, 32) || "catalog";
+  const base = trimRuns(repoPathOf(url).replace(/[^a-z0-9]+/g, "-"), "-").slice(0, 32) || "catalog";
   if (!used.has(base)) return base;
   for (let n = 2; ; n++) {
     const id = `${base.slice(0, 36)}-${n}`;
@@ -141,12 +164,12 @@ export function catalogIdFor(url: string, taken: Iterable<string>): string {
 
 /** Same repository and directory, however it was written — what makes a second add of one URL a duplicate. */
 export function sameCatalogUrl(a: string, b: string): boolean {
-  const norm = (u: string) =>
-    u
-      .trim()
-      .toLowerCase()
-      .replace(/^git@github\.com:/, "https://github.com/")
-      .replace(/\/+$/, "")
-      .replace(/\.git$/, "");
+  const norm = (u: string) => {
+    let s = u.trim().toLowerCase();
+    if (s.startsWith("git@github.com:")) s = `https://github.com/${s.slice("git@github.com:".length)}`;
+    let end = s.length;
+    while (end > 0 && s[end - 1] === "/") end--;
+    return stripSuffix(s.slice(0, end), ".git");
+  };
   return norm(a) === norm(b);
 }
