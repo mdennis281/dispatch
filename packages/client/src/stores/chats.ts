@@ -13,6 +13,7 @@ import {
   isPrSettledIdle,
   parseReviewingTarget,
   parseSpawnedParent,
+  prRecordKey,
 } from "@dispatch/shared";
 import { clearDraft } from "../lib/composerDrafts.js";
 import { usePrs } from "./prs.js";
@@ -456,10 +457,37 @@ export function spawnParentId(chat: Chat): string | null {
  * the change — there is no moment at which one chat asks for the other. A
  * spawned chat has that moment, so it carries the id.
  */
-function parentOf(chat: Chat, prsByKey: Record<string, PrRecord>): string | null {
+function parentOf(chat: Chat, prOwners: ReadonlyMap<string, string>): string | null {
   const key = reviewTargetKey(chat);
-  if (key) return prsByKey[key]?.chatId ?? null;
+  if (key) return prOwners.get(key) ?? null;
   return spawnParentId(chat);
+}
+
+/**
+ * Which chat opened each pull request, by `PrRecord` key.
+ *
+ * The registry's `PrRecord.chatId` is the authority, but it is NOT the only
+ * place the answer lives: the opening chat's own `Chat.prs` names the PR too.
+ * Both are read, registry first, because the PR store is the less reliable of
+ * the two to have on hand. It hydrates from `/api/prs` — every PR the install
+ * has ever tracked, which took 6.8s on a loaded machine — and that fetch is
+ * NON-gating, so when it failed the store sat empty. Open PRs crept back as the
+ * sweep re-announced them; merged ones are never polled again, so every one of
+ * their reviewers fell out to the top level and stayed there until a reload.
+ * The chat list is the gating fetch — if it failed there is no tree at all —
+ * so the edge read off it cannot go missing that way.
+ */
+function prOwnersOf(chats: Chat[], prsByKey: Record<string, PrRecord>): Map<string, string> {
+  const owners = new Map<string, string>();
+  for (const chat of chats) {
+    for (const ref of chat.prs ?? []) {
+      if (ref.repo) owners.set(prRecordKey(ref.repo, ref.number), chat.id);
+    }
+  }
+  for (const [key, rec] of Object.entries(prsByKey)) {
+    if (rec.chatId) owners.set(key, rec.chatId);
+  }
+  return owners;
 }
 
 /**
@@ -500,13 +528,13 @@ function ancestorPath(
   chat: Chat,
   byId: Map<string, Chat>,
   present: ReadonlySet<string>,
-  prsByKey: Record<string, PrRecord>,
+  prOwners: ReadonlyMap<string, string>,
 ): string[] | null {
   const seen = new Set<string>([chat.id]);
   const upward: string[] = [];
   let cursor = chat;
   for (;;) {
-    const parent = parentOf(cursor, prsByKey);
+    const parent = parentOf(cursor, prOwners);
     if (!parent || !present.has(parent)) break;
     if (seen.has(parent)) return null;
     seen.add(parent);
@@ -531,9 +559,9 @@ function renderParentOf(
   chat: Chat,
   byId: Map<string, Chat>,
   present: ReadonlySet<string>,
-  prsByKey: Record<string, PrRecord>,
+  prOwners: ReadonlyMap<string, string>,
 ): string | null {
-  const path = ancestorPath(chat, byId, present, prsByKey);
+  const path = ancestorPath(chat, byId, present, prOwners);
   if (!path || path.length === 0) return null;
   return path[Math.min(path.length, MAX_CHAT_NEST_DEPTH) - 1] ?? null;
 }
@@ -675,11 +703,12 @@ export function buildChatTree(
   const at = (c: Chat) => sectionSince[c.id] ?? c.updatedAt ?? c.createdAt;
   const present = new Set(chats.map((c) => c.id));
   const byId = new Map(chats.map((c) => [c.id, c]));
+  const prOwners = prOwnersOf(chats, prsByKey);
   const children = new Map<string, Chat[]>();
   const roots: Chat[] = [];
 
   for (const chat of chats) {
-    const parent = renderParentOf(chat, byId, present, prsByKey);
+    const parent = renderParentOf(chat, byId, present, prOwners);
     if (parent && parent !== chat.id) {
       const list = children.get(parent);
       if (list) list.push(chat);

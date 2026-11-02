@@ -529,6 +529,45 @@ export async function hydrateUntilLanded(
   );
 }
 
+/** The pending retry of a failed PR-roster fetch, if any. */
+let prsRetryTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Re-fetch the PR roster after the snapshot's copy of it failed.
+ *
+ * The roster's failure used to be `.catch(() => [])` fed straight into
+ * `usePrs.hydrate`, which REPLACES the store — so one failed read under load
+ * (`/api/prs` ships every PR the install has tracked, and took 6.8s on a
+ * pegged machine) emptied it. Open PRs crept back as the sweep re-announced
+ * them; merged and closed ones are never polled again, so they stayed gone, and
+ * every reviewer of one fell out of its parent to the top level of the chat
+ * tree until the next full reload. A failure now leaves the store as it was
+ * and retries here, on the same backoff and the same supersession rule as
+ * {@link hydrateUntilLanded}.
+ */
+async function hydratePrsUntilLanded(attempt: number, generation: number): Promise<void> {
+  if (prsRetryTimer) {
+    clearTimeout(prsRetryTimer);
+    prsRetryTimer = null;
+  }
+  if (attempt > 0) {
+    const prs = await api.prs.list().catch(() => null);
+    if (generation !== hydrateGeneration) return;
+    if (prs) {
+      usePrs.getState().hydrate(prs);
+      return;
+    }
+  }
+  if (useConnection.getState().state !== "open") return;
+  prsRetryTimer = setTimeout(
+    () => {
+      prsRetryTimer = null;
+      void hydratePrsUntilLanded(attempt + 1, generation);
+    },
+    Math.min(HYDRATE_RETRY_BASE_MS * 2 ** attempt, HYDRATE_RETRY_MAX_MS),
+  );
+}
+
 /**
  * REST-hydrate the authoritative snapshot into every store. Config lists always
  * load; the per-project/per-chat deep views (worktrees, PRs, Actions, transcript)
@@ -556,7 +595,9 @@ export async function hydrateFromServer(): Promise<boolean> {
       // The PR catalog. Non-gating like the terminals roster, and cheap: it's a
       // read of the server's own store, not a `gh` call — which is exactly why
       // the PRs tab can render on open with no fetch of its own.
-      api.prs.list().catch(() => []),
+      //
+      // `null`, not `[]`: see `hydratePrsUntilLanded`.
+      api.prs.list().catch(() => null),
     ]);
   } catch (err) {
     useAttention.getState().abortSync(attentionSync);
@@ -640,7 +681,13 @@ export async function hydrateFromServer(): Promise<boolean> {
     .backends()
     .then((r) => useTerminals.getState().setBackends(r.backends, r.ports))
     .catch(() => {});
-  usePrs.getState().hydrate(prs);
+  if (prs) {
+    if (prsRetryTimer) clearTimeout(prsRetryTimer);
+    prsRetryTimer = null;
+    usePrs.getState().hydrate(prs);
+  } else {
+    void hydratePrsUntilLanded(0, hydrateGeneration);
+  }
   // NOT `useMessages.hydrate({})`. Blanking every transcript here is what made a
   // reconnect feel like a page refresh: the open chat's rows went to `[]`, the
   // scroll container collapsed, and the refetch below landed the reader back at
