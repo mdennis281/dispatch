@@ -329,6 +329,21 @@ describe("routes — composer send-mode default", () => {
     const after = await app.inject({ method: "GET", url: "/api/settings" });
     expect(after.json()).toMatchObject({ theme: "light", defaultSendMode: "interrupt" });
   });
+
+  it("keeps the plugin catalog list through a settings PUT, and refuses to remove the built-in one", async () => {
+    // Switching off never fetches, so this stays off the network.
+    const off = await app.inject({ method: "PUT", url: "/api/plugin-catalogs/dispatch/enabled", payload: { enabled: false } });
+    expect(off.statusCode).toBe(200);
+    await app.inject({ method: "PUT", url: "/api/settings", payload: { theme: "light" } });
+
+    const list = await app.inject({ method: "GET", url: "/api/plugin-catalogs" });
+    expect(list.json().catalogs).toEqual([expect.objectContaining({ id: "dispatch", builtin: true, enabled: false })]);
+
+    const del = await app.inject({ method: "DELETE", url: "/api/plugin-catalogs/dispatch" });
+    expect(del.statusCode).toBe(409);
+    const unknown = await app.inject({ method: "POST", url: "/api/plugin-catalogs/nope/refresh" });
+    expect(unknown.statusCode).toBe(404);
+  });
 });
 
 describe("routes — REST CRUD", () => {

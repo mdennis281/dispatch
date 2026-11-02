@@ -1,7 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
-import { Copy, FolderOpen, Link2, RefreshCw, RotateCw, Save, Trash2, Unlink2 } from "lucide-react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { ArrowLeft, ChevronRight, Copy, FolderOpen, Link2, RefreshCw, RotateCw, Save, Trash2, Unlink2 } from "lucide-react";
 import type {
   PluginAutoUpdate,
+  PluginCatalog,
+  PluginCatalogMember,
+  PluginCatalogsStatus,
   PluginCleanupSummary,
   PluginInfo,
   PluginOAuthStatus,
@@ -13,6 +16,7 @@ import { Field, InlineError, TextArea, TextInput } from "../../sidebar/Modal.js"
 import { Button } from "../../ui/Button.js";
 import { IconButton } from "../../ui/IconButton.js";
 import { Chip } from "../../ui/Chip.js";
+import { RowButton } from "../../ui/RowButton.js";
 import { Select } from "../../ui/Select.js";
 import { Spinner } from "../../ui/Spinner.js";
 import { StatusDot, type DotTone } from "../../ui/StatusDot.js";
@@ -25,10 +29,19 @@ import { useNotices } from "../../../stores/notices.js";
 import { coerceNumber, displayValue, fieldsFromSchema, type SettingsField } from "./pluginSettingsForm.js";
 import { PluginInspectPanel } from "./PluginInspectPanel.js";
 import { PluginSourceLine, PluginUninstallDialog, PluginUpdatePanel, type CheckState } from "./PluginLifecycle.js";
+import { CatalogManager, CatalogPluginReport, catalogMemberFor, catalogStateLine } from "./PluginCatalogs.js";
 
 /**
- * Settings → Plugins: every directory under `<configDir>/plugins/`, with the
- * host's verdict on each.
+ * Settings → Plugins: a LIST — what is installed, then what the catalogs
+ * offer that is not — and a DETAIL page per plugin, reached by clicking a row.
+ *
+ * It used to be one stacked card per installed plugin with everything open at
+ * once. That stopped scaling the moment there was more than one source of
+ * plugins to show: a browse list of cards each carrying a settings form, an
+ * OAuth row and an update panel is a wall. So the list carries only what you
+ * decide on (status, version, "update available"), and the card — unchanged —
+ * is the detail page, with the catalog's full report under it when a catalog
+ * lists that plugin.
  *
  * Saves through its own routes on every change rather than through the
  * settings draft, like Permissions does, because the toggle and a plugin's
@@ -36,6 +49,8 @@ import { PluginSourceLine, PluginUninstallDialog, PluginUpdatePanel, type CheckS
  * can observe live (`ctx.settings.onChange`). A draft would hand the plugin a
  * stale copy the next time anyone saved a theme.
  */
+type View = { kind: "list" } | { kind: "installed"; id: string } | { kind: "available"; catalogId: string; subdir: string };
+
 export function PluginsSection() {
   const [plugins, setPlugins] = useState<PluginInfo[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -44,6 +59,13 @@ export function PluginsSection() {
   // and its answers seed this map on load (see `seed` below).
   const [checks, setChecks] = useState<Record<string, CheckState>>({});
   const [background, setBackground] = useState<PluginUpdateStatus | null>(null);
+  const [catalogs, setCatalogs] = useState<PluginCatalogsStatus | null>(null);
+  const [refreshingCatalogs, setRefreshingCatalogs] = useState(false);
+  const [view, setView] = useState<View>({ kind: "list" });
+  // Bumped after an install so an open catalog report re-reads its
+  // `installed` block instead of still offering Install.
+  const [reloadKey, setReloadKey] = useState(0);
+  const top = useRef<HTMLDivElement>(null);
   const pushToast = useNotices((s) => s.push);
 
   const load = useCallback(() => {
@@ -57,6 +79,11 @@ export function PluginsSection() {
       .updates()
       .then(setBackground)
       .catch(() => setBackground(null));
+    // Owner-only too, and from the server's cache: no fetch happens here.
+    api.pluginCatalogs
+      .list()
+      .then(setCatalogs)
+      .catch(() => setCatalogs(null));
   }, []);
   useEffect(load, [load]);
   // A plugin writes its own settings too (`ctx.settings.set`), and so does the
@@ -86,8 +113,20 @@ export function PluginsSection() {
     });
   }, [background, plugins]);
 
+  // A detail page opens at its top, not at the scroll offset the list was at.
+  const open = (next: View) => {
+    setView(next);
+    requestAnimationFrame(() => top.current?.scrollIntoView({ block: "start" }));
+  };
+  const back = () => open({ kind: "list" });
+
   const replace = (next: PluginInfo) =>
     setPlugins((rows) => rows?.map((p) => (p.id === next.id ? next : p)) ?? rows);
+
+  const installed = () => {
+    load();
+    setReloadKey((k) => k + 1);
+  };
 
   const check = useCallback(async (id: string) => {
     setChecks((c) => ({ ...c, [id]: "checking" }));
@@ -114,9 +153,34 @@ export function PluginsSection() {
     await Promise.all([worker(), worker(), worker()]);
   };
 
+  const refreshCatalogs = async () => {
+    setRefreshingCatalogs(true);
+    try {
+      setCatalogs(await api.pluginCatalogs.refreshAll());
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRefreshingCatalogs(false);
+    }
+  };
+
+  const replaceCatalog = (next: PluginCatalog) =>
+    setCatalogs(
+      (s) =>
+        s && {
+          ...s,
+          catalogs: s.catalogs.some((c) => c.id === next.id)
+            ? s.catalogs.map((c) => (c.id === next.id ? next : c))
+            : [...s.catalogs, next],
+        },
+    );
+
   const removed = (p: PluginInfo, res: PluginUninstallResult) => {
     setPlugins((rows) => rows?.filter((r) => r.id !== p.id) ?? rows);
     setChecks(({ [p.id]: _gone, ...rest }) => rest);
+    back();
+    // The catalogs' rows carry `installed`; one just stopped being true.
+    api.pluginCatalogs.list().then(setCatalogs).catch(() => {});
     const what = res.removed === "link" ? "Unlinked" : "Uninstalled";
     const data = res.purged ? " and deleted its data" : "";
     pushToast({ level: "info", text: `${what} ${p.name}${data}.${res.note ? ` ${res.note}` : ""}` });
@@ -130,54 +194,321 @@ export function PluginsSection() {
     );
   }
 
-  return (
-    <div className="space-y-3">
-      <PluginInspectPanel onInstalled={load} />
-      <InlineError message={error} />
-      {plugins && plugins.length === 0 ? (
-        <div className="rounded-md border border-line-soft px-3 py-4 text-xs leading-relaxed text-muted">
-          <p className="font-medium text-secondary">No plugins installed.</p>
-          <p className="mt-1">
-            Drop one into <code className="text-fg">plugins/&lt;id&gt;/</code> under Dispatch&apos;s config
-            directory, run <code className="text-fg">dispatch plugin add &lt;path&gt;</code>, or inspect one from a URL
-            above, then restart.
-          </p>
-        </div>
-      ) : (
-        plugins?.map((p) => (
+  const catalogList = catalogs?.catalogs ?? [];
+
+  /* ---------------------------------------------------------- detail pages */
+
+  if (view.kind === "installed") {
+    const p = plugins?.find((x) => x.id === view.id);
+    if (p) {
+      const listed = catalogMemberFor(p, catalogList);
+      return (
+        <div ref={top} className="space-y-3">
+          <BackBar onBack={back} />
           <PluginCard
-            key={p.id}
             plugin={p}
             onChange={replace}
             check={checks[p.id]}
             onCheck={() => void check(p.id)}
             onRemoved={(res) => removed(p, res)}
           />
-        ))
-      )}
-      <div className="flex flex-wrap items-center justify-end gap-1">
-        {checkable.length > 0 && background && (
-          <span className="mr-auto text-2xs text-faint" data-testid="plugin-background-check">
-            {backgroundLine(background)}
-          </span>
-        )}
-        {checkable.length > 0 && (
-          <Button
-            variant="ghost"
-            size="sm"
-            leftIcon={checkingAll ? <Spinner size={12} /> : <RotateCw />}
-            disabled={checkingAll}
-            onClick={() => void checkAll()}
-            title="Check every plugin installed from a URL against its source"
-          >
-            {checkingAll ? "Checking…" : "Check all for updates"}
+          {listed && (
+            <section className="space-y-1.5" data-testid="plugin-catalog-report">
+              <GroupHeading title={`Listed in ${listed.catalog.label}`}>
+                <span className="text-2xs text-faint">{catalogStateLine(listed.catalog)}</span>
+              </GroupHeading>
+              <CatalogPluginReport
+                catalog={listed.catalog}
+                subdir={listed.member.subdir}
+                reloadKey={reloadKey}
+                onInstalled={installed}
+              />
+            </section>
+          )}
+        </div>
+      );
+    }
+  }
+
+  if (view.kind === "available") {
+    const catalog = catalogList.find((c) => c.id === view.catalogId);
+    const member = catalog?.plugins.find((m) => m.subdir === view.subdir);
+    if (catalog && member) {
+      const nowInstalled = member.id ? plugins?.find((x) => x.id === member.id) : undefined;
+      return (
+        <div ref={top} className="space-y-3">
+          <BackBar onBack={back}>
+            {nowInstalled && (
+              <Button
+                variant="ghost"
+                size="sm"
+                rightIcon={<ChevronRight />}
+                onClick={() => open({ kind: "installed", id: nowInstalled.id })}
+              >
+                Manage installed plugin
+              </Button>
+            )}
+          </BackBar>
+          <p className="text-2xs text-faint">
+            From {catalog.label} · {catalogStateLine(catalog)}
+          </p>
+          <CatalogPluginReport catalog={catalog} subdir={member.subdir} reloadKey={reloadKey} onInstalled={installed} />
+        </div>
+      );
+    }
+  }
+
+  /* ------------------------------------------------------------------ list */
+
+  const installedIds = new Set(plugins?.map((p) => p.id) ?? []);
+  const enabledCatalogs = catalogList.filter((c) => c.enabled);
+
+  return (
+    <div ref={top} className="space-y-5">
+      <InlineError message={error} />
+
+      <section className="space-y-1.5" data-testid="plugins-installed">
+        <GroupHeading title="Installed" count={plugins?.length}>
+          {checkable.length > 0 && (
+            <Button
+              variant="ghost"
+              size="sm"
+              leftIcon={checkingAll ? <Spinner size={12} /> : <RotateCw />}
+              disabled={checkingAll}
+              onClick={() => void checkAll()}
+              title="Check every plugin installed from a URL against its source"
+            >
+              {checkingAll ? "Checking…" : "Check all for updates"}
+            </Button>
+          )}
+          <Button variant="ghost" size="sm" leftIcon={<RefreshCw />} onClick={load} title="Re-read the installed list">
+            Reload
           </Button>
+        </GroupHeading>
+        {plugins && plugins.length === 0 ? (
+          <div className="rounded-md border border-line-soft px-3 py-4 text-xs leading-relaxed text-muted">
+            <p className="font-medium text-secondary">No plugins installed.</p>
+            <p className="mt-1">
+              Pick one from a catalog below, inspect one from a URL, or run{" "}
+              <code className="text-fg">dispatch plugin add &lt;path&gt;</code>, then restart.
+            </p>
+          </div>
+        ) : (
+          <div className="divide-y divide-line-soft overflow-hidden rounded-md border border-line-soft">
+            {plugins?.map((p) => (
+              <InstalledRow
+                key={p.id}
+                plugin={p}
+                check={checks[p.id]}
+                listed={catalogMemberFor(p, catalogList)?.member}
+                onOpen={() => open({ kind: "installed", id: p.id })}
+              />
+            ))}
+          </div>
         )}
-        <Button variant="ghost" size="sm" leftIcon={<RefreshCw />} onClick={load}>
-          Refresh
-        </Button>
-      </div>
+        {checkable.length > 0 && background && (
+          <p className="text-2xs text-faint" data-testid="plugin-background-check">
+            {backgroundLine(background)}
+          </p>
+        )}
+      </section>
+
+      {catalogs && (
+        <section className="space-y-3" data-testid="plugins-available">
+          <GroupHeading title="Available">
+            {enabledCatalogs.length > 0 && (
+              <Button
+                variant="ghost"
+                size="sm"
+                leftIcon={refreshingCatalogs ? <Spinner size={12} /> : <RotateCw />}
+                disabled={refreshingCatalogs}
+                onClick={() => void refreshCatalogs()}
+                title="Re-read every catalog that is switched on"
+              >
+                {refreshingCatalogs ? "Refreshing…" : "Refresh catalogs"}
+              </Button>
+            )}
+          </GroupHeading>
+          {enabledCatalogs.length === 0 && (
+            <p className="text-xs text-muted">Every catalog is switched off — switch one on under Catalogs below.</p>
+          )}
+          {enabledCatalogs.map((c) => (
+            <AvailableGroup
+              key={c.id}
+              catalog={c}
+              installedIds={installedIds}
+              onOpen={(m) => open({ kind: "available", catalogId: c.id, subdir: m.subdir })}
+            />
+          ))}
+        </section>
+      )}
+
+      {catalogs && (
+        <CatalogManager
+          catalogs={catalogList}
+          onChange={replaceCatalog}
+          onRemoved={(id) => setCatalogs((s) => s && { ...s, catalogs: s.catalogs.filter((c) => c.id !== id) })}
+        />
+      )}
+      <PluginInspectPanel onInstalled={installed} />
     </div>
+  );
+}
+
+/* ------------------------------------------------------------ list parts */
+
+function GroupHeading({ title, count, children }: { title: string; count?: number; children?: ReactNode }) {
+  return (
+    <div className="flex min-h-7 flex-wrap items-center gap-1">
+      <h3 className="mr-auto text-2xs font-semibold uppercase tracking-[0.08em] text-faint">
+        {title}
+        {count !== undefined && <span className="font-normal normal-case tracking-normal"> · {count}</span>}
+      </h3>
+      {children}
+    </div>
+  );
+}
+
+function BackBar({ onBack, children }: { onBack: () => void; children?: ReactNode }) {
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <Button variant="ghost" size="sm" leftIcon={<ArrowLeft />} onClick={onBack}>
+        All plugins
+      </Button>
+      {children}
+    </div>
+  );
+}
+
+/**
+ * "Update to v1.2.0" when one is known — from a Check (the row's own or the
+ * background pass), or from a catalog listing a newer version than the one
+ * installed. The catalog answer is only a version compare; Check is what
+ * diffs what the update would ask for, so the detail page is where to act.
+ */
+function updateBadge(check: CheckState | undefined, listed: PluginCatalogMember | undefined): string | null {
+  if (check && check !== "checking" && check.status === "available") {
+    const v = check.target?.version;
+    return v ? `Update to v${v}` : "Update available";
+  }
+  if (listed?.installed?.comparison === "newer" && listed.version) return `v${listed.version} available`;
+  return null;
+}
+
+function InstalledRow({
+  plugin: p,
+  check,
+  listed,
+  onOpen,
+}: {
+  plugin: PluginInfo;
+  check?: CheckState;
+  listed?: PluginCatalogMember;
+  onOpen: () => void;
+}) {
+  const status = statusOf(p);
+  const update = updateBadge(check, listed);
+  return (
+    <RowButton className="flex w-full items-center gap-2 px-3 py-2 hover:bg-hover" onClick={onOpen} data-testid={`plugin-row-${p.id}`}>
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span className="text-sm font-semibold text-primary">{p.name}</span>
+          {p.version && <Chip mono>v{p.version}</Chip>}
+          {p.builtin && <Chip tone="muted">built-in</Chip>}
+          {p.origin === "linked" && <Chip tone="muted">linked</Chip>}
+          <span className="inline-flex items-center gap-1.5 text-xs text-secondary">
+            <StatusDot tone={status.tone} />
+            {status.label}
+          </span>
+          {check === "checking" && <Spinner size={10} />}
+          {update && <Chip tone="accent">{update}</Chip>}
+          {p.pendingCleanups && <Chip tone="warn">cleanups stuck</Chip>}
+        </div>
+        {p.description && <p className="mt-0.5 truncate text-xs text-muted">{p.description}</p>}
+      </div>
+      <ChevronRight className="size-4 shrink-0 text-faint" />
+    </RowButton>
+  );
+}
+
+function AvailableGroup({
+  catalog: c,
+  installedIds,
+  onOpen,
+}: {
+  catalog: PluginCatalog;
+  installedIds: Set<string>;
+  onOpen: (m: PluginCatalogMember) => void;
+}) {
+  // Installed members live in the list above (with their update badge); this
+  // is what you could ADD. A member with no id could not be read at all and
+  // is shown so its error is seen, not silently dropped.
+  const fresh = c.plugins.filter((m) => !m.id || !installedIds.has(m.id));
+  return (
+    <div className="space-y-1" data-testid={`plugins-available-${c.id}`}>
+      <div className="flex flex-wrap items-baseline gap-x-2 text-xs">
+        <span className="font-medium text-secondary">{c.label}</span>
+        <span className="text-2xs text-faint">{catalogStateLine(c)}</span>
+      </div>
+      {c.error && !c.refreshedAt ? (
+        <p className="cm-mono break-words text-2xs text-warn">{c.error}</p>
+      ) : !c.refreshedAt ? (
+        <p className="text-2xs text-muted">Not read yet — press Refresh catalogs.</p>
+      ) : fresh.length === 0 ? (
+        <p className="text-2xs text-muted">
+          {c.plugins.length === 0
+            ? "It lists no plugins."
+            : c.plugins.length === 1
+              ? "Its one plugin is installed."
+              : `All ${c.plugins.length} of its plugins are installed.`}
+        </p>
+      ) : (
+        <div className="divide-y divide-line-soft overflow-hidden rounded-md border border-line-soft">
+          {fresh.map((m) => (
+            <AvailableRow key={m.subdir} member={m} onOpen={() => onOpen(m)} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AvailableRow({ member: m, onOpen }: { member: PluginCatalogMember; onOpen: () => void }) {
+  if (m.error) {
+    return (
+      <div className="px-3 py-2 text-xs">
+        <span className="cm-mono text-secondary">{m.subdir}</span>
+        <p className="cm-mono text-2xs text-warn">{m.error}</p>
+      </div>
+    );
+  }
+  return (
+    <RowButton
+      className="flex w-full items-center gap-2 px-3 py-2 hover:bg-hover"
+      onClick={onOpen}
+      data-testid={`plugin-available-${m.id ?? m.subdir}`}
+    >
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span className="text-sm font-semibold text-primary">{m.name ?? m.id ?? m.subdir}</span>
+          {m.version && <Chip mono>v{m.version}</Chip>}
+          {!m.installable && (
+            <span className="inline-flex items-center gap-1.5 text-xs text-secondary" title={m.refusal}>
+              <StatusDot tone="warn" />
+              Can&apos;t install here
+            </span>
+          )}
+          {m.capabilities.slice(0, 4).map((cap) => (
+            <Chip key={cap} tone="muted">
+              {cap}
+            </Chip>
+          ))}
+          {m.capabilities.length > 4 && <span className="text-2xs text-faint">+{m.capabilities.length - 4}</span>}
+        </div>
+        {m.description && <p className="mt-0.5 truncate text-xs text-muted">{m.description}</p>}
+      </div>
+      <ChevronRight className="size-4 shrink-0 text-faint" />
+    </RowButton>
   );
 }
 
@@ -209,6 +540,17 @@ const STATUS: Record<PluginStatus, { tone: DotTone; label: string }> = {
   incompatible: { tone: "warn", label: "Incompatible" },
 };
 
+/**
+ * An enabled plugin the host has not loaded yet (installed or switched on
+ * since boot) reports `disabled`; "Off" beside a switch that is ON read as a
+ * contradiction, so the row names what is actually pending.
+ */
+function statusOf(plugin: PluginInfo): { tone: DotTone; label: string } {
+  return plugin.needsRestart && plugin.enabled && plugin.status === "disabled"
+    ? { tone: "warn", label: "Restart to load" }
+    : STATUS[plugin.status];
+}
+
 function PluginCard({
   plugin,
   onChange,
@@ -227,13 +569,7 @@ function PluginCard({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [uninstalling, setUninstalling] = useState(false);
-  // An enabled plugin the host has not loaded yet (installed or switched on
-  // since boot) reports `disabled`; "Off" beside a switch that is ON read as a
-  // contradiction, so the row names what is actually pending.
-  const status: { tone: DotTone; label: string } =
-    plugin.needsRestart && plugin.enabled && plugin.status === "disabled"
-      ? { tone: "warn", label: "Restart to load" }
-      : STATUS[plugin.status];
+  const status = statusOf(plugin);
   // Invalid and incompatible plugins cannot be turned on; the toggle would
   // promise an activation that can never happen.
   const toggleable = plugin.status !== "invalid" && plugin.status !== "incompatible";

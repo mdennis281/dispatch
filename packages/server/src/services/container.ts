@@ -13,6 +13,7 @@
  * Tests pass fully-formed fakes via `overrides`; production gets the real
  * execa/SDK-backed services. `start()`/`dispose()` bound the background work.
  */
+import { join } from "node:path";
 import type { ServerConfig } from "../config.js";
 // Value import (not `import type`): the InspectService needs to CONSTRUCT a
 // second Store over the installed instance's roots for `instance: "stable"`.
@@ -108,6 +109,7 @@ import { PluginService } from "../plugins/service.js";
 import { findShippedPluginsRoot } from "../plugins/shipped.js";
 import { PluginInspector } from "../plugins/inspect/index.js";
 import { PluginUpdateWatcher, pluginUpdateHours } from "../plugins/inspect/watcher.js";
+import { PluginCatalogService } from "../plugins/inspect/catalogs.js";
 import { PluginOAuthService } from "../plugins/oauth.js";
 import { PluginCleanupQueue } from "../plugins/cleanup.js";
 import { pluginMcpServersUsingSecret } from "../plugins/contributions.js";
@@ -182,6 +184,7 @@ export interface ServiceOverrides {
   plugins?: PluginService;
   pluginInspector?: PluginInspector;
   pluginUpdates?: PluginUpdateWatcher;
+  pluginCatalogs?: PluginCatalogService;
   pluginOAuth?: PluginOAuthService;
 }
 
@@ -276,6 +279,8 @@ export interface Services extends ServiceBase {
   pluginInspector: PluginInspector;
   /** Background update checks for git-installed plugins, and the `auto` policy. */
   pluginUpdates: PluginUpdateWatcher;
+  /** Settings → Plugins → Catalogs: collection URLs listed for browsing, the built-in one included. */
+  pluginCatalogs: PluginCatalogService;
   /** The host-run OAuth client flow behind `ctx.oauth` and the plugin pane's Connect button. */
   pluginOAuth: PluginOAuthService;
   fileIndex: FileIndexService;
@@ -1336,6 +1341,17 @@ export function createServices(
       notice: (level, text) => bus.publish({ type: "notice", level, text }),
       intervalHours: pluginUpdateHours(),
     });
+  const pluginCatalogs: PluginCatalogService =
+    overrides.pluginCatalogs ??
+    new PluginCatalogService({
+      inspector: pluginInspector,
+      settings: { get: () => store.getSettings(), update: (fn) => store.updateSettings(fn) },
+      // Per-instance: a cache, and the data dir is the one that is ours alone.
+      cacheFile: join(config.dataDir, "plugin-catalogs.json"),
+      // Same cadence as update checks — one knob for "how often may Dispatch
+      // fetch from plugin hosts".
+      intervalHours: pluginUpdateHours(),
+    });
   // "The chat you spawned is done" — armed by `broker.spawnChat` below, delivered
   // over the messenger above. Constructed here because it needs both, and
   // disposed in `dispose()` so a pending notice is not a reason the process
@@ -1656,6 +1672,7 @@ export function createServices(
     plugins,
     pluginInspector,
     pluginUpdates,
+    pluginCatalogs,
     pluginOAuth,
     fileIndex,
     fsExplorer,
@@ -1824,6 +1841,7 @@ export function createServices(
       safeStart("release", () => release.start());
       // Same shape as release polling: deferred first pass, unref'd interval.
       safeStart("pluginUpdates", () => pluginUpdates.start());
+      safeStart("pluginCatalogs", () => pluginCatalogs.start());
       // Backoff retries of failed plugin cleanups. Each plugin's own rows are
       // also retried right after it activates (see `PluginService.reconcileOne`).
       safeStart("pluginCleanups", () => pluginCleanups.start());
@@ -1998,6 +2016,8 @@ export function createServices(
       // An auto-update mid-copy finishes rather than leaving a half-renamed slot.
       pluginUpdates.stop();
       await pluginUpdates.drain().catch(() => {});
+      pluginCatalogs.stop();
+      await pluginCatalogs.drain().catch(() => {});
       // Rows not yet retried stay in state.db; the next boot picks them up.
       pluginCleanups.stop();
       await pluginCleanups.drain().catch(() => {});

@@ -9,7 +9,10 @@ import type {
   Persona,
   PluginInfo,
   PluginInstance,
+  PluginCatalog,
+  PluginCatalogsStatus,
   PluginInspectResult,
+  PluginInspection,
   PluginAutoUpdate,
   PluginUpdateStatus,
   PluginInstallResult,
@@ -1605,6 +1608,26 @@ export const api = {
     /** Remove it; `purge` also deletes its settings, kv, secrets and OAuth tokens. Owner only. */
     uninstall: (id: string, purge: boolean) =>
       post<PluginUninstallResult>(`/api/plugins/${encodeURIComponent(id)}/uninstall`, { purge }),
+  },
+
+  /*
+   * pluginCatalogs — repositories Settings → Plugins lists plugins from, the
+   * built-in one included. Served from the server's cache; Refresh re-reads.
+   * Owner only.
+   */
+  pluginCatalogs: {
+    list: () => get<PluginCatalogsStatus>("/api/plugin-catalogs"),
+    /** Refused unless the URL holds at least one plugin — the server reads it before saving. */
+    add: (url: string, label?: string) =>
+      post<PluginCatalog>("/api/plugin-catalogs", { url, ...(label ? { label } : {}) }),
+    remove: (id: string) => del<{ ok: boolean }>(`/api/plugin-catalogs/${encodeURIComponent(id)}`),
+    setEnabled: (id: string, enabled: boolean) =>
+      put<PluginCatalog>(`/api/plugin-catalogs/${encodeURIComponent(id)}/enabled`, { enabled }),
+    refresh: (id: string) => post<PluginCatalog>(`/api/plugin-catalogs/${encodeURIComponent(id)}/refresh`),
+    refreshAll: () => post<PluginCatalogsStatus>("/api/plugin-catalogs/refresh"),
+    /** One listed plugin's full report — what Install installs, with its installed state as of now. */
+    plugin: (id: string, subdir: string) =>
+      get<PluginInspection>(`/api/plugin-catalogs/${encodeURIComponent(id)}/plugin?subdir=${encodeURIComponent(subdir)}`),
   },
 
   settings: {
