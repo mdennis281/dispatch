@@ -226,6 +226,7 @@ describe("catalog ids and URLs", () => {
   it("treats .git, trailing slashes, case and the scp form as the same URL", () => {
     expect(sameCatalogUrl("https://github.com/Acme/X.git", "https://github.com/acme/x/")).toBe(true);
     expect(sameCatalogUrl("git@github.com:acme/x.git", "https://github.com/acme/x")).toBe(true);
+    expect(sameCatalogUrl("github.com/acme/x", "https://github.com/acme/x")).toBe(true);
     expect(sameCatalogUrl("https://github.com/acme/x", "https://github.com/acme/y")).toBe(false);
   });
 });

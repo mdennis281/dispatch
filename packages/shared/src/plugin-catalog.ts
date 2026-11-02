@@ -167,6 +167,9 @@ export function sameCatalogUrl(a: string, b: string): boolean {
   const norm = (u: string) => {
     let s = u.trim().toLowerCase();
     if (s.startsWith("git@github.com:")) s = `https://github.com/${s.slice("git@github.com:".length)}`;
+    // `parsePluginUrl` accepts a bare `github.com/o/r`, so a scheme-less paste
+    // must compare equal to the https URL already listed.
+    else if (!s.includes("://")) s = `https://${s}`;
     let end = s.length;
     while (end > 0 && s[end - 1] === "/") end--;
     return stripSuffix(s.slice(0, end), ".git");
