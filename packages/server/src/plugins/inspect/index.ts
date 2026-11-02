@@ -44,7 +44,7 @@ import {
   type FetchedPlugin,
 } from "./fetch.js";
 import type { TarExtractResult } from "./tar.js";
-import { inspectPluginDir, type InstalledLookup } from "./inspect.js";
+import { compareVersions, inspectPluginDir, type InstalledLookup } from "./inspect.js";
 import { PluginInspectError, browseUrl, parsePluginUrl } from "./url.js";
 
 export { PluginInspectError } from "./url.js";
@@ -98,6 +98,25 @@ export class PluginInspector {
       ...(host ? { status: host.status } : {}),
       ...(host?.needsRestart ? { needsRestart: true } : {}),
       ...(found.linked ? { linked: true } : {}),
+    };
+  }
+
+  /**
+   * A report's `installed` block as of NOW. A catalog's reports are cached for
+   * hours, and the block baked in at refresh time would keep offering Install
+   * for a plugin installed since — or "Installed" for one removed.
+   */
+  async installedState(report: PluginInspection): Promise<PluginInspection["installed"]> {
+    if (!report.valid || !report.id) return undefined;
+    const found = await this.installed(report.id);
+    if (!found) return undefined;
+    const cmp = found.version && report.version ? compareVersions(report.version, found.version) : null;
+    return {
+      ...(found.version ? { version: found.version } : {}),
+      ...(found.status ? { status: found.status } : {}),
+      ...(found.needsRestart ? { needsRestart: true } : {}),
+      ...(found.linked ? { linked: true } : {}),
+      comparison: cmp === null ? "unknown" : cmp === 0 ? "same" : cmp > 0 ? "newer" : "older",
     };
   }
 

@@ -162,7 +162,7 @@ function verdict(r: PluginInspection): { tone: "success" | "warn" | "danger"; la
   return { tone: "success", label: `Compatible · API ${r.compatibility.hostApi}` };
 }
 
-function InspectionReport({ report: r, onInstalled }: { report: PluginInspection; onInstalled: () => void }) {
+export function InspectionReport({ report: r, onInstalled }: { report: PluginInspection; onInstalled: () => void }) {
   const v = verdict(r);
   const c = r.contributions;
   const contributionCount =

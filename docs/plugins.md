@@ -543,11 +543,59 @@ Rules that keep it as safe as one plugin:
 `dispatch plugin add <collection>` refuses to guess and lists the members; pick
 with `--plugin <path|id>` (repeatable) or `--all`. Each pick is its own add.
 
-Settings → Plugins is the same list with the enable toggle, status, error text,
-capability and secret chips, warnings, a generic settings form rendered from the
-JSON schema (string / number / integer / boolean / enum), Connect / Disconnect
-per declared OAuth client, the source line, copy path, "open folder", Check for
-updates and Uninstall.
+### Catalogs
+
+A **catalog** is a collection URL the host remembers, so Settings → Plugins can
+list what there is to install without anyone pasting a URL
+(`packages/shared/src/plugin-catalog.ts`, `PluginCatalogService` in
+`packages/server/src/plugins/inspect/catalogs.ts`).
+
+- **The built-in catalog** is `https://github.com/mdennis281/dispatch-plugins`
+  (`BUILTIN_PLUGIN_CATALOG`). It is always listed and can be switched off, but
+  never removed — it is not stored, only whether it is off.
+- **Added catalogs** live in `AppSettings.pluginCatalogs` (`config/`, shared by
+  both instances like `plugins`). An add READS the URL first and is refused
+  with the inspector's reason if it holds no plugin, so a typo is never saved as
+  a row that fails every six hours. The same URL twice is a 409.
+- **A refresh is `PluginInspector.inspect`** — the same tarball fetch and full
+  per-member report Inspect from URL produces — run per catalog on Refresh,
+  Refresh catalogs, and every `DISPATCH_PLUGIN_UPDATE_HOURS` (first pass 3 min
+  after boot, after the update watcher's). A failed refresh keeps the last good
+  listing and shows why.
+- **The listing is cached** in `<dataDir>/plugin-catalogs.json` (per instance,
+  one writer), so the browse list is there immediately after a restart. Each
+  report's `installed` block is recomputed on every read (`installedState`):
+  the listing may be hours old, the install state never is.
+- **Installing from a catalog is the ordinary install**
+  (`POST /api/plugins/install { url: <catalog url>, sha, subdir }`), so the
+  recorded source, updates and uninstall know nothing about catalogs, and
+  removing a catalog uninstalls nothing.
+
+Routes are under their own prefix, `/api/plugin-catalogs` (not
+`/api/plugins/catalogs`, which a plugin with the id `catalogs` would own), and
+all of them are owner-only. "Catalog", because "provider" is an agent runtime
+here and `PluginSource` is one install's origin.
+
+### The Settings pane
+
+Settings → Plugins is a list with a page per plugin:
+
+- **Installed**: one row each, showing status, version, and an update badge
+  (from a Check, the background pass, or a catalog listing a newer version).
+- **Available**: grouped by catalog, showing what each enabled catalog lists
+  that is not installed.
+- **Catalogs**: add, switch off, refresh or remove a catalog.
+- **Inspect from URL**.
+
+Clicking an installed row opens the full card. It has the enable toggle, status,
+error text, capability and secret chips, and warnings. It renders a generic
+settings form from the JSON schema (string / number / integer / boolean / enum).
+It also has Connect / Disconnect per declared OAuth client, the source line,
+copy path, "open folder", Check for updates and Uninstall. When a catalog lists
+the plugin, that catalog's full report follows the card. Its InstallBar offers
+"Update to X" when the catalog is ahead, and that is also how a copy installed
+from an old URL is re-pointed at its catalog. Clicking an available row opens
+the same report a pasted URL would give, with Install.
 
 ### Updating and uninstalling
 

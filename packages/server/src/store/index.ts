@@ -109,6 +109,7 @@ import {
   McpEnabledMapSchema,
   ProjectConfigLocationSchema,
   SendModeSchema,
+  PluginCatalogSettingsSchema,
   PluginSettingsEntrySchema,
   GLOBAL_PROJECT_ID,
   globalProject,
@@ -486,6 +487,12 @@ export const AppSettingsSchema = z.object({
    * the same plugin and should agree on whether it is on.
    */
   plugins: z.record(z.string(), PluginSettingsEntrySchema).optional(),
+  /**
+   * Plugin catalogs the owner added, and which (the built-in one included)
+   * are switched off — see plugin-catalog.ts. Owned by `/api/plugin-catalogs/*`
+   * and preserved by the full-replace `PUT /api/settings`, like `plugins`.
+   */
+  pluginCatalogs: PluginCatalogSettingsSchema.optional(),
 });
 export type AppSettings = z.infer<typeof AppSettingsSchema>;
 

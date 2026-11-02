@@ -80,6 +80,8 @@ export function registerSettingsRoutes(app: FastifyInstance): void {
       // predates a toggle or a plugin's own settings save would otherwise undo
       // it the next time anyone picked a theme.
       ...(current.plugins ? { plugins: current.plugins } : {}),
+      // And the catalog list, owned by /api/plugin-catalogs — same reason.
+      ...(current.pluginCatalogs ? { pluginCatalogs: current.pluginCatalogs } : {}),
     });
     // The concurrency cap is held by the LIVE broker, not re-read per turn, so a
     // save has to hand it over or the new number means nothing until a restart —

@@ -126,13 +126,13 @@ export const APP_SECTIONS: AppSectionDef[] = [
     id: "plugins",
     icon: Puzzle,
     label: "Plugins",
-    blurb: "Extensions installed on this machine",
+    blurb: "Installed extensions, and catalogs to add more",
     explainer:
       "Built-in plugins ship with Dispatch (the Codex and goose providers) and update with " +
       "it. Installed ones are loaded from the shared config directory, so both the " +
-      "installed app and a dev server see the same list. Each row says what the plugin " +
-      "declared it will touch. Turning one off takes effect now; turning one on, or " +
-      "changing its files, needs a restart.",
+      "installed app and a dev server see the same list. Catalogs list more to install; " +
+      "open any plugin to see what it will touch before you add it. Turning one off takes " +
+      "effect now; turning one on, or changing its files, needs a restart.",
   },
   {
     id: "auth",
