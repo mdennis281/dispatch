@@ -319,6 +319,32 @@ describe("buildChatTree — reviewers file under the chat that opened the PR", (
 
     expect(shape(tree)).toEqual([["self", []]]);
   });
+
+  it("still nests when the PR store is empty, off the opener's own `Chat.prs`", () => {
+    // What a failed `/api/prs` under load left behind: the chats loaded, the PR
+    // roster didn't, and every reviewer of a merged PR sat at the top level.
+    const author: Chat = {
+      ...chat("author", "p1", 100),
+      prs: [{ number: 7, repo: "o/r", url: "", branch: "feat/x" }],
+    };
+    const tree = buildChatTree([author, reviewer("r", "o/r#7", 50)], {}, {});
+
+    expect(shape(tree)).toEqual([["author", ["r"]]]);
+  });
+
+  it("lets the registry's attribution win over a `Chat.prs` entry", () => {
+    const stale: Chat = {
+      ...chat("stale", "p1", 100),
+      prs: [{ number: 7, repo: "o/r", url: "", branch: "feat/x" }],
+    };
+    const tree = buildChatTree(
+      [stale, chat("owner", "p1", 90), reviewer("r", "o/r#7", 50)],
+      {},
+      { "o/r#7": pr("o/r#7", 7, "owner") },
+    );
+
+    expect(shape(tree)).toEqual([["stale", []], ["owner", ["r"]]]);
+  });
 });
 
 describe("buildChatTree — spawned chats file under the chat that spawned them", () => {
