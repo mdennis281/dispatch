@@ -4,6 +4,7 @@ import { QUEUE_TIER_LABELS } from "@dispatch/shared";
 import { Button } from "../ui/Button.js";
 import { Tooltip } from "../ui/Tooltip.js";
 import { useScheduler } from "../../stores/scheduler.js";
+import { useChats } from "../../stores/chats.js";
 
 /**
  * "Run now" beside a queued chat's status: start it past the cap and ahead of
@@ -19,8 +20,34 @@ import { useScheduler } from "../../stores/scheduler.js";
 export function QueueOverride({ chatId }: { chatId: string }) {
   const snapshot = useScheduler((s) => s.snapshot);
   const runNow = useScheduler((s) => s.runNow);
+  const projectId = useChats((s) => s.byId[chatId]?.projectId);
   const [pending, setPending] = useState(false);
-  if (!snapshot || snapshot.paused) return null;
+  if (!snapshot) return null;
+  // Paused on its own: say so right where "queued" shows, or a message sent to
+  // it reads as stuck in the queue with no reason given.
+  if (snapshot.chatPauses?.[chatId] && !snapshot.paused) {
+    return (
+      <>
+        <span className="text-faint">·</span>
+        <span className="text-warn">paused</span>
+        <Button
+          variant="link"
+          size="sm"
+          disabled={pending}
+          className="-my-1"
+          leftIcon={<Play className="text-accent-hi" />}
+          onClick={() => {
+            setPending(true);
+            void useScheduler.getState().resumeChat(chatId).finally(() => setPending(false));
+          }}
+        >
+          <span className="text-accent-hi">Resume</span>
+        </Button>
+      </>
+    );
+  }
+  // Its project's pause refuses it just the same.
+  if (snapshot.paused || (projectId && snapshot.projectPauses?.[projectId])) return null;
   const index = snapshot.queued.findIndex((q) => q.chatId === chatId);
   if (index < 0) return null;
   const entry = snapshot.queued[index]!;

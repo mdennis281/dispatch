@@ -2303,6 +2303,120 @@ describe("SessionBroker — steering & concurrency", () => {
     expect(controllers.at(-1)!.pushed).toContain("held");
   });
 
+  it("a project pause interrupts and holds only that project, and its parked chats outrank nobody", async () => {
+    const gate = deferred();
+    const { fn, controllers } = makeFakeQuery(async (text) => {
+      if (text === "go") await gate.promise;
+      return [assistantText(text), resultMsg(text === "go" ? "interrupted" : "success")];
+    });
+    // Cap 1: a held p1 start must not keep p2's send out of the free slot.
+    const broker = makeBroker(fn, 1);
+    for (const [id, project] of [["a1", "p1"], ["a2", "p1"], ["b1", "p2"]] as const) {
+      await store.saveChat(chatFor(id, project));
+      broker.create(chatFor(id, project));
+    }
+    await broker.sendMessage("a1", "go");
+    await until(() => controllers[0]?.pushed.length === 1);
+
+    const state = await broker.pauseProject("p1");
+    expect(state.interrupted).toEqual(["a1"]);
+    expect(controllers[0]!.calls.interrupt).toBe(1);
+    expect(broker.pause).toBeUndefined();
+    expect(broker.schedulerSnapshot().projectPauses).toEqual({ p1: state });
+
+    gate.resolve();
+    await until(() => broker.getStatus("a1") === "queued");
+    await broker.sendMessage("a2", "held");
+    expect(broker.getStatus("a2")).toBe("queued");
+    expect(broker.runNow("a2")).toBe(false);
+
+    // The other project runs as if nothing were paused.
+    const b1Done = waitForResults("b1", 1);
+    await broker.sendMessage("b1", "free");
+    await b1Done;
+    expect(controllers.at(-1)!.pushed).toEqual(["free"]);
+    expect(broker.getStatus("a2")).toBe("queued");
+
+    await broker.sendMessage("a1", "resume note");
+    const a1ran = broker.waitFor("a1", "running");
+    broker.resumeProject("p1", ["a1"]);
+    await a1ran;
+    expect(broker.schedulerSnapshot().projectPauses).toEqual({});
+  });
+
+  it("a chat pause interrupts and holds that chat alone, and its siblings keep running", async () => {
+    const gate = deferred();
+    const { fn, controllers } = makeFakeQuery(async (text) => {
+      if (text === "go") await gate.promise;
+      return [assistantText(text), resultMsg(text === "go" ? "interrupted" : "success")];
+    });
+    const broker = makeBroker(fn);
+    for (const id of ["c1", "c2"]) {
+      await store.saveChat(chatFor(id));
+      broker.create(chatFor(id));
+    }
+    await broker.sendMessage("c1", "go");
+    await until(() => controllers[0]?.pushed.length === 1);
+
+    const state = await broker.pauseChat("c1");
+    expect(state.interrupted).toEqual(["c1"]);
+    expect(controllers[0]!.calls.interrupt).toBe(1);
+    gate.resolve();
+    await until(() => broker.getStatus("c1") === "queued");
+    await broker.sendMessage("c1", "held");
+    expect(broker.getStatus("c1")).toBe("queued");
+
+    // Same project, not paused: runs.
+    const c2Done = waitForResults("c2", 1);
+    await broker.sendMessage("c2", "free");
+    await c2Done;
+
+    const c1Done = waitForResults("c1", 1);
+    broker.resumeChat("c1", ["c1"]);
+    await c1Done;
+    expect(controllers[0]!.pushed).toContain("held");
+    expect(broker.schedulerSnapshot().chatPauses).toEqual({});
+  });
+
+  it("a chat pause stacked under a global one still owes the brief, so no restart ticket is cut", async () => {
+    const gate = deferred();
+    const { fn, controllers } = makeFakeQuery(async (text) => {
+      if (text === "go") await gate.promise;
+      return [assistantText(text), resultMsg("interrupted")];
+    });
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+    await broker.sendMessage("c1", "go");
+    await until(() => controllers[0]?.pushed.length === 1);
+
+    await broker.pauseChat("c1");
+    gate.resolve();
+    await until(() => broker.getStatus("c1") === "queued");
+    // The global pause did not interrupt c1 — the chat pause did — but its
+    // brief is still owed, so a restart must not ALSO send a "carry on".
+    await broker.pauseAll();
+    expect(broker.interruptionSnapshot().map((s) => s.chatId)).toEqual([]);
+  });
+
+  it("lifting the global pause leaves a project pause in force", async () => {
+    const { fn, controllers } = makeFakeQuery((text) => [assistantText(text), resultMsg()]);
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("a1", "p1"));
+    broker.create(chatFor("a1", "p1"));
+    await broker.pauseProject("p1");
+    await broker.pauseAll();
+    await broker.sendMessage("a1", "held");
+    broker.resumeAll();
+    expect(broker.getStatus("a1")).toBe("queued");
+    expect(controllers).toHaveLength(0);
+
+    const done = waitForResults("a1", 1);
+    broker.resumeProject("p1");
+    await done;
+    expect(controllers[0]!.pushed).toEqual(["held"]);
+  });
+
   it("raising the cap starts the parked chats immediately", async () => {
     // Why `setCap` pumps rather than waiting for the next turn to settle: the
     // reason a human raises the cap is that chats are parked RIGHT NOW, and a

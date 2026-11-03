@@ -32,8 +32,31 @@ export type QueueEntryKind = z.infer<typeof QueueEntryKindSchema>;
 export const QueueTierSchema = z.union([z.literal(0), z.literal(1), z.literal(2), z.literal(3)]);
 export type QueueTier = z.infer<typeof QueueTierSchema>;
 
+/**
+ * What `<dataDir>/pause.json` holds: the global pause and every per-project
+ * one. They are independent — a project paused before a global pause stays
+ * paused after it lifts, because the human paused it for its own reason.
+ */
+export const PauseFileSchema = z.object({
+  global: PauseStateSchema.nullable(),
+  projects: z.record(z.string(), PauseStateSchema).default({}),
+  chats: z.record(z.string(), PauseStateSchema).default({}),
+});
+export type PauseFile = z.infer<typeof PauseFileSchema>;
+
+/** Which pause a resume note is about. */
+export type PauseScope = "all" | "project" | "chat";
+
 export const SchedulerSnapshotSchema = z.object({
   paused: PauseStateSchema.nullable(),
+  /**
+   * Per-project pauses, keyed by project id. Same mechanics as the global one
+   * (interrupt, hold, brief on resume), scoped to that project's chats. Default
+   * empty so a snapshot from an older server still parses.
+   */
+  projectPauses: z.record(z.string(), PauseStateSchema).default({}),
+  /** Per-chat pauses, keyed by chat id — the ⋯ menu's "Pause chat". */
+  chatPauses: z.record(z.string(), PauseStateSchema).default({}),
   /** The `maxActiveSessions` cap in force. */
   cap: z.number(),
   /**
@@ -101,11 +124,18 @@ export const SchedulerEventSchema = z.object({
  * The note an interrupted chat receives on resume. Shared so the server sends
  * and the tests assert the same sentence.
  */
-export function pauseResumeNote(state: PauseState, chatId: string, now: number): string {
+export function pauseResumeNote(
+  state: PauseState,
+  chatId: string,
+  now: number,
+  scope: PauseScope = "all",
+): string {
   const minutes = Math.max(1, Math.round((now - state.since) / 60_000));
   const killed = state.killed?.includes(chatId) ?? false;
+  const what =
+    scope === "project" ? "agent work in this project" : scope === "chat" ? "this chat" : "all agent work";
   return [
-    `Dispatch paused all agent work for about ${minutes} minute${minutes === 1 ? "" : "s"}, ` +
+    `Dispatch paused ${what} for about ${minutes} minute${minutes === 1 ? "" : "s"}, ` +
       "and your previous turn was interrupted mid-flight by that pause — not by an error, and not by anything you did.",
     "Pick up where you left off. A tool call that was running when the pause hit may or may not have completed, " +
       "so check its effect (files, git state, PRs) before repeating it.",

@@ -1773,6 +1773,15 @@ export const api = {
     pause: () => post<{ paused: PauseState }>("/api/pause"),
     kill: () => post<{ chatIds: string[] }>("/api/pause/kill"),
     resume: () => post<{ notified: string[] }>("/api/pause/resume"),
+    pauseProject: (projectId: string) =>
+      post<{ paused: PauseState }>(`/api/pause/projects/${encodeURIComponent(projectId)}`),
+    resumeProject: (projectId: string) =>
+      post<{ notified: string[] }>(`/api/pause/projects/${encodeURIComponent(projectId)}/resume`),
+    pauseChat: (chatId: string) =>
+      post<{ paused: PauseState }>(`/api/pause/chats/${encodeURIComponent(chatId)}`),
+    resumeChat: (chatId: string) =>
+      post<{ notified: string[] }>(`/api/pause/chats/${encodeURIComponent(chatId)}/resume`),
+    resumeAllScoped: () => post<{ notified: string[] }>("/api/pause/scoped/resume-all"),
     runNow: (chatId: string) => post<{ ok: boolean }>(`/api/scheduler/run/${encodeURIComponent(chatId)}`),
   },
 

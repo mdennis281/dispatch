@@ -4,6 +4,7 @@ import {
   ChevronsUpDown,
   LayoutGrid,
   Plus,
+  Pause,
   Play,
   Square,
   Gamepad2,
@@ -32,7 +33,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { GLOBAL_PROJECT_ID, isGlobalProject, parsePrRecordKey } from "@dispatch/shared";
-import type { Chat, PrRecord, SubApp, RunnerInstance, Project } from "@dispatch/shared";
+import type { Chat, PauseState, PrRecord, SubApp, RunnerInstance, Project } from "@dispatch/shared";
 import { Popover, MenuItem } from "../ui/Popover.js";
 import { Button } from "../ui/Button.js";
 import { IconButton } from "../ui/IconButton.js";
@@ -86,6 +87,7 @@ import {
 import { useProjectMemories } from "../../stores/memory.js";
 import { useGit, useGitChangeCount } from "../../stores/git.js";
 import { useRunners } from "../../stores/runners.js";
+import { useScheduler } from "../../stores/scheduler.js";
 import { useAttention } from "../../stores/attention.js";
 import { actions, loadOlderChats } from "../../lib/actions.js";
 import { cn } from "../../lib/cn.js";
@@ -96,6 +98,7 @@ import { useCopyId } from "../../lib/useCopyId.js";
 import { LAYER } from "../../lib/layers.js";
 import { foldedChildrenLabel } from "./reviewLabel.js";
 import { DeleteChatDialog } from "../chat/DeleteChatDialog.js";
+import { PauseChatMenuItem } from "../chat/PauseChatMenuItem.js";
 import { useChatRename } from "../chat/useChatRename.js";
 import { BranchWorktreePicker } from "../panels/BranchWorktreePicker.js";
 import { SubAppRunsPopover } from "../panels/SubAppRunsPopover.js";
@@ -194,6 +197,9 @@ function ProjectAgentBadge({ counts }: { counts: ProjectAgentCounts | undefined 
   );
 }
 
+/** Stable empty fallback — a fresh `{}` per render would re-render every subscriber. */
+const NO_PAUSES: Record<string, PauseState> = {};
+
 function ProjectSelector({
   onAddProject,
   onManageConfig,
@@ -208,6 +214,9 @@ function ProjectSelector({
   const active = useActiveProject();
   const agentCounts = useProjectAgentCounts();
   const globalActive = active?.id === GLOBAL_PROJECT_ID;
+  const projectPauses = useScheduler((s) => s.snapshot?.projectPauses ?? NO_PAUSES);
+  const scopedBusy = useScheduler((s) => s.scopedBusy);
+  const activePaused = active ? projectPauses[active.id] !== undefined : false;
 
   return (
     <Popover
@@ -253,6 +262,15 @@ function ProjectSelector({
                   : "—"}
             </span>
           </span>
+          {/* The menu says it too, but that is closed — and a project you are
+              sitting in that silently won't run is the confusing case. */}
+          {activePaused && (
+            <Tooltip label="This project is paused — resume it from this menu">
+              <span className="flex shrink-0 text-warn [&_svg]:size-3.5">
+                <Pause aria-label="Project paused" />
+              </span>
+            </Tooltip>
+          )}
           <ChevronsUpDown className="size-3.5 shrink-0 text-faint" />
         </button>
       )}
@@ -287,25 +305,63 @@ function ProjectSelector({
           {projects.length === 0 && (
             <p className="px-2 py-1.5 text-xs text-faint">No projects yet.</p>
           )}
-          {projects.map((p) => (
-            <MenuItem
-              key={p.id}
-              icon={<FolderGit2 />}
-              active={p.id === active?.id}
-              hint={<ProjectAgentBadge counts={agentCounts[p.id]} />}
-              onClick={() => {
-                selectProject(p.id);
-                close();
-                // Deliberately NOT dismissLeftDrawer(): unlike the nav items below,
-                // switching project navigates you INTO the sidebar, not out of it.
-                // `selectProject` clears the open chat, so closing the drawer here
-                // left a phone staring at the empty state with the chat list it
-                // needs to pick from hidden behind a second tap.
-              }}
-            >
-              {p.name}
-            </MenuItem>
-          ))}
+          {projects.map((p) => {
+            const paused = projectPauses[p.id];
+            return (
+              <div key={p.id} className="group/proj relative flex items-center">
+                <MenuItem
+                  icon={<FolderGit2 />}
+                  active={p.id === active?.id}
+                  // Room for the toggle, so it never sits on top of the badge.
+                  className="pr-8"
+                  hint={
+                    paused ? (
+                      <span className="text-warn">paused</span>
+                    ) : (
+                      <ProjectAgentBadge counts={agentCounts[p.id]} />
+                    )
+                  }
+                  onClick={() => {
+                    selectProject(p.id);
+                    close();
+                    // Deliberately NOT dismissLeftDrawer(): unlike the nav items below,
+                    // switching project navigates you INTO the sidebar, not out of it.
+                    // `selectProject` clears the open chat, so closing the drawer here
+                    // left a phone staring at the empty state with the chat list it
+                    // needs to pick from hidden behind a second tap.
+                  }}
+                >
+                  {p.name}
+                </MenuItem>
+                {/* A sibling, not a child: MenuItem is itself a button, and a
+                    button inside a button is invalid and swallows the inner click.
+                    Shown on hover only while running — thirteen pause glyphs
+                    down the menu would read as thirteen things to worry about —
+                    but always once paused, since that is the state to undo.
+                    Always shown where there is no hover to reveal it. The menu
+                    stays open so the row visibly flips. */}
+                <IconButton
+                  tip={
+                    paused
+                      ? `Resume ${p.name} — tell ${paused.interrupted.length || "no"} interrupted chat${paused.interrupted.length === 1 ? "" : "s"} what happened, then run its queue`
+                      : `Pause ${p.name} — interrupt its running turns and hold new ones`
+                  }
+                  disabled={!!scopedBusy[`project:${p.id}`]}
+                  className={cn(
+                    "absolute right-1",
+                    !paused &&
+                      "opacity-0 focus-visible:opacity-100 group-hover/proj:opacity-100 [@media(hover:none)]:opacity-100",
+                  )}
+                  onClick={() => {
+                    const s = useScheduler.getState();
+                    void (paused ? s.resumeProject(p.id) : s.pauseProject(p.id));
+                  }}
+                >
+                  {paused ? <Play className="text-accent-hi" /> : <Pause className="text-danger" />}
+                </IconButton>
+              </div>
+            );
+          })}
           <div className="my-1 h-px bg-line" />
           {/* The global chat's entry point. Below the projects and above the
               actions, because it is a place you GO rather than a thing you do
@@ -1291,6 +1347,7 @@ function ChatRow({
                       Copy chat ID
                     </MenuItem>
                     <div className="my-1 h-px bg-line" />
+                    <PauseChatMenuItem chatId={chat.id} onDone={() => choose(() => {})} />
                     <MenuItem
                       icon={<Activity />}
                       title={
