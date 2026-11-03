@@ -2378,6 +2378,27 @@ describe("SessionBroker — steering & concurrency", () => {
     expect(broker.schedulerSnapshot().chatPauses).toEqual({});
   });
 
+  it("a chat pause stacked under a global one still owes the brief, so no restart ticket is cut", async () => {
+    const gate = deferred();
+    const { fn, controllers } = makeFakeQuery(async (text) => {
+      if (text === "go") await gate.promise;
+      return [assistantText(text), resultMsg("interrupted")];
+    });
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+    await broker.sendMessage("c1", "go");
+    await until(() => controllers[0]?.pushed.length === 1);
+
+    await broker.pauseChat("c1");
+    gate.resolve();
+    await until(() => broker.getStatus("c1") === "queued");
+    // The global pause did not interrupt c1 — the chat pause did — but its
+    // brief is still owed, so a restart must not ALSO send a "carry on".
+    await broker.pauseAll();
+    expect(broker.interruptionSnapshot().map((s) => s.chatId)).toEqual([]);
+  });
+
   it("lifting the global pause leaves a project pause in force", async () => {
     const { fn, controllers } = makeFakeQuery((text) => [assistantText(text), resultMsg()]);
     const broker = makeBroker(fn);

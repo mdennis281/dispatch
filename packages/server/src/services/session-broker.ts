@@ -4379,7 +4379,7 @@ export class SessionBroker {
       if (
         session.status === "queued" &&
         session.outbox.length === 0 &&
-        this.pauseFor(session)?.interrupted.includes(session.chatId)
+        this.interruptedByPause(session)
       ) {
         continue;
       }
