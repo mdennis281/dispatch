@@ -26,6 +26,17 @@ interface SchedulerStore {
   kill: () => Promise<number>;
   /** Start one queued chat now, past the cap and ahead of the queue. */
   runNow: (chatId: string) => Promise<void>;
+  /**
+   * Scoped pauses with a request in flight, keyed `project:<id>` / `chat:<id>`
+   * — per target, see below.
+   */
+  scopedBusy: Record<string, true>;
+  pauseProject: (projectId: string) => Promise<void>;
+  resumeProject: (projectId: string) => Promise<void>;
+  pauseChat: (chatId: string) => Promise<void>;
+  resumeChat: (chatId: string) => Promise<void>;
+  /** Lift every project and chat pause — never the global one. */
+  resumeAllScoped: () => Promise<void>;
 }
 
 export const useScheduler = create<SchedulerStore>((set, get) => {
@@ -85,5 +96,38 @@ export const useScheduler = create<SchedulerStore>((set, get) => {
       }
       await get().load();
     },
+    // Per target rather than through `run`: toggling two projects in a row
+    // is the normal use, and the one-at-a-time gate would drop the second
+    // click while the first's interrupts land.
+    scopedBusy: {},
+    pauseProject: (id) =>
+      scopedToggle(`project:${id}`, "Pause project", () => api.scheduler.pauseProject(id)),
+    resumeProject: (id) =>
+      scopedToggle(`project:${id}`, "Resume project", () => api.scheduler.resumeProject(id)),
+    pauseChat: (id) => scopedToggle(`chat:${id}`, "Pause chat", () => api.scheduler.pauseChat(id)),
+    resumeChat: (id) => scopedToggle(`chat:${id}`, "Resume chat", () => api.scheduler.resumeChat(id)),
+    resumeAllScoped: async () => {
+      await run("resume", () => api.scheduler.resumeAllScoped());
+    },
   };
+
+  async function scopedToggle(key: string, label: string, fn: () => Promise<unknown>) {
+    if (get().scopedBusy[key]) return;
+    set((s) => ({ scopedBusy: { ...s.scopedBusy, [key]: true } }));
+    try {
+      await fn();
+    } catch (err) {
+      useNotices.getState().push({
+        level: "error",
+        text: `${label} failed`,
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      await get().load();
+      set((s) => {
+        const { [key]: _, ...rest } = s.scopedBusy;
+        return { scopedBusy: rest };
+      });
+    }
+  }
 });

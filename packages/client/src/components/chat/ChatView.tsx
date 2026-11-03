@@ -33,6 +33,7 @@ import { TitleText } from "../ui/TitleText.js";
 import { Spinner } from "../ui/Spinner.js";
 import { ChatHeaderBadges } from "./ChatHeaderBadges.js";
 import { QueueOverride } from "./QueueOverride.js";
+import { PauseChatMenuItem } from "./PauseChatMenuItem.js";
 import { chatPrRefs, chatWorktreeRefs } from "./chatHeaderRefs.js";
 import { MessageList } from "./MessageList.js";
 import { StreamingTail } from "./StreamingTail.js";
@@ -762,6 +763,7 @@ export function ChatView({ chat }: { chat: Chat }) {
                     Transcript visibility ({shellFilter.enabled.length}/{SHELL_FILTER_OPTIONS.length})
                   </MenuItem>
                   <div className="my-1 h-px bg-line" />
+                  <PauseChatMenuItem chatId={chat.id} onDone={close} />
                   {/* A long chat can be holding several dev servers by now, on
                       ports nothing else in the UI mentions. The roster is the
                       safe door — it shows what would die before anything does —

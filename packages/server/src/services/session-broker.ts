@@ -2568,6 +2568,13 @@ export class SessionBroker {
    * exactly as if the cap were full. See {@link pauseAll}.
    */
   private pauseState: PauseState | undefined;
+  /**
+   * Per-project pauses, keyed by project id. The same gate as `pauseState`,
+   * applied only to that project's chats — see {@link pauseFor}.
+   */
+  private projectPauses = new Map<string, PauseState>();
+  /** Per-chat pauses, keyed by chat id — the narrowest scope of the same gate. */
+  private chatPauses = new Map<string, PauseState>();
   /** Debounce for the `scheduler` broadcast — see {@link publishScheduler}. */
   private schedulerTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -3975,7 +3982,7 @@ export class SessionBroker {
    */
   private async compactIfPastThreshold(session: LiveSession, ok: boolean): Promise<void> {
     // A compaction is a turn like any other; a pause holds it too.
-    if (!ok || this.pauseState) return;
+    if (!ok || this.pauseFor(session)) return;
     const settings = await this.store.getSettings().catch(() => undefined);
     const limit = this.compactThreshold(session, settings);
     if (!limit || (session.lastContextTokens ?? 0) < limit) return;
@@ -4372,7 +4379,7 @@ export class SessionBroker {
       if (
         session.status === "queued" &&
         session.outbox.length === 0 &&
-        this.pauseState?.interrupted.includes(session.chatId)
+        this.pauseFor(session)?.interrupted.includes(session.chatId)
       ) {
         continue;
       }
@@ -4459,6 +4466,110 @@ export class SessionBroker {
     this.publishScheduler();
   }
 
+  /** Per-project pauses in force, keyed by project id. */
+  get projectPauseStates(): Record<string, PauseState> {
+    return Object.fromEntries(this.projectPauses);
+  }
+
+  /** {@link restorePause} for the per-project pauses. */
+  restoreProjectPauses(states: Record<string, PauseState>): void {
+    this.projectPauses = new Map(Object.entries(states));
+    this.publishScheduler();
+  }
+
+  /**
+   * The pause holding this chat, if any: the global one, else its project's.
+   * Every gate asks this rather than reading `pauseState`, so a project pause
+   * closes exactly the doors the global one does — for that project only.
+   */
+  private pauseFor(
+    session: Pick<LiveSession, "projectId" | "chatId"> | undefined,
+  ): PauseState | undefined {
+    if (this.pauseState) return this.pauseState;
+    if (!session) return undefined;
+    return this.projectPauses.get(session.projectId) ?? this.chatPauses.get(session.chatId);
+  }
+
+  /**
+   * Was this chat cut off by a pause still in force? Checks EVERY scope, not
+   * just {@link pauseFor}'s answer: a chat a project pause interrupted is still
+   * owed its project brief while a global pause sits on top of it.
+   */
+  private interruptedByPause(session: LiveSession): boolean {
+    return [
+      this.pauseState,
+      this.projectPauses.get(session.projectId),
+      this.chatPauses.get(session.chatId),
+    ].some((p) => p?.interrupted.includes(session.chatId) ?? false);
+  }
+
+  /** Per-chat pauses in force, keyed by chat id. */
+  get chatPauseStates(): Record<string, PauseState> {
+    return Object.fromEntries(this.chatPauses);
+  }
+
+  /** {@link restorePause} for the per-chat pauses. */
+  restoreChatPauses(states: Record<string, PauseState>): void {
+    this.chatPauses = new Map(Object.entries(states));
+    this.publishScheduler();
+  }
+
+  /**
+   * Pause one chat: interrupt its turn if one is open and hold whatever it is
+   * sent next — a peer's `chat_send`, a PR review round, a usage-limit resume —
+   * until it is resumed. A chat with no turn open is simply held.
+   */
+  async pauseChat(chatId: string, onArmed?: (state: PauseState) => Promise<void>): Promise<PauseState> {
+    const existing = this.chatPauses.get(chatId);
+    if (existing) return existing;
+    const session = this.sessions.get(chatId);
+    const live = session && this.isTurnLive(session) ? [session] : [];
+    const state: PauseState = { since: this.now(), interrupted: live.map((s) => s.chatId) };
+    this.chatPauses.set(chatId, state);
+    this.publishScheduler();
+    await onArmed?.(state).catch(() => {});
+    await this.interruptBounded(live);
+    return state;
+  }
+
+  /** Lift one chat's pause — {@link resumeAll}, scoped. */
+  resumeChat(chatId: string, first: string[] = []): void {
+    const state = this.chatPauses.get(chatId);
+    if (!state) return;
+    this.chatPauses.delete(chatId);
+    this.liftPause(state.interrupted, first);
+  }
+
+  /**
+   * Pause one project: interrupt its open turns and hold its chats, exactly as
+   * {@link pauseAll} does for everything. Other projects keep running and keep
+   * their slots — a paused project's chats simply stop being admitted.
+   */
+  async pauseProject(
+    projectId: string,
+    onArmed?: (state: PauseState) => Promise<void>,
+  ): Promise<PauseState> {
+    const existing = this.projectPauses.get(projectId);
+    if (existing) return existing;
+    const live = [...this.sessions.values()].filter(
+      (s) => s.projectId === projectId && this.isTurnLive(s),
+    );
+    const state: PauseState = { since: this.now(), interrupted: live.map((s) => s.chatId) };
+    this.projectPauses.set(projectId, state);
+    this.publishScheduler();
+    await onArmed?.(state).catch(() => {});
+    await this.interruptBounded(live);
+    return state;
+  }
+
+  /** Lift one project's pause — {@link resumeAll}, scoped. */
+  resumeProject(projectId: string, first: string[] = []): void {
+    const state = this.projectPauses.get(projectId);
+    if (!state) return;
+    this.projectPauses.delete(projectId);
+    this.liftPause(state.interrupted, first);
+  }
+
   /**
    * Stop every open turn and close the queue.
    *
@@ -4489,6 +4600,11 @@ export class SessionBroker {
     this.pauseState = { since: this.now(), interrupted: live.map((s) => s.chatId) };
     this.publishScheduler();
     await onArmed?.(this.pauseState).catch(() => {});
+    await this.interruptBounded(live);
+    return this.pauseState;
+  }
+
+  private async interruptBounded(live: LiveSession[]): Promise<void> {
     // Settled, not all: one provider refusing must not leave the rest running.
     await Promise.allSettled(
       live.map((s) =>
@@ -4498,7 +4614,6 @@ export class SessionBroker {
         ]),
       ),
     );
-    return this.pauseState;
   }
 
   /** Record that "kill processes" ran during this pause, for the resume note. */
@@ -4519,11 +4634,18 @@ export class SessionBroker {
     if (!this.pauseState) return;
     const { interrupted } = this.pauseState;
     this.pauseState = undefined;
+    this.liftPause(interrupted, first);
+  }
+
+  /** The shared tail of {@link resumeAll} and {@link resumeProject}. */
+  private liftPause(interrupted: string[], first: string[]): void {
     // An interrupted chat whose resume note never landed is parked with
-    // nothing to say. Admitted, it would open a turn on an empty prompt.
+    // nothing to say. Admitted, it would open a turn on an empty prompt. One
+    // the OTHER pause also cut off stays parked: that pause still owes it a note.
     for (const id of interrupted) {
       const session = this.sessions.get(id);
       if (first.includes(id) || session?.status !== "queued" || session.outbox.length > 0) continue;
+      if (this.interruptedByPause(session)) continue;
       this.dequeue(id, "start");
       session.activity.unqueued(this.now());
       this.setStatus(session, "idle", { state: "idle" });
@@ -4554,7 +4676,7 @@ export class SessionBroker {
    * resume note is built from who it interrupted. Resume first.
    */
   runNow(chatId: string): boolean {
-    if (this.pauseState) return false;
+    if (this.pauseFor(this.sessions.get(chatId))) return false;
     const entry = this.queue.find((e) => e.chatId === chatId);
     if (!entry) return false;
     const session = this.sessions.get(chatId);
@@ -4593,7 +4715,7 @@ export class SessionBroker {
     await this.stop(chatId);
     if (held.length === 0 && !wasQueued) return;
     session.outbox = [...held, ...session.outbox];
-    if (this.pauseState) this.parkForPause(session);
+    if (this.pauseFor(session)) this.parkForPause(session);
     else this.schedule(session);
   }
 
@@ -4610,8 +4732,8 @@ export class SessionBroker {
    * provider will start it regardless.
    */
   private holdsForPause(session: LiveSession, runtimePending: number): boolean {
-    if (!this.pauseState || runtimePending > 0) return false;
-    return session.outbox.length > 0 || this.pauseState.interrupted.includes(session.chatId);
+    if (!this.pauseFor(session) || runtimePending > 0) return false;
+    return session.outbox.length > 0 || this.interruptedByPause(session);
   }
 
   /** Park a session as `queued` behind the pause. */
@@ -4629,6 +4751,8 @@ export class SessionBroker {
     }
     return {
       paused: this.pauseState ?? null,
+      projectPauses: Object.fromEntries(this.projectPauses),
+      chatPauses: Object.fromEntries(this.chatPauses),
       cap: this.cap,
       lent: this.lentCount(),
       running,
@@ -4874,7 +4998,7 @@ export class SessionBroker {
       // provider refused it). Steering it would hand the agent new work through
       // the side door, so the message waits in the outbox; the turn-end handler
       // parks the chat as `queued` once the turn settles.
-      if (this.pauseState) {
+      if (this.pauseFor(session)) {
         this.setStatus(session, session.status);
         return;
       }
@@ -4888,7 +5012,7 @@ export class SessionBroker {
     // A free slot is not enough on its own: something already parked may
     // outrank this start (a resume, a chat somebody is waiting on), and taking
     // the slot past it would be the FIFO the tiers replace.
-    const admission = this.pauseState ? undefined : this.admission(session.chatId);
+    const admission = this.pauseFor(session) ? undefined : this.admission(session.chatId);
     if (admission && !this.outranked({ chatId: session.chatId, kind: "start", human: false })) {
       this.startTurn(session, admission === "lent");
     } else {
@@ -5259,7 +5383,7 @@ export class SessionBroker {
     for (const entry of [...this.queue]) {
       if (entry.kind !== "resume") continue;
       const session = this.sessions.get(entry.chatId);
-      if (session && this.holdsSlot(session)) {
+      if (session && this.holdsSlot(session) && !this.pauseFor(session)) {
         this.queue = this.queue.filter((e) => e !== entry);
         session.activity.unblocked(RESUME_SLOT_ID, this.now());
         entry.grant?.();
@@ -5270,7 +5394,13 @@ export class SessionBroker {
     // head would leave a sponsored reviewer parked behind an unsponsored start.
     for (;;) {
       let admission: "slot" | "lent" | undefined;
-      const entry = this.orderedQueue().find((e) => (admission = this.admission(e.chatId)) !== undefined);
+      // A paused project's entries stay where they are — the queue is closed to
+      // them, not to everyone behind them.
+      const entry = this.orderedQueue().find(
+        (e) =>
+          !this.pauseFor(this.sessions.get(e.chatId)) &&
+          (admission = this.admission(e.chatId)) !== undefined,
+      );
       if (!entry) break;
       this.queue = this.queue.filter((e) => e !== entry);
       const session = this.sessions.get(entry.chatId);
@@ -5430,7 +5560,15 @@ export class SessionBroker {
   /** Would something already parked be admitted before an entry of this shape? */
   private outranked(shape: Pick<QueueEntry, "chatId" | "kind" | "human">): boolean {
     const mine = this.tierOf(shape);
-    return this.queue.some((e) => e.chatId !== shape.chatId && this.tierOf(e) <= mine);
+    // A paused project's parked entries cannot be admitted, so they outrank
+    // nothing — otherwise one paused project's cold starts would queue every
+    // other project's sends behind a door that is shut.
+    return this.queue.some(
+      (e) =>
+        e.chatId !== shape.chatId &&
+        this.tierOf(e) <= mine &&
+        !this.pauseFor(this.sessions.get(e.chatId)),
+    );
   }
 
   private isQueuedToStart(chatId: string): boolean {

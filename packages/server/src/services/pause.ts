@@ -1,7 +1,8 @@
 /**
  * The global pause: stop every chat, hold the queue shut, optionally kill the
  * processes the chats left behind, and on resume tell each interrupted chat
- * what happened.
+ * what happened. Per-project and per-chat pauses are the same thing scoped to
+ * one project's chats or one chat; every pause is independent of the others.
  *
  * The broker owns the mechanism (the gate in `schedule`, the interrupts); this
  * owns everything around it — persistence across a restart, the kill sweep, and
@@ -15,7 +16,15 @@
  * restart that silently lifted it would hand every held chat to
  * `RestartResumeService`, which would then start them all.
  */
-import { pauseResumeNote, PauseStateSchema, type PauseState, type MessagePart } from "@dispatch/shared";
+import {
+  pauseResumeNote,
+  PauseFileSchema,
+  PauseStateSchema,
+  type MessagePart,
+  type PauseFile,
+  type PauseScope,
+  type PauseState,
+} from "@dispatch/shared";
 import { readJson, writeJsonAtomic } from "../store/fsq.js";
 import type { SessionBroker } from "./session-broker.js";
 
@@ -43,6 +52,8 @@ export class PauseService {
    * interrupted chat receives two briefs and acts on both.
    */
   private resuming?: Promise<{ notified: string[] }>;
+  /** The same guard per project / chat pause, keyed `project:<id>` / `chat:<id>`. */
+  private resumingScoped = new Map<string, Promise<{ notified: string[] }>>();
 
   constructor(private readonly deps: PauseServiceDeps) {
     this.now = deps.now ?? Date.now;
@@ -53,8 +64,16 @@ export class PauseService {
     try {
       const raw = await readJson(this.deps.file);
       if (raw === undefined || raw === null) return;
-      const parsed = PauseStateSchema.safeParse(raw);
-      if (parsed.success) this.deps.broker.restorePause(parsed.data);
+      const parsed = PauseFileSchema.safeParse(raw);
+      if (parsed.success) {
+        if (parsed.data.global) this.deps.broker.restorePause(parsed.data.global);
+        this.deps.broker.restoreProjectPauses(parsed.data.projects);
+        this.deps.broker.restoreChatPauses(parsed.data.chats);
+        return;
+      }
+      // Written before per-project pauses existed: a bare global PauseState.
+      const legacy = PauseStateSchema.safeParse(raw);
+      if (legacy.success) this.deps.broker.restorePause(legacy.data);
     } catch (err) {
       // An unreadable file must not wedge boot; an un-restored pause is
       // recoverable by clicking Pause again, a dead server is not.
@@ -74,7 +93,63 @@ export class PauseService {
   async pause(): Promise<PauseState> {
     // Persisted the moment the gate shuts, not after the interrupts land —
     // see `pauseAll`'s `onArmed`.
-    return this.deps.broker.pauseAll((state) => this.persist(state));
+    return this.deps.broker.pauseAll(() => this.persist());
+  }
+
+  /** Pause one project's chats — {@link pause}, scoped. */
+  async pauseProject(projectId: string): Promise<PauseState> {
+    return this.deps.broker.pauseProject(projectId, () => this.persist());
+  }
+
+  /** Pause one chat — {@link pause}, scoped to it alone. */
+  async pauseChat(chatId: string): Promise<PauseState> {
+    return this.deps.broker.pauseChat(chatId, () => this.persist());
+  }
+
+  /** Lift one project's pause, briefing the chats it cut off. */
+  resumeProject(projectId: string): Promise<{ notified: string[] }> {
+    return this.resumeScoped("project", projectId);
+  }
+
+  /** Lift one chat's pause, briefing it if the pause cut a turn off. */
+  resumeChat(chatId: string): Promise<{ notified: string[] }> {
+    return this.resumeScoped("chat", chatId);
+  }
+
+  /**
+   * The pause menu's "Resume all": every project and chat pause, never the
+   * global one — that has its own Resume, and lifting it from a button about
+   * projects would start every chat on the machine.
+   */
+  async resumeAllScoped(): Promise<{ notified: string[] }> {
+    const results = await Promise.all([
+      ...Object.keys(this.deps.broker.projectPauseStates).map((id) => this.resumeProject(id)),
+      ...Object.keys(this.deps.broker.chatPauseStates).map((id) => this.resumeChat(id)),
+    ]);
+    return { notified: results.flatMap((r) => r.notified) };
+  }
+
+  private resumeScoped(scope: "project" | "chat", id: string): Promise<{ notified: string[] }> {
+    const key = `${scope}:${id}`;
+    let pending = this.resumingScoped.get(key);
+    if (!pending) {
+      pending = this.resumeScopedOnce(scope, id).finally(() => {
+        this.resumingScoped.delete(key);
+      });
+      this.resumingScoped.set(key, pending);
+    }
+    return pending;
+  }
+
+  private async resumeScopedOnce(scope: "project" | "chat", id: string): Promise<{ notified: string[] }> {
+    const { broker } = this.deps;
+    const state = (scope === "project" ? broker.projectPauseStates : broker.chatPauseStates)[id];
+    if (!state) return { notified: [] };
+    const notified = await this.brief(state, scope);
+    if (scope === "project") broker.resumeProject(id, notified);
+    else broker.resumeChat(id, notified);
+    await this.persist();
+    return { notified };
   }
 
   /**
@@ -91,8 +166,7 @@ export class PauseService {
     // sees them exiting — and caches that for the TTL. The panel then offers
     // to kill processes that are already gone. Seen on the first live run.
     await this.deps.afterKill?.(ids);
-    const state = this.deps.broker.markKilled(ids);
-    if (state) await this.persist(state);
+    if (this.deps.broker.markKilled(ids)) await this.persist();
     return { chatIds: ids };
   }
 
@@ -112,10 +186,18 @@ export class PauseService {
   private async resumeOnce(): Promise<{ notified: string[] }> {
     const state = this.deps.broker.pause;
     if (!state) return { notified: [] };
+    const notified = await this.brief(state, "all");
+    this.deps.broker.resumeAll(notified);
+    await this.persist();
+    return { notified };
+  }
+
+  /** Send the resume note to every chat this pause cut off; returns who got one. */
+  private async brief(state: PauseState, scope: PauseScope): Promise<string[]> {
     const now = this.now();
     const notified: string[] = [];
     for (const chatId of state.interrupted) {
-      const text = pauseResumeNote(state, chatId, now);
+      const text = pauseResumeNote(state, chatId, now, scope);
       try {
         // A `brief`, not bare text: nobody typed this, and rendered flat it
         // would sit in the human's speech bubble as though they wrote it.
@@ -129,13 +211,21 @@ export class PauseService {
         console.error(`[Dispatch] resume note to ${chatId} failed:`, err);
       }
     }
-    this.deps.broker.resumeAll(notified);
-    await this.persist(null);
-    return { notified };
+    return notified;
   }
 
-  private async persist(state: PauseState | null): Promise<void> {
-    await writeJsonAtomic(this.deps.file, state).catch((err: unknown) => {
+  /**
+   * Write the WHOLE picture every time — global and every project. Two pauses
+   * share one file, and writing only the half that changed would let a
+   * project pause's persist erase a global pause armed a moment earlier.
+   */
+  private async persist(): Promise<void> {
+    const file: PauseFile = {
+      global: this.deps.broker.pause ?? null,
+      projects: this.deps.broker.projectPauseStates,
+      chats: this.deps.broker.chatPauseStates,
+    };
+    await writeJsonAtomic(this.deps.file, file).catch((err: unknown) => {
       console.error("[Dispatch] failed to persist pause state:", err);
     });
   }

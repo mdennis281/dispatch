@@ -3,6 +3,7 @@ import { Pause, Play, Skull, ArrowRight, Check, ChevronRight } from "lucide-reac
 import { QUEUE_TIER_LABELS, type SchedulerSnapshot } from "@dispatch/shared";
 import { Popover } from "../ui/Popover.js";
 import { IconButton } from "../ui/IconButton.js";
+import { Button } from "../ui/Button.js";
 import { RowButton } from "../ui/RowButton.js";
 import { Chip } from "../ui/Chip.js";
 import { Tooltip } from "../ui/Tooltip.js";
@@ -114,6 +115,7 @@ export function PausePopover({ compact }: { compact?: boolean }) {
   const chatsById = useChats((s) => s.byId);
   const processes = useChatProcesses((s) => s.byChat);
   const refreshProcesses = useChatProcesses((s) => s.refresh);
+  const projects = useProjects((s) => s.projects);
   const [confirmKill, setConfirmKill] = useState(false);
   const paused = snapshot?.paused ?? null;
 
@@ -148,6 +150,16 @@ export function PausePopover({ compact }: { compact?: boolean }) {
   const procChats = mine.length;
   const killOff = !paused || procTotal === 0 || busy !== null;
   const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+  // Only projects this client knows: a pause for a since-deleted project would
+  // otherwise be counted with no name to show for it.
+  const pausedProjects = projects.filter((p) => snapshot.projectPauses?.[p.id]);
+  const pausedChats = Object.keys(snapshot.chatPauses ?? {}).filter((id) => id in chatsById);
+  const scopedSummary = [
+    pausedProjects.length > 0 ? plural(pausedProjects.length, "project") : null,
+    pausedChats.length > 0 ? plural(pausedChats.length, "chat") : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
   return (
     <Popover
@@ -292,6 +304,35 @@ export function PausePopover({ compact }: { compact?: boolean }) {
               </IconButton>
             </div>
 
+            {/* Project and chat pauses are toggled one at a time — from the
+                project switcher and a chat's ⋯ menu. This is the one place that
+                lifts them all at once. It never touches the global pause above;
+                that has its own Resume. */}
+            {scopedSummary && (
+              <div className="flex items-center gap-2 py-1.5 pl-3 pr-1.5 cm-hairline-b">
+                <Tooltip
+                  label={[
+                    ...pausedProjects.map((p) => p.name),
+                    ...pausedChats.map((id) => chatsById[id]?.title || "Untitled chat"),
+                  ].join(", ")}
+                >
+                  <span className="flex min-w-0 flex-1 items-center gap-1.5 text-xs text-muted">
+                    <Pause className="size-3.5 shrink-0 text-warn" />
+                    <span className="truncate">{scopedSummary} paused</span>
+                  </span>
+                </Tooltip>
+                <Button
+                  size="sm"
+                  variant="subtle"
+                  disabled={busy !== null}
+                  leftIcon={<Play className="text-accent-hi" />}
+                  onClick={() => void useScheduler.getState().resumeAllScoped()}
+                >
+                  {pausedChats.length === 0 ? "Resume all projects" : "Resume all"}
+                </Button>
+              </div>
+            )}
+
             <div className="max-h-[340px] cm-scroll overflow-y-auto px-1.5 py-1">
               <Section label="Running" count={snapshot.running.length}>
                 {snapshot.running.map((r) => (
@@ -342,7 +383,11 @@ export function PausePopover({ compact }: { compact?: boolean }) {
                         ? paused.interrupted.includes(q.chatId)
                           ? "interrupted — resumes first"
                           : "held by pause"
-                        : QUEUE_TIER_LABELS[q.tier]
+                        : snapshot.projectPauses?.[chatsById[q.chatId]?.projectId ?? ""]
+                          ? "held — project paused"
+                          : snapshot.chatPauses?.[q.chatId]
+                            ? "held — chat paused"
+                            : QUEUE_TIER_LABELS[q.tier]
                     }
                   />
                 ))}
