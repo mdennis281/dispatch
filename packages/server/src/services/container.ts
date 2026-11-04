@@ -31,6 +31,8 @@ import {
   type PrSnapshot,
   expandSecretsOnly,
   realProjects,
+  composeMessageText,
+  SCHEDULE_RUN_PURPOSE,
 } from "@dispatch/shared";
 import { launchAgentTask } from "./agent-tasks.js";
 import { SecretsService } from "./secrets.js";
@@ -76,6 +78,7 @@ import { GitHubService } from "./github.js";
 import { CiService } from "./ci.js";
 import { IssueService } from "./issues/service.js";
 import { IssueWatcher } from "./issue-watcher.js";
+import { ScheduleRunner, scheduleRunParts, scheduleRunTitle } from "./schedule-runner.js";
 import { Notifier } from "./notifier.js";
 import { WebhookService } from "./webhooks.js";
 import { EventFeedService } from "./event-feed.js";
@@ -178,6 +181,7 @@ export interface ServiceOverrides {
   trunkSync?: TrunkSyncService;
   prReviewWatcher?: PrReviewWatcher;
   issueWatcher?: IssueWatcher;
+  scheduleRunner?: ScheduleRunner;
   prRegistry?: PrRegistry;
   chatMessenger?: ChatMessenger;
   chatCompletionNotices?: ChatCompletionNotices;
@@ -302,6 +306,8 @@ export interface Services extends ServiceBase {
   prReviewWatcher: PrReviewWatcher;
   /** Polls enrolled projects' trackers and starts a chat per batch of new issues. */
   issueWatcher: IssueWatcher;
+  /** Fires each project's `.dispatch/schedules/` as a fresh chat on its cron. */
+  scheduleRunner: ScheduleRunner;
   /** The tracked-PR catalog — the Workspace view's third registry. */
   prRegistry: PrRegistry;
   /** Start background wiring (attention, notifier, auto-checkpoint). Bounded. */
@@ -1092,6 +1098,43 @@ export function createServices(
         return out ? { chatId: out.chat.id } : null;
       },
     });
+  const scheduleRunner =
+    overrides.scheduleRunner ??
+    new ScheduleRunner({
+      store,
+      schedulesFor: (projectId) => projectConfig.getSchedules(projectId),
+      // Same line as the issue watcher, for the same reason: stable and dev
+      // load the same `.dispatch/schedules/` but keep separate run state, so a
+      // dev checkout firing too would run every schedule twice. The env var is
+      // the escape hatch for exercising the timer from a checkout on purpose.
+      active: () => {
+        const forced = process.env.DISPATCH_SCHEDULES;
+        if (forced === "1" || forced === "true") return true;
+        if (forced === "0" || forced === "false") return false;
+        return release.supported;
+      },
+      spawn: async (input) => {
+        const { schedule } = input;
+        const parts = scheduleRunParts(input);
+        // Pins only what the schedule actually names — anything passed to
+        // createChat is frozen onto the chat and beats the project defaults
+        // (see CreateChatInput), so an unset model must stay unset here.
+        const chat = await createChat(services, {
+          projectId: input.projectId,
+          title: scheduleRunTitle(schedule, Date.now()),
+          personaId: schedule.personaId,
+          model: schedule.model,
+          effort: schedule.effort,
+          harness: schedule.harness,
+          modeId: schedule.modeId,
+          purpose: { kind: SCHEDULE_RUN_PURPOSE, label: `Scheduled: ${schedule.name}` },
+          scheduleId: schedule.id,
+        });
+        await ensureSession(services, chat.id);
+        await services.broker.sendMessage(chat.id, composeMessageText(parts), { parts });
+        return { chatId: chat.id };
+      },
+    });
   // `create_pr` pre-seeds the watcher so the first sweep after a PR opens can't
   // badge the chat for activity that predates it.
   // Fire-and-forget: arming now reads GitHub, and `create_pr` must not wait on
@@ -1587,6 +1630,7 @@ export function createServices(
     // doesn't require an agent to keep asking — and keeps the catalog current.
     safeStart("prReviewWatcher", () => prReviewWatcher.start());
     safeStart("issueWatcher", () => issueWatcher.start());
+    safeStart("scheduleRunner", () => scheduleRunner.start());
 
     // The runner reconcile BEFORE plugin activation. A plugin's `autostart`
     // asks the runner whether its process is already running, and after an
@@ -1685,6 +1729,7 @@ export function createServices(
     trunkSync,
     prReviewWatcher,
     issueWatcher,
+    scheduleRunner,
     prRegistry,
     restartResume,
     pause,
@@ -2026,6 +2071,8 @@ export function createServices(
       await prReviewWatcher.drain().catch(() => {});
       issueWatcher.dispose();
       await issueWatcher.drain().catch(() => {});
+      scheduleRunner.dispose();
+      await scheduleRunner.drain().catch(() => {});
       limitSampler.stop();
       release.stop();
       // An auto-update mid-copy finishes rather than leaving a half-renamed slot.

@@ -32,7 +32,7 @@ const DAY = 86_400_000;
 /** Write a chat record + its transcript rows. */
 async function seedChat(
   id: string,
-  chat: Partial<{ title: string; projectId: string; updatedAt: number; archived: boolean; status: string; prs: unknown[] }>,
+  chat: Partial<{ title: string; projectId: string; updatedAt: number; archived: boolean; status: string; prs: unknown[]; scheduleId: string }>,
   rows: RawRow[],
 ): Promise<void> {
   const dir = join(root, "chats", id);
@@ -49,6 +49,7 @@ async function seedChat(
       prs: chat.prs ?? [],
       archived: chat.archived,
       status: chat.status,
+      scheduleId: chat.scheduleId,
       createdAt: T0,
       updatedAt: chat.updatedAt ?? T0,
     }),
@@ -161,6 +162,17 @@ describe("findChats", () => {
 
     const before = await service().findChats({ before: T0 + DAY });
     expect(before.chats.map((c) => c.id)).toEqual(["chat-old"]);
+  });
+
+  it("filters to one schedule's runs — how a scheduled run finds its predecessors", async () => {
+    await seedChat("run-1", { title: "audit run", scheduleId: "audit", updatedAt: T0 + 3 * DAY }, [
+      { id: "s1", ts: T0 + 3 * DAY, kind: "assistant", text: "found two stale lockfile entries" },
+    ]);
+    await seedChat("run-other", { title: "other run", scheduleId: "digest", updatedAt: T0 + 4 * DAY }, []);
+    const runs = await service().findChats({ schedule: "audit" });
+    expect(runs.chats.map((c) => c.id)).toEqual(["run-1"]);
+    const searched = await service().findChats({ schedule: "audit", query: "lockfile" });
+    expect(searched.chats.map((c) => c.id)).toEqual(["run-1"]);
   });
 
   it("filters to chats blocked on the human, and flags them in the listing", async () => {

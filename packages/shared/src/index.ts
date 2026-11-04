@@ -20,6 +20,7 @@ export * from "./ci.js";
 export * from "./project-config.js";
 export * from "./manifest.js";
 export * from "./agent-tasks.js";
+export * from "./schedules.js";
 export * from "./workflow.js";
 export * from "./reviewer.js";
 export * from "./env-expand.js";

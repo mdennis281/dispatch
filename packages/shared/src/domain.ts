@@ -933,6 +933,13 @@ export const ChatSchema = z.object({
    */
   reviewOf: z.string().optional(),
   /**
+   * The schedule that launched this chat (its id within the chat's project).
+   * The durable edge "previous runs" is computed from — `purpose.label` names
+   * the schedule too, but that is display text and changes on a rename, while
+   * the id is the file stem and does not.
+   */
+  scheduleId: z.string().optional(),
+  /**
    * The chat that spawned this one, when an agent created it via
    * `mcp__dispatch-chat__spawn_chat`.
    *

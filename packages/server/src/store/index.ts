@@ -98,6 +98,8 @@ import {
   type IssueClaim,
   IssueWatchSchema,
   type IssueWatch,
+  ScheduleStateSchema,
+  type ScheduleState,
   McpPortLeaseSchema,
   type McpPortLease,
   WebhookSubscriptionSchema,
@@ -2461,6 +2463,38 @@ export class Store {
 
   async deleteIssueWatch(projectId: string): Promise<void> {
     this.db.prepare("DELETE FROM issue_watch WHERE project_id = ?").run(projectId);
+  }
+
+  /* ---------------------------------------------------- schedule state */
+
+  async listScheduleStates(projectId: string): Promise<ScheduleState[]> {
+    return this.rows("SELECT body FROM schedule_state WHERE project_id = ?", projectId)
+      .map((r) => decodeRow(ScheduleStateSchema, r.body))
+      .filter((s): s is ScheduleState => s !== null);
+  }
+
+  async getScheduleState(projectId: string, scheduleId: string): Promise<ScheduleState | null> {
+    const row = this.db
+      .prepare("SELECT body FROM schedule_state WHERE project_id = ? AND schedule_id = ?")
+      .get(projectId, scheduleId);
+    return row ? decodeRow(ScheduleStateSchema, row.body) : null;
+  }
+
+  async saveScheduleState(state: ScheduleState): Promise<ScheduleState> {
+    const parsed = ScheduleStateSchema.parse(state);
+    this.db
+      .prepare(
+        "INSERT INTO schedule_state (project_id, schedule_id, body) VALUES (?, ?, ?)" +
+          " ON CONFLICT(project_id, schedule_id) DO UPDATE SET body = excluded.body",
+      )
+      .run(parsed.projectId, parsed.scheduleId, JSON.stringify(parsed));
+    return parsed;
+  }
+
+  async deleteScheduleState(projectId: string, scheduleId: string): Promise<void> {
+    this.db
+      .prepare("DELETE FROM schedule_state WHERE project_id = ? AND schedule_id = ?")
+      .run(projectId, scheduleId);
   }
 
   /* ------------------------------------------------------- checkpoints */

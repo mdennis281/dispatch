@@ -102,6 +102,16 @@ export function sectionItems(
         rel: "project.yaml",
         deletable: false,
       }));
+    case "schedules":
+      // Not deletable from the generic list: the pane's own delete also drops
+      // this instance's run state, which removing the file alone would orphan.
+      return (config.schedules ?? []).map((s) => ({
+        key: s.id,
+        title: s.name,
+        sub: s.cron,
+        rel: `schedules/${s.file}`,
+        deletable: false,
+      }));
     case "memory":
       return memories.map((m) => ({ key: m.name, title: m.name, sub: m.description }));
     default:

@@ -92,6 +92,8 @@ export interface CreateChatInput {
   startedBy?: Chat["startedBy"];
   /** The PR this chat reviews, `owner/repo#number`. See `Chat.reviewOf`. */
   reviewOf?: string;
+  /** The schedule that launched it. See `Chat.scheduleId`. */
+  scheduleId?: string;
   /** The chat that spawned this one, so the sidebar can file it. See `Chat.parentChatId`. */
   parentChatId?: string;
   /**
@@ -209,6 +211,7 @@ export async function createChat(
     ...(input.purpose ? { purpose: input.purpose } : {}),
     ...(input.startedBy ? { startedBy: input.startedBy } : {}),
     ...(input.reviewOf ? { reviewOf: input.reviewOf } : {}),
+    ...(input.scheduleId ? { scheduleId: input.scheduleId } : {}),
     ...(input.parentChatId ? { parentChatId: input.parentChatId } : {}),
     createdAt: now,
     updatedAt: now,
