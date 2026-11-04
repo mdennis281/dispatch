@@ -1722,6 +1722,7 @@ export function createServices(
         .getSettings()
         .then((s) => {
           broker.setCap(s.maxActiveSessions);
+          broker.setReviewersSkipCap(s.reviewersSkipCap);
           broker.setIdleTimeout(s.idleSessionMinutes);
           // Same arrangement for the Attention Queue filter: the push service
           // holds it (its bus handler is synchronous), `PUT /api/settings` hands

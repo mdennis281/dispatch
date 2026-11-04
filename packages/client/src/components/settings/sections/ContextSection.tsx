@@ -165,6 +165,19 @@ export function ContextSection({ draft, patch, serverDefaults, catalogs }: AppPa
           never interrupts a chat that's already running, and a blocked chat resumes the
           moment it's unblocked even if that briefly puts you over.
         </p>
+        <div className="flex items-center justify-between gap-3 pt-1">
+          <span className="text-xs font-medium text-secondary">Reviewers skip the cap</span>
+          <Switch
+            checked={draft.reviewersSkipCap === true}
+            onChange={(v) => patch({ reviewersSkipCap: v || undefined })}
+            label={draft.reviewersSkipCap ? "On" : "Off"}
+          />
+        </div>
+        <p className="text-xs leading-snug text-faint">
+          When on, PR reviewer chats don&apos;t count against the cap and never queue — a PR
+          can&apos;t land until its review runs, so a busy install doesn&apos;t make it wait.
+          They still show in the scheduler, marked as outside the cap.
+        </p>
       </div>
 
       <div className="space-y-2 border-b border-line-soft pb-3">

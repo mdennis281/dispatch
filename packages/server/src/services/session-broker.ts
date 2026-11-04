@@ -2428,6 +2428,8 @@ export class SessionBroker {
    *  setting you have to restart the server to apply is a restart, not a
    *  setting. */
   private cap: number;
+  /** `AppSettings.reviewersSkipCap` — see {@link uncapped}. */
+  private reviewersSkipCap = false;
   /** True while `pump` is draining — see the guard there. */
   private pumping = false;
   /** Boot value for the idle window (env/default), the fallback for a cleared setting. */
@@ -4443,6 +4445,18 @@ export class SessionBroker {
     if (raised) this.pump();
   }
 
+  /**
+   * Apply `AppSettings.reviewersSkipCap`. Turning it on pumps for the same
+   * reason raising the cap does: reviewers may be parked RIGHT NOW.
+   */
+  setReviewersSkipCap(on: boolean | undefined): void {
+    const next = on === true;
+    if (next === this.reviewersSkipCap) return;
+    this.reviewersSkipCap = next;
+    if (next) this.pump();
+    this.publishScheduler();
+  }
+
   /** The cap in force — what a `queued` chat is queued behind. */
   get maxActive(): number {
     return this.cap;
@@ -4747,7 +4761,12 @@ export class SessionBroker {
   schedulerSnapshot(): SchedulerSnapshot {
     const running: SchedulerSnapshot["running"] = [];
     for (const s of this.sessions.values()) {
-      if (this.isTurnLive(s)) running.push({ chatId: s.chatId, status: s.status, occupied: this.holdsSlot(s) });
+      if (this.isTurnLive(s)) running.push({
+          chatId: s.chatId,
+          status: s.status,
+          occupied: this.holdsSlot(s),
+          uncapped: this.uncapped(s),
+        });
     }
     return {
       paused: this.pauseState ?? null,
@@ -4892,16 +4911,19 @@ export class SessionBroker {
   private refreshCap(): void {
     void this.store
       .getSettings()
-      .then((s) => this.setCap(s.maxActiveSessions))
+      .then((s) => {
+        this.setCap(s.maxActiveSessions);
+        this.setReviewersSkipCap(s.reviewersSkipCap);
+      })
       .catch(() => {
         /* unreadable config → keep the cap in force; never fall back silently */
       });
   }
 
-  /** Count of sessions holding an active slot — see {@link holdsSlot}. */
+  /** Count of sessions holding one of the cap's slots — see {@link holdsSlot}, {@link uncapped}. */
   activeCount(): number {
     let n = 0;
-    for (const s of this.sessions.values()) if (this.holdsSlot(s)) n += 1;
+    for (const s of this.sessions.values()) if (this.holdsSlot(s) && !this.uncapped(s)) n += 1;
     return n;
   }
 
@@ -4988,6 +5010,21 @@ export class SessionBroker {
     return this.isTurnLive(s) && (s.activity.occupied || s.slotReserved === true);
   }
 
+  /**
+   * Is this chat outside the cap altogether? True for a PR reviewer (it has
+   * `reviewOf`) while `AppSettings.reviewersSkipCap` is on.
+   *
+   * THE WHOLE RULE, in three places and no more: it is not counted
+   * ({@link activeCount}), it is always admissible ({@link admission}), and it
+   * does not wait its turn behind parked chats ({@link schedule}). Everything
+   * else — tiers, loans, reservations — is about sharing slots, and a chat that
+   * doesn't use one has nothing to share. `holdsSlot` itself is untouched: it
+   * still answers "is this chat busy", which the resume path relies on.
+   */
+  private uncapped(s: LiveSession | undefined): boolean {
+    return this.reviewersSkipCap && s?.reviewOf !== undefined;
+  }
+
   private schedule(session: LiveSession): void {
     // Cheap and off the critical path — see refreshCap. A cap raised by the OTHER
     // instance reaches this one here rather than only at its next restart.
@@ -5013,7 +5050,10 @@ export class SessionBroker {
     // outrank this start (a resume, a chat somebody is waiting on), and taking
     // the slot past it would be the FIFO the tiers replace.
     const admission = this.pauseFor(session) ? undefined : this.admission(session.chatId);
-    if (admission && !this.outranked({ chatId: session.chatId, kind: "start", human: false })) {
+    if (
+      admission &&
+      (this.uncapped(session) || !this.outranked({ chatId: session.chatId, kind: "start", human: false }))
+    ) {
       this.startTurn(session, admission === "lent");
     } else {
       this.enqueueStart(session);
@@ -5455,6 +5495,7 @@ export class SessionBroker {
    * `undefined` when it cannot be. A free slot is taken before a loan is.
    */
   private admission(chatId: string): "slot" | "lent" | undefined {
+    if (this.uncapped(this.sessions.get(chatId))) return "slot";
     const net = this.activeCount() - this.lentCount();
     if (net + 1 <= this.cap) return "slot";
     return this.freeSponsorOf(chatId) ? "lent" : undefined;
@@ -5493,7 +5534,7 @@ export class SessionBroker {
    */
   private lentCount(): number {
     let n = 0;
-    for (const s of this.sessions.values()) if (s.onLentSlot && this.holdsSlot(s)) n += 1;
+    for (const s of this.sessions.values()) if (s.onLentSlot && this.holdsSlot(s) && !this.uncapped(s)) n += 1;
     return n;
   }
 

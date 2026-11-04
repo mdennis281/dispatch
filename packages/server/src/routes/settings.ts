@@ -89,6 +89,7 @@ export function registerSettingsRoutes(app: FastifyInstance): void {
     // saved object rather than `parsed.data` so it can never disagree with what
     // was written (the preserved-field spread above sits between the two).
     broker.setCap(saved.maxActiveSessions);
+    broker.setReviewersSkipCap(saved.reviewersSkipCap);
     // Same reason: the idle window lives on the live broker's sweep timer.
     broker.setIdleTimeout(saved.idleSessionMinutes);
     // The Attention Queue filter has two live readers that are NOT this request:
