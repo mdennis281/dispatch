@@ -169,10 +169,11 @@ jobs:
           #   echo 'SMOKE_EXPECT_UNRELEASED=--expect-unreleased "<check name>"' >> "$GITHUB_ENV"
           # and delete it once the fix is in the channel head (the run says so).
           #
-          # #428 — Claude ships as a built-in plugin, not compiled into the
-          # server. A payload from before it has no packages/plugins/claude and
-          # no plugin to switch off.
-          echo 'SMOKE_EXPECT_UNRELEASED=--expect-unreleased "payload carries everything the launcher and installer run" --expect-unreleased "native dependencies resolved for this OS/arch" --expect-unreleased "provider plugins as shipped: built in, enabled, active" --expect-unreleased "Claude plugin off: no Claude provider, and its chat is refused rather than moved" --expect-unreleased "a restart with the Claude plugin off still has no Claude"' >> "$GITHUB_ENV"
+          # A FEATURE (not a fix) that the stable head may lag behind for weeks
+          # belongs behind a version floor in the script instead — see
+          # PROVIDER_PLUGINS_SINCE — because this list never reaches the
+          # scheduled run, which then stays red until stable catches up (#488).
+          true
 
       - name: Install, set up, exercise, update, restart, reinstall, stop
         shell: bash

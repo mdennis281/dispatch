@@ -361,6 +361,17 @@ const STAMP = /^v\d{4}\.\d{2}\.\d{2}\.\d{5}$/;
 const OLDEST_INSTALLABLE = "v2026.10.13.01375";
 
 /**
+ * The first release built with #428 — providers as built-in plugins under
+ * packages/plugins/, the /api/plugins routes, the Agent SDK owned by the
+ * Claude plugin. A head older than this is not broken, it is just from before
+ * there was anything to check. The checks that need it are skipped by VERSION
+ * rather than excused with --expect-unreleased: that flag is PR-only, so the
+ * strict scheduled run kept failing its stable legs for as long as stable sat
+ * on a pre-#428 release (#488), on a "regression" no user could ever hit.
+ */
+const PROVIDER_PLUGINS_SINCE = "v2026.10.27.15476";
+
+/**
  * The newest release on `channel` that is OLDER than `head` — what the first
  * install uses so the second one is a real update. `null` when the channel has
  * nothing older that still installs (a brand-new stable channel, or one whose
@@ -450,6 +461,12 @@ async function main() {
     return head;
   });
   const headVersion = head.replace(/^v/, "");
+  // Tags are fixed-width (vYYYY.MM.DD.NNNNN), so they compare as strings —
+  // the same comparison previousRelease() already relies on.
+  const hasProviderPlugins = head >= PROVIDER_PLUGINS_SINCE;
+  /** A check that only means something once the head carries #428. */
+  const pluginCheck = (name, fn) =>
+    hasProviderPlugins ? check(name, fn) : (skip(name, `${head} predates provider plugins (${PROVIDER_PLUGINS_SINCE})`), true);
 
   /* ---- 2. first install, through the bootstrap script ---- */
 
@@ -597,7 +614,9 @@ async function main() {
       "tools/install.mjs", "install.sh", "install.ps1",
       // No provider is compiled into the server (#428): a payload missing one
       // of these has no such provider at all.
-      ...SHIPPED_PROVIDERS.flatMap((id) => [`packages/plugins/${id}/plugin.yaml`, `packages/plugins/${id}/server/main.js`]),
+      ...(hasProviderPlugins
+        ? SHIPPED_PROVIDERS.flatMap((id) => [`packages/plugins/${id}/plugin.yaml`, `packages/plugins/${id}/server/main.js`])
+        : []),
     ];
     const missing = required.filter((p) => !existsSync(join(app, p)));
     assert(missing.length === 0, `missing: ${missing.join(", ")}`);
@@ -615,9 +634,9 @@ async function main() {
     // server resolving it would mean a Claude-free install still carried it.
     const resolveSdk = (dir) =>
       runQuiet(process.execPath, ["-e", "import.meta.resolve('@anthropic-ai/claude-agent-sdk')", "--input-type=module"], { cwd: join(app, dir) });
-    const fromPlugin = resolveSdk("packages/plugins/claude");
-    assert(fromPlugin.code === 0, `the Claude plugin cannot resolve the Agent SDK: ${fromPlugin.out.slice(0, 300)}`);
-    if (existsSync(join(app, "packages/plugins/claude"))) {
+    if (hasProviderPlugins) {
+      const fromPlugin = resolveSdk("packages/plugins/claude");
+      assert(fromPlugin.code === 0, `the Claude plugin cannot resolve the Agent SDK: ${fromPlugin.out.slice(0, 300)}`);
       const fromServer = resolveSdk("packages/server");
       assert(fromServer.code !== 0, "packages/server resolves @anthropic-ai/claude-agent-sdk — the server must not depend on it");
     }
@@ -700,7 +719,14 @@ async function main() {
     assert(claude.path && existsSync(claude.path), `claude binary ${claude.path} does not exist`);
     assert(claude.login.checked === true, `claude login not checked: ${claude.login.error}`);
     // A runner has no Claude login — the probe must SAY so rather than pass.
-    assert(claude.login.loggedIn === false, "a CI runner reported a Claude login");
+    // Except under DISPATCH_FAKE_SDK, which this smoke sets for the chat
+    // round-trip: since #440 a logged-out provider is unavailable, so the fake
+    // harness answers "logged in" by design and never runs `claude auth
+    // status` (packages/plugins/claude/src/main.ts). Accept exactly THAT
+    // answer — a real login reported on a runner still fails.
+    const fakeLogin = claude.login.method === "fake SDK";
+    assert(claude.login.loggedIn === false || fakeLogin, `a CI runner reported a Claude login: ${JSON.stringify(claude.login)}`);
+    if (fakeLogin) note("claude login answered by the fake SDK — the real `claude auth status` probe is not exercised (codex's still is)");
     const codex = r.json.find((h) => h.kind === "codex");
     if (args.expectInstalledClis) {
       assert(claude.source === "installed", `the npm-installed claude should win over the bundled one, got ${claude.source}`);
@@ -709,7 +735,7 @@ async function main() {
     }
     return `claude ${claude.version} (${claude.source}) login=${claude.login.loggedIn}; codex available=${codex?.available}`;
   });
-  await check("provider plugins as shipped: built in, enabled, active", async () => {
+  await pluginCheck("provider plugins as shipped: built in, enabled, active", async () => {
     const list = (await get("/api/plugins", { expect: 200 })).json;
     const rows = Array.isArray(list) ? list : list.plugins ?? [];
     const bad = SHIPPED_PROVIDERS.map((id) => [id, rows.find((p) => p.id === id)]).filter(
@@ -852,7 +878,7 @@ async function main() {
   // live, and its chats show "provider unavailable" — they are refused, never
   // moved to another provider. It stays off across the restart below, and the
   // reinstall at the end is the restart that brings it back.
-  await check("Claude plugin off: no Claude provider, and its chat is refused rather than moved", async () => {
+  await pluginCheck("Claude plugin off: no Claude provider, and its chat is refused rather than moved", async () => {
     await put("/api/plugins/claude/enabled", { enabled: false }, { expect: 200 });
     const list = (await get("/api/harnesses", { expect: 200 })).json;
     assert(!list.some((h) => h.kind === "claude"), `claude still listed: ${list.map((h) => h.kind).join(", ")}`);
@@ -886,7 +912,7 @@ async function main() {
     assert(projects.length === 1 && projects[0].id === projectId, `projects: ${projects.length}`);
     assert(chats.some((c) => c.id === chatId), "the chat is gone");
   });
-  await check("a restart with the Claude plugin off still has no Claude", async () => {
+  await pluginCheck("a restart with the Claude plugin off still has no Claude", async () => {
     const list = (await get("/api/harnesses", { expect: 200 })).json;
     assert(!list.some((h) => h.kind === "claude"), `claude came back: ${list.map((h) => h.kind).join(", ")}`);
     // Re-enabling takes a restart; the reinstall below is that restart.
