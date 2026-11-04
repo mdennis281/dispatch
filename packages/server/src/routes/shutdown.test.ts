@@ -8,10 +8,12 @@
  *
  * `installShutdown` is given a fake `exit` so the test process survives.
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, onTestFinished, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
 import type { FastifyInstance } from "fastify";
 import { buildApp } from "../app.js";
 import { loadConfig } from "../config.js";
@@ -67,6 +69,47 @@ describe("POST /api/shutdown", () => {
     await closer();
 
     expect(seen).toHaveLength(1);
+  });
+
+  // Fastify's own `server.close()` runs as an onClose hook AHEAD of ours, and by
+  // default it waits out every in-flight request. A Codex chat parked in
+  // `watch_pr` on the manager bridge never finishes, so `services.dispose()`
+  // never ran and the grace timer killed the process with no resume tickets.
+  it("an in-flight request does not hold teardown hostage", async () => {
+    const own = await mkdtemp(join(tmpdir(), "cm-shutdown-hang-"));
+    const store = new Store(own);
+    await store.init();
+    const hang = await buildApp({ config: { ...loadConfig(), dataDir: own }, store, bus });
+    onTestFinished(async () => {
+      await hang.close().catch(() => {});
+      await rm(own, { recursive: true, force: true });
+    });
+    hang.get("/__hang", (_req, reply) => {
+      reply.hijack();
+      reply.raw.writeHead(200, { "content-type": "text/event-stream" });
+      reply.raw.write("data: open\n\n");
+    });
+    const disposed = vi.spyOn(hang.services, "dispose");
+    // Before `listen`, as in start.ts: Fastify refuses decorators after start.
+    let exit!: (code: number) => void;
+    const exited = new Promise<number>((resolve) => (exit = resolve));
+    const closer = installShutdown(hang, { exit, graceMs: 5_000 });
+    await hang.listen({ port: 0, host: "127.0.0.1" });
+    const { port } = hang.server.address() as AddressInfo;
+    await new Promise<void>((resolve, reject) => {
+      http
+        .get({ host: "127.0.0.1", port, path: "/__hang" }, (res) => {
+          res.on("error", () => {});
+          resolve();
+        })
+        .on("error", reject);
+    });
+
+    void closer();
+
+    // A clean exit, not the grace timer's `exit(1)`.
+    expect(await exited).toBe(0);
+    expect(disposed).toHaveBeenCalled();
   });
 
   it("is idempotent — a second stop rides the first teardown", async () => {

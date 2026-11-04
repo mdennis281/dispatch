@@ -145,6 +145,76 @@ describe("RestartResumeService", () => {
     expect((await store.getChat("a"))?.interruption).toBeUndefined();
   });
 
+  // Shutdown captures twice: provisionally first, so a teardown killed by the
+  // grace timer still leaves tickets, then authoritatively before the broker
+  // goes. The second one is the truth for every chat the first one touched.
+  it("a later capture retracts a ticket for a chat that came to rest in between", async () => {
+    await store.saveChat(chat("a"));
+    await store.saveChat(chat("b"));
+    const svc = makeService();
+    await svc.capture([
+      { chatId: "a", status: "running", pending: [] },
+      { chatId: "b", status: "running", pending: [] },
+    ]);
+
+    clock = NOW + 5_000;
+    // `a` finished its turn during the drains; `b` is still going, and has
+    // picked up a queued message since.
+    await svc.capture([{ chatId: "b", status: "running", pending: [{ text: "and then" }] }]);
+
+    expect((await store.getChat("a"))?.interruption).toMatchObject({
+      at: NOW,
+      settledAt: NOW + 5_000,
+      settledAs: "skipped",
+    });
+    expect((await store.getChat("b"))?.interruption).toMatchObject({
+      at: NOW + 5_000,
+      pending: [{ text: "and then" }],
+    });
+    expect((await store.getChat("b"))?.interruption?.settledAt).toBeUndefined();
+
+    // And the boot pass resumes only `b`.
+    const boot = makeService();
+    boot.restore();
+    await tick(boot);
+    expect(sent.map((s) => s.chatId)).toEqual(["b"]);
+  });
+
+  it("a later capture keeps the earlier ticket of a live chat whose re-write failed", async () => {
+    await store.saveChat(chat("a"));
+    const svc = makeService();
+    await svc.capture([{ chatId: "a", status: "running", pending: [] }]);
+
+    // A busy database on the authoritative pass: `a` is still live, its
+    // re-write throws, and the provisional ticket is all it has left.
+    const realPatch = store.patchChat.bind(store);
+    let failed = false;
+    store.patchChat = (async (id: string, patch: Partial<Chat>) => {
+      if (!failed) {
+        failed = true;
+        throw new Error("SQLITE_BUSY");
+      }
+      return realPatch(id, patch);
+    }) as typeof store.patchChat;
+    clock = NOW + 5_000;
+    await svc.capture([{ chatId: "a", status: "running", pending: [] }]);
+
+    const rec = (await store.getChat("a"))?.interruption;
+    expect(rec?.at).toBe(NOW);
+    expect(rec?.settledAt).toBeUndefined();
+  });
+
+  it("a later capture leaves alone a record it did not write", async () => {
+    // Settled by an earlier boot. This process never captured `a`, so an empty
+    // snapshot is no reason to touch it.
+    const old = { at: NOW - 60_000, status: "running" as const, pending: [], settledAt: NOW - 50_000, settledAs: "resumed" as const };
+    await store.saveChat(chat("a", { interruption: old }));
+    const svc = makeService();
+    await svc.capture([]);
+    await svc.capture([]);
+    expect((await store.getChat("a"))?.interruption).toEqual(old);
+  });
+
   it("records nothing on a source checkout, where there is no sha either side", async () => {
     sha = undefined;
     await store.saveChat(chat("a"));

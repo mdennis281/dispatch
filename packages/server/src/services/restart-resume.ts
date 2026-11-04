@@ -178,6 +178,11 @@ export class RestartResumeService {
   private disposed = false;
   /** Set by {@link skipNextCapture}; see there. */
   private captureSkipped = false;
+  /**
+   * chatId -> the `at` of the ticket this process wrote for it. Lets a later
+   * capture retract an earlier one; see {@link capture}.
+   */
+  private readonly captured = new Map<string, number>();
 
   constructor(opts: RestartResumeOpts) {
     this.store = opts.store;
@@ -228,6 +233,14 @@ export class RestartResumeService {
    * Best-effort per chat. One unwritable record must not stop the other chats
    * getting theirs, and none of it may stop the shutdown — this runs inside the
    * 20s grace window that also has to tree-kill subApps and flush transcripts.
+   *
+   * CALLED TWICE per shutdown: once provisionally at the top of
+   * `services.dispose()`, so the tickets exist even if a slow drain gets the
+   * process killed, and once authoritatively just before `broker.dispose()`.
+   * The later call overwrites every chat it still sees live, and retracts any
+   * ticket an earlier call wrote for a chat that has since come to rest.
+   * Otherwise a chat whose turn ended naturally during the drains would be told
+   * on the next boot that a restart cut it short, and would set off again.
    */
   async capture(
     live: Array<{
@@ -240,9 +253,15 @@ export class RestartResumeService {
     const sha = safely(() => this.readSha());
     const at = this.now();
     let written = 0;
+    const earlier = new Map(this.captured);
     for (const entry of live) {
       const status = asInterruptedStatus(entry.status);
       if (!status) continue;
+      // Still live, so never retracted. Taken out here and not on a successful
+      // write: if this re-write fails (a busy database), the provisional ticket
+      // is the one it has, and retracting that would throw away exactly what the
+      // early capture exists to protect.
+      earlier.delete(entry.chatId);
       try {
         const chat = await this.store.getChat(entry.chatId);
         if (!chat || chat.archived) continue;
@@ -259,9 +278,28 @@ export class RestartResumeService {
         //
         // No bus publish: every client is being told the server is going away,
         // and a `chat-update` racing the socket close is noise at best.
-        if (await this.store.patchChat(entry.chatId, { interruption })) written += 1;
+        if (await this.store.patchChat(entry.chatId, { interruption })) {
+          written += 1;
+          this.captured.set(entry.chatId, at);
+        }
       } catch {
         /* one unwritable record must not cost the others theirs */
+      }
+    }
+    // Whatever is left in `earlier` is absent from `live`, i.e. it came to rest
+    // since that capture: its ticket
+    // is retracted, settled as `skipped` so the boot pass leaves it alone.
+    for (const [chatId, earlierAt] of earlier) {
+      try {
+        const record = (await this.store.getChat(chatId))?.interruption;
+        // Only OUR ticket, and only if nothing has spent it.
+        if (record?.at !== earlierAt || record.settledAt !== undefined) continue;
+        await this.store.patchChat(chatId, {
+          interruption: { ...record, settledAt: at, settledAs: "skipped" },
+        });
+        this.captured.delete(chatId);
+      } catch {
+        /* worst case is the old behaviour for this one chat: a spurious resume */
       }
     }
     return written;
