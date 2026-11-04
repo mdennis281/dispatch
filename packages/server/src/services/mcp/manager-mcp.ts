@@ -100,6 +100,7 @@ import {
   WorkflowMergeMethodSchema,
   describeExemptionScope,
   prReviewAgentView,
+  type PrReviewAgentView,
   MANAGER_TOOL_CATEGORY,
   managerServerName,
   isToolAllowed,
@@ -3211,6 +3212,142 @@ export function spentReviewRounds(
   return { round: v.round, maxRounds: v.maxRounds, posted: v.posted, inFlight };
 }
 
+/**
+ * Where Dispatch's own reviewer stands on a PR, as `watch_pr` reports it on
+ * EVERY return — not only when something has gone wrong.
+ *
+ * WHY. `watch_pr` used to speak about this reviewer only in the failure cases
+ * (stalled, spent, blocked). In the normal case — a round queued for the sweep,
+ * or a reviewer chat three minutes into the diff — a timeout said "no new
+ * activity" and green CI said "nothing to fix, merge it", so from the author's
+ * side a review in flight was indistinguishable from one never asked for. The
+ * observed result was agents calling `request_review` again and again on a
+ * round that was already running. This states the in-flight review so the
+ * agent can see it is coming; it deliberately does not FORBID re-requesting.
+ */
+export interface ReviewAgentStatus {
+  /** One human-readable sentence for the tool result. */
+  line: string;
+  /** True while a round is asked-for or running and expected to post. */
+  inProgress: boolean;
+  /** Machine-readable twin of {@link line}, for the result's JSON tail. */
+  json: {
+    phase: PrReviewAgentView["phase"];
+    round: number;
+    maxRounds?: number;
+    chatId?: string;
+    /** The reviewer chat's live broker status, when it has a session. */
+    chatStatus?: ChatStatus;
+    /** How long the current phase has lasted, in whole seconds. */
+    sinceSeconds?: number;
+  };
+}
+
+/** "45s", "6m", "1h12m" — coarse on purpose; the agent needs scale, not precision. */
+function ago(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}m`;
+}
+
+/**
+ * Reduce a PR row's reviewer state to {@link ReviewAgentStatus}, or null when
+ * the project has no Dispatch reviewer on this PR (say nothing — see
+ * `prReviewAgentView`).
+ */
+export function describeReviewAgent(
+  state: PrReviewAgentState | null,
+  opts: { statusOf: (chatId: string) => ChatStatus | undefined; now: number },
+): ReviewAgentStatus | null {
+  const v = prReviewAgentView(state ?? undefined);
+  if (!v) return null;
+  const since = v.at != null ? opts.now - v.at : undefined;
+  const of = v.maxRounds != null ? `${v.round} of ${v.maxRounds}` : `${v.round}`;
+  const live = v.chatId ? opts.statusOf(v.chatId) : undefined;
+  const chatRef = v.chatId ? ` (reviewer chat ${v.chatId})` : "";
+  const json: ReviewAgentStatus["json"] = {
+    phase: v.phase,
+    round: v.round,
+    ...(v.maxRounds != null ? { maxRounds: v.maxRounds } : {}),
+    ...(v.chatId ? { chatId: v.chatId } : {}),
+    ...(live ? { chatStatus: live } : {}),
+    ...(since != null ? { sinceSeconds: Math.round(since / 1000) } : {}),
+  };
+  const took = since != null ? ` ${ago(since)} ago` : "";
+  const forDur = since != null ? ` for ${ago(since)}` : "";
+
+  switch (v.phase) {
+    case "queued":
+      return {
+        inProgress: true,
+        json,
+        line:
+          `requested${took}, waiting for the review sweep (~every 90s) to start a reviewer ` +
+          "chat. The request is registered — watch_pr returns when the review posts.",
+      };
+    case "running": {
+      // The same ambiguity `spentReviewRounds` resolves: a claimed, unposted
+      // round reads identically whether its chat is mid-diff or dead. A live
+      // session is authoritative; without one, only the spawn window counts.
+      if (live === "queued") {
+        return {
+          inProgress: true,
+          json,
+          line:
+            `round ${of} claimed${took}; its reviewer chat is waiting for a free session ` +
+            `slot${chatRef}. watch_pr has bumped it ahead of unrelated work.`,
+        };
+      }
+      if (live !== undefined && !TERMINAL_STATES.has(live)) {
+        return {
+          inProgress: true,
+          json,
+          line: `round ${of} is being reviewed now${chatRef}, running${forDur}.`,
+        };
+      }
+      if (live === undefined && (since ?? Infinity) < REVIEW_ROUND_GRACE_MS) {
+        return {
+          inProgress: true,
+          json,
+          line: `round ${of} claimed${took}; its reviewer chat is starting${chatRef}.`,
+        };
+      }
+      return {
+        inProgress: false,
+        json,
+        line:
+          `round ${of} was claimed${took} but its reviewer chat ` +
+          (live ? `is ${live}` : "is not running") +
+          ` and nothing was posted${chatRef} — that round is not coming.`,
+      };
+    }
+    case "reviewed":
+    case "spent": {
+      const detail = [
+        v.postedEvent?.toLowerCase().replace(/_/g, " "),
+        v.findings != null ? `${v.findings} finding(s)` : undefined,
+      ]
+        .filter(Boolean)
+        .join(", ");
+      return {
+        inProgress: false,
+        json,
+        line:
+          `round ${of} posted${took}${detail ? ` (${detail})` : ""}` +
+          (v.phase === "spent" ? "; every round is used." : "."),
+      };
+    }
+    case "blocked":
+      return {
+        inProgress: false,
+        json,
+        line: `cannot run: ${v.problem ?? "unknown problem"}`,
+      };
+  }
+}
+
 /** One-line, length-bounded rendering of a review comment body for the summary. */
 function firstLine(body: string | undefined, max = 200): string {
   const line = (body ?? "").split("\n").find((l) => l.trim()) ?? "";
@@ -3773,6 +3910,21 @@ export function createManagerTools(ctx: ManagerMcpContext) {
             }) },
         );
       }
+      // Dispatch's own reviewer, stated on every non-terminal return. A quiet
+      // timeout or a green-CI return used to say nothing about it, so a round
+      // that was queued or mid-diff looked exactly like one never requested —
+      // and agents re-requested it. See `describeReviewAgent`.
+      const review = ctx.prRegistry?.reviewAgent
+        ? describeReviewAgent(
+            await ctx.prRegistry.reviewAgent(number, repo).catch(() => null),
+            {
+              statusOf: (id) => ctx.broker.getStatus(id),
+              now: (ctx.now ?? Date.now)(),
+            },
+          )
+        : null;
+      const reviewLine = review ? `  ⧗ Dispatch's reviewer: ${review.line}` : null;
+
       if (outcome.kind === "timeout") {
         const s = outcome.state;
         return prToolResult(
@@ -3780,13 +3932,21 @@ export function createManagerTools(ctx: ManagerMcpContext) {
           {
             summary: `No new activity on PR #${number} for ${timeoutSeconds}s`,
             ok: true,
-            details: [`Still ${s.state}.`],
+            details: [`Still ${s.state}.`, ...(reviewLine ? [reviewLine.trim()] : [])],
           },
           await snap(),
           { text:
           `No new activity on PR #${number} in the last ${timeoutSeconds}s (still ` +
             `${s.state}). Call watch_pr again to keep watching until it merges.\n` +
-            JSON.stringify({ number, state: s.state, done: false, timedOut: true, events: [] }) },
+            (reviewLine ? `${reviewLine}\n` : "") +
+            JSON.stringify({
+              number,
+              state: s.state,
+              done: false,
+              timedOut: true,
+              events: [],
+              ...(review ? { reviewAgent: review.json } : {}),
+            }) },
         );
       }
 
@@ -3879,8 +4039,15 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         );
       } else if (!stalled && !spent) {
         adviceParts.push(
-          "Nothing to fix. Merge it if you're ready, or call watch_pr again to wait for " +
-            "the merge and any later review round.",
+          review?.inProgress
+            ? // "Merge it if you're ready" over a review that is still being
+              // written sent agents to approve_pr early, or — reading the
+              // silence as a lost request — back to request_review.
+              "Nothing to fix yet, but Dispatch's review of this PR is already requested " +
+                "and in progress (see above). Call watch_pr again — it returns the moment " +
+                "that review posts."
+            : "Nothing to fix. Merge it if you're ready, or call watch_pr again to wait for " +
+                "the merge and any later review round.",
         );
       }
       // A spent cap SUPERSEDES the stalled-queue advice, and has to. Both are
@@ -3935,12 +4102,14 @@ export function createManagerTools(ctx: ManagerMcpContext) {
           ok: true,
           // The event lines verbatim, minus the thread ids the model needs and a
           // human reading a card does not — those are in the drilldown.
-          details: lines.map((line) => line.split("\n")[0]!.trim()),
+          details: [...lines, ...(reviewLine ? [reviewLine] : [])].map(
+            (line) => line.split("\n")[0]!.trim(),
+          ),
         },
         await snap(),
         { text:
         `PR #${number} ${needsWork ? "needs attention" : "update"}: ${parts.join(" and ")}.\n` +
-          `${lines.join("\n")}\n\n${advice}\n` +
+          `${[...lines, ...(reviewLine ? [reviewLine] : [])].join("\n")}\n\n${advice}\n` +
           JSON.stringify({
             number,
             state: s.state,
@@ -3953,6 +4122,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
             // later call about something else still carries it.
             reviewsSpent: !!spent,
             ...(spent ? { landableOnChecks: spent.landable } : {}),
+            ...(review ? { reviewAgent: review.json } : {}),
             events,
           }) },
       );

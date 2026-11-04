@@ -26,6 +26,7 @@ import {
 import {
   createManagerTools,
   createManagerMcpServers,
+  describeReviewAgent,
   externalToolPolicy,
   SLOT_REACQUIRE_MIN_MS,
   withSlotReacquire,
@@ -5574,6 +5575,85 @@ describe("manager-mcp — a steering message interrupts blocking waits", () => {
     expect(resultText(res)).toContain("interrupted by a new message from the user");
     expect(resultText(res)).toContain("arrives as a chat_send");
     expect(steer.live()).toBe(0);
+  });
+
+  describe("describeReviewAgent", () => {
+    const now = 10 * 60_000;
+    const none = () => undefined;
+
+    it("says nothing on a PR with no Dispatch reviewer", () => {
+      expect(describeReviewAgent(null, { statusOf: none, now })).toBeNull();
+    });
+
+    it("reports a requested-but-unclaimed round as in progress", () => {
+      const r = describeReviewAgent(
+        { requestedAt: now - 45_000, maxRounds: 2 } as PrReviewAgentState,
+        { statusOf: none, now },
+      );
+      expect(r?.inProgress).toBe(true);
+      expect(r?.json.phase).toBe("queued");
+      expect(r?.line).toMatch(/requested 45s ago, waiting for the review sweep/);
+    });
+
+    it("distinguishes a reviewer chat waiting for a slot from one reviewing", () => {
+      const state = {
+        rounds: 1,
+        maxRounds: 2,
+        reviewedAt: now - 6 * 60_000,
+        chatId: "rev1",
+      } as PrReviewAgentState;
+      const waiting = describeReviewAgent(state, { statusOf: () => "queued", now });
+      expect(waiting?.inProgress).toBe(true);
+      expect(waiting?.line).toMatch(/waiting for a free session slot \(reviewer chat rev1\)/);
+      expect(waiting?.json.chatStatus).toBe("queued");
+
+      const busy = describeReviewAgent(state, { statusOf: () => "running", now });
+      expect(busy?.inProgress).toBe(true);
+      expect(busy?.line).toBe(
+        "round 1 of 2 is being reviewed now (reviewer chat rev1), running for 6m.",
+      );
+    });
+
+    it("does not claim a dead round is coming", () => {
+      const r = describeReviewAgent(
+        { rounds: 1, maxRounds: 2, reviewedAt: now - 60_000, chatId: "rev1" } as PrReviewAgentState,
+        { statusOf: () => "error", now },
+      );
+      expect(r?.inProgress).toBe(false);
+      expect(r?.line).toMatch(/is error and nothing was posted .* not coming/);
+    });
+
+    it("gives an unseen chat only the spawn window", () => {
+      const state = { rounds: 1, maxRounds: 2, chatId: "rev1" } as PrReviewAgentState;
+      const fresh = describeReviewAgent(
+        { ...state, reviewedAt: now - 60_000 },
+        { statusOf: none, now },
+      );
+      expect(fresh?.inProgress).toBe(true);
+      const stale = describeReviewAgent(
+        { ...state, reviewedAt: now - REVIEW_ROUND_GRACE_MS - 1 },
+        { statusOf: none, now },
+      );
+      expect(stale?.inProgress).toBe(false);
+    });
+
+    it("reports a posted round as finished", () => {
+      const r = describeReviewAgent(
+        {
+          rounds: 2,
+          maxRounds: 2,
+          reviewedAt: now - 5 * 60_000,
+          postedAt: now - 2 * 60_000,
+          postedEvent: "REQUEST_CHANGES",
+          findings: 3,
+        } as PrReviewAgentState,
+        { statusOf: none, now },
+      );
+      expect(r?.inProgress).toBe(false);
+      expect(r?.line).toBe(
+        "round 2 of 2 posted 2m ago (request changes, 3 finding(s)); every round is used.",
+      );
+    });
   });
 
   describe("watch_pr", () => {
