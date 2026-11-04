@@ -257,6 +257,11 @@ export class RestartResumeService {
     for (const entry of live) {
       const status = asInterruptedStatus(entry.status);
       if (!status) continue;
+      // Still live, so never retracted. Taken out here and not on a successful
+      // write: if this re-write fails (a busy database), the provisional ticket
+      // is the one it has, and retracting that would throw away exactly what the
+      // early capture exists to protect.
+      earlier.delete(entry.chatId);
       try {
         const chat = await this.store.getChat(entry.chatId);
         if (!chat || chat.archived) continue;
@@ -276,13 +281,13 @@ export class RestartResumeService {
         if (await this.store.patchChat(entry.chatId, { interruption })) {
           written += 1;
           this.captured.set(entry.chatId, at);
-          earlier.delete(entry.chatId);
         }
       } catch {
         /* one unwritable record must not cost the others theirs */
       }
     }
-    // Whatever is left in `earlier` came to rest since that capture: its ticket
+    // Whatever is left in `earlier` is absent from `live`, i.e. it came to rest
+    // since that capture: its ticket
     // is retracted, settled as `skipped` so the boot pass leaves it alone.
     for (const [chatId, earlierAt] of earlier) {
       try {

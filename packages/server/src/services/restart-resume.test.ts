@@ -180,6 +180,30 @@ describe("RestartResumeService", () => {
     expect(sent.map((s) => s.chatId)).toEqual(["b"]);
   });
 
+  it("a later capture keeps the earlier ticket of a live chat whose re-write failed", async () => {
+    await store.saveChat(chat("a"));
+    const svc = makeService();
+    await svc.capture([{ chatId: "a", status: "running", pending: [] }]);
+
+    // A busy database on the authoritative pass: `a` is still live, its
+    // re-write throws, and the provisional ticket is all it has left.
+    const realPatch = store.patchChat.bind(store);
+    let failed = false;
+    store.patchChat = (async (id: string, patch: Partial<Chat>) => {
+      if (!failed) {
+        failed = true;
+        throw new Error("SQLITE_BUSY");
+      }
+      return realPatch(id, patch);
+    }) as typeof store.patchChat;
+    clock = NOW + 5_000;
+    await svc.capture([{ chatId: "a", status: "running", pending: [] }]);
+
+    const rec = (await store.getChat("a"))?.interruption;
+    expect(rec?.at).toBe(NOW);
+    expect(rec?.settledAt).toBeUndefined();
+  });
+
   it("a later capture leaves alone a record it did not write", async () => {
     // Settled by an earlier boot. This process never captured `a`, so an empty
     // snapshot is no reason to touch it.
