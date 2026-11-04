@@ -5621,6 +5621,14 @@ describe("manager-mcp — a steering message interrupts blocking waits", () => {
       );
       expect(r?.inProgress).toBe(false);
       expect(r?.line).toMatch(/is error and nothing was posted .* not coming/);
+
+      // A crashed reviewer chat sits in `failed`, which TERMINAL_STATES omits.
+      const crashed = describeReviewAgent(
+        { rounds: 1, maxRounds: 2, reviewedAt: now - 6 * 60_000, chatId: "rev1" } as PrReviewAgentState,
+        { statusOf: () => "failed", now },
+      );
+      expect(crashed?.inProgress).toBe(false);
+      expect(crashed?.line).toMatch(/is failed and nothing was posted .* not coming/);
     });
 
     it("gives an unseen chat only the spawn window", () => {

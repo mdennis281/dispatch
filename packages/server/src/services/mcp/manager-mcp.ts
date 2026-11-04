@@ -3300,7 +3300,11 @@ export function describeReviewAgent(
             `slot${chatRef}. watch_pr has bumped it ahead of unrelated work.`,
         };
       }
-      if (live !== undefined && !TERMINAL_STATES.has(live)) {
+      // `failed` on top of TERMINAL_STATES: a crashed reviewer chat sits in
+      // `failed`, and reading it as live told the agent "being reviewed now"
+      // about a round that would never post. Local rather than widening
+      // TERMINAL_STATES, which `wait_for_chat` also reads.
+      if (live !== undefined && !TERMINAL_STATES.has(live) && live !== "failed") {
         return {
           inProgress: true,
           json,
@@ -4077,6 +4081,16 @@ export function createManagerTools(ctx: ManagerMcpContext) {
                   "not yours. Do NOT call watch_pr again, there is nothing coming.")
             : "Wait on CI instead — fix whatever is failing above, then call watch_pr " +
                 "again for the checks and land it on those.",
+        );
+      } else if (stalled && review?.inProgress) {
+        // GitHub's queue can read empty while Dispatch's own round is queued or
+        // running — under `self` identity that reviewer never appears in it.
+        // Printing the stall advice under a "being reviewed now" line handed the
+        // agent two contradictory instructions, and it took the re-request one.
+        adviceParts.push(
+          "GitHub's reviewer queue is empty, but Dispatch's own review of this PR is " +
+            "already requested and in progress (see above) — that one does not show in " +
+            "GitHub's queue. Call watch_pr again; it returns when that review posts.",
         );
       } else if (stalled) {
         // A stalled queue is the one case where "call watch_pr again" is WRONG
