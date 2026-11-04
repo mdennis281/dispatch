@@ -158,6 +158,16 @@ export async function buildApp(
     // Omitted entirely when unset, so Fastify keeps its own default of `false`
     // and `req.ip` stays the socket peer. See trust-proxy.ts.
     ...(trustProxy === undefined ? {} : { trustProxy }),
+    // Destroy every open connection at close, not just the idle ones. Fastify
+    // runs `server.close()` as an `onClose` hook registered at preReady, AHEAD
+    // of ours, and that waits for every in-flight request to finish. So one
+    // Codex chat parked in `watch_pr` on the manager bridge, or one 29s
+    // `/api/projects/:id/memory` on a loaded box, held `services.dispose()` off
+    // until the 20s grace timer `exit(1)`ed. Then the resume capture never ran,
+    // the broker never settled, and every running chat came back from the
+    // update as `error`. A request that is still in flight while we shut down
+    // has no answer worth waiting for.
+    forceCloseConnections: true,
   };
   const app = Fastify(options);
   // Fastify's stock JSON parser answers a bodyless POST that still carries

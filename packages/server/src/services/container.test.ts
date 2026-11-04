@@ -202,6 +202,10 @@ describe("createServices().start() resilience", () => {
       // Our own boot timer is disarmed first: a shutdown seconds after boot must
       // not fire a resume into a server that is going away.
       "restartResume.dispose",
+      // Provisional, before any drain can wait...
+      "snapshot",
+      "capture",
+      // ...and authoritative, the last thing before the broker goes.
       "snapshot",
       "capture",
       "broker.dispose",
@@ -210,6 +214,48 @@ describe("createServices().start() resilience", () => {
     expect(capture).toHaveBeenCalledWith([
       { chatId: "c1", status: "running", pending: [{ text: "keep going" }] },
     ]);
+  });
+
+  it("writes resume tickets even when a drain ahead of the broker never finishes", async () => {
+    // What an update on a loaded box looked like: a PR sweep stuck behind 18s
+    // `gh` calls held teardown past the 20s grace timer, the process
+    // `exit(1)`ed with no tickets, and every running chat came back as `error`.
+    const capture = vi.fn(async (_live: unknown) => 1);
+    const services = createServices(
+      {
+        config: { maxActiveSessions: 4 } as unknown as ServerConfig,
+        store: stub<Store>(),
+        bus: new EventBus(),
+      },
+      {
+        broker: stub({
+          interruptionSnapshot: () => [{ chatId: "c1", status: "running", pending: [] }],
+        }),
+        restartResume: stub({ dispose: () => {}, capture }),
+        prReviewWatcher: stub({ dispose: () => {}, drain: () => new Promise<void>(() => {}) }),
+        terminals: stub(),
+        memory: stub(),
+        projectConfig: stub(),
+        projectConfigArchive: stub(),
+        title: stub(),
+        checkpoints: stub(),
+        worktrees: stub(),
+        worktreeDetector: stub(),
+        worktreeReaper: stub(),
+        runner: stub(),
+        github: stub(),
+        notifier: stub(),
+        push: stub(),
+        secrets: stub(),
+        attention: stub(),
+      },
+    );
+
+    void services.dispose();
+
+    await vi.waitFor(() =>
+      expect(capture).toHaveBeenCalledWith([{ chatId: "c1", status: "running", pending: [] }]),
+    );
   });
 });
 

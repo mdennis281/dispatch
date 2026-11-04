@@ -1972,6 +1972,19 @@ export function createServices(
       // the store it was spawned against — same reasoning as the `drain()`
       // calls below.
       disposed = true;
+      // Resume tickets FIRST, provisionally, before anything below can wait.
+      // The authoritative capture sits just before `broker.dispose()`. Everything
+      // ahead of it is an unbounded drain: the warm pass, PR and issue sweeps,
+      // memory commits, plugin teardown, `runner.stopAll()`. On a box already
+      // taking 18s per `gh` call, those drains outlasted the 20s grace timer, so
+      // the process `exit(1)`ed with no tickets written and every running chat
+      // came back from the update as `error` with nothing to resume it. The
+      // later capture overwrites these records and retracts any chat that
+      // finished in between (see `RestartResumeService.capture`). Disarm our own
+      // boot timer first: a shutdown seconds after boot must not fire a resume
+      // into a server that is going away.
+      restartResume.dispose();
+      await restartResume.capture(broker.interruptionSnapshot()).catch(() => {});
       await warming?.catch(() => {});
       secrets.stop();
       offCheckpoint?.();
@@ -2043,9 +2056,8 @@ export function createServices(
       //
       // Reaching `dispose()` at all is also the entire proof that the stop was
       // deliberate — a crash runs none of this and therefore, correctly, resumes
-      // nothing. Disarm our own boot timer first: a shutdown seconds after boot
-      // must not fire a resume into a server that is going away.
-      restartResume.dispose();
+      // nothing. (The boot timer was disarmed at the top, with the provisional
+      // capture.)
       await restartResume.drain().catch(() => {});
       await restartResume.capture(broker.interruptionSnapshot()).catch(() => {});
       await broker.dispose().catch(() => {});
