@@ -2799,6 +2799,74 @@ describe("SessionBroker — steering & concurrency", () => {
     gate.resolve();
   });
 
+  it("reviewersSkipCap: a reviewer runs outside the cap, with no shipper to lend it a slot", async () => {
+    // The lent-slot path needs a shipper parked on the PR. The setting is for
+    // when you'd rather not depend on that: a reviewer never queues, never
+    // counts, and never pushes a cold start out of its place.
+    const gate = deferred();
+    const { fn } = makeFakeQuery(async () => {
+      await gate.promise;
+      return [assistantText("done"), resultMsg()];
+    });
+    await store.saveSettings({ theme: "dark", maxActiveSessions: 1, reviewersSkipCap: true });
+    const broker = makeBroker(fn, 1);
+    broker.setReviewersSkipCap(true);
+    for (const id of ["busy", "other"]) {
+      await store.saveChat(chatFor(id));
+      broker.create(chatFor(id));
+    }
+    const reviewer = { ...chatFor("reviewer"), reviewOf: "o/r#7" };
+    await store.saveChat(reviewer);
+    broker.create(reviewer);
+
+    const busyRunning = broker.waitFor("busy", "running");
+    await broker.sendMessage("busy", "go");
+    await busyRunning;
+    await broker.sendMessage("other", "go");
+    expect(broker.getStatus("other")).toBe("queued");
+
+    const reviewerRunning = broker.waitFor("reviewer", "running");
+    await broker.sendMessage("reviewer", "review #7");
+    await reviewerRunning;
+    // Not a loan, not a slot: the cap's count is untouched and `other` keeps waiting.
+    expect(broker.activeCount()).toBe(1);
+    const snap = broker.schedulerSnapshot();
+    expect(snap.lent).toBe(0);
+    expect(snap.running.find((r) => r.chatId === "reviewer")?.uncapped).toBe(true);
+    expect(snap.running.find((r) => r.chatId === "busy")?.uncapped).toBe(false);
+    expect(broker.getStatus("other")).toBe("queued");
+    gate.resolve();
+  });
+
+  it("reviewersSkipCap off: the same reviewer queues; turning it on admits it at once", async () => {
+    const gate = deferred();
+    const { fn } = makeFakeQuery(async () => {
+      await gate.promise;
+      return [assistantText("done"), resultMsg()];
+    });
+    await store.saveSettings({ theme: "dark", maxActiveSessions: 1 });
+    const broker = makeBroker(fn, 1);
+    await store.saveChat(chatFor("busy"));
+    broker.create(chatFor("busy"));
+    const reviewer = { ...chatFor("reviewer"), reviewOf: "o/r#7" };
+    await store.saveChat(reviewer);
+    broker.create(reviewer);
+
+    const busyRunning = broker.waitFor("busy", "running");
+    await broker.sendMessage("busy", "go");
+    await busyRunning;
+    await broker.sendMessage("reviewer", "review #7");
+    expect(broker.getStatus("reviewer")).toBe("queued");
+
+    // Saved first, because every pump re-reads settings and would switch it back off.
+    await store.saveSettings({ theme: "dark", maxActiveSessions: 1, reviewersSkipCap: true });
+    const reviewerRunning = broker.waitFor("reviewer", "running");
+    broker.setReviewersSkipCap(true);
+    await reviewerRunning;
+    expect(broker.activeCount()).toBe(1);
+    gate.resolve();
+  });
+
   it("a blocked shipper LENDS its slot to its reviewer, so the reviewer runs at a full cap", async () => {
     // Seen on the install this was built for: six chats generating under a cap
     // of six for half an hour, two shippers parked in watch_pr, their reviewers

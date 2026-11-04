@@ -180,6 +180,18 @@ export const AppSettingsSchema = z.object({
    */
   maxActiveSessions: z.number().int().positive().optional(),
   /**
+   * When on, a PR reviewer chat (one with `Chat.reviewOf`) never counts against
+   * `maxActiveSessions` and is never queued behind it.
+   *
+   * A review round is two chats for one piece of work — the author parked in
+   * `watch_pr` and the reviewer Dispatch spawned — and the PR cannot land until
+   * the reviewer runs. The lent-slot machinery gets the reviewer in eventually;
+   * this switch makes it unconditional for installs that would rather spend the
+   * extra parallelism than wait. Off (unset) by default so the cap stays a hard
+   * bound unless somebody chooses otherwise.
+   */
+  reviewersSkipCap: z.boolean().optional(),
+  /**
    * Minutes a chat may sit idle before its runtime subprocess (and every MCP
    * server under it) is retired. `0` switches the sweep off.
    *

@@ -77,6 +77,7 @@ function normalize(s: AppSettings): AppSettings {
     // server — which the field asks for separately (`/api/settings/defaults`)
     // and shows as a placeholder.
     maxActiveSessions: s.maxActiveSessions,
+    reviewersSkipCap: s.reviewersSkipCap,
     idleSessionMinutes: s.idleSessionMinutes,
     webhook: {
       kind: s.webhook?.kind ?? "ntfy",

@@ -28,7 +28,8 @@ type Running = SchedulerSnapshot["running"][number];
 function runningLabel(r: Running, activityLabel: string | undefined): string {
   if (r.status === "awaiting-input") return "waiting on you";
   if (!r.occupied) return activityLabel ? `blocked — ${activityLabel}` : "blocked";
-  return activityLabel ?? "working";
+  const label = activityLabel ?? "working";
+  return r.uncapped ? `${label} · outside cap` : label;
 }
 
 function ChatRow({
@@ -140,6 +141,11 @@ export function PausePopover({ compact }: { compact?: boolean }) {
 
   const working = snapshot.running.filter((r) => r.occupied).length;
   const blocked = snapshot.running.length - working;
+  // Working reviewers outside the cap (`reviewersSkipCap`). Counted apart so the
+  // chip's "n/cap slots" is the number the cap is actually compared against —
+  // otherwise "8/6 slots" reads as a broken cap.
+  const uncapped = snapshot.running.filter((r) => r.occupied && r.uncapped).length;
+  const slotted = working - uncapped;
   const busyIds = new Set([...snapshot.running, ...snapshot.queued].map((c) => c.chatId));
   const interruptedIdle = (paused?.interrupted ?? []).filter((id) => !busyIds.has(id));
   // Only chats this instance knows. The server's process scan is machine-wide,
@@ -216,7 +222,8 @@ export function PausePopover({ compact }: { compact?: boolean }) {
                 label={
                   paused
                     ? "Paused — nothing starts until you resume"
-                    : `${working} of ${snapshot.cap} active slots in use` +
+                    : `${slotted} of ${snapshot.cap} active slots in use` +
+                      (uncapped > 0 ? ` · ${uncapped} reviewer${uncapped === 1 ? "" : "s"} running outside the cap` : "") +
                       (snapshot.lent > 0
                         ? ` · ${snapshot.lent} lent by a blocked chat to the chat it waits on`
                         : "") +
@@ -226,7 +233,9 @@ export function PausePopover({ compact }: { compact?: boolean }) {
                 <Chip tone={paused ? "warn" : working > 0 ? "accent" : "muted"} className="ml-1">
                   {paused
                     ? "paused"
-                    : `${working}/${snapshot.cap} slots${snapshot.lent > 0 ? ` · ${snapshot.lent} lent` : ""}`}
+                    : `${slotted}/${snapshot.cap} slots` +
+                      (snapshot.lent > 0 ? ` · ${snapshot.lent} lent` : "") +
+                      (uncapped > 0 ? ` · +${uncapped} review` : "")}
                 </Chip>
               </Tooltip>
               <span className="flex-1" />

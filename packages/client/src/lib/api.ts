@@ -332,6 +332,8 @@ export interface AppSettings {
   /** How many chats may hold an execution slot at once. Unset = the server's
    *  own default (`DISPATCH_MAX_ACTIVE_SESSIONS`, else DEFAULT_MAX_ACTIVE_SESSIONS). */
   maxActiveSessions?: number;
+  /** PR reviewer chats never count against `maxActiveSessions`. Unset = off. */
+  reviewersSkipCap?: boolean;
   /**
    * Minutes a chat may sit idle before its runtime subprocess and MCP servers
    * are retired. `0` = never. Unset = the server's own default

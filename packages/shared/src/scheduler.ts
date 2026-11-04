@@ -78,6 +78,12 @@ export const SchedulerSnapshotSchema = z.object({
       chatId: z.string(),
       status: ChatStatusSchema,
       occupied: z.boolean(),
+      /**
+       * Working outside the cap: a PR reviewer while `reviewersSkipCap` is on.
+       * `occupied` still says whether it is busy; this says it isn't counted.
+       * Default false so a snapshot from an older server still parses.
+       */
+      uncapped: z.boolean().default(false),
     }),
   ),
   /**

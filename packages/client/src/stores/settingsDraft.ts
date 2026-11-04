@@ -84,7 +84,7 @@ const SECTION_SLICE: Record<
     s.harness?.defaults,
     s.reviewAgent,
   ],
-  context: (s) => [s.autoCompact, s.harness?.contextLimits, s.maxActiveSessions],
+  context: (s) => [s.autoCompact, s.harness?.contextLimits, s.maxActiveSessions, s.reviewersSkipCap],
   retention: (s) => s.retention,
   notifications: (s) => s.webhook,
 };
