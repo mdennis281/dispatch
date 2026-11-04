@@ -339,26 +339,35 @@ function ProjectSelector({
                     down the menu would read as thirteen things to worry about —
                     but always once paused, since that is the state to undo.
                     Always shown where there is no hover to reveal it. The menu
-                    stays open so the row visibly flips. */}
-                <IconButton
-                  tip={
-                    paused
-                      ? `Resume ${p.name} — tell ${paused.interrupted.length || "no"} interrupted chat${paused.interrupted.length === 1 ? "" : "s"} what happened, then run its queue`
-                      : `Pause ${p.name} — interrupt its running turns and hold new ones`
-                  }
-                  disabled={!!scopedBusy[`project:${p.id}`]}
+                    stays open so the row visibly flips.
+
+                    The positioning is on THIS span, not the IconButton: a `tip`
+                    wraps the button in Tooltip's own `relative inline-flex`
+                    span, so `absolute` on the button resolved against that
+                    zero-width wrapper — which sat in the row's flex flow — and
+                    the glyph hung low and off the menu's right edge. */}
+                <span
                   className={cn(
-                    "absolute right-1",
+                    "absolute inset-y-0 right-1 flex items-center",
                     !paused &&
-                      "opacity-0 focus-visible:opacity-100 group-hover/proj:opacity-100 [@media(hover:none)]:opacity-100",
+                      "opacity-0 focus-within:opacity-100 group-hover/proj:opacity-100 [@media(hover:none)]:opacity-100",
                   )}
-                  onClick={() => {
-                    const s = useScheduler.getState();
-                    void (paused ? s.resumeProject(p.id) : s.pauseProject(p.id));
-                  }}
                 >
-                  {paused ? <Play className="text-accent-hi" /> : <Pause className="text-danger" />}
-                </IconButton>
+                  <IconButton
+                    tip={
+                      paused
+                        ? `Resume ${p.name} — tell ${paused.interrupted.length || "no"} interrupted chat${paused.interrupted.length === 1 ? "" : "s"} what happened, then run its queue`
+                        : `Pause ${p.name} — interrupt its running turns and hold new ones`
+                    }
+                    disabled={!!scopedBusy[`project:${p.id}`]}
+                    onClick={() => {
+                      const s = useScheduler.getState();
+                      void (paused ? s.resumeProject(p.id) : s.pauseProject(p.id));
+                    }}
+                  >
+                    {paused ? <Play className="text-accent-hi" /> : <Pause className="text-danger" />}
+                  </IconButton>
+                </span>
               </div>
             );
           })}
