@@ -97,6 +97,13 @@ describe("schedule files", () => {
     expect(errs.find((e) => e.file === "too-often.md")!.message).toMatch(/every 5 minutes/);
   });
 
+  it("refuses an id that could leave the schedules dir", async () => {
+    await expect(deleteScheduleFile(paths(), "../project")).rejects.toThrow(/invalid schedule id/);
+    await expect(
+      writeScheduleFile(paths(), { id: "..\evil", name: "x", cron: "0 9 * * *", prompt: "Go." }),
+    ).rejects.toThrow(/invalid schedule id/);
+  });
+
   it("deletes a schedule's file and reports a missing one", async () => {
     const path = await writeScheduleFile(paths(), { id: "x", name: "x", cron: "0 9 * * *", prompt: "Go." });
     expect(await readFile(path, "utf8")).toContain("Go.");
