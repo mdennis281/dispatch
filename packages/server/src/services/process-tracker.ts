@@ -183,10 +183,10 @@ export class ProcessTracker {
     if (this.started || this.intervalMs <= 0) return;
     this.started = true;
     void (async () => {
-      await this.sweep();
+      await this.sweep().catch(() => undefined);
       await this.sleep(this.primeDelayMs);
       if (!this.started) return;
-      await this.sweep();
+      await this.sweep().catch(() => undefined);
       this.schedule();
     })();
   }
@@ -299,7 +299,15 @@ export class ProcessTracker {
     }
     const live = skip.size ? rows.filter((r) => !skip.has(r.pid)) : rows;
     const { cpuByPid, windowMs } = this.rates(live, startedAt);
-    const snap = this.derive(live, startedAt, cpuByPid, windowMs, ++this.seq);
+    let snap: ProcessSnapshot;
+    try {
+      snap = this.derive(live, startedAt, cpuByPid, windowMs, this.seq + 1);
+    } catch {
+      // A root source that throws (a broker mid-teardown) makes this sweep a
+      // failed one, exactly like an empty read — never a crash.
+      return this.current ?? this.derive([], startedAt, new Map(), 0, 0);
+    }
+    this.seq += 1;
     this.current = snap;
     // Detached, not awaited: a consumer that itself asks for a sweep (the
     // reaper killing a shell, say) would otherwise wait on the very sweep that
@@ -322,7 +330,11 @@ export class ProcessTracker {
     // time it is meant to be measuring.
     const delay = Math.max(base, this.lastSweepMs * 4);
     this.timer = setTimeout(() => {
-      void this.sweep().finally(() => this.schedule());
+      // `.catch` before `.finally`: a rejection carried through `finally` is
+      // still unhandled, and an unhandled rejection takes the server down.
+      void this.sweep()
+        .catch(() => undefined)
+        .finally(() => this.schedule());
     }, delay);
     this.timer.unref?.();
   }
@@ -389,7 +401,7 @@ export class ProcessTracker {
       if (list) list.push(pid);
       else map.set(chatId, [pid]);
     };
-    for (const [chatId, pid] of this.sessionPids()) {
+    for (const [chatId, pid] of safely(() => this.sessionPids(), new Map<string, number>())) {
       add(sessionRoots, chatId, pid);
       add(allRoots, chatId, pid);
     }
@@ -404,7 +416,9 @@ export class ProcessTracker {
         add(allRoots, chatId, row.pid);
       }
     }
-    for (const shell of this.terminals?.livePids() ?? []) add(allRoots, shell.chatId, shell.pid);
+    for (const shell of safely(() => this.terminals?.livePids() ?? [], [])) {
+      add(allRoots, shell.chatId, shell.pid);
+    }
 
     const owners = new Map<string, ChatOwnership>();
     for (const [chatId, roots] of allRoots) {
@@ -422,6 +436,15 @@ export class ProcessTracker {
 }
 
 /* ------------------------------------------------------------------ helpers */
+
+/** A root source's answer, or `fallback` if it throws. */
+function safely<T>(read: () => T, fallback: T): T {
+  try {
+    return read() ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
 
 let cachedCores = 0;
 function osCores(): number {

@@ -112,6 +112,24 @@ describe("ProcessTracker ownership", () => {
     expect([...snap.owners.keys()]).toEqual(["mine"]);
   });
 
+  it("survives a root source that throws or returns nothing — a sweep must never crash the server", async () => {
+    // Seen in CI: containers built with a fake broker made every background
+    // sweep an unhandled rejection.
+    const tracker = new ProcessTracker({
+      read: async () => [{ pid: 20, ppid: 1 }],
+      sessionPids: () => undefined as never,
+      terminals: {
+        livePids: () => {
+          throw new Error("terminal service torn down");
+        },
+      },
+      intervalMs: 0,
+    });
+    const snap = await tracker.sweep();
+    expect(snap.rows).toHaveLength(1);
+    expect(snap.owners.size).toBe(0);
+  });
+
   it("keeps the last real table when a read comes back empty", async () => {
     const h = harness([{ pid: 10, ppid: 1 }], { sessionPids: new Map([["a", 10]]) });
     await h.tracker.sweep();
