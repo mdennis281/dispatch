@@ -50,12 +50,14 @@ describe("perf monitor", () => {
     }
   });
 
+  const quiet = { waitMs: 0, maxWaitMs: 0, maxQueue: 1, coalesced: 0, subs: {} };
+
   it("names the stall and the spawns in one line", () => {
     const line = formatStallLine(
       { since: 1_000_000, p50Ms: 3, p99Ms: 812, maxMs: 2_140 },
       [
-        { file: "gh", count: 40, syncMs: 6_120, wallMs: 20_000, maxSyncMs: 480 },
-        { file: "git", count: 62, syncMs: 3_010, wallMs: 9_000, maxSyncMs: 220 },
+        { ...quiet, file: "gh", count: 40, syncMs: 6_120, wallMs: 20_000, maxSyncMs: 480 },
+        { ...quiet, file: "git", count: 62, syncMs: 3_010, wallMs: 9_000, maxSyncMs: 220 },
       ],
       1_060_000,
     );
@@ -64,7 +66,35 @@ describe("perf monitor", () => {
     expect(line).toContain("over 60s");
     expect(line).toContain("gh×40 sync=6120ms max=480ms wall=20000ms");
     expect(line).toContain("git×62");
+    // A gate that held nothing up adds nothing to the line.
+    expect(line).not.toContain("queue=");
+    expect(line).not.toContain("coalesced=");
     expect(line.startsWith("[1970-01-01T00:17:40.000Z]")).toBe(true);
+  });
+
+  it("names queueing, coalescing and the top subcommands when the gate engaged", () => {
+    const line = formatStallLine(
+      { since: 0, p50Ms: 3, p99Ms: 812, maxMs: 2_140 },
+      [
+        {
+          file: "git",
+          count: 120,
+          syncMs: 3_010,
+          wallMs: 9_000,
+          maxSyncMs: 220,
+          waitMs: 4_200,
+          maxWaitMs: 900,
+          maxQueue: 14,
+          coalesced: 31,
+          subs: { status: 50, "worktree list": 40, "rev-parse": 20, "for-each-ref": 9, log: 1 },
+        },
+      ],
+      60_000,
+    );
+    expect(line).toContain("queue=14 wait=4200ms maxWait=900ms coalesced=31");
+    // Top four only, busiest first.
+    expect(line).toContain("[status×50, worktree list×40, rev-parse×20, for-each-ref×9]");
+    expect(line).not.toContain("log×1");
   });
 
   it("says so when a stall had no spawns to blame", () => {

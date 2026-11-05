@@ -87,7 +87,22 @@ export function perfSnapshot(): PerfSnapshot | undefined {
 export function formatStallLine(loop: LoopLag, exec: ExecStat[], now = Date.now()): string {
   const top = exec
     .slice(0, 5)
-    .map((e) => `${e.file}×${e.count} sync=${e.syncMs}ms max=${e.maxSyncMs}ms wall=${e.wallMs}ms`)
+    .map((e) => {
+      let part = `${e.file}×${e.count} sync=${e.syncMs}ms max=${e.maxSyncMs}ms wall=${e.wallMs}ms`;
+      // Only when the gate actually held something up — a quiet line on a
+      // healthy box stays as short as it always was.
+      if (e.maxQueue > 1 || e.waitMs > 0) {
+        part += ` queue=${e.maxQueue} wait=${e.waitMs}ms maxWait=${e.maxWaitMs}ms`;
+      }
+      if (e.coalesced > 0) part += ` coalesced=${e.coalesced}`;
+      // The top callers by subcommand, so the line names the poller too.
+      const subs = Object.entries(e.subs ?? {})
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 4)
+        .map(([sub, n]) => `${sub}×${n}`);
+      if (subs.length > 0) part += ` [${subs.join(", ")}]`;
+      return part;
+    })
     .join("; ");
   return (
     `[${new Date(now).toISOString()}] loop stall: p50=${loop.p50Ms}ms p99=${loop.p99Ms}ms ` +

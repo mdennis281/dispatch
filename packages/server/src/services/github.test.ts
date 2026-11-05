@@ -66,6 +66,32 @@ beforeEach(() => {
   bus = new EventBus();
 });
 
+/* ------------------------------------------------------------- repo resolution */
+
+describe("resolveRepo caching", () => {
+  it("asks gh once per directory, sharing an in-flight lookup", async () => {
+    const { exec, calls, push } = makeExec();
+    push({ stdout: `${REPO}\n` });
+    push({ stdout: "other/repo\n" });
+    const gh = new GitHubService({ bus, exec });
+    const [a, b] = await Promise.all([gh.resolveRepo("/r"), gh.resolveRepo("/r")]);
+    expect([a, b, await gh.resolveRepo("/r")]).toEqual([REPO, REPO, REPO]);
+    // A different directory is a different question.
+    expect(await gh.resolveRepo("/elsewhere")).toBe("other/repo");
+    expect(calls.filter((c) => c.args[0] === "repo")).toHaveLength(2);
+  });
+
+  it("never caches a failure — a checkout can gain its remote later", async () => {
+    const { exec, calls, push } = makeExec();
+    push({ stdout: "", stderr: "no git remotes found", exitCode: 1 });
+    push({ stdout: REPO });
+    const gh = new GitHubService({ bus, exec });
+    await expect(gh.resolveRepo("/r")).rejects.toThrow();
+    expect(await gh.resolveRepo("/r")).toBe(REPO);
+    expect(calls).toHaveLength(2);
+  });
+});
+
 /* ------------------------------------------------------------------ repo guard */
 
 describe("owner/repo validation", () => {

@@ -80,6 +80,13 @@ const defaultExec: ExecaLike = (file, args = [], options) =>
 
 /* --------------------------------------------------------------------- consts */
 
+/**
+ * How long a directory's owner/repo is trusted. Matches CiService's
+ * `REPO_TTL_MS`: a checkout's remote changing under a running server is rare,
+ * and GitHub redirects a renamed repo's API calls anyway.
+ */
+const REPO_CACHE_TTL_MS = 5 * 60_000;
+
 /** owner/repo shape — GitHub-valid chars only (alnum . _ -). Strict on purpose. */
 const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
@@ -881,6 +888,8 @@ export class GitHubService {
   private readonly bus: EventBus;
   private readonly store?: Store;
   private readonly exec: ExecaLike;
+  /** cwd → its owner/repo lookup (settled or in flight). See {@link resolveRepo}. */
+  private readonly repoByCwd = new Map<string, { at: number; repo: Promise<string> }>();
 
   constructor(deps: GitHubServiceDeps) {
     this.bus = deps.bus;
@@ -903,13 +912,31 @@ export class GitHubService {
     return { owner, name };
   }
 
-  /** Discover owner/repo from a working directory via `gh repo view`. */
-  async resolveRepo(cwd: string): Promise<string> {
-    const out = await this.gh(
-      ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-      { cwd },
+  /**
+   * Discover owner/repo from a working directory via `gh repo view`, memoised
+   * per directory for {@link REPO_CACHE_TTL_MS}.
+   *
+   * WHY. Every `/api/github/*` request resolves its repo first, and the PRs
+   * panel polls every 8 s per open tab — so each poll paid a `gh` spawn plus a
+   * GitHub round-trip to re-learn a fact that does not change. On 2026-11-04
+   * `gh repo view` was the second most common gh call caught running under the
+   * stable server while its loop stalled on spawns (14 in a two-minute sample,
+   * behind only `watch_pr`'s GraphQL polls). CiService already caches the same
+   * answer for the same reason. A failure is never cached (a repo can gain a
+   * remote); concurrent callers share one in-flight lookup.
+   */
+  resolveRepo(cwd: string): Promise<string> {
+    const now = Date.now();
+    const hit = this.repoByCwd.get(cwd);
+    if (hit && now - hit.at < REPO_CACHE_TTL_MS) return hit.repo;
+    const repo = this.gh(["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"], { cwd }).then(
+      (out) => this.assertRepo(out.trim()),
     );
-    return this.assertRepo(out.trim());
+    this.repoByCwd.set(cwd, { at: now, repo });
+    repo.catch(() => {
+      if (this.repoByCwd.get(cwd)?.repo === repo) this.repoByCwd.delete(cwd);
+    });
+    return repo;
   }
 
   /**
