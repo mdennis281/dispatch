@@ -83,6 +83,16 @@ export interface ProcRow {
   rssBytes?: number;
   /** CUMULATIVE CPU time since the process started, ms. A rate needs two. */
   cpuMs?: number;
+  /**
+   * When the process started, epoch ms — its IDENTITY alongside the pid.
+   *
+   * A pid alone names whatever process holds that number NOW. The tracker kills
+   * off a snapshot that can be seconds old, and in that window Windows can hand
+   * a dead chat's pid to an unrelated process; `pid + startedAt` is what lets
+   * it refuse to signal that stranger. Exact on Windows (CIM `CreationDate`),
+   * whole-second on POSIX (derived from `etime`), absent where unknown.
+   */
+  startedAt?: number;
 }
 
 /** Result of a bulk kill: one entry per requested pid. */
@@ -262,7 +272,7 @@ function splitCsvLine(line: string): string[] {
 /** Column names this understands, mapped to where they land on a {@link ProcRow}. */
 const PROC_CSV_COLUMNS: Record<
   string,
-  "pid" | "ppid" | "name" | "commandLine" | "rss" | "kernel" | "user"
+  "pid" | "ppid" | "name" | "commandLine" | "rss" | "kernel" | "user" | "startedAt"
 > = {
   processid: "pid",
   parentprocessid: "ppid",
@@ -271,6 +281,7 @@ const PROC_CSV_COLUMNS: Record<
   workingsetsize: "rss",
   kernelmodetime: "kernel",
   usermodetime: "user",
+  startedat: "startedAt",
 };
 
 /**
@@ -322,6 +333,11 @@ export function parseProcCsv(output: string): ProcRow[] {
     if (Number.isFinite(kernel) && Number.isFinite(user)) {
       row.cpuMs = (kernel + user) / 10_000;
     }
+    // Already epoch ms — the query converts `CreationDate` itself, because
+    // `ConvertTo-Csv` would otherwise render the DateTime in the user's
+    // locale ("04/11/2026 15:21:07" vs "11/4/2026 3:21:07 PM").
+    const startedAt = Number(at("startedAt"));
+    if (at("startedAt") && Number.isFinite(startedAt) && startedAt > 0) row.startedAt = startedAt;
     rows.push(row);
   }
   return rows;
@@ -347,12 +363,32 @@ export function parseProcCsv(output: string): ProcRow[] {
  * uniformly-wrong-but-plausible failure the rest of this file works to avoid,
  * and it would render as a Resources page listing every chat at 0 B and "—".
  */
-export function parsePsTable(output: string, includesCommandLine = false): ProcRow[] {
+export function parsePsTable(
+  output: string,
+  includesCommandLine = false,
+  /**
+   * The line carries `etime` straight after `ppid` — how long the process has
+   * been running — and this is "now", to turn it into {@link ProcRow.startedAt}.
+   * Omitted for the older layouts, which have no such column.
+   */
+  elapsedAt?: number,
+): ProcRow[] {
   const rows: ProcRow[] = [];
-  for (const line of output.split(/\r?\n/)) {
-    const m = line
-      .trim()
-      .match(/^(\d+)\s+(\d+)\s+(?:(\d+)\s+((?:\d+-)?(?:\d+:)?\d+:\d+(?:\.\d+)?)\s+)?(.*)$/);
+  for (const raw of output.split(/\r?\n/)) {
+    let line = raw.trim();
+    let startedAt: number | undefined;
+    if (elapsedAt !== undefined) {
+      // Peel `pid ppid etime` off the front and hand the remainder to the
+      // existing pattern, rather than growing that pattern another optional
+      // clock-shaped group it could confuse with `time`.
+      const e = /^(\d+)\s+(\d+)\s+((?:\d+-)?(?:\d+:)?\d+:\d+)\s+(.*)$/.exec(line);
+      if (!e) continue;
+      startedAt = elapsedAt - parsePsTime(e[3]);
+      line = `${e[1]} ${e[2]} ${e[4]}`;
+    }
+    const m = line.match(
+      /^(\d+)\s+(\d+)\s+(?:(\d+)\s+((?:\d+-)?(?:\d+:)?\d+:\d+(?:\.\d+)?)\s+)?(.*)$/,
+    );
     if (!m) continue;
     const tail = m[5] || undefined;
     const withArgs = includesCommandLine && tail ? /^(\S+)\s+(.*)$/.exec(tail) : null;
@@ -364,6 +400,7 @@ export function parsePsTable(output: string, includesCommandLine = false): ProcR
     if (withArgs?.[2]) row.commandLine = withArgs[2];
     if (m[3] !== undefined) row.rssBytes = Number(m[3]) * 1024;
     if (m[4] !== undefined) row.cpuMs = parsePsTime(m[4]);
+    if (startedAt !== undefined) row.startedAt = startedAt;
     rows.push(row);
   }
   return rows;
@@ -397,29 +434,57 @@ function parsePsTime(t: string): number {
  * `Get-Counter "\GPU Engine(*)"` costs FOUR, for a figure that measured ≤0.09%
  * across every process on the box — agent workloads don't touch the GPU.
  */
+export const PROC_TABLE_QUERY =
+  "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,WorkingSetSize," +
+  "KernelModeTime,UserModeTime,Name,CommandLine," +
+  // Epoch ms computed IN PowerShell: see the `startedAt` note in `parseProcCsv`.
+  "@{n='StartedAt';e={if($_.CreationDate){[long]($_.CreationDate.ToUniversalTime()-[datetime]'1970-01-01').TotalMilliseconds}}} " +
+  "| ConvertTo-Csv -NoTypeInformation";
+
+/**
+ * How long one table read may take before it is abandoned.
+ *
+ * There was no bound at all, and a CIM query on a box that is already out of
+ * headroom does not fail — it just doesn't come back. Measured on a live
+ * install: 24 `powershell.exe` reads in one minute averaging ELEVEN SECONDS of
+ * wall time each, and a kill request waiting on them for 21 s. A read that
+ * outlives this is treated as failed (empty), which every consumer already
+ * handles as "keep the last real reading".
+ */
+export const PROC_TABLE_TIMEOUT_MS = 30_000;
+
+/**
+ * One table read, spawned fresh. On Windows the tracker uses the persistent
+ * reader in `proc-table-reader.ts` instead and falls back to this.
+ */
 export const defaultProcTable: ProcTableFn = async () => {
   if (process.platform === "win32") {
     const res = await execBinary(
       "powershell.exe",
-      [
-        "-NoLogo",
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,WorkingSetSize,KernelModeTime,UserModeTime,Name,CommandLine | ConvertTo-Csv -NoTypeInformation",
-      ],
-      { reject: false, buffer: true, windowsHide: true },
+      ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", PROC_TABLE_QUERY],
+      { reject: false, buffer: true, windowsHide: true, timeout: PROC_TABLE_TIMEOUT_MS },
     );
     return parseProcCsv(res.stdout ?? "");
   }
-  // `args` LAST: it is the only field that can contain spaces, so anything
-  // after it would be unparseable.
-  const res = await execBinary("ps", ["-ww", "-e", "-o", "pid=,ppid=,rss=,time=,comm=,args="], {
-    reject: false,
-    buffer: true,
-  });
-  return parsePsTable(res.stdout ?? "", true);
+  return posixProcTable();
 };
+
+/**
+ * `ps`, which is cheap enough (~20 ms) to spawn per read.
+ *
+ * `args` LAST: it is the only field that can contain spaces, so anything after
+ * it would be unparseable. `etime` because it exists on both GNU and BSD `ps`;
+ * `etimes` (plain seconds) would be simpler and is GNU-only — exactly the kind
+ * of difference that ships green from the Linux gate and breaks every Mac.
+ */
+export async function posixProcTable(): Promise<ProcRow[]> {
+  const res = await execBinary(
+    "ps",
+    ["-ww", "-e", "-o", "pid=,ppid=,etime=,rss=,time=,comm=,args="],
+    { reject: false, buffer: true, timeout: PROC_TABLE_TIMEOUT_MS },
+  );
+  return parsePsTable(res.stdout ?? "", true, Date.now());
+}
 
 /**
  * Signal 0: no signal is sent, it just asks whether the pid is addressable.

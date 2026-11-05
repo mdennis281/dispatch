@@ -162,9 +162,6 @@ export class PauseService {
     const ids = await this.deps.chatsWithProcesses();
     // Settled, not all: one chat that won't die must not spare the rest.
     await Promise.allSettled(ids.map((id) => this.deps.killChat(id)));
-    // Shell kills are fire-and-forget, so a scan right after the sweep still
-    // sees them exiting — and caches that for the TTL. The panel then offers
-    // to kill processes that are already gone. Seen on the first live run.
     await this.deps.afterKill?.(ids);
     if (this.deps.broker.markKilled(ids)) await this.persist();
     return { chatIds: ids };

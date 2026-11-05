@@ -860,6 +860,54 @@ async function main() {
     return `exit ${r.exitCode}`;
   });
 
+  // The process tracker on a REAL host: the table this OS produces has to form
+  // a tree (so a dev server is attributed to the shell that started it), and
+  // the reap has to leave nothing behind. Each of those has a per-OS spelling —
+  // CIM on Windows, GNU `ps` on Linux, BSD `ps` on macOS — and this smoke is
+  // the only place macOS runs at all. Behaviour-only assertions, so it holds
+  // for any payload new enough to have the per-chat count.
+  await check("a chat's background process is counted, then reaped by the kill", async () => {
+    const started = (
+      await post(
+        "/api/terminals/run",
+        {
+          chatId,
+          name: "smoke-proc",
+          command: 'node -e "setInterval(() => {}, 1000)"',
+          background: true,
+          timeoutMs: 30_000,
+        },
+        { expect: 200 },
+      )
+    ).json;
+    const counted = async () => (await get("/api/chats/processes", { expect: 200 })).json.byChat?.[chatId];
+    // The shell plus the node under it. Generous: a background sweep can be
+    // up to an interval away, and a cold runner is slow.
+    let tally;
+    const until = Date.now() + 90_000;
+    while (Date.now() < until) {
+      tally = await counted();
+      if ((tally?.shells ?? 0) + (tally?.session ?? 0) >= 2) break;
+      await new Promise((r) => setTimeout(r, 2_000));
+    }
+    assert((tally?.shells ?? 0) + (tally?.session ?? 0) >= 2, `never attributed: ${JSON.stringify(tally)} (run: ${JSON.stringify(started).slice(0, 200)})`);
+
+    const t0 = Date.now();
+    const killed = (await post("/api/chats/processes/kill", { chatIds: [chatId] }, { expect: 200 })).json;
+    const killMs = Date.now() - t0;
+    // Polled rather than read once: a payload from before the tracker drops
+    // the count only after its shell kills land, and the scheduled run tests
+    // whatever the channel head is. How long it took is in the report.
+    let after = await counted();
+    const settle = Date.now() + 30_000;
+    while (after && after.session + after.shells > 0 && Date.now() < settle) {
+      await new Promise((r) => setTimeout(r, 1_000));
+      after = await counted();
+    }
+    assert(!after || after.session + after.shells === 0, `still counted after the kill: ${JSON.stringify(after)}`);
+    return `counted ${JSON.stringify(tally)}, kill took ${killMs} ms, settled ${Date.now() - t0} ms after it, freed ${killed.freed}`;
+  });
+
   await check("update surface knows what is installed", async () => {
     const u = (await get("/api/update", { expect: 200 })).json;
     assert(u.supported === true, JSON.stringify(u).slice(0, 200));

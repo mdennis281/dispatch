@@ -91,6 +91,18 @@ describe("defaultAlive (the real probe)", () => {
 });
 
 describe("parseProcCsv", () => {
+  it("reads the epoch-ms StartedAt column, and leaves a blank one absent", () => {
+    const rows = parseProcCsv(
+      [
+        '"ProcessId","ParentProcessId","Name","StartedAt"',
+        '"900","800","node.exe","1793764846820"',
+        '"4","0","System",',
+      ].join("\r\n"),
+    );
+    expect(rows[0].startedAt).toBe(1_793_764_846_820);
+    expect(rows[1].startedAt).toBeUndefined();
+  });
+
   it("reads pid/ppid/name and skips the header", () => {
     const rows = parseProcCsv(
       [
@@ -224,6 +236,24 @@ describe("parsePsTable", () => {
       name: "node",
       commandLine: "/usr/bin/node lazy-browser-shim.mjs --output-dir /tmp/dispatch-browser-mcp/chat-1",
     });
+  });
+
+  it("turns etime into a start time, on both GNU and BSD layouts", () => {
+    const now = 10_000_000;
+    const rows = parsePsTable(
+      [
+        // GNU: [[dd-]hh:]mm:ss for both etime and time.
+        "  900   800    01:40   2048 01:02:03 node /usr/bin/node a.js",
+        // BSD (macOS): etime has no fraction, time has hundredths.
+        "  123     1 1-00:00:00   1234   0:00.03 /usr/sbin/syslogd /usr/sbin/syslogd",
+      ].join("\n"),
+      true,
+      now,
+    );
+    expect(rows[0]).toMatchObject({ pid: 900, ppid: 800, name: "node", rssBytes: 2048 * 1024, startedAt: now - 100_000 });
+    expect(rows[0].cpuMs).toBe((3600 + 120 + 3) * 1000);
+    expect(rows[1]).toMatchObject({ pid: 123, name: "/usr/sbin/syslogd", startedAt: now - 86_400_000 });
+    expect(rows[1].cpuMs).toBeCloseTo(30);
   });
 });
 

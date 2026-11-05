@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ProcTableCache } from "./proc-table-cache.js";
+import { ProcessTracker } from "./process-tracker.js";
 import { ResourceService } from "./resources.js";
 import type { ProcRow } from "./processes.js";
 
@@ -19,7 +19,13 @@ function cores(n: number, idle: number, busy: number) {
 }
 
 interface Harness {
-  svc: ResourceService;
+  /**
+   * The service, with `snapshot()` taking a SWEEP first — what the tracker's
+   * background timer does between real polls. The first call also takes the
+   * one-second baseline sweep `ProcessTracker.start()` takes at boot, so the
+   * first answer already carries rates, exactly as it does in production.
+   */
+  svc: Pick<ResourceService, "snapshot" | "chatDetail" | "system">;
   advance: (ms: number) => void;
   /** Replace the table the next scan will see. */
   setTable: (rows: ProcRow[]) => void;
@@ -35,10 +41,8 @@ function harness(
     sessionPids?: Map<string, number>;
     terminals?: { chatId: string; name: string; terminalId: string; pid: number }[];
     serverPid?: number;
-    /**
-     * Runs during a re-prime's wait, between its two scans. The default leaves
-     * the table alone, so a re-prime measures every process at 0%.
-     */
+    infraPids?: number[];
+    /** Runs during the boot baseline's one second, between its two sweeps. */
     whilePriming?: (h: Omit<Harness, "svc">) => void;
   } = {},
 ): Harness {
@@ -47,27 +51,21 @@ function harness(
   let idle = 1000;
   let busy = 1000;
   let scans = 0;
-  const cache = new ProcTableCache({
+  const tracker = new ProcessTracker({
     read: async () => {
       scans += 1;
       return table;
     },
-    now: c.now,
-    // No caching: each test call should see the table it just set.
-    ttlMs: 0,
-  });
-  const svc = new ResourceService({
-    procTable: cache,
     sessionPids: () => opts.sessionPids ?? new Map(),
     terminals: opts.terminals ? { livePids: () => opts.terminals! } : undefined,
-    serverPid: opts.serverPid ?? 1,
     now: c.now,
-    // The re-prime's wait moves the fake clock instead of the real one, so a
-    // primed window is exactly the delay and the tests stay instant.
-    sleep: async (ms) => {
-      c.advance(ms);
-      opts.whilePriming?.(rest);
-    },
+    intervalMs: 0,
+  });
+  const real = new ResourceService({
+    tracker,
+    serverPid: opts.serverPid ?? 1,
+    infraPids: () => opts.infraPids ?? [],
+    now: c.now,
     cpus: () => cores(4, idle, busy),
     freemem: () => 4_000,
     totalmem: () => 10_000,
@@ -80,6 +78,24 @@ function harness(
       busy += b;
     },
     scans: () => scans,
+  };
+  let primed = false;
+  const svc: Harness["svc"] = {
+    snapshot: async () => {
+      if (!primed) {
+        primed = true;
+        await tracker.sweep();
+        c.advance(1000);
+        opts.whilePriming?.(rest);
+      }
+      await tracker.sweep();
+      return real.snapshot();
+    },
+    chatDetail: async (chatId) => {
+      if (!tracker.latest()) await svc.snapshot();
+      return real.chatDetail(chatId);
+    },
+    system: () => real.system(),
   };
   return { svc, ...rest };
 }
@@ -283,63 +299,31 @@ describe("ResourceService.snapshot", () => {
     expect(next.chats[0].cpuPct).toBeCloseTo(50);
   });
 
-  it("throws a stale baseline away and re-primes instead of averaging over it", async () => {
-    // THE BUG. The baseline only advances when someone asks, so the first
-    // hover after a quiet stretch differenced against a scan from minutes or
-    // hours ago. Over that window a process spawned since is "new" and skipped
-    // entirely, and one that survived is averaged over the whole stretch. On a
-    // live install the pill read "Dispatch 1.2%" while six chats of headless
-    // Chrome held half the machine.
+  it("refuses a stale baseline rather than averaging over it", async () => {
+    // THE BUG this guards: a baseline from minutes ago averages a busy process
+    // over the whole stretch and skips everything spawned since — the pill once
+    // read "Dispatch 1.2%" while headless Chrome held half the machine. The
+    // background sweep keeps baselines fresh; if one is ever stale anyway (the
+    // tracker was stopped), the answer is "not measured", never a smear.
     const h = harness([row(1, 0), row(10, 1, { cpuMs: 0 })], {
-      sessionPids: new Map([["chat-a", 10], ["chat-b", 20]]),
-      whilePriming: (p) => {
-        // Both processes burn half a core during the re-prime's one second.
-        p.setTable([row(1, 0), row(10, 1, { cpuMs: 10_500 }), row(20, 1, { cpuMs: 500_500 })]);
-      },
+      sessionPids: new Map([["chat-a", 10]]),
     });
     await h.svc.snapshot();
-
-    // Ten minutes later: pid 10 has used 10 s of CPU in total (1.7% smeared
-    // over the stretch), and pid 20 — busy the entire time — did not exist at
-    // the baseline at all.
     h.advance(600_000);
-    h.setTable([row(1, 0), row(10, 1, { cpuMs: 10_000 }), row(20, 1, { cpuMs: 500_000 })]);
+    h.setTable([row(1, 0), row(10, 1, { cpuMs: 10_000 })]);
     const snap = await h.svc.snapshot();
-    expect(snap.windowMs).toBe(1000);
-    const byChat = Object.fromEntries(snap.chats.map((c) => [c.chatId, c.cpuPct]));
-    expect(byChat["chat-a"]).toBeCloseTo(50);
-    expect(byChat["chat-b"]).toBeCloseTo(50);
+    expect(snap.chats[0].cpuPct).toBeNull();
+    expect(snap.windowMs).toBe(0);
   });
 
-  it("shares one re-prime between readers that open together", async () => {
-    const h = harness([row(1, 0), row(10, 1, { cpuMs: 0 })], {
-      sessionPids: new Map([["chat-a", 10]]),
-    });
-    // Two tabs, same instant. One baseline scan, one re-prime scan — not two
-    // of each, and neither reader handed the empty first half.
-    const [a, b] = await Promise.all([h.svc.snapshot(), h.svc.snapshot()]);
-    expect(h.scans()).toBe(2);
-    expect(a.windowMs).toBe(1000);
-    expect(b.windowMs).toBe(1000);
-    expect(a.chats[0].cpuPct).toBe(0);
-    expect(b.chats[0].cpuPct).toBe(0);
-  });
-
-  it("does not re-prime while a live poll keeps the baseline fresh", async () => {
+  it("serves every reader the same sweep's figures without scanning per read", async () => {
     const h = harness([row(1, 0), row(10, 1, { cpuMs: 0 })], {
       sessionPids: new Map([["chat-a", 10]]),
     });
     await h.svc.snapshot();
-    const primed = h.scans();
-
-    // The page's cadence: well inside the stale limit, so each poll is one
-    // scan differenced against the last — no extra spawn, no extra wait.
-    h.advance(10_000);
-    h.setTable([row(1, 0), row(10, 1, { cpuMs: 5_000 })]);
-    const next = await h.svc.snapshot();
-    expect(h.scans()).toBe(primed + 1);
-    expect(next.windowMs).toBe(10_000);
-    expect(next.chats[0].cpuPct).toBeCloseTo(50);
+    const scans = h.scans();
+    await Promise.all([h.svc.chatDetail("chat-a"), h.svc.chatDetail("chat-a")]);
+    expect(h.scans()).toBe(scans);
   });
 
   it("keeps a tree's CPU when only some of its processes are measurable", async () => {
@@ -599,91 +583,5 @@ describe("ResourceService.chatDetail", () => {
   it("returns nothing for a chat that holds no processes", async () => {
     const h = harness([row(1, 0)]);
     expect((await h.svc.chatDetail("ghost")).procs).toEqual([]);
-  });
-});
-
-describe("ProcTableCache", () => {
-  it("serves one scan to concurrent callers", async () => {
-    let scans = 0;
-    const cache = new ProcTableCache({
-      read: async () => {
-        scans++;
-        return [row(1, 0)];
-      },
-    });
-    await Promise.all([cache.read(), cache.read(), cache.read()]);
-    expect(scans).toBe(1);
-  });
-
-  it("keeps the last real reading when a scan comes back empty", async () => {
-    // An empty table is a FAILED table. Serving it would tell every chat it
-    // holds nothing — plausible, uniformly wrong, indistinguishable from real.
-    let rows = [row(1, 0), row(2, 1)];
-    const c = clock();
-    const cache = new ProcTableCache({ read: async () => rows, now: c.now, ttlMs: 10 });
-    expect((await cache.read()).rows).toHaveLength(2);
-
-    rows = [];
-    c.advance(100);
-    expect((await cache.read()).rows).toHaveLength(2);
-
-    // ...and the gap was not cached, so the next call retries rather than
-    // serving the stale answer for a full TTL.
-    rows = [row(1, 0)];
-    c.advance(1);
-    expect((await cache.read()).rows).toHaveLength(1);
-  });
-
-  it("bypasses the cache when a caller demands a fresh read", async () => {
-    let rows = [row(1, 0)];
-    const c = clock();
-    const cache = new ProcTableCache({ read: async () => rows, now: c.now, ttlMs: 60_000 });
-    await cache.read();
-    rows = [row(1, 0), row(2, 1)];
-    // Cached — still the old answer.
-    expect((await cache.read()).rows).toHaveLength(1);
-    // A kill path must never signal pids off that. `fresh` re-scans.
-    expect((await cache.read(true)).rows).toHaveLength(2);
-  });
-
-  it("does not let an in-flight scan overwrite a forced read", async () => {
-    // `read(true)` is the kill path's read. If a normal scan was already in
-    // flight when it ran, that scan started BEFORE the kill — letting it
-    // resolve into the cache afterwards puts the pre-kill rows back, which is
-    // the exact hazard `generation` exists for.
-    const c = clock();
-    let release: (rows: ProcRow[]) => void = () => {};
-    let call = 0;
-    const cache = new ProcTableCache({
-      read: () => {
-        call += 1;
-        // First call (the slow, already-running scan) hangs until released.
-        if (call === 1) return new Promise<ProcRow[]>((res) => (release = res));
-        return Promise.resolve([row(1, 0)]);
-      },
-      now: c.now,
-      ttlMs: 60_000,
-    });
-
-    const slow = cache.read();
-    const forced = await cache.read(true);
-    expect(forced.rows).toHaveLength(1);
-
-    // The stale scan lands late, carrying three pre-kill rows.
-    release([row(1, 0), row(2, 1), row(3, 1)]);
-    await slow;
-
-    // The cache must still hold the forced result, not the stale one.
-    expect((await cache.read()).rows).toHaveLength(1);
-  });
-
-  it("re-scans after an invalidate", async () => {
-    let rows = [row(1, 0), row(2, 1)];
-    const c = clock();
-    const cache = new ProcTableCache({ read: async () => rows, now: c.now, ttlMs: 60_000 });
-    await cache.read();
-    rows = [row(1, 0)];
-    cache.invalidate();
-    expect((await cache.read()).rows).toHaveLength(1);
   });
 });

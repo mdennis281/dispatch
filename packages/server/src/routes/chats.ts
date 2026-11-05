@@ -24,7 +24,7 @@ import { createChat } from "./dispatch.js";
 import { ProviderUnavailableError, providerUnavailableBody } from "../harness/index.js";
 import { leanRows } from "../services/transcript-lean.js";
 import { chatTotalsByProject, listCappedChats } from "../services/chat-load-cap.js";
-import { deleteChat, reapChatResidual } from "../services/chat-deletion.js";
+import { deleteChat } from "../services/chat-deletion.js";
 import { GLOBAL_MODE_ID, isGlobalProject } from "@dispatch/shared";
 
 /** Cap on one hydrate request (a card needs 2 — its tool_use + tool_result). */
@@ -38,7 +38,6 @@ function isTruthyFlag(v: string | undefined): boolean {
 export function registerChatRoutes(app: FastifyInstance): void {
   const { store, bus } = app.cm;
   const { broker, chatProcesses, terminals } = app.services;
-  const reapResidual = (chatId: string) => reapChatResidual(app.services, chatId);
 
   // The load cap's dependencies, in one place: both routes below need the same
   // view of what is live, and a second spelling of it would mean the totals and
@@ -340,26 +339,11 @@ export function registerChatRoutes(app: FastifyInstance): void {
         : [];
       if (ids.length === 0) return reply.code(400).send({ error: "chatIds required" });
 
-      const before = await chatProcesses.counts();
-      // Settled, not all: one chat failing to stop must not abandon the rest.
-      await Promise.allSettled(
-        ids.map(async (id) => {
-          await broker.stop(id).catch(() => {});
-          terminals.killChat(id);
-          // Codex launches MCPs from its shared app-server, outside the runtime
-          // subtree that `broker.stop()` owns. Re-scan AFTER stopping and reap
-          // roots carrying this chat's browser output marker plus descendants.
-          await reapResidual(id);
-        }),
-      );
-      // The count is a cache with a TTL; without this the row keeps showing the
-      // number we just reaped, which reads as the button doing nothing.
-      chatProcesses.invalidate();
-      const freed = ids.reduce((n, id) => {
-        const tally = before.byChat[id];
-        return n + (tally ? tally.session + tally.shells : 0);
-      }, 0);
-      return { chatIds: ids, freed };
+      // See `ChatProcessService.release`: no process-table scan unless
+      // something outlived the stop, and the dead pids leave the tracker's
+      // snapshot before this returns — so the client's re-read shows the reap.
+      const { freed, orphans } = await chatProcesses.release(ids, (id) => broker.stop(id));
+      return { chatIds: ids, freed, orphans };
     },
   );
 }

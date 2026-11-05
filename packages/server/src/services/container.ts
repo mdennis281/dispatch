@@ -65,14 +65,16 @@ import { WorktreeService } from "./worktree.js";
 import { WorktreeDetector } from "./worktree-detector.js";
 import { WorktreeReaper } from "./worktree-reaper.js";
 import { RetentionService } from "./retention.js";
-import { deleteChat, reapChatResidual } from "./chat-deletion.js";
+import { deleteChat } from "./chat-deletion.js";
 import { GitService } from "./git.js";
 import { GrowthService } from "./growth.js";
 import { CommitMessageService, makeFakeCommitGenerator } from "./commit-message.js";
 import { RunnerService } from "./runner.js";
-import { ProcessService, defaultProcTable } from "./processes.js";
+import { ProcessService } from "./processes.js";
 import { ChatProcessService } from "./chat-processes.js";
-import { ProcTableCache } from "./proc-table-cache.js";
+import { ProcessTracker } from "./process-tracker.js";
+import { createProcTableReader } from "./proc-table-reader.js";
+import { reapIdleShells } from "./idle-shell-reaper.js";
 import { ResourceService } from "./resources.js";
 import { GitHubService } from "./github.js";
 import { CiService } from "./ci.js";
@@ -159,7 +161,7 @@ export interface ServiceOverrides {
   runner?: RunnerService;
   processes?: ProcessService;
   chatProcesses?: ChatProcessService;
-  procTableCache?: ProcTableCache;
+  processTracker?: ProcessTracker;
   resources?: ResourceService;
   github?: GitHubService;
   ci?: CiService;
@@ -245,7 +247,7 @@ export interface Services extends ServiceBase {
   processes: ProcessService;
   /** Per-chat process totals for the sidebar, and the manual reap behind them. */
   chatProcesses: ChatProcessService;
-  procTableCache: ProcTableCache;
+  processTracker: ProcessTracker;
   resources: ResourceService;
   github: GitHubService;
   /** The CI/CD page's provider-neutral read/act layer (GitHub Actions today). */
@@ -584,7 +586,17 @@ export function createServices(
   // shell started it — the only way an agent's own dev server on a port nobody
   // declared is visible at all.
   const processes =
-    overrides.processes ?? new ProcessService({ store, terminals });
+    overrides.processes ??
+    new ProcessService({
+      store,
+      terminals,
+      // The tracker's latest sweep rather than a scan of its own: this only
+      // walks ancestry (which shell a listener descends from, which pids in a
+      // kill set cover others), and a pid the table no longer matches is
+      // re-checked by `alive` before anything is reported. Declared below —
+      // the tracker needs the broker — and only called after construction.
+      procTable: async () => (await processTracker.read()).rows,
+    });
   const broker =
     overrides.broker ??
     new SessionBroker({
@@ -617,38 +629,57 @@ export function createServices(
       metrics,
       tokens,
     });
-  // ONE process-table read, shared by everything below that needs one. The
-  // sidebar's count poll and the resource snapshot run on different cadences
-  // over identical data; without this they would spawn a `powershell.exe` each,
-  // and the feature whose job is to show a loaded machine would be adding to
-  // the load. See `ProcTableCache`.
-  const procTableCache = overrides.procTableCache ?? new ProcTableCache();
+  // ONE process table, swept in the background and shared by everything that
+  // needs to know what is running: the sidebar's per-chat count, the Resources
+  // page's CPU and memory, the Ports & processes panel's ancestry, the kill
+  // button, and the idle-shell reaper. Each used to read (or cache) the table
+  // separately and attribute it separately — see `ProcessTracker`.
+  const procTableReader = createProcTableReader();
+  // This instance's chat ids, for the tracker's `ownsChat`. Refreshed after
+  // every sweep (`listChats` is a cached readdir) — a chat created since is
+  // still attributed through its live session pid in the meantime.
+  let knownChats: ReadonlySet<string> | undefined;
+  const refreshKnownChats = (): Promise<void> =>
+    store
+      .listChats()
+      .then((chats) => {
+        knownChats = new Set(chats.map((c) => c.id));
+      })
+      .catch(() => {});
+  const processTracker =
+    overrides.processTracker ??
+    new ProcessTracker({
+      read: procTableReader.read,
+      sessionPids: () => broker.sessionPids(),
+      terminals,
+      ownsChat: (chatId) => knownChats?.has(chatId) ?? false,
+      // Same window as the session sweep, so "idle" means one thing. Detached
+      // inside the tracker, so a slow kill never delays the next sweep.
+      onSweep: (snap) => {
+        void refreshKnownChats();
+        const retired = reapIdleShells(snap, terminals, broker.idleTimeoutMinutes, Date.now());
+        if (retired.length) {
+          console.log(`[Dispatch] retired ${retired.length} idle shell(s): ${retired.join(", ")}`);
+        }
+      },
+    });
 
-  // What each chat is holding in OS processes, for the count on its sidebar row.
-  // Constructed AFTER the broker because the session roots it walks down from
-  // are the broker's; `terminals` supplies the other kind of root (background
-  // shells, which hang off the SERVER rather than off a session).
+  // What each chat is holding in OS processes, for the count on its sidebar
+  // row — and the ONE reap path every "kill this chat's processes" goes through.
   const chatProcesses =
     overrides.chatProcesses ??
     new ChatProcessService({
-      procTable: async () => (await procTableCache.read()).rows,
-      // Kills read fresh: a cached table can name a pid the OS has recycled.
-      procTableFresh: defaultProcTable,
-      // A reap has to drop the SHARED table, not just this service's tally —
-      // otherwise the Resources page reports the killed processes as an
-      // unattributed leak for the rest of the TTL.
-      invalidateSource: () => procTableCache.invalidate(),
-      sessionPids: () => broker.sessionPids(),
-      terminals,
+      tracker: processTracker,
+      killShells: (chatId) => terminals.killChat(chatId),
+      killPids: (pids) => processes.killPids(pids),
     });
 
   // What each chat is COSTING, as opposed to how many processes it holds.
   const resources =
     overrides.resources ??
     new ResourceService({
-      procTable: procTableCache,
-      sessionPids: () => broker.sessionPids(),
-      terminals,
+      tracker: processTracker,
+      infraPids: () => [procTableReader.workerPid()],
     });
   const title =
     overrides.title ??
@@ -871,22 +902,14 @@ export function createServices(
       const mine = new Set(chats.map((c) => c.id));
       return Object.keys(counts.byChat).filter((id) => mine.has(id));
     },
-    // The same three steps as `POST /api/chats/processes/kill`, except that the
+    // The same reap as `POST /api/chats/processes/kill`, except that the
     // session stop keeps what is queued behind the pause — see
-    // `stopKeepingQueued` for why a plain `stop()` would lose it.
+    // `stopKeepingQueued` for why a plain `stop()` would lose it. No settle
+    // loop afterwards: `release` awaits the shell kills and drops the dead
+    // pids from the tracker itself. (The loop it replaces re-scanned up to
+    // twenty times.)
     killChat: async (chatId) => {
-      await broker.stopKeepingQueued(chatId).catch(() => {});
-      terminals.killChat(chatId);
-      await reapChatResidual({ chatProcesses, processes }, chatId).catch(() => {});
-    },
-    afterKill: async (ids) => {
-      for (let i = 0; i < 20; i++) {
-        chatProcesses.invalidate();
-        const { byChat } = await chatProcesses.counts();
-        if (!ids.some((id) => id in byChat)) break;
-        await new Promise((r) => setTimeout(r, 250));
-      }
-      chatProcesses.invalidate();
+      await chatProcesses.release([chatId], (id) => broker.stopKeepingQueued(id));
     },
     send: async (chatId, text, opts) => {
       await ensureSession(services, chatId);
@@ -1229,14 +1252,11 @@ export function createServices(
     send: (input) => chatMessenger.send(input),
     getChat: (id) => store.getChat(id).catch(() => null),
     interrupt: (chatId) => broker.interrupt(chatId),
-    // The sidebar reap's three steps (`POST /api/chats/processes/kill`):
-    // `broker.stop` owns only the provider's subtree — shells are separate
-    // roots, and Codex launches MCPs from its shared app-server.
+    // The sidebar reap (`POST /api/chats/processes/kill`): `broker.stop` owns
+    // only the provider's subtree — shells are separate roots, and Codex
+    // launches MCPs from its shared app-server. `release` covers all three.
     release: async (chatId) => {
-      await broker.stop(chatId).catch(() => {});
-      terminals.killChat(chatId);
-      await reapChatResidual({ chatProcesses, processes }, chatId).catch(() => {});
-      chatProcesses.invalidate();
+      await chatProcesses.release([chatId], (id) => broker.stop(id));
     },
     archive: async (chatId, archived = true) => {
       const saved = await store.patchChat(chatId, { archived });
@@ -1697,7 +1717,7 @@ export function createServices(
     runner,
     processes,
     chatProcesses,
-    procTableCache,
+    processTracker,
     resources,
     github,
     ci,
@@ -1777,6 +1797,11 @@ export function createServices(
         .catch(() => {
           /* best-effort: an unreadable config leaves the env/default cap in force */
         });
+
+      // After the idle window is applied: the tracker's first sweeps run the
+      // idle-shell reaper, which reads it.
+      await refreshKnownChats();
+      processTracker.start();
 
       // One-time transparent memory migration: when a project has (or gains) a
       // `.dispatch/` config, copy any legacy `.data` memories into the
@@ -2117,6 +2142,10 @@ export function createServices(
       metrics.dispose();
       if (terminalSweep) clearInterval(terminalSweep);
       terminalSweep = undefined;
+      // Before the shells are reaped below: a sweep landing mid-teardown would
+      // run the idle reaper against a terminal service that is shutting down.
+      processTracker.stop();
+      procTableReader.dispose();
       // Kill any lingering persistent shells after the broker unwinds — flushing
       // their queued output first, because the tail of a transcript is usually
       // the part that explains why anyone is reading it.

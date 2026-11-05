@@ -2000,8 +2000,18 @@ export class TerminalService {
    * under it would be to delete the chat.
    */
   kill(terminalId: string): boolean {
+    return this.killAndWait(terminalId) !== undefined;
+  }
+
+  /**
+   * {@link kill}, returning a promise that settles once the shell's tree-kill
+   * has FINISHED (undefined when there was no such shell). The chat reap needs
+   * it: what it does next is check which processes survived, and asking that
+   * while `taskkill /T` is still walking the tree reports every one of them.
+   */
+  killAndWait(terminalId: string): Promise<void> | undefined {
     const term = this.terminals.get(terminalId);
-    if (!term) return false;
+    if (!term) return undefined;
     this.terminals.delete(terminalId);
     // A command still in `beforeRun` must not be written to a shell being
     // closed; its caller hears "Terminal has exited." now, not after the kill.
@@ -2018,9 +2028,10 @@ export class TerminalService {
     // ever drain. Waiting means those lines are in the batch instead — and
     // they are the interesting ones, since they are what it said on the way
     // out.
-    this.trackKill(this.killProc(term).then(() => this.archiveOnClose(term)));
+    const killed = this.killProc(term);
+    this.trackKill(killed.then(() => this.archiveOnClose(term)));
     this.bus.publish({ type: "terminal-closed", terminalId: term.id, chatId: term.chatId });
-    return true;
+    return killed;
   }
 
   /** Flush a closed shell's tail and keep its row as an archived one. */
@@ -2060,11 +2071,40 @@ export class TerminalService {
     await this.store?.deleteTerminalRecord(terminalId).catch(() => null);
   }
 
-  /** Kill + forget every terminal owned by a chat (chat deleted / teardown). */
-  killChat(chatId: string): void {
+  /**
+   * Kill + forget every terminal owned by a chat (chat deleted / teardown).
+   * Resolves once every tree-kill has finished; callers that don't care can
+   * ignore the promise, exactly as they ignored the old `void`.
+   */
+  killChat(chatId: string): Promise<void> {
+    const waits: Promise<void>[] = [];
     for (const [key, term] of [...this.terminals.entries()]) {
-      if (term.chatId === chatId) this.kill(key);
+      if (term.chatId !== chatId) continue;
+      const killed = this.killAndWait(key);
+      if (killed) waits.push(killed);
     }
+    return Promise.all(waits).then(() => undefined);
+  }
+
+  /**
+   * Live shells sitting at an empty prompt since before `cutoff`: nothing
+   * running in them (not `busy`, not holding a `background` command, no run in
+   * flight), and no output or command since.
+   *
+   * CANDIDATES, not a verdict. A shell can be idle by this definition while a
+   * process it started with `Start-Process` or `&` still runs under it — the
+   * reaper checks the process tree before it kills anything.
+   */
+  idleShells(cutoff: number): { terminalId: string; chatId: string; name: string; pid: number }[] {
+    const out: { terminalId: string; chatId: string; name: string; pid: number }[] = [];
+    for (const t of this.terminals.values()) {
+      const pid = t.proc.pid;
+      if (t.status !== "live" || t.busy || t.background || t.pending) continue;
+      if (typeof pid !== "number" || pid <= 0) continue;
+      if (t.lastActivityAt >= cutoff) continue;
+      out.push({ terminalId: t.id, chatId: t.chatId, name: t.name, pid });
+    }
+    return out;
   }
 
   /**
