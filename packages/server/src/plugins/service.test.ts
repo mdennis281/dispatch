@@ -174,8 +174,9 @@ describe("activation", () => {
       // around importModule), not just `activate`. At 50ms the healthy
       // hello-server's cold import on the loaded self-hosted runner overran it
       // and came back `error` too — red CI/Release on main from Oct 28 (#442,
-      // #445). `slow` never resolves, so any budget trips it; this one just has
-      // to be generous for hello-server while staying well under the 5s test timeout.
+      // #445). `slow` never resolves, so any budget trips it; this one only has
+      // to exceed hello-server's worst cold import, and stays far below the
+      // 60s `testTimeout` (vitest.config.ts) — raise it freely if runners slow down.
       activateBudgetMs: 1500,
       fault: () => {},
       log: () => {},
