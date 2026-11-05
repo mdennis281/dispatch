@@ -52,19 +52,6 @@ export function toCodexPosture(mode: PermissionMode): CodexPosture {
 }
 
 /**
- * Dispatch effort → Codex reasoning effort.
- *
- * The two ladders agree on low/medium/high/xhigh. Codex adds "ultra" above
- * "max" on some models; Dispatch's shared `Effort` enum has no member for it,
- * so "max" is as high as a Dispatch chat can ask for. Passing an effort a model
- * doesn't support makes `turn/start` fail, so the caller clamps against the
- * model's advertised list (see CodexHarness.listModels).
- */
-export function toCodexEffort(effort: Effort): string {
-  return effort;
-}
-
-/**
  * Clamp an effort to what a model actually supports.
  *
  * Codex's `model/list` reports per-model effort options and rejects anything

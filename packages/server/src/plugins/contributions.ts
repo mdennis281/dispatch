@@ -64,13 +64,6 @@ export interface PluginMcpDeclaration {
   secrets: readonly string[];
 }
 
-/** A plugin's declared managed process, with the directory it resolves against. */
-export interface PluginProcessDeclaration {
-  pluginId: string;
-  dir: string;
-  spec: PluginProcess;
-}
-
 /** What one plugin contributes, as read from its directory. */
 export interface PluginContributions {
   skills: SkillConfig[];
@@ -428,14 +421,4 @@ export function mergeDeclaredMcpServers<T>(layers: {
 /** `plugin:<id>` — the runner `owner` a plugin's processes carry. */
 export function pluginProcessOwner(pluginId: string): string {
   return `plugin:${pluginId}`;
-}
-
-/** The plugin id behind a runner `owner`, or null when it is not a plugin's. */
-export function pluginIdOfOwner(owner: string | undefined): string | null {
-  return owner?.startsWith("plugin:") ? owner.slice("plugin:".length) : null;
-}
-
-/** Where the contribution dirs of a plugin are, absolute — for `config_list` paths. */
-export function contributionDir(dir: string, rel: string | undefined): string | undefined {
-  return rel ? join(dir, rel) : undefined;
 }

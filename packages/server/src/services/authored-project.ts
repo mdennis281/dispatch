@@ -22,7 +22,7 @@
  * No reload plumbing here either: `ProjectConfigService` watches `.dispatch/` and
  * debounce-reloads, so a write lands for the next turn exactly like a hand edit.
  */
-import { join, relative, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { readFile, writeFile, mkdir, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import {
@@ -287,11 +287,6 @@ function fileOf(item: unknown): string | undefined {
       ? get.call(item, "file")
       : (item as { file?: unknown } | null)?.file;
   return typeof value === "string" ? value.replace(/\\/g, "/") : undefined;
-}
-
-/** Config-dir-relative, forward-slashed — the form the UI and errors speak. */
-export function relToConfig(configDir: string, abs: string): string {
-  return relative(configDir, abs).replace(/\\/g, "/");
 }
 
 export type { LoadedManifest };

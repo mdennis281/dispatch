@@ -23,29 +23,6 @@ import type { SectionState } from "./sections.js";
 
 /* ------------------------------------------------------------------ titles */
 
-export function SectionTitle({
-  icon,
-  label,
-  children,
-  right,
-}: {
-  icon?: ReactNode;
-  label: string;
-  children?: ReactNode;
-  right?: ReactNode;
-}) {
-  return (
-    <div className="mb-2 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-      <span className="flex items-center gap-1.5 text-xs font-semibold text-secondary">
-        {icon}
-        {label}
-      </span>
-      <span className="text-2xs text-faint">{children}</span>
-      {right && <span className="ml-auto">{right}</span>}
-    </div>
-  );
-}
-
 export function Empty({ children }: { children: ReactNode }) {
   return <span className="text-2xs italic text-faint">{children}</span>;
 }

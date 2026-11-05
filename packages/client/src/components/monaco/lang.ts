@@ -92,12 +92,3 @@ export function languageForPath(path: string): string {
 export function isImagePath(path: string): boolean {
   return IMAGE_EXT.has(ext(path));
 }
-
-/** Guess an image mime for a base64 inline preview data URL. */
-export function imageMimeForPath(path: string): string {
-  const e = ext(path);
-  if (e === "svg") return "image/svg+xml";
-  if (e === "jpg" || e === "jpeg") return "image/jpeg";
-  if (e === "ico") return "image/x-icon";
-  return `image/${e || "png"}`;
-}

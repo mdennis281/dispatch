@@ -2758,8 +2758,3 @@ export class GitHubService {
     this.bus.publish({ type: "notice", chatId, level, text });
   }
 }
-
-/** Convenience factory (matches the DI shape used elsewhere). */
-export function createGitHubService(deps: GitHubServiceDeps): GitHubService {
-  return new GitHubService(deps);
-}

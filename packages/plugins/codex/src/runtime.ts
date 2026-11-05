@@ -219,8 +219,3 @@ let memo: HarnessRuntimeInfo | undefined;
 export function codexRuntime(): HarnessRuntimeInfo {
   return (memo ??= resolveCodexRuntime());
 }
-
-/** Drop the memo (tests; also lets a process re-probe after an install). */
-export function resetCodexRuntime(): void {
-  memo = undefined;
-}

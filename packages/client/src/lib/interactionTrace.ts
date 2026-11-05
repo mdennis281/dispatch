@@ -151,11 +151,6 @@ export function tracePage(phase: string, detail: Record<string, unknown> = {}): 
   if (t0) push({ k: "page", phase, ...detail });
 }
 
-/** A free-text marker, so the person holding the phone can label what they just did. */
-export function traceNote(text: string): void {
-  if (t0) push({ k: "note", text });
-}
-
 /**
  * A short, stable name for an element. Tag, id, the data attributes the shell
  * uses as landmarks, and the first couple of `cm-` classes — enough to tell the

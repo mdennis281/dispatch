@@ -259,8 +259,6 @@ export const SECTIONS: SectionDef[] = [
   },
 ];
 
-export const SECTION_BY_ID = new Map(SECTIONS.map((s) => [s.id, s]));
-
 /**
  * The icon for a spawned chat's `purpose.kind` — which is the agent-task id that
  * spawned it — or null when the kind is one this build doesn't know. Unknown

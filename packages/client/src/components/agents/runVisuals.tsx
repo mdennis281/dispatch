@@ -6,24 +6,9 @@
 import { Bot, Check, X, Square } from "lucide-react";
 import type { Effort } from "@dispatch/shared";
 import type { RunStatus, SubagentRun } from "../../lib/subagentRuns.js";
-import type { DotTone } from "../ui/StatusDot.js";
-import { StatusDot } from "../ui/StatusDot.js";
 import { Chip } from "../ui/Chip.js";
 import { Spinner } from "../ui/Spinner.js";
 import { cn } from "../../lib/cn.js";
-
-/** Dot tone per run status (accent = live, matching the chat's own convention). */
-export function runTone(status: RunStatus): DotTone {
-  if (status === "running") return "accent";
-  if (status === "failed") return "danger";
-  // Stopped isn't a failure — it just never got to finish.
-  if (status === "stopped") return "muted";
-  return "success";
-}
-
-export function runStatusLabel(status: RunStatus): string {
-  return status;
-}
 
 /** The status pill used in every run header. */
 export function RunStatusChip({ status }: { status: RunStatus }) {
@@ -227,9 +212,4 @@ export function RunIdentity({
       {run.effort && <EffortChip effort={run.effort} label="ran at effort" />}
     </span>
   );
-}
-
-/** Live dot + label pair used in list rows. */
-export function RunStatusDot({ status }: { status: RunStatus }) {
-  return <StatusDot tone={runTone(status)} pulse={status === "running"} size={7} />;
 }

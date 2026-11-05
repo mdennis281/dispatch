@@ -176,8 +176,3 @@ let memo: HarnessRuntimeInfo | undefined;
 export function gooseRuntime(): HarnessRuntimeInfo {
   return (memo ??= resolveGooseRuntime());
 }
-
-/** Drop the memo (tests; also lets a process re-probe after an install). */
-export function resetGooseRuntime(): void {
-  memo = undefined;
-}

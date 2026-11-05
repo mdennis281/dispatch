@@ -215,8 +215,3 @@ export const useMetrics = create<MetricsStore>((set, get) => {
     load,
   };
 });
-
-/** How many filter values are selected across every dimension. */
-export function activeFilterCount(filter: MetricFilter): number {
-  return Object.values(filter).reduce((n, values) => n + (values?.length ?? 0), 0);
-}

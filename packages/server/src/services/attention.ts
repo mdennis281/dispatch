@@ -11,7 +11,7 @@
  * `attention-resolve` (or when a chat is deleted) the matching item(s) drop out.
  */
 import { DISMISSIBLE_ATTENTION_KINDS } from "@dispatch/shared";
-import type { AttentionItem, WsServerEvent } from "@dispatch/shared";
+import type { AttentionItem } from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
 
 /**
@@ -185,11 +185,4 @@ export class AttentionQueue {
     }
     return removed;
   }
-}
-
-/** Narrow guard used by tests/consumers: is this a bus attention event? */
-export function isAttentionEvent(
-  e: WsServerEvent,
-): e is Extract<WsServerEvent, { type: "attention-add" | "attention-resolve" }> {
-  return e.type === "attention-add" || e.type === "attention-resolve";
 }

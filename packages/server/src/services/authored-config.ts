@@ -466,11 +466,6 @@ export function renderSkill(name: string, description: string | undefined, body:
   return `${front.join("\n")}\n${body.trim()}\n`;
 }
 
-/** Path a project-scope item is written to, relative to the config dir. */
-export function projectRelPath(kind: AuthoredKind, name: string): string {
-  return kind === "skill" ? `skills/${name}/SKILL.md` : `${kind === "persona" ? "personas" : "instructions"}/${name}.md`;
-}
-
 /** Last path segment, tolerant of either separator. */
 export function baseName(path: string): string {
   return basename(path.replace(/\\/g, "/"));
