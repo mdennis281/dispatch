@@ -411,4 +411,28 @@ describe("subcommandOf / isCoalescibleRead", () => {
     expect(isCoalescibleRead("gh", ["api", "repos/a/b/issues", "-f", "title=x"])).toBe(false);
     expect(isCoalescibleRead("netstat", ["-ano"])).toBe(false);
   });
+
+  it("keeps the gh api read spellings the services actually use shareable", () => {
+    const q = "query=query($owner:String!,$repo:String!,$number:Int!){repository{x}}";
+    expect(
+      isCoalescibleRead("gh", ["api", "graphql", "-f", q, "-f", "owner=a", "-f", "repo=b", "-F", "number=5"]),
+    ).toBe(true);
+    expect(isCoalescibleRead("gh", ["api", "repos/a/b/pulls", "--jq", ".[]", "--paginate"])).toBe(true);
+    expect(isCoalescibleRead("gh", ["api", "-H", "Accept: application/vnd.github.raw", "repos/a/b/x"])).toBe(true);
+    expect(isCoalescibleRead("gh", ["api", "-X", "GET", "repos/a/b", "--silent"])).toBe(true);
+    expect(isCoalescibleRead("gh", ["api", "--jq=.name", "repos/a/b"])).toBe(true);
+  });
+
+  it("fails closed on gh api spellings it doesn't understand — a wrong 'read' would drop a write", () => {
+    // Each of these is a write gh accepts that an exact-match check missed.
+    expect(isCoalescibleRead("gh", ["api", "-XPOST", "repos/a/b/issues"])).toBe(false);
+    expect(isCoalescibleRead("gh", ["api", "repos/a/b/issues", "--field=title=x"])).toBe(false);
+    expect(isCoalescibleRead("gh", ["api", "repos/a/b/issues", "--raw-field=title=x"])).toBe(false);
+    expect(isCoalescibleRead("gh", ["api", "graphql", "-F", "query=@mutation.graphql"])).toBe(false);
+    expect(isCoalescibleRead("gh", ["api", "graphql", "--input", "f.json"])).toBe(false);
+    expect(isCoalescibleRead("gh", ["api", "graphql", "--field=query=mutation{x}"])).toBe(false);
+    // And anything simply unknown.
+    expect(isCoalescibleRead("gh", ["api", "repos/a/b", "--some-future-flag"])).toBe(false);
+    expect(isCoalescibleRead("gh", ["api", "-fquery=x", "graphql"])).toBe(false);
+  });
 });

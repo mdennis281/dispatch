@@ -446,24 +446,69 @@ const GH_READS = new Set([
   "release view",
 ]);
 
-/** `gh api` flags that put a body on the request (and default it to POST). */
-const GH_API_BODY_FLAGS = new Set(["-f", "-F", "--field", "--raw-field", "--input"]);
+/**
+ * `gh api` flags known to shape only the OUTPUT or transport of a request, with
+ * whether each takes the next argument as its value. Anything not listed here
+ * makes the call a non-read — see {@link ghApiIsRead}.
+ */
+const GH_API_READ_FLAGS = new Map<string, boolean>([
+  ["--jq", true],
+  ["-q", true],
+  ["--template", true],
+  ["-t", true],
+  ["-H", true],
+  ["--header", true],
+  ["--hostname", true],
+  ["--cache", true],
+  ["--paginate", false],
+  ["--slurp", false],
+  ["--silent", false],
+  ["--include", false],
+  ["-i", false],
+  ["--verbose", false],
+]);
+/** Fields that carry a value: GraphQL variables, or a REST body. */
+const GH_API_FIELD_FLAGS = new Set(["-f", "-F", "--field", "--raw-field"]);
 
-function ghApiIsRead(args: readonly string[]): boolean {
-  const graphql = args.includes("graphql");
+/**
+ * Is this `gh api` call a read? FAILS CLOSED: a wrong "read" silently drops a
+ * write (two identical queued calls become one spawn), while a wrong "write"
+ * only costs a spawn. So every flag must be one this function understands —
+ * `-XPOST`, `--field=x`, `--input f.json`, or a spelling gh adds next year all
+ * land on "not a read" instead of slipping past an exact-match check.
+ */
+function ghApiIsRead(args: readonly string[], graphql: boolean): boolean {
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
-    if (a === "-X" || a === "--method") {
-      if ((args[i + 1] ?? "").toUpperCase() !== "GET") return false;
-    } else if (a.startsWith("--method=")) {
-      if (a.slice("--method=".length).toUpperCase() !== "GET") return false;
-    } else if (GH_API_BODY_FLAGS.has(a)) {
-      // GraphQL is always POSTed with -f fields; only the operation says
-      // whether it writes. REST with a body is a write by definition.
-      if (!graphql) return false;
-      const field = args[i + 1] ?? "";
-      if (/^query=\s*mutation\b/.test(field)) return false;
+    if (!a.startsWith("-")) continue; // `api`, the endpoint, `graphql`
+    const eq = a.indexOf("=");
+    const name = a.startsWith("--") && eq > 0 ? a.slice(0, eq) : a;
+    const attached = a.startsWith("--") && eq > 0 ? a.slice(eq + 1) : undefined;
+    if (name === "-X" || name === "--method") {
+      const method = attached ?? args[++i] ?? "";
+      if (method.toUpperCase() !== "GET") return false;
+      continue;
     }
+    if (a.startsWith("-X")) {
+      // Attached short form: `-XGET` / `-XPOST`.
+      if (a.slice(2).toUpperCase() !== "GET") return false;
+      continue;
+    }
+    if (GH_API_FIELD_FLAGS.has(name)) {
+      // REST with a body is a write by definition. GraphQL is always POSTed
+      // with fields; only the operation says whether it writes, and only an
+      // INLINE query can be read — `query=@file` could hold anything.
+      if (!graphql) return false;
+      const field = attached ?? args[++i] ?? "";
+      if (field.startsWith("query=")) {
+        const query = field.slice("query=".length);
+        if (query.startsWith("@") || /^\s*mutation\b/.test(query)) return false;
+      }
+      continue;
+    }
+    const takesValue = GH_API_READ_FLAGS.get(name);
+    if (takesValue === undefined) return false; // unknown — includes `--input`
+    if (takesValue && attached === undefined) i++;
   }
   return true;
 }
@@ -473,7 +518,7 @@ export function isCoalescibleRead(file: string, args: readonly string[]): boolea
   const sub = subcommandOf(file, args);
   if (file === "git") return GIT_READS.has(sub);
   if (file === "gh") {
-    if (sub === "api graphql" || sub === "api rest") return ghApiIsRead(args);
+    if (sub === "api graphql" || sub === "api rest") return ghApiIsRead(args, sub === "api graphql");
     return GH_READS.has(sub);
   }
   return false;
