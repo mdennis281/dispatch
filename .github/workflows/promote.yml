@@ -240,6 +240,8 @@ jobs:
           src/services/agent-cwd.test.ts
           src/services/runtime.test.ts
           src/services/processes.test.ts
+          src/services/process-tracker.integration.test.ts
+          src/services/proc-table-reader.test.ts
           src/services/terminal.test.ts
           src/services/terminal.stdin.test.ts
           src/services/file-index.test.ts

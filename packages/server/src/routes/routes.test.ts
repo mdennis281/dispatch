@@ -886,18 +886,22 @@ describe("routes — REST CRUD", () => {
         payload: { projectId, title: "Junk" },
       })
     ).json().id as string;
-    const pidsFor = vi.spyOn(app.services.chatProcesses, "pidsFor").mockImplementation(async (id) => {
-      expect(id).toBe(chatId);
-      expect(await store.getChat(chatId)).toBeDefined();
-      return [43210];
-    });
-    const killPids = vi.spyOn(app.services.processes, "killPids").mockResolvedValue([]);
+    // The shared reap must run while the chat still exists: its id is the
+    // ownership key the tracker attributes a browser shim's orphan by.
+    let existedDuringReap = false;
+    const release = vi
+      .spyOn(app.services.chatProcesses, "release")
+      .mockImplementation(async (ids) => {
+        expect(ids).toEqual([chatId]);
+        existedDuringReap = Boolean(await store.getChat(chatId));
+        return { freed: 1, orphans: 1 };
+      });
 
     const del = await app.inject({ method: "DELETE", url: `/api/chats/${chatId}` });
 
     expect(del.statusCode).toBe(204);
-    expect(pidsFor).toHaveBeenCalledWith(chatId);
-    expect(killPids).toHaveBeenCalledWith([43210]);
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(existedDuringReap).toBe(true);
     expect(await store.getChat(chatId)).toBeNull();
   });
 
