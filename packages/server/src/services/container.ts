@@ -24,7 +24,6 @@ import {
   PrSnapshotSchema,
   prRecordKey,
   resolveAgentContext,
-  resolveWorkflow,
   spawnedPurposeLabel,
   type PRRef,
   type PrRecord,

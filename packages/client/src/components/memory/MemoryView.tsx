@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Brain, Plus, Pencil, Trash2, Search, Sparkles, X, ScrollText, Bot } from "lucide-react";
+import { Brain, Plus, Pencil, Trash2, Search, Sparkles, X, Bot } from "lucide-react";
 import type { ProjectMemory } from "@dispatch/shared";
 import { TaskLauncherDialog } from "../tasks/TaskLauncherDialog.js";
 import { useMemory, useProjectMemories } from "../../stores/memory.js";
@@ -11,7 +11,6 @@ import { IconButton } from "../ui/IconButton.js";
 import { Chip } from "../ui/Chip.js";
 import { ScrollArea } from "../ui/ScrollArea.js";
 import { Markdown } from "../chat/Markdown.js";
-import { cn } from "../../lib/cn.js";
 import { SegmentedControl } from "../ui/SegmentedControl.js";
 import { MemoryForm, TYPE_META } from "./MemoryForm.js";
 import { MemoryListRow } from "./MemoryListRow.js";

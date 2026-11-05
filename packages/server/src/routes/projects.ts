@@ -7,7 +7,6 @@
  *   DELETE /api/projects/:id        → 204
  *   GET    /api/projects/:id/worktrees → WorktreeInfo[] (live `git worktree list`)
  */
-import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import type { FastifyInstance } from "fastify";

@@ -35,12 +35,11 @@ import {
   PanelRightOpen,
   Target,
 } from "lucide-react";
-import { cn } from "../../lib/cn.js";
 import { Chip, IconButton } from "../../components/ui/index.js";
 import { MOCK_MISSION } from "./mock.js";
 import { MOCK_MANAGER_CHAT, MOCK_RUN, effectiveTasks } from "./mockRun.js";
 import { validate, type Plan } from "./derive.js";
-import type { MissionPolicy, MissionSpec, TeamId } from "./types.js";
+import type { MissionSpec } from "./types.js";
 import { Crumbs, RowButton, RunStatusPill } from "./chrome.js";
 import { crumbsFor, parentOf, titleFor, type Nav, type Route } from "./nav.js";
 import { defaultOpen, type SectionState } from "./sections.js";

@@ -465,10 +465,6 @@ export class AuthService {
     return this.authReload;
   }
 
-  private async persist(): Promise<void> {
-    await this.queuePersist(true, true);
-  }
-
   private async persistAuth(): Promise<void> {
     await this.queuePersist(true, false);
   }

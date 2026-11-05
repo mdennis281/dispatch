@@ -7,7 +7,6 @@ import { IconButton } from "../ui/IconButton.js";
 import { Chip, type Tone } from "../ui/Chip.js";
 import { ScrollArea } from "../ui/ScrollArea.js";
 import { Markdown } from "../chat/Markdown.js";
-import { cn } from "../../lib/cn.js";
 import { MemoryListRow } from "./MemoryListRow.js";
 
 const TYPE_TONE: Record<string, Tone> = {

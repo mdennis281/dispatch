@@ -36,7 +36,7 @@ import {
 import { cn } from "../../lib/cn.js";
 import { RowButton } from "./chrome.js";
 import { phaseCounts, type Plan } from "./derive.js";
-import type { Nav, Route } from "./nav.js";
+import type { Nav } from "./nav.js";
 import { SECTIONS, type SectionState } from "./sections.js";
 
 export function Sidebar({

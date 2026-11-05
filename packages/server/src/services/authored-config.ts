@@ -38,7 +38,6 @@ import {
   type AuthoredKind,
   type AuthoredScope,
   type SkillConfig,
-  type WritableAuthoredScope,
 } from "@dispatch/shared";
 import { parseFrontmatter } from "./project-config.js";
 import { bundledSkills } from "./bundled-skills.js";

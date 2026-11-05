@@ -71,7 +71,6 @@ describe("buildApp", () => {
 
   it("treats dev mode as SPA-present (Vite serves it in-process)", async () => {
     const dir = await mkdtemp(join(tmpdir(), "cm-app-"));
-    const config = { ...loadConfig(), dataDir: dir };
     // `dev: true` on buildApp would mount Vite middleware, which needs the real
     // client package — so the health module's own dev branch is exercised
     // directly instead.

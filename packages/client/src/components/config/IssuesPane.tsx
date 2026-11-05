@@ -23,7 +23,6 @@ import { api } from "../../lib/api.js";
 import { cn } from "../../lib/cn.js";
 import { EFFORT_OPTIONS } from "../../lib/efforts.js";
 import { relTime } from "../../lib/format.js";
-import { harnessLabel } from "../../lib/harness.js";
 import { useProviderCatalogs } from "../../lib/useProviderCatalogs.js";
 import { selectChat } from "../../stores/navigation.js";
 import { Button } from "../ui/Button.js";

@@ -43,7 +43,6 @@ import { Modal } from "../../sidebar/Modal.js";
 import { Button } from "../../ui/Button.js";
 import { Chip } from "../../ui/Chip.js";
 import { OverflowTooltip } from "../../ui/OverflowTooltip.js";
-import { Spinner } from "../../ui/Spinner.js";
 import { cn } from "../../../lib/cn.js";
 import { dur, parseMcpName, relTime, untilShort } from "../../../lib/format.js";
 import { hydrateFullRows } from "../../../stores/index.js";

@@ -23,7 +23,7 @@
  *     left as a placeholder would be expanded a moment later by the project's
  *     own resolver, which hands the plugin a secret it never declared.
  */
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
 import { assertValidServerName } from "@dispatch/cli/core";
