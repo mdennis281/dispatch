@@ -9,6 +9,7 @@ function snapshot(rows: ProcRow[]): ProcessSnapshot {
     byPid: new Map(rows.map((r) => [r.pid, r])),
     children: childMap(rows),
     at: 0,
+    seq: 1,
     cpuByPid: new Map(),
     windowMs: 0,
     owners: new Map(),

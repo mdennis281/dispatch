@@ -122,6 +122,16 @@ export interface ProcessDeps {
   describe?: DescribeFn;
   killTree?: KillTreeFn;
   procTable?: ProcTableFn;
+  /**
+   * The table the LISTING attributes listeners with. Defaults to `procTable`.
+   *
+   * Separate because the two uses tolerate staleness differently. Pruning a
+   * kill set (`coveredByAncestor`) is safe on a cached table — anything it
+   * gets wrong is re-checked with `alive`. Attribution is not: a dev server
+   * started after the cached sweep has no edge to its shell yet, so the panel
+   * would show it as an untracked ORPHAN — the opposite of what it is for.
+   */
+  listingTable?: ProcTableFn;
   /** Is this pid still running? Defaults to a signal-0 probe. */
   alive?: (pid: number) => boolean;
   /** Omitted → no chat attribution, just the legacy declared-port sweep. */
@@ -517,6 +527,7 @@ export class ProcessService {
   private readonly killTree: KillTreeFn;
   private readonly portWindow: number;
   private readonly procTable: ProcTableFn;
+  private readonly listingTable: ProcTableFn;
   private readonly terminals?: TerminalRoots;
   private readonly alive: (pid: number) => boolean;
 
@@ -527,6 +538,7 @@ export class ProcessService {
     this.killTree = deps.killTree ?? defaultKillTree;
     this.portWindow = deps.portWindow ?? PORT_SCAN_RANGE;
     this.procTable = deps.procTable ?? defaultProcTable;
+    this.listingTable = deps.listingTable ?? this.procTable;
     this.terminals = deps.terminals;
     this.alive = deps.alive ?? defaultAlive;
   }
@@ -651,7 +663,7 @@ export class ProcessService {
     const owner = new Map<number, ShellRoot>();
     if (shells.length === 0) return owner;
 
-    const table = await this.procTable().catch(() => [] as ProcRow[]);
+    const table = await this.listingTable().catch(() => [] as ProcRow[]);
     const children = new Map<number, number[]>();
     for (const row of table) {
       const kids = children.get(row.ppid);

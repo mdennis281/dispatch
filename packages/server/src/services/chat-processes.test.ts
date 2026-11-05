@@ -38,6 +38,7 @@ function machine(opts: { survivors?: number[] } = {}) {
   ]);
   let shells = [{ chatId: "chat-a", pid: 30, name: "server", terminalId: "t-30" }];
   let reads = 0;
+  let failReads = false;
   const killSubtree = (root: number) => {
     const stack = [root];
     while (stack.length) {
@@ -50,6 +51,8 @@ function machine(opts: { survivors?: number[] } = {}) {
   const tracker = new ProcessTracker({
     read: async () => {
       reads += 1;
+      // A failed read (CIM timeout, dead worker) comes back empty.
+      if (failReads) return [];
       return table.filter((r) => live.has(r.pid));
     },
     sessionPids: () => sessions,
@@ -84,6 +87,8 @@ function machine(opts: { survivors?: number[] } = {}) {
     stop,
     killPids,
     reads: () => reads,
+    /** Make every table read from now on fail. */
+    failReads: () => (failReads = true),
     /** Swap a pid for an unrelated process — what Windows does with a freed id. */
     recycle: (pid: number) => {
       table = table.map((r) => (r.pid === pid ? { pid, ppid: 1, name: "explorer.exe", startedAt: 9_999_999 } : r));
@@ -143,6 +148,18 @@ describe("ChatProcessService.release", () => {
     const m = machine({ survivors: [11] });
     await m.tracker.sweep();
     m.recycle(11);
+    const res = await m.svc.release(["chat-a"], m.stop);
+    expect(m.killPids).not.toHaveBeenCalled();
+    expect(res.orphans).toBe(0);
+  });
+
+  it("kills NO orphan when the fresh sweep's read failed — the old snapshot proves nothing", async () => {
+    // The failed sweep hands back the previous snapshot; matching a captured
+    // row against the snapshot it was captured from would pass a recycled pid.
+    const m = machine({ survivors: [11] });
+    await m.tracker.sweep();
+    m.recycle(11);
+    m.failReads();
     const res = await m.svc.release(["chat-a"], m.stop);
     expect(m.killPids).not.toHaveBeenCalled();
     expect(res.orphans).toBe(0);

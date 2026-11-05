@@ -590,12 +590,15 @@ export function createServices(
     new ProcessService({
       store,
       terminals,
-      // The tracker's latest sweep rather than a scan of its own: this only
-      // walks ancestry (which shell a listener descends from, which pids in a
-      // kill set cover others), and a pid the table no longer matches is
-      // re-checked by `alive` before anything is reported. Declared below —
-      // the tracker needs the broker — and only called after construction.
+      // Pruning a kill set reads the tracker's latest sweep: anything a
+      // stale table gets wrong there is re-checked by `alive`. Declared below
+      // — the tracker needs the broker — and only called after construction.
       procTable: async () => (await processTracker.read()).rows,
+      // The panel's listing takes a FRESH sweep: a dev server started after
+      // the last one has no edge to its shell yet and would list as an
+      // orphan. The panel scans on open and on refresh, not on a timer, and
+      // the sweep refreshes the tracker for every other reader too.
+      listingTable: async () => (await processTracker.read(true)).rows,
     });
   const broker =
     overrides.broker ??

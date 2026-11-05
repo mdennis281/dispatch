@@ -53,6 +53,13 @@ export interface ProcessSnapshot {
   children: Map<number, number[]>;
   /** When the table was read. */
   at: number;
+  /**
+   * Which successful READ this is. A sweep whose read failed hands back the
+   * previous snapshot — same `seq` — so a caller that needs evidence newer
+   * than something it already holds compares this, not `at` (two sweeps can
+   * land in the same millisecond).
+   */
+  seq: number;
   /** pid → CPU %, over {@link windowMs}. Absent = not measured (new, or no baseline). */
   cpuByPid: Map<number, number>;
   /** The window the rates cover; 0 when there are none. */
@@ -149,6 +156,7 @@ export class ProcessTracker {
   private forgotten = new Map<number, number>();
   private lastReadAt = 0;
   private lastSweepMs = 0;
+  private seq = 0;
   private timer?: ReturnType<typeof setTimeout>;
   private started = false;
 
@@ -248,6 +256,7 @@ export class ProcessTracker {
       this.current.at,
       this.current.cpuByPid,
       this.current.windowMs,
+      this.current.seq,
     );
   }
 
@@ -278,7 +287,7 @@ export class ProcessTracker {
     this.lastSweepMs = Math.max(0, this.now() - startedAt);
     // An empty table is a FAILED read, not a machine with no processes —
     // serving it would tell every consumer every chat holds nothing.
-    if (rows.length === 0) return this.current ?? this.derive([], startedAt, new Map(), 0);
+    if (rows.length === 0) return this.current ?? this.derive([], startedAt, new Map(), 0, 0);
 
     // Pids forgotten while this read was in flight are dead as far as anyone
     // is concerned; the read just predates the kill. Older entries are
@@ -290,7 +299,7 @@ export class ProcessTracker {
     }
     const live = skip.size ? rows.filter((r) => !skip.has(r.pid)) : rows;
     const { cpuByPid, windowMs } = this.rates(live, startedAt);
-    const snap = this.derive(live, startedAt, cpuByPid, windowMs);
+    const snap = this.derive(live, startedAt, cpuByPid, windowMs, ++this.seq);
     this.current = snap;
     // Detached, not awaited: a consumer that itself asks for a sweep (the
     // reaper killing a shell, say) would otherwise wait on the very sweep that
@@ -367,6 +376,7 @@ export class ProcessTracker {
     at: number,
     cpuByPid: Map<number, number>,
     windowMs: number,
+    seq: number,
   ): ProcessSnapshot {
     const byPid = new Map(rows.map((r) => [r.pid, r]));
     const children = childMap(rows);
@@ -407,7 +417,7 @@ export class ProcessTracker {
       // which is what a failed read also produces.
       if (session.size || shells.size) owners.set(chatId, { session, shells });
     }
-    return { rows, byPid, children, at, cpuByPid, windowMs, owners };
+    return { rows, byPid, children, at, seq, cpuByPid, windowMs, owners };
   }
 }
 

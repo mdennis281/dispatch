@@ -113,6 +113,9 @@ export class ChatProcessService {
     // Never scans when a sweep already exists; the very first one after boot
     // is the only time this waits.
     if (!this.tracker.latest()) await this.tracker.read().catch(() => undefined);
+    // Which read the pids were captured from — the fresh sweep below has to
+    // be a LATER read to count as evidence at all.
+    const capturedSeq = this.tracker.latest()?.seq ?? 0;
     const captured = new Map<number, ProcRow>();
     for (const id of chatIds) {
       for (const row of this.tracker.owned(id)) captured.set(row.pid, row);
@@ -130,7 +133,15 @@ export class ChatProcessService {
     const survivors = [...captured.values()].filter((r) => this.alive(r.pid));
     if (survivors.length > 0) {
       const fresh = await this.tracker.sweep();
-      const targets = survivors.filter((r) => sameProcess(r, fresh.byPid.get(r.pid))).map((r) => r.pid);
+      // A sweep whose read FAILED (CIM timeout, a dead worker — the loaded box
+      // this exists for) hands back the previous snapshot, and comparing a
+      // captured row against the very snapshot it came from is no identity
+      // check at all: a recycled pid would sail through and get killed. No new
+      // table, no orphan kill — the next click, or the next sweep, gets them.
+      const reread = fresh.seq > capturedSeq;
+      const targets = reread
+        ? survivors.filter((r) => sameProcess(r, fresh.byPid.get(r.pid))).map((r) => r.pid)
+        : [];
       if (targets.length > 0) {
         orphans = targets.length;
         await this.killPids(targets).catch(() => []);

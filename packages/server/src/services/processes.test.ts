@@ -376,6 +376,27 @@ describe("ProcessService.listForProject", () => {
     });
   });
 
+  it("attributes listeners from the LISTING table, not the cached one", async () => {
+    // The cached sweep predates the dev server; only a fresh read has the edge
+    // from the listener to its shell. Reading the cache listed it as an orphan.
+    await saveChat("chatA", "A");
+    const svc = new ProcessService({
+      store,
+      scan: async () => [{ port: 47820, pid: 900 }],
+      describe: async () => new Map([[900, "node.exe"]]),
+      procTable: table([[500, 1]]),
+      listingTable: table([
+        [500, 1],
+        [900, 500],
+      ]),
+      terminals: {
+        livePids: () => [{ chatId: "chatA", name: "server", terminalId: "chatA::server", pid: 500 }],
+      },
+    });
+    const [row] = await svc.listForProject("p1");
+    expect(row).toMatchObject({ pid: 900, source: "terminal", chatId: "chatA" });
+  });
+
   it("leaves a listener that descends from nothing we own an orphan", async () => {
     await saveChat("chatA", "A");
     const svc = new ProcessService({
