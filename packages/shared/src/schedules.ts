@@ -168,11 +168,59 @@ function cronOf(expr: string, timezone?: string): Cron {
 }
 
 /**
+ * Expand one plain cron field (`*`, `a`, `a-b`, any of them `/n`, comma lists)
+ * to its sorted values, or null for syntax this doesn't model (names, `L`,
+ * `#`…) — the caller then falls back to walking real fires.
+ */
+function expandField(field: string, lo: number, hi: number): number[] | null {
+  const out = new Set<number>();
+  for (const item of field.split(",")) {
+    const m = /^(\*|\d+)(?:-(\d+))?(?:\/(\d+))?$/.exec(item);
+    if (!m) return null;
+    const step = m[3] ? Number(m[3]) : 1;
+    if (step < 1) return null;
+    const start = m[1] === "*" ? lo : Number(m[1]);
+    // `a/n` (no range) runs from a to the top, as in Vixie cron.
+    const end = m[1] === "*" ? hi : m[2] ? Number(m[2]) : m[3] ? hi : start;
+    if (start < lo || end > hi || start > end) return null;
+    for (let v = start; v <= end; v += step) out.add(v);
+  }
+  return [...out].sort((a, b) => a - b);
+}
+
+/**
+ * The smallest gap between two consecutive fires, in minutes, from the
+ * minute and hour fields alone — independent of WHEN it is asked.
+ *
+ * Asking croner for "the next two fires from now" was the first version, and
+ * its answer depended on the clock: `0,3 * * * *` checked at :01 sees :03 then
+ * the next :00 (57 minutes, accepted) and checked at :04 sees :00 then :03 (3
+ * minutes, refused). So the same file saved fine and then failed to load an
+ * hour later. A gap under the floor can only come from two fires in one hour,
+ * or from the last minute of one firing hour to the first of the next — both
+ * readable straight off the fields.
+ */
+function minGapMinutes(minuteField: string, hourField: string): number | null {
+  const minutes = expandField(minuteField, 0, 59);
+  const hours = expandField(hourField, 0, 23);
+  if (!minutes?.length || !hours?.length) return null;
+  let gap = Infinity;
+  for (let i = 1; i < minutes.length; i++) gap = Math.min(gap, minutes[i]! - minutes[i - 1]!);
+  // Wrap from one firing hour into the next, counting 23 → 0 (the day fields
+  // may well allow consecutive days, and assuming so only errs strict).
+  const firing = new Set(hours);
+  if (hours.some((h) => firing.has((h + 1) % 24))) {
+    gap = Math.min(gap, 60 - minutes[minutes.length - 1]! + minutes[0]!);
+  }
+  return gap;
+}
+
+/**
  * Is this a usable schedule cron? Five fields only: croner also takes a leading
  * seconds field, and a six-field pattern pasted from a Quartz example would
  * otherwise be read as seconds-first and fire at a completely different time.
  */
-export function checkCron(expr: string, timezone?: string, from = Date.now()): CronCheck {
+export function checkCron(expr: string, timezone?: string): CronCheck {
   const fields = expr.trim().split(/\s+/);
   if (fields.length !== 5) {
     return {
@@ -180,16 +228,30 @@ export function checkCron(expr: string, timezone?: string, from = Date.now()): C
       error: `expected 5 fields (minute hour day month weekday), got ${fields.length}`,
     };
   }
-  let runs: Date[];
+  let cron: Cron;
   try {
-    runs = cronOf(expr, timezone).nextRuns(2, new Date(from));
+    cron = cronOf(expr, timezone);
+    // Construction is lazy about the zone; resolving one fire is what throws on a bad one.
+    cron.nextRun();
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
-  if (runs.length === 2 && runs[1]!.getTime() - runs[0]!.getTime() < MIN_SCHEDULE_SPACING_MS) {
+  const floor = MIN_SCHEDULE_SPACING_MS / 60_000;
+  let gap = minGapMinutes(fields[0]!, fields[1]!);
+  if (gap === null) {
+    // Syntax the field reader doesn't model: walk real fires instead, from a
+    // FIXED reference (so the verdict can't depend on the clock either) and
+    // bounded, because each step costs ~0.3ms and this runs as you type.
+    const runs = cron.nextRuns(300, new Date(Date.UTC(2026, 0, 5)));
+    gap = Infinity;
+    for (let i = 1; i < runs.length; i++) {
+      gap = Math.min(gap, (runs[i]!.getTime() - runs[i - 1]!.getTime()) / 60_000);
+    }
+  }
+  if (gap < floor) {
     return {
       ok: false,
-      error: `fires more often than every ${MIN_SCHEDULE_SPACING_MS / 60_000} minutes — each run is a whole chat`,
+      error: `fires more often than every ${floor} minutes — each run is a whole chat`,
     };
   }
   return { ok: true };

@@ -36,6 +36,20 @@ describe("checkCron", () => {
     expect(checkCron("*/5 * * * *", TZ).ok).toBe(true);
   });
 
+  it("judges spacing over the whole hour, not from whenever it is asked", () => {
+    // Two fires three minutes apart once an hour: the next-two-fires check
+    // accepted this at :01 (57 min to the next pair) and refused it at :04.
+    expect(checkCron("0,3 * * * *", TZ).ok).toBe(false);
+    // The wrap from :58 to the next hour's :01 is a 3-minute gap too…
+    expect(checkCron("1,58 * * * *", TZ).ok).toBe(false);
+    // …but only when consecutive hours both fire.
+    expect(checkCron("1,58 9,15 * * *", TZ).ok).toBe(true);
+    expect(checkCron("1,58 9-10 * * *", TZ).ok).toBe(false);
+    expect(checkCron("0,30 * * * *", TZ).ok).toBe(true);
+    expect(checkCron("10-20/5 * * * *", TZ).ok).toBe(true);
+    expect(checkCron("10-14 * * * *", TZ).ok).toBe(false);
+  });
+
   it("refuses an unknown timezone", () => {
     expect(checkCron("0 9 * * *", "Not/AZone").ok).toBe(false);
   });
