@@ -7,7 +7,7 @@
 import type { PluginModule } from "@dispatch/shared";
 import { ClaudeHarness } from "./index.js";
 import { CLAUDE_PROVIDER } from "./descriptor.js";
-import { makeFakeQuery } from "./fake-sdk.js";
+import { fakeLoginFlow, makeFakeQuery } from "./fake-sdk.js";
 
 const plugin: PluginModule = {
   activate(ctx) {
@@ -31,6 +31,9 @@ export function createClaudeHarness(env: Readonly<Record<string, string | undefi
   // No `claude auth status` either: the echo needs no login, and the host
   // probes every registered provider's login in the background.
   harness.probeLogin = async () => ({ checked: true, loggedIn: true, method: "fake SDK" });
+  // Nor `claude auth login`: a scripted paste-code flow instead, so the
+  // Accounts pane's Log in can be driven end to end on a screenshot instance.
+  harness.startLogin = () => fakeLoginFlow();
   return harness;
 }
 

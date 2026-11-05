@@ -250,6 +250,33 @@ export interface SubscriptionStatus extends ResolvedSubscription {
    * chat pinned to another account would be judged by the wrong probe (#428).
    */
   login?: { checked: boolean; loggedIn: boolean; notRequired?: boolean };
+  /**
+   * The provider can run its sign-in from here (`Harness.startLogin`), so the
+   * Accounts pane offers a "Log in" button rather than a shell recipe.
+   */
+  canLogIn?: boolean;
+}
+
+/**
+ * A provider sign-in the server is running for one account — the wire shape of
+ * `POST|GET /api/subscriptions/:id/login`. In memory only: it outlives no
+ * restart, and nothing about it is a credential.
+ */
+export interface AccountLoginFlow {
+  subscriptionId: string;
+  provider: HarnessKind;
+  state: "running" | "succeeded" | "failed" | "cancelled";
+  /** The sign-in page, once the CLI has printed it. */
+  url?: string;
+  /** A code to type into that page (device-code flows). */
+  userCode?: string;
+  /** The CLI wants a code pasted back from that page. */
+  awaitingCode?: boolean;
+  /** A provider-specific caveat, shown next to the link. Plain text. */
+  hint?: string;
+  /** Why it failed, in the CLI's own words where it gave any. */
+  error?: string;
+  startedAt: number;
 }
 
 /**

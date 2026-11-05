@@ -16,6 +16,7 @@
  * and screenshots need: a chat that is visibly running when Pause is pressed.
  */
 import type { QueryFn } from "./session.js";
+import type { HarnessLoginFlow, HarnessLoginProgress } from "@dispatch/shared";
 
 let sessionSeq = 0;
 /** Ids for `[hold]` rows. A counter, not `Math.random()` — they only need to be unique. */
@@ -119,5 +120,32 @@ export function makeFakeQuery(): QueryFn {
       mcpServerStatus: async () => ({}),
     };
     return q as unknown as ReturnType<QueryFn>;
+  };
+}
+
+/**
+ * A paste-code sign-in that needs no `claude` and no network: shows a URL,
+ * asks for a code, and succeeds on any non-empty one. For screenshot and E2E
+ * instances, where the real `claude auth login` would open a browser on the
+ * host and wait on a human.
+ */
+export function fakeLoginFlow(): HarnessLoginFlow {
+  const listeners = new Set<(p: HarnessLoginProgress) => void>();
+  const progress: HarnessLoginProgress = { url: "https://example.invalid/fake-login", awaitingCode: true };
+  let settle: (r: { ok: boolean; error?: string }) => void = () => {};
+  const done = new Promise<{ ok: boolean; error?: string }>((resolve) => (settle = resolve));
+  return {
+    onProgress(cb) {
+      listeners.add(cb);
+      cb(progress);
+      return () => listeners.delete(cb);
+    },
+    submitCode(code) {
+      if (code.trim()) settle({ ok: true });
+    },
+    cancel() {
+      settle({ ok: false, error: "sign-in was cancelled or timed out" });
+    },
+    done,
   };
 }

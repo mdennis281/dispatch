@@ -881,6 +881,30 @@ export interface HarnessRuntimeInfo {
   available: boolean;
 }
 
+/** What a running {@link Harness.startLogin} has to show the human so far. */
+export interface HarnessLoginProgress {
+  /** The page to sign in on, once the CLI has printed it. */
+  url?: string;
+  /** A code the human types INTO that page (device-code flows). */
+  userCode?: string;
+  /** The CLI is waiting for a code pasted back from that page. */
+  awaitingCode?: boolean;
+  /** A provider-specific caveat worth showing next to the link. Plain text. */
+  hint?: string;
+}
+
+/** A sign-in in progress, owned by the provider that started it. */
+export interface HarnessLoginFlow {
+  /** Called whenever the progress changes. Returns an unsubscribe. */
+  onProgress(cb: (progress: HarnessLoginProgress) => void): () => void;
+  /** Relay a pasted code to the CLI. Absent when the flow never asks for one. */
+  submitCode?(code: string): void;
+  /** Abandon it — kill the CLI. `done` then settles `{ ok: false }`. */
+  cancel(): void;
+  /** Settles when the CLI exits. Never rejects. */
+  done: Promise<{ ok: boolean; error?: string }>;
+}
+
 /** One agent runtime Dispatch can drive. */
 export interface Harness {
   readonly kind: HarnessKind;
@@ -897,6 +921,18 @@ export interface Harness {
    * Never throws: an unrunnable binary is `checked: false`.
    */
   probeLogin?(exe: string, env: Readonly<Record<string, string | undefined>>): Promise<RuntimeLoginStatus>;
+  /**
+   * Start the runtime's OWN sign-in for one account, so Settings → Accounts can
+   * offer "Log in" instead of telling the user to go and find a terminal and
+   * get `CLAUDE_CONFIG_DIR` quoted right. `exe`/`env` are as for
+   * {@link probeLogin}, with the account's overlay already applied.
+   *
+   * The provider drives its real CLI (`claude auth login`, `codex login`); the
+   * host never sees a credential, only the sign-in URL and, for a paste-code
+   * flow, a one-time code it relays to the CLI's stdin. Optional: a provider
+   * with no login (goose) leaves it out and the button is not offered.
+   */
+  startLogin?(exe: string, env: Readonly<Record<string, string | undefined>>): HarnessLoginFlow;
   /**
    * Models for the picker. Never throws — degrades to a static list. Per
    * account, because which models a login may use is a fact about its plan.

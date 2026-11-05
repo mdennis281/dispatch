@@ -7,11 +7,15 @@
  *   GET /api/harnesses                       → registered providers + capabilities
  *   GET /api/subscriptions                   → every account, with login presence
  *   PUT /api/subscriptions                   → replace the stored account list
+ *   POST   /api/subscriptions/:id/login      → start the provider's sign-in (owner only)
+ *   GET    /api/subscriptions/:id/login      → { flow } — that sign-in's progress, null when none (owner only)
+ *   POST   /api/subscriptions/:id/login/code → { code } relayed to the CLI (owner only)
+ *   DELETE /api/subscriptions/:id/login      → cancel it (owner only)
  *
  * Models are live from each runtime's own list, which works on subscription auth
  * with no API key. See packages/plugins/claude/src/models.ts.
  */
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
   SubscriptionListSchema,
   providerFor,
@@ -19,6 +23,25 @@ import {
   subscriptionFor,
 } from "@dispatch/shared";
 import { accountOf, subscriptionStatuses } from "../services/subscriptions.js";
+import { AccountLoginError } from "../services/account-login.js";
+
+/**
+ * Signing a machine into a paid account is the owner's call, the way installing
+ * a plugin is: an invited user or an integration token must not be able to
+ * re-point an account's directory at their own login.
+ */
+function refuseNonOwner(req: FastifyRequest, reply: FastifyReply): FastifyReply | null {
+  const who = req.authIdentity;
+  if (!who) return null;
+  if (who.kind !== "user") return reply.code(403).send({ error: "Integration tokens cannot sign accounts in." });
+  if (!who.user.owner) return reply.code(403).send({ error: "Only the owner can sign accounts in." });
+  return null;
+}
+
+function loginFailure(reply: FastifyReply, err: unknown): FastifyReply {
+  if (err instanceof AccountLoginError) return reply.code(err.status).send({ error: err.message });
+  throw err;
+}
 
 export function registerModelRoutes(app: FastifyInstance): void {
   const { store } = app.cm;
@@ -73,14 +96,59 @@ export function registerModelRoutes(app: FastifyInstance): void {
     })),
   );
 
+  // Both the read and the save answer with this, so a pane that just saved its
+  // list keeps its "Log in" buttons and login badges instead of losing them
+  // until the next visit re-reads.
+  const decorate = (statuses: ReturnType<typeof subscriptionStatuses>) =>
+    statuses.map((status) => {
+      // Each account's own cached login, so the composer judges a chat pinned
+      // to a second account by THAT account's probe, as the broker does (#428).
+      const login = app.services.logins?.peek(status.provider, accountOf(status));
+      const canLogIn = app.services.accountLogins?.supports(status.provider) ?? false;
+      return { ...status, ...(login ? { login } : {}), ...(canLogIn ? { canLogIn } : {}) };
+    });
+
   app.get("/api/subscriptions", async () => {
     const settings = await store.getSettings().catch(() => null);
-    // Each account's own cached login, so the composer judges a chat pinned to
-    // a second account by THAT account's probe, as the broker does (#428).
-    return subscriptionStatuses(settings).map((status) => {
-      const login = app.services.logins?.peek(status.provider, accountOf(status));
-      return login ? { ...status, login } : status;
-    });
+    return decorate(subscriptionStatuses(settings));
+  });
+
+  app.post<{ Params: { id: string } }>("/api/subscriptions/:id/login", async (req, reply) => {
+    if (refuseNonOwner(req, reply)) return reply;
+    try {
+      return await app.services.accountLogins.start(req.params.id);
+    } catch (err) {
+      return loginFailure(reply, err);
+    }
+  });
+
+  app.get<{ Params: { id: string } }>("/api/subscriptions/:id/login", async (req, reply) => {
+    if (refuseNonOwner(req, reply)) return reply;
+    // "None ran" is an answer, not an error: the pane asks on every visit, and
+    // a 404 per account was a console full of red for nothing.
+    return { flow: app.services.accountLogins.get(req.params.id) ?? null };
+  });
+
+  app.post<{ Params: { id: string }; Body: { code?: unknown } }>(
+    "/api/subscriptions/:id/login/code",
+    async (req, reply) => {
+      if (refuseNonOwner(req, reply)) return reply;
+      const code = req.body?.code;
+      if (typeof code !== "string" || !code.trim() || code.length > 4096) {
+        return reply.code(400).send({ error: "A code is required." });
+      }
+      try {
+        return app.services.accountLogins.submitCode(req.params.id, code);
+      } catch (err) {
+        return loginFailure(reply, err);
+      }
+    },
+  );
+
+  app.delete<{ Params: { id: string } }>("/api/subscriptions/:id/login", async (req, reply) => {
+    if (refuseNonOwner(req, reply)) return reply;
+    app.services.accountLogins.cancel(req.params.id);
+    return { ok: true };
   });
 
   /**
@@ -100,6 +168,6 @@ export function registerModelRoutes(app: FastifyInstance): void {
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
     const current = await store.getSettings();
     const saved = await store.saveSettings({ ...current, subscriptions: parsed.data });
-    return subscriptionStatuses(saved);
+    return decorate(subscriptionStatuses(saved));
   });
 }

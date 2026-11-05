@@ -25,6 +25,7 @@ import type {
   HarnessCapabilities,
   HarnessLimits,
   HarnessLimitReadOpts,
+  HarnessLoginFlow,
   HarnessRuntimeInfo,
   HarnessSession,
   HarnessSessionSpec,
@@ -33,6 +34,7 @@ import type {
 import { codexHome, codexRuntime } from "./runtime.js";
 import { acquireCodexConnection, disposeSharedCodexConnection, type CodexConnection } from "./rpc.js";
 import { CodexSession } from "./session.js";
+import { startCodexLogin } from "./login-flow.js";
 import { CODEX_PROVIDER } from "./descriptor.js";
 import { probeCodexLogin } from "./login.js";
 
@@ -115,6 +117,10 @@ export class CodexHarness implements Harness {
 
   probeLogin(exe: string, env: Readonly<Record<string, string | undefined>>): Promise<RuntimeLoginStatus> {
     return probeCodexLogin(exe, env);
+  }
+
+  startLogin(exe: string, env: Readonly<Record<string, string | undefined>>): HarnessLoginFlow {
+    return startCodexLogin(exe, env);
   }
 
   /**

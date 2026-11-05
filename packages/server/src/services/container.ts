@@ -108,6 +108,7 @@ import { LimitSampler } from "./limit-sampler.js";
 import { FsExplorerService } from "./fs-explorer.js";
 import { HarnessRegistry } from "../harness/index.js";
 import { ProviderLogins } from "./provider-logins.js";
+import { AccountLogins } from "./account-login.js";
 import { ManagerMcpBridge } from "./mcp/manager-http.js";
 import { PluginService } from "../plugins/service.js";
 import { findShippedPluginsRoot } from "../plugins/shipped.js";
@@ -199,6 +200,8 @@ export interface Services extends ServiceBase {
   harnesses: HarnessRegistry;
   /** Cached login state per provider account — what `logged-out` is judged by. */
   logins: ProviderLogins;
+  /** Provider sign-ins started from Settings → Accounts, one per account. */
+  accountLogins: AccountLogins;
   /** HTTP front door used by runtimes that cannot consume in-process MCP. */
   managerMcp: ManagerMcpBridge;
   broker: SessionBroker;
@@ -363,6 +366,11 @@ export function createServices(
       settings: () => store.getSettings(),
       onChange: () => bus.publish({ type: "providers-changed" }),
     });
+  const accountLogins = new AccountLogins({
+    harnesses,
+    logins,
+    settings: () => store.getSettings(),
+  });
   const managerMcp =
     overrides.managerMcp ?? new ManagerMcpBridge(`http://127.0.0.1:${config.port}`);
   /** Retention sweep handle, armed in `start()` and cleared in `dispose()`. */
@@ -1690,6 +1698,7 @@ export function createServices(
     bus,
     harnesses,
     logins,
+    accountLogins,
     managerMcp,
     broker,
     secrets,
@@ -2123,6 +2132,9 @@ export function createServices(
       await plugins.dispose().catch(() => {});
       chatMessenger.dispose();
       chatCompletionNotices.dispose();
+      // A sign-in CLI left running would hold its account's credentials file
+      // open with nobody to finish it.
+      accountLogins.dispose();
       await runner.stopAll().catch(() => {});
       // ORDER IS LOAD-BEARING: this must read the broker's live sessions BEFORE
       // `dispose()` tears them down. Teardown overwrites every status with
