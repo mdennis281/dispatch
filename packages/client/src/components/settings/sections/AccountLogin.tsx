@@ -51,7 +51,10 @@ export function AccountLogin({ status }: { status: SubscriptionStatus }) {
     const timer = setInterval(() => {
       api.subscriptions
         .login(id)
-        .then(({ flow: f }) => f && setFlow(f))
+        // Unlike the mount read, `null` here is news: we thought one was
+        // running and the server knows nothing of it — a restart killed the
+        // CLI with it. Keeping the old state spun "Waiting…" forever.
+        .then(({ flow: f }) => setFlow(f))
         .catch(() => {});
     }, POLL_MS);
     return () => clearInterval(timer);
