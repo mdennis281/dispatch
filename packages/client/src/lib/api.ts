@@ -161,6 +161,7 @@ import {
   type ProviderDescriptor,
   type Subscription,
   type SubscriptionStatus,
+  type AccountLoginFlow,
 } from "@dispatch/shared";
 import { sessionFetch } from "../stores/auth.js";
 import type {
@@ -869,6 +870,16 @@ export const api = {
     /** Replace the stored list; answers with the new statuses. */
     save: (subscriptions: Subscription[]) =>
       put<SubscriptionStatus[]>("/api/subscriptions", { subscriptions }),
+    /** Start the provider's own sign-in for this account (restarts a running one). */
+    startLogin: (id: string) =>
+      post<AccountLoginFlow>(`/api/subscriptions/${encodeURIComponent(id)}/login`),
+    /** That sign-in's progress; `flow` is null when none ran recently. */
+    login: (id: string) =>
+      get<{ flow: AccountLoginFlow | null }>(`/api/subscriptions/${encodeURIComponent(id)}/login`),
+    /** Relay a code pasted from the sign-in page to the CLI. */
+    submitLoginCode: (id: string, code: string) =>
+      post<AccountLoginFlow>(`/api/subscriptions/${encodeURIComponent(id)}/login/code`, { code }),
+    cancelLogin: (id: string) => del<{ ok: true }>(`/api/subscriptions/${encodeURIComponent(id)}/login`),
   },
 
   /* self-contained project config (the repo's `.dispatch/`, or the external one) */

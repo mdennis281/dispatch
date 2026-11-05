@@ -949,6 +949,19 @@ ctx.providers.register(harness, descriptor);
   `checked: true, loggedIn: false` shows "provider unavailable" with reason
   `logged-out` instead of failing mid-turn. A probe that could not run
   (`checked: false`) or reports `notRequired` never refuses a turn.
+- Optionally `startLogin(exe, env)` → `HarnessLoginFlow`: run the runtime's own
+  sign-in for one account (`env` carries that account's overlay). With it,
+  Settings → Accounts offers **Log in** on that provider's accounts. The flow
+  reports `{ url, userCode?, awaitingCode?, hint? }` through `onProgress`, and
+  takes a pasted code through `submitCode` if it has one. Its `done` settles when
+  the CLI exits, and the host then re-probes that account so the `logged-out`
+  banner clears at once. The host never sees a credential, only the URL and the
+  one-time code it relays to stdin. Claude drives `claude auth login`, a
+  paste-code flow that works from any browser. Codex drives `codex login`,
+  whose localhost callback only completes in a browser on the host, and its
+  `hint` says so. goose has no login and leaves `startLogin` out. Routes:
+  `POST|GET|DELETE /api/subscriptions/:id/login` and `POST …/login/code`, all
+  owner-only (`server/src/services/account-login.ts`).
 - `descriptor` is the `ProviderDescriptor` every surface labels, picks and
   accounts it by (label, seed models, efforts, skills dir, how an account is
   selected). Its `id` must equal `harness.kind` and match

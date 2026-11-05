@@ -25,6 +25,7 @@ import type {
   HarnessCapabilities,
   HarnessLimitReadOpts,
   HarnessLimits,
+  HarnessLoginFlow,
   HarnessRuntimeInfo,
   HarnessSession,
   HarnessSessionSpec,
@@ -36,6 +37,7 @@ import { cachedContextWindow, listAvailableModels, listContextWindows } from "./
 import { claudeExecutable, claudeExecutableOption, claudeRuntime } from "./runtime.js";
 import { envWithAccount, transferClaudeSession } from "./account.js";
 import { probeClaudeLogin, type RunLoginProbe } from "./login.js";
+import { startClaudeLogin } from "./login-flow.js";
 import { ClaudeUsage } from "./usage.js";
 import { ClaudeSession, type QueryFn } from "./session.js";
 
@@ -108,6 +110,10 @@ export class ClaudeHarness implements Harness {
 
   probeLogin(exe: string, env: Readonly<Record<string, string | undefined>>): Promise<RuntimeLoginStatus> {
     return probeClaudeLogin(exe, env, this.opts.runLoginProbe);
+  }
+
+  startLogin(exe: string, env: Readonly<Record<string, string | undefined>>): HarnessLoginFlow {
+    return startClaudeLogin(exe, env);
   }
 
   listModels(opts: { refresh?: boolean; account?: HarnessAccount } = {}): Promise<ModelOption[]> {

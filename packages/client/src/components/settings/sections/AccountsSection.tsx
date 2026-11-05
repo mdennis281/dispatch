@@ -28,6 +28,7 @@ import { Select } from "../../ui/Select.js";
 import { SectionLabel } from "../../ui/Panel.js";
 import { Spinner } from "../../ui/Spinner.js";
 import { useSubscriptions } from "../../../stores/subscriptions.js";
+import { AccountLogin } from "./AccountLogin.js";
 
 /**
  * The login accounts — several per provider.
@@ -39,8 +40,8 @@ import { useSubscriptions } from "../../../stores/subscriptions.js";
  * Save, the way Authentication acts on its own.
  *
  * Nothing here ever holds a credential. An account is a directory; the login in
- * it is made by the provider's CLI, and all this pane can say about it is
- * whether the login FILE exists.
+ * it is made by the provider's CLI — run from here by "Log in" (`AccountLogin`)
+ * when the provider offers `Harness.startLogin`, from a terminal otherwise.
  */
 export function AccountsSection() {
   const statuses = useSubscriptions((s) => s.list);
@@ -206,7 +207,8 @@ export function AccountsSection() {
                         />
                         <LoginBadge status={status} />
                       </div>
-                      {status && !status.loggedIn && (
+                      {status?.canLogIn && <AccountLogin status={status} />}
+                      {status && !status.loggedIn && !status.canLogIn && (
                         <p className="mt-1.5 text-2xs leading-snug text-faint">
                           Log in with the provider&rsquo;s own CLI, pointed at this directory:{" "}
                           <span className="cm-mono">
@@ -276,7 +278,8 @@ export function AccountsSection() {
             {implicit.map((s) => {
               const { account } = providerFor(s.provider);
               return (
-                <div key={s.id} className="flex items-center gap-2 text-xs text-secondary">
+                <div key={s.id}>
+                <div className="flex items-center gap-2 text-xs text-secondary">
                   <span className="w-24 shrink-0">{providerFor(s.provider).label}</span>
                   {/*
                     An endpoint provider's default is a HOST, and it has no login
@@ -297,6 +300,8 @@ export function AccountsSection() {
                       <LoginBadge status={s} />
                     </>
                   )}
+                </div>
+                {!account.endpointEnv && s.canLogIn && <AccountLogin status={s} />}
                 </div>
               );
             })}
