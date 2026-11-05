@@ -51,7 +51,6 @@ import {
   parseReviewingTarget,
   resolveRetention,
   type Chat,
-  type ResolvedRetention,
 } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import type { CheckpointService } from "./checkpoint.js";

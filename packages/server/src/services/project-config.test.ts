@@ -1044,7 +1044,7 @@ describe("ProjectConfigService — ${secret:NAME}", () => {
   ].join("\n");
 
   it("keeps the placeholder in config, persists and broadcasts no value, and records who references what", async () => {
-    const project = await seedProject();
+    await seedProject();
     await writeConfig("project.yaml", MANIFEST);
     const values: Record<string, string> = { LINEAR: "lin-123" };
     const svc = new ProjectConfigService({

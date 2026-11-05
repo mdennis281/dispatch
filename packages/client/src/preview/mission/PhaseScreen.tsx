@@ -31,7 +31,6 @@ export function PhaseScreen({
   const phase = spec.phases.find((p) => p.id === phaseId);
   if (!phase) return <div className="p-4 text-xs text-faint">no such phase</div>;
   const live = run?.phases[phaseId];
-  const remediations = (run?.remediations ?? []).filter((r) => r.phaseId === phaseId);
   const counts = { waves: waveGroups(plan, phaseId).length };
 
   return (

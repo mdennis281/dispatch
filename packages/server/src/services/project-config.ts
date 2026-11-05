@@ -90,7 +90,6 @@ export interface ConfigWatcher {
 export interface ProjectConfigServiceOptions {
   store: Store;
   bus: EventBus;
-  now?: () => number;
   /** Debounce for watcher-triggered reloads (ms). Default 250. */
   debounceMs?: number;
   /**
@@ -214,13 +213,6 @@ function oneLine(text: unknown): string {
   return String(text ?? "").replace(/\s*\r?\n\s*/g, " ").trim();
 }
 
-/** Coerce an unknown to a `string[]` (drops non-strings). Undefined stays undefined. */
-function toStringArray(v: unknown): string[] | undefined {
-  if (!Array.isArray(v)) return undefined;
-  const out = v.filter((x): x is string => typeof x === "string");
-  return out.length ? out : undefined;
-}
-
 /**
  * A tool allow/deny list read off committed config, with names carried through
  * the manager-server rename.
@@ -339,7 +331,6 @@ function transportToMcpConfig(
 export class ProjectConfigService {
   private readonly store: Store;
   private readonly bus: EventBus;
-  private readonly now: () => number;
   private readonly debounceMs: number;
   private readonly watchFactory: (
     dir: string,
@@ -364,7 +355,6 @@ export class ProjectConfigService {
   constructor(opts: ProjectConfigServiceOptions) {
     this.store = opts.store;
     this.bus = opts.bus;
-    this.now = opts.now ?? (() => Date.now());
     this.debounceMs = opts.debounceMs ?? 250;
     this.secrets = opts.secrets;
     this.watchFactory =

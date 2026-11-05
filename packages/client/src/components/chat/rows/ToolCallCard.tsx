@@ -7,7 +7,6 @@ import { MediaGroup } from "./MediaGroup.js";
 import { PlanBody, parsePlan } from "./PlanCard.js";
 import { ackTaskId } from "../../../lib/subagentRuns.js";
 import { Chip } from "../../ui/Chip.js";
-import { Button } from "../../ui/Button.js";
 import { Spinner } from "../../ui/Spinner.js";
 import { cn } from "../../../lib/cn.js";
 import { parseMcpName, toolLabel, dur, safeJson, kb } from "../../../lib/format.js";

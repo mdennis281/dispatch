@@ -28,7 +28,7 @@ export type ChatDeletionDeps = Pick<
 
 /** Stop, reap and forget a chat, then delete it and tell every client. */
 export async function deleteChat(deps: ChatDeletionDeps, id: string): Promise<void> {
-  const { store, bus, broker, attention, terminals, checkpoints } = deps;
+  const { store, bus, broker, attention, checkpoints } = deps;
   const existing = await store.getChat(id);
   // Tear the subprocess down, THEN forget the session so it can't leak. The
   // shared reap: stop the session, kill the shells (awaited), and kill what

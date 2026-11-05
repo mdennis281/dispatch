@@ -99,12 +99,6 @@ export interface WebhookServiceDeps {
   log?: (line: string) => void;
 }
 
-/** Headers on every delivery. */
-export interface SignedRequest {
-  headers: Record<string, string>;
-  body: string;
-}
-
 /**
  * Sign `body` the way a receiver verifies it: `t=<unix seconds>,v1=<hex
  * HMAC-SHA256 over "<t>.<body>">`. The timestamp is INSIDE the signed string,

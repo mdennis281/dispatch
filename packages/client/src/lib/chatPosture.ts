@@ -15,7 +15,6 @@
  * case the source label exists to explain.
  */
 import {
-  layerSourceLabel,
   layerSourceShort,
   resolveChatPosture,
   enforceGlobalPosture,
@@ -49,15 +48,6 @@ export function useChatPosture(chatId: string | null): ChatPosture {
       settings,
     }),
   );
-}
-
-/**
- * The sentence a chat control shows for where its value came from. `parent`
- * never survives to a stored chat (a spawn pins what it inherited), so the
- * three-layer label covers it.
- */
-export function postureSourceLabel(source: PostureSource, defaultLabel = "built-in default"): string {
-  return source === "parent" ? "inherited from the parent chat" : layerSourceLabel(source, defaultLabel);
 }
 
 /** The one-word form for a menu row's trailing hint — see `layerSourceShort`. */

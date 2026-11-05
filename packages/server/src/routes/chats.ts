@@ -37,7 +37,7 @@ function isTruthyFlag(v: string | undefined): boolean {
 
 export function registerChatRoutes(app: FastifyInstance): void {
   const { store, bus } = app.cm;
-  const { broker, chatProcesses, terminals } = app.services;
+  const { broker, chatProcesses } = app.services;
 
   // The load cap's dependencies, in one place: both routes below need the same
   // view of what is live, and a second spelling of it would mean the totals and

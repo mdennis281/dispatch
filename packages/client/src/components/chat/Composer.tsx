@@ -72,7 +72,7 @@ import { useProjects } from "../../stores/projects.js";
 import { IconButton } from "../ui/IconButton.js";
 import { Button } from "../ui/Button.js";
 import { RowButton } from "../ui/RowButton.js";
-import { Select, type SelectInherit, type SelectOption } from "../ui/Select.js";
+import { Select, type SelectInherit } from "../ui/Select.js";
 import { EffortGauge } from "../ui/EffortGauge.js";
 import { Chip } from "../ui/Chip.js";
 import { Tooltip } from "../ui/Tooltip.js";

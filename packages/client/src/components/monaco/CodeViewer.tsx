@@ -5,7 +5,7 @@
  * `monaco-editor` never touches the initial bundle. Fetch/loading/empty/error
  * states render without pulling Monaco at all.
  */
-import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   FileCode2,

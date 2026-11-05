@@ -129,11 +129,6 @@ const SUBAPP_ICON: Record<string, LucideIcon> = {
   "studio-director": Clapperboard,
 };
 
-/** Runner states that mean "this subApp is live / in-flight" (vs a dead record). */
-function isActive(status: RunnerInstance["status"] | undefined): boolean {
-  return status === "running" || status === "starting" || status === "stopping";
-}
-
 /* ------------------------------------------------------------ project head */
 
 /**

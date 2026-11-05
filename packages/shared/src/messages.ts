@@ -9,7 +9,6 @@ import {
   MessageOriginSchema,
   EffortSchema,
   HarnessKindSchema,
-  PermissionDecisionSchema,
 } from "./common.js";
 import { FileToolStatSchema } from "./file-tools.js";
 import { INTEGRATION_TRUST_LEVELS } from "./integration.js";

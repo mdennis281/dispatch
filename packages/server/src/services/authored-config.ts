@@ -38,7 +38,6 @@ import {
   type AuthoredKind,
   type AuthoredScope,
   type SkillConfig,
-  type WritableAuthoredScope,
 } from "@dispatch/shared";
 import { parseFrontmatter } from "./project-config.js";
 import { bundledSkills } from "./bundled-skills.js";
@@ -464,11 +463,6 @@ export function renderSkill(name: string, description: string | undefined, body:
   const desc = (description ?? "").replace(/\r?\n/g, " ").trim();
   const front = ["---", `name: ${name}`, `description: ${desc || name}`, "---", ""];
   return `${front.join("\n")}\n${body.trim()}\n`;
-}
-
-/** Path a project-scope item is written to, relative to the config dir. */
-export function projectRelPath(kind: AuthoredKind, name: string): string {
-  return kind === "skill" ? `skills/${name}/SKILL.md` : `${kind === "persona" ? "personas" : "instructions"}/${name}.md`;
 }
 
 /** Last path segment, tolerant of either separator. */

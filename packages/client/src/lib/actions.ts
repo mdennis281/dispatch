@@ -414,7 +414,3 @@ export const writeWorktreeFile = (
   relPath: string,
   content: string,
 ) => api.worktrees.writeFile(worktreePath, relPath, content);
-
-/** Structured worktree-vs-base diff (per-file patch + counts) for the diff view. */
-export const readWorktreeDiff = (worktreePath: string, base = "main") =>
-  api.worktrees.diff(worktreePath, base);

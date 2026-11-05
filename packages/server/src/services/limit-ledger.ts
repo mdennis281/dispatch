@@ -24,7 +24,6 @@ import {
   type LimitEvent,
   type LimitEventKind,
   type LimitPeriod,
-  type LimitPoint,
   type LimitQueryInput,
   type LimitReading,
   type LimitWindowSeries,

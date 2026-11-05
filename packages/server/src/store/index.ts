@@ -66,7 +66,7 @@ import {
   readFile as fsReadFile,
   writeFile as fsWriteFile,
 } from "node:fs/promises";
-import { existsSync, readFileSync, createReadStream, type Dirent } from "node:fs";
+import { existsSync, createReadStream, type Dirent } from "node:fs";
 import type { Readable } from "node:stream";
 import * as z from "zod";
 import {

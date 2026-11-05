@@ -29,7 +29,6 @@
  */
 import { FileText } from "lucide-react";
 import type { ChannelSender, HarnessKind, MessagePart, PeerSender } from "@dispatch/shared";
-import { cn } from "../../../lib/cn.js";
 import { useInjectedContext } from "../../../lib/injectedContext.js";
 import { useChats } from "../../../stores/chats.js";
 import { rowHarnessLabel } from "../../../lib/harness.js";

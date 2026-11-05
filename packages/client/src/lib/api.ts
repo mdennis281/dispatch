@@ -556,11 +556,6 @@ export function assetUrl(chatId: string, image: { path: string }): string {
  * them would mean either caching a live file forever or re-fetching an
  * immutable one on every scroll.
  */
-/** Every image in a chat, in transcript order — independent of the window. */
-export function chatMediaUrl(chatId: string): string {
-  return `${BASE}/api/chats/${chatId}/media`;
-}
-
 export function fsAssetUrl(chatId: string, path: string): string {
   return `${BASE}/api/chats/${chatId}/fs-asset?path=${encodeURIComponent(path)}`;
 }
