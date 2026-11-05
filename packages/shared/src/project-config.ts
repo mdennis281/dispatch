@@ -30,6 +30,7 @@ import { TerminalBackendRefSchema, TerminalLocationsSchema } from "./terminal-ba
 import { IssueConfigSchema } from "./issues.js";
 import { ProjectAgentContextSchema } from "./agent-context.js";
 import { ProjectRetentionSchema } from "./retention.js";
+import { ScheduleSchema } from "./schedules.js";
 
 /* ------------------------------------------------------------ dir defaults */
 
@@ -582,6 +583,12 @@ export const ProjectConfigSchema = z.object({
   modes: z.array(ConfigModeSchema).default([]),
   /** Skills loaded from `skills/` — materialized into `<cwd>/.claude/skills/`. */
   skills: z.array(SkillConfigSchema).default([]),
+  /**
+   * Scheduled chats loaded from `schedules/*.md` (see schedules.ts). Optional
+   * rather than defaulted so every hand-built config (tests, fixtures) that
+   * predates it still type-checks; absent reads as none.
+   */
+  schedules: z.array(ScheduleSchema).optional(),
   /** Absolute resolved memory dir (the memory SOURCE OF TRUTH). */
   memoryDir: z.string(),
   /** Absolute resolved agents dir. */
@@ -592,6 +599,8 @@ export const ProjectConfigSchema = z.object({
   skillsDir: z.string(),
   /** Absolute resolved instructions dir. */
   instructionsDir: z.string(),
+  /** Absolute resolved schedules dir. Optional so a config built before it existed still parses. */
+  schedulesDir: z.string().optional(),
 });
 export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;
 
@@ -614,6 +623,7 @@ export const ConfigSectionSchema = z.enum([
   "chat",
   "reviewer",
   "issues",
+  "schedules",
   "secrets",
   "instructions",
   "agents",
@@ -638,6 +648,7 @@ export const ProjectConfigErrorScopeSchema = z.enum([
   "agent",
   "mode",
   "skill",
+  "schedule",
   "io",
 ]);
 export type ProjectConfigErrorScope = z.infer<typeof ProjectConfigErrorScopeSchema>;

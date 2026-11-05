@@ -9,6 +9,7 @@ import { registerProjectRoutes } from "./projects.js";
 import { registerProjectConfigRoutes } from "./project-config.js";
 import { registerAgentTaskRoutes } from "./agent-tasks.js";
 import { registerPersonaRoutes } from "./personas.js";
+import { registerScheduleRoutes } from "./schedules.js";
 import { registerChatRoutes } from "./chats.js";
 import { registerAssetRoutes } from "./assets.js";
 import { registerAgentRoutes } from "./agents.js";
@@ -58,6 +59,7 @@ export function registerRoutes(app: FastifyInstance): void {
   registerProjectRoutes(app);
   registerProjectConfigRoutes(app);
   registerAgentTaskRoutes(app);
+  registerScheduleRoutes(app);
   registerChatRoutes(app);
   registerPersonaRoutes(app);
   registerAssetRoutes(app);

@@ -51,6 +51,11 @@ import {
   DEFAULT_MODES_DIR,
   DEFAULT_MEMORY_DIR,
   DEFAULT_SKILLS_DIR,
+  DEFAULT_SCHEDULES_DIR,
+  SCHEDULE_ID_RE,
+  ScheduleSchema,
+  checkCron,
+  type Schedule,
   type Project,
   type ProjectConfig,
   type ProjectAgentContext,
@@ -496,6 +501,11 @@ export class ProjectConfigService {
     return this.cache.get(projectId)?.config?.issues ?? null;
   }
 
+  /** This project's loaded schedules (empty when it has none or no config). */
+  getSchedules(projectId: string): Schedule[] {
+    return this.cache.get(projectId)?.config?.schedules ?? [];
+  }
+
   /* ----------------------------------------------------- agent/mode registry */
 
   /**
@@ -762,6 +772,10 @@ export class ProjectConfigService {
     // --- skills ---
     const skills = await this.loadSkills(skillsDir, errors);
 
+    // --- schedules ---
+    const schedulesDir = join(sourceDir, DEFAULT_SCHEDULES_DIR);
+    const schedules = await this.loadSchedules(schedulesDir, errors);
+
     // --- subApps (cwd → path, docker → dockerCompose) ---
     const refs = new Map<string, Set<string>>();
     const noteRefs = (consumer: string, values: unknown): void => {
@@ -876,11 +890,13 @@ export class ProjectConfigService {
       agents,
       modes,
       skills,
+      schedules,
       memoryDir,
       agentsDir,
       modesDir,
       skillsDir,
       instructionsDir,
+      schedulesDir,
     });
 
     return ProjectConfigResultSchema.parse({ sourceDir, config, errors });
@@ -1128,6 +1144,89 @@ export class ProjectConfigService {
         out.push(agent);
       } catch (err) {
         errors.push({ scope: "agent", file, message: msg(err) });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Load `schedules/*.md` into {@link Schedule}s (frontmatter + prompt body).
+   *
+   * Every rejection is a load ERROR, never a silently dropped schedule: a cron
+   * typo that just made the schedule vanish would read as "it ran and did
+   * nothing", which is the hardest kind of broken to notice on something whose
+   * whole point is to run while nobody is watching.
+   */
+  private async loadSchedules(
+    schedulesDir: string,
+    errors: ProjectConfigError[],
+  ): Promise<Schedule[]> {
+    if (!existsSync(schedulesDir)) return [];
+    let files: string[];
+    try {
+      files = (await readdir(schedulesDir, { withFileTypes: true }))
+        .filter((e) => e.isFile() && e.name.endsWith(".md"))
+        .map((e) => e.name);
+    } catch (err) {
+      errors.push({ scope: "schedule", message: msg(err) });
+      return [];
+    }
+    files.sort();
+    const out: Schedule[] = [];
+    for (const file of files) {
+      const id = file.replace(/\.md$/, "");
+      if (!SCHEDULE_ID_RE.test(id)) {
+        errors.push({
+          scope: "schedule",
+          file,
+          message: "file name must be lowercase letters, digits and dashes — it is the schedule's id",
+        });
+        continue;
+      }
+      try {
+        const raw = await readFile(join(schedulesDir, file), "utf8");
+        const { data, body } = parseFrontmatter(raw);
+        const str = (v: unknown): string | undefined =>
+          typeof v === "string" && v.trim() ? v.trim() : undefined;
+        const cron = str(data.cron);
+        if (!cron) {
+          errors.push({ scope: "schedule", file, message: "missing `cron`" });
+          continue;
+        }
+        const timezone = str(data.timezone);
+        const check = checkCron(cron, timezone);
+        if (!check.ok) {
+          errors.push({ scope: "schedule", file, message: `cron "${cron}": ${check.error}` });
+          continue;
+        }
+        if (!body.trim()) {
+          errors.push({ scope: "schedule", file, message: "empty prompt — the body is what each run is asked" });
+          continue;
+        }
+        const effort = EffortSchema.safeParse(data.effort);
+        if (data.effort !== undefined && !effort.success) {
+          errors.push({ scope: "schedule", file, message: `unknown effort "${String(data.effort)}"` });
+          continue;
+        }
+        out.push(
+          ScheduleSchema.parse({
+            id,
+            name: str(data.name) ?? id,
+            cron,
+            timezone,
+            prompt: body,
+            personaId: str(data.persona),
+            model: str(data.model),
+            effort: effort.success ? effort.data : undefined,
+            harness: str(data.harness),
+            modeId: str(data.mode),
+            enabled: data.enabled !== false,
+            catchUp: data.catchUp !== false,
+            file,
+          }),
+        );
+      } catch (err) {
+        errors.push({ scope: "schedule", file, message: msg(err) });
       }
     }
     return out;

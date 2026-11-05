@@ -571,6 +571,20 @@ const MIGRATIONS: ReadonlyArray<string> = [
     seen_at   INTEGER NOT NULL
   );
   `,
+  // 17 — scheduled chats' run state (services/schedule-runner.ts). One row per
+  // (project, schedule): the slot last honoured and the chat it started. Here
+  // and not in the schedule's file because that file is committed — a stamp
+  // rewritten every run would dirty the repo on every fire — and per instance
+  // because only one instance fires (see ScheduleRunner.active). JSON body,
+  // zod-validated on read, like `issue_watch`.
+  `
+  CREATE TABLE schedule_state (
+    project_id  TEXT NOT NULL,
+    schedule_id TEXT NOT NULL,
+    body        TEXT NOT NULL,
+    PRIMARY KEY (project_id, schedule_id)
+  );
+  `,
 ];
 
 /** Schema version a database must be at for this build to use it. */

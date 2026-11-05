@@ -174,6 +174,12 @@ export interface FindChatsQuery {
   blockedOnHuman?: boolean;
   /** true → only chats with at least one PR not yet merged or closed. */
   unmerged?: boolean;
+  /**
+   * Only runs of this schedule (`Chat.scheduleId`). How a scheduled run finds
+   * its predecessors — see `scheduleRunParts`. Schedule ids are per project, so
+   * pair it with `project` when two projects might share one.
+   */
+  schedule?: string;
   /** Include archived chats (default false). */
   archived?: boolean;
   /** Only chats active at/after this time (epoch ms). */
@@ -243,6 +249,7 @@ function findFingerprint(q: FindChatsQuery): string {
     q.status ?? "",
     q.blockedOnHuman ?? null,
     Boolean(q.unmerged),
+    q.schedule ?? "",
     Boolean(q.archived),
     [...(q.kinds ?? [])].sort(),
     q.match ?? "similar",
@@ -798,6 +805,7 @@ export class InspectService {
     const candidates = all
       .filter((c) => (q.archived ? true : !c.archived))
       .filter((c) => (q.status ? c.status === q.status : true))
+      .filter((c) => (q.schedule ? c.scheduleId === q.schedule : true))
       .filter((c) => (q.blockedOnHuman === undefined ? true : (c.status === "awaiting-input") === q.blockedOnHuman))
       .filter((c) => !q.unmerged || chatPrStatuses(c.prs, (key) => prRecords.get(key)).some(isUnmerged))
       .filter((c) => {

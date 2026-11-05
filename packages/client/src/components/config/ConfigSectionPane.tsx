@@ -20,6 +20,7 @@
 import { PersonasPane } from "./PersonasPane.js";
 import { SecretsPane } from "./SecretsPane.js";
 import { IssuesPane } from "./IssuesPane.js";
+import { SchedulesPane } from "./SchedulesPane.js";
 import { AgentContextPane } from "./AgentContextPane.js";
 import { useState } from "react";
 import { FileCog, Plus, SquarePen, Trash2 } from "lucide-react";
@@ -72,6 +73,7 @@ export function ConfigSectionPane({
   if (section.id === "personas") return <PersonasPane projectId={projectId} />;
   if (section.id === "secrets") return <SecretsPane projectId={projectId} />;
   if (section.id === "issues" && projectId) return <IssuesPane projectId={projectId} hasConfigDir={!!config} />;
+  if (section.id === "schedules" && projectId) return <SchedulesPane projectId={projectId} />;
   if (section.id === "agentContext" && projectId)
     // `config.agentContext` and not just `!!config`: the pane SAVES the block
     // whole, so it has to start from what is already in `project.yaml` or a save

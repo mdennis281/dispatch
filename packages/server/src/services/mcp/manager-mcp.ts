@@ -7357,6 +7357,13 @@ ${look}` : "")
           "true: only chats with at least one PR not seen to merge or close (state open, or unknown before the " +
             "registry has polled it). Each hit lists its PRs' state and CI.",
         ),
+      schedule: z
+        .string()
+        .optional()
+        .describe(
+          "Only runs of this scheduled chat (its id — the file stem under `.dispatch/schedules/`). " +
+            "A scheduled run uses this to find what its earlier runs did; pair with `project`.",
+        ),
       archived: z.boolean().optional().describe("Include archived chats (default false)."),
       kinds: z
         .array(z.string())
@@ -7404,6 +7411,7 @@ ${look}` : "")
           status: args.status?.trim() || undefined,
           blockedOnHuman: args.blockedOnHuman,
           unmerged: args.unmerged,
+          schedule: args.schedule?.trim() || undefined,
           archived: args.archived,
           since,
           before,

@@ -7,6 +7,8 @@
 import type {
   CommitMessageAvailability,
   Persona,
+  ScheduleInput,
+  SchedulesResponse,
   PluginInfo,
   PluginInstance,
   PluginCatalog,
@@ -680,6 +682,26 @@ export const api = {
   personas: {
     list: (projectId: string) => get<Persona[]>(`/api/projects/${encodeURIComponent(projectId)}/personas`),
     select: (chatId: string, personaId: string | null) => put<Chat>(`/api/chats/${encodeURIComponent(chatId)}/persona`, { personaId }),
+  },
+  /** Scheduled chats (see routes/schedules.ts). Every write returns the fresh list. */
+  schedules: {
+    list: (projectId: string) =>
+      get<SchedulesResponse>(`/api/projects/${encodeURIComponent(projectId)}/schedules`),
+    /** Create or overwrite `.dispatch/schedules/<id>.md`. The id comes from the path, not the body. */
+    save: (projectId: string, input: ScheduleInput) =>
+      put<SchedulesResponse>(
+        `/api/projects/${encodeURIComponent(projectId)}/schedules/${encodeURIComponent(input.id)}`,
+        input,
+      ),
+    remove: (projectId: string, scheduleId: string) =>
+      del<SchedulesResponse>(
+        `/api/projects/${encodeURIComponent(projectId)}/schedules/${encodeURIComponent(scheduleId)}`,
+      ),
+    /** Start a run now, regardless of cadence or which instance this is. */
+    run: (projectId: string, scheduleId: string) =>
+      post<{ chatId: string }>(
+        `/api/projects/${encodeURIComponent(projectId)}/schedules/${encodeURIComponent(scheduleId)}/run`,
+      ),
   },
   /* projects */
   projects: {

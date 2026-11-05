@@ -20,6 +20,7 @@ import {
   Bot,
   Boxes,
   Brain,
+  CalendarClock,
   CircleDot,
   FileCog,
   GitPullRequest,
@@ -31,7 +32,13 @@ import {
   Wand2,
   type LucideIcon,
 } from "lucide-react";
-import { configTaskId, isAgentTaskId, AGENT_TASKS, type ConfigSection } from "@dispatch/shared";
+import {
+  configTaskId,
+  isAgentTaskId,
+  AGENT_TASKS,
+  SCHEDULE_RUN_PURPOSE,
+  type ConfigSection,
+} from "@dispatch/shared";
 import { taskIconOrNull } from "../../lib/taskIcons.js";
 
 export interface SectionDef {
@@ -111,6 +118,18 @@ export const SECTIONS: SectionDef[] = [
     noun: "issue",
     manifestBacked: true,
     countable: false,
+  },
+  {
+    id: "schedules",
+    icon: CalendarClock,
+    label: "Scheduled chats",
+    blurb: "Start a chat on a schedule",
+    explainer:
+      "A prompt Dispatch starts as a fresh chat on a cron — a morning dependency audit, a " +
+      "weekly flaky-test sweep — with its own persona, model and effort. Each run is told " +
+      "where the previous runs are, so it can build on what they found. Only the installed " +
+      "app fires them; Run now works anywhere.",
+    noun: "schedule",
   },
   {
     id: "secrets",
@@ -255,6 +274,9 @@ export const SECTION_BY_ID = new Map(SECTIONS.map((s) => [s.id, s]));
  */
 export function purposeIcon(kind: string | undefined): LucideIcon | null {
   if (!kind) return null;
+  // Not an agent task (there is no launcher for it — a schedule's run is
+  // started by the runner), so it has no catalog entry to take an icon from.
+  if (kind === SCHEDULE_RUN_PURPOSE) return CalendarClock;
   if (isAgentTaskId(kind)) {
     const fromCatalog = taskIconOrNull(AGENT_TASKS[kind].icon);
     if (fromCatalog) return fromCatalog;
