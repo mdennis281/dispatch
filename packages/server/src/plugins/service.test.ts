@@ -170,7 +170,13 @@ describe("activation", () => {
       configDir: r.configDir,
       store,
       context: stubContext(),
-      activateBudgetMs: 50,
+      // The budget also covers each plugin's module IMPORT (service.ts withBudget
+      // around importModule), not just `activate`. At 50ms the healthy
+      // hello-server's cold import on the loaded self-hosted runner overran it
+      // and came back `error` too — red CI/Release on main from Oct 28 (#442,
+      // #445). `slow` never resolves, so any budget trips it; this one just has
+      // to be generous for hello-server while staying well under the 5s test timeout.
+      activateBudgetMs: 1500,
       fault: () => {},
       log: () => {},
     });
