@@ -41,7 +41,6 @@ import { useMcp } from "./mcp.js";
 import { useConfig } from "./config.js";
 import { useCheckpoints } from "./checkpoints.js";
 import { useNotices } from "./notices.js";
-import { usePendingChat } from "./pendingChat.js";
 import { useUsage } from "./usage.js";
 import { useSubscriptions } from "./subscriptions.js";
 import { useUpdate } from "./update.js";
@@ -448,12 +447,6 @@ function reduceServerEvent(evt: WsServerEvent): void {
       return;
 
     case "error":
-      // A failed `create-chat` is the only failure that arrives untagged while
-      // a New chat placeholder is up (it has no chatId to tag yet). Clearing on
-      // any untagged error is deliberately loose: a wrongly-dropped placeholder
-      // costs nothing — the chat still gets selected if it lands — whereas one
-      // that outlives its failed create sits there spinning for 8s.
-      if (!evt.chatId) usePendingChat.getState().clearAll();
       useNotices.getState().push({
         level: "error",
         text: evt.message,
