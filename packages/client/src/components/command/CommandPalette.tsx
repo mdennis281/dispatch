@@ -17,6 +17,15 @@
  * either side. Commands are a closed set you're recalling; files are an open
  * set you're searching — keeping them in that order means typing a command name
  * never gets outbid by a file that happens to share letters.
+ *
+ * And it searches what was SAID in every chat — the "which chat was it where we
+ * talked about the house colours" question, which a title can't answer. That
+ * search is a stream: the server walks transcripts newest-first a day at a time
+ * (services/chat-search.ts) and the rows grow underneath as older days come
+ * in. It stops when the palette closes, the query changes, or history runs out.
+ * Those rows go LAST, after files, for the same reason files go after commands,
+ * and because a list that only ever grows at the bottom never moves the row
+ * your cursor is on.
  */
 import {
   useCallback,
@@ -50,7 +59,10 @@ import {
   FolderOpen,
   FileText,
   Workflow,
+  MessageSquareText,
+  Loader2,
 } from "lucide-react";
+import { significantTokens, stem, type ChatSearchHit } from "@dispatch/shared";
 import { actions } from "../../lib/actions.js";
 import { createChatAndFocus } from "../../stores/pendingChat.js";
 import { api } from "../../lib/api.js";
@@ -71,6 +83,7 @@ import { requestFocusPanel, type FocusPanelTab } from "../panels/panelBus.js";
 import { Kbd } from "../ui/Kbd.js";
 import { cn } from "../../lib/cn.js";
 import { LAYER } from "../../lib/layers.js";
+import { ago } from "../metrics/chrome.js";
 
 interface Command {
   id: string;
@@ -80,6 +93,11 @@ interface Command {
   icon: ReactNode;
   /** Extra text folded into the fuzzy search (not shown). */
   keywords?: string;
+  /** A matched passage, shown in place of the subtitle with `terms` marked. */
+  snippet?: string;
+  terms?: readonly string[];
+  /** Small trailing note under the group label — a transcript hit's age. */
+  meta?: string;
   run: () => void;
 }
 
@@ -173,6 +191,149 @@ function useProjectFileCommands(
           }),
       })),
     [files, repoPath],
+  );
+}
+
+/** Below this, a transcript query matches half of everything ever said. */
+const CHAT_SEARCH_MIN_CHARS = 3;
+/**
+ * Longer than the file search's: each query starts a walk over every
+ * transcript, so one per word is the right rate, not one per letter.
+ */
+const CHAT_SEARCH_DEBOUNCE_MS = 220;
+/** Past this the list isn't being read, so the walk stops too. */
+const CHAT_SEARCH_MAX_HITS = 150;
+
+interface ChatSearchProgress {
+  running: boolean;
+  /** How far back the walk has reached, in days. */
+  daysBack: number;
+  searched: number;
+  total: number;
+  /** Stopped at {@link CHAT_SEARCH_MAX_HITS} rather than at the end of history. */
+  capped?: boolean;
+  error?: string;
+}
+
+const NO_PROGRESS = { daysBack: 0, searched: 0, total: 0 };
+
+/**
+ * Every chat whose transcript matches `query`, growing as the server's age walk
+ * reaches older days.
+ *
+ * The walk is ONE streamed request, and aborting it is the cancel: the effect's
+ * cleanup runs on a new query, on close, and on unmount, and the server stops
+ * scanning the moment the socket drops. Hits from a superseded query can't
+ * land, because the frame callback checks the same signal.
+ */
+function useChatSearch(
+  query: string,
+  open: boolean,
+): { hits: ChatSearchHit[]; progress: ChatSearchProgress | null } {
+  const [hits, setHits] = useState<ChatSearchHit[]>([]);
+  const [progress, setProgress] = useState<ChatSearchProgress | null>(null);
+
+  useEffect(() => {
+    const q = query.trim();
+    setHits([]);
+    setProgress(null);
+    if (!open || q.length < CHAT_SEARCH_MIN_CHARS) return;
+    const abort = new AbortController();
+    let count = 0;
+    const timer = setTimeout(() => {
+      setProgress({ running: true, ...NO_PROGRESS });
+      api.chats
+        .search(
+          q,
+          (frame) => {
+            if (abort.signal.aborted) return;
+            if (frame.type === "hits") {
+              if (frame.hits.length) {
+                count += frame.hits.length;
+                setHits((prev) => [...prev, ...frame.hits]);
+              }
+              const capped = count >= CHAT_SEARCH_MAX_HITS;
+              setProgress({
+                running: !capped,
+                daysBack: frame.daysBack,
+                searched: frame.searched,
+                total: frame.total,
+                capped,
+              });
+              if (capped) abort.abort();
+            } else if (frame.type === "done") {
+              setProgress({
+                running: false,
+                daysBack: frame.daysBack,
+                searched: frame.searched,
+                total: frame.total,
+              });
+            } else {
+              setProgress((p) => ({ ...(p ?? NO_PROGRESS), running: false, error: frame.error }));
+            }
+          },
+          abort.signal,
+        )
+        .catch((err: unknown) => {
+          if (abort.signal.aborted) return;
+          setProgress((p) => ({
+            ...(p ?? NO_PROGRESS),
+            running: false,
+            error: err instanceof Error ? err.message : String(err),
+          }));
+        });
+    }, CHAT_SEARCH_DEBOUNCE_MS);
+    return () => {
+      clearTimeout(timer);
+      abort.abort();
+    };
+  }, [query, open]);
+
+  return { hits, progress };
+}
+
+/**
+ * The words to mark in a snippet: the query's significant tokens, STEMMED, so
+ * "colors" also marks the "color" and "colorful" the scorer credited, not only
+ * the literal word.
+ */
+function highlightTerms(query: string): string[] {
+  return [...new Set(significantTokens(query).map(stem).filter((t) => t.length >= 2))];
+}
+
+const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * A snippet on one truncated line, with its matches marked.
+ *
+ * The server pads ~140 chars either side of the match, which on a one-line row
+ * puts the match past the ellipsis — so it is re-centred here to start just
+ * before the first marked term.
+ */
+function Highlighted({ text, terms }: { text: string; terms: readonly string[] }) {
+  // The WHOLE word around a term is marked: a stem is a fragment ("worktree"
+  // stems to "worktre"), and a highlight that stops a letter short reads as a
+  // rendering bug.
+  const re = terms.length
+    ? new RegExp(`([\\p{L}\\p{N}_]*(?:${terms.map(escapeRe).join("|")})[\\p{L}\\p{N}_]*)`, "giu")
+    : null;
+  let shown = text.replace(/\s+/g, " ").trim();
+  if (!re) return <>{shown}</>;
+  const first = shown.search(re);
+  if (first > 40) shown = `…${shown.slice(first - 24).replace(/^\S*\s/, "")}`;
+  // A split on a capturing group puts the matches at the odd indices.
+  return (
+    <>
+      {shown.split(re).map((part, i) =>
+        i % 2 === 1 ? (
+          <mark key={i} className="rounded-sm bg-accent-ghost px-px text-accent-hi">
+            {part}
+          </mark>
+        ) : (
+          part
+        ),
+      )}
+    </>
   );
 }
 
@@ -472,6 +633,9 @@ export function CommandPalette({
     open,
   );
 
+  const chatSearch = useChatSearch(query, open);
+  const terms = useMemo(() => highlightTerms(query), [query]);
+
   const results = useMemo(() => {
     const scored: { cmd: Command; score: number; i: number }[] = [];
     commands.forEach((cmd, i) => {
@@ -481,16 +645,38 @@ export function CommandPalette({
     });
     // stable: by score desc, then original order.
     scored.sort((a, b) => b.score - a.score || a.i - b.i);
-    // Files last — see the header note. They arrive already ranked, so folding
+    // Files next — see the header note. They arrive already ranked, so folding
     // them into the sort above would re-rank them by a scorer that never saw
     // the repo.
-    return [...scored.map((s) => s.cmd), ...fileCommands];
-  }, [commands, query, fileCommands]);
+    const listed = scored.map((s) => s.cmd);
+    // A chat already listed by its title isn't listed again for its transcript:
+    // the same chat twice reads as two chats.
+    const shown = new Set(listed.map((c) => c.id));
+    const transcript: Command[] = [];
+    for (const h of chatSearch.hits) {
+      if (shown.has(`chat-${h.chatId}`)) continue;
+      const fromRow = h.kind !== "title";
+      transcript.push({
+        id: `transcript-${h.chatId}`,
+        title: h.title || "Untitled chat",
+        subtitle: fromRow ? undefined : "matched the title",
+        snippet: fromRow ? h.snippet : undefined,
+        terms,
+        meta: [h.archived ? "archived" : null, ago(h.at)].filter(Boolean).join(" · "),
+        group: h.projectName ?? "Chat",
+        icon: <MessageSquareText />,
+        run: () => selectChat(h.chatId),
+      });
+    }
+    return { all: [...listed, ...fileCommands, ...transcript], transcript: transcript.length };
+  }, [commands, query, fileCommands, chatSearch.hits, terms]);
+  const transcriptCount = results.transcript;
+  const items = results.all;
 
   // keep the active index in range as the result set changes.
   useEffect(() => {
-    setActive((a) => (results.length === 0 ? 0 : Math.min(a, results.length - 1)));
-  }, [results.length]);
+    setActive((a) => (items.length === 0 ? 0 : Math.min(a, items.length - 1)));
+  }, [items.length]);
 
   // scroll the active row into view.
   useEffect(() => {
@@ -501,22 +687,22 @@ export function CommandPalette({
 
   const runAt = useCallback(
     (idx: number) => {
-      const cmd = results[idx];
+      const cmd = items[idx];
       if (!cmd) return;
       onOpenChange(false);
       // run after close so a command that opens another surface (Settings) lands last.
       queueMicrotask(() => cmd.run());
     },
-    [results, onOpenChange],
+    [items, onOpenChange],
   );
 
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      setActive((a) => (results.length ? (a + 1) % results.length : 0));
+      setActive((a) => (items.length ? (a + 1) % items.length : 0));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      setActive((a) => (results.length ? (a - 1 + results.length) % results.length : 0));
+      setActive((a) => (items.length ? (a - 1 + items.length) % items.length : 0));
     } else if (e.key === "Enter") {
       e.preventDefault();
       runAt(active);
@@ -562,7 +748,7 @@ export function CommandPalette({
               setQuery(e.target.value);
               setActive(0);
             }}
-            placeholder="Search files or run a command…"
+            placeholder="Search chats, files or run a command…"
             className="min-w-0 flex-1 bg-transparent text-lg text-primary placeholder:text-faint outline-none"
             spellCheck={false}
             autoComplete="off"
@@ -571,18 +757,26 @@ export function CommandPalette({
         </div>
 
         <div ref={listRef} className="cm-scroll max-h-[52vh] overflow-y-auto p-1.5">
-          {results.length === 0 ? (
+          {items.length === 0 && chatSearch.progress?.running ? (
+            // Not "nothing matches": the walk hasn't reached the chat yet, and
+            // saying otherwise is how a search that works gets abandoned.
+            <div className="flex items-center justify-center gap-2 px-3 py-10 text-base text-muted">
+              <Loader2 className="size-4 animate-spin" />
+              Searching chat history…
+            </div>
+          ) : items.length === 0 ? (
             <div className="px-3 py-10 text-center text-base text-muted">
               Nothing matches “{query}”.
               {/* Naming the limit turns "this app can't find my file" into "this
                   search doesn't cover that", which is actionable. */}
               <span className="mt-1 block text-xs text-faint">
-                File search covers the project's tracked and untracked files.
-                Ignored files and other drives are in Browse files.
+                Chat search covers every transcript, archived ones included. File
+                search covers the project's tracked and untracked files; ignored
+                files and other drives are in Browse files.
               </span>
             </div>
           ) : (
-            results.map((cmd, idx) => (
+            items.map((cmd, idx) => (
               <button
                 key={cmd.id}
                 data-idx={idx}
@@ -607,12 +801,21 @@ export function CommandPalette({
                   <span className="block truncate text-base font-medium text-primary">
                     {cmd.title}
                   </span>
-                  {cmd.subtitle && (
-                    <span className="block truncate text-xs text-muted">{cmd.subtitle}</span>
+                  {cmd.snippet ? (
+                    <span className="block truncate text-xs text-muted">
+                      <Highlighted text={cmd.snippet} terms={cmd.terms ?? []} />
+                    </span>
+                  ) : (
+                    cmd.subtitle && (
+                      <span className="block truncate text-xs text-muted">{cmd.subtitle}</span>
+                    )
                   )}
                 </span>
-                <span className="shrink-0 text-2xs font-medium uppercase tracking-wide text-faint">
-                  {cmd.group}
+                <span className="flex max-w-[30%] shrink-0 flex-col items-end gap-0.5">
+                  <span className="max-w-full truncate text-2xs font-medium uppercase tracking-wide text-faint">
+                    {cmd.group}
+                  </span>
+                  {cmd.meta && <span className="text-2xs text-faint">{cmd.meta}</span>}
                 </span>
               </button>
             ))
@@ -638,16 +841,45 @@ export function CommandPalette({
           {/* "commands" stopped being true once files joined the list, and a
               count that names the wrong thing is how you conclude the file
               search isn't running when it is. */}
-          <span className="ml-auto cm-mono">
-            {fileCommands.length > 0
-              ? `${results.length - fileCommands.length} command${
-                  results.length - fileCommands.length === 1 ? "" : "s"
-                } · ${fileCommands.length} file${fileCommands.length === 1 ? "" : "s"}`
-              : `${results.length} command${results.length === 1 ? "" : "s"}`}
+          <ChatSearchStatus progress={chatSearch.progress} />
+          <span className="ml-auto shrink-0 cm-mono">
+            {footerCount(items.length, fileCommands.length, transcriptCount)}
           </span>
         </div>
       </div>
     </div>,
     document.body,
+  );
+}
+
+const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+/** "12 commands · 3 files · 8 chats" — only the sections that have rows. */
+function footerCount(total: number, files: number, chats: number): string {
+  const parts = [plural(total - files - chats, "command")];
+  if (files) parts.push(plural(files, "file"));
+  if (chats) parts.push(plural(chats, "chat"));
+  return parts.join(" · ");
+}
+
+/**
+ * Where the transcript walk is. While it runs, how far back it has got — what
+ * tells you whether to keep waiting for an older chat — and once it stops,
+ * why: history exhausted, the row cap, or an error.
+ */
+function ChatSearchStatus({ progress }: { progress: ChatSearchProgress | null }) {
+  if (!progress) return null;
+  const { running, daysBack, searched, total, capped, error } = progress;
+  let label: string;
+  if (error) label = "chat search failed";
+  else if (running) {
+    label = daysBack ? `searching ${daysBack}d back · ${searched}/${total} chats` : "searching chats…";
+  } else if (capped) label = `first ${CHAT_SEARCH_MAX_HITS} chat matches · ${daysBack}d back`;
+  else label = `searched all ${plural(total, "chat")}`;
+  return (
+    <span className="flex min-w-0 items-center gap-1" title={error}>
+      {running && <Loader2 className="size-3 shrink-0 animate-spin" />}
+      <span className="truncate">{label}</span>
+    </span>
   );
 }
