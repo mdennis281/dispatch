@@ -45,8 +45,9 @@ describe("buildArtifactDocument", () => {
   it("cannot be closed early by a script tag in the bridge", () => {
     const doc = buildArtifactDocument("html", "");
     // Exactly one script element (the bridge), and it is closed once.
-    expect(doc.match(/<script>/g)).toHaveLength(1);
-    expect(doc.match(/<\/script>/g)).toHaveLength(1);
+    const lower = doc.toLowerCase();
+    expect(lower.split("<script").length - 1).toBe(1);
+    expect(lower.split("</script").length - 1).toBe(1);
   });
 });
 

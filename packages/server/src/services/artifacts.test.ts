@@ -128,53 +128,57 @@ describe("artifact tools", () => {
     };
   }
   const text = (r: { content: unknown[] }) => (r.content[0] as { text: string }).text;
+  /** Tool args as an agent sends them: optional keys simply absent. The handler
+   *  type spells every key out, which a hand-written call can't satisfy. */
+  const run = (def: { handler: (args: never, extra: unknown) => Promise<{ content: unknown[]; isError?: boolean }> }, args: object) =>
+    def.handler(args as never, {});
 
   it("create → update → read round-trips, and each result carries a parseable ref", async () => {
     const tools = createArtifactTools({ artifacts: bound() });
-    const created = await tools.artifactCreate.handler({ title: "Demo", type: "html", content: "<b>1</b>" }, {});
+    const created = await run(tools.artifactCreate, { title: "Demo", type: "html", content: "<b>1</b>" });
     expect(created.isError).toBe(false);
     const ref = parseArtifactRef(text(created));
     expect(ref).toMatchObject({ version: 1, title: "Demo", type: "html" });
 
-    const updated = await tools.artifactUpdate.handler({ id: ref!.id, old_str: "1", new_str: "2" }, {});
+    const updated = await run(tools.artifactUpdate, { id: ref!.id, old_str: "1", new_str: "2" });
     expect(parseArtifactRef(text(updated))).toMatchObject({ id: ref!.id, version: 2 });
 
     svc.recordErrors("c1", ref!.id, 2, ["ReferenceError: x is not defined"]);
-    const read = await tools.artifactRead.handler({ id: ref!.id }, {});
+    const read = await run(tools.artifactRead, { id: ref!.id });
     expect(text(read)).toContain("ReferenceError: x is not defined");
     expect(text(read)).toContain("<b>2</b>");
     expect(parseArtifactRef(text(read))).toBeNull();
 
-    const listed = await tools.artifactList.handler({}, {});
+    const listed = await run(tools.artifactList, {});
     expect(text(listed)).toContain(ref!.id);
   });
 
   it("publishes from a path relative to the session cwd", async () => {
     await writeFile(join(root, "page.html"), "<h1>file</h1>");
     const tools = createArtifactTools({ artifacts: bound(root) });
-    const res = await tools.artifactCreate.handler({ title: "F", type: "html", path: "page.html" }, {});
+    const res = await run(tools.artifactCreate, { title: "F", type: "html", path: "page.html" });
     const ref = parseArtifactRef(text(res))!;
     expect((await svc.read("c1", ref.id)).content).toBe("<h1>file</h1>");
   });
 
   it("refuses ambiguous or empty calls with a readable error", async () => {
     const tools = createArtifactTools({ artifacts: bound() });
-    expect((await tools.artifactCreate.handler({ title: "x", type: "html" }, {})).isError).toBe(true);
+    expect((await run(tools.artifactCreate, { title: "x", type: "html" })).isError).toBe(true);
     expect(
-      (await tools.artifactCreate.handler({ title: "x", type: "html", content: "a", path: "b" }, {})).isError,
+      (await run(tools.artifactCreate, { title: "x", type: "html", content: "a", path: "b" })).isError,
     ).toBe(true);
-    const created = await tools.artifactCreate.handler({ title: "x", type: "html", content: "a" }, {});
+    const created = await run(tools.artifactCreate, { title: "x", type: "html", content: "a" });
     const id = parseArtifactRef(text(created))!.id;
-    const none = await tools.artifactUpdate.handler({ id }, {});
+    const none = await run(tools.artifactUpdate, { id });
     expect(none.isError).toBe(true);
-    const missing = await tools.artifactUpdate.handler({ id, old_str: "zzz", new_str: "q" }, {});
+    const missing = await run(tools.artifactUpdate, { id, old_str: "zzz", new_str: "q" });
     expect(missing.isError).toBe(true);
     expect(text(missing)).toMatch(/does not occur/);
   });
 
   it("reports itself unavailable with no store bound", async () => {
     const tools = createArtifactTools({});
-    const res = await tools.artifactList.handler({}, {});
+    const res = await run(tools.artifactList, {});
     expect(res.isError).toBe(true);
   });
 });
