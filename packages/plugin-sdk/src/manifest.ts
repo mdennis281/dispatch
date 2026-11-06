@@ -34,4 +34,6 @@ export {
   pluginRangeAccepts,
   pluginSecretAllowed,
   manifestPathDir,
+  grantedPluginCapabilities,
+  optionalPluginCapabilities,
 } from "@dispatch/shared";

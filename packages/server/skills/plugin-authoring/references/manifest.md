@@ -20,6 +20,7 @@ capabilities:                   # what the plugin touches; gates members of ctx;
   - routes
   - chats:write
   - process
+optionalCapabilities: [approvals] # granted where the host knows them, IGNORED (with a note) where it does not
 contributes:                    # see contributions.md
   modes: ./modes
   skills: ./skills
@@ -88,6 +89,13 @@ receives — the member is `undefined`, not a stub that throws. `settings`, `pro
 human who installs the plugin (the consent summary `dispatch plugin add` prints and the
 Settings row), not a sandbox: server plugins run in-process with the server's
 privileges.
+
+`optionalCapabilities` is for a capability newer than some hosts the plugin runs on.
+A host that knows the name grants it exactly like `capabilities`, and the consent card
+marks it optional. A host that does not know it ignores it with a note, where under
+`capabilities` it would make the manifest invalid. Hosts older than the key strip it.
+Feature-detect the member (`ctx.approvals?.…`) and degrade that one feature. See
+docs/plugins.md → "Optional capabilities".
 
 ## `settings` — the JSON Schema
 

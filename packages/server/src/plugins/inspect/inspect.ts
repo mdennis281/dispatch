@@ -32,6 +32,9 @@ import {
   type PluginInspectionSource,
   type PluginManifest,
   type PluginStatus,
+  grantedPluginCapabilities,
+  optionalPluginCapabilities,
+  ignoredOptionalCapabilitiesNote,
 } from "@dispatch/shared";
 import { assertValidServerName } from "@dispatch/cli/core";
 import { readInstructionsDir, readSkillsDir } from "../../services/authored-config.js";
@@ -301,7 +304,10 @@ export async function inspectPluginDir(dir: string, opts: InspectDirOptions): Pr
 
   /* -- contributions -------------------------------------------------- */
   const c = m?.contributes;
-  const caps = new Set<PluginCapability>(m?.capabilities ?? []);
+  const caps = new Set<PluginCapability>(grantedPluginCapabilities(m));
+  const optional = optionalPluginCapabilities(m);
+  const ignoredNote = ignoredOptionalCapabilitiesNote(optional.ignored);
+  if (ignoredNote) warnings.push(ignoredNote);
   const contributions: PluginInspection["contributions"] = {
     modes: [],
     skills: [],
@@ -495,7 +501,12 @@ export async function inspectPluginDir(dir: string, opts: InspectDirOptions): Pr
   const declared = [...caps];
   const capabilities = declared
     .sort((a, b) => PLUGIN_CAPABILITIES.indexOf(a) - PLUGIN_CAPABILITIES.indexOf(b))
-    .map((name) => ({ name, line: PLUGIN_CAPABILITY_LINES[name], used: usedOf(name) }));
+    .map((name) => ({
+      name,
+      line: PLUGIN_CAPABILITY_LINES[name],
+      used: usedOf(name),
+      ...(optional.granted.includes(name) ? { optional: true } : {}),
+    }));
   const undeclared = [...reasons.entries()]
     .filter(([cap]) => !caps.has(cap))
     .sort(([a], [b]) => PLUGIN_CAPABILITIES.indexOf(a) - PLUGIN_CAPABILITIES.indexOf(b))

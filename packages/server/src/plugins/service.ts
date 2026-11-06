@@ -63,6 +63,9 @@ import {
   type PluginUninstallPreview,
   type PluginUninstallResult,
   type SkillConfig,
+  grantedPluginCapabilities,
+  optionalPluginCapabilities,
+  ignoredOptionalCapabilitiesNote,
 } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import type { PluginContext } from "@dispatch/shared";
@@ -392,7 +395,7 @@ export class PluginService implements PluginContributionSource {
     const waiting = [...this.records.values()].some(
       (r) =>
         r.phase === "pending" &&
-        (r.manifest?.capabilities ?? []).some((c) => c === "providers" || c === "terminals"),
+        grantedPluginCapabilities(r.manifest).some((c) => c === "providers" || c === "terminals"),
     );
     if (!waiting) this.providersSettled.resolve();
   }
@@ -771,7 +774,10 @@ export class PluginService implements PluginContributionSource {
     const pendingCleanups = this.cleanups?.summary(rec.id);
     const check = rec.settingsCheck;
     const settingsErrors = check?.ok ? check.check(rec.settings).map((e) => e.message) : [];
+    const optional = optionalPluginCapabilities(m);
+    const ignoredNote = ignoredOptionalCapabilitiesNote(optional.ignored);
     const warnings = [
+      ...(ignoredNote ? [ignoredNote] : []),
       ...rec.contributions.warnings,
       // Said on the row, because the alternative is a schema that looks enforced and is not.
       ...(check && !check.ok ? [`settings schema is not enforced (${check.reason}) — saves are stored unchecked`] : []),
@@ -787,7 +793,8 @@ export class PluginService implements PluginContributionSource {
       ...(error ? { error } : {}),
       enabled: rec.enabled,
       ...(rec.needsRestart ? { needsRestart: true } : {}),
-      capabilities: m?.capabilities ?? [],
+      capabilities: grantedPluginCapabilities(m),
+      ...(optional.granted.length ? { optionalCapabilities: optional.granted } : {}),
       hasServer: !!m?.server,
       // The ENTRY MODULE's URL, not the directory's: the SPA `import()`s this
       // string as-is, and the file's name is the manifest's to choose

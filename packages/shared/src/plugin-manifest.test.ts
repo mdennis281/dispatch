@@ -5,7 +5,10 @@ import {
   PluginMcpServersFileSchema,
   PluginProcessSchema,
   PluginProcessesFileSchema,
+  grantedPluginCapabilities,
+  ignoredOptionalCapabilitiesNote,
   manifestPathDir,
+  optionalPluginCapabilities,
   pluginRangeAccepts,
   pluginSecretAllowed,
 } from "./plugin-manifest.js";
@@ -81,6 +84,35 @@ describe("PluginManifestSchema", () => {
     expect(secrets(["MY-KEY_*"])).toBe(false);
     // Exact entries keep the old, lenient rule: a manifest that loaded before still loads.
     expect(secrets(["lower-case-name"])).toBe(true);
+  });
+});
+
+describe("optionalCapabilities", () => {
+  it("accepts names this host does not know, where capabilities would refuse them", () => {
+    const m = PluginManifestSchema.parse({ ...base, capabilities: ["routes"], optionalCapabilities: ["approvals", "teleport"] });
+    expect(m.optionalCapabilities).toEqual(["approvals", "teleport"]);
+    expect(PluginManifestSchema.safeParse({ ...base, capabilities: ["teleport"] }).success).toBe(false);
+  });
+
+  it("grants the known names like capabilities, and ignores the rest", () => {
+    const m = { capabilities: ["routes" as const], optionalCapabilities: ["approvals", "teleport", "routes"] };
+    expect(grantedPluginCapabilities(m)).toEqual(["routes", "approvals"]);
+    // A name in both lists is required, not optional.
+    expect(optionalPluginCapabilities(m)).toEqual({ granted: ["approvals"], ignored: ["teleport"] });
+    expect(grantedPluginCapabilities(undefined)).toEqual([]);
+  });
+
+  it("names what was ignored, and says nothing when nothing was", () => {
+    expect(ignoredOptionalCapabilitiesNote([])).toBeUndefined();
+    expect(ignoredOptionalCapabilitiesNote(["teleport"])).toMatch(/"teleport" is not known to this Dispatch and was ignored/);
+    expect(ignoredOptionalCapabilitiesNote(["a", "b"])).toMatch(/"a", "b" are not known/);
+  });
+
+  it("an optional secrets:write still needs secrets", () => {
+    const r = PluginManifestSchema.safeParse({ ...base, optionalCapabilities: ["secrets:write"] });
+    expect(r.success).toBe(false);
+    expect(r.error?.issues[0]?.path).toEqual(["optionalCapabilities"]);
+    expect(PluginManifestSchema.safeParse({ ...base, capabilities: ["secrets"], optionalCapabilities: ["secrets:write"] }).success).toBe(true);
   });
 });
 

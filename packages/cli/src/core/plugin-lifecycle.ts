@@ -28,6 +28,7 @@ import {
   type PluginRefKind,
   type PluginSurface,
   type PluginUpdateDiff,
+  grantedPluginCapabilities,
 } from "@dispatch/shared";
 import { CmError } from "./manifest.js";
 import {
@@ -90,7 +91,7 @@ export async function pluginSurface(dir: string): Promise<PluginSurface> {
   const procs = c.processes ? PluginProcessesFileSchema.safeParse(await readYaml(join(dir, c.processes))) : undefined;
   return {
     version: m.version,
-    capabilities: (m.capabilities ?? []).map((name) => ({ name, line: PLUGIN_CAPABILITY_LINES[name], used: null })),
+    capabilities: grantedPluginCapabilities(m).map((name) => ({ name, line: PLUGIN_CAPABILITY_LINES[name], used: null })),
     secrets: m.secrets ?? [],
     oauth: Object.entries(m.oauth?.clients ?? {}).map(([name, cl]) => {
       let provider = cl.authorizationUrl;

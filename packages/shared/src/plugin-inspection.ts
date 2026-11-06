@@ -160,6 +160,8 @@ export const PluginInspectionSchema = z.object({
       line: z.string(),
       /** Did the scan find a use? `null` when there was no code to scan for it. */
       used: z.boolean().nullable(),
+      /** Granted from `optionalCapabilities` — the plugin runs without it on a host that lacks it. */
+      optional: z.boolean().optional(),
     }),
   ),
 

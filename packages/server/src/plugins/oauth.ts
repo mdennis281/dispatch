@@ -27,6 +27,7 @@ import {
   type PluginManifest,
   type PluginOAuthClient,
   type PluginOAuthStatus,
+  grantedPluginCapabilities,
 } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 
@@ -98,7 +99,7 @@ export class PluginOAuthError extends Error {
 }
 
 function pluginManifestView(manifest: PluginManifest): PluginOAuthManifestView | undefined {
-  if (!manifest.capabilities?.includes("oauth")) return undefined;
+  if (!grantedPluginCapabilities(manifest).includes("oauth")) return undefined;
   const clients = manifest.oauth?.clients;
   if (!clients || !Object.keys(clients).length) return undefined;
   return { clients, secretNames: manifest.secrets ?? [] };

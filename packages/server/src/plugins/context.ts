@@ -46,6 +46,7 @@ import {
   type PluginRouter,
   type QuestionAnswer,
   type WsServerEvent,
+  grantedPluginCapabilities,
 } from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
 import type { Store } from "../store/index.js";
@@ -225,7 +226,7 @@ export function buildPluginContext(
   owned: OwnedResources,
 ): ServerPluginContext {
   const id = manifest.id;
-  const caps = new Set<PluginCapability>(manifest.capabilities ?? []);
+  const caps = new Set<PluginCapability>(grantedPluginCapabilities(manifest));
   const has = (c: PluginCapability) => caps.has(c);
   // The messenger's channel sender for this plugin: rate limits key on the
   // name, and the row is stamped `origin: "channel"` with it.

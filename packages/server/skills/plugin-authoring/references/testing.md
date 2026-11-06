@@ -17,6 +17,7 @@ it("counts and answers", async () => {
   const t = createTestContext({
     id: "my-plugin",
     capabilities: ["routes", "events", "kv", "secrets"],   // the manifest's list → the shape the host delivers
+    optionalCapabilities: ["approvals"],                    // granted if this SDK's host knows them; omit to test a host without
     settings: { greeting: "hi" },
     settingsSchema: JSON.parse(readFileSync("settings.schema.json", "utf8")),  // ctx.settings.set enforces it as the host does
     secrets: { API_KEY: "k" },                              // the store; t.secrets is the live Map
