@@ -100,6 +100,7 @@ import {
   type IssueWatch,
   ScheduleStateSchema,
   type ScheduleState,
+  type PluginApprovalDecision,
   McpPortLeaseSchema,
   type McpPortLease,
   WebhookSubscriptionSchema,
@@ -509,6 +510,23 @@ export const AppSettingsSchema = z.object({
   pluginCatalogs: PluginCatalogSettingsSchema.optional(),
 });
 export type AppSettings = z.infer<typeof AppSettingsSchema>;
+
+/** One settled plugin approval request — a row of the `approval_audit` table. */
+export interface ApprovalAuditRow {
+  requestId: string;
+  pluginId: string;
+  chatId: string;
+  projectId?: string;
+  title: string;
+  command?: string;
+  cwd?: string;
+  machine?: string;
+  decision: PluginApprovalDecision;
+  /** The account that answered; absent for `timeout`/`cancelled` and on installs without sign-in. */
+  by?: string;
+  requestedAt: number;
+  decidedAt: number;
+}
 
 const DEFAULT_SETTINGS: AppSettings = { theme: "dark" };
 
@@ -2503,6 +2521,64 @@ export class Store {
     this.db
       .prepare("DELETE FROM schedule_state WHERE project_id = ? AND schedule_id = ?")
       .run(projectId, scheduleId);
+  }
+
+  /* ---------------------------------------------------- approval audit */
+
+  /** Record how one plugin approval request ended. A second write for the same request is ignored. */
+  async appendApprovalAudit(row: ApprovalAuditRow): Promise<void> {
+    this.db
+      .prepare(
+        "INSERT INTO approval_audit (request_id, plugin, chat_id, project_id, title, command, cwd, machine," +
+          " decision, by, requested_at, decided_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)" +
+          " ON CONFLICT(request_id) DO NOTHING",
+      )
+      .run(
+        row.requestId,
+        row.pluginId,
+        row.chatId,
+        row.projectId ?? null,
+        row.title,
+        row.command ?? null,
+        row.cwd ?? null,
+        row.machine ?? null,
+        row.decision,
+        row.by ?? null,
+        row.requestedAt,
+        row.decidedAt,
+      );
+  }
+
+  /** The audit trail, newest first. */
+  async listApprovalAudit(q: { pluginId?: string; chatId?: string; limit?: number } = {}): Promise<ApprovalAuditRow[]> {
+    const where: string[] = [];
+    const params: Array<string | number> = [];
+    if (q.pluginId) {
+      where.push("plugin = ?");
+      params.push(q.pluginId);
+    }
+    if (q.chatId) {
+      where.push("chat_id = ?");
+      params.push(q.chatId);
+    }
+    params.push(Math.max(1, Math.min(q.limit ?? 200, 1000)));
+    return this.rows(
+      `SELECT * FROM approval_audit${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY seq DESC LIMIT ?`,
+      ...params,
+    ).map((r) => ({
+      requestId: r.request_id as string,
+      pluginId: r.plugin as string,
+      chatId: r.chat_id as string,
+      ...(r.project_id != null ? { projectId: r.project_id as string } : {}),
+      title: r.title as string,
+      ...(r.command != null ? { command: r.command as string } : {}),
+      ...(r.cwd != null ? { cwd: r.cwd as string } : {}),
+      ...(r.machine != null ? { machine: r.machine as string } : {}),
+      decision: r.decision as PluginApprovalDecision,
+      ...(r.by != null ? { by: r.by as string } : {}),
+      requestedAt: Number(r.requested_at),
+      decidedAt: Number(r.decided_at),
+    }));
   }
 
   /* ------------------------------------------------------- checkpoints */

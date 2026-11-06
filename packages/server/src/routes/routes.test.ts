@@ -1214,6 +1214,50 @@ describe("routes — WebSocket", () => {
     await ws.waitFor((e) => e.type === "chat-status" && e.chatId === chatId && e.status === "idle");
     ws.close();
   });
+
+  it("a plugin's approval card is answered over the socket, and only there", async () => {
+    // The agent is mid-turn, blocked in a tool call — where a plugin's approval
+    // request comes from (an elevated command waiting in a terminal).
+    let release!: () => void;
+    const blocked = new Promise<void>((r) => (release = r));
+    const query = makeFakeQuery(async () => {
+      await blocked;
+      return [assistantText("done"), resultMsg()];
+    });
+    await boot(query);
+    const projectId = await makeProject();
+    const chatId = (
+      await app.inject({ method: "POST", url: "/api/chats", payload: { projectId } })
+    ).json().id as string;
+    const ws = await connect(port);
+    await ws.waitFor((e) => e.type === "hello");
+    ws.send({ type: "send-message", chatId, text: "install it" });
+    await ws.waitFor((e) => e.type === "chat-status" && e.chatId === chatId && e.status === "running");
+
+    const resultP = app.services.broker.requestPluginApproval(
+      chatId,
+      { pluginId: "remote-host", pluginName: "Remote hosts" },
+      { title: "Run a command as root", command: "sudo id -u", machine: "CVX Mac" },
+    );
+    const permEvt = await ws.waitFor((e) => e.type === "permission-request");
+    const requestId = permEvt.type === "permission-request" ? permEvt.request.id : "";
+    const att = (await app.inject({ method: "GET", url: "/api/attention" })).json() as Array<{ kind: string; summary: string }>;
+    expect(att.some((i) => i.kind === "permission" && i.summary === "Remote hosts: Run a command as root")).toBe(true);
+
+    // The question path names the same id and must not settle it.
+    ws.send({ type: "answer-question", chatId, requestId, answer: "Allow" });
+    await ws.waitFor((e) => e.type === "error");
+    expect(app.services.broker.isPluginApproval(requestId)).toBe(true);
+
+    // Sign-in is off in this app, so this socket IS the owner.
+    ws.send({ type: "answer-permission", chatId, requestId, decision: "allow", remember: true });
+    expect(await resultP).toMatchObject({ decision: "approved" });
+    const settings = (await app.inject({ method: "GET", url: "/api/settings" })).json() as { autoAllowTools?: string[] };
+    expect(settings.autoAllowTools ?? []).toEqual([]);
+    release();
+    await ws.waitFor((e) => e.type === "chat-status" && e.chatId === chatId && e.status === "idle");
+    ws.close();
+  });
 });
 
 describe("routes — WebSocket liveness", () => {

@@ -1358,6 +1358,7 @@ export function createServices(
         attention,
         messenger: chatMessenger,
         broker,
+        approvals: broker,
         pluginOAuth,
         // Announced on the bus either way: a chat's provider-unavailable state
         // is derived from the registered list, so an open tab re-reads it here

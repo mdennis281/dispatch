@@ -8,10 +8,11 @@
  * which routes them to the services. Malformed frames get an `error` reply; the
  * bus subscription is torn down on close.
  */
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import { WsClientActionSchema, type WsServerEvent } from "@dispatch/shared";
 import { readInstalledRelease } from "../services/release.js";
 import { dispatchClientAction } from "./dispatch.js";
+import type { PermissionActor } from "../services/session-broker.js";
 
 /** ws readyState OPEN (avoids importing the `ws` package for a constant). */
 const WS_OPEN = 1;
@@ -79,6 +80,27 @@ const IDENTITY_FAILURES_BEFORE_CLOSE = 3;
  */
 const PING_MS = 30_000;
 
+/**
+ * Who answers cards from a socket, for the one card that asks: a plugin's
+ * approval request, which only the owner may answer.
+ *
+ * - A person's session: owner iff their account is the owner.
+ * - No identity at all: the gate only lets a socket through without one when
+ *   sign-in is OFF, and then there are no accounts — whoever reaches the app
+ *   IS the owner. The identity poll in the route closes such a socket the
+ *   moment sign-in is turned on, so it cannot outlive that assumption.
+ * - Anything else (an integration identity, should one ever reach here):
+ *   not the owner.
+ */
+export function socketActor(identity: FastifyRequest["authIdentity"]): PermissionActor {
+  if (!identity) return { owner: true };
+  if (identity.kind !== "user") return { owner: false };
+  return {
+    owner: identity.user.owner === true && identity.user.disabled !== true,
+    name: identity.user.displayName || identity.user.username,
+  };
+}
+
 export function registerWsRoutes(app: FastifyInstance): void {
   app.get("/ws", { websocket: true }, (rawSocket, req) => {
     const socket = rawSocket as unknown as SocketLike;
@@ -101,6 +123,7 @@ export function registerWsRoutes(app: FastifyInstance): void {
     // A socket is only ever a person's: tickets are JWTs the gate resolves to a
     // session, and an integration token cannot mint one (routes/auth.ts).
     const sessionIdentity = req.authIdentity?.kind === "user" ? req.authIdentity : undefined;
+    const actor = socketActor(req.authIdentity);
     const unsubRevocation = sessionIdentity
       ? app.auth.onSessionRevoked((id) => {
           if (id === sessionIdentity.sessionId) socket.close(4401, "session revoked");
@@ -164,7 +187,7 @@ export function registerWsRoutes(app: FastifyInstance): void {
         send({ type: "pong", nonce: parsed.data.nonce });
         return;
       }
-      void dispatchClientAction(app.services, parsed.data);
+      void dispatchClientAction(app.services, parsed.data, actor);
     });
 
     socket.on("close", cleanup);

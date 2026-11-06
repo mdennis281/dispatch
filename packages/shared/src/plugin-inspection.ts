@@ -36,6 +36,8 @@ export const PLUGIN_CAPABILITY_LINES: Record<z.infer<typeof PluginCapabilitySche
   providers: "Adds an agent runtime your chats can run on, and runs that runtime's CLI on this machine.",
   terminals:
     "Runs your chats' managed terminals somewhere else (a container, another machine) and sees every command and its output there.",
+  approvals:
+    "Asks you to approve or deny an action it is about to take, on a card in your chats — the same card a tool-call permission uses.",
 };
 
 /** Where the inspected files came from, and exactly which commit. */

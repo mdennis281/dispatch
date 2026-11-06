@@ -54,6 +54,15 @@ import {
   formatBytes,
 } from "./media-types.js";
 import { identifyMedia } from "./media-sniff.js";
+import {
+  PLUGIN_APPROVAL_DEFAULT_TIMEOUT_SECONDS,
+  PLUGIN_APPROVAL_LIMITS,
+  PLUGIN_APPROVAL_MAX_TIMEOUT_SECONDS,
+  PLUGIN_APPROVAL_TOOL,
+  pluginApprovalNotice,
+  type PluginApprovalCard,
+  type PluginApprovalDecision,
+} from "@dispatch/shared";
 import type {
   ChatInterruption,
   SentContext,
@@ -2048,7 +2057,35 @@ interface PendingPermission {
   abortListener?: () => void;
   /** The manager tool call waiting on this card, when one is. */
   call?: ManagerCardCall;
+  /**
+   * Set when a PLUGIN raised this card (`ctx.approvals.request`). Its presence
+   * is what every resolve path checks — never the tool name, which is only a
+   * label for the client — and it takes the card off every path but
+   * {@link SessionBroker.answerPluginApproval}.
+   */
+  pluginApproval?: PendingPluginApproval;
 }
+
+/** A plugin approval's half of a pending card. See {@link SessionBroker.requestPluginApproval}. */
+interface PendingPluginApproval {
+  pluginId: string;
+  card: PluginApprovalCard;
+  requestedAt: number;
+  /** Ends it: rows, events, audit, the plugin's promise. Idempotent. */
+  close(decision: PluginApprovalDecision, opts?: { by?: string; teardown?: boolean }): void;
+}
+
+/** Who sent an answer over the socket, as far as a plugin approval cares. */
+export interface PermissionActor {
+  /** True for the owner's signed-in session, and for any session on an install without sign-in. */
+  owner: boolean;
+  /** Their account name, when sign-in is on. */
+  name?: string;
+}
+
+/** The sentence every refused non-owner answer gets. */
+const PLUGIN_APPROVAL_OWNER_ONLY =
+  "Only the owner, signed in to Dispatch, can answer a plugin's approval request.";
 
 /** The two manager tools whose whole call is a card the human answers. */
 type ManagerCardTool = "ask_user" | "request_human_review";
@@ -3209,6 +3246,10 @@ export class SessionBroker {
     for (const session of this.sessions.values()) {
       const pending = session.pendingPermissions.get(requestId);
       if (!pending) continue;
+      // A plugin approval is answered ONLY through `answerPluginApproval`, which
+      // checks who is answering. This resolver takes no actor, and is also what
+      // timeouts and teardowns call — so it must never be able to grant one.
+      if (pending.pluginApproval) return false;
       session.pendingPermissions.delete(requestId);
       if (pending.timeoutTimer) clearTimeout(pending.timeoutTimer);
       pending.abortListener?.();
@@ -3324,6 +3365,8 @@ export class SessionBroker {
     for (const session of this.sessions.values()) {
       const pending = session.pendingPermissions.get(requestId);
       if (!pending) continue;
+      // `answer-question` would otherwise ALLOW whatever card the id names.
+      if (pending.pluginApproval) return false;
       if (pending.harnessSession && pending.questions) {
         const submitted = answer.answers?.length
           ? answer.answers
@@ -3404,7 +3447,9 @@ export class SessionBroker {
    */
   declineQuestion(requestId: string, message?: string): boolean {
     for (const session of this.sessions.values()) {
-      if (!session.pendingPermissions.has(requestId)) continue;
+      const pending = session.pendingPermissions.get(requestId);
+      if (!pending) continue;
+      if (pending.pluginApproval) return false;
       return this.resolvePermission(
         requestId,
         { decision: "deny", message: message ?? "The user declined to answer this question." },
@@ -7157,6 +7202,276 @@ export class SessionBroker {
   }
 
   /**
+   * A PLUGIN's approval request (`ctx.approvals.request`): one decision on the
+   * permission card a tool call gets — same Attention Queue entry, same push,
+   * same `awaiting-input` status — labelled with the plugin's name.
+   *
+   * It guards things like "run this as root on the Mac", so it is not
+   * {@link requestApproval}: that one resolves through `resolvePermission`,
+   * which any caller holding the request id can reach. This card can be
+   * answered by exactly one path, {@link answerPluginApproval}, and only for an
+   * owner. Every other resolver refuses it, and every way it can end without a
+   * person (timeout, the plugin's `signal`, the session ending, the plugin going
+   * down) resolves to something other than `approved`.
+   *
+   * Rejects when no card can be shown — bad input, or no live session to ask
+   * through — so a caller can never mistake "nobody was asked" for an answer.
+   */
+  requestPluginApproval(
+    chatId: string,
+    origin: { pluginId: string; pluginName: string },
+    req: {
+      title: string;
+      detail?: string;
+      command?: string;
+      cwd?: string;
+      machine?: string;
+      timeoutSeconds?: number;
+      signal?: AbortSignal;
+    },
+  ): Promise<{ decision: PluginApprovalDecision; by?: string; at: number }> {
+    const title = typeof req.title === "string" ? req.title.trim() : "";
+    if (!title) return Promise.reject(new Error("approvals.request: title is required"));
+    const fields = { title, detail: req.detail, command: req.command, cwd: req.cwd, machine: req.machine };
+    for (const [key, max] of Object.entries(PLUGIN_APPROVAL_LIMITS)) {
+      const v = fields[key as keyof typeof fields];
+      if (v === undefined) continue;
+      if (typeof v !== "string") return Promise.reject(new Error(`approvals.request: ${key} must be a string`));
+      if (v.length > max) return Promise.reject(new Error(`approvals.request: ${key} is over ${max} characters`));
+    }
+    const timeoutSeconds = req.timeoutSeconds ?? PLUGIN_APPROVAL_DEFAULT_TIMEOUT_SECONDS;
+    if (
+      typeof timeoutSeconds !== "number" ||
+      !Number.isFinite(timeoutSeconds) ||
+      timeoutSeconds <= 0 ||
+      timeoutSeconds > PLUGIN_APPROVAL_MAX_TIMEOUT_SECONDS
+    ) {
+      return Promise.reject(
+        new Error(`approvals.request: timeoutSeconds must be above 0 and at most ${PLUGIN_APPROVAL_MAX_TIMEOUT_SECONDS}`),
+      );
+    }
+    const session = this.sessions.get(chatId);
+    if (!session) {
+      return Promise.reject(new Error(`approvals.request: chat "${chatId}" has no live session to ask through`));
+    }
+    // Withdrawn before it was ever shown: no card, no row — nobody was asked.
+    if (req.signal?.aborted) return Promise.resolve({ decision: "cancelled", at: this.now() });
+
+    const requestId = this.genId();
+    const requestedAt = this.now();
+    const card: PluginApprovalCard = {
+      pluginId: origin.pluginId,
+      pluginName: origin.pluginName,
+      title,
+      ...(fields.detail ? { detail: fields.detail } : {}),
+      ...(fields.command ? { command: fields.command } : {}),
+      ...(fields.cwd ? { cwd: fields.cwd } : {}),
+      ...(fields.machine ? { machine: fields.machine } : {}),
+      expiresAt: requestedAt + timeoutSeconds * 1000,
+    };
+    const input = { pluginApproval: card };
+    const request: PermissionRequest = {
+      id: requestId,
+      chatId,
+      toolName: PLUGIN_APPROVAL_TOOL,
+      input,
+      displayName: origin.pluginName,
+      title,
+      ...(fields.detail ? { description: fields.detail } : {}),
+      createdAt: requestedAt,
+    };
+    const attentionId = `att-perm-${requestId}`;
+    const summary = `${origin.pluginName}: ${title}`;
+
+    return new Promise((resolve) => {
+      let closed = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const pending: PendingPermission = { toolName: PLUGIN_APPROVAL_TOOL, input, request, attentionId };
+      const approval: PendingPluginApproval = {
+        pluginId: origin.pluginId,
+        card,
+        requestedAt,
+        close: (decision, opts = {}) => {
+          if (closed) return;
+          closed = true;
+          if (timer) clearTimeout(timer);
+          req.signal?.removeEventListener("abort", onAbort);
+          // Never a name on an ending nobody chose: the one place every ending
+          // goes through, so no future caller can stamp one by mistake.
+          const by = decision === "approved" || decision === "denied" ? opts.by : undefined;
+          const at = this.now();
+          session.pendingPermissions.delete(requestId);
+          session.activity.unblocked(requestId, at);
+          this.recordPluginApproval(session, requestId, pending, approval, decision, by, at, opts.teardown === true);
+          const result = { decision, ...(by ? { by } : {}), at };
+          if (decision === "approved" || decision === "denied") {
+            // A person answered, so the turn continues from here — through the
+            // same slot gate every answered card takes (see `resolvePermission`).
+            const go = () => resolve(result);
+            void this.acquireSlot(session.chatId, { human: true }).then(go, go);
+          } else {
+            resolve(result);
+          }
+        },
+      };
+      const onAbort = (): void => approval.close("cancelled");
+      pending.pluginApproval = approval;
+      session.pendingPermissions.set(requestId, pending);
+      session.activity.blocked(MAIN_ACTOR, requestId, "waiting_human", PLUGIN_APPROVAL_TOOL, requestedAt);
+      // Cancellation and the timer are armed BEFORE the card is published, as in
+      // `handlePermission`: a plugin that aborts during delivery withdraws it.
+      timer = setTimeout(() => approval.close("timeout"), timeoutSeconds * 1000);
+      timer.unref?.();
+      req.signal?.addEventListener("abort", onAbort, { once: true });
+      this.setStatus(session, "awaiting-input", {
+        state: "awaiting",
+        label: summary,
+        toolName: PLUGIN_APPROVAL_TOOL,
+      });
+      this.bus.publish({ type: "permission-request", chatId, request });
+      this.bus.publish({
+        type: "attention-add",
+        item: {
+          id: attentionId,
+          chatId,
+          kind: "permission",
+          summary,
+          projectId: session.projectId || undefined,
+          permissionRequestId: requestId,
+          createdAt: requestedAt,
+        },
+      });
+    });
+  }
+
+  /** Whether `requestId` names an open plugin approval card. */
+  isPluginApproval(requestId: string): boolean {
+    for (const session of this.sessions.values()) {
+      if (session.pendingPermissions.get(requestId)?.pluginApproval) return true;
+    }
+    return false;
+  }
+
+  /**
+   * The ONE way a plugin approval is answered: the permission card's Allow or
+   * Deny, from a session the socket layer vouched for as the owner's. An
+   * integration token never gets a socket, `ctx.attention.answer` and the
+   * integration answer routes refuse permission items before they get here, and
+   * a socket that is not the owner's is refused below — denials included, since
+   * "only the owner answers" is the rule and a non-owner's "no" is not theirs to
+   * give either.
+   */
+  answerPluginApproval(
+    requestId: string,
+    decision: "allow" | "deny",
+    actor: PermissionActor | undefined,
+  ): { ok: true } | { ok: false; message: string } {
+    for (const session of this.sessions.values()) {
+      const approval = session.pendingPermissions.get(requestId)?.pluginApproval;
+      if (!approval) continue;
+      if (actor?.owner !== true) return { ok: false, message: PLUGIN_APPROVAL_OWNER_ONLY };
+      approval.close(decision === "allow" ? "approved" : "denied", { by: actor.name });
+      return { ok: true };
+    }
+    return { ok: false, message: "That approval request is no longer pending." };
+  }
+
+  /**
+   * Withdraw every open approval a plugin raised — it is going down, and an
+   * answer would resolve a promise nothing is reading. Returns how many.
+   */
+  cancelPluginApprovals(pluginId: string): number {
+    const open: PendingPluginApproval[] = [];
+    for (const session of this.sessions.values()) {
+      for (const p of session.pendingPermissions.values()) {
+        if (p.pluginApproval?.pluginId === pluginId) open.push(p.pluginApproval);
+      }
+    }
+    for (const a of open) a.close("cancelled");
+    return open.length;
+  }
+
+  /** The transcript, the client, the queue and the audit table learn how an approval ended. */
+  private recordPluginApproval(
+    session: LiveSession,
+    requestId: string,
+    pending: PendingPermission,
+    approval: PendingPluginApproval,
+    decision: PluginApprovalDecision,
+    by: string | undefined,
+    at: number,
+    teardown: boolean,
+  ): void {
+    const allowed = decision === "approved";
+    const text = pluginApprovalNotice(approval.card, decision, by);
+    void this.emit(session, {
+      kind: "permission",
+      id: this.genId(),
+      chatId: session.chatId,
+      ts: at,
+      sessionId: session.sessionId,
+      requestId,
+      toolName: PLUGIN_APPROVAL_TOOL,
+      input: { ...pending.input, outcome: decision },
+      decision: allowed ? "allow" : "deny",
+      displayName: pending.request.displayName,
+      title: pending.request.title,
+      description: pending.request.description,
+      message: text,
+    });
+    void this.emit(session, {
+      kind: "notice",
+      id: this.genId(),
+      chatId: session.chatId,
+      ts: at,
+      sessionId: session.sessionId,
+      level: allowed ? "warn" : "info",
+      text,
+    });
+    this.bus.publish({
+      type: "permission-resolved",
+      chatId: session.chatId,
+      requestId,
+      decision: allowed ? "allow" : "deny",
+    });
+    this.bus.publish({ type: "attention-resolve", id: pending.attentionId, chatId: session.chatId });
+    void this.store
+      .appendApprovalAudit({
+        requestId,
+        pluginId: approval.pluginId,
+        chatId: session.chatId,
+        ...(session.projectId ? { projectId: session.projectId } : {}),
+        title: approval.card.title,
+        ...(approval.card.command ? { command: approval.card.command } : {}),
+        ...(approval.card.cwd ? { cwd: approval.card.cwd } : {}),
+        ...(approval.card.machine ? { machine: approval.card.machine } : {}),
+        decision,
+        ...(by ? { by } : {}),
+        requestedAt: approval.requestedAt,
+        decidedAt: at,
+      })
+      .catch((err: unknown) => {
+        // The decision stands — the plugin has its answer and the transcript its
+        // notice — but a missing audit row must not be silent.
+        this.bus.publish({
+          type: "error",
+          chatId: session.chatId,
+          message: "failed to record an approval in the audit table",
+          detail: err instanceof Error ? err.message : String(err),
+        });
+      });
+    if (!teardown && session.pendingPermissions.size === 0 && session.status === "awaiting-input") {
+      // The tool call waiting on the plugin carries on, so the turn is still
+      // running — unless the card outlived its turn, and then there is none.
+      if (this.isTurnLive(session)) {
+        this.setStatus(session, "running", { state: allowed ? "tool" : "responding" });
+      } else {
+        this.setStatus(session, "idle", { state: "idle" });
+      }
+    }
+  }
+
+  /**
    * Swap freshly loaded definitions of some external MCP servers into every
    * live chat of a project — how a changed `${secret:…}` reaches a chat that is
    * already running, instead of waiting for its next session.
@@ -7858,6 +8173,12 @@ export class SessionBroker {
    */
   private drainPendingPermissions(session: LiveSession, message: string): void {
     for (const [requestId, p] of session.pendingPermissions) {
+      if (p.pluginApproval) {
+        // The session the card was shown through is going away, and with it the
+        // card. That is nobody's "no" — the plugin hears `cancelled`.
+        p.pluginApproval.close("cancelled", { teardown: true });
+        continue;
+      }
       if (p.timeoutTimer) clearTimeout(p.timeoutTimer);
       p.abortListener?.();
       session.activity.unblocked(requestId, this.now());

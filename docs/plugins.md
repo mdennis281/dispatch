@@ -135,6 +135,7 @@ and a manifest whose range excludes it — or cannot be parsed — is listed as
 | `ui` | a `client` entry |
 | `providers` | `ctx.providers.register` — see "Providers" |
 | `terminals` | `ctx.terminals.registerBackend/publishPort/ports` — see "Terminal backends" |
+| `approvals` | `ctx.approvals.request` — see "Approval requests" |
 
 A capability the manifest does not declare is simply absent from the context
 object the plugin receives — the members are typed optional for that reason.
@@ -757,6 +758,9 @@ export interface PluginContext<Req = unknown, Reply = unknown> {
     list?(): Promise<AttentionItem[]>;
     answer?(itemId: string, answer: QuestionAnswerInput | { decline: true }): Promise<{ ok: boolean; message?: string }>;
   };
+  approvals?: {
+    request(chatId: string, req: PluginApprovalRequest): Promise<PluginApprovalResult>;   // see "Approval requests"
+  };
   memory?: {
     recall(projectId: string, query?: string): Promise<string>;
     remember(projectId: string, m: { name: string; description: string; type: MemoryType; body: string }): Promise<void>;
@@ -848,6 +852,68 @@ wholesale by an update. So `secrets:write` adds `ctx.secrets.set(name, value)` a
   plugin directory, where there is no `node_modules`. Write TypeScript and
   bundle it with the SDK's `dispatchServerBuild`, or write dependency-free
   JavaScript (`examples/plugins/hello-server`).
+
+#### Approval requests
+
+`approvals` adds `ctx.approvals.request(chatId, req)`: the plugin puts ONE
+decision in front of the human — "run `sudo installer -pkg …` on CVX Mac?" — and
+waits for it. It exists for a plugin that is itself the gate on something the
+agent must not do alone (remote-host's elevation: the plugin holds the key that
+can run a command as root, and runs it only on a yes).
+
+```ts
+const r = await ctx.approvals?.request(chatId, {
+  title: "Run a command as root",            // required, ≤ 200 chars
+  command: "sudo installer -pkg /tmp/x.pkg -target /",   // shown verbatim, ≤ 8000
+  cwd: "/Users/dispatch/repo",
+  machine: "CVX Mac",
+  detail: "Requested by the agent's dispatch-elevate call.",   // ≤ 4000
+  timeoutSeconds: 300,                       // default 300, at most 3600
+  signal,                                    // abort → the card is withdrawn
+});
+// r: { decision: "approved" | "denied" | "timeout" | "cancelled"; by?: string; at: number }
+if (r?.decision !== "approved") return refuse();
+```
+
+- **The same card as a tool-call permission.** Same Attention Queue entry (kind
+  `permission`, summary `<plugin name>: <title>`), same push notification and
+  notifier webhooks, same `awaiting-input` status, so the chat reads as
+  blocked on the human. The card names the plugin from its MANIFEST — a plugin
+  cannot ask in another's name — and shows the command in full. It has
+  **Approve once** and **Deny** and nothing else: no Edit (approving an edited
+  command approves something the plugin never asked for) and no "Always allow".
+- **Only the owner answers it.** The one path that settles it is the card's
+  button over the app's socket, from the owner's signed-in session (on an
+  install without sign-in, whoever reaches the app is the owner). Refused, in
+  both directions: another user's session, `ctx.attention.answer` (any
+  plugin's, the requester's included), an integration or OAuth token (REST
+  `attention/:id/answer` and MCP `attention_answer` answer 409, as for any
+  permission), and the socket's question actions naming the same id.
+- **Every ending without a person is a no.** `timeout` after `timeoutSeconds`;
+  `cancelled` when `signal` aborts, when the chat's session ends (Stop,
+  interrupt, teardown), or when the plugin goes down (disable, uninstall,
+  restart). `by` is set only on `approved`/`denied`, and only when sign-in is
+  on. Anything but `approved` must be treated as denied.
+- **It leaves a record.** Every decision writes a `notice` into the chat's
+  transcript ("Approved by Michael: `sudo …` on CVX Mac (asked by Remote
+  hosts)"), a resolved permission row whose `input.outcome` is the decision,
+  and a row in the instance's `approval_audit` table, which outlives the chat
+  and the plugin.
+- **It rejects when nobody can be asked.** No title, an over-long field, a
+  timeout out of range, an unknown chat, or a chat with **no live session** to
+  ask through: the promise rejects rather than inventing an answer. The card
+  rides the session's permission channel, so the chat must be running — which
+  it is when the request comes from a command the agent ran. A request from
+  outside any chat (a Settings pane button) has no card to put it on; the
+  owner clicking the button is the consent there.
+- **Feature-detect it.** `ctx.approvals?.request` is absent on hosts before
+  it; a plugin that guards something with it must refuse — loudly — when it is
+  missing, never fall through to "approved".
+- **Testing.** `createTestContext({ approve })` plays the human: return a
+  decision, `{ decision, by }`, or a promise of one (a promise that never
+  settles is a card nobody answers, which the request's `signal` withdraws).
+  The default is `timeout`. Every request is recorded in `t.approvals` with its
+  result, and the host's refusals reject there too.
 
 ### The `plugin-event` wire event
 

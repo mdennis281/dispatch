@@ -54,6 +54,10 @@ export type {
   PluginAskResult,
   PluginProjectSummary,
   PluginMemoryInput,
+  // `ctx.approvals.request` (docs/plugins.md → "Approval requests")
+  PluginApprovalRequest,
+  PluginApprovalResult,
+  PluginApprovalDecision,
   // providers — implement `Harness`, describe it with `ProviderDescriptor`,
   // hand both to `ctx.providers.register` (docs/plugins.md → "Providers")
   Harness,
