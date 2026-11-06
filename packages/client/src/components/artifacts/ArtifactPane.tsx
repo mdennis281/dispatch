@@ -94,17 +94,22 @@ export function ArtifactPane({ open }: { open: OpenArtifact }) {
   // Batch the frame's reports to the server, so `artifact_read` can tell the
   // agent its page threw. Deduped per version: an error in an animation loop
   // fires sixty times a second and is one fact.
+  //
+  // Two dedupes, with different lifetimes. What the BANNER shows resets with
+  // every render (the effect above), so an error that comes back after Reload
+  // is shown again. What has been POSTED lives for the version: the server
+  // already has it, and resending it on every reload says nothing new.
   const pending = useRef<string[]>([]);
-  const sentFor = useRef<{ key: string; seen: Set<string> }>({ key: "", seen: new Set() });
+  const posted = useRef<{ key: string; seen: Set<string> }>({ key: "", seen: new Set() });
   const flushTimer = useRef<number | undefined>(undefined);
   const onFrameError = useCallback(
     (message: string) => {
       if (shownVersion === undefined) return;
-      const key = `${chatId}:${id}:${shownVersion}`;
-      if (sentFor.current.key !== key) sentFor.current = { key, seen: new Set() };
-      if (sentFor.current.seen.has(message)) return;
-      sentFor.current.seen.add(message);
       setFrameErrors((prev) => (prev.includes(message) ? prev : [...prev, message]));
+      const key = `${chatId}:${id}:${shownVersion}`;
+      if (posted.current.key !== key) posted.current = { key, seen: new Set() };
+      if (posted.current.seen.has(message)) return;
+      posted.current.seen.add(message);
       pending.current.push(message);
       window.clearTimeout(flushTimer.current);
       flushTimer.current = window.setTimeout(() => {

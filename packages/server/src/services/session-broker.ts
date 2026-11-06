@@ -8711,6 +8711,14 @@ export class SessionBroker {
             read: (id, version) => this.artifacts!.read(session.chatId, id, version),
             list: () => this.artifacts!.list(session.chatId),
             ...(cwd ? { cwd } : {}),
+            // Where a `path` may point: the trees this chat already works in.
+            // Read per call, so a worktree created mid-session counts.
+            roots: async () => {
+              const chat = await this.store.getChat(session.chatId).catch(() => null);
+              return [cwd, project?.repoPath, ...(chat?.worktrees ?? [])].filter(
+                (p): p is string => typeof p === "string" && p.length > 0,
+              );
+            },
           }
         : undefined,
       secrets: this.secrets

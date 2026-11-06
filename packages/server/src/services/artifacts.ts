@@ -271,7 +271,7 @@ export class ArtifactService {
       let touched = false;
       for (const meta of await this.list(chatId).catch(() => [] as ArtifactMeta[])) {
         if (meta.expiredAt !== undefined || meta.updatedAt > cutoff) continue;
-        const freed = await this.mutex.run(`${chatId}:${meta.id}`, () => this.expire(chatId, meta.id));
+        const freed = await this.mutex.run(`${chatId}:${meta.id}`, () => this.expire(chatId, meta.id, cutoff));
         if (freed === null) continue;
         artifacts++;
         bytes += freed;
@@ -282,10 +282,14 @@ export class ArtifactService {
     return { artifacts, bytes, chats };
   }
 
-  /** Bytes freed, or null when it was already expired / gone. */
-  private async expire(chatId: string, id: string): Promise<number | null> {
+  /** Bytes freed, or null when it was already expired, gone, or no longer stale. */
+  private async expire(chatId: string, id: string, cutoff: number): Promise<number | null> {
     const meta = await this.getMeta(chatId, id);
     if (!meta || meta.expiredAt !== undefined) return null;
+    // Re-judged UNDER the lock: the candidate list is a snapshot, and an
+    // `artifact_update` that landed after it was taken has just written a
+    // version this would otherwise delete.
+    if (meta.updatedAt > cutoff) return null;
     let freed = 0;
     const dir = this.artifactDir(chatId, id);
     for (const name of await readdir(dir).catch(() => [] as string[])) {

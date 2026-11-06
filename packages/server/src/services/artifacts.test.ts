@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -115,16 +115,36 @@ describe("ArtifactService", () => {
     // Already expired → not counted again.
     expect((await svc.sweep(["c1"], 7 * DAY)).artifacts).toBe(0);
   });
+
+  it("sweep spares an artifact edited after the candidate list was taken", async () => {
+    const a = await svc.create("c1", { title: "a", type: "html", content: "a" });
+    clock += 8 * DAY;
+    // Hold the edit until the sweep has listed `a` as stale, then let it land
+    // before the sweep takes the artifact's lock.
+    const realList = svc.list.bind(svc);
+    let edited: Promise<unknown> = Promise.resolve();
+    svc.list = async (chatId: string) => {
+      const snapshot = await realList(chatId);
+      edited = svc.update("c1", a.id, { content: "fresh" });
+      await edited;
+      return snapshot;
+    };
+    const report = await svc.sweep(["c1"], 7 * DAY);
+    await edited;
+    expect(report.artifacts).toBe(0);
+    expect((await svc.read("c1", a.id)).content).toBe("fresh");
+  });
 });
 
 describe("artifact tools", () => {
-  function bound(cwd?: string): ManagerMcpArtifacts {
+  function bound(cwd?: string, roots: string[] = cwd ? [cwd] : []): ManagerMcpArtifacts {
     return {
       create: (input) => svc.create("c1", input),
       update: (id, change) => svc.update("c1", id, change),
       read: (id, version) => svc.read("c1", id, version),
       list: () => svc.list("c1"),
       ...(cwd ? { cwd } : {}),
+      roots: async () => roots,
     };
   }
   const text = (r: { content: unknown[] }) => (r.content[0] as { text: string }).text;
@@ -159,6 +179,43 @@ describe("artifact tools", () => {
     const res = await run(tools.artifactCreate, { title: "F", type: "html", path: "page.html" });
     const ref = parseArtifactRef(text(res))!;
     expect((await svc.read("c1", ref.id)).content).toBe("<h1>file</h1>");
+  });
+
+  it("refuses a path outside the chat's directories, however it is spelled", async () => {
+    // The tools are prompt-free and artifact_read returns content to the model,
+    // so an unconfined path would be a silent read of the whole disk.
+    const repo = join(root, "repo");
+    await mkdir(repo, { recursive: true });
+    await writeFile(join(root, "secret.txt"), "id_rsa");
+    await writeFile(join(repo, "ok.md"), "fine");
+    const tools = createArtifactTools({ artifacts: bound(repo) });
+    for (const path of [join(root, "secret.txt"), "../secret.txt", `${repo}/../secret.txt`]) {
+      const res = await run(tools.artifactCreate, { title: "x", type: "code", path });
+      expect(res.isError, path).toBe(true);
+      expect(text(res)).toMatch(/outside this chat's working directories/);
+    }
+    expect(await svc.list("c1")).toEqual([]);
+    // A second root (a worktree) is as good as the cwd.
+    const wt = join(root, "wt");
+    await mkdir(wt, { recursive: true });
+    await writeFile(join(wt, "w.md"), "from worktree");
+    const both = createArtifactTools({ artifacts: bound(repo, [repo, wt]) });
+    expect((await run(both.artifactCreate, { title: "w", type: "markdown", path: join(wt, "w.md") })).isError).toBe(false);
+    // …and with no roots at all, no path is publishable.
+    const none = createArtifactTools({ artifacts: bound(undefined, []) });
+    expect((await run(none.artifactCreate, { title: "n", type: "markdown", path: join(repo, "ok.md") })).isError).toBe(true);
+  });
+
+  it("refuses a path update that escapes too", async () => {
+    const repo = join(root, "repo2");
+    await mkdir(repo, { recursive: true });
+    await writeFile(join(root, "outside.txt"), "nope");
+    const tools = createArtifactTools({ artifacts: bound(repo) });
+    const created = await run(tools.artifactCreate, { title: "x", type: "markdown", content: "a" });
+    const id = parseArtifactRef(text(created))!.id;
+    const res = await run(tools.artifactUpdate, { id, path: "../outside.txt" });
+    expect(res.isError).toBe(true);
+    expect((await svc.read("c1", id)).content).toBe("a");
   });
 
   it("refuses ambiguous or empty calls with a readable error", async () => {

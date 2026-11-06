@@ -8,8 +8,8 @@
  * (`formatArtifactRef`). The transcript card reads the id and version from it —
  * a create's id is minted here, so the call's input cannot carry it.
  */
-import { isAbsolute, resolve } from "node:path";
-import { readFile, stat } from "node:fs/promises";
+import { isAbsolute, relative, resolve } from "node:path";
+import { readFile, realpath, stat } from "node:fs/promises";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod";
 import {
@@ -32,6 +32,11 @@ export interface ManagerMcpArtifacts {
   list(): Promise<ArtifactMeta[]>;
   /** Where a relative `path` argument is resolved from — the session's working directory. */
   cwd?: string;
+  /**
+   * The directories a `path` may name a file inside: the chat's cwd, its
+   * project checkout and its worktrees. Omitted or empty → no `path` at all.
+   */
+  roots?: () => Promise<string[]>;
 }
 
 function textResult(text: string, isError = false): CallToolResult {
@@ -47,18 +52,50 @@ function refLine(meta: ArtifactMeta): string {
   return formatArtifactRef({ id: meta.id, version: latestArtifactVersion(meta), title: meta.title, type: meta.type });
 }
 
+/** True when `child` is `root` or inside it. Both must already be real paths. */
+function isInside(root: string, child: string): boolean {
+  const rel = relative(root, child);
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
 /**
- * Read a `path` argument. Bounded BEFORE reading so a mistaken path to a build
- * artifact or a log is refused by its size, not after buffering it.
+ * Read a `path` argument — but only from inside the chat's own directories.
+ *
+ * These tools run WITHOUT a permission prompt (they are on the default
+ * auto-allow list), and `artifact_read` hands the content straight back to the
+ * model. Unconfined, `path` would be a prompt-free `Read` of the whole disk —
+ * `~/.ssh/id_rsa` included — that also slips past a mode denying `Read` by
+ * name, which is exactly what an agent steered by a hostile issue would reach
+ * for. Confined to the trees the chat already works in, it can only publish
+ * what the agent could already read there without asking.
+ *
+ * Both sides go through `realpath`, so a symlink or junction inside the tree
+ * that points out of it is judged by where it lands, not where it sits.
+ *
+ * Bounded BEFORE reading so a mistaken path to a build output or a log is
+ * refused by its size, not after buffering it.
  */
 async function readSource(ctx: ManagerMcpArtifacts, path: string): Promise<string> {
   const abs = isAbsolute(path) ? path : resolve(ctx.cwd ?? process.cwd(), path);
-  const info = await stat(abs).catch(() => null);
+  const roots = await (ctx.roots?.() ?? Promise.resolve([]));
+  const realRoots = (await Promise.all(roots.map((r) => realpath(r).catch(() => null)))).filter(
+    (r): r is string => !!r,
+  );
+  const real = await realpath(abs).catch(() => null);
+  if (!real) throw new ArtifactError("not_found", `No file at ${abs}.`);
+  if (!realRoots.some((root) => isInside(root, real))) {
+    throw new ArtifactError(
+      "invalid",
+      `${abs} is outside this chat's working directories, so it can't be published by path. ` +
+        `Pass its content instead if the human should see it.`,
+    );
+  }
+  const info = await stat(real).catch(() => null);
   if (!info?.isFile()) throw new ArtifactError("not_found", `No file at ${abs}.`);
   if (info.size > ARTIFACT_MAX_BYTES) {
     throw new ArtifactError("too_large", `${abs} is ${info.size} bytes; the limit is ${ARTIFACT_MAX_BYTES}.`);
   }
-  return readFile(abs, "utf8");
+  return readFile(real, "utf8");
 }
 
 const TYPE_GUIDE =
@@ -74,7 +111,10 @@ const createShape = {
   path: z
     .string()
     .optional()
-    .describe("A file to publish instead of `content` — absolute, or relative to your working directory."),
+    .describe(
+      "A file to publish instead of `content` — inside your working directory or one of this chat's " +
+        "worktrees; absolute, or relative to your working directory.",
+    ),
   language: z.string().max(32).optional().describe("For type 'code': the language, e.g. 'typescript'."),
 };
 
