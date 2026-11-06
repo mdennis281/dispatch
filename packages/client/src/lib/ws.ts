@@ -190,6 +190,11 @@ export class WsClient {
       return;
     }
     this.connecting = false;
+    // Replacing a socket that is still CLOSING (a send during that window calls
+    // `connect()`) means ITS close event will be thrown away by the stale-socket
+    // guard in `handleClose` — so its generation has to be retired here, or a
+    // send that went out on it sits "sending" forever with no Retry.
+    this.retireEpoch();
     this.socket = socket;
     // The old socket may have died during the ticket fetch above and armed a
     // retry while this attempt was already in flight.
@@ -257,10 +262,7 @@ export class WsClient {
     if (this.socket !== socket) return;
     this.socket = null;
     this.clearSocketTimers();
-    if (this.openEpoch !== null) {
-      usePendingSends.getState().lost(this.openEpoch);
-      this.openEpoch = null;
-    }
+    this.retireEpoch();
 
     const reason = info.reason || this.forcedReason || "";
     this.forcedReason = null;
@@ -272,6 +274,13 @@ export class WsClient {
     // schedule — `open()` owns the outcome of the attempt it is running.
     if (this.connecting) return;
     this.scheduleReconnect();
+  }
+
+  /** The open socket's generation is over: its unanswered sends are in doubt. */
+  private retireEpoch(): void {
+    if (this.openEpoch === null) return;
+    usePendingSends.getState().lost(this.openEpoch);
+    this.openEpoch = null;
   }
 
   private noteClose(info: { code: number; reason: string; wasClean: boolean }): void {

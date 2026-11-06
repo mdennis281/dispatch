@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { WsClient } from "./ws.js";
 import { useConnection } from "../stores/connection.js";
+import { usePendingSends } from "../stores/pendingSends.js";
 
 /**
  * A WebSocket that behaves like the real one in the way that matters here:
@@ -222,6 +223,37 @@ describe("WsClient — heartbeat", () => {
     // store — it is about this socket's liveness, nothing else.
     expect(useConnection.getState().state).toBe("open");
     expect(useConnection.getState().badFrames).toBe(0);
+    client.close();
+  });
+});
+
+describe("WsClient — pending sends", () => {
+  it("fails a send whose socket was replaced while CLOSING, whose close event is then ignored", () => {
+    usePendingSends.setState({ byChat: {}, restore: null });
+    const { client, socket: a } = connected();
+    const add = (clientId: string) =>
+      usePendingSends.getState().add({ clientId, chatId: "c", text: clientId, ts: 0, state: "sending" });
+
+    add("g1");
+    const epoch = client.send({ type: "send-message", chatId: "c", text: "g1", clientId: "g1" });
+    expect(epoch).toBeDefined();
+    usePendingSends.getState().sentOn("c", "g1", epoch!);
+
+    // A errors and starts closing; a second Send in that window queues and
+    // opens socket B before A's close event arrives.
+    a.close();
+    add("g2");
+    expect(client.send({ type: "send-message", chatId: "c", text: "g2", clientId: "g2" })).toBeUndefined();
+    const b = FakeSocket.last!;
+    expect(b).not.toBe(a);
+    a.flushClose(); // stale: ignored by handleClose
+    b.fireOpen();
+
+    const byId = Object.fromEntries((usePendingSends.getState().byChat.c ?? []).map((g) => [g.clientId, g]));
+    expect(byId.g1?.state).toBe("failed");
+    // The queued one went out on B and is still legitimately in flight.
+    expect(byId.g2?.state).toBe("sending");
+    expect(byId.g2?.epoch).toBeDefined();
     client.close();
   });
 });
