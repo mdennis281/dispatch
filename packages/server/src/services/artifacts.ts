@@ -13,10 +13,16 @@
  * be pointed at one. Agent-written HTML must only ever reach a browser through
  * the sandboxed viewer.
  */
-import { readdir, readFile, rm, stat, writeFile, mkdir } from "node:fs/promises";
+import { createHash, randomBytes } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { copyFile, readdir, readFile, rename, rm, stat, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { nanoid } from "nanoid";
 import {
+  ARTIFACT_ASSET_MAX_BYTES,
+  ARTIFACT_ASSETS_MAX_BYTES,
+  ARTIFACT_ASSETS_MAX_FILES,
+  ARTIFACT_BLOB_ID,
   ARTIFACT_ERROR_MAX_CHARS,
   ARTIFACT_MAX_BYTES,
   ARTIFACT_MAX_ERRORS,
@@ -25,9 +31,12 @@ import {
   ARTIFACT_TITLE_MAX,
   ArtifactMetaSchema,
   applyArtifactEdit,
+  artifactAssetType,
   artifactExtension,
   artifactStorageChars,
+  normalizeAssetPath,
   latestArtifactVersion,
+  type ArtifactAsset,
   type ArtifactMeta,
   type ArtifactStorage,
   type ArtifactStoragePatch,
@@ -58,7 +67,19 @@ export class ArtifactError extends Error {
 export interface ArtifactServiceDeps {
   /** `Store.chatArtifactsDir` — which also validates the chat id. */
   dirFor: (chatId: string) => string;
+  /**
+   * `Store.chatArtifactBlobsDir`: the chat's content-addressed asset bytes.
+   * Omitted → this service refuses assets (tests about other things).
+   */
+  blobDirFor?: (chatId: string) => string;
   now?: () => number;
+}
+
+/** One file to bundle: where it is on disk, and the path the page asks for it by. */
+export interface ArtifactAssetInput {
+  path: string;
+  /** Absolute path, already confined by the caller (see `readSource` in artifact-tools). */
+  file: string;
 }
 
 export interface ArtifactWrite {
@@ -66,6 +87,7 @@ export interface ArtifactWrite {
   type?: ArtifactType;
   language?: string;
   content: string;
+  assets?: ArtifactAssetInput[];
 }
 
 export interface ArtifactEdit {
@@ -74,7 +96,21 @@ export interface ArtifactEdit {
   /** Or apply one exact-match replacement to the current version. */
   edit?: { oldStr: string; newStr: string };
   title?: string;
+  /**
+   * The new version's assets: a list replaces them, `null` drops them, and
+   * omitted CARRIES THE PREVIOUS VERSION'S FORWARD — an edit to one line of a
+   * game must not orphan its textures.
+   */
+  assets?: ArtifactAssetInput[] | null;
 }
+
+/**
+ * A blob nobody references is only deleted once it is at least this old. A
+ * create stores its blobs BEFORE it writes the meta naming them, so a sweep
+ * landing in between would otherwise delete the bytes of an artifact that is
+ * one write from existing.
+ */
+const BLOB_GC_GRACE_MS = 60 * 60_000;
 
 /**
  * Runtime errors are kept in memory, not on disk: they describe one render of
@@ -87,12 +123,14 @@ const ERROR_KEYS_MAX = 500;
 
 export class ArtifactService {
   private readonly dirFor: (chatId: string) => string;
+  private readonly blobDirFor?: (chatId: string) => string;
   private readonly now: () => number;
   private readonly mutex = new KeyedMutex();
   private readonly errors = new Map<string, string[]>();
 
   constructor(deps: ArtifactServiceDeps) {
     this.dirFor = deps.dirFor;
+    this.blobDirFor = deps.blobDirFor;
     this.now = deps.now ?? Date.now;
   }
 
@@ -113,6 +151,11 @@ export class ArtifactService {
    */
   private storagePath(chatId: string, id: string): string {
     return join(this.artifactDir(chatId, id), "storage.json");
+  }
+  /** Where a blob's bytes live, or null for a name that is not a content hash. */
+  blobPath(chatId: string, sha256: string): string | null {
+    if (!this.blobDirFor || !ARTIFACT_BLOB_ID.test(sha256)) return null;
+    return join(this.blobDirFor(chatId), sha256);
   }
   private versionPath(chatId: string, meta: ArtifactMeta, n: number): string {
     return join(this.artifactDir(chatId, meta.id), `v${n}.${artifactExtension(meta.type, meta.language)}`);
@@ -146,7 +189,13 @@ export class ArtifactService {
     chatId: string,
     id: string,
     version?: number,
-  ): Promise<{ meta: ArtifactMeta; version: number; content: string; errors: string[] }> {
+  ): Promise<{
+    meta: ArtifactMeta;
+    version: number;
+    content: string;
+    errors: string[];
+    assets?: Record<string, ArtifactAsset>;
+  }> {
     const meta = await this.getMeta(chatId, id);
     if (!meta) throw new ArtifactError("not_found", `No artifact "${id}" in this chat.`);
     if (meta.expiredAt !== undefined) {
@@ -168,7 +217,8 @@ export class ArtifactService {
       if (isMissing(err)) throw new ArtifactError("not_found", `Version ${n} of "${id}" is missing on disk.`);
       throw err;
     });
-    return { meta, version: n, content, errors: this.errorsFor(chatId, id, n) };
+    const assets = meta.versions.find((v) => v.n === n)?.assets;
+    return { meta, version: n, content, errors: this.errorsFor(chatId, id, n), ...(assets ? { assets } : {}) };
   }
 
   /* --------------------------------------------------------------- writes */
@@ -187,8 +237,12 @@ export class ArtifactService {
       versions: [],
     };
     return this.mutex.run(`${chatId}:${id}`, async () => {
+      // Size the main document BEFORE copying assets in: refusing an 9 MB page
+      // after storing 200 MB of its textures is the expensive way to say no.
+      assertContentSize(input.content);
+      const assets = input.assets?.length ? await this.storeAssets(chatId, input.assets) : undefined;
       await mkdir(this.artifactDir(chatId, id), { recursive: true });
-      return this.appendVersion(chatId, meta, input.content);
+      return this.appendVersion(chatId, meta, input.content, assets);
     });
   }
 
@@ -209,24 +263,33 @@ export class ArtifactService {
         ...current.meta,
         ...(change.title !== undefined ? { title: cleanTitle(change.title) } : {}),
       };
+      assertContentSize(next);
+      const assets =
+        change.assets === undefined
+          ? current.assets
+          : change.assets === null || !change.assets.length
+            ? undefined
+            : await this.storeAssets(chatId, change.assets);
       // A title-only change still cuts a version: the card in the transcript
       // names a version, and two cards naming the same one would disagree.
-      return this.appendVersion(chatId, meta, next);
+      return this.appendVersion(chatId, meta, next, assets);
     });
   }
 
-  private async appendVersion(chatId: string, meta: ArtifactMeta, content: string): Promise<ArtifactMeta> {
-    const size = Buffer.byteLength(content, "utf8");
-    if (size > ARTIFACT_MAX_BYTES) {
-      throw new ArtifactError(
-        "too_large",
-        `Artifact content is ${size} bytes; the limit is ${ARTIFACT_MAX_BYTES}. Split it, or link the file instead.`,
-      );
-    }
+  private async appendVersion(
+    chatId: string,
+    meta: ArtifactMeta,
+    content: string,
+    assets?: Record<string, ArtifactAsset>,
+  ): Promise<ArtifactMeta> {
+    const size = assertContentSize(content);
     const now = this.now();
     const n = latestArtifactVersion(meta) + 1;
     await writeFile(this.versionPath(chatId, meta, n), content, "utf8");
-    let versions = [...meta.versions, { n, createdAt: now, size }];
+    let versions = [
+      ...meta.versions,
+      { n, createdAt: now, size, ...(assets && Object.keys(assets).length ? { assets } : {}) },
+    ];
     const dropped = versions.length > ARTIFACT_MAX_VERSIONS ? versions.slice(0, versions.length - ARTIFACT_MAX_VERSIONS) : [];
     versions = versions.slice(dropped.length);
     const next: ArtifactMeta = { ...meta, updatedAt: now, versions };
@@ -235,6 +298,109 @@ export class ArtifactService {
     // nobody names, never a meta naming a file that is gone.
     for (const v of dropped) await rm(this.versionPath(chatId, meta, v.n), { force: true }).catch(() => {});
     return next;
+  }
+
+  /* --------------------------------------------------------------- assets */
+
+  /**
+   * Copy a version's files into the chat's blob store and return its manifest.
+   *
+   * Each file is copied to a temp name FIRST and hashed from the copy, then
+   * renamed to its hash. Hashing the source and copying it separately would
+   * let a file the agent is still writing (a build in progress) land under the
+   * hash of different bytes. A blob that already exists is identical by
+   * definition, so the copy is dropped — which is the whole point: version 7
+   * of a game re-uses version 6's 200 MB of textures without storing them twice.
+   *
+   * Limits are checked from `stat` before anything is copied, so a refusal
+   * costs a directory listing rather than the copy it refuses.
+   */
+  private async storeAssets(chatId: string, inputs: ArtifactAssetInput[]): Promise<Record<string, ArtifactAsset>> {
+    if (!this.blobDirFor) throw new ArtifactError("invalid", "Assets aren't available here.");
+    if (inputs.length > ARTIFACT_ASSETS_MAX_FILES) {
+      throw new ArtifactError("too_large", `${inputs.length} asset files; the limit is ${ARTIFACT_ASSETS_MAX_FILES}.`);
+    }
+    const planned: Array<{ path: string; file: string; size: number }> = [];
+    const seen = new Set<string>();
+    let total = 0;
+    for (const input of inputs) {
+      const path = normalizeAssetPath(input.path);
+      if (!path) throw new ArtifactError("invalid", `"${input.path}" is not a usable asset path.`);
+      if (seen.has(path)) throw new ArtifactError("invalid", `Two assets map to "${path}".`);
+      seen.add(path);
+      const info = await stat(input.file).catch(() => null);
+      if (!info?.isFile()) throw new ArtifactError("not_found", `No file at ${input.file}.`);
+      if (info.size > ARTIFACT_ASSET_MAX_BYTES) {
+        throw new ArtifactError("too_large", `${path} is ${info.size} bytes; one asset may be ${ARTIFACT_ASSET_MAX_BYTES}.`);
+      }
+      total += info.size;
+      planned.push({ path, file: input.file, size: info.size });
+    }
+    if (total > ARTIFACT_ASSETS_MAX_BYTES) {
+      throw new ArtifactError("too_large", `Assets total ${total} bytes; the limit is ${ARTIFACT_ASSETS_MAX_BYTES}.`);
+    }
+    const dir = this.blobDirFor(chatId);
+    await mkdir(dir, { recursive: true });
+    const manifest: Record<string, ArtifactAsset> = {};
+    for (const p of planned) {
+      const tmp = join(dir, `.tmp-${randomBytes(8).toString("hex")}`);
+      try {
+        await copyFile(p.file, tmp);
+        const sha256 = await hashFile(tmp);
+        const final = join(dir, sha256);
+        const exists = await stat(final).then(() => true, () => false);
+        if (exists) await rm(tmp, { force: true });
+        else await rename(tmp, final);
+        const size = (await stat(final)).size;
+        manifest[p.path] = { sha256, size, type: artifactAssetType(p.path) };
+      } catch (err) {
+        await rm(tmp, { force: true }).catch(() => {});
+        throw err;
+      }
+    }
+    return manifest;
+  }
+
+  /**
+   * Delete blobs no live version names. Run per chat by the sweep: version
+   * pruning past {@link ARTIFACT_MAX_VERSIONS}, an update that replaced the
+   * assets and expiry all leave bytes behind, and none of them can know whether
+   * another artifact in the chat still uses the same file.
+   */
+  async gcBlobs(chatId: string): Promise<{ files: number; bytes: number }> {
+    if (!this.blobDirFor) return { files: 0, bytes: 0 };
+    const dir = this.blobDirFor(chatId);
+    let names: string[];
+    try {
+      names = await readdir(dir);
+    } catch (err) {
+      if (isMissing(err)) return { files: 0, bytes: 0 };
+      throw err;
+    }
+    const referenced = new Set<string>();
+    for (const meta of await this.list(chatId)) {
+      if (meta.expiredAt !== undefined) continue;
+      for (const v of meta.versions) for (const a of Object.values(v.assets ?? {})) referenced.add(a.sha256);
+    }
+    const cutoff = this.now() - BLOB_GC_GRACE_MS;
+    let files = 0;
+    let bytes = 0;
+    for (const name of names) {
+      // Temp files too: a copy that died mid-way leaves one behind.
+      if (referenced.has(name)) continue;
+      if (!ARTIFACT_BLOB_ID.test(name) && !name.startsWith(".tmp-")) continue;
+      const path = join(dir, name);
+      const info = await stat(path).catch(() => null);
+      if (!info || info.mtimeMs > cutoff) continue;
+      try {
+        await rm(path);
+        files++;
+        bytes += info.size;
+      } catch {
+        // Held open (a download streaming it): the next pass gets it.
+      }
+    }
+    return { files, bytes };
   }
 
   /* -------------------------------------------------------------- storage */
@@ -349,7 +515,10 @@ export class ArtifactService {
         bytes += freed;
         touched = true;
       }
-      if (touched) chats++;
+      // After the expiries, so this pass frees what it just orphaned.
+      const gc = await this.gcBlobs(chatId).catch(() => ({ files: 0, bytes: 0 }));
+      bytes += gc.bytes;
+      if (touched || gc.files) chats++;
     }
     return { artifacts, bytes, chats };
   }
@@ -381,6 +550,29 @@ export class ArtifactService {
     for (const v of meta.versions) this.errors.delete(this.errorKey(chatId, id, v.n));
     return freed;
   }
+}
+
+/** Bytes of a main document, or the refusal past {@link ARTIFACT_MAX_BYTES}. */
+function assertContentSize(content: string): number {
+  const size = Buffer.byteLength(content, "utf8");
+  if (size > ARTIFACT_MAX_BYTES) {
+    throw new ArtifactError(
+      "too_large",
+      `Artifact content is ${size} bytes; the limit is ${ARTIFACT_MAX_BYTES}. ` +
+        `Move textures, models, audio and wasm into assets instead of inlining them.`,
+    );
+  }
+  return size;
+}
+
+function hashFile(path: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const hash = createHash("sha256");
+    createReadStream(path)
+      .on("data", (chunk) => hash.update(chunk))
+      .on("error", reject)
+      .on("end", () => resolve(hash.digest("hex")));
+  });
 }
 
 function cleanTitle(raw: string): string {

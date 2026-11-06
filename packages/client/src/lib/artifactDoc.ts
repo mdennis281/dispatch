@@ -52,12 +52,14 @@ export const ARTIFACT_SANDBOX = "allow-scripts allow-popups allow-popups-to-esca
  *  - `connect-src data: blob:` — `fetch()` of embedded data and blobs:
  *    texture loaders, `WebAssembly.instantiateStreaming`. Still no http(s).
  *  - `font-src … blob:` — fonts unpacked at runtime.
+ *  - `style-src … blob:` — a bundled stylesheet, which the asset loader below
+ *    links as a blob URL.
  */
 export const ARTIFACT_CSP = [
   "default-src 'none'",
   "script-src 'unsafe-inline' 'unsafe-eval' blob:",
   "worker-src blob:",
-  "style-src 'unsafe-inline'",
+  "style-src 'unsafe-inline' blob:",
   "img-src data: blob:",
   "media-src data: blob:",
   "font-src data: blob:",
@@ -71,6 +73,8 @@ export const ARTIFACT_MESSAGE_TAG = "__dispatchArtifact";
 
 export type ArtifactFrameMessage =
   | { kind: "error"; message: string }
+  /** A bundle-mode frame is listening and wants its page and assets. */
+  | { kind: "boot-ready" }
   /** One `localStorage` write: `clear` (if set) happened before `set`; null removes. */
   | { kind: "storage"; clear?: true; set: Record<string, string | null> };
 
@@ -93,7 +97,7 @@ export type ArtifactFrameMessage =
  * a page learns at the `setItem` that failed rather than from a server 413 it
  * never sees. `sessionStorage` gets the same shape, unpersisted.
  */
-function bridge(storage: Record<string, string>): string {
+function bridge(storage: Record<string, string>, bundle = false): string {
   return `(() => {
   const TAG = ${JSON.stringify(ARTIFACT_MESSAGE_TAG)};
   const post = (m) => { try { parent.postMessage(Object.assign({ [TAG]: true }, m), "*"); } catch {} };
@@ -102,18 +106,21 @@ function bridge(storage: Record<string, string>): string {
     if (sent++ > 50) return;
     post({ kind: "error", message: String(message).slice(0, 2000) });
   };
-  addEventListener("error", (e) => {
-    const where = e.filename ? " (line " + e.lineno + ":" + e.colno + ")" : "";
-    send((e.error && e.error.stack) || (e.message + where));
-  });
-  addEventListener("unhandledrejection", (e) => {
-    const r = e.reason;
-    send("Unhandled rejection: " + ((r && (r.stack || r.message)) || String(r)));
-  });
-  addEventListener("securitypolicyviolation", (e) => {
-    send("Blocked by the artifact sandbox (" + e.effectiveDirective + "): " + (e.blockedURI || "inline") +
-      " — artifacts have no network; inline the resource, or build it as a data: or blob: URL.");
-  });
+  const reporters = () => {
+    addEventListener("error", (e) => {
+      const where = e.filename ? " (line " + e.lineno + ":" + e.colno + ")" : "";
+      send((e.error && e.error.stack) || (e.message + where));
+    });
+    addEventListener("unhandledrejection", (e) => {
+      const r = e.reason;
+      send("Unhandled rejection: " + ((r && (r.stack || r.message)) || String(r)));
+    });
+    addEventListener("securitypolicyviolation", (e) => {
+      send("Blocked by the artifact sandbox (" + e.effectiveDirective + "): " + (e.blockedURI || "inline") +
+        " — artifacts have no network; inline the resource, ship it in assets_dir, or build it as a data: or blob: URL.");
+    });
+  };
+  reporters();
   const original = console.error.bind(console);
   console.error = (...args) => {
     original(...args);
@@ -169,8 +176,223 @@ function bridge(storage: Record<string, string>): string {
   };
   install("localStorage", makeStorage(${jsonForScript(storage)}, true));
   install("sessionStorage", makeStorage({}, false));
+${bundle ? ASSET_LOADER : ""}
 })();`;
 }
+
+/**
+ * Pure helpers the asset loader runs in the frame. Kept as SOURCE, not as
+ * functions turned into strings with `toString()`: a minifier is free to
+ * rename or hoist helpers out of a compiled function, and the frame would get
+ * code that references names it never received. Tests evaluate this same
+ * string, so what is tested is byte-for-byte what runs.
+ *
+ * `resolveAssetRef(base, ref)` — a reference as written in a file in directory
+ * `base` → `{ path, hash }` in the bundle, or null for anything that is not a
+ * bundle path (a scheme, `//host`, a `..` above the root). The query is dropped:
+ * a blob URL with one names nothing.
+ *
+ * `rewriteAssetRefs(text, base, find)` — every quoted string, `url(…)` and
+ * unquoted `attr=value` in `text` that names a bundled file becomes that file's
+ * blob URL. Anything `find` doesn't know is left byte-for-byte alone, so a false
+ * candidate (a string that merely looks like a path) costs nothing.
+ *
+ * `runtimeAssetRefs(u, baseURI)` — the candidates for a URL handed to `fetch`,
+ * `img.src` and friends at runtime. Beyond a plain relative path, two shapes
+ * show up in practice: a srcdoc frame resolves relative URLs against the
+ * PARENT's address, so `new URL("a.png", document.baseURI)` arrives as
+ * `http://dispatch/chat/a.png`; and loaders that resolve relative to their own
+ * file produce `blob:null/a.png` from a blob URL. For both, the path's suffixes
+ * are tried longest first.
+ */
+export const ASSET_HELPERS = `
+function resolveAssetRef(base, ref) {
+  if (typeof ref !== "string" || !ref || ref.length > 2048) return null;
+  let hash = "";
+  const h = ref.indexOf("#");
+  if (h >= 0) { hash = ref.slice(h); ref = ref.slice(0, h); }
+  const q = ref.indexOf("?");
+  if (q >= 0) ref = ref.slice(0, q);
+  if (!ref || /^[a-z][a-z0-9+.-]*:/i.test(ref) || ref.startsWith("//")) return null;
+  const parts = ref.startsWith("/") || !base ? [] : base.split("/");
+  for (const seg of ref.split("/")) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") { if (!parts.length) return null; parts.pop(); continue; }
+    parts.push(seg);
+  }
+  return parts.length ? { path: parts.join("/"), hash } : null;
+}
+function rewriteAssetRefs(text, base, find) {
+  const swap = (ref) => {
+    const r = resolveAssetRef(base, ref);
+    if (!r) return null;
+    const u = find(r.path);
+    return u ? u + r.hash : null;
+  };
+  return text.replace(
+    /(\\\\?["'\\x60])([^"'\\x60\\s<>(){}\\\\]{1,1024}?)\\1|url\\(\\s*([^)"'\\s]{1,1024})\\s*\\)|(=)([^\\s"'\\x60=<>(){};,\\\\]{1,1024})/g,
+    (m, q, a, b, eq, c) => {
+      if (q !== undefined) { const u = swap(a); return u ? q + u + q : m; }
+      if (b !== undefined) { const u = swap(b); return u ? "url(" + u + ")" : m; }
+      const u = swap(c);
+      return u ? "=" + u : m;
+    },
+  );
+}
+function runtimeAssetRefs(u, baseURI) {
+  if (u && typeof u === "object" && typeof u.href === "string") u = u.href;
+  if (typeof u !== "string") return [];
+  const rel = resolveAssetRef("", u);
+  if (rel) return [rel];
+  let rest = null;
+  const m = /^blob:(?:null|[a-z][a-z0-9+.-]*:\\/\\/[^/]+)\\/(.*)$/i.exec(u);
+  if (m) rest = m[1];
+  else {
+    try {
+      const abs = new URL(u);
+      if ((abs.protocol === "http:" || abs.protocol === "https:") && abs.origin === new URL(baseURI).origin) {
+        rest = abs.pathname + abs.hash;
+      }
+    } catch {}
+  }
+  if (rest === null) return [];
+  const r = resolveAssetRef("", rest);
+  if (!r) return [];
+  const segs = r.path.split("/");
+  const out = [];
+  for (let i = 0; i < segs.length; i++) out.push({ path: segs.slice(i).join("/"), hash: r.hash });
+  return out;
+}
+`;
+
+/**
+ * Bundle mode: the page arrives AFTER the frame is up, with its files.
+ *
+ * WHY TWO PHASES. The assets — up to 256 MB of textures and wasm — cannot ride
+ * in the `srcdoc` (as data: URLs they would be a third bigger and parsed as one
+ * giant string), and the frame cannot fetch them (no network, by design). So
+ * the srcdoc is just the head and this loader. It says `boot-ready`; the parent
+ * answers with the page and every asset as a Blob (by reference, not copied);
+ * the loader mints a blob URL per file, points the page's references at them,
+ * and only then writes the page into the document with `document.open()`.
+ *
+ * `document.open()` keeps what matters and drops one thing: the CSP, the
+ * storage shim and the patched prototypes all survive (same Window, same
+ * policy container), but every window event listener is ERASED — so the error
+ * reporters are installed again right after it, or a page that throws on load
+ * would throw silently.
+ *
+ * References are fixed two ways, because neither covers everything alone:
+ *  - REWRITING the text of the page and of every text asset — markup, CSS
+ *    `url()`, JSON (glTF `uri`s), scripts' string literals — which is the only
+ *    way to reach what the parser loads by itself (`<img src>`, a stylesheet's
+ *    fonts). Text assets are rewritten depth-first, so a stylesheet that names
+ *    a font gets the font's URL before the page gets the stylesheet's; a cycle
+ *    falls back to the unrewritten file rather than looping.
+ *  - SHIMS for URLs built at runtime: `fetch`, `XMLHttpRequest`, `Worker`, the
+ *    `src`/`href` setters, `setAttribute`, `Audio`, and `artifactAsset(path)`
+ *    for anything else.
+ */
+const ASSET_LOADER = `
+  ${ASSET_HELPERS}
+  let booted = false;
+  const boot = async (html, assets) => {
+    const urls = new Map();
+    const made = new Set();
+    const mk = (blob) => { const u = URL.createObjectURL(blob); made.add(u); return u; };
+    const texts = new Map();
+    for (const a of assets) {
+      if (a.rewrite) texts.set(a.path, { type: a.type, text: await a.blob.text(), blob: a.blob });
+      else urls.set(a.path, mk(a.blob));
+    }
+    const state = new Map();
+    const textUrl = (path) => {
+      const t = texts.get(path);
+      if (state.get(path) === "visiting") {
+        if (!t.raw) t.raw = mk(t.blob);
+        return t.raw;
+      }
+      if (!state.has(path)) {
+        state.set(path, "visiting");
+        // A stylesheet's url() and a glTF's uri are relative to THAT file; a
+        // script's strings become URLs in the page, so they are relative to it.
+        const dir = /javascript/.test(t.type) || !path.includes("/") ? "" : path.slice(0, path.lastIndexOf("/"));
+        urls.set(path, mk(new Blob([rewriteAssetRefs(t.text, dir, find)], { type: t.type })));
+        state.set(path, "done");
+      }
+      return urls.get(path);
+    };
+    const exact = (p) => (texts.has(p) ? textUrl(p) : urls.get(p));
+    const find = (p) => {
+      const hit = exact(p);
+      if (hit) return hit;
+      try { const d = decodeURIComponent(p); return d === p ? undefined : exact(d); } catch { return undefined; }
+    };
+    for (const path of texts.keys()) textUrl(path);
+
+    const assetUrl = (u) => {
+      if (typeof u === "string" && made.has(u)) return null;
+      for (const r of runtimeAssetRefs(u, document.baseURI)) {
+        const hit = find(r.path);
+        if (hit) return hit + r.hash;
+      }
+      return null;
+    };
+    const swap = (u) => { const hit = assetUrl(u); return hit === null ? u : hit; };
+    try { Object.defineProperty(window, "artifactAsset", {
+      // A literal path in the page was already rewritten to its blob URL by the
+      // time this runs, so one of ours is its own answer.
+      value: (p) => { p = String(p); return made.has(p) ? p : assetUrl(p); },
+      configurable: true,
+    }); } catch {}
+
+    const realFetch = window.fetch;
+    window.fetch = function (input, init) {
+      if (typeof input === "string" || input instanceof URL) return realFetch.call(this, swap(input), init);
+      if (input instanceof Request) {
+        const hit = assetUrl(input.url);
+        if (hit) return realFetch.call(this, hit, init);
+      }
+      return realFetch.call(this, input, init);
+    };
+    const xhrOpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function (method, url, ...rest) { return xhrOpen.call(this, method, swap(url), ...rest); };
+    const wrapCtor = (name) => {
+      const C = window[name];
+      if (typeof C !== "function") return;
+      window[name] = new Proxy(C, { construct: (t, args, nt) => { if (args.length) args[0] = swap(args[0]); return Reflect.construct(t, args, nt); } });
+    };
+    wrapCtor("Worker"); wrapCtor("SharedWorker"); wrapCtor("Audio");
+    const patch = (C, prop) => {
+      const proto = C && C.prototype;
+      const d = proto && Object.getOwnPropertyDescriptor(proto, prop);
+      if (!d || !d.set) return;
+      Object.defineProperty(proto, prop, Object.assign({}, d, { set(v) { d.set.call(this, swap(v)); } }));
+    };
+    patch(window.HTMLImageElement, "src"); patch(window.HTMLMediaElement, "src"); patch(window.HTMLMediaElement, "poster");
+    patch(window.HTMLVideoElement, "poster"); patch(window.HTMLSourceElement, "src"); patch(window.HTMLScriptElement, "src");
+    patch(window.HTMLLinkElement, "href"); patch(window.HTMLTrackElement, "src"); patch(window.HTMLEmbedElement, "src");
+    const setAttr = Element.prototype.setAttribute;
+    const URL_ATTRS = new Set(["src", "href", "xlink:href", "poster", "data"]);
+    Element.prototype.setAttribute = function (n, v) {
+      return setAttr.call(this, n, URL_ATTRS.has(String(n).toLowerCase()) ? swap(v) : v);
+    };
+
+    const page = rewriteAssetRefs(html, "", find);
+    document.open();
+    reporters();
+    document.write(page);
+    document.close();
+  };
+  addEventListener("message", (e) => {
+    const d = e.data;
+    if (booted || e.source !== parent || !d || d[TAG] !== true || d.kind !== "boot") return;
+    booted = true;
+    boot(String(d.html), Array.isArray(d.assets) ? d.assets : []).catch((err) =>
+      send("The artifact's assets failed to load: " + ((err && (err.stack || err.message)) || String(err))));
+  });
+  post({ kind: "boot-ready" });
+`;
 
 /**
  * JSON that is safe inside a `<script>`. `<` is escaped so a stored value of
@@ -194,14 +416,14 @@ function inlineScript(code: string): string {
   return `<script>${code.replace(/<\/script/gi, "<\\/script")}</script>`;
 }
 
-function head(storage: Record<string, string>, extra = ""): string {
+function head(storage: Record<string, string>, extra = "", bundle = false): string {
   return (
     // The doctype FIRST, or the frame renders in quirks mode — and the
     // artifact's own doctype, arriving after our head, would be ignored.
     "<!doctype html><html><head>" +
     `<meta http-equiv="Content-Security-Policy" content="${ARTIFACT_CSP}">` +
     '<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">' +
-    inlineScript(bridge(storage)) +
+    inlineScript(bridge(storage, bundle)) +
     extra
   );
 }
@@ -237,6 +459,29 @@ export function buildArtifactDocument(
 }
 
 /**
+ * The `srcdoc` for an html artifact with assets: our head and the loader, and
+ * nothing else — the page itself is posted in once the loader asks (see
+ * {@link ASSET_LOADER}).
+ */
+export function buildArtifactBundleDocument(storage: Record<string, string> = {}): string {
+  return head(storage, "", true) + "</head><body></body></html>";
+}
+
+/** One asset as the frame receives it in the `boot` message. */
+export interface ArtifactBootAsset {
+  path: string;
+  type: string;
+  blob: Blob;
+  /** A text file whose references to other assets the loader rewrites. */
+  rewrite: boolean;
+}
+
+/** The parent's answer to `boot-ready`. */
+export function artifactBootMessage(html: string, assets: ArtifactBootAsset[]) {
+  return { [ARTIFACT_MESSAGE_TAG]: true, kind: "boot" as const, html, assets };
+}
+
+/**
  * Narrow an arbitrary `message` event payload to one of ours. Everything in a
  * storage write is checked, since the page wrote it: string keys within the
  * key limit, string-or-null values. A malformed write is dropped whole.
@@ -248,6 +493,7 @@ export function asArtifactMessage(data: unknown): ArtifactFrameMessage | null {
   if (d.kind === "error" && typeof d.message === "string") {
     return { kind: "error", message: d.message.slice(0, 2000) };
   }
+  if (d.kind === "boot-ready") return { kind: "boot-ready" };
   if (d.kind === "storage" && d.set && typeof d.set === "object" && !Array.isArray(d.set)) {
     const set: Record<string, string | null> = {};
     for (const [k, v] of Object.entries(d.set as Record<string, unknown>)) {

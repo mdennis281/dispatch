@@ -567,7 +567,10 @@ export function createServices(
       getProject: (id) => store.getProject(id),
       getConfig: (id) => projectConfig.getIssues(id),
     });
-  const artifacts = new ArtifactService({ dirFor: (chatId) => store.chatArtifactsDir(chatId) });
+  const artifacts = new ArtifactService({
+    dirFor: (chatId) => store.chatArtifactsDir(chatId),
+    blobDirFor: (chatId) => store.chatArtifactBlobsDir(chatId),
+  });
   // Worktrees + subApp runner are constructed BEFORE the broker so the session
   // MCP's `run_subapp` tool can launch apps (and resolve/create worktrees).
   const worktrees = overrides.worktrees ?? new WorktreeService({ bus, store });

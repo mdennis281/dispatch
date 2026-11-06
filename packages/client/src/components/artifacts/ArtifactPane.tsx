@@ -23,6 +23,7 @@ import { CodeBlock } from "../chat/CodeBlock.js";
 import { Markdown } from "../chat/Markdown.js";
 import { ArtifactFrame } from "./ArtifactFrame.js";
 import { artifactIcon } from "./artifactIcon.js";
+import { useArtifactAssets } from "./useArtifactAssets.js";
 import { useArtifactStorage } from "./useArtifactStorage.js";
 
 type Loaded =
@@ -35,6 +36,13 @@ type View = "preview" | "source";
 
 /** Types whose preview is something other than the source itself. */
 const PREVIEWABLE: ReadonlySet<ArtifactType> = new Set(["html", "svg", "markdown"]);
+
+/**
+ * Past this, Source shows a plain, truncated listing. An 8 MB page with an
+ * inlined engine would otherwise go through the highlighter whole and hang
+ * the tab; Copy and Download still give the full text.
+ */
+const SOURCE_HIGHLIGHT_MAX = 200_000;
 
 /** How long to gather a burst of frame errors before sending them in one POST. */
 const ERROR_FLUSH_MS = 600;
@@ -85,6 +93,7 @@ export function ArtifactPane({ open }: { open: OpenArtifact }) {
   const shownVersion = data?.version;
   const storage = useArtifactStorage(chatId, id);
   const type = data?.meta.type;
+  const bundle = useArtifactAssets(chatId, type === "html" ? data?.assets : undefined);
 
   // The errors on screen are the ones the server already knew for this
   // version plus what the frame reports now — reset whenever the version or
@@ -213,10 +222,28 @@ export function ArtifactPane({ open }: { open: OpenArtifact }) {
       </div>
 
       <div className="relative min-h-0 flex-1">
-        {(loaded.state === "loading" || (data && !storage.ready && (data.meta.type === "html" || data.meta.type === "svg"))) && (
-          <div className="flex h-full items-center justify-center">
-            <Spinner />
+        {(loaded.state === "loading" ||
+          (data && !storage.ready && (data.meta.type === "html" || data.meta.type === "svg"))) &&
+          bundle.state !== "loading" && (
+            <div className="flex h-full items-center justify-center">
+              <Spinner />
+            </div>
+          )}
+        {data && effectiveView === "preview" && bundle.state === "loading" && (
+          <div className="flex h-full flex-col items-center justify-center gap-2 p-6">
+            <div className="h-1.5 w-56 overflow-hidden rounded-full bg-line">
+              <div
+                className="h-full rounded-full bg-accent transition-[width]"
+                style={{ width: `${bundle.total ? Math.min(100, (bundle.loaded / bundle.total) * 100) : 0}%` }}
+              />
+            </div>
+            <p className="text-xs text-muted tabular-nums">
+              Loading assets — {formatMb(bundle.loaded)} of {formatMb(bundle.total)}
+            </p>
           </div>
+        )}
+        {data && effectiveView === "preview" && bundle.state === "error" && (
+          <Notice tone="danger">The artifact&rsquo;s assets didn&rsquo;t load: {bundle.message}</Notice>
         )}
         {loaded.state === "expired" && (
           <Notice>
@@ -227,13 +254,18 @@ export function ArtifactPane({ open }: { open: OpenArtifact }) {
           </Notice>
         )}
         {loaded.state === "error" && <Notice tone="danger">{loaded.message}</Notice>}
-        {data && storage.ready && effectiveView === "preview" && (type === "html" || type === "svg") && (
+        {data &&
+          storage.ready &&
+          effectiveView === "preview" &&
+          (type === "html" || type === "svg") &&
+          (bundle.state === "none" || bundle.state === "ready") && (
           <ArtifactFrame
             key={`${data.version}:${reloadKey}`}
             type={type}
             content={data.content}
             title={data.meta.title}
             storage={storage.mirror.current}
+            {...(bundle.state === "ready" ? { assets: bundle.assets } : {})}
             onError={onFrameError}
             onStorage={storage.onWrite}
           />
@@ -248,10 +280,23 @@ export function ArtifactPane({ open }: { open: OpenArtifact }) {
         {data && effectiveView === "source" && (
           <ScrollArea className="h-full">
             <div className="p-3">
-              <CodeBlock
-                code={data.content}
-                language={sourceLanguage(data.meta.type, data.meta.language)}
-              />
+              {data.content.length > SOURCE_HIGHLIGHT_MAX ? (
+                <>
+                  <p className="mb-2 text-xs text-muted">
+                    Showing the first {SOURCE_HIGHLIGHT_MAX.toLocaleString()} of{" "}
+                    {data.content.length.toLocaleString()} characters, unhighlighted — Copy or Download for all
+                    of it.
+                  </p>
+                  <pre className="cm-mono whitespace-pre-wrap break-all text-xs text-secondary">
+                    {data.content.slice(0, SOURCE_HIGHLIGHT_MAX)}
+                  </pre>
+                </>
+              ) : (
+                <CodeBlock
+                  code={data.content}
+                  language={sourceLanguage(data.meta.type, data.meta.language)}
+                />
+              )}
             </div>
           </ScrollArea>
         )}
@@ -285,6 +330,10 @@ function Notice({ children, tone }: { children: ReactNode; tone?: "danger" }) {
       </p>
     </div>
   );
+}
+
+function formatMb(bytes: number): string {
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function slug(title: string): string {
