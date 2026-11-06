@@ -612,6 +612,16 @@ const MIGRATIONS: ReadonlyArray<string> = [
   );
   CREATE INDEX approval_audit_plugin ON approval_audit(plugin, decided_at);
   `,
+  // 19 — the per-chat runtime rollup now filters on state.
+  //
+  // `MetricsService.chatRuntime` stopped counting blocked spans (queued,
+  // waiting, sleeping), so it reads `state` as well. `metric_span_chat` (4)
+  // doesn't carry it, which would turn the index-only sum back into a table
+  // lookup per span on every sidebar poll. This replaces it with one that does.
+  `
+  DROP INDEX IF EXISTS metric_span_chat;
+  CREATE INDEX metric_span_chat_state ON metric_span(chat_id, state, end_ts, start_ts);
+  `,
 ];
 
 /** Schema version a database must be at for this build to use it. */

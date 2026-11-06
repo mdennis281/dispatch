@@ -26,6 +26,7 @@ import {
   METRIC_ACTIVITY_CLASS_LABELS,
   METRIC_MAX_BUCKETS,
   METRIC_OTHER_KEY,
+  METRIC_STATES,
   METRIC_STATE_LABELS,
   activityClass,
   resolveBucket,
@@ -65,6 +66,15 @@ import {
   type UnionRow,
 } from "./metrics-spans.js";
 import type { StateDb } from "../store/db.js";
+
+/**
+ * The states that are the agent actually running — everything outside the
+ * `blocked` class. Derived from the shared class map rather than listed, so a
+ * state re-classified there moves in or out of the sidebar figure with it.
+ */
+const RUNNING_STATES: readonly MetricState[] = METRIC_STATES.filter(
+  (s) => activityClass(s) !== "blocked",
+);
 
 /** How long a partly-filled write buffer waits before it's flushed. */
 const FLUSH_INTERVAL_MS = 1_000;
@@ -871,10 +881,18 @@ export class MetricsService {
    * them into `busyMs`. Neither is survivable on a poll that has to label every
    * row in the list.
    *
-   * One statement, answered from `metric_span_chat` without touching the table.
-   * `MAX(end, start)` floors the pathological row whose end precedes its start;
-   * `COALESCE(end_ts, at)` counts a span still running up to now, which is what
-   * makes a live chat's number climb while you watch it.
+   * Only `thinking` and `working` spans count. A `blocked` span — queued for a
+   * slot, waiting on a human, parked in `watch_pr`, asleep — is the agent doing
+   * nothing, and summing it made a chat that sat in the queue for an afternoon
+   * read as hours of work. Worse, a main loop waiting on its subagents booked
+   * that wait ON TOP of the subagents' own spans, counting the same minutes
+   * twice. The Metrics view still charts blocked time; this row asks "how much
+   * did this chat actually run", and waiting is not running.
+   *
+   * One statement, answered from `metric_span_chat_state` without touching the
+   * table. `MAX(end, start)` floors the pathological row whose end precedes its
+   * start; `COALESCE(end_ts, at)` counts a span still running up to now, which
+   * is what makes a live chat's number climb while you watch it.
    */
   chatRuntime(): ChatRuntimeResponse {
     this.flush();
@@ -885,9 +903,10 @@ export class MetricsService {
                 SUM(MAX(COALESCE(end_ts, ?), start_ts) - start_ts) AS ms
            FROM metric_span
           WHERE chat_id IS NOT NULL
+            AND state IN (${RUNNING_STATES.map(() => "?").join(", ")})
           GROUP BY chat_id`,
       )
-      .all(at) as { id: string; ms: number | null }[];
+      .all(at, ...RUNNING_STATES) as { id: string; ms: number | null }[];
     const byChat: Record<string, number> = {};
     for (const row of rows) {
       const ms = Number(row.ms ?? 0);

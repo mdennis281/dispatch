@@ -750,6 +750,31 @@ describe("MetricsService — chatRuntime (the sidebar's per-row figure)", () => 
     expect(metrics.chatRuntime().byChat).toEqual({});
   });
 
+  it("counts running, not waiting — queued, blocked and asleep add nothing", () => {
+    // The sidebar read 28 minutes on a chat that had spent most of
+    // it queued for a slot and parked in watch_pr. Only thinking and working
+    // time is the chat running.
+    metrics.recordSpans([
+      span({ state: "generating", identifier: "turn", startTs: NOW - 60 * MIN, endTs: NOW - 59 * MIN, toolUseId: "g" }),
+      span({ state: "shell", identifier: "Bash", startTs: NOW - 59 * MIN, endTs: NOW - 58 * MIN, toolUseId: "sh" }),
+      span({ state: "queued", identifier: "slot", startTs: NOW - 58 * MIN, endTs: NOW - 40 * MIN, toolUseId: "q" }),
+      span({ state: "waiting_remote", identifier: "watch_pr", startTs: NOW - 40 * MIN, endTs: NOW - 20 * MIN, toolUseId: "w" }),
+      span({ state: "waiting_human", identifier: "ask", startTs: NOW - 20 * MIN, endTs: NOW - 10 * MIN, toolUseId: "h" }),
+      span({ state: "waiting_agent", identifier: "Task", startTs: NOW - 10 * MIN, endTs: NOW - 5 * MIN, toolUseId: "a" }),
+      span({ state: "sleeping", identifier: "wait", startTs: NOW - 5 * MIN, endTs: NOW - MIN, toolUseId: "z" }),
+    ]);
+    // Still open, and still blocked: must not climb while it waits.
+    metrics.openSpan(span({ state: "paused_limit", identifier: "limit", startTs: NOW - MIN, toolUseId: "p" }));
+
+    expect(metrics.chatRuntime().byChat).toEqual({ c1: 2 * MIN });
+  });
+
+  it("omits a chat that has only ever waited", () => {
+    metrics.openSpan(span({ state: "queued", identifier: "slot", startTs: NOW - 30 * MIN }));
+
+    expect(metrics.chatRuntime().byChat).toEqual({});
+  });
+
   it("flushes buffered spans first, so a just-finished turn is already counted", () => {
     metrics.openSpan(span({ startTs: NOW - 2 * MIN, endTs: NOW - MIN }));
     expect(metrics.stats().spansBuffered).toBe(1);
