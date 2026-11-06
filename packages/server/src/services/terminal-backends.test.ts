@@ -2030,3 +2030,111 @@ describe("spawnProcess — hosting an MCP server on a backend (E7)", () => {
     await expect(p).rejects.toThrow("cancelled");
   });
 });
+
+describe("runs in flight, for a lock that spans shells (E28)", () => {
+  function watch(svc: TerminalService) {
+    const log: Array<{ kind: string; runId: string; backend: string; at: number }> = [];
+    const off = svc.onRun((e) => log.push({ kind: e.kind, runId: e.run.runId, backend: e.run.backend, at: e.at }));
+    return { log, off };
+  }
+
+  it("lists a backend's run from beforeRun through afterRun, under the SAME runId its hooks get", async () => {
+    const h = setup();
+    const order: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let beforeId = "";
+    let afterId = "";
+    const backend = fakeBackend({
+      beforeRun: async (info) => {
+        beforeId = info.runId;
+        await gate;
+        return {};
+      },
+      afterRun: (info) => {
+        afterId = info.runId;
+        order.push("afterRun");
+        // Still in flight while the backend brings changes back.
+        order.push(`listed:${h.svc.runs().length}`);
+        return {};
+      },
+    });
+    h.registry.register(backend, "plug");
+    h.chats.set("c1", { terminalBackend: "box", projectId: "p1" });
+    const { log } = watch(h.svc);
+    h.svc.onRun((e) => order.push(e.kind));
+
+    const running = h.svc.run({ chatId: "c1", projectId: "p1", name: "build", command: "say built", cwd: "/w" });
+    await vi.waitFor(() => expect(beforeId).not.toBe(""));
+    const [run] = h.svc.runs();
+    expect(run).toMatchObject({
+      runId: beforeId,
+      chatId: "c1",
+      projectId: "p1",
+      terminal: "build",
+      backend: "box",
+      cwd: "/srv/repo",
+      command: "say built",
+      background: false,
+    });
+    expect(log).toEqual([expect.objectContaining({ kind: "started", runId: beforeId, backend: "box" })]);
+
+    release();
+    await running;
+    expect(afterId).toBe(beforeId);
+    expect(h.svc.runs()).toEqual([]);
+    // Ended only once afterRun was done with it.
+    expect(order).toEqual(["started", "afterRun", "listed:1", "ended"]);
+    expect(log.map((e) => e.kind)).toEqual(["started", "ended"]);
+  });
+
+  it("counts LOCAL shells too, filters, and holds a backgrounded command until it really ends", async () => {
+    const h = setup();
+    const { log } = watch(h.svc);
+    const res = await h.svc.run({ chatId: "c1", projectId: "p1", name: "dev", command: "hang", cwd: "/w", background: true });
+    expect(res.backgrounded).toBe(true);
+    await h.svc.run({ chatId: "c2", name: "main", command: "say quick", cwd: "/w" });
+
+    // The quick one came and went; the dev server is still in flight.
+    expect(h.svc.runs()).toEqual([expect.objectContaining({ chatId: "c1", backend: "local", background: true, command: "hang" })]);
+    expect(h.svc.runs({ chatId: "c2" })).toEqual([]);
+    expect(h.svc.runs({ backend: "box" })).toEqual([]);
+    expect(h.svc.runs({ projectId: "p1", backend: "local" })).toHaveLength(1);
+    expect(log.map((e) => e.kind)).toEqual(["started", "started", "ended"]);
+
+    // The command exits: its marker lands, and the run is over.
+    const shell = h.local[0]!;
+    const marker = shell.writes.join("").match(/CMTERMSENTINEL_[A-Za-z0-9_-]+/)![0];
+    shell.stdout.emit("data", Buffer.from(`${marker}|0|True|/w\n`));
+    await vi.waitFor(() => expect(h.svc.runs()).toEqual([]));
+    expect(log.map((e) => e.kind)).toEqual(["started", "started", "ended", "ended"]);
+  });
+
+  it("ends a run whose shell is closed, or dies, under it — a lock must never be left held", async () => {
+    const h = setup();
+    const { log } = watch(h.svc);
+    await h.svc.run({ chatId: "c1", name: "a", command: "hang", cwd: "/w", background: true });
+    await h.svc.run({ chatId: "c1", name: "b", command: "hang", cwd: "/w", background: true });
+    expect(h.svc.runs()).toHaveLength(2);
+
+    h.svc.kill(h.svc.listChat("c1").find((t) => t.name === "a")!.id);
+    expect(h.svc.runs().map((r) => r.terminal)).toEqual(["b"]);
+    h.local[1]!.kill();
+    await vi.waitFor(() => expect(h.svc.runs()).toEqual([]));
+    expect(log.filter((e) => e.kind === "ended")).toHaveLength(2);
+  });
+
+  it("a listener that throws breaks neither the run nor the other listeners", async () => {
+    const h = setup();
+    h.svc.onRun(() => {
+      throw new Error("lock bookkeeping blew up");
+    });
+    const { log, off } = watch(h.svc);
+    const res = await h.svc.run({ chatId: "c1", name: "main", command: "say ok", cwd: "/w" });
+    expect(res.output).toBe("ok");
+    expect(log.map((e) => e.kind)).toEqual(["started", "ended"]);
+    off();
+    await h.svc.run({ chatId: "c1", name: "main", command: "say again", cwd: "/w" });
+    expect(log).toHaveLength(2);
+  });
+});

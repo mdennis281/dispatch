@@ -42,6 +42,8 @@ import type {
   TerminalBackendUpdate,
   TerminalProcessHandle,
   TerminalProcessSpawnInfo,
+  TerminalRunEvent,
+  TerminalRunInFlight,
   TerminalRunInfo,
   TerminalSpawnInfo,
   WsServerEvent,
@@ -260,6 +262,18 @@ export interface TestContext {
       backendId: string,
       info: Partial<TerminalAfterRunInfo> & { chatId: string; command: string },
     ): Promise<{ notices: string[] }>;
+    /**
+     * Put a run in flight, as a chat's shell taking a command anywhere would —
+     * on one of your backends, another plugin's, or `local`. It shows in
+     * `ctx.terminals.runs()` and fires `onRun` "started". Fills `runId`,
+     * `terminal` ("main"), `backend` ("local"), `cwd` ("/repo"), `command`,
+     * `background` and `startedAt`. The host's visibility rule applies: the
+     * plugin sees `command` only for a backend it registered. Returns the run
+     * as core holds it.
+     */
+    startRun(run: Partial<TerminalRunInFlight> & { chatId: string }): TerminalRunInFlight;
+    /** End a run started with `startRun`: gone from `runs()`, `onRun` "ended". False when it wasn't in flight. */
+    endRun(runId: string): boolean;
   };
   /**
    * Play the HOST's side of the cleanup lifecycle (docs/plugins.md → "Cleanup
@@ -861,6 +875,42 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
     };
   }
 
+  // Runs in flight anywhere, as core would report them, and who is listening.
+  const inFlight: TerminalRunInFlight[] = [];
+  const runListeners = new Set<(e: TerminalRunEvent) => void>();
+  // The host's rule: a run elsewhere is counted, but what it runs is not shown.
+  const visibleRun = (run: TerminalRunInFlight): TerminalRunInFlight => {
+    if (terminalBackends.has(run.backend)) return { ...run };
+    const { command: _hidden, ...rest } = run;
+    return rest;
+  };
+  const fireRun = (kind: TerminalRunEvent["kind"], run: TerminalRunInFlight): void => {
+    const event: TerminalRunEvent = { kind, run: visibleRun(run), at: Date.now() };
+    for (const fn of [...runListeners]) {
+      try {
+        fn(event);
+      } catch {
+        // As on the host: a listener's throw never reaches the run.
+      }
+    }
+  };
+  if (ctx.terminals) {
+    ctx.terminals.runs = (filter = {}) =>
+      inFlight
+        .filter(
+          (r) =>
+            (filter.chatId === undefined || r.chatId === filter.chatId) &&
+            (filter.projectId === undefined || r.projectId === filter.projectId) &&
+            (filter.backend === undefined || r.backend === filter.backend),
+        )
+        .sort((a, b) => a.startedAt - b.startedAt)
+        .map(visibleRun);
+    ctx.terminals.onRun = (fn) => {
+      runListeners.add(fn);
+      return () => runListeners.delete(fn);
+    };
+  }
+
   // A fresh `runId` per call, as core gives each run its own. A test pairing a
   // `beforeRun` with its `afterRun` passes the same `runId` to both.
   let runSeq = 0;
@@ -938,6 +988,29 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
     terminalStatus,
     terminalUpdates,
     terminals: {
+      startRun: (run) => {
+        const full: TerminalRunInFlight = {
+          runId: `test-run-${++runSeq}`,
+          terminal: "main",
+          backend: "local",
+          cwd: "/repo",
+          command: "true",
+          background: false,
+          startedAt: Date.now(),
+          ...run,
+        };
+        if (inFlight.some((r) => r.runId === full.runId)) throw new Error(`run "${full.runId}" is already in flight`);
+        inFlight.push(full);
+        fireRun("started", full);
+        return full;
+      },
+      endRun: (runId) => {
+        const i = inFlight.findIndex((r) => r.runId === runId);
+        if (i < 0) return false;
+        const [run] = inFlight.splice(i, 1);
+        fireRun("ended", run!);
+        return true;
+      },
       spawn: (backendId, info) =>
         backendOf(backendId).spawn({
           name: "main",

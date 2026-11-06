@@ -86,6 +86,9 @@ import {
   type TerminalAfterRunInfo,
   type TerminalBackend,
   type TerminalExitReason,
+  type TerminalRunEvent,
+  type TerminalRunFilter,
+  type TerminalRunInFlight,
   type TerminalBackendFallback,
   type TerminalLocation,
   type TerminalInfo,
@@ -638,6 +641,12 @@ interface Terminal {
   hookStop?: () => void;
   /** Set while a `background` command holds this shell (see `run`). */
   background?: { command: string; since: number };
+  /**
+   * The run this shell has taken and not yet let go of — set in `beginRun`,
+   * cleared by {@link TerminalService.settleRun} the moment the shell is free.
+   * What `runs()` lists and `onRun` reports.
+   */
+  run?: { runId: string; startedAt: number; command: string; background: boolean };
   /** The probe dialect THIS shell speaks — a backend's bash under a Windows host. */
   flavour: ShellFlavour;
   /** A command has been written, so a PowerShell has compiled its stdin helper (see `commandWrite`). */
@@ -1304,15 +1313,26 @@ export class TerminalService {
     // every shell took before hooks existed.
     const backend = term.backend;
     if (backend?.beforeRun || backend?.afterRun) return this.execHooked(term, args, backend);
-    this.beginRun(term, args.command);
+    this.beginRun(term, args.command, { background: Boolean(args.background) });
     return this.writeAndWait(term, args).then((end) => end.result);
   }
 
   /** Mark the shell busy with `command` and echo it into the read-only stream. */
-  private beginRun(term: Terminal, command: string): void {
+  private beginRun(term: Terminal, command: string, opts: { runId?: string; background?: boolean } = {}): void {
     term.busy = true;
     term.lastCommand = command;
     term.updatedAt = this.now();
+    // A previous run this shell never reported ending (it cannot happen while
+    // runs are serialized, but a lock built on these events must never see two
+    // runs on one shell) ends first.
+    this.settleRun(term, true);
+    term.run = {
+      runId: opts.runId ?? nanoid(),
+      startedAt: term.updatedAt,
+      command,
+      background: opts.background === true,
+    };
+    this.emitRun("started", term, term.run);
     this.publishUpdate(term);
     // Echo the command into the read-only stream (piped shells don't echo input).
     this.record(term, "command", command);
@@ -1353,7 +1373,9 @@ export class TerminalService {
       const all = [...notices, ...(r.notices ?? []), ...afterLines];
       return all.length ? { ...r, notices: all } : r;
     };
-    this.beginRun(term, command);
+    // The SAME id the hooks get, so a backend can pair what `runs()` / `onRun`
+    // report with its own `beforeRun` / `afterRun`.
+    this.beginRun(term, command, { runId: base.runId, background: base.background });
 
     if (backend.beforeRun) {
       const before = await this.callHook(term, args.signal, hookMs, true, (signal) =>
@@ -1970,6 +1992,7 @@ export class TerminalService {
     term.status = "exited";
     term.busy = false;
     term.updatedAt = this.now();
+    this.settleRun(term);
     if (reason) term.exitReason = reason;
     // An exited shell is not "stalled" any more, whatever it was a moment ago.
     if (term.stall) {
@@ -2013,6 +2036,9 @@ export class TerminalService {
     const term = this.terminals.get(terminalId);
     if (!term) return undefined;
     this.terminals.delete(terminalId);
+    // Whatever it was running is over as far as anyone holding a lock is
+    // concerned: the shell is going, and nothing more will be written to it.
+    this.settleRun(term, true);
     // A command still in `beforeRun` must not be written to a shell being
     // closed; its caller hears "Terminal has exited." now, not after the kill.
     term.hookStop?.();
@@ -2402,7 +2428,77 @@ export class TerminalService {
   }
 
   private publishUpdate(term: Terminal): void {
+    // Every change to `busy` is published through here, so this is where a run
+    // is noticed ending — whichever of the half-dozen ways freed the shell.
+    this.settleRun(term);
     this.bus.publish({ type: "terminal-update", terminal: this.view(term) });
+  }
+
+  /* ------------------------------------------------------- runs in flight */
+
+  private readonly runListeners = new Set<(e: TerminalRunEvent) => void>();
+
+  /**
+   * Every run a managed shell has taken and not let go of, on any location —
+   * what a backend's cross-shell lock reads (`ctx.terminals.runs`). The
+   * command is always here; the plugin context decides who may see it.
+   */
+  runs(filter: TerminalRunFilter = {}): TerminalRunInFlight[] {
+    const out: TerminalRunInFlight[] = [];
+    for (const term of this.terminals.values()) {
+      if (!term.run || term.status !== "live") continue;
+      const run = this.runView(term, term.run);
+      if (filter.chatId !== undefined && run.chatId !== filter.chatId) continue;
+      if (filter.projectId !== undefined && run.projectId !== filter.projectId) continue;
+      if (filter.backend !== undefined && run.backend !== filter.backend) continue;
+      out.push(run);
+    }
+    return out.sort((a, b) => a.startedAt - b.startedAt);
+  }
+
+  /** Hear every run start and end. Returns the unsubscribe. A throwing listener is isolated. */
+  onRun(fn: (e: TerminalRunEvent) => void): () => void {
+    this.runListeners.add(fn);
+    return () => this.runListeners.delete(fn);
+  }
+
+  /** End the shell's run if it is over — the shell is free, gone, or `force`. Idempotent. */
+  private settleRun(term: Terminal, force = false): void {
+    const run = term.run;
+    if (!run) return;
+    if (!force && term.busy && term.status === "live") return;
+    term.run = undefined;
+    this.emitRun("ended", term, run);
+  }
+
+  private emitRun(kind: TerminalRunEvent["kind"], term: Terminal, run: NonNullable<Terminal["run"]>): void {
+    if (!this.runListeners.size) return;
+    const event: TerminalRunEvent = { kind, run: this.runView(term, run), at: this.now() };
+    for (const fn of [...this.runListeners]) {
+      try {
+        fn(event);
+      } catch {
+        // A listener's failure is its own — a plugin's lock bookkeeping must
+        // never be able to break the run it is watching.
+      }
+    }
+  }
+
+  private runView(term: Terminal, run: NonNullable<Terminal["run"]>): TerminalRunInFlight {
+    return {
+      runId: run.runId,
+      chatId: term.chatId,
+      ...(term.projectId ? { projectId: term.projectId } : {}),
+      terminal: term.name,
+      // `backendId` is only set while a backend SERVES the shell; a fallback
+      // runs here, and says so.
+      backend: term.backendId ?? LOCAL_TERMINAL_BACKEND,
+      cwd: term.cwd,
+      command: run.command,
+      // Sent to the background after it started, or asked for up front.
+      background: run.background || Boolean(term.background),
+      startedAt: run.startedAt,
+    };
   }
 }
 

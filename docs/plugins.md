@@ -1246,6 +1246,39 @@ local shell, and never for a shell opened with no command.
 - Notices also land in the transcript as `[<label>] …` lines, so the human
   watching the Terminals panel reads what the agent reads.
 
+**Runs in flight everywhere (`runs` / `onRun`).** A backend's hooks only ever
+tell it about its own shells. A lock that spans more than that — a checkout's
+foreground lock, which a `pnpm install` in a LOCAL shell on the same worktree
+must respect as much as a remote run — needs to see the rest:
+
+```ts
+ctx.terminals.runs?.({ chatId?, projectId?, backend? })   // → TerminalRunInFlight[], oldest first
+const off = ctx.terminals.onRun?.((e) => { /* e.kind: "started" | "ended"; e.run; e.at */ });
+
+// TerminalRunInFlight:
+// { runId, chatId, projectId?, terminal, backend, cwd, command?, background, startedAt }
+```
+
+- **Every location.** This plugin's backends, other plugins', and `local`. A
+  shell that fell back to this machine reports `backend: "local"`, because
+  that is where its command runs.
+- **In flight means the shell is taken.** A run starts when the shell takes
+  it, so before `beforeRun`, and ends when the shell is free again: after
+  `afterRun`, after a backgrounded command really exits, or the moment the
+  shell dies or is closed. A lock built on these events is never left held by
+  a shell that is gone.
+- **Same `runId` as the hooks**, so `runs()` and a backend's own `beforeRun` /
+  `afterRun` pair up.
+- **Counted, not shown.** `command` is present only for runs on this plugin's
+  own backends. A run elsewhere is reported (a lock has to count it) without
+  what it runs: `terminals` is consent to see the commands run on YOUR
+  backends.
+- `runs` is synchronous. A listener that throws is ignored. Deactivation
+  unsubscribes for you.
+- **Feature-detect.** Both members are optional; hosts before them lack them.
+- **Testing.** `t.terminals.startRun({ chatId, backend?, … })` and
+  `t.terminals.endRun(runId)` play core's side, with the same visibility rule.
+
 Before these hooks existed a backend had to sniff stdin to tell the command
 from core's probe (the probe line starts `__cm_ec=` for bash). That still
 works, since core still sends the command and the probe as two separate writes,
