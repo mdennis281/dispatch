@@ -233,15 +233,25 @@ function useChatSearch(
   const [hits, setHits] = useState<ChatSearchHit[]>([]);
   const [progress, setProgress] = useState<ChatSearchProgress | null>(null);
 
+  // Keyed on what the MATCHER sees — trimmed, and lowercased because the
+  // scorer is case-insensitive. Keyed on the raw input, typing the space
+  // before the next word aborted a walk 12 days deep and restarted it from
+  // today for an identical search.
+  const q = query.trim().toLowerCase();
+
   useEffect(() => {
-    const q = query.trim();
     setHits([]);
-    setProgress(null);
-    if (!open || q.length < CHAT_SEARCH_MIN_CHARS) return;
+    if (!open || q.length < CHAT_SEARCH_MIN_CHARS) {
+      setProgress(null);
+      return;
+    }
+    // Running from the first keystroke, not from the end of the debounce:
+    // otherwise a query that matches no command or file (the whole point of
+    // this search) flashes "Nothing matches" for 220ms before the spinner.
+    setProgress({ running: true, ...NO_PROGRESS });
     const abort = new AbortController();
     let count = 0;
     const timer = setTimeout(() => {
-      setProgress({ running: true, ...NO_PROGRESS });
       api.chats
         .search(
           q,
@@ -287,7 +297,7 @@ function useChatSearch(
       clearTimeout(timer);
       abort.abort();
     };
-  }, [query, open]);
+  }, [q, open]);
 
   return { hits, progress };
 }
