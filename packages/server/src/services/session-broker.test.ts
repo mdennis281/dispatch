@@ -6865,3 +6865,45 @@ describe("SessionBroker — MCP placement (E7)", () => {
     expect(placed).toEqual([]);
   });
 });
+
+describe("SessionBroker — plugin agent tools (E8)", () => {
+  it("hands a session every plugin's tool server, bound to its chat, beside Dispatch's own", async () => {
+    const { PluginToolRegistry } = await import("../plugins/tools.js");
+    const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+    const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+    const reg = new PluginToolRegistry();
+    const seen: Array<{ chatId: string; projectId?: string }> = [];
+    reg.register("remote-host", "Remote host", {
+      name: "machine_status",
+      description: "Report the machine's status.",
+      handler: (_a, call) => {
+        seen.push({ chatId: call.chatId, projectId: call.projectId });
+        return "up";
+      },
+    });
+    const { fn, controllers } = makeFakeQuery(async () => [assistantText("ok"), resultMsg()]);
+    const broker = makeBroker(fn, 6, { pluginTools: reg });
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+    const idleP = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "hi");
+    await idleP;
+
+    const servers = (controllers[0]!.options as { mcpServers?: Record<string, { type?: string; instance?: unknown }> })
+      .mcpServers!;
+    expect(Object.keys(servers)).toContain("dispatch-plugin-remote-host");
+    expect(Object.keys(servers)).toContain("dispatch-session");
+    expect(servers["dispatch-plugin-remote-host"]!.type).toBe("sdk");
+
+    // The instance Claude would connect to answers for THIS chat.
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await (servers["dispatch-plugin-remote-host"]!.instance as McpServerLike).connect(serverSide);
+    const client = new Client({ name: "t", version: "1" });
+    await client.connect(clientSide);
+    await client.callTool({ name: "machine_status", arguments: {} });
+    await client.close();
+    expect(seen).toEqual([{ chatId: "c1", projectId: "p1" }]);
+  });
+});
+
+type McpServerLike = { connect(t: unknown): Promise<void> };

@@ -43,7 +43,7 @@ import {
   type Project,
 } from "@dispatch/shared";
 import { managerToolDescriptors, type ManagerToolBindings } from "./manager-mcp.js";
-import { MANAGER_CATEGORIES, isManagerServer, managerServerName } from "@dispatch/shared";
+import { MANAGER_CATEGORIES, isReservedServerName, managerServerName } from "@dispatch/shared";
 
 /** Default per-server probe budget — bounds a hanging/slow external server. */
 export const DEFAULT_PROBE_TIMEOUT_MS = 4_000;
@@ -428,7 +428,7 @@ export async function buildProjectMcpCatalog(
   const external = Object.fromEntries(
     Object.entries(
       (opts.mcpServers ?? project.mcpServers ?? {}) as Record<string, McpServerConfig>,
-    ).filter(([name]) => !isManagerServer(name)),
+    ).filter(([name]) => !isReservedServerName(name)),
   );
   const cwd = opts.cwd ?? project.repoPath;
   // A project may declare a server of the same name as a bundled or plugin
@@ -438,7 +438,7 @@ export async function buildProjectMcpCatalog(
   // bundled one, and the first plugin (by id) to claim a name keeps it.
   const pluginRows: PluginCatalogServer[] = [];
   for (const p of opts.plugins ?? []) {
-    if (p.name in external || isManagerServer(p.name)) continue;
+    if (p.name in external || isReservedServerName(p.name)) continue;
     if (pluginRows.some((r) => r.name === p.name)) continue;
     pluginRows.push(p);
   }

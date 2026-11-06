@@ -37,6 +37,7 @@ import {
   isManagerBridgePath,
   managerCategoryFromPath,
 } from "./manager-http.js";
+import { PluginToolRegistry } from "../../plugins/tools.js";
 
 describe("isManagerBridgePath", () => {
   it("matches every category endpoint the bridge actually serves", () => {
@@ -201,6 +202,55 @@ describe("serving the manager tools", () => {
     for (let i = 0; i < 400 && !check(); i++) await new Promise((r) => setTimeout(r, 5));
     expect(check()).toBe(true);
   };
+
+  it("serves a plugin's tools at the URL urlFor gives, from the grant's own binding (E8)", async () => {
+    const reg = new PluginToolRegistry();
+    const calls: string[] = [];
+    reg.register("remote-host", "Remote host", {
+      name: "machine_status",
+      description: "Report the machine's status.",
+      handler: (_args, call) => {
+        calls.push(call.chatId);
+        return "up";
+      },
+    });
+    const { ctx } = context({ pluginTools: reg.bind({ chatId: "c1" }) });
+    const bridge = new ManagerMcpBridge();
+    bridge.setOrigin(await listen(bridge, "chat"));
+    const grant = bridge.mint("c1", () => ctx);
+    // Exactly what startHarnessSession hands Codex and goose: urlFor over the
+    // session's server names. Before E8 this path answered 404.
+    const url = grant.urlFor("dispatch-plugin-remote-host");
+    expect(new URL(url).pathname).toBe(`${MANAGER_MCP_PATH}/plugin-remote-host`);
+    const client = await connect(url, grant.token);
+    expect((await client.listTools()).tools.map((t) => t.name)).toEqual(["machine_status"]);
+    expect(text(await client.callTool({ name: "machine_status", arguments: {} }))).toBe("up");
+    expect(calls).toEqual(["c1"]);
+  });
+
+  it("404s a plugin path for a grant whose context has no plugin binding, or a plugin with no tools", async () => {
+    const reg = new PluginToolRegistry();
+    reg.register("remote-host", "Remote host", { name: "machine_status", description: "d", handler: () => "up" });
+    const bridge = new ManagerMcpBridge();
+    const origin = await listen(bridge, "chat");
+    bridge.setOrigin(origin);
+    const bare = bridge.mint("c1", () => context().ctx);
+    const bound = bridge.mint("c2", () => context({ pluginTools: reg.bind({ chatId: "c2" }) }).ctx);
+    const post = (url: string, token: string) =>
+      fetch(url, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+      });
+    expect((await post(bare.urlFor("dispatch-plugin-remote-host"), bare.token)).status).toBe(404);
+    expect((await post(bound.urlFor("dispatch-plugin-other"), bound.token)).status).toBe(404);
+    // And no grant at all is still a 401, before any plugin lookup.
+    expect((await post(bound.urlFor("dispatch-plugin-remote-host"), "nope")).status).toBe(401);
+  });
 
   it("serves a chat's tools over HTTP against the context the grant was minted with", async () => {
     const { ctx, asked } = context();

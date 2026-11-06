@@ -73,7 +73,7 @@ import {
   type IssueConfig,
   type ProjectConfigDefaults,
   migrateToolList,
-  isManagerServer,
+  isReservedServerName,
   MANAGER_SERVER_PREFIX,
   realProjects,
   isReadableTerminalBackendId,
@@ -809,13 +809,14 @@ export class ProjectConfigService {
       // the manifest, rather than filtered at each consumer — and reported as a
       // config error, which is what it is, and where a human already looks for
       // "why isn't my config doing anything".
-      if (isManagerServer(server.name)) {
+      if (isReservedServerName(server.name)) {
         errors.push({
           scope: "manifest",
           file: MANIFEST_FILE,
           message:
-            `MCP server "${server.name}" uses a name reserved for Dispatch's own tools. ` +
-            `It is ignored — Dispatch's server of that name is merged last and wins. ` +
+            `MCP server "${server.name}" uses a name reserved for Dispatch's own tools ` +
+            `(and its plugins' tool servers). It is ignored — Dispatch's server of that name ` +
+            `is merged last and wins, and where it has none the name still is not yours. ` +
             `Rename it to something outside the "${MANAGER_SERVER_PREFIX}" prefix.`,
         });
         continue;

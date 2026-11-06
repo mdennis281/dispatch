@@ -50,8 +50,18 @@ import type {
   TerminalSpawnInfo,
   WsServerEvent,
   WsServerEventType,
+  PluginTool,
+  PluginToolCall,
+  PluginToolCallResult,
+  PluginToolInputSchema,
 } from "@dispatch/shared";
 import {
+  PLUGIN_TOOL_LIMITS,
+  PLUGIN_TOOL_NAME_PATTERN,
+  normalizePluginToolResult,
+  pluginToolError,
+  pluginToolThrown,
+  pluginToolQualifiedName,
   PLUGIN_SHARED_LIMITS,
   PLUGIN_APPROVAL_DEFAULT_TIMEOUT_SECONDS,
   PLUGIN_APPROVAL_LIMITS,
@@ -72,6 +82,8 @@ import type { PluginContext, PluginReply, PluginRequest } from "./index.js";
 
 export interface TestContextOptions {
   id?: string;
+  /** The manifest's display name, where the host shows one (a tool's error results). Default: `id`. */
+  name?: string;
   version?: string;
   /** Absolute path the plugin believes it lives at. Default `/plugins/<id>`. */
   dir?: string;
@@ -207,6 +219,27 @@ export interface TestContext {
    * timeout) rejects, as there, and is not recorded.
    */
   approvals: Array<{ chatId: string; request: PluginApprovalRequest; result?: PluginApprovalResult }>;
+  /**
+   * `ctx.tools`, from the agent's side. `register` checks a definition as the
+   * host does (name, the 64-character agent-facing name, description) and
+   * throws on the same mistakes.
+   */
+  tools: {
+    /** Registered tool names, sorted. */
+    list(): string[];
+    /** One registered definition, as the agent's runtime would be handed it. */
+    get(name: string): { name: string; qualifiedName: string; description: string; inputSchema: PluginToolInputSchema } | undefined;
+    /**
+     * Call a tool as an agent would. A string result comes back as one text
+     * block and a throw as `isError: true` with its message, as on the host.
+     * `call` defaults to chat "test-chat" and a signal that never aborts.
+     */
+    call(
+      name: string,
+      args?: Record<string, unknown>,
+      call?: Partial<PluginToolCall>,
+    ): Promise<PluginToolCallResult>;
+  };
   /** The attention items `attention.list` reports. Push to simulate a pending question. */
   attention: AttentionItem[];
   /** `memory.remember` results, keyed by project then name. */
@@ -586,6 +619,7 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
   const replied: TestContext["replied"] = [];
   const answered: TestContext["answered"] = [];
   const approvalLog: TestContext["approvals"] = [];
+  const registeredTools = new Map<string, PluginTool>();
   const attention: AttentionItem[] = [];
   const memory = new Map<string, Map<string, PluginMemoryInput>>();
   const processes = new Map<string, { id: string; status: string; ports?: number[]; url?: string }>();
@@ -695,6 +729,42 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
         });
         entry.result = await Promise.race([scripted, withdrawn]);
         return entry.result;
+      },
+    };
+  }
+
+  if (has("tools")) {
+    ctx.tools = {
+      register: (tool) => {
+        const t = tool as PluginTool;
+        if (!t || typeof t !== "object") throw new Error("tools.register: a tool is an object");
+        if (typeof t.name !== "string" || !PLUGIN_TOOL_NAME_PATTERN.test(t.name)) {
+          throw new Error(`tools.register: name must match ${PLUGIN_TOOL_NAME_PATTERN} (lower snake case)`);
+        }
+        const qualified = pluginToolQualifiedName(id, t.name);
+        if (qualified.length > PLUGIN_TOOL_LIMITS.qualifiedNameLength) {
+          throw new Error(
+            `tools.register: "${qualified}" is ${qualified.length} characters; the agent-facing name may be at most ${PLUGIN_TOOL_LIMITS.qualifiedNameLength}`,
+          );
+        }
+        if (typeof t.description !== "string" || !t.description.trim()) {
+          throw new Error(`tools.register: ${t.name} needs a description`);
+        }
+        if (t.description.length > PLUGIN_TOOL_LIMITS.descriptionLength) {
+          throw new Error(`tools.register: ${t.name}'s description is over ${PLUGIN_TOOL_LIMITS.descriptionLength} characters`);
+        }
+        if (typeof t.handler !== "function") throw new Error(`tools.register: ${t.name} needs a handler`);
+        if (t.inputSchema !== undefined && t.inputSchema?.type !== "object") {
+          throw new Error(`tools.register: ${t.name}'s inputSchema must be a JSON Schema with type "object"`);
+        }
+        if (registeredTools.has(t.name)) throw new Error(`tools.register: "${t.name}" is already registered; unregister it first`);
+        if (registeredTools.size >= PLUGIN_TOOL_LIMITS.toolsPerPlugin) {
+          throw new Error(`tools.register: at most ${PLUGIN_TOOL_LIMITS.toolsPerPlugin} tools per plugin`);
+        }
+        registeredTools.set(t.name, t);
+        return () => {
+          if (registeredTools.get(t.name) === t) registeredTools.delete(t.name);
+        };
       },
     };
   }
@@ -1196,6 +1266,35 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
     replied,
     answered,
     approvals: approvalLog,
+    tools: {
+      list: () => [...registeredTools.keys()].sort(),
+      get: (name) => {
+        const t = registeredTools.get(name);
+        if (!t) return undefined;
+        return {
+          name: t.name,
+          qualifiedName: pluginToolQualifiedName(id, t.name),
+          description: t.description,
+          inputSchema: t.inputSchema ?? { type: "object", properties: {} },
+        };
+      },
+      call: async (name, args = {}, call = {}) => {
+        const t = registeredTools.get(name);
+        if (!t) return pluginToolError(`The tool ${name} is no longer available`);
+        try {
+          const out = await t.handler(args, {
+            chatId: "test-chat",
+            signal: new AbortController().signal,
+            ...call,
+          });
+          // The HOST's normalizer and error text, from shared: a result the
+          // host would cut or refuse is cut or refused here too.
+          return normalizePluginToolResult(out, opts.name ?? id);
+        } catch (err) {
+          return pluginToolThrown(err, opts.name ?? id);
+        }
+      },
+    },
     attention,
     memory,
     processes,

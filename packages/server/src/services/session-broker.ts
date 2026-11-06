@@ -213,6 +213,7 @@ import {
   type ManagerSecretDeleteResult,
   type ManagerSecretRequestResult,
 } from "./mcp/manager-mcp.js";
+import type { PluginToolRegistry } from "../plugins/tools.js";
 import { expandSecretsInMcpServers, type SecretKey, type SecretsService } from "./secrets.js";
 import type { IssueService } from "./issues/service.js";
 import type { ArtifactService } from "./artifacts.js";
@@ -277,6 +278,7 @@ import {
   PROVIDER_UNAVAILABLE,
   type ProviderUnavailable,
   isManagerServer,
+  isReservedServerName,
   managerToolQualifiedName,
   resolveChatPosture,
   resolveLayered,
@@ -1301,6 +1303,8 @@ export interface SessionBrokerOptions {
   idleSweepMs?: number;
   /** Persistent-terminal service exposed to sessions as `mcp__dispatch-workspace__terminal`. */
   terminals?: TerminalService;
+  /** Plugins' agent tools (`ctx.tools`). Absent ⇒ sessions get none. */
+  pluginTools?: Pick<PluginToolRegistry, "bind">;
   /**
    * Plugin terminal backends (#414): told when the idle sweep retires a chat,
    * asked for the "where your terminal runs" prompt section, and the source of
@@ -2511,6 +2515,7 @@ export class SessionBroker {
   private idleSweep?: ReturnType<typeof setInterval>;
   private readonly terminals?: TerminalService;
   private readonly terminalBackends?: SessionBrokerOptions["terminalBackends"];
+  private readonly pluginTools?: SessionBrokerOptions["pluginTools"];
   private readonly mcpPlacement?: SessionBrokerOptions["mcpPlacement"];
   private readonly memory?: MemoryService;
   private readonly secrets?: SecretsService;
@@ -2684,6 +2689,7 @@ export class SessionBroker {
     }
     this.terminals = opts.terminals;
     this.terminalBackends = opts.terminalBackends;
+    this.pluginTools = opts.pluginTools;
     this.mcpPlacement = opts.mcpPlacement;
     this.memory = opts.memory;
     this.secrets = opts.secrets;
@@ -5322,7 +5328,11 @@ export class SessionBroker {
       // A project that declares `dispatch-<category>` by hand must not shadow
       // or duplicate the real one.
       const mcpServers = Object.fromEntries(
-        Object.entries(setup.mcpServers).filter(([name]) => !isManagerServer(name)),
+        // The whole `dispatch-` namespace, not just the categories: a declared
+        // `dispatch-plugin-<id>` would otherwise reach a session in which that
+        // plugin has no tool server of its own (activated late, every tool
+        // denied by the mode) and pass for it.
+        Object.entries(setup.mcpServers).filter(([name]) => !isReservedServerName(name)),
       );
 
       let managerMcp: HarnessSessionSpec["managerMcp"];
@@ -9540,6 +9550,15 @@ ${placedNote}`);
         session.steerListeners.add(listener);
         return () => session.steerListeners.delete(listener);
       },
+      // Plugins' tools, served beside these under `dispatch-plugin-<id>`. The
+      // SAME policy as Dispatch's own: a tool the mode denies is not listed.
+      pluginTools: this.pluginTools?.bind({
+        chatId: session.chatId,
+        projectId: session.projectId,
+        ...(cwd ? { cwd } : {}),
+        toolPolicy: { allowedTools: session.allowedTools, disallowedTools: session.deniedTools },
+        ...(session.abortController ? { signal: session.abortController.signal } : {}),
+      }),
       now: this.now,
     });
     // Lead with a compact inventory of EVERY MCP server this session actually
