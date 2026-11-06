@@ -41,9 +41,28 @@ describe("SecretRefresher", () => {
   it("reloads config BEFORE reconnecting chats, so they pick up the new expansion", async () => {
     const { deps, order } = harness();
     const report = await new SecretRefresher(deps).refresh([{ name: "LINEAR", scope: "global" }]);
-    expect(order).toEqual(["reload:p1", "mcp:p1:linear", "reload:p2", "mcp:p2:linear"]);
+    // Projects run concurrently, so only the order WITHIN each one is fixed.
+    for (const p of ["p1", "p2"]) {
+      expect(order.indexOf(`reload:${p}`)).toBeGreaterThanOrEqual(0);
+      expect(order.indexOf(`reload:${p}`)).toBeLessThan(order.indexOf(`mcp:${p}:linear`));
+    }
+    // ...but the report still reads in project order.
     expect(report.mcpServers).toEqual(["p1/linear", "p2/linear"]);
     expect(report.chatsRefreshed).toEqual(["chat-p1", "chat-p2"]);
+  });
+
+  it("refreshes projects in parallel, so one slow reconnect per project doesn't add up to a 504", async () => {
+    const { deps } = harness();
+    let inFlight = 0;
+    let peak = 0;
+    deps.broker.refreshMcpServers = vi.fn(async (projectId: string) => {
+      peak = Math.max(peak, ++inFlight);
+      await new Promise((r) => setTimeout(r, 20));
+      inFlight--;
+      return { refreshed: [`chat-${projectId}`], nextSession: [] };
+    });
+    await new SecretRefresher(deps).refresh([{ name: "LINEAR", scope: "global" }]);
+    expect(peak).toBe(2);
   });
 
   it("confines a project secret to its own project", async () => {
