@@ -82,6 +82,7 @@
  * per-session factory closed over `{ chatId, bus, broker, signal }`.
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { PluginToolsBinding } from "../../plugins/tools.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod";
 import {
@@ -2288,6 +2289,14 @@ export interface ManagerMcpContext {
    * Omitted → waits ignore steering, exactly as before.
    */
   onSteer?: (listener: () => void) => () => void;
+  /**
+   * Plugins' agent tools (`ctx.tools`), bound to this session. Served beside
+   * Dispatch's own, one `dispatch-plugin-<id>` server per plugin, on both
+   * paths: {@link createManagerMcpServers} for in-process, the bridge for HTTP.
+   * Omitted — the integration mount, which has no chat to tell a handler
+   * about — means no plugin tools.
+   */
+  pluginTools?: PluginToolsBinding;
   now?: () => number;
 }
 
@@ -8935,6 +8944,9 @@ export function createManagerMcpServers(ctx: ManagerMcpContext): Record<string, 
   for (const [category, categoryTools] of boundToolsByCategory(ctx)) {
     servers[managerServerName(category)] = buildCategoryServer(ctx, category, categoryTools);
   }
+  // After Dispatch's own, and under names they can never take: every
+  // category is `dispatch-<category>`, every plugin `dispatch-plugin-<id>`.
+  Object.assign(servers, ctx.pluginTools?.servers());
   return servers;
 }
 

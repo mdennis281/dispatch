@@ -68,6 +68,12 @@ export type {
   PluginSharedLock,
   PluginSharedLockHolder,
   PluginSharedLockOptions,
+  // `ctx.tools.register` (docs/plugins.md → "Agent tools")
+  PluginTool,
+  PluginToolCall,
+  PluginToolContent,
+  PluginToolInputSchema,
+  PluginToolResult,
   // providers — implement `Harness`, describe it with `ProviderDescriptor`,
   // hand both to `ctx.providers.register` (docs/plugins.md → "Providers")
   Harness,

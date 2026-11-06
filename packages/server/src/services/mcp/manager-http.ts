@@ -44,6 +44,7 @@ import {
   managerServerName,
   toolScope,
   type ManagerCategory,
+  PLUGIN_TOOL_SERVER_PREFIX,
 } from "@dispatch/shared";
 
 /** A minted grant: which chat's manager tools a token unlocks. */
@@ -104,6 +105,9 @@ export const INTEGRATION_MCP_ROUTE = `${INTEGRATION_MCP_PATH}/:category`;
 export function isIntegrationBridgePath(path: string): boolean {
   return path === INTEGRATION_MCP_PATH || path.startsWith(`${INTEGRATION_MCP_PATH}/`);
 }
+
+/** The path segment of a plugin's tool server: `dispatch-plugin-<id>` with `dispatch-` stripped. */
+const PLUGIN_SEGMENT_PREFIX = PLUGIN_TOOL_SERVER_PREFIX.replace(/^dispatch-/, "");
 
 /** Recognise a category from a URL segment, or undefined when it isn't one. */
 export function managerCategoryFromPath(segment: string | undefined): ManagerCategory | undefined {
@@ -190,6 +194,20 @@ export class ManagerMcpBridge {
     if (!grant) {
       res.writeHead(401, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: "unauthorized" }));
+      return;
+    }
+    // A plugin's tools: `urlFor` stripped `dispatch-` from `dispatch-plugin-<id>`.
+    // Built from the grant's own context, so a grant only ever reaches the
+    // plugin servers its session was bound to — and none at all from a
+    // context with no `pluginTools`.
+    if (category?.startsWith(PLUGIN_SEGMENT_PREFIX)) {
+      const server = grant.context().pluginTools?.server(`dispatch-${category}`);
+      if (!server) {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "plugin-tools-unavailable", server: `dispatch-${category}` }));
+        return;
+      }
+      await this.serve(req, res, body, server);
       return;
     }
     const resolved = managerCategoryFromPath(category);

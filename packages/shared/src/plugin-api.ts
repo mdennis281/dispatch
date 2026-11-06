@@ -116,6 +116,97 @@ export const PLUGIN_SHUTDOWN_BUDGET_MS = 5_000;
 /** Budget for one {@link PluginModule.reconcile}. Nothing waits for it but the plugin itself. */
 export const PLUGIN_RECONCILE_BUDGET_MS = 120_000;
 
+/**
+ * Every plugin's agent tools are served from ONE MCP server named this plus the
+ * plugin id, so the agent calls `mcp__dispatch-plugin-<id>__<tool>`. Under the
+ * reserved `dispatch-` prefix on purpose: neither a project's `mcpServers` nor
+ * a plugin's own contributed servers may use it, so nothing can shadow it.
+ */
+export const PLUGIN_TOOL_SERVER_PREFIX = "dispatch-plugin-";
+
+/** The server a plugin's tools are served from. */
+export function pluginToolServerName(pluginId: string): string {
+  return `${PLUGIN_TOOL_SERVER_PREFIX}${pluginId}`;
+}
+
+/** The name an agent calls a plugin tool by. */
+export function pluginToolQualifiedName(pluginId: string, tool: string): string {
+  return `mcp__${pluginToolServerName(pluginId)}__${tool}`;
+}
+
+/** A plugin tool's own name: lower snake case, as the agent sees it after the server. */
+export const PLUGIN_TOOL_NAME_PATTERN = /^[a-z][a-z0-9_]*$/;
+
+/** `ctx.tools` limits. */
+export const PLUGIN_TOOL_LIMITS = {
+  /**
+   * The QUALIFIED name, `mcp__dispatch-plugin-<id>__<tool>`. 64 is what an
+   * OpenAI-style function name allows, which is what Codex hands its model;
+   * a longer one is truncated or refused there, so it is refused HERE, at
+   * register, where the plugin author sees it.
+   */
+  qualifiedNameLength: 64,
+  descriptionLength: 4_000,
+  /** Tools one plugin may have registered at once. */
+  toolsPerPlugin: 32,
+  /** All text in one result, in characters. More is cut, and the result says so. */
+  resultTextLength: 200_000,
+  /** Images in one result. */
+  resultImages: 8,
+  /** One image's base64 length (≈ 3.75 MB decoded). */
+  imageBase64Length: 5_000_000,
+} as const;
+
+/** Image types a tool result may carry, the ones every runtime renders. */
+export const PLUGIN_TOOL_IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
+
+/** What a plugin tool's handler learns about the call it is serving. */
+export interface PluginToolCall {
+  /** The chat whose agent called the tool. */
+  chatId: string;
+  projectId?: string;
+  /** The chat's working directory: its worktree, else the project root. */
+  cwd?: string;
+  /**
+   * Aborts when the agent's call is cancelled (the human pressed stop, the
+   * turn was interrupted) or the session ends. Stop the work and return.
+   */
+  signal: HostAbortSignal;
+}
+
+/** One block of a tool result. `data` is base64, without a `data:` prefix. */
+export type PluginToolContent =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: (typeof PLUGIN_TOOL_IMAGE_TYPES)[number] };
+
+/**
+ * A plain string is one text block. `isError: true` tells the agent the call
+ * failed; a handler that THROWS gets the same, with the error's message.
+ */
+export type PluginToolResult = string | { content: PluginToolContent[]; isError?: boolean };
+
+/**
+ * A JSON Schema for the tool's arguments: an object, as MCP requires. Handed
+ * to the runtime as written — it is what the model reads to call the tool —
+ * and NOT enforced by Dispatch: validate `args` in the handler.
+ */
+export interface PluginToolInputSchema {
+  type: "object";
+  properties?: Record<string, unknown>;
+  required?: string[];
+  [k: string]: unknown;
+}
+
+export interface PluginTool<Args extends Record<string, unknown> = Record<string, unknown>> {
+  /** See {@link PLUGIN_TOOL_NAME_PATTERN} and {@link PLUGIN_TOOL_LIMITS.qualifiedNameLength}. */
+  name: string;
+  /** What the model reads to decide when to call it. Say what it does, what it returns, and when not to use it. */
+  description: string;
+  /** Omitted: the tool takes no arguments. */
+  inputSchema?: PluginToolInputSchema;
+  handler(args: Args, call: PluginToolCall): PluginToolResult | Promise<PluginToolResult>;
+}
+
 /** `ctx.shared`'s database, in the CONFIG root (beside config.json and secrets.json). */
 export const PLUGIN_SHARED_DB_FILENAME = "plugin-shared.db";
 /** `ctx.shared` limits: a key, a lock name, a value's JSON, and a lease. */
@@ -671,6 +762,28 @@ export interface PluginContext<Req = unknown, Reply = unknown> {
     lock(name: string, opts?: PluginSharedLockOptions): Promise<PluginSharedLock | undefined>;
     /** Who holds `name` now, if anyone. */
     holder(name: string): Promise<PluginSharedLockHolder | undefined>;
+  };
+
+  /**
+   * `tools` — give every chat's agent a tool whose handler is this plugin's
+   * code, running in Dispatch. The agent calls it as
+   * `mcp__dispatch-plugin-<id>__<name>`, on every runtime (Claude in-process,
+   * Codex and goose over Dispatch's MCP bridge), and the handler is told which
+   * chat called.
+   *
+   * - **Register in `activate()`.** A session takes the tools registered when
+   *   it STARTS; one already running (a chat resumed while plugins were still
+   *   activating) gets them from its next session.
+   * - **Gated like any MCP tool.** A call asks the human unless the mode or an
+   *   "always allow" says otherwise, and a mode can deny it by name.
+   * - **The handler is looked up per call.** After the plugin is disabled or
+   *   updated, a session still holding the tool gets an error result, or the
+   *   new code — never the old.
+   *
+   * Returns the unregister. Deactivation unregisters everything.
+   */
+  tools?: {
+    register<Args extends Record<string, unknown> = Record<string, unknown>>(tool: PluginTool<Args>): () => void;
   };
 
   /** `memory` */

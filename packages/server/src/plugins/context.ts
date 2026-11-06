@@ -18,6 +18,7 @@
  * not declare is not on the object. That is enforcement enough for code the
  * owner chose to install; the point is the consent card, not containment.
  */
+import type { PluginToolRegistry } from "./tools.js";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import Router from "find-my-way";
 import {
@@ -131,6 +132,8 @@ export interface PluginContextDeps {
   broker: PluginQuestionAnswerer;
   /** `ctx.approvals`. Absent in a context built without one; then the member is absent too. */
   approvals?: PluginApprover;
+  /** `ctx.tools`: where registered agent tools go, and what every session serves from. */
+  tools?: Pick<PluginToolRegistry, "register" | "unregisterAll">;
   /**
    * `ctx.shared`'s database in the config root. Absent in a context built
    * without one; then the member is absent too.
@@ -591,6 +594,18 @@ export function buildPluginContext(
     owned.offs.push(() => {
       approvals.cancelPluginApprovals(id);
     });
+  }
+
+  if (has("tools") && deps.tools) {
+    const tools = deps.tools;
+    ctx.tools = {
+      // Under the MANIFEST's id and name: a plugin cannot serve a tool from
+      // another plugin's server, or have its errors read as another's.
+      register: (tool) => tools.register(id, manifest.name, tool as never),
+    };
+    // Deactivation (disable, update, uninstall) takes them all back. A session
+    // still holding the server gets "no longer available" from the next call.
+    owned.offs.push(() => tools.unregisterAll(id));
   }
 
   if (has("memory")) {

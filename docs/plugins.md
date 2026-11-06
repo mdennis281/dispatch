@@ -139,6 +139,7 @@ and a manifest whose range excludes it — or cannot be parsed — is listed as
 | `approvals` | `ctx.approvals.request` — see "Approval requests" |
 | `runner` | `ctx.runner.list/reservedPorts` — see "Local ports" |
 | `shared` | `ctx.shared` — values and leased locks every instance on the machine shares; see "Shared state and locks" |
+| `tools` | `ctx.tools.register` — tools every chat's agent can call, run as this plugin's code; see "Agent tools" |
 
 A capability the manifest does not declare is simply absent from the context
 object the plugin receives — the members are typed optional for that reason.
@@ -1010,6 +1011,73 @@ if (r?.decision !== "approved") return refuse();
   settles is a card nobody answers, which the request's `signal` withdraws).
   The default is `timeout`. Every request is recorded in `t.approvals` with its
   result, and the host's refusals reject there too.
+
+#### Agent tools
+
+`tools` adds `ctx.tools.register(tool)`. It gives every chat's agent a tool whose
+handler is the plugin's own code, running inside Dispatch. The handler is told
+which chat called. Use it for something the agent should ASK for, rather than
+something that happens to it: remote-host's `remote_fetch` (copy an xcresult or
+a screenshot off the machine into the chat's worktree) and machine status.
+
+```ts
+ctx.tools?.register<{ path: string }>({
+  name: "remote_fetch",                      // lower snake case
+  description: "Copy a file from the chat's remote machine into its worktree. Returns the local path.",
+  inputSchema: {                             // JSON Schema, type "object"; omit for no arguments
+    type: "object",
+    properties: { path: { type: "string", description: "Absolute path on the machine" } },
+    required: ["path"],
+  },
+  handler: async (args, call) => {           // call: { chatId, projectId?, cwd?, signal }
+    const local = await fetchFrom(call.chatId, args.path, call.signal);
+    return `Saved to ${local}`;              // or { content: [{ type: "text", text } | { type: "image", data, mimeType }], isError? }
+  },
+});
+```
+
+- **What the agent sees.** `mcp__dispatch-plugin-<id>__<name>`, one MCP server
+  per plugin, on every runtime: in-process on Claude, over Dispatch's per-chat
+  MCP bridge on Codex and goose.
+  - The server name uses the reserved `dispatch-` prefix, so neither a
+    project's `mcpServers` nor any plugin's contributed servers can shadow it.
+  - The whole name may be at most 64 characters, the limit for a function name
+    on Codex. `register` throws past it, naming the limit.
+- **Register in `activate()`.** A session takes the tools registered when it
+  STARTS.
+  - A session already running when the plugin activated does not see them
+    until its next session. Installed plugins activate after the port opens,
+    so this includes a chat auto-resumed at boot.
+  - A tool registered later is listed to new sessions, and to HTTP runtimes on
+    their next list.
+- **Gated like any MCP tool.** On Claude, a call asks the human on the usual
+  permission card unless the mode or an "Always allow" covers it.
+  - A mode can deny a tool by its full name. A denied tool is not listed at
+    all, and a call that names it anyway is refused.
+  - Codex does not ask before an MCP call (this is not specific to plugin
+    tools). A tool that does something irreversible should ask the human
+    itself, with `ctx.approvals`.
+- **The handler is looked up per call.** A session built before the plugin was
+  disabled, updated or uninstalled gets "no longer available", or the NEW
+  code. It never gets the old closure running against torn-down state.
+  Deactivation unregisters everything, and `register` returns the unregister
+  for one tool.
+- **Results.**
+  - A string is one text block. A throw is an error result carrying its
+    message, prefixed with the plugin's name.
+  - Text past 200,000 characters is cut, and the result says so.
+  - Images are base64 without a `data:` prefix, PNG, JPEG, GIF or WebP, at most
+    8 per result and about 3.75 MB each. A malformed block is an error.
+- **Arguments are not validated by Dispatch.** The schema is what the model
+  reads. Check `args` in the handler.
+- **`call.signal`** aborts when the agent's call is cancelled or the session
+  ends. Stop the work and return.
+- **Limits.** 32 tools per plugin, and a description of at most 4,000
+  characters. The same name twice throws.
+- **Feature-detect it.** `ctx.tools?.register` is absent on hosts before it.
+- **Testing.** `t.tools.list()`, `t.tools.get(name)` (the agent-facing name and
+  schema), and `t.tools.call(name, args, { chatId })`, which returns what the
+  agent would get. `register` throws on the same mistakes as the host.
 
 #### Local ports
 

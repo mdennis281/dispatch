@@ -116,6 +116,7 @@ import { AccountLogins } from "./account-login.js";
 import { ManagerMcpBridge } from "./mcp/manager-http.js";
 import { PluginService } from "../plugins/service.js";
 import { PluginSharedStore, pluginSharedDbPath } from "../plugins/shared-state.js";
+import { PluginToolRegistry } from "../plugins/tools.js";
 import { findShippedPluginsRoot } from "../plugins/shipped.js";
 import { PluginInspector } from "../plugins/inspect/index.js";
 import { PluginUpdateWatcher, pluginUpdateHours } from "../plugins/inspect/watcher.js";
@@ -631,6 +632,8 @@ export function createServices(
       // the sweep refreshes the tracker for every other reader too.
       listingTable: async () => (await processTracker.read(true)).rows,
     });
+  // `ctx.tools`: plugins register into it, every session serves from it.
+  const pluginTools = new PluginToolRegistry();
   const broker =
     overrides.broker ??
     new SessionBroker({
@@ -641,6 +644,7 @@ export function createServices(
       idleSessionMinutes: config.idleSessionMinutes,
       terminals,
       terminalBackends,
+      pluginTools,
       mcpPlacement,
       memory,
       secrets,
@@ -1400,6 +1404,7 @@ export function createServices(
         messenger: chatMessenger,
         broker,
         approvals: broker,
+        tools: pluginTools,
         sharedState: pluginShared,
         pluginOAuth,
         // Announced on the bus either way: a chat's provider-unavailable state
