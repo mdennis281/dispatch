@@ -655,6 +655,10 @@ export type MetricSpanSummary = z.infer<typeof MetricSpanSummarySchema>;
  * docblock), so one row already covers a chat's main loop and everything it
  * spawned.
  *
+ * RUNNING time only — `thinking` and `working` spans. `blocked` spans (queued
+ * for a slot, waiting on a human or a PR, asleep) are left out: a chat parked
+ * in the queue all afternoon did not run all afternoon.
+ *
  * Every chat in one answer and no window, unlike {@link MetricSpanTotal}, which
  * caps at 50 groups and folds the rest into `__other__` — right for a top-N
  * chart, useless for labelling three hundred sidebar rows whose work finished
