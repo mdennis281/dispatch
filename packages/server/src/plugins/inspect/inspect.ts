@@ -479,7 +479,7 @@ export async function inspectPluginDir(dir: string, opts: InspectDirOptions): Pr
 
   const clientDir = m?.client ? manifestPathDir(m.client) : undefined;
   const serverCodeScanned = scanned.some((f) => !clientDir || !f.path.startsWith(`${clientDir}/`));
-  const CODE_CAPS: PluginCapability[] = ["events", "routes", "chats:read", "chats:write", "memory", "secrets", "secrets:write", "kv", "approvals"];
+  const CODE_CAPS: PluginCapability[] = ["events", "routes", "chats:read", "chats:write", "memory", "secrets", "secrets:write", "kv", "approvals", "runner"];
   const usedOf = (cap: PluginCapability): boolean | null => {
     if (reasons.has(cap)) return true;
     if (destructuredChats && (cap === "chats:read" || cap === "chats:write")) return true;

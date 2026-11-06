@@ -19,6 +19,8 @@ import type {
   PluginApprovalDecision,
   PluginApprovalRequest,
   PluginApprovalResult,
+  PluginReservedPort,
+  PluginRunnerProcess,
   PluginAskResult,
   PluginCapability,
   PluginChatState,
@@ -195,6 +197,13 @@ export interface TestContext {
   memory: Map<string, Map<string, PluginMemoryInput>>;
   /** Processes `ctx.processes` believes exist. Start/stop flip `status`. */
   processes: Map<string, { id: string; status: string; ports?: number[]; url?: string }>;
+  /**
+   * What `ctx.runner` reports. Push to simulate this machine: `runnerProcesses`
+   * is `list()`, `reservedPorts` is `reservedPorts()`. Starts with Dispatch's
+   * own ports, as a real host's deny-list always does.
+   */
+  runnerProcesses: PluginRunnerProcess[];
+  reservedPorts: PluginReservedPort[];
   /** OAuth: what `ctx.oauth.token(name)` returns. Set to simulate a connected provider. */
   oauthTokens: Map<string, string>;
   /** Every `ctx.providers.register` call, in order. */
@@ -542,6 +551,14 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
   const attention: AttentionItem[] = [];
   const memory = new Map<string, Map<string, PluginMemoryInput>>();
   const processes = new Map<string, { id: string; status: string; ports?: number[]; url?: string }>();
+  const runnerProcesses: PluginRunnerProcess[] = [];
+  // A real host always reserves these (server `dispatchPorts`), so a plugin's
+  // test sees the same floor it will meet in production.
+  const reservedPorts: PluginReservedPort[] = [
+    { port: 4318, owner: "dispatch", reason: "the installed Dispatch instance's default port" },
+    { port: 4319, owner: "dispatch", reason: "the development Dispatch instance's default port" },
+    { port: 24678, owner: "dispatch", reason: "a development Dispatch instance's live-reload socket" },
+  ];
   const oauthTokens = new Map<string, string>();
   const providers: TestContext["providers"] = [];
   const terminalBackends = new Map<string, TerminalBackend>();
@@ -793,6 +810,13 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
     };
   }
 
+  if (has("runner")) {
+    ctx.runner = {
+      list: async () => runnerProcesses.map((p) => ({ ...p, ports: [...p.ports] })),
+      reservedPorts: async () => [...reservedPorts].sort((a, b) => a.port - b.port).map((p) => ({ ...p })),
+    };
+  }
+
   if (has("oauth")) {
     ctx.oauth = {
       connectUrl: async (name) => `https://example.invalid/oauth/authorize?client=${encodeURIComponent(name)}`,
@@ -1005,6 +1029,8 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
     attention,
     memory,
     processes,
+    runnerProcesses,
+    reservedPorts,
     oauthTokens,
     providers,
     terminalBackends,

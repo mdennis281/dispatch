@@ -13,7 +13,8 @@
  * Tests pass fully-formed fakes via `overrides`; production gets the real
  * execa/SDK-backed services. `start()`/`dispose()` bound the background work.
  */
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { readFile } from "node:fs/promises";
 import type { ServerConfig } from "../config.js";
 // Value import (not `import type`): the InspectService needs to CONSTRUCT a
 // second Store over the installed instance's roots for `instance: "stable"`.
@@ -58,7 +59,8 @@ import { MemoryCommitter } from "./memory-committer.js";
 import { MemoryHistoryService } from "./memory-history.js";
 import { ProjectConfigService } from "./project-config.js";
 import { ProjectConfigArchive } from "./project-config-archive.js";
-import { InspectService, installedRoots } from "./inspect.js";
+import { InspectService, installedRootPaths, installedRoots } from "./inspect.js";
+import { dispatchPorts } from "../plugins/runner-view.js";
 import { TitleService, makeFakeTitleGenerator } from "./title.js";
 import { CheckpointService } from "./checkpoint.js";
 import { WorktreeService } from "./worktree.js";
@@ -1371,6 +1373,20 @@ export function createServices(
         // further down, once the runner and broker it drives exist.
         refreshSecrets: (keys) => secretRefresher.refresh(keys),
         instance: currentInstance,
+        // `ctx.runner.reservedPorts()`: this instance's port, and the installed
+        // one's as its launcher wrote it — it scans up from 4318 when that is
+        // taken, so the default alone can name the wrong port. Read per call:
+        // the other instance comes and goes.
+        dispatchPorts: async () => {
+          const runtime = join(dirname(installedRootPaths().dataDir), "runtime.json");
+          const stablePort = await readFile(runtime, "utf8")
+            .then((raw) => (JSON.parse(raw) as { port?: unknown }).port)
+            .catch(() => undefined);
+          return dispatchPorts({
+            ownPort: config.port,
+            ...(typeof stablePort === "number" ? { stablePort } : {}),
+          });
+        },
         inspect,
         memory,
         attention,

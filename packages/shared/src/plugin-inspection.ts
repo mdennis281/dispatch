@@ -38,6 +38,8 @@ export const PLUGIN_CAPABILITY_LINES: Record<z.infer<typeof PluginCapabilitySche
     "Runs your chats' managed terminals somewhere else (a container, another machine) and sees every command and its output there.",
   approvals:
     "Asks you to approve or deny an action it is about to take, on a card in your chats — the same card a tool-call permission uses.",
+  runner:
+    "Sees which local ports your projects' sub-apps, its fellow plugins and Dispatch itself hold or reserve, and which project and chat each belongs to.",
 };
 
 /** Where the inspected files came from, and exactly which commit. */

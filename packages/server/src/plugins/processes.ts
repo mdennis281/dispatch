@@ -73,6 +73,11 @@ export class PluginProcessHost {
     return this.specs.get(pluginId)?.processes ?? [];
   }
 
+  /** Every plugin's declarations, for `ctx.runner.reservedPorts()`. */
+  *allDeclared(): Iterable<{ pluginId: string; processes: readonly PluginProcess[] }> {
+    for (const [pluginId, { processes }] of this.specs) yield { pluginId, processes };
+  }
+
   private spec(pluginId: string, id: string): { dir: string; spec: PluginProcess } {
     const entry = this.specs.get(pluginId);
     const spec = entry?.processes.find((p) => p.id === id);

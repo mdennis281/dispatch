@@ -65,6 +65,8 @@ import {
   type SkillConfig,
 } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
+import type { PluginContext } from "@dispatch/shared";
+import { createRunnerView, dispatchPorts } from "./runner-view.js";
 import { KeyedMutex } from "../store/fsq.js";
 import { recordFault } from "../crash-log.js";
 import type { InstructionFile, PluginContributionSource } from "../services/authored-config.js";
@@ -156,7 +158,7 @@ export interface PluginServiceOptions {
   shippedRoot?: string;
   store: Store;
   /** Everything the context adapts over, minus what the service supplies itself. */
-  context: Omit<PluginContextDeps, "log" | "settings" | "store" | "processes">;
+  context: Omit<PluginContextDeps, "log" | "settings" | "store" | "processes" | "runner">;
   /**
    * The sub-app runner, which plugin processes run through. Optional so the
    * host still comes up without one (tests, a stripped container); then
@@ -239,6 +241,8 @@ export class PluginService implements PluginContributionSource {
   private readonly ctxDeps: PluginServiceOptions["context"];
   /** Present when the container handed over a runner; see {@link PluginServiceOptions.runner}. */
   private readonly processHost: PluginProcessHost | undefined;
+  /** `ctx.runner`, one view shared by every plugin that declares `runner`. */
+  private readonly runnerView: PluginContext["runner"];
   private readonly activateBudgetMs: number;
   private readonly deactivateBudgetMs: number;
   private readonly shutdownBudgetMs: number;
@@ -296,6 +300,15 @@ export class PluginService implements PluginContributionSource {
     this.processHost = opts.runner
       ? new PluginProcessHost({ runner: opts.runner, portFree: opts.portFree, log: this.log })
       : undefined;
+    const processHost = this.processHost;
+    this.runnerView =
+      opts.runner && processHost
+        ? createRunnerView({
+            runner: opts.runner,
+            declared: () => processHost.allDeclared(),
+            dispatchPorts: async () => (await this.ctxDeps.dispatchPorts?.()) ?? dispatchPorts({}),
+          })
+        : undefined;
   }
 
   /** `<configDir>/plugins` — what "open folder" and the CLI both point at. */
@@ -458,6 +471,7 @@ export class PluginService implements PluginContributionSource {
           settings: () => rec.settings,
           setSettings: (patch) => this.writeSettings(rec, (stored) => applySettingsPatch(stored, patch)),
           processes: this.processHost?.for(rec.id),
+          runner: this.runnerView,
         },
         owned,
       );

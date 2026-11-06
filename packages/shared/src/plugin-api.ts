@@ -368,6 +368,61 @@ export interface PluginInstance {
   readonly reminted?: { readonly at: string; readonly reason: PluginInstanceRemintReason };
 }
 
+/* ------------------------------------------------------------ ctx.runner (E10/E26) */
+
+/** Who a running process belongs to. */
+export type PluginRunnerOwner =
+  /** A project's sub-app (`run_subapp`, the Ports & processes panel). */
+  | { kind: "sub-app"; projectId?: string; chatId?: string; subAppId: string; branch?: string }
+  /** A plugin's managed process (`contributes.processes`). */
+  | { kind: "plugin"; pluginId: string; processId: string };
+
+/** One process Dispatch runs on this machine that holds local ports, as `ctx.runner.list()` reports it. */
+export interface PluginRunnerProcess {
+  id: string;
+  owner: PluginRunnerOwner;
+  status: "starting" | "running" | "stopping";
+  /** The local ports it holds (allocated, so not necessarily the declared ones). */
+  ports: number[];
+  url?: string;
+  /** A singleton the OTHER Dispatch instance spawned; this one only found it on its port. */
+  adopted?: boolean;
+}
+
+/**
+ * A local port a plugin must neither bind nor expose to another machine,
+ * whether or not anything holds it right now. As `ctx.runner.reservedPorts()`
+ * reports it.
+ */
+export interface PluginReservedPort {
+  port: number;
+  /** `dispatch` for Dispatch's own ports; `plugin:<id>` for a port a plugin declares or holds. */
+  owner: string;
+  /** One line for a log or a refusal: "the installed (stable) Dispatch instance". */
+  reason: string;
+}
+
+/** `ctx.runner` (capability `runner`). */
+export interface PluginRunnerView {
+  /** Processes running now — sub-apps of every project, and every plugin's processes. Stopped ones are left out. */
+  list(): Promise<PluginRunnerProcess[]>;
+  /**
+   * The deny-list, sorted by port, one entry per port:
+   * - Dispatch's own: this instance's port, the installed instance's actual
+   *   port, both instances' default ports (4318, 4319) and the dev server's
+   *   live-reload socket. Reserved even while the instance is down: a forward
+   *   parked on 4319 stops `pnpm dev` from starting — or, on Windows, lets it
+   *   bind the same port and answer half the requests.
+   * - Every installed plugin's declared process ports, and the ports its
+   *   processes hold now.
+   *
+   * Never forward ONTO one of these, and never reverse-forward one to another
+   * machine: a Dispatch port reachable from a remote shell is an API that
+   * creates chats and runs commands here.
+   */
+  reservedPorts(): Promise<PluginReservedPort[]>;
+}
+
 /**
  * The context. Members gated by a capability (see docs/plugins.md →
  * "Capabilities") are OPTIONAL here because they are genuinely absent from the
@@ -534,6 +589,14 @@ export interface PluginContext<Req = unknown, Reply = unknown> {
     stop(id: string): Promise<void>;
     list(): Promise<Array<{ id: string; status: string; ports?: number[]; url?: string }>>;
   };
+  /**
+   * `runner` — read-only: which LOCAL ports the processes Dispatch runs hold,
+   * and which ports are not a plugin's to take (docs/plugins.md → "Local
+   * ports"). For a plugin that binds or exposes ports on this machine: a
+   * terminal backend choosing where to forward a remote listener, or deciding
+   * whether a reverse forward would hand another machine a Dispatch port.
+   */
+  runner?: PluginRunnerView;
   /**
    * `oauth` — the host-run client flow for the manifest's `oauth.clients`.
    * `connectUrl` mints a single-use state and returns the provider URL to send
