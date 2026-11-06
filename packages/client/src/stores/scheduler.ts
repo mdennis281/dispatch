@@ -8,7 +8,7 @@
  * not whether a running chat is actually holding a slot or blocked on CI.
  */
 import { create } from "zustand";
-import type { SchedulerSnapshot } from "@dispatch/shared";
+import type { ChatStatus, SchedulerSnapshot } from "@dispatch/shared";
 import { api } from "../lib/api.js";
 import { useNotices } from "./notices.js";
 
@@ -131,3 +131,45 @@ export const useScheduler = create<SchedulerStore>((set, get) => {
     }
   }
 });
+
+/**
+ * The status a chat is DRAWN with, which is not always the one it has.
+ *
+ * A chat whose blocking call has answered (`watch_pr` saw CI finish, a `wait`
+ * ran out) but which gave its slot up while it was blocked is parked to RESUME:
+ * the broker holds the answer until a slot frees. Its status stays `waiting`,
+ * and must — the turn is live, so a message still steers it instead of opening
+ * a new one. But drawn as Waiting it sat beside every chat still parked on CI,
+ * and the two want opposite things from the human: this one is done waiting
+ * and Run now lets it finish; the other has nothing to run yet. So it is drawn
+ * as what it is — back in the scheduler's queue.
+ *
+ * Any turn-live status, not just `waiting`: a permission answered while the
+ * cap is full parks the same way with the status still `awaiting-input`, and a
+ * card that is genuinely still open is marked by the attention store on its
+ * own, so nothing a human must act on is hidden by reading Queued here.
+ */
+export function displayStatus(
+  status: ChatStatus | undefined,
+  resumeQueued: boolean,
+): ChatStatus | undefined {
+  if (!resumeQueued) return status;
+  return status === "waiting" || status === "running" || status === "awaiting-input"
+    ? "queued"
+    : status;
+}
+
+/** Does the scheduler hold this chat's answer until it gets a slot back? */
+export function isResumeQueued(snapshot: SchedulerSnapshot | null, chatId: string): boolean {
+  return snapshot?.queued.some((q) => q.chatId === chatId && q.kind === "resume") ?? false;
+}
+
+/**
+ * {@link displayStatus} for one row. The selector returns a boolean, so a
+ * scheduler push re-renders only the rows whose answer flipped — the sidebar
+ * draws hundreds of these.
+ */
+export function useDisplayStatus(chatId: string, status: ChatStatus | undefined): ChatStatus | undefined {
+  const resumeQueued = useScheduler((s) => isResumeQueued(s.snapshot, chatId));
+  return displayStatus(status, resumeQueued);
+}

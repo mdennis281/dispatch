@@ -82,6 +82,7 @@ import { Card } from "../metrics/chrome.js";
 import { relTimeShort } from "../../lib/format.js";
 import { cn } from "../../lib/cn.js";
 import { useProjectChats } from "../../stores/chats.js";
+import { useDisplayStatus } from "../../stores/scheduler.js";
 import { BranchMark, OrphanPrRow, PrMark } from "./rowBits.js";
 import {
   orphanPrs,
@@ -453,7 +454,7 @@ function ChatRow({
   // the one question this page exists to answer. The child rows omit it for the
   // same reason `ReviewRow`/`SpawnRow` do: a reviewer's PR is somebody else's.
   const prSettled = useChats((s) => (depth === 0 ? (s.prSettled[chat.id] ?? false) : false));
-  const meta = statusMeta(chat.status, prSettled, isUnstartedChat(chat));
+  const meta = statusMeta(useDisplayStatus(chat.id, chat.status), prSettled, isUnstartedChat(chat));
   const worktrees = ctx.worktrees.get(chat.id) ?? EMPTY_TREES;
   // A reviewer's `#139` is the PR it is READING, which the column below already
   // draws from `reviewTargetKey`. Its own `prs` would be empty anyway, but
