@@ -20,6 +20,7 @@ import * as z from "zod";
 import {
   EffortSchema,
   HarnessKindSchema,
+  McpLocationSchema,
   McpServerConfigSchema,
   PermissionModeSchema,
   ShellTranscriptFilterSchema,
@@ -160,6 +161,12 @@ export const ManifestMcpServerSchema = z.object({
    * booting the dev server it fronts). Best-effort — never fails the worktree.
    */
   prewarm: z.string().optional(),
+  /**
+   * Which machine a STDIO server runs on: `local` (the default), `terminal`
+   * (wherever the chat's terminals run), or a terminal backend id. See
+   * `McpLocationSchema`. The command runs there exactly as written.
+   */
+  location: McpLocationSchema.optional(),
 });
 export type ManifestMcpServer = z.infer<typeof ManifestMcpServerSchema>;
 
@@ -248,6 +255,15 @@ export const BrowserMcpConfigSchema = z.object({
     .string()
     .regex(/^\d+x\d+$/, 'viewport must look like "1280x800"')
     .default("1280x800"),
+  /**
+   * Where the two browser servers run — see `McpLocationSchema`. Default
+   * `terminal`: a chat whose terminals run on another machine drives a
+   * browser on THAT machine, where the dev server it started answers on
+   * `localhost` (Michael's call, 2026-10-31). Falls back to local only when
+   * that location cannot host processes at all; a chat's `mcpLocations` entry
+   * for `playwright` / `chrome-devtools` overrides it per server.
+   */
+  location: McpLocationSchema.default("terminal"),
 });
 export type BrowserMcpConfig = z.infer<typeof BrowserMcpConfigSchema>;
 

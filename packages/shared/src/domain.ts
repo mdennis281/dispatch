@@ -7,6 +7,7 @@ import * as z from "zod";
 import {
   EffortSchema,
   HarnessKindSchema,
+  McpLocationSchema,
   McpServerConfigSchema,
   PermissionModeSchema,
   ChatStatusSchema,
@@ -989,6 +990,13 @@ export const ChatSchema = z.object({
    * `TERMINAL_BACKEND_REF_PATTERN`).
    */
   terminalBackend: TerminalBackendRefSchema.optional(),
+  /**
+   * Where this chat's MCP servers run, by server name — beats the server's own
+   * `location` and `browser.location` (see `McpLocationSchema`). Read when a
+   * session is BUILT, like every `mcpServers` setting: a change applies to the
+   * chat's next session.
+   */
+  mcpLocations: z.record(z.string(), McpLocationSchema).optional(),
   /** Transcript-shell categories shown for this chat; unset inherits the project. */
   shellFilter: ShellTranscriptFilterSchema.optional(),
   /**

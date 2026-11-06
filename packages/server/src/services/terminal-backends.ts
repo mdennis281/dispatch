@@ -62,6 +62,8 @@ import {
   type TerminalLocationOption,
   type TerminalPortForward,
   type TerminalPortForwardInput,
+  type TerminalProcessHandle,
+  type TerminalProcessSpawnInfo,
 } from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
 import type { CleanupKey, CleanupOutcome } from "../plugins/cleanup.js";
@@ -663,6 +665,75 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
   labelOf(id: string): string | undefined {
     if (id === LOCAL_TERMINAL_BACKEND) return LOCAL_LABEL;
     return this.entries.get(id)?.label;
+  }
+
+  /**
+   * Whether `id` is registered right now with a backend that can host
+   * processes. Asked when a session is built, to decide whether an MCP server
+   * FOLLOWING the terminal goes there or stays local — a backend whose plugin
+   * predates `spawnProcess` simply never gets one.
+   */
+  canHostProcesses(id: string): boolean {
+    return typeof this.entries.get(id)?.backend.spawnProcess === "function";
+  }
+
+  /**
+   * Start one long-lived process on a backend (an MCP server — see
+   * `services/mcp/placement.ts`). Refuses at once, with a message written for
+   * the agent, when the backend is offline, unregistered or cannot host one:
+   * a placed server never runs locally instead. Bounded by the backend's own
+   * `spawnTimeoutMs`, like a shell; a handle that arrives after the bound (or
+   * after the caller gave up) is killed rather than leaked.
+   */
+  async spawnProcess(id: string, info: TerminalProcessSpawnInfo): Promise<TerminalProcessHandle> {
+    const refused = this.cannotServe(id);
+    if (refused) {
+      const label = refused.label ?? id;
+      throw new Error(
+        refused.offline ??
+          (refused.unreadable
+            ? `${id}: ${UNREADABLE_TERMINAL_BACKEND_REASON}`
+            : `${label} is not available — its plugin is off or not installed`),
+      );
+    }
+    const entry = this.entries.get(id)!;
+    const { backend } = entry;
+    if (typeof backend.spawnProcess !== "function") {
+      throw new Error(`${entry.label} cannot host processes (its plugin does not support MCP placement)`);
+    }
+    const timeoutMs = Math.min(600_000, Math.max(1_000, backend.spawnTimeoutMs ?? 120_000));
+    const spawned = Promise.resolve().then(() => backend.spawnProcess!(info));
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
+    const bound = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`${entry.label} did not start it within ${Math.round(timeoutMs / 1000)} s`)),
+        timeoutMs,
+      );
+      timer.unref?.();
+      onAbort = () => reject(new Error("cancelled"));
+      if (info.signal.aborted) onAbort();
+      else info.signal.addEventListener("abort", onAbort, { once: true });
+    });
+    try {
+      return await Promise.race([spawned, bound]);
+    } catch (err) {
+      // Late arrival: nobody will ever talk to it, so it must not outlive us.
+      void spawned.then(
+        (h) => {
+          try {
+            h.kill();
+          } catch {
+            /* already gone */
+          }
+        },
+        () => {},
+      );
+      throw err;
+    } finally {
+      clearTimeout(timer);
+      if (onAbort) info.signal.removeEventListener("abort", onAbort);
+    }
   }
 
   /**

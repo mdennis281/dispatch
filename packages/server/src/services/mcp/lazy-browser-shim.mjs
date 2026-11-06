@@ -39,6 +39,7 @@
  * into a shim whose whole point is to be cheaper than the thing it stands in for.
  */
 import { spawn } from "node:child_process";
+import { connect } from "node:net";
 import { existsSync, readFileSync, realpathSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { basename, dirname, extname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -62,10 +63,18 @@ const flagValue = (name) => {
 };
 const manifestPath = flagValue("--manifest");
 const ownerDir = flagValue("--owner-dir");
+/**
+ * `--relay <socket>`: the real server runs on ANOTHER machine, hosted by a
+ * terminal backend, and Dispatch relays it on this socket (services/mcp/
+ * placement.ts). There is then no command after `--`, and the token that
+ * proves which chat's server this is comes in the environment, not argv.
+ */
+const relayPath = flagValue("--relay");
+const relayToken = process.env.DISPATCH_MCP_RELAY_TOKEN ?? "";
 const realCommand = real[0];
 const realArgs = real.slice(1);
 
-if (!realCommand) {
+if (!realCommand && !relayPath) {
   process.stderr.write("lazy-browser-shim: no command after `--`\n");
   process.exit(2);
 }
@@ -252,6 +261,10 @@ let handshakeTimer = null;
 
 function spawnReal() {
   if (child) return;
+  if (relayPath) {
+    connectRelay();
+    return;
+  }
   if (ownerDir) mkdirSync(ownerDir, { recursive: true });
   // `windowsHide` because this runs under a server started detached with no
   // console: without it the browser server — and the Chrome it launches —
@@ -276,12 +289,64 @@ function spawnReal() {
   // session holding a server that answers nothing.
   child.on("exit", (code) => process.exit(code ?? 0));
 
-  createLineReader(child.stdout, (line) => {
+  createLineReader(child.stdout, onUpstreamLine);
+
+  handshakeTimer = setTimeout(() => {
+    if (ready) return;
+    // Same contract as `child.on("error")`: answer everything outstanding and
+    // go, so the client sees a dead server instead of a thinking one.
+    for (const frame of pending) {
+      failFrame(frame, "browser server did not answer its handshake");
+    }
+    pending = [];
+    process.exit(1);
+  }, HANDSHAKE_TIMEOUT_MS);
+  handshakeTimer.unref?.();
+
+  sendHandshake();
+}
+
+/** Replay the client's own `initialize` upstream, under our id. */
+function sendHandshake() {
+  child.stdin.write(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: HANDSHAKE_ID,
+      method: "initialize",
+      params: clientInitialize,
+    }) + "\n",
+  );
+}
+
+/** One line from upstream: the real server's stdout, or Dispatch's relay. */
+function onUpstreamLine(line) {
     let msg;
     try {
       msg = JSON.parse(line);
     } catch {
       return;
+    }
+    if (relayPath) {
+      // The relay's own control line, answering our attach. Refused means the
+      // token is stale (Dispatch restarted and forgot this session's servers);
+      // nothing this process can do fixes that, so say so and stay up.
+      if (msg.dispatchRelay === "attached") return;
+      if (msg.dispatchRelay === "refused") {
+        dropRelay(
+          `Dispatch refused the connection: ${msg.error ?? "no reason given"}. ` +
+            "Restarting the chat's session reconnects it.",
+        );
+        return;
+      }
+      if (msg.method === undefined && msg.id !== undefined) relayInFlight.delete(msg.id);
+      // Dispatch could not start the server over there (the machine is
+      // offline, its plugin is off). Re-sending the queued call would just ask
+      // it to try again; answer the call with the reason, and let the agent's
+      // NEXT call be the retry.
+      if (msg.id === HANDSHAKE_ID && !msg.result) {
+        dropRelay(msg.error?.message ?? "Dispatch could not start the server.");
+        return;
+      }
     }
     // Our handshake's reply is ours to consume — the client already has an
     // `initialize` result (from the manifest, or from this same reply the first
@@ -300,34 +365,84 @@ function spawnReal() {
         unansweredInitId = null;
       }
       child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
-      for (const frame of pending) child.stdin.write(JSON.stringify(frame) + "\n");
+      for (const frame of pending) writeUp(frame);
       pending = [];
       return;
     }
     if (!manifest) captureTools(msg);
     writeOut(enrichScreenshotResult(msg));
+}
+
+/** Forward one client frame upstream, remembering a relayed request until it is answered. */
+function writeUp(frame) {
+  if (relayPath && frame.method !== undefined && frame.id !== undefined) relayInFlight.add(frame.id);
+  child.stdin.write(JSON.stringify(frame) + "\n");
+}
+
+/* ------------------------------------------------------- relay upstream */
+
+/**
+ * Client request ids sent up the relay and not answered yet. Only the relay
+ * needs this: a local child that dies takes the shim with it, but a relay
+ * that drops must answer these itself and carry on.
+ */
+const relayInFlight = new Set();
+
+/**
+ * How long a relayed handshake may take. Longer than the local one: the first
+ * call on a machine may start the server there from cold, and Dispatch bounds
+ * that start itself. This is only the backstop for a relay that never answers.
+ */
+const RELAY_HANDSHAKE_TIMEOUT_MS = 300_000;
+
+/**
+ * Attach to Dispatch's relay and handshake through it.
+ *
+ * THIS PROCESS NEVER EXITS BECAUSE THE RELAY WENT AWAY. Measured (project
+ * memory `stdio-mcp-exit-behaviour-by-provider`): Codex never restarts a stdio
+ * server that exits, so one exit would cost the agent these tools for the rest
+ * of its thread. Instead the calls in flight are answered with an error, and
+ * the next call attaches again. Lazily, so a shim displaced by a newer one
+ * (Claude Code respawned it) never fights it for the relay. Dispatch answers
+ * the repeated `initialize` from its cache, so the server over there is never
+ * initialized twice.
+ */
+function connectRelay() {
+  const socket = connect(relayPath);
+  socket.setEncoding("utf8");
+  child = { stdin: socket };
+  createLineReader(socket, onUpstreamLine);
+  socket.on("error", () => {}); // `close` follows, and is where this is handled
+  socket.on("close", () => {
+    if (child?.stdin === socket) dropRelay("Lost the connection to Dispatch. This call did not complete; retry it.");
   });
-
   handshakeTimer = setTimeout(() => {
-    if (ready) return;
-    // Same contract as `child.on("error")`: answer everything outstanding and
-    // go, so the client sees a dead server instead of a thinking one.
-    for (const frame of pending) {
-      failFrame(frame, "browser server did not answer its handshake");
+    if (!ready && child?.stdin === socket) {
+      dropRelay("Dispatch did not finish starting the server in time. Retry the call.");
     }
-    pending = [];
-    process.exit(1);
-  }, HANDSHAKE_TIMEOUT_MS);
+  }, RELAY_HANDSHAKE_TIMEOUT_MS);
   handshakeTimer.unref?.();
+  socket.write(JSON.stringify({ dispatchRelay: "attach", token: relayToken }) + "\n");
+  sendHandshake();
+}
 
-  child.stdin.write(
-    JSON.stringify({
-      jsonrpc: "2.0",
-      id: HANDSHAKE_ID,
-      method: "initialize",
-      params: clientInitialize,
-    }) + "\n",
-  );
+/** The relay is gone: answer everything owed, forget it, and wait for the next call. */
+function dropRelay(message) {
+  const socket = child?.stdin;
+  child = null;
+  ready = false;
+  if (handshakeTimer) clearTimeout(handshakeTimer);
+  handshakeTimer = null;
+  for (const frame of pending) failFrame(frame, message);
+  pending = [];
+  for (const id of relayInFlight) failFrame({ id }, message);
+  relayInFlight.clear();
+  // A cold start still owes the client its `initialize` answer.
+  if (unansweredInitId !== null) {
+    failFrame({ id: unansweredInitId }, message);
+    unansweredInitId = null;
+  }
+  socket?.destroy();
 }
 
 /* ------------------------------------------- manifest capture (cold path) */
@@ -449,7 +564,7 @@ createLineReader(process.stdin, (line) => {
     // the per-chat owner path. Forward the prepared frame, not the original
     // wire text, or a fast roots/list handshake can redirect the capture into
     // the advertised workspace before enrichment looks for it under the owner.
-    if (ready) child.stdin.write(JSON.stringify(msg) + "\n");
+    if (ready) writeUp(msg);
     else pending.push(msg);
     return;
   }
@@ -509,6 +624,14 @@ const GRACEFUL_EXIT_MS = 2_000;
 // ignores it.
 process.stdin.on("end", () => {
   if (!child) process.exit(0);
+  if (relayPath) {
+    // Dispatch owns the process over there and ends it after a grace period,
+    // so a session restart can pick the same browser back up.
+    const socket = child.stdin;
+    child = null;
+    socket.end();
+    process.exit(0);
+  }
   try {
     child.stdin.end();
   } catch {

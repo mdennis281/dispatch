@@ -48,6 +48,7 @@ import { ChatCompletionNotices } from "./chat-completion-notice.js";
 import { SessionBroker } from "./session-broker.js";
 import { TerminalService } from "./terminal.js";
 import { TerminalBackendRegistry, stateDbBackendMemory } from "./terminal-backends.js";
+import { McpPlacementService } from "./mcp/placement.js";
 import { MemoryService } from "./memory.js";
 import { AuthoredConfigService } from "./authored-config.js";
 import { HouseRulesService, houseRulesDirFor } from "./house-rules.js";
@@ -440,6 +441,19 @@ export function createServices(
   // A rename relabels the shells on it in place; going offline cuts short a
   // spawn still waiting on it. Neither ends a running shell.
   terminalBackends.onChange((id, change) => terminals.backendChanged(id, change));
+  // MCP servers placed on another machine (E7): relayed to the backend that
+  // hosts them. A backend going away ends its processes (their transport went
+  // with it), and so does deleting the chat; ending a SESSION does not, so a
+  // restart inside the grace keeps the browser and its pages.
+  const mcpPlacement = new McpPlacementService({
+    host: {
+      spawnProcess: (id, info) => terminalBackends.spawnProcess(id, info),
+      labelOf: (id) => terminalBackends.labelOf(id) ?? terminalBackends.recall(id)?.label,
+    },
+    log: (message, err) => console.warn(`[mcp-placement] ${message}`, err ?? ""),
+  });
+  terminalBackends.onDetach((id) => mcpPlacement.backendDetached(id));
+  bus.on("chat-deleted", (e) => mcpPlacement.chatDeleted(e.chatId));
   // Self-contained project config: discovers + validates the authored config for
   // a managed project — the repo's committed `.dispatch/` or the install-owned
   // dir, resolved per project by `config-location.ts` — syncs it into the
@@ -621,6 +635,7 @@ export function createServices(
       idleSessionMinutes: config.idleSessionMinutes,
       terminals,
       terminalBackends,
+      mcpPlacement,
       memory,
       secrets,
       issues,
@@ -1791,6 +1806,11 @@ export function createServices(
       } catch {
         /* an unreadable chat list costs the warning, never the boot */
       }
+      // Before any session is built: a placed server's shim attaches here.
+      // Failing to listen costs placement (every server stays local), never the boot.
+      await mcpPlacement.start().catch((err) => {
+        console.error("[Dispatch] MCP placement relay failed to start; every MCP server stays local:", err);
+      });
 
       // Before anything can send: `restartResume.restore()` (start.ts) and the
       // usage-limit resumes would otherwise start turns the pause was holding.
@@ -2136,6 +2156,9 @@ export function createServices(
       // Plugins go BEFORE the messenger and the broker: a `deactivate` may
       // still want to send a last message or read a chat, and their bus
       // listeners should be gone before the broker's teardown floods the bus.
+      // Placed MCP processes first, while the plugins whose transports carry
+      // them are still up to deliver the stdin EOF that lets a browser close.
+      await mcpPlacement.dispose().catch(() => {});
       await plugins.dispose().catch(() => {});
       chatMessenger.dispose();
       chatCompletionNotices.dispose();

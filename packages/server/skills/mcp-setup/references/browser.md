@@ -36,6 +36,29 @@ browser:                      # long form
   engine: chrome              # chrome | chromium | firefox | webkit | msedge
 ```
 
+## Where they run
+
+`browser.location` decides which MACHINE the browser runs on:
+
+```yaml
+browser:
+  location: terminal      # default: wherever this chat's terminals run
+  # location: local       # always on the Dispatch host
+  # location: remote-host/cvx-mac   # always on that machine
+```
+
+- **`terminal` (the default).** A chat whose terminals run on another machine
+  (a terminal backend such as `remote-host/cvx-mac`) gets its browser there
+  too. A dev server it started on that machine answers on `localhost` as-is.
+  If that backend cannot host processes, the browser stays local.
+- **A named machine is never swapped for a local browser.** While it is
+  offline, each browser call fails and says why.
+- **Per chat:** `PUT /api/chats/:id` with `{ "mcpLocations": { "playwright": "local" } }`.
+  This beats the project setting, and it takes effect on the chat's next session.
+- **Other stdio servers** under `mcpServers` take the same values as a
+  `location:` key. Their default is `local`, because their commands and paths
+  are this machine's.
+
 `browser: off` is written as YAML's `off`, which the parser resolves to boolean
 `false` before any schema sees it. That spelling is handled deliberately — don't
 "fix" it to a string.

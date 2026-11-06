@@ -32,6 +32,7 @@ export * from "./setup.js";
 export * from "./limits.js";
 export * from "./mcp.js";
 export * from "./mcp-enablement.js";
+export * from "./mcp-placement.js";
 export * from "./layered.js";
 export * from "./agent-context.js";
 export * from "./sent-context.js";

@@ -89,6 +89,11 @@ export type {
   TerminalAfterRunResult,
   TerminalExitReason,
   TerminalStallInfo,
+  // hosting a process (an MCP server) on a backend: `TerminalBackend.spawnProcess`
+  // (docs/plugins.md → "Hosting processes")
+  TerminalProcessSpawnInfo,
+  TerminalProcessHandle,
+  TerminalBundledProcess,
   // client host
   ClientHost,
   ClientHostKit,

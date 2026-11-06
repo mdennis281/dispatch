@@ -416,3 +416,86 @@ describe("lifecycle", () => {
     expect(PLUGIN_RECONCILE_BUDGET_MS).toBe(120_000);
   });
 });
+
+describe("createTestContext terminals.spawnProcess (E7, hosting an MCP server)", () => {
+  /**
+   * The shape a remote-host backend has: one process per chat + server, kept
+   * alive across a dropped link and re-attached. Here the "link" is a flag.
+   */
+  async function fakeRemoteHost() {
+    const { EventEmitter } = await import("node:events");
+    const t = createTestContext({ id: "remote-host", capabilities: ["terminals"] });
+    const handles: Array<InstanceType<typeof EventEmitter> & { initializes: number }> = [];
+    t.ctx.terminals!.registerBackend({
+      id: "remote-host/cvx-mac",
+      label: "CVX Mac",
+      shell: "bash",
+      fallback: "refuse",
+      spawn: () => Promise.reject(new Error("unused")),
+      spawnProcess: async (info) => {
+        const h = Object.assign(new EventEmitter(), { initializes: 0 }) as InstanceType<typeof EventEmitter> & {
+          initializes: number;
+          stdout: InstanceType<typeof EventEmitter>;
+          stdin: { write(c: string): boolean };
+          kill(): void;
+        };
+        h.stdout = new EventEmitter();
+        const reply = (m: unknown) => h.stdout.emit("data", JSON.stringify(m) + "\n");
+        h.stdin = {
+          write: (chunk: string) => {
+            for (const line of chunk.split("\n").filter(Boolean)) {
+              const m = JSON.parse(line) as { id?: string; method?: string };
+              if (m.method === "initialize") {
+                h.initializes++;
+                reply({ jsonrpc: "2.0", id: m.id, result: { serverInfo: { name: info.bundled?.server ?? info.name } } });
+              } else if (m.method === "tools/call") reply({ jsonrpc: "2.0", id: m.id, result: { content: [] } });
+            }
+            return true;
+          },
+        };
+        h.kill = () => h.emit("exit", null, { kind: "killed" });
+        handles.push(h);
+        return h as never;
+      },
+    });
+    return { t, handles };
+  }
+
+  it("starts the process with core's defaults and speaks JSON-RPC lines to it", async () => {
+    const { t, handles } = await fakeRemoteHost();
+    const p = await t.terminals.spawnProcess("remote-host/cvx-mac", {
+      chatId: "c1",
+      name: "playwright",
+      bundled: { server: "playwright", package: "@playwright/mcp", version: "0.0.79", bin: "cli.js", args: ["--headless"] },
+    });
+    expect((await p.request("initialize", {})).result).toEqual({ serverInfo: { name: "playwright" } });
+    expect((await p.request("tools/call", { name: "x" })).result).toEqual({ content: [] });
+    expect(p.garbage).toEqual([]);
+    expect(handles[0]!.initializes).toBe(1);
+  });
+
+  it("records stalled / resumed / exit, and fails a pending request when the process exits", async () => {
+    const { t, handles } = await fakeRemoteHost();
+    const p = await t.terminals.spawnProcess("remote-host/cvx-mac", { chatId: "c1" });
+    await p.request("initialize", {});
+    handles[0]!.emit("stalled", { detail: "wifi" });
+    handles[0]!.emit("resumed");
+    expect(await p.next("stalled")).toEqual([{ detail: "wifi" }]);
+    await p.next("resumed");
+    // Re-attached to the same process: it answers without another initialize.
+    expect((await p.request("tools/call", { name: "x" })).result).toEqual({ content: [] });
+    expect(handles[0]!.initializes).toBe(1);
+
+    const hung = p.request("tools/list", undefined, { timeoutMs: 1_000 });
+    p.handle.kill();
+    await expect(hung).rejects.toThrow(/exited before replying/);
+    expect(await p.next("exit")).toEqual([null, { kind: "killed" }]);
+    expect(p.events.map((e) => e.event)).toEqual(["stalled", "resumed", "exit"]);
+  });
+
+  it("refuses a backend that has no spawnProcess, as core never places a process there", async () => {
+    const t = createTestContext({ id: "proxmox-terminal", capabilities: ["terminals"] });
+    t.ctx.terminals!.registerBackend({ id: "proxmox", label: "Proxmox", shell: "bash", spawn: () => Promise.reject(new Error("unused")) });
+    await expect(t.terminals.spawnProcess("proxmox", { chatId: "c1" })).rejects.toThrow(/has no spawnProcess/);
+  });
+});

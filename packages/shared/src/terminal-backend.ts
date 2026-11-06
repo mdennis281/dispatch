@@ -401,6 +401,103 @@ export interface TerminalBackend {
   onChatDeleted?(e: TerminalChatEvent): void | Promise<void>;
   /** Called when the backend is unregistered (the plugin deactivating). */
   dispose?(): void | Promise<void>;
+  /**
+   * Host one long-lived stdio process over there — today, an MCP server a
+   * chat's agent talks to (`mcpServers.<name>.location`, `browser.location`).
+   * Optional: a backend without it is never asked, and a server set to follow
+   * the terminal stays local for a chat on it.
+   *
+   * Core speaks newline-delimited JSON-RPC to the handle and enforces the
+   * reconnect contract the agent's runtime sees (docs/plugins.md, "Hosting
+   * processes"). The backend's half: keep the process alive across a dropped
+   * link, emit `stalled` / `resumed` around a re-attach to the SAME process,
+   * and `exit` only once it is gone or given up on.
+   *
+   * Rejecting fails the call that asked for it, with the message; core
+   * retries on the agent's next call. It is never run locally instead.
+   */
+  spawnProcess?(info: TerminalProcessSpawnInfo): Promise<TerminalProcessHandle>;
+}
+
+/**
+ * A server Dispatch bundles, described portably: the backend provides the
+ * runtime and the package at this version on its side. The Dispatch host's
+ * own resolved path to it would mean nothing over there.
+ */
+export interface TerminalBundledProcess {
+  /** Which bundled server: `playwright`, `chrome-devtools`. */
+  server: string;
+  /** npm package name, e.g. `@playwright/mcp`. */
+  package: string;
+  /** The exact version the Dispatch host bundles — its cached tool list was taken from it. */
+  version: string;
+  /** The package's CLI entry within it (its `bin`), e.g. `cli.js`. */
+  bin: string;
+  /**
+   * Flags derived from the project's `browser:` config. Path-free by
+   * construction: where its output, profile and downloads go is the
+   * backend's to choose — it owns the paths on its side — so a
+   * Dispatch-host path is never in here.
+   */
+  args: string[];
+  env?: Record<string, string>;
+}
+
+/** What `spawnProcess` is told. */
+export interface TerminalProcessSpawnInfo {
+  chatId: string;
+  projectId?: string;
+  /** What the process is for. Only `mcp` today. */
+  purpose: "mcp";
+  /** The MCP server's name in the session (`playwright`). One live process per chat + name. */
+  name: string;
+  /** The LOCAL directory the chat works in — map it, as for a shell. */
+  cwd: string;
+  /** The chat's own worktree, when it has one. */
+  worktreePath?: string;
+  /** Set for a server Dispatch bundles; `command` is then absent. */
+  bundled?: TerminalBundledProcess;
+  /** A configured server: run exactly this over there. Absent when `bundled` is set. */
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  /** Aborted when core stops waiting for the spawn (the chat was deleted, the server is shutting down). */
+  signal: HostAbortSignal;
+}
+
+/**
+ * The handle `spawnProcess` resolves to. A `TerminalBackendHandle` minus the
+ * shell bits; a Node `ChildProcess` satisfies it.
+ *
+ * Besides `exit` and `error`, core subscribes through this same `on` to two
+ * optional events — the reconnect contract:
+ *
+ * - `"stalled"`, with an optional {@link TerminalStallInfo}: the link to the
+ *   process dropped, the process is believed alive, and the backend is
+ *   re-attaching. Core answers every request in flight with a JSON-RPC error
+ *   and fails new ones at once until `resumed` — it never queues an agent's
+ *   call behind a reconnect of unknown length.
+ * - `"resumed"`: re-attached to the SAME process, which is still initialized.
+ *   Core does NOT re-send `initialize`. Resume stdout at a line boundary; core
+ *   drops any half line it held when the stall began, and any late reply to a
+ *   request it already failed.
+ *
+ * `exit` means the process is gone, or the backend has given up on it (pass
+ * `{ kind: "transport-lost" }`). Core then spawns a fresh one on the next call
+ * and replays the client's `initialize` to it.
+ */
+export interface TerminalProcessHandle {
+  stdin: {
+    write(chunk: string): unknown;
+    end?(): unknown;
+    on?(event: "error", listener: (err: Error) => void): unknown;
+  };
+  stdout: TerminalBackendReadable;
+  stderr?: TerminalBackendReadable;
+  /** Stop the process over there, and whatever it started. */
+  kill(signal?: string): void;
+  on(event: "exit", listener: (code: number | null, reason?: TerminalExitReason) => void): unknown;
+  on(event: "error", listener: (err: Error) => void): unknown;
 }
 
 /**
