@@ -16,6 +16,9 @@
 import type {
   AttentionItem,
   Harness,
+  PluginApprovalDecision,
+  PluginApprovalRequest,
+  PluginApprovalResult,
   PluginAskResult,
   PluginCapability,
   PluginChatState,
@@ -45,6 +48,9 @@ import type {
   WsServerEventType,
 } from "@dispatch/shared";
 import {
+  PLUGIN_APPROVAL_DEFAULT_TIMEOUT_SECONDS,
+  PLUGIN_APPROVAL_LIMITS,
+  PLUGIN_APPROVAL_MAX_TIMEOUT_SECONDS,
   PLUGIN_CAPABILITIES,
   PLUGIN_RECONCILE_BUDGET_MS,
   PLUGIN_SHUTDOWN_BUDGET_MS,
@@ -99,6 +105,20 @@ export interface TestContextOptions {
   kv?: Record<string, unknown>;
   /** What `chats.ask` answers with. Default: an unanswered timeout, like a chat nobody is watching. */
   answerAsk?: (chatId: string, question: string) => string | undefined;
+  /**
+   * Play the human answering `ctx.approvals.request`. Return the decision, or
+   * a whole result (to set `by`), or a promise of either — a promise that
+   * never settles is a card nobody answers, which the request's `signal`
+   * withdraws (`cancelled`). Default: `"timeout"`, like a card nobody is
+   * watching — the safe answer for a plugin to be tested against.
+   */
+  approve?: (
+    chatId: string,
+    req: PluginApprovalRequest,
+  ) =>
+    | PluginApprovalDecision
+    | Pick<PluginApprovalResult, "decision" | "by">
+    | Promise<PluginApprovalDecision | Pick<PluginApprovalResult, "decision" | "by">>;
   /** What `chats.read` returns. Default: a one-line stub naming the chat and view. */
   readChat?: (chatId: string, view: string) => string;
   /** What `chats.state` returns. Default: idle, not dormant, nothing pending. */
@@ -160,6 +180,13 @@ export interface TestContext {
   replied: Array<{ askId: string; answer: string }>;
   /** `attention.answer` calls. */
   answered: Array<{ itemId: string; answer: unknown }>;
+  /**
+   * Every `approvals.request` that the host would have put on a card, in
+   * order, with how it ended once it has (`result` is absent while it waits).
+   * A request the host would refuse (no title, an over-long field, a bad
+   * timeout) rejects, as there, and is not recorded.
+   */
+  approvals: Array<{ chatId: string; request: PluginApprovalRequest; result?: PluginApprovalResult }>;
   /** The attention items `attention.list` reports. Push to simulate a pending question. */
   attention: AttentionItem[];
   /** `memory.remember` results, keyed by project then name. */
@@ -483,6 +510,7 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
   const asked: TestContext["asked"] = [];
   const replied: TestContext["replied"] = [];
   const answered: TestContext["answered"] = [];
+  const approvalLog: TestContext["approvals"] = [];
   const attention: AttentionItem[] = [];
   const memory = new Map<string, Map<string, PluginMemoryInput>>();
   const processes = new Map<string, { id: string; status: string; ports?: number[]; url?: string }>();
@@ -545,6 +573,45 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
       subscribe: (fn) => {
         listeners.add(fn);
         return () => listeners.delete(fn);
+      },
+    };
+  }
+
+  if (has("approvals")) {
+    ctx.approvals = {
+      // The host's refusals, so a plugin's error path is exercised here too.
+      request: async (chatId, req) => {
+        if (typeof chatId !== "string" || !chatId) throw new Error("approvals.request: chatId is required");
+        const title = typeof req?.title === "string" ? req.title.trim() : "";
+        if (!title) throw new Error("approvals.request: title is required");
+        for (const [key, max] of Object.entries(PLUGIN_APPROVAL_LIMITS)) {
+          const v = key === "title" ? title : (req as unknown as Record<string, unknown>)[key];
+          if (v === undefined) continue;
+          if (typeof v !== "string") throw new Error(`approvals.request: ${key} must be a string`);
+          if (v.length > max) throw new Error(`approvals.request: ${key} is over ${max} characters`);
+        }
+        const timeoutSeconds = req.timeoutSeconds ?? PLUGIN_APPROVAL_DEFAULT_TIMEOUT_SECONDS;
+        if (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0 || timeoutSeconds > PLUGIN_APPROVAL_MAX_TIMEOUT_SECONDS) {
+          throw new Error(`approvals.request: timeoutSeconds must be above 0 and at most ${PLUGIN_APPROVAL_MAX_TIMEOUT_SECONDS}`);
+        }
+        if (req.signal?.aborted) return { decision: "cancelled", at: Date.now() };
+        const entry: TestContext["approvals"][number] = { chatId, request: req };
+        approvalLog.push(entry);
+        const scripted = Promise.resolve(opts.approve ? opts.approve(chatId, req) : ("timeout" as const)).then(
+          (a): PluginApprovalResult => {
+            const r = typeof a === "string" ? { decision: a } : a;
+            // As on the host: a name only on an answer a person gave.
+            const named = r.decision === "approved" || r.decision === "denied";
+            return { decision: r.decision, ...(named && r.by ? { by: r.by } : {}), at: Date.now() };
+          },
+        );
+        const withdrawn = new Promise<PluginApprovalResult>((resolve) => {
+          req.signal?.addEventListener("abort", () => resolve({ decision: "cancelled", at: Date.now() }), {
+            once: true,
+          });
+        });
+        entry.result = await Promise.race([scripted, withdrawn]);
+        return entry.result;
       },
     };
   }
@@ -860,6 +927,7 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
     asked,
     replied,
     answered,
+    approvals: approvalLog,
     attention,
     memory,
     processes,

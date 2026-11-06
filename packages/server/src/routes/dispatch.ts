@@ -37,6 +37,7 @@ import { configPathsFor } from "../services/config-location.js";
 import { COPILOT_LOGIN } from "../services/github.js";
 import { resolveReviewer } from "../services/reviewer.js";
 import type { Services } from "../services/container.js";
+import type { PermissionActor } from "../services/session-broker.js";
 import { ProviderUnavailableError } from "../harness/index.js";
 
 /* ----------------------------------------------------------------- helpers */
@@ -465,6 +466,13 @@ export async function runGhAction(
 export async function dispatchClientAction(
   services: Services,
   action: Exclude<WsClientAction, { type: "ping" }>,
+  /**
+   * Who is on the other end of the socket. Read by exactly one case today:
+   * a PLUGIN approval card is the owner's alone to answer, and this is the
+   * only place an answer arrives with an identity attached. Absent means
+   * "unknown", which that case treats as not the owner.
+   */
+  actor?: PermissionActor,
 ): Promise<void> {
   const { broker, worktrees, runner, store } = services;
   const chatId = "chatId" in action ? action.chatId : undefined;
@@ -543,6 +551,15 @@ export async function dispatchClientAction(
         return;
 
       case "answer-permission": {
+        // Before the generic resolver, which refuses these cards outright: a
+        // plugin's approval is answered only with the actor attached, and an
+        // edited input or "always allow" means nothing for it, so neither is
+        // passed on.
+        if (broker.isPluginApproval(action.requestId)) {
+          const r = broker.answerPluginApproval(action.requestId, action.decision, actor);
+          if (!r.ok) emitError(services, r.message, action.requestId, action.chatId);
+          return;
+        }
         const ok = broker.resolvePermission(action.requestId, {
           decision: action.decision,
           updatedInput: action.updatedInput,

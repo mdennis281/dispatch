@@ -17,6 +17,7 @@ import type { MemoryType } from "./domain.js";
 import type { QuestionAnswer, WsServerEvent, WsServerEventType } from "./wire.js";
 import type { Harness, HostAbortSignal } from "./harness.js";
 import type { ProviderDescriptor } from "./providers.js";
+import type { PluginApprovalDecision } from "./plugin-approval.js";
 import type {
   TerminalBackend,
   TerminalBackendStatusInput,
@@ -265,6 +266,47 @@ export interface PluginRouter<Req = unknown, Reply = unknown> {
   delete(path: string, handler: PluginRouteHandler<Req, Reply>): void;
 }
 
+/**
+ * What `ctx.approvals.request` puts in front of the human. Everything here is
+ * shown verbatim; nothing is shown that is not here. The card names the
+ * plugin from its manifest, so `title` need not.
+ */
+export interface PluginApprovalRequest {
+  /** One line: what is being approved. "Run a command as root". At most 200 chars. */
+  title: string;
+  /** Why, or what happens next. Plain text, at most 4000 chars. */
+  detail?: string;
+  /** The exact command, already shell-quoted. Shown in full; the human cannot edit it. At most 8000 chars. */
+  command?: string;
+  /** Where `command` runs. */
+  cwd?: string;
+  /** Which machine, as the plugin labels it ("CVX Mac"). */
+  machine?: string;
+  /**
+   * Seconds to wait for an answer before resolving `timeout`. Default 300,
+   * at most 3600. The clock does not pause while the app is closed.
+   */
+  timeoutSeconds?: number;
+  /** Aborting withdraws the card and resolves `cancelled`. */
+  signal?: HostAbortSignal;
+}
+
+/**
+ * How an approval ended. Anything but `approved` is a no: `timeout` and
+ * `cancelled` are a no that nobody said.
+ */
+export interface PluginApprovalResult {
+  decision: PluginApprovalDecision;
+  /**
+   * Who answered, as their account names them, when a person did and the app
+   * has sign-in on. Absent for `timeout`/`cancelled`, and for any answer on an
+   * install without sign-in (whoever reaches it IS the owner).
+   */
+  by?: string;
+  /** Epoch ms the decision was made. */
+  at: number;
+}
+
 /** Why an instance's id was re-minted. See {@link PluginInstance.reminted}. */
 export type PluginInstanceRemintReason = "copied" | "moved" | "hostname";
 
@@ -440,6 +482,27 @@ export interface PluginContext<Req = unknown, Reply = unknown> {
       itemId: string,
       answer: { optionId?: string; answer?: string; notes?: string; answers?: QuestionAnswer[] } | { decline: true },
     ): Promise<{ ok: boolean; message?: string }>;
+  };
+
+  /**
+   * `approvals` — ask the human to approve ONE action, on the same card,
+   * Attention Queue entry and push notification a tool-call permission gets,
+   * labelled with this plugin's name. Resolves when they answer, after
+   * `timeoutSeconds` (default 5 min) with `timeout`, or with `cancelled` when
+   * `signal` aborts, the chat's session ends, or this plugin goes down.
+   *
+   * Only the owner, signed in to the app, can answer it — not
+   * `ctx.attention.answer`, not an integration or OAuth token, not another
+   * plugin. Approve-once or deny: there is no "always allow". Every outcome
+   * writes a notice into the chat's transcript and a row to the instance's
+   * approval audit table.
+   *
+   * REJECTS (rather than resolving a decision) when no card could be shown:
+   * an unknown chat, a chat with no live session to ask through, or a request
+   * with no title or an over-long field. Treat a rejection as a no.
+   */
+  approvals?: {
+    request(chatId: string, req: PluginApprovalRequest): Promise<PluginApprovalResult>;
   };
 
   /** `memory` */

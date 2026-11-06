@@ -3,6 +3,7 @@ import { ShieldQuestion, Check, X, ShieldCheck, Pencil } from "lucide-react";
 import {
   canRememberAutoAllow,
   readHumanReview,
+  readPluginApproval,
   readSecretRequest,
   type PermissionRow,
 } from "@dispatch/shared";
@@ -11,6 +12,7 @@ import { QuestionCard } from "./QuestionCard.js";
 import { ReviewCard } from "./ReviewCard.js";
 import { SecretCard } from "./SecretCard.js";
 import { PlanCard } from "./PlanCard.js";
+import { PluginApprovalCard } from "./PluginApprovalCard.js";
 import { Button } from "../../ui/Button.js";
 import { Chip } from "../../ui/Chip.js";
 import { cn } from "../../../lib/cn.js";
@@ -63,6 +65,9 @@ export function PermissionCard({ row }: PermissionCardProps) {
     return review ? <ReviewCard row={row} review={review} /> : <QuestionCard row={row} />;
   }
   if (row.toolName === "ExitPlanMode") return <PlanCard row={row} />;
+  // A plugin asking for approval: no Edit, no Always allow, named for the plugin.
+  const approval = readPluginApproval(row.toolName, row.input);
+  if (approval) return <PluginApprovalCard row={row} card={approval} />;
 
   const pending = row.decision === "pending";
   const busy = pending && answered;

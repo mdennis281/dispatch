@@ -585,6 +585,33 @@ const MIGRATIONS: ReadonlyArray<string> = [
     PRIMARY KEY (project_id, schedule_id)
   );
   `,
+  // 18 — every plugin approval request (`ctx.approvals.request`) and how it
+  // ended. The transcript notice is the human-facing record, but a chat can be
+  // deleted, and what was approved to run as root on someone's machine must
+  // outlive the conversation that asked for it. Nothing deletes these rows —
+  // not chat deletion, not plugin uninstall.
+  //
+  // One row per request, written when it settles (a request still open lives
+  // only in memory, on its card). `by` is the account name of the person who
+  // answered; NULL for a timeout or a withdrawal.
+  `
+  CREATE TABLE approval_audit (
+    seq         INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id  TEXT    NOT NULL UNIQUE,
+    plugin      TEXT    NOT NULL,
+    chat_id     TEXT    NOT NULL,
+    project_id  TEXT,
+    title       TEXT    NOT NULL,
+    command     TEXT,
+    cwd         TEXT,
+    machine     TEXT,
+    decision    TEXT    NOT NULL,
+    by          TEXT,
+    requested_at INTEGER NOT NULL,
+    decided_at  INTEGER NOT NULL
+  );
+  CREATE INDEX approval_audit_plugin ON approval_audit(plugin, decided_at);
+  `,
 ];
 
 /** Schema version a database must be at for this build to use it. */

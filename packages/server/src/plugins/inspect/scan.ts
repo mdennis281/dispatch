@@ -120,6 +120,7 @@ const SERVER_MEMBERS: Record<string, { capability?: PluginCapability; methods?: 
   oauth: { capability: "oauth" },
   providers: { capability: "providers" },
   terminals: { capability: "terminals" },
+  approvals: { capability: "approvals" },
   projects: {},
 };
 

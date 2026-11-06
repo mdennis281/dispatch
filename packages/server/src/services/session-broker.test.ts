@@ -2733,6 +2733,48 @@ describe("SessionBroker — steering & concurrency", () => {
     expect(broker.schedulerSnapshot().queued).toEqual([]);
   });
 
+  it("a plugin approval answered while the cap is full waits for a slot before the plugin hears it", async () => {
+    // The card releases the chat's slot (waiting on a human is not working), so
+    // another chat takes it. The owner's answer then has to queue like any
+    // answered card's — asked for BEFORE the human-wait span is released, or the
+    // chat reads as occupied and walks straight past the cap.
+    const gates = [deferred(), deferred()];
+    let call = 0;
+    const { fn } = makeFakeQuery(async () => {
+      await gates[call++]!.promise;
+      return [assistantText("done"), resultMsg()];
+    });
+    const broker = makeBroker(fn, 1);
+    for (const id of ["c1", "c2"]) {
+      await store.saveChat(chatFor(id));
+      broker.create(chatFor(id));
+    }
+    const c1running = broker.waitFor("c1", "running");
+    await broker.sendMessage("c1", "install it");
+    await c1running;
+
+    const idP = nextPermissionId();
+    let result: unknown;
+    const resultP = broker
+      .requestPluginApproval("c1", { pluginId: "remote-host", pluginName: "Remote hosts" }, { title: "Run as root" })
+      .then((r) => (result = r));
+    const requestId = await idP;
+    const c2running = broker.waitFor("c2", "running");
+    await broker.sendMessage("c2", "go");
+    await c2running;
+    expect(broker.activeCount()).toBe(1);
+
+    expect(broker.answerPluginApproval(requestId, "allow", { owner: true, name: "Michael" })).toEqual({ ok: true });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(result).toBeUndefined();
+    expect(broker.schedulerSnapshot().queued).toEqual([{ chatId: "c1", kind: "resume", tier: 0 }]);
+
+    gates[1]!.resolve();
+    await resultP;
+    expect(result).toMatchObject({ decision: "approved", by: "Michael" });
+    gates[0]!.resolve();
+  });
+
   it("a resume outranks a cold start, and a human-answered resume outranks both", async () => {
     const gate = deferred();
     let call = 0;

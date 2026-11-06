@@ -74,6 +74,7 @@ export * from "./plugin-manifest.js";
 export * from "./plugin-settings.js";
 export * from "./terminal-backend.js";
 export * from "./plugin-api.js";
+export * from "./plugin-approval.js";
 export * from "./plugin-inspection.js";
 export * from "./plugin-collection.js";
 export * from "./plugin-catalog.js";

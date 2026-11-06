@@ -34,6 +34,7 @@ import {
   type TerminalPortForwardInput,
   type TerminalBackendStatusInput,
   type TerminalBackendUpdate,
+  type PluginApprovalResult,
   type PluginContext,
   type PluginInstance,
   type PluginLog,
@@ -93,6 +94,27 @@ export interface PluginQuestionAnswerer {
   declineQuestion(requestId: string, message?: string): boolean;
 }
 
+/**
+ * Where `ctx.approvals` lands — the broker, which owns the permission channel
+ * the card rides. Narrow so tests can fake it.
+ */
+export interface PluginApprover {
+  requestPluginApproval(
+    chatId: string,
+    origin: { pluginId: string; pluginName: string },
+    req: {
+      title: string;
+      detail?: string;
+      command?: string;
+      cwd?: string;
+      machine?: string;
+      timeoutSeconds?: number;
+      signal?: AbortSignal;
+    },
+  ): Promise<PluginApprovalResult>;
+  cancelPluginApprovals(pluginId: string): number;
+}
+
 export interface PluginContextDeps {
   store: Store;
   bus: EventBus;
@@ -102,6 +124,8 @@ export interface PluginContextDeps {
   attention: AttentionQueue;
   messenger: ChatMessenger;
   broker: PluginQuestionAnswerer;
+  /** `ctx.approvals`. Absent in a context built without one; then the member is absent too. */
+  approvals?: PluginApprover;
   log: PluginLog;
   /** The plugin's cached settings — read live so `onChange` and `get` agree. */
   settings: () => Record<string, unknown>;
@@ -474,6 +498,39 @@ export function buildPluginContext(
         return terminals.unregister(backendId);
       },
     };
+  }
+
+  if (has("approvals") && deps.approvals) {
+    const approvals = deps.approvals;
+    ctx.approvals = {
+      // `async` so a bad argument is a rejection, never a throw out of a call
+      // the plugin may not have wrapped in try.
+      request: async (chatId, req) => {
+        if (typeof chatId !== "string" || !chatId) throw new Error("approvals.request: chatId is required");
+        const r = req ?? ({} as Partial<typeof req>);
+        // Field by field: the card shows exactly these and nothing else a
+        // plugin might tuck into the object. The NAME is the manifest's, so a
+        // plugin cannot ask in another plugin's name.
+        return approvals.requestPluginApproval(
+          chatId,
+          { pluginId: id, pluginName: manifest.name },
+          {
+            title: r.title as string,
+            detail: r.detail,
+            command: r.command,
+            cwd: r.cwd,
+            machine: r.machine,
+            timeoutSeconds: r.timeoutSeconds,
+            signal: r.signal as AbortSignal | undefined,
+          },
+        );
+      },
+    };
+    // A plugin going down withdraws its open cards: an answer would resolve a
+    // promise nothing is reading, and a stale "approve" must not be clickable.
+    owned.offs.push(() => {
+      approvals.cancelPluginApprovals(id);
+    });
   }
 
   if (has("memory")) {
