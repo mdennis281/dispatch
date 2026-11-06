@@ -41,6 +41,7 @@ import {
   type CopilotQuotaFacts,
   WAIT_CAP_SECONDS,
   PR_POLL_INTERVAL_MS,
+  SETTLED_RED_REMIND_MS,
   NO_CHECKS_GRACE_MS,
   REVIEW_QUEUE_GRACE_MS,
   REVIEW_ROUND_GRACE_MS,
@@ -754,6 +755,83 @@ describe("manager-mcp — watch_pr", () => {
     expect(resultText(res)).not.toContain("needs attention"); // nothing to fix
     expect(gh.calls.length).toBe(1); // resolved on the very first poll
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  describe("CI finishing red", () => {
+    const RUNNING_MAC: CheckRun = { name: "mac", status: "in_progress" };
+    const PASS_MAC: CheckRun = { name: "mac", status: "completed", conclusion: "success" };
+
+    it("wakes when the rest of a red run finishes, after the failure was already reported", async () => {
+      // dispatch-plugins #43: the build failed while mac was still running, the
+      // agent re-watched to re-run the flake once mac finished — and mac finishing
+      // was news to nothing, so it sat out the whole window on a finished red run.
+      const gh = fakeGitHub([
+        { merge: OPEN, checks: [FAIL_BUILD, RUNNING_MAC] }, // call 1 → ci-failed
+        { merge: OPEN, checks: [FAIL_BUILD, RUNNING_MAC] }, // call 2, poll 1 → nothing new
+        { merge: OPEN, checks: [FAIL_BUILD, PASS_MAC] }, // call 2, poll 2 → settled red
+      ]);
+      const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
+
+      const first = await watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 600 }, {});
+      expect(resultText(first)).toContain('"type":"ci-failed"');
+      expect(resultText(first)).not.toContain("ci-settled-red"); // mac still running
+
+      const p = watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 600 }, {});
+      await vi.advanceTimersByTimeAsync(PR_POLL_INTERVAL_MS);
+      const second = await p;
+      expect(resultText(second)).toContain('"type":"ci-settled-red"');
+      expect(resultText(second)).toContain('"ciSettledRed":true');
+      expect(resultText(second)).toContain("needs attention");
+      expect(resultText(second)).not.toContain('"timedOut":true');
+      expect(gh.calls.length).toBe(3);
+      // The red-only result must not ALSO say all is well — "Merge it" or "keeps
+      // watching" next to "push a fix" is a contradiction the agent resolves wrong.
+      expect(resultText(second)).toContain("FINISHED and red");
+      expect(resultText(second)).not.toContain("Merge it");
+      expect(resultText(second)).not.toContain("Nothing to fix");
+      expect(resultText(second)).not.toContain("keeps watching");
+    });
+
+    it("repeats a red build left alone every few minutes — not instantly, not never", async () => {
+      const gh = fakeGitHub([{ merge: OPEN, checks: [FAIL_BUILD, PASS_LINT] }]);
+      const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
+
+      const first = await watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 1800 }, {});
+      expect(resultText(first)).toContain('"type":"ci-settled-red"');
+
+      // Re-called straight away (waiting on a review, or the rollup still shows the
+      // old head after a push): an instant return here would make it a hot loop.
+      const p = watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 1800 }, {});
+      await vi.advanceTimersByTimeAsync(SETTLED_RED_REMIND_MS - PR_POLL_INTERVAL_MS);
+      let settled = false;
+      void p.then(() => (settled = true));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toBe(false);
+
+      // …but it is not waited out for the whole window either.
+      await vi.advanceTimersByTimeAsync(PR_POLL_INTERVAL_MS);
+      const second = await p;
+      expect(resultText(second)).toContain('"type":"ci-settled-red"');
+      expect(resultText(second)).not.toContain('"type":"ci-failed"'); // still deduped
+      expect(resultText(second)).not.toContain('"timedOut":true');
+    });
+
+    it("waits on a re-run, and reports when it settles red again", async () => {
+      const gh = fakeGitHub([
+        { merge: OPEN, checks: [FAIL_BUILD] }, // call 1 → settled red
+        { merge: OPEN, checks: [RUNNING_BUILD] }, // call 2: the re-run is going
+        { merge: OPEN, checks: [FAIL_BUILD] }, // …and it failed again
+      ]);
+      const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
+
+      await watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 600 }, {});
+      const p = watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 600 }, {});
+      await vi.advanceTimersByTimeAsync(PR_POLL_INTERVAL_MS);
+      const second = await p;
+      expect(resultText(second)).toContain('"type":"ci-failed"');
+      expect(resultText(second)).toContain('"type":"ci-settled-red"');
+      expect(gh.calls.length).toBe(3);
+    });
   });
 
   it("keeps waiting while a check is still running", async () => {
