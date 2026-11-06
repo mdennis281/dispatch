@@ -1504,6 +1504,11 @@ const THREAD_MAP_CAP = 2_000;
  * can linger. Polling faster would buy nothing a 30-minute window cares about.
  */
 const IDLE_SWEEP_MS = 60_000;
+/**
+ * How long a secret save waits on one chat's MCP reconnect before answering
+ * anyway. Well under a reverse proxy's gateway timeout — see `refreshMcpServers`.
+ */
+export const MCP_REFRESH_WAIT_MS = 10_000;
 
 /**
  * Statuses a session may be RETIRED from — a turn has settled and the runtime is
@@ -7156,6 +7161,14 @@ export class SessionBroker {
     const fresh = this.projectConfig.getMcpServers(projectId);
     const pick = <T>(all: Record<string, T>): Record<string, T> =>
       Object.fromEntries(serverNames.filter((n) => all[n]).map((n) => [n, all[n]!]));
+    // Every live chat at once, and none waited on past MCP_REFRESH_WAIT_MS.
+    // `PUT /api/secrets` answers only after this returns, and it used to walk the
+    // chats one by one awaiting each `setMcpServers` — which waits for the
+    // reconnect. A server that can't connect yet (an ssh-mcp whose host was just
+    // saved but whose user/password cards are still open) stalled every chat
+    // behind it until the reverse proxy gave up with a 504, the card never got
+    // answered, and the agent sat on its `secret_request` forever.
+    const swaps: Promise<void>[] = [];
     for (const session of this.sessions.values()) {
       if (session.projectId !== projectId) continue;
       const layers: McpEnablementLayers = {
@@ -7186,30 +7199,51 @@ export class SessionBroker {
         continue;
       }
       const cwd = session.worktreeCwd ?? project?.repoPath;
-      const resolved = cwd
-        ? await resolveMcpServers(
-            enabled,
-            {
-              projectId,
-              cwd,
-              repoRoot: project?.repoPath ?? cwd,
-              chatId: session.chatId,
-              branch: session.worktreeCwd ? basename(session.worktreeCwd) : undefined,
-            },
-            this.mcpPorts,
-          )
-        : enabled;
-      try {
-        await harness.updateMcpServers(resolved);
-        out.refreshed.push(session.chatId);
-      } catch (err) {
-        console.warn(
-          `[Dispatch] could not refresh MCP servers in chat ${session.chatId}: ` +
-            (err instanceof Error ? err.message : String(err)),
-        );
-        out.nextSession.push(session.chatId);
-      }
+      swaps.push(
+        (async () => {
+          const resolved = cwd
+            ? await resolveMcpServers(
+                enabled,
+                {
+                  projectId,
+                  cwd,
+                  repoRoot: project?.repoPath ?? cwd,
+                  chatId: session.chatId,
+                  branch: session.worktreeCwd ? basename(session.worktreeCwd) : undefined,
+                },
+                this.mcpPorts,
+              )
+            : enabled;
+          const swap = harness.updateMcpServers!(resolved);
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          const outcome = await Promise.race([
+            swap.then(() => "done" as const),
+            new Promise<"slow">((r) => {
+              timer = setTimeout(() => r("slow"), MCP_REFRESH_WAIT_MS);
+            }),
+          ]).finally(() => clearTimeout(timer));
+          // Slow is still refreshed: the new definition is already handed to the
+          // runtime, which keeps reconnecting after we stop waiting. Only a swap
+          // that actually FAILED leaves the chat on the old value.
+          if (outcome === "slow") {
+            swap.catch((err) =>
+              console.warn(
+                `[Dispatch] MCP refresh in chat ${session.chatId} failed after the save returned: ` +
+                  (err instanceof Error ? err.message : String(err)),
+              ),
+            );
+          }
+          out.refreshed.push(session.chatId);
+        })().catch((err) => {
+          console.warn(
+            `[Dispatch] could not refresh MCP servers in chat ${session.chatId}: ` +
+              (err instanceof Error ? err.message : String(err)),
+          );
+          out.nextSession.push(session.chatId);
+        }),
+      );
     }
+    await Promise.all(swaps);
     return out;
   }
 

@@ -17,6 +17,7 @@ import {
   makeDirResolver,
   makePrCreateBinding,
   makeRepoResolver,
+  MCP_REFRESH_WAIT_MS,
   statusForTool,
   type SessionDirs,
 } from "./session-broker.js";
@@ -1629,6 +1630,36 @@ describe("SessionBroker — permissions", () => {
       await broker.refreshMcpServers(projectId, ["plug-only"]);
       // Nothing enabled → nothing swapped: the call count did not move.
       expect(updateMcpServers).toHaveBeenCalledTimes(1);
+    });
+
+    it("stops waiting on a reconnect that hangs, so a secret save can't outlive the proxy (HTTP 504)", async () => {
+      const { broker } = await withSecrets();
+      const projectId = chatFor("c1").projectId;
+      (broker as unknown as { projectConfig?: unknown }).projectConfig = {
+        getMcpServers: () => ({ box: { type: "stdio", command: "ssh-mcp" } }),
+        getMcpEnabled: () => ({}),
+      };
+      broker.plugins = { modes: () => [], mcpServers: () => [] };
+      const session = (broker as unknown as { sessions: Map<string, Record<string, unknown>> }).sessions.get("c1")!;
+      // ssh-mcp with a host but no credentials yet: the runtime's swap never settles.
+      session.harnessSession = { updateMcpServers: vi.fn(() => new Promise<void>(() => {})) };
+      // Only the deadline's clock — faking setImmediate too would freeze the fs I/O.
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        let settled: unknown;
+        void broker.refreshMcpServers(projectId, ["box"]).then((r) => (settled = r));
+        // The deadline is armed only after real store I/O, so one advance can
+        // land before the timer exists — keep stepping until it fires, bounded
+        // so a regression to an unbounded wait fails instead of hanging the run.
+        for (let i = 0; i < 50 && !settled; i++) {
+          await new Promise((r) => setImmediate(r));
+          await vi.advanceTimersByTimeAsync(MCP_REFRESH_WAIT_MS);
+        }
+        // Handed over, still reconnecting — reported refreshed, not left hanging.
+        expect(settled).toEqual({ refreshed: ["c1"], nextSession: [] });
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("reads a bare 'Saved' with no stored value as skipped — an old card can't fake a save", async () => {
