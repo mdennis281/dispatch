@@ -22,11 +22,32 @@ export type ArtifactType = (typeof ARTIFACT_TYPES)[number];
 export const ArtifactTypeSchema = z.enum(ARTIFACT_TYPES);
 
 /**
- * Largest single version. An artifact is something a human reads in a pane; a
- * megabyte of HTML is already well past that, and the bound is what keeps a
- * runaway `path` (a build output, a log) from being copied in wholesale.
+ * Largest single version's MAIN document (the HTML, SVG, Markdown or code).
+ *
+ * Was 1 MiB, which a game probe hit at once: a self-contained page that
+ * inlines its engine is several megabytes of JavaScript before a single
+ * texture. 8 MiB fits an inlined engine; anything bigger — textures, models,
+ * audio, wasm — belongs in the version's ASSETS, which are stored once by
+ * content hash instead of being re-copied into every version's document.
  */
-export const ARTIFACT_MAX_BYTES = 1024 * 1024;
+export const ARTIFACT_MAX_BYTES = 8 * 1024 * 1024;
+
+/** Largest single asset file. */
+export const ARTIFACT_ASSET_MAX_BYTES = 64 * 1024 * 1024;
+/**
+ * All of one version's assets together. Every one of them is shipped to the
+ * browser before the page boots, so this is also the download a human waits
+ * through when they open the artifact.
+ */
+export const ARTIFACT_ASSETS_MAX_BYTES = 256 * 1024 * 1024;
+/** Files per version — a build output with more than this is not one page. */
+export const ARTIFACT_ASSETS_MAX_FILES = 2000;
+/**
+ * How much of a version's main document `artifact_read` hands the model. The
+ * agent published it, usually from a file it still has; past this the content
+ * is context the model pays for and does not need.
+ */
+export const ARTIFACT_READ_CONTENT_MAX = 100_000;
 /** Versions kept per artifact. Past this the OLDEST are dropped, never the newest. */
 export const ARTIFACT_MAX_VERSIONS = 50;
 export const ARTIFACT_TITLE_MAX = 120;
@@ -78,10 +99,28 @@ export function artifactExtension(type: ArtifactType, language?: string): string
   return lang ? lang.slice(0, 12) : "txt";
 }
 
+/** A content-hash name: lowercase hex SHA-256. Checked before it is ever joined onto a path. */
+export const ARTIFACT_BLOB_ID = /^[0-9a-f]{64}$/;
+
+/** One asset in a version's manifest. The bytes live once per chat, named by `sha256`. */
+export const ArtifactAssetSchema = z.object({
+  sha256: z.string().regex(ARTIFACT_BLOB_ID),
+  size: z.number().int().nonnegative(),
+  /** MIME type, from the file name. `fetch()` of a blob reports it as Content-Type. */
+  type: z.string(),
+});
+export type ArtifactAsset = z.infer<typeof ArtifactAssetSchema>;
+
 export const ArtifactVersionSchema = z.object({
   n: z.number().int().positive(),
   createdAt: z.number(),
   size: z.number().int().nonnegative(),
+  /**
+   * Files the page loads, keyed by their path relative to the asset directory
+   * (`textures/hero.ktx2`). Absent for a version with none — every artifact
+   * before asset bundles.
+   */
+  assets: z.record(z.string(), ArtifactAssetSchema).optional(),
 });
 export type ArtifactVersion = z.infer<typeof ArtifactVersionSchema>;
 
@@ -112,6 +151,67 @@ export interface ArtifactContent {
   content: string;
   /** Runtime errors the viewer reported for THIS version, newest last. */
   errors: string[];
+  /** This version's asset manifest; fetch each by `sha256` from the blob route. */
+  assets?: Record<string, ArtifactAsset>;
+}
+
+/** Total bytes of a manifest. */
+export function artifactAssetsBytes(assets: Record<string, ArtifactAsset> | undefined): number {
+  let n = 0;
+  for (const a of Object.values(assets ?? {})) n += a.size;
+  return n;
+}
+
+/**
+ * The key an asset is stored and looked up under: forward slashes, no leading
+ * `./` or `/`, no `..`, no empty segments. Null when the path cannot name a
+ * file inside the bundle — which is a refusal, never a guess.
+ */
+export function normalizeAssetPath(raw: string): string | null {
+  const parts = raw.replace(/\\/g, "/").split("/");
+  const out: string[] = [];
+  for (const part of parts) {
+    if (part === "" || part === ".") continue;
+    if (part === "..") return null;
+    out.push(part);
+  }
+  if (!out.length) return null;
+  const joined = out.join("/");
+  return /[\u0000-\u001f]/.test(joined) ? null : joined;
+}
+
+/**
+ * MIME type for an asset, by extension. Not the server's media table: that one
+ * answers "can this be previewed", while this has to be right for the loaders
+ * that check — `WebAssembly.instantiateStreaming` refuses anything but
+ * `application/wasm`, and a module script refuses a non-JavaScript type.
+ */
+export function artifactAssetType(path: string): string {
+  const ext = path.toLowerCase().split(".").pop() ?? "";
+  return ASSET_TYPES[ext] ?? "application/octet-stream";
+}
+
+const ASSET_TYPES: Record<string, string> = {
+  html: "text/html", htm: "text/html", css: "text/css", js: "text/javascript", mjs: "text/javascript",
+  cjs: "text/javascript", json: "application/json", map: "application/json", txt: "text/plain",
+  xml: "application/xml", svg: "image/svg+xml", wasm: "application/wasm",
+  png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp",
+  avif: "image/avif", bmp: "image/bmp", ico: "image/x-icon", ktx2: "image/ktx2", ktx: "image/ktx",
+  basis: "application/octet-stream", dds: "image/vnd-ms.dds", hdr: "image/vnd.radiance", exr: "image/x-exr",
+  glb: "model/gltf-binary", gltf: "model/gltf+json", obj: "model/obj", stl: "model/stl", bin: "application/octet-stream",
+  mp3: "audio/mpeg", ogg: "audio/ogg", oga: "audio/ogg", wav: "audio/wav", flac: "audio/flac", m4a: "audio/mp4",
+  opus: "audio/ogg", mp4: "video/mp4", webm: "video/webm", ogv: "video/ogg",
+  woff: "font/woff", woff2: "font/woff2", ttf: "font/ttf", otf: "font/otf",
+};
+
+/** Types whose text may name OTHER assets, and so get their references rewritten in the frame. */
+export function isRewritableAssetType(type: string): boolean {
+  return (
+    type.startsWith("text/") ||
+    type === "application/json" ||
+    type === "image/svg+xml" ||
+    type === "model/gltf+json"
+  );
 }
 
 /** The newest version number, or 0 for a meta with none (never stored that way). */

@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { applyArtifactEdit, artifactExtension, formatArtifactRef, parseArtifactRef } from "./artifacts.js";
+import {
+  applyArtifactEdit,
+  artifactAssetType,
+  artifactAssetsBytes,
+  artifactExtension,
+  formatArtifactRef,
+  isRewritableAssetType,
+  normalizeAssetPath,
+  parseArtifactRef,
+} from "./artifacts.js";
 import { resolveRetention, DEFAULT_ARTIFACT_DAYS } from "./retention.js";
 
 describe("artifact refs", () => {
@@ -48,5 +57,24 @@ describe("artifact retention", () => {
     expect(DEFAULT_ARTIFACT_DAYS).toBe(7);
     expect(resolveRetention(undefined).artifactDays.effective).toBe(7);
     expect(resolveRetention({ artifactDays: 2 }).artifactMs).toBe(2 * 24 * 60 * 60_000);
+  });
+});
+
+describe("asset paths and types", () => {
+  it("normalizes to a bundle key, refusing anything that leaves the bundle", () => {
+    expect(normalizeAssetPath("./textures//hero.png")).toBe("textures/hero.png");
+    expect(normalizeAssetPath("textures\\hero.png")).toBe("textures/hero.png");
+    for (const bad of ["../x.png", "a/../../x", "", "./", "a/\u0000b"]) expect(normalizeAssetPath(bad), bad).toBeNull();
+  });
+
+  it("gives loaders that check the type the one they insist on", () => {
+    // instantiateStreaming refuses anything but application/wasm.
+    expect(artifactAssetType("engine.WASM")).toBe("application/wasm");
+    expect(artifactAssetType("a/b.mjs")).toBe("text/javascript");
+    expect(artifactAssetType("noext")).toBe("application/octet-stream");
+    expect(isRewritableAssetType("text/css")).toBe(true);
+    expect(isRewritableAssetType("model/gltf+json")).toBe(true);
+    expect(isRewritableAssetType("model/gltf-binary")).toBe(false);
+    expect(artifactAssetsBytes({ a: { sha256: "0".repeat(64), size: 3, type: "x" }, b: { sha256: "1".repeat(64), size: 4, type: "x" } })).toBe(7);
   });
 });

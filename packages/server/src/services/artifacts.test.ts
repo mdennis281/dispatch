@@ -1,10 +1,12 @@
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   ARTIFACT_MAX_BYTES,
   ARTIFACT_MAX_VERSIONS,
+  ARTIFACT_READ_CONTENT_MAX,
   ARTIFACT_STORAGE_MAX_CHARS,
   parseArtifactRef,
 } from "@dispatch/shared";
@@ -20,7 +22,11 @@ let svc: ArtifactService;
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "artifacts-"));
   clock = 1_000_000;
-  svc = new ArtifactService({ dirFor: (chatId) => join(root, chatId, "artifacts"), now: () => clock });
+  svc = new ArtifactService({
+    dirFor: (chatId) => join(root, chatId, "artifacts"),
+    blobDirFor: (chatId) => join(root, chatId, "artifact-blobs"),
+    now: () => clock,
+  });
 });
 afterEach(async () => {
   await rm(root, { recursive: true, force: true });
@@ -181,6 +187,112 @@ describe("artifact storage", () => {
   });
 });
 
+const sha = (s: string) => createHash("sha256").update(s).digest("hex");
+
+describe("artifact assets", () => {
+  async function files(spec: Record<string, string>): Promise<Array<{ path: string; file: string }>> {
+    const dir = await mkdtemp(join(root, "src-"));
+    const out = [];
+    for (const [path, body] of Object.entries(spec)) {
+      const file = join(dir, ...path.split("/"));
+      await mkdir(join(file, ".."), { recursive: true });
+      await writeFile(file, body);
+      out.push({ path, file });
+    }
+    return out;
+  }
+  const blobs = async () => (await readdir(join(root, "c1", "artifact-blobs")).catch(() => [])).sort();
+
+  it("stores each file once by content hash and records the manifest on the version", async () => {
+    const meta = await svc.create("c1", {
+      title: "Game",
+      type: "html",
+      content: "<canvas>",
+      assets: await files({ "textures/a.png": "AAA", "./copy-of-a.png": "AAA", "level.json": "{}" }),
+    });
+    expect(meta.versions[0]!.assets).toEqual({
+      "textures/a.png": { sha256: sha("AAA"), size: 3, type: "image/png" },
+      "copy-of-a.png": { sha256: sha("AAA"), size: 3, type: "image/png" },
+      "level.json": { sha256: sha("{}"), size: 2, type: "application/json" },
+    });
+    // Two paths, same bytes: one blob.
+    expect(await blobs()).toEqual([sha("AAA"), sha("{}")].sort());
+    const got = await svc.read("c1", meta.id);
+    expect(got.assets?.["level.json"]?.sha256).toBe(sha("{}"));
+    expect(svc.blobPath("c1", sha("AAA"))).toBe(join(root, "c1", "artifact-blobs", sha("AAA")));
+  });
+
+  it("carries assets forward through an edit, replaces them on request, and drops them on null", async () => {
+    const meta = await svc.create("c1", { title: "G", type: "html", content: "v1", assets: await files({ "a.bin": "1" }) });
+    // An edit to one line of the page must not orphan its textures.
+    await svc.update("c1", meta.id, { edit: { oldStr: "v1", newStr: "v2" } });
+    expect((await svc.read("c1", meta.id)).assets).toEqual(meta.versions[0]!.assets);
+    await svc.update("c1", meta.id, { content: "v3", assets: await files({ "b.bin": "2" }) });
+    expect(Object.keys((await svc.read("c1", meta.id)).assets!)).toEqual(["b.bin"]);
+    await svc.update("c1", meta.id, { content: "v4", assets: null });
+    expect((await svc.read("c1", meta.id)).assets).toBeUndefined();
+    // Old versions keep theirs.
+    expect(Object.keys((await svc.read("c1", meta.id, 1)).assets!)).toEqual(["a.bin"]);
+  });
+
+  it("refuses paths that leave the bundle, collide, or name no file — before storing anything", async () => {
+    const ok = await files({ "a.png": "x" });
+    for (const bad of [
+      [...ok, { path: "../escape.png", file: ok[0]!.file }],
+      [...ok, { path: "./a.png", file: ok[0]!.file }],
+      [{ path: "gone.png", file: join(root, "nope.png") }],
+    ]) {
+      await expect(svc.create("c1", { title: "t", type: "html", content: "p", assets: bad })).rejects.toBeInstanceOf(
+        ArtifactError,
+      );
+    }
+    expect(await svc.list("c1")).toEqual([]);
+    expect(svc.blobPath("c1", "../../etc/passwd")).toBeNull();
+    expect(svc.blobPath("c1", "A".repeat(64))).toBeNull();
+  });
+
+  it("refuses assets outright on a store with no blob directory", async () => {
+    const bare = new ArtifactService({ dirFor: (chatId) => join(root, chatId, "artifacts") });
+    await expect(
+      bare.create("c1", { title: "t", type: "html", content: "p", assets: await files({ "a.png": "x" }) }),
+    ).rejects.toThrow(/Assets aren't available/);
+  });
+
+  it("stamps a stored or reused blob as fresh, whatever the source's mtime", async () => {
+    // Before the meta naming them is written, only mtime keeps new blobs from
+    // the GC — and Windows copyFile keeps the source's, which may be weeks old.
+    clock = Date.now();
+    const src = await files({ "old.png": "OLD" });
+    const monthAgo = new Date(clock - 30 * DAY);
+    await utimes(src[0]!.file, monthAgo, monthAgo);
+    await svc.create("c1", { title: "a", type: "html", content: "p", assets: src });
+    const blob = join(root, "c1", "artifact-blobs", sha("OLD"));
+    expect((await stat(blob)).mtimeMs).toBeGreaterThan(clock - 60_000);
+    // A dedup hit on an orphan that already looks old refreshes it too.
+    await utimes(blob, monthAgo, monthAgo);
+    await svc.create("c1", { title: "b", type: "html", content: "p", assets: src });
+    expect((await stat(blob)).mtimeMs).toBeGreaterThan(clock - 60_000);
+  });
+
+  it("collects blobs no live version names — but only once they are past the grace period", async () => {
+    const meta = await svc.create("c1", { title: "G", type: "html", content: "p", assets: await files({ "a.bin": "old" }) });
+    await svc.update("c1", meta.id, { content: "q", assets: await files({ "a.bin": "new" }) });
+    // v1 still names "old", so nothing goes.
+    clock = Date.now() + 2 * 60 * 60_000;
+    expect((await svc.gcBlobs("c1")).files).toBe(0);
+    // Once the artifact expires, everything it named is garbage — but a blob
+    // written moments ago is spared, since a create stores its blobs before
+    // the meta that names them.
+    await svc.sweep(["c1"], 1);
+    expect(await blobs()).toEqual([]);
+    await svc.create("c1", { title: "H", type: "html", content: "p", assets: await files({ "b.bin": "fresh" }) });
+    await rm(join(root, "c1", "artifacts"), { recursive: true });
+    clock = Date.now();
+    expect((await svc.gcBlobs("c1")).files).toBe(0);
+    expect(await blobs()).toEqual([sha("fresh")]);
+  });
+});
+
 describe("artifact tools", () => {
   function bound(cwd?: string, roots: string[] = cwd ? [cwd] : []): ManagerMcpArtifacts {
     return {
@@ -276,6 +388,56 @@ describe("artifact tools", () => {
     const missing = await run(tools.artifactUpdate, { id, old_str: "zzz", new_str: "q" });
     expect(missing.isError).toBe(true);
     expect(text(missing)).toMatch(/does not occur/);
+  });
+
+  it("bundles assets_dir recursively, skipping .git, node_modules and the page itself", async () => {
+    const site = join(root, "site");
+    await mkdir(join(site, "img"), { recursive: true });
+    await mkdir(join(site, "node_modules", "x"), { recursive: true });
+    await mkdir(join(site, ".git"), { recursive: true });
+    await writeFile(join(site, "index.html"), '<img src="img/a.png">');
+    await writeFile(join(site, "img", "a.png"), "PNG");
+    await writeFile(join(site, "node_modules", "x", "i.js"), "dep");
+    await writeFile(join(site, ".git", "HEAD"), "ref");
+    const tools = createArtifactTools({ artifacts: bound(root) });
+    const res = await run(tools.artifactCreate, { title: "S", type: "html", path: "site/index.html", assets_dir: "site" });
+    expect(res.isError).toBe(false);
+    expect(text(res)).toMatch(/with 1 asset/);
+    const id = parseArtifactRef(text(res))!.id;
+    expect(Object.keys((await svc.read("c1", id)).assets!)).toEqual(["img/a.png"]);
+
+    const read = await run(tools.artifactRead, { id });
+    expect(text(read)).toMatch(/Assets \(1, 3 B\):\n- img\/a\.png \(3 B, image\/png\)/);
+
+    // An edit keeps them; clear_assets drops them.
+    await run(tools.artifactUpdate, { id, old_str: "a.png", new_str: "a.png?" });
+    expect((await svc.read("c1", id)).assets).toBeDefined();
+    await run(tools.artifactUpdate, { id, clear_assets: true });
+    expect((await svc.read("c1", id)).assets).toBeUndefined();
+  });
+
+  it("refuses an assets_dir outside the chat's directories, and assets on a non-html artifact", async () => {
+    const repo = join(root, "repo3");
+    const elsewhere = join(root, "elsewhere");
+    await mkdir(repo, { recursive: true });
+    await mkdir(elsewhere, { recursive: true });
+    await writeFile(join(elsewhere, "secret.bin"), "s");
+    const tools = createArtifactTools({ artifacts: bound(repo) });
+    const out = await run(tools.artifactCreate, { title: "x", type: "html", content: "p", assets_dir: "../elsewhere" });
+    expect(out.isError).toBe(true);
+    expect(text(out)).toMatch(/outside this chat's working directories/);
+    const md = await run(tools.artifactCreate, { title: "x", type: "markdown", content: "p", assets_dir: "." });
+    expect(md.isError).toBe(true);
+    expect(await svc.list("c1")).toEqual([]);
+  });
+
+  it("truncates a huge page in artifact_read instead of handing the model all of it", async () => {
+    const tools = createArtifactTools({ artifacts: bound() });
+    const big = "x".repeat(ARTIFACT_READ_CONTENT_MAX + 10);
+    const id = parseArtifactRef(text(await run(tools.artifactCreate, { title: "b", type: "html", content: big })))!.id;
+    const read = text(await run(tools.artifactRead, { id }));
+    expect(read).toMatch(/truncated: \d+ characters in all/);
+    expect(read.length).toBeLessThan(ARTIFACT_READ_CONTENT_MAX + 1000);
   });
 
   it("reports itself unavailable with no store bound", async () => {

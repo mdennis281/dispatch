@@ -8,27 +8,43 @@
  * (`formatArtifactRef`). The transcript card reads the id and version from it —
  * a create's id is minted here, so the call's input cannot carry it.
  */
-import { isAbsolute, relative, resolve } from "node:path";
-import { readFile, realpath, stat } from "node:fs/promises";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { readdir, readFile, realpath, stat } from "node:fs/promises";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod";
 import {
+  ARTIFACT_ASSETS_MAX_FILES,
   ARTIFACT_MAX_BYTES,
+  ARTIFACT_READ_CONTENT_MAX,
   ARTIFACT_TITLE_MAX,
   ARTIFACT_TYPES,
   formatArtifactRef,
   latestArtifactVersion,
+  artifactAssetsBytes,
+  type ArtifactAsset,
   type ArtifactMeta,
   type ArtifactType,
 } from "@dispatch/shared";
-import { ArtifactError, type ArtifactEdit } from "../artifacts.js";
+import { ArtifactError, type ArtifactAssetInput, type ArtifactEdit } from "../artifacts.js";
 import type { ManagerToolDefinition } from "./manager-mcp.js";
 
 /** The artifact store bound to ONE chat (omitted → no artifact tools). */
 export interface ManagerMcpArtifacts {
-  create(input: { title: string; type: ArtifactType; language?: string; content: string }): Promise<ArtifactMeta>;
+  create(input: {
+    title: string;
+    type: ArtifactType;
+    language?: string;
+    content: string;
+    assets?: ArtifactAssetInput[];
+  }): Promise<ArtifactMeta>;
   update(id: string, change: ArtifactEdit): Promise<ArtifactMeta>;
-  read(id: string, version?: number): Promise<{ meta: ArtifactMeta; version: number; content: string; errors: string[] }>;
+  read(id: string, version?: number): Promise<{
+    meta: ArtifactMeta;
+    version: number;
+    content: string;
+    errors: string[];
+    assets?: Record<string, ArtifactAsset>;
+  }>;
   list(): Promise<ArtifactMeta[]>;
   /** Where a relative `path` argument is resolved from — the session's working directory. */
   cwd?: string;
@@ -76,11 +92,27 @@ function isInside(root: string, child: string): boolean {
  * refused by its size, not after buffering it.
  */
 async function readSource(ctx: ManagerMcpArtifacts, path: string): Promise<string> {
-  const abs = isAbsolute(path) ? path : resolve(ctx.cwd ?? process.cwd(), path);
+  const { abs, real } = await confine(ctx, path, await realRootsOf(ctx));
+  const info = await stat(real).catch(() => null);
+  if (!info?.isFile()) throw new ArtifactError("not_found", `No file at ${abs}.`);
+  if (info.size > ARTIFACT_MAX_BYTES) {
+    throw new ArtifactError("too_large", `${abs} is ${info.size} bytes; the limit is ${ARTIFACT_MAX_BYTES}.`);
+  }
+  return readFile(real, "utf8");
+}
+
+async function realRootsOf(ctx: ManagerMcpArtifacts): Promise<string[]> {
   const roots = await (ctx.roots?.() ?? Promise.resolve([]));
-  const realRoots = (await Promise.all(roots.map((r) => realpath(r).catch(() => null)))).filter(
-    (r): r is string => !!r,
-  );
+  return (await Promise.all(roots.map((r) => realpath(r).catch(() => null)))).filter((r): r is string => !!r);
+}
+
+/** Resolve `path` and refuse it unless it really lands inside one of `realRoots`. */
+async function confine(
+  ctx: ManagerMcpArtifacts,
+  path: string,
+  realRoots: string[],
+): Promise<{ abs: string; real: string }> {
+  const abs = isAbsolute(path) ? path : resolve(ctx.cwd ?? process.cwd(), path);
   const real = await realpath(abs).catch(() => null);
   if (!real) throw new ArtifactError("not_found", `No file at ${abs}.`);
   if (!realRoots.some((root) => isInside(root, real))) {
@@ -90,20 +122,84 @@ async function readSource(ctx: ManagerMcpArtifacts, path: string): Promise<strin
         `Pass its content instead if the human should see it.`,
     );
   }
-  const info = await stat(real).catch(() => null);
-  if (!info?.isFile()) throw new ArtifactError("not_found", `No file at ${abs}.`);
-  if (info.size > ARTIFACT_MAX_BYTES) {
-    throw new ArtifactError("too_large", `${abs} is ${info.size} bytes; the limit is ${ARTIFACT_MAX_BYTES}.`);
-  }
-  return readFile(real, "utf8");
+  return { abs, real };
 }
+
+/** Never bundled: a repo's history and its dependencies are not what a page loads. */
+const SKIP_DIRS = new Set([".git", "node_modules"]);
+
+/**
+ * Every file under `dir`, keyed by its path relative to `dir`.
+ *
+ * Confinement is per FILE, not just per directory: a symlink inside an
+ * in-bounds asset folder that points at `~/.ssh` would otherwise ride the
+ * folder's approval out to the browser. Anything that resolves outside the
+ * chat's trees is refused, which fails the whole call — silently dropping it
+ * would publish a page with a hole the agent can't see.
+ *
+ * Stops counting one past the file limit, so pointing at a home directory by
+ * mistake is refused after a bounded walk instead of after listing the disk.
+ */
+async function collectAssets(
+  ctx: ManagerMcpArtifacts,
+  dir: string,
+  exclude?: string,
+): Promise<ArtifactAssetInput[]> {
+  const realRoots = await realRootsOf(ctx);
+  const { abs, real: root } = await confine(ctx, dir, realRoots);
+  const info = await stat(root);
+  if (!info.isDirectory()) throw new ArtifactError("invalid", `${abs} is not a directory.`);
+  const out: ArtifactAssetInput[] = [];
+  const walk = async (here: string): Promise<void> => {
+    for (const entry of await readdir(here, { withFileTypes: true })) {
+      if (out.length > ARTIFACT_ASSETS_MAX_FILES) return;
+      const full = join(here, entry.name);
+      if (entry.isDirectory()) {
+        if (!SKIP_DIRS.has(entry.name)) await walk(full);
+        continue;
+      }
+      if (!entry.isFile() && !entry.isSymbolicLink()) continue;
+      const { real } = await confine(ctx, full, realRoots);
+      if (!(await stat(real)).isFile()) continue;
+      if (exclude && real === exclude) continue;
+      out.push({ path: relative(root, full).split(sep).join("/"), file: real });
+    }
+  };
+  await walk(root);
+  if (out.length > ARTIFACT_ASSETS_MAX_FILES) {
+    throw new ArtifactError(
+      "too_large",
+      `${abs} has more than ${ARTIFACT_ASSETS_MAX_FILES} files. Point assets_dir at the built output, not a source tree.`,
+    );
+  }
+  return out;
+}
+
+/** The main `path` file's real location, so a page sitting inside its own asset folder isn't bundled twice. */
+async function realOf(ctx: ManagerMcpArtifacts, path: string | undefined): Promise<string | undefined> {
+  if (path === undefined) return undefined;
+  const abs = isAbsolute(path) ? path : resolve(ctx.cwd ?? process.cwd(), path);
+  return realpath(abs).catch(() => undefined);
+}
+
+const ASSETS_GUIDE =
+  "A directory of files the page loads — textures, models, audio, wasm, JSON, fonts, a worker " +
+  "script. Inside your working directory or a worktree; every file under it is bundled (except " +
+  ".git and node_modules), up to 64 MB each and 256 MB in all, and shipped to the viewer before " +
+  "the page starts. In the page, name them by their path relative to this directory, exactly as " +
+  "you would on a web server: <img src=\"textures/hero.png\">, fetch(\"levels/1.json\"), new " +
+  "Worker(\"worker.js\"), WebAssembly.instantiateStreaming(fetch(\"engine.wasm\")), CSS " +
+  "url(fonts/a.woff2). For a path built at runtime that none of those see, call " +
+  "artifactAsset(\"path\") for a URL. JS assets cannot import each other — bundle scripts into " +
+  "one file. html artifacts only.";
 
 const TYPE_GUIDE =
   "'html' — a complete page, rendered in a sandboxed iframe. Inline <script>/<style>, WebGL/WebGL2, " +
   "WebAudio, WebAssembly and Workers created from blob: URLs all work; fetch() works for data: and " +
   "blob: URLs. localStorage works and persists per artifact across reloads and versions (5M " +
   "characters); sessionStorage is per render. There is NO network (no CDN scripts, no http fetch), " +
-  "no IndexedDB and no access to Dispatch, so inline every library and asset it needs. 'svg' — one " +
+  "no IndexedDB and no access to Dispatch, so inline every library it needs, and ship larger files " +
+  "(textures, models, audio, wasm) as `assets_dir` rather than as data: URLs. 'svg' — one " +
   "<svg> document. 'markdown' — a document. 'code' — a listing shown with highlighting (pass `language`).";
 
 const createShape = {
@@ -118,6 +214,7 @@ const createShape = {
         "worktrees; absolute, or relative to your working directory.",
     ),
   language: z.string().max(32).optional().describe("For type 'code': the language, e.g. 'typescript'."),
+  assets_dir: z.string().optional().describe(ASSETS_GUIDE),
 };
 
 const updateShape = {
@@ -127,13 +224,48 @@ const updateShape = {
   content: z.string().optional().describe("Replace the whole content instead of editing."),
   path: z.string().optional().describe("Or re-publish from a file (absolute, or relative to your working directory)."),
   title: z.string().min(1).max(ARTIFACT_TITLE_MAX).optional().describe("A new title."),
+  assets_dir: z
+    .string()
+    .optional()
+    .describe(
+      "Re-bundle the page's assets from this directory (see artifact_create). Omitted, the new version " +
+        "keeps the previous version's assets unchanged.",
+    ),
+  clear_assets: z.boolean().optional().describe("Drop all assets from the new version."),
 };
 
 const readShape = {
   id: z.string().describe("The artifact id."),
   version: z.number().int().positive().optional().describe("Default: the newest."),
-  includeContent: z.boolean().optional().describe("Return the content too (default true)."),
+  includeContent: z
+    .boolean()
+    .optional()
+    .describe(`Return the content too (default true; the first ${ARTIFACT_READ_CONTENT_MAX} characters).`),
 };
+
+function assetsNote(meta: ArtifactMeta): string {
+  const latest = meta.versions[meta.versions.length - 1];
+  const assets = latest?.assets;
+  if (!assets) return "";
+  const n = Object.keys(assets).length;
+  return ` with ${n} asset${n === 1 ? "" : "s"} (${formatBytes(artifactAssetsBytes(assets))})`;
+}
+
+/** At most this many asset lines in artifact_read — the rest are summarised. */
+const ASSET_LIST_MAX = 50;
+
+function describeAssets(assets: Record<string, ArtifactAsset>): string {
+  const entries = Object.entries(assets).sort(([a], [b]) => a.localeCompare(b));
+  const lines = entries.slice(0, ASSET_LIST_MAX).map(([path, a]) => `- ${path} (${formatBytes(a.size)}, ${a.type})`);
+  if (entries.length > ASSET_LIST_MAX) lines.push(`- …and ${entries.length - ASSET_LIST_MAX} more`);
+  return `Assets (${entries.length}, ${formatBytes(artifactAssetsBytes(assets))}):\n${lines.join("\n")}`;
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 export function createArtifactTools(ctx: { artifacts?: ManagerMcpArtifacts }) {
   const unavailable = () => textResult("Artifacts aren't available in this session.", true);
@@ -153,15 +285,23 @@ export function createArtifactTools(ctx: { artifacts?: ManagerMcpArtifacts }) {
         return textResult("Pass exactly one of `content` or `path`.", true);
       }
       try {
+        if (args.assets_dir !== undefined && args.type !== "html") {
+          return textResult("assets_dir is for html artifacts only.", true);
+        }
         const content = args.path !== undefined ? await readSource(ctx.artifacts, args.path) : args.content!;
+        const assets =
+          args.assets_dir !== undefined
+            ? await collectAssets(ctx.artifacts, args.assets_dir, await realOf(ctx.artifacts, args.path))
+            : undefined;
         const meta = await ctx.artifacts.create({
           title: args.title,
           type: args.type,
           ...(args.language ? { language: args.language } : {}),
           content,
+          ...(assets ? { assets } : {}),
         });
         return textResult(
-          `Published "${meta.title}" (${meta.type}) as artifact ${meta.id}, version 1. The human sees it ` +
+          `Published "${meta.title}" (${meta.type}) as artifact ${meta.id}, version 1${assetsNote(meta)}. The human sees it ` +
             `in the artifact pane. Edit it with artifact_update; artifact_read reports any runtime errors ` +
             `the viewer caught.\n${refLine(meta)}`,
         );
@@ -185,11 +325,19 @@ export function createArtifactTools(ctx: { artifacts?: ManagerMcpArtifacts }) {
       if (args.old_str !== undefined && args.new_str === undefined) {
         return textResult("old_str needs new_str (use an empty string to delete).", true);
       }
-      if (!modes.length && args.title === undefined) {
-        return textResult("Nothing to change — pass an edit, new content, a path or a title.", true);
+      if (args.assets_dir !== undefined && args.clear_assets) {
+        return textResult("Pass assets_dir OR clear_assets, not both.", true);
+      }
+      const assetsChange = args.assets_dir !== undefined || !!args.clear_assets;
+      if (!modes.length && args.title === undefined && !assetsChange) {
+        return textResult("Nothing to change — pass an edit, new content, a path, a title or assets.", true);
       }
       try {
         const change: ArtifactEdit = {
+          ...(args.clear_assets ? { assets: null } : {}),
+          ...(args.assets_dir !== undefined
+            ? { assets: await collectAssets(ctx.artifacts, args.assets_dir, await realOf(ctx.artifacts, args.path)) }
+            : {}),
           ...(args.title !== undefined ? { title: args.title } : {}),
           ...(args.content !== undefined ? { content: args.content } : {}),
           ...(args.path !== undefined ? { content: await readSource(ctx.artifacts, args.path) } : {}),
@@ -197,7 +345,7 @@ export function createArtifactTools(ctx: { artifacts?: ManagerMcpArtifacts }) {
         };
         const meta = await ctx.artifacts.update(args.id, change);
         const n = latestArtifactVersion(meta);
-        return textResult(`Updated "${meta.title}" to version ${n}.\n${refLine(meta)}`);
+        return textResult(`Updated "${meta.title}" to version ${n}${assetsNote(meta)}.\n${refLine(meta)}`);
       } catch (err) {
         return failure(err);
       }
@@ -222,8 +370,17 @@ export function createArtifactTools(ctx: { artifacts?: ManagerMcpArtifacts }) {
         const errors = got.errors.length
           ? `Runtime errors reported for v${got.version}:\n${got.errors.map((e) => `- ${e}`).join("\n")}`
           : `No runtime errors reported for v${got.version} (it may not have been opened yet).`;
-        const body = args.includeContent === false ? "" : `\n\n${got.content}`;
-        return textResult(`${head}\n${errors}${body}`);
+        const assetList = got.assets && Object.keys(got.assets).length ? `\n${describeAssets(got.assets)}` : "";
+        let body = "";
+        if (args.includeContent !== false) {
+          // The agent published this, usually from a file it still has. An 8 MB
+          // inlined engine read back whole would cost far more than it tells.
+          body =
+            got.content.length > ARTIFACT_READ_CONTENT_MAX
+              ? `\n\n${got.content.slice(0, ARTIFACT_READ_CONTENT_MAX)}\n…[truncated: ${got.content.length} characters in all]`
+              : `\n\n${got.content}`;
+        }
+        return textResult(`${head}\n${errors}${assetList}${body}`);
       } catch (err) {
         return failure(err);
       }

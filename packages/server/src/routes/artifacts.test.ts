@@ -3,7 +3,8 @@
  * dataDir. Artifacts are written through the same service the MCP tools use.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
@@ -45,6 +46,31 @@ async function makeChat(): Promise<string> {
 }
 
 describe("artifact routes", () => {
+  it("serves an asset blob as inert bytes, immutable, and nothing that is not a hash", async () => {
+    const chatId = await makeChat();
+    const file = join(dir, "page-asset.html");
+    await writeFile(file, "<script>alert(1)</script>");
+    await app.services.artifacts.create(chatId, {
+      title: "G",
+      type: "html",
+      content: "p",
+      assets: [{ path: "evil.html", file }],
+    });
+    const sha = createHash("sha256").update("<script>alert(1)</script>").digest("hex");
+    const res = await app.inject({ url: `/api/chats/${chatId}/artifact-blobs/${sha}` });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toBe("<script>alert(1)</script>");
+    // Opened straight from this URL, an html asset must not run on Dispatch's origin.
+    expect(res.headers["content-type"]).toBe("application/octet-stream");
+    expect(res.headers["x-content-type-options"]).toBe("nosniff");
+    expect(res.headers["content-security-policy"]).toMatch(/^sandbox/);
+    expect(res.headers["cache-control"]).toMatch(/immutable/);
+
+    expect((await app.inject({ url: `/api/chats/${chatId}/artifact-blobs/${"0".repeat(64)}` })).statusCode).toBe(404);
+    expect((await app.inject({ url: `/api/chats/${chatId}/artifact-blobs/..%2F..%2Fstate.db` })).statusCode).toBe(400);
+    expect((await app.inject({ url: `/api/chats/nochat/artifact-blobs/${sha}` })).statusCode).toBe(404);
+  });
+
   it("lists, reads latest and pinned versions, and records viewer errors", async () => {
     const chatId = await makeChat();
     const { artifacts } = app.services;

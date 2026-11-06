@@ -851,6 +851,14 @@ export class Store {
   chatArtifactsDir(chatId: string) {
     return join(this.chatDir(chatId), "artifacts");
   }
+  /**
+   * A chat's artifact asset bytes, one file per content hash, shared by every
+   * artifact and version in the chat. Its own sibling rather than inside
+   * `artifacts/`, where every directory name is read as an artifact id.
+   */
+  chatArtifactBlobsDir(chatId: string) {
+    return join(this.chatDir(chatId), "artifact-blobs");
+  }
   private settingsFile() {
     return join(this.configDir, "config.json");
   }

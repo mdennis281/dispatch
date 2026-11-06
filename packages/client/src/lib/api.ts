@@ -798,6 +798,33 @@ export const api = {
         body,
         opts?.keepalive ? { keepalive: true } : undefined,
       ),
+    /**
+     * One asset's bytes, by content hash, as a Blob of `type` — reporting bytes
+     * as they arrive, since a 200 MB bundle is a long wait and a bar beats a
+     * spinner for it. A Blob, not an ArrayBuffer: it crosses `postMessage` into
+     * the frame by reference, where a buffer would be copied or, transferred,
+     * gone for the next Reload. Immutable, so the browser cache serves a re-open.
+     */
+    artifactBlob: async (
+      id: string,
+      sha256: string,
+      type: string,
+      onBytes?: (n: number) => void,
+      signal?: AbortSignal,
+    ): Promise<Blob> => {
+      const res = await sessionFetch(`${BASE}/api/chats/${id}/artifact-blobs/${sha256}`, { signal });
+      if (!res.ok) throw new ApiError(res.status, `Asset download failed (HTTP ${res.status}).`);
+      if (!res.body || !onBytes) return new Blob([await res.arrayBuffer()], { type });
+      const reader = res.body.getReader();
+      const chunks: Uint8Array[] = [];
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        onBytes(value.byteLength);
+      }
+      return new Blob(chunks as BlobPart[], { type });
+    },
     /** Runtime errors the viewer caught, so `artifact_read` can tell the agent. */
     artifactErrors: (id: string, artifactId: string, version: number, errors: string[]) =>
       post<void>(`/api/chats/${id}/artifacts/${encodeURIComponent(artifactId)}/errors`, { version, errors }),

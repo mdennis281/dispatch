@@ -4,7 +4,9 @@ import {
   ARTIFACT_CSP,
   ARTIFACT_MESSAGE_TAG,
   ARTIFACT_SANDBOX,
+  ASSET_HELPERS,
   asArtifactMessage,
+  buildArtifactBundleDocument,
   buildArtifactDocument,
 } from "./artifactDoc.js";
 
@@ -159,3 +161,69 @@ describe("the bridge's localStorage", () => {
     expect(runBridge({ k: evil }).local.getItem("k")).toBe(evil);
   });
 });
+
+describe("asset bundles", () => {
+  // Evaluated from the very string the frame runs, so what passes here is what ships.
+  const h = new Function(`${ASSET_HELPERS}; return { resolveAssetRef, rewriteAssetRefs, runtimeAssetRefs };`)() as {
+    resolveAssetRef: (base: string, ref: string) => { path: string; hash: string } | null;
+    rewriteAssetRefs: (text: string, base: string, find: (p: string) => string | undefined) => string;
+    runtimeAssetRefs: (u: unknown, baseURI: string) => Array<{ path: string; hash: string }>;
+  };
+  const urls: Record<string, string> = {
+    "a.png": "blob:null/A",
+    "css/site.css": "blob:null/S",
+    "fonts/f.woff2": "blob:null/F",
+  };
+  const find = (p: string) => urls[p];
+
+  it("resolves references relative to the file that makes them, and refuses anything outside the bundle", () => {
+    expect(h.resolveAssetRef("", "./a.png?v=2#x")).toEqual({ path: "a.png", hash: "#x" });
+    expect(h.resolveAssetRef("css", "../fonts/f.woff2")).toEqual({ path: "fonts/f.woff2", hash: "" });
+    expect(h.resolveAssetRef("css/deep", "/a.png")).toEqual({ path: "a.png", hash: "" });
+    for (const ref of ["../a.png", "https://x/a.png", "//x/a.png", "data:,x", "blob:null/1", "", "#only"]) {
+      expect(h.resolveAssetRef("", ref), ref).toBeNull();
+    }
+  });
+
+  it("rewrites markup, CSS and script strings that name a bundled file — and nothing else", () => {
+    const page =
+      '<img src="a.png"><img src=a.png><link rel="stylesheet" href=\'./css/site.css\'>' +
+      '<script>el.innerHTML = "<img src=\\"a.png\\">"; load(`a.png`); keep("b.png", "a.png.bak")</script>';
+    expect(h.rewriteAssetRefs(page, "", find)).toBe(
+      '<img src="blob:null/A"><img src=blob:null/A><link rel="stylesheet" href=\'blob:null/S\'>' +
+        '<script>el.innerHTML = "<img src=\\"blob:null/A\\">"; load(`blob:null/A`); keep("b.png", "a.png.bak")</script>',
+    );
+    expect(h.rewriteAssetRefs('@font-face{src:url(../fonts/f.woff2)} b{background:url("../a.png#sprite")}', "css", find)).toBe(
+      '@font-face{src:url(blob:null/F)} b{background:url("blob:null/A#sprite")}',
+    );
+  });
+
+  it("maps runtime URLs back to bundle paths, including the shapes a srcdoc frame and blob-relative loaders produce", () => {
+    expect(h.runtimeAssetRefs("a.png", "http://h:4318/chat/1")).toEqual([{ path: "a.png", hash: "" }]);
+    // A srcdoc frame resolves relative URLs against the PARENT's address.
+    expect(h.runtimeAssetRefs(new URL("http://h:4318/chat/a.png"), "http://h:4318/chat/1").map((r) => r.path)).toEqual([
+      "chat/a.png",
+      "a.png",
+    ]);
+    // A loader resolving against its own blob URL.
+    expect(h.runtimeAssetRefs("blob:null/css/site.css", "http://h/").map((r) => r.path)).toEqual(["css/site.css", "site.css"]);
+    // Another origin is never a bundle path.
+    expect(h.runtimeAssetRefs("http://evil/a.png", "http://h:4318/")).toEqual([]);
+  });
+
+  it("boots in two phases: a srcdoc with the CSP and loader, and the page posted in later", () => {
+    const doc = buildArtifactBundleDocument({ save: "1" });
+    expect(doc.startsWith("<!doctype html>")).toBe(true);
+    expect(doc).toContain(ARTIFACT_CSP);
+    expect(doc).toContain('"boot-ready"');
+    expect(doc).toContain("document.open()");
+    expect(doc.endsWith("</head><body></body></html>")).toBe(true);
+    expect(buildArtifactDocument("html", "<p>x</p>")).not.toContain("document.open()");
+    expect(asArtifactMessage({ [ARTIFACT_MESSAGE_TAG]: true, kind: "boot-ready" })).toEqual({ kind: "boot-ready" });
+    expect(sourcesOf("style-src")).toContain("blob:");
+  });
+});
+
+function sourcesOf(name: string) {
+  return ARTIFACT_CSP.split(";").map((d) => d.trim().split(/\s+/)).find(([n]) => n === name)?.slice(1) ?? [];
+}

@@ -6,6 +6,7 @@
  *   POST /api/chats/:id/artifacts/:aid/errors     → record runtime errors the viewer caught
  *   GET  /api/chats/:id/artifacts/:aid/storage    → ArtifactStorage (the page's localStorage)
  *   PATCH /api/chats/:id/artifacts/:aid/storage   → apply { clear?, set } → { chars }
+ *   GET  /api/chats/:id/artifact-blobs/:sha       → one asset's bytes, by content hash
  *
  * Content is returned as JSON, never served as a document. The client puts it in
  * an `<iframe sandbox="allow-scripts" srcdoc>` — an opaque origin — so
@@ -13,6 +14,8 @@
  * and drive the API. A route that served the HTML raw would be one "open in new
  * tab" away from running it same-origin.
  */
+import { createReadStream } from "node:fs";
+import { stat } from "node:fs/promises";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import * as z from "zod";
 import {
@@ -92,6 +95,27 @@ export function registerArtifactRoutes(app: FastifyInstance): void {
       }
     },
   );
+
+  // Asset bytes, named by hash — so immutable, and cacheable for as long as the
+  // browser likes. Always `application/octet-stream` + nosniff + a sandbox CSP:
+  // the frame gives each blob its real type itself, and an agent-written .html
+  // asset opened straight from this URL must not run on Dispatch's origin.
+  // Per chat, not per artifact: one blob may back several artifacts, and the
+  // hash is unguessable without the bytes, which the chat already has.
+  app.get<{ Params: { id: string; sha: string } }>("/api/chats/:id/artifact-blobs/:sha", async (req, reply) => {
+    if (!(await chatExists(req.params.id))) return reply.code(404).send({ error: "chat not found" });
+    const path = artifacts.blobPath(req.params.id, req.params.sha);
+    if (!path) return reply.code(400).send({ error: "not a blob id" });
+    const info = await stat(path).catch(() => null);
+    if (!info?.isFile()) return reply.code(404).send({ error: "not found" });
+    reply
+      .header("content-type", "application/octet-stream")
+      .header("content-length", String(info.size))
+      .header("x-content-type-options", "nosniff")
+      .header("content-security-policy", "sandbox; default-src 'none'")
+      .header("cache-control", "private, max-age=31536000, immutable");
+    return reply.send(createReadStream(path));
+  });
 
   app.patch<{ Params: { id: string; aid: string } }>(
     "/api/chats/:id/artifacts/:aid/storage",
