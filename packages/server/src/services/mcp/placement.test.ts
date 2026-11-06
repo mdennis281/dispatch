@@ -250,6 +250,24 @@ describe("McpPlacementService", () => {
     expect(procs[0]!.initializes).toHaveLength(1);
   });
 
+  it("answers a respawned shim's initialize from cache DURING a stall, so its calls fail fast instead of hanging", async () => {
+    const { svc, procs, spec } = setup();
+    await svc.start();
+    const { token } = svc.place("remote-host/cvx-mac", spec);
+    const a = await attach(svc, token);
+    await a.request(0, "initialize", INIT_PARAMS);
+    procs[0]!.emit("stalled", { detail: "wifi" });
+
+    const b = await attach(svc, token);
+    expect((await b.request("dispatch-lazy-init", "initialize", INIT_PARAMS)).result).toMatchObject({
+      serverInfo: { name: "fake" },
+    });
+    expect(errorOf(await b.request(1, "tools/call", { name: "ping" }))).toMatch(/Nothing was sent/);
+    procs[0]!.emit("resumed");
+    expect(textOf(await b.request(2, "tools/call", { name: "ping" }))).toBe("pong from life 1");
+    expect(procs[0]!.initializes).toHaveLength(1);
+  });
+
   it("drops a half line held when the stall began", async () => {
     const { svc, procs, spec } = setup();
     await svc.start();

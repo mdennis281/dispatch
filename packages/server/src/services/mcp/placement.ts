@@ -198,7 +198,11 @@ class PlacedServer {
     if (msg.method === "initialize") {
       this.clientInit = msg.params ?? null;
       if (msg.id === undefined) return;
-      if (this.state === "ready" && this.initResult) {
+      // `stalled` too: the answer is cached here and goes back over the LOCAL
+      // socket, so it does not need the link. Queued instead, it would never
+      // be answered (nothing drains the queue on `resumed`), and a shim
+      // respawned during a drop would hang every call behind its handshake.
+      if ((this.state === "ready" || this.state === "stalled") && this.initResult) {
         att.send({ jsonrpc: "2.0", id: msg.id, result: this.initResult });
         return;
       }
