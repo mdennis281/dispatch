@@ -253,7 +253,8 @@ describe("createTestContext terminals", () => {
 
     await t.terminals.spawn("box", { chatId: "c1" });
     const withdraw = t.ctx.terminals!.publishPort("box", { chatId: "c1", remotePort: 5173, url: "http://127.0.0.1:1" });
-    expect(t.ctx.terminals!.ports("c1")).toEqual([{ chatId: "c1", remotePort: 5173, url: "http://127.0.0.1:1", backend: "box" }]);
+    expect(t.ctx.terminals!.ports("c1")).toEqual([{ chatId: "c1", remotePort: 5173, url: "http://127.0.0.1:1", remoteUrl: "http://localhost:5173", backend: "box" }]);
+    expect(() => t.ctx.terminals!.publishPort("box", { chatId: "c1", remotePort: 2, url: "http://127.0.0.1:2", remoteUrl: "nope" })).toThrow(/remoteUrl/);
     expect(() => t.ctx.terminals!.publishPort("other", { chatId: "c1", remotePort: 1, url: "http://x" })).toThrow(/not registered/);
     withdraw();
     expect(t.terminalPorts).toEqual([]);

@@ -322,7 +322,10 @@ function ForwardedPorts({ chatId }: { chatId: string }) {
           href={p.url}
           target="_blank"
           rel="noreferrer"
-          title={`${p.label ? `${p.label} — ` : ""}:${p.remotePort} on the backend, reachable at ${p.url}`}
+          title={
+            `${p.label ? `${p.label} — ` : ""}:${p.remotePort} on the backend, reachable here at ${p.url}` +
+            (p.remoteUrl && p.remoteUrl !== p.url ? ` and on that machine at ${p.remoteUrl}` : "")
+          }
           className="inline-flex items-center gap-1 rounded-[5px] border border-info-line bg-info-ghost px-1.5 py-px cm-mono !text-2xs text-info-hi hover:underline"
         >
           :{p.remotePort} → {p.url.replace(/^https?:\/\//, "")}

@@ -343,18 +343,19 @@ describe("McpPlacementService", () => {
   });
 
   it("ends the process gracefully once nothing has been attached for the grace period, and a re-attach inside it keeps it", async () => {
-    const { svc, procs, spec } = setup({ graceMs: 80 });
+    // Generous real-timer margins: the first cut (80 ms grace) flaked once
+    // when this file ran alongside thirty other suites.
+    const { svc, procs, spec } = setup({ graceMs: 400 });
     await svc.start();
     const { token } = svc.place("remote-host/cvx-mac", spec);
     const a = await attach(svc, token);
     await a.request(0, "initialize", INIT_PARAMS);
     a.close();
-    await tick(30);
     const b = await attach(svc, token);
-    await tick(100);
+    await tick(600);
     expect(procs[0]!.ended).toBe(false);
     b.close();
-    await tick(150);
+    for (let i = 0; i < 100 && !procs[0]!.killed; i++) await tick(50);
     expect(procs[0]!.ended).toBe(true);
     expect(procs[0]!.killed).toBe(true); // the bound after stdin EOF
   });

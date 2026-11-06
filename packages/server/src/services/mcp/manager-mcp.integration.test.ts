@@ -352,7 +352,7 @@ describe("manager-mcp integration — terminal over a real TerminalService", () 
         run: async (a) => ({
           ...(await svc.run({ chatId: "c1", cwd: "C:\\start", ...a })),
           ...(ran++ === 0 ? { notice: "This chat's managed terminals run on Box, NOT on the Dispatch host." } : {}),
-          ports: [{ remotePort: 5173, url: "http://127.0.0.1:41000", label: "vite" }],
+          ports: [{ remotePort: 5173, url: "http://127.0.0.1:41000", remoteUrl: "http://localhost:5173", label: "vite", backend: "box" }],
         }),
         tail: async (a) => ({
           ...(await svc.tail("c1", a.name, a.lines)),
@@ -365,13 +365,15 @@ describe("manager-mcp integration — terminal over a real TerminalService", () 
       await terminal.handler({ name: "b", command: "printout hi", timeoutMs: undefined, background: undefined }, {}),
     );
     expect(first.startsWith("This chat's managed terminals run on Box")).toBe(true);
-    expect(first).toContain("Forwarded ports (open these, not localhost:<port>):\n  :5173 → http://127.0.0.1:41000 (vite)");
+    expect(first).toContain('"there" is for a browser running on that machine');
+    expect(first).toContain("  :5173 (vite, on box) → here: http://127.0.0.1:41000 · there: http://localhost:5173");
     const second = resultText(
       await terminal.handler({ name: "b", command: "printout again", timeoutMs: undefined, background: undefined }, {}),
     );
     expect(second.startsWith("[b]")).toBe(true);
     const tail = resultText(await terminalOutput.handler({ name: "b", lines: undefined, grep: undefined, since: undefined, stream: undefined, scope: undefined }, {}));
-    expect(tail).toContain(":5173 → http://127.0.0.1:41000");
+    // A forward with no remoteUrl (published by a server that predates E23) names only the local URL.
+    expect(tail).toMatch(/ {2}:5173 → here: http:\/\/127\.0\.0\.1:41000$/m);
     svc.dispose();
   });
 

@@ -739,8 +739,24 @@ describe("lifecycle hooks and ports", () => {
     expect(last).toEqual({
       type: "terminal-backends",
       backends: [{ id: "box", label: "Test box", shell: "bash", pluginId: "plug", fallback: "local" }],
-      ports: [{ chatId: "c1", backend: "box", remotePort: 8080, url: "http://127.0.0.1:9" }],
+      ports: [
+        { chatId: "c1", backend: "box", remotePort: 8080, url: "http://127.0.0.1:9", remoteUrl: "http://localhost:8080" },
+      ],
     });
+  });
+
+  it("names where a browser ON the machine reaches a forward: derived from url, or as the backend says (E23)", () => {
+    const h = setup();
+    h.registry.register(fakeBackend(), "plug");
+    h.registry.publishPort("box", { chatId: "c1", remotePort: 5173, url: "https://127.0.0.1:41000/app?x=1" });
+    h.registry.publishPort("box", { chatId: "c1", remotePort: 3000, url: "http://127.0.0.1:41001", remoteUrl: "http://mac.local:3000" });
+    expect(h.registry.ports("c1").map((p) => p.remoteUrl)).toEqual([
+      "http://mac.local:3000",
+      "https://localhost:5173/app?x=1",
+    ]);
+    expect(() =>
+      h.registry.publishPort("box", { chatId: "c1", remotePort: 1, url: "http://127.0.0.1:1", remoteUrl: "localhost:1" }),
+    ).toThrow(/remoteUrl must be an http/);
   });
 
   it("agentNote is undefined for a local chat and composed for a backend chat", async () => {
