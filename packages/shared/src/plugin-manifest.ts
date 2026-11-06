@@ -70,6 +70,7 @@ export const PLUGIN_CAPABILITIES = [
   "providers",
   "terminals",
   "approvals",
+  "runner",
 ] as const;
 export const PluginCapabilitySchema = z.enum(PLUGIN_CAPABILITIES);
 export type PluginCapability = z.infer<typeof PluginCapabilitySchema>;

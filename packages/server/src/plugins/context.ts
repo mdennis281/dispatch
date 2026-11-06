@@ -160,6 +160,17 @@ export interface PluginContextDeps {
    */
   processes?: PluginContext["processes"];
   /**
+   * `ctx.runner` (E10/E26), shared by every plugin — it is a read-only view of
+   * the whole machine. Supplied by the service alongside `processes`; absent
+   * when the host has no runner.
+   */
+  runner?: PluginContext["runner"];
+  /**
+   * Dispatch's own ports for `ctx.runner.reservedPorts()` — this instance's,
+   * and the installed one's from its `runtime.json`. Supplied by the container.
+   */
+  dispatchPorts?: () => Promise<Array<{ port: number; reason: string }>>;
+  /**
    * Where `ctx.providers.register` lands — the host's `HarnessRegistry`. Absent
    * in a host built without one (unit tests); then the member is absent too.
    */
@@ -527,6 +538,10 @@ export function buildPluginContext(
         return off;
       };
     }
+  }
+
+  if (has("runner") && deps.runner) {
+    ctx.runner = deps.runner;
   }
 
   if (has("approvals") && deps.approvals) {

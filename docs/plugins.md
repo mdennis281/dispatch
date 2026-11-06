@@ -136,6 +136,7 @@ and a manifest whose range excludes it — or cannot be parsed — is listed as
 | `providers` | `ctx.providers.register` — see "Providers" |
 | `terminals` | `ctx.terminals.registerBackend/publishPort/ports` — see "Terminal backends" |
 | `approvals` | `ctx.approvals.request` — see "Approval requests" |
+| `runner` | `ctx.runner.list/reservedPorts` — see "Local ports" |
 
 A capability the manifest does not declare is simply absent from the context
 object the plugin receives — the members are typed optional for that reason.
@@ -914,6 +915,52 @@ if (r?.decision !== "approved") return refuse();
   settles is a card nobody answers, which the request's `signal` withdraws).
   The default is `timeout`. Every request is recorded in `t.approvals` with its
   result, and the host's refusals reject there too.
+
+#### Local ports
+
+`runner` adds a read-only view of this machine's ports: what is running and
+holding which, and which ports a plugin must never bind or expose. It is for a
+plugin that binds or exposes local ports on someone else's behalf —
+remote-host forwards a listener on a paired Mac to the SAME port number here
+when it can, so OAuth redirects and CORS origins survive the trip.
+
+```ts
+const running = await ctx.runner?.list();
+// [{ id, owner: { kind: "sub-app", projectId, chatId?, subAppId, branch? }
+//            | { kind: "plugin", pluginId, processId },
+//    status: "starting" | "running" | "stopping", ports: [5173], url?, adopted? }]
+
+const reserved = await ctx.runner?.reservedPorts();
+// [{ port: 4318, owner: "dispatch", reason: "the installed Dispatch instance's default port" },
+//  { port: 8765, owner: "plugin:voice", reason: "declared by plugin \"voice\" for its process \"whisper\"" }, …]
+```
+
+- **`list()` is what holds a port now.** Every live sub-app and plugin
+  process, any project, with whoever owns it. Stopped rows are left out.
+- **`reservedPorts()` is the deny-list, and it is about ownership, not
+  occupancy.** A port can be free only because its owner is down: a forward
+  parked on 4319 while `pnpm dev` is stopped keeps the dev instance from
+  starting (or, on Windows, lets both bind it and answer half the requests
+  each). So it includes, whether bound or not: this instance's port, the
+  installed instance's (read from its `runtime.json` — the launcher scans up
+  from 4318 when that is taken), 4318, 4319, the dev live-reload socket 24678,
+  every installed plugin's declared `processes[].ports` (enabled or not), and
+  every port a plugin process actually holds (the allocator moves past a busy
+  declared one). One row per port; Dispatch's reason wins, so a plugin that
+  declares 4319 does not make it the plugin's.
+- **Sub-apps are not reserved.** They are in `list()`; their ports move with
+  the allocator, and refusing a port a user's dev server might want later
+  would refuse most of them.
+- **A reverse forward must refuse every reserved port.** Exposing a Dispatch
+  port to another machine hands its API — create chats, run commands here —
+  to every process over there.
+- **Feature-detect it.** `ctx.runner` is absent on hosts before it, and on a
+  host with no runner. A plugin that guards a forward with it should treat
+  "absent" as "the defaults are reserved", not as "nothing is".
+- **Testing.** `createTestContext({ capabilities: ["runner"] })` serves
+  `t.runnerProcesses` from `list()` and `t.reservedPorts` from
+  `reservedPorts()`; push to them. `t.reservedPorts` starts with 4318, 4319
+  and 24678, as a real host's always does.
 
 ### The `plugin-event` wire event
 

@@ -121,6 +121,7 @@ const SERVER_MEMBERS: Record<string, { capability?: PluginCapability; methods?: 
   providers: { capability: "providers" },
   terminals: { capability: "terminals" },
   approvals: { capability: "approvals" },
+  runner: { capability: "runner" },
   projects: {},
 };
 

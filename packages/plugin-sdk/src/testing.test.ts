@@ -500,3 +500,21 @@ describe("createTestContext terminals.spawnProcess (E7, hosting an MCP server)",
     await expect(t.terminals.spawnProcess("proxmox", { chatId: "c1" })).rejects.toThrow(/has no spawnProcess/);
   });
 });
+
+describe("createTestContext runner (E10/E26)", () => {
+  it("is absent without the capability, and reports what the test seeds with Dispatch's own ports as a floor", async () => {
+    expect(createTestContext({ id: "x", capabilities: [] }).ctx.runner).toBeUndefined();
+    const t = createTestContext({ id: "remote-host", capabilities: ["runner"] });
+    t.runnerProcesses.push({
+      id: "r1",
+      owner: { kind: "sub-app", projectId: "p1", subAppId: "web" },
+      status: "running",
+      ports: [5173],
+    });
+    t.reservedPorts.push({ port: 8765, owner: "plugin:voice", reason: "declared by plugin \"voice\"" });
+    expect(await t.ctx.runner!.list()).toEqual([
+      { id: "r1", owner: { kind: "sub-app", projectId: "p1", subAppId: "web" }, status: "running", ports: [5173] },
+    ]);
+    expect((await t.ctx.runner!.reservedPorts()).map((p) => p.port)).toEqual([4318, 4319, 8765, 24678]);
+  });
+});

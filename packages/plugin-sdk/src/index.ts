@@ -35,6 +35,11 @@ export type {
   // `ctx.instance` / `host.instance` (docs/plugins.md → "Instance identity")
   PluginInstance,
   PluginInstanceRemintReason,
+  // `ctx.runner` — local ports and who holds or reserves them (docs/plugins.md → "Local ports")
+  PluginRunnerView,
+  PluginRunnerProcess,
+  PluginRunnerOwner,
+  PluginReservedPort,
   // cleanup lifecycle — `onShutdown` / `reconcile` on the module
   // (docs/plugins.md → "Cleanup lifecycle")
   PluginShutdownEvent,
