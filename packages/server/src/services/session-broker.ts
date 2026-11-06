@@ -4366,15 +4366,16 @@ export class SessionBroker {
    * at all, so a result on an install with no backend is byte-identical.
    */
   private forwardedPorts(chatId: string): {
-    ports?: { remotePort: number; url: string; label?: string; backend: string }[];
+    ports?: { remotePort: number; url: string; remoteUrl?: string; label?: string; backend: string }[];
   } {
     if (!this.terminalBackends?.size) return {};
     const ports = this.terminalBackends.ports(chatId);
     return ports.length
       ? {
-          ports: ports.map(({ remotePort, url, label, backend }) => ({
+          ports: ports.map(({ remotePort, url, remoteUrl, label, backend }) => ({
             remotePort,
             url,
+            ...(remoteUrl ? { remoteUrl } : {}),
             backend,
             ...(label ? { label } : {}),
           })),

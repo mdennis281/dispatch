@@ -384,6 +384,8 @@ export interface ManagerMcpBroker {
 interface ForwardedPort {
   remotePort: number;
   url: string;
+  /** The same listener as a browser on the backend's machine reaches it (E23). */
+  remoteUrl?: string;
   label?: string;
   /**
    * The backend forwarding it. Named in the result because one chat can hold
@@ -400,9 +402,17 @@ function portsNote(ports: ForwardedPort[] | undefined): string {
   if (!ports?.length) return "";
   const rows = ports.map((p) => {
     const tags = [p.label, p.backend ? `on ${p.backend}` : undefined].filter(Boolean).join(", ");
-    return `  :${p.remotePort} → ${p.url}${tags ? ` (${tags})` : ""}`;
+    // BOTH URLs, labelled by where they work. Only the forward used to be
+    // listed, with "open these" — right for Bash and a local browser, and
+    // wrong for a browser MCP placed on the machine itself (E7), which would
+    // dial a port on the Dispatch host that does not exist over there.
+    const there = p.remoteUrl && p.remoteUrl !== p.url ? ` · there: ${p.remoteUrl}` : "";
+    return `  :${p.remotePort}${tags ? ` (${tags})` : ""} → here: ${p.url}${there}`;
   });
-  return `\nForwarded ports (open these, not localhost:<port>):\n${rows.join("\n")}`;
+  return (
+    `\nForwarded ports. "here" is for the Dispatch host (Bash, curl, a browser running here); ` +
+    `"there" is for a browser running on that machine. Never guess localhost:<port>:\n${rows.join("\n")}`
+  );
 }
 
 /** " on <where>" for a terminal result header — the agent's record of where a command ran. */

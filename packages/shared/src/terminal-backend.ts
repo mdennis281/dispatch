@@ -513,11 +513,48 @@ export const TerminalPortForwardSchema = z.object({
   remotePort: z.number().int().positive(),
   /** Where it answers locally — what a browser on the Dispatch host opens. */
   url: z.string(),
+  /**
+   * Where the SAME listener answers for a browser on the backend's own
+   * machine: `http://localhost:3000` on the Mac, not the forward on the
+   * Dispatch host. A browser MCP placed there (E7) must open this one: the
+   * forwarded `url` is a port on the Dispatch host and means nothing over
+   * there. Optional on the wire because servers that predate it never set it;
+   * the host always fills it on publish (see {@link defaultForwardRemoteUrl}).
+   */
+  remoteUrl: z.string().optional(),
   label: z.string().optional(),
 });
 export type TerminalPortForward = z.infer<typeof TerminalPortForwardSchema>;
-/** What a backend passes to `ctx.terminals.publishPort` — `backend` is filled in by the host. */
+/**
+ * What a backend passes to `ctx.terminals.publishPort` — `backend` is filled
+ * in by the host, and `remoteUrl` defaults to {@link defaultForwardRemoteUrl}.
+ * Pass it when that guess is wrong: a listener bound to one interface, a
+ * hostname the dev server insists on (Vite's `allowedHosts`).
+ */
 export type TerminalPortForwardInput = Omit<TerminalPortForward, "backend">;
+
+/**
+ * The URL a browser on the backend's machine uses for a forward: the forwarded
+ * `url` with its host swapped for `localhost` and its port for the remote one,
+ * keeping the scheme and path (`https://127.0.0.1:53211/app` → `https://localhost:5173/app`).
+ * A `url` that does not parse gives `http://localhost:<remotePort>`.
+ */
+export function defaultForwardRemoteUrl(url: string, remotePort: number): string {
+  // String slicing, not `URL` (this package compiles with no DOM or Node
+  // globals) and not a regex (CodeQL flagged `[^/?#]*(.*)` as polynomial on a
+  // plugin-supplied string). Only the authority is swapped; the scheme, path,
+  // query and fragment are kept byte for byte.
+  const head = url.slice(0, 8).toLowerCase();
+  const scheme = head.startsWith("https://") ? "https:" : head.startsWith("http://") ? "http:" : null;
+  if (!scheme) return `http://localhost:${remotePort}`;
+  const rest = url.slice(scheme.length + 2);
+  let end = rest.length;
+  for (const stop of ["/", "?", "#"]) {
+    const at = rest.indexOf(stop);
+    if (at !== -1 && at < end) end = at;
+  }
+  return `${scheme}//localhost:${remotePort}${rest.slice(end)}`;
+}
 
 /**
  * Whether a backend can take a shell right now, as its plugin reports it with

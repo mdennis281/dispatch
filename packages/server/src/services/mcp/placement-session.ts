@@ -138,7 +138,8 @@ export function placedMcpNote(placed: readonly PlacedMcpServer[]): string | unde
     ...lines,
     "",
     "A browser there loads pages AS THAT MACHINE: `localhost` is its own, so a dev server your " +
-      "terminal started there answers on `localhost:<port>` as-is, while a server on the Dispatch " +
+      "terminal started there answers on `localhost:<port>` as-is (the \"there\" URL under " +
+      "Forwarded ports), while a server on the Dispatch " +
       "host (run_subapp, your Bash) is not reachable at its local URL. Files these tools save " +
       "are on that machine too.",
     "If the machine drops off, calls fail with an error that says so. Retry once it is back; " +

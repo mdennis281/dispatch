@@ -408,6 +408,20 @@ export interface TestMcpProcess {
 
 export type TestMcpProcessEvent = "stalled" | "resumed" | "exit" | "error";
 
+/** Mirror of shared `defaultForwardRemoteUrl`. */
+function testRemoteUrl(url: string, remotePort: number): string {
+  const head = url.slice(0, 8).toLowerCase();
+  const scheme = head.startsWith("https://") ? "https:" : head.startsWith("http://") ? "http:" : null;
+  if (!scheme) return `http://localhost:${remotePort}`;
+  const rest = url.slice(scheme.length + 2);
+  let end = rest.length;
+  for (const stop of ["/", "?", "#"]) {
+    const at = rest.indexOf(stop);
+    if (at !== -1 && at < end) end = at;
+  }
+  return `${scheme}//localhost:${remotePort}${rest.slice(end)}`;
+}
+
 /** Core's side of a `spawnProcess` handle: line framing, request ids, the contract events. */
 function testMcpProcess(handle: TerminalProcessHandle): TestMcpProcess {
   let buf = "";
@@ -832,7 +846,17 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
         if (!terminalBackends.has(backendId)) {
           throw new Error(`terminal backend "${backendId}" was not registered by plugin "${id}"`);
         }
-        const forward: TerminalPortForward = { ...port, backend: backendId };
+        if (port.remoteUrl !== undefined && !/^https?:\/\//.test(String(port.remoteUrl))) {
+          throw new Error("publishPort: remoteUrl must be an http(s) URL");
+        }
+        // As the host fills it: the forwarded url with host → localhost and
+        // port → the remote one. Duplicated, because the SDK takes no values
+        // from shared (`defaultForwardRemoteUrl` there).
+        const forward: TerminalPortForward = {
+          ...port,
+          backend: backendId,
+          remoteUrl: port.remoteUrl ?? testRemoteUrl(port.url, port.remotePort),
+        };
         const at = terminalPorts.findIndex((p) => p.chatId === port.chatId && p.remotePort === port.remotePort);
         if (at >= 0) terminalPorts.splice(at, 1, forward);
         else terminalPorts.push(forward);

@@ -47,6 +47,7 @@ import {
   TERMINAL_BACKEND_STATES,
   TERMINAL_CHAT_HOOK_TIMEOUT_MS,
   UNREADABLE_TERMINAL_BACKEND_REASON,
+  defaultForwardRemoteUrl,
   isReadableTerminalBackendId,
   resolveTerminalBackend,
   terminalBackendPluginOf,
@@ -808,8 +809,9 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
       `Only the terminal moves. Your own Bash/PowerShell tool, file reads and edits, and git always ` +
         `stay on the Dispatch host — keep git local. A build or test meant for a remote location must ` +
         `go through the terminal tool; run through Bash it runs here instead. A server started remotely ` +
-        `listens over there: use the forwarded local URL the terminal results list ("Forwarded ports"), ` +
-        `not localhost:<port>.`,
+        `listens over there. The terminal results list each one under "Forwarded ports" with TWO URLs: ` +
+        `"here" for anything on the Dispatch host (Bash, curl, a browser running here), "there" for a ` +
+        `browser running on that machine. Never guess localhost:<port>.`,
     ].join("\n");
   }
 
@@ -841,8 +843,9 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
       `- Run builds, tests, installs and dev servers through the terminal tool. Running them with Bash ` +
         `would run them on the host instead, against a different environment.`,
       `- Keep git local — commit, branch and push from Bash as usual.`,
-      `- A server the terminal starts listens over there. Use the forwarded local URL the terminal ` +
-        `results list ("Forwarded ports"), not localhost:<port>.`,
+      `- A server the terminal starts listens over there. The terminal results list it under ` +
+        `"Forwarded ports" with two URLs: "here" for anything on the Dispatch host (Bash, curl, a ` +
+        `browser running here), "there" for a browser running on ${label}. Never guess localhost:<port>.`,
       ...(backend.fallback === "refuse" ? [`- ${refuseNote(label)}`] : []),
       ...(extra ? [extra] : []),
     ].join("\n");
@@ -973,11 +976,18 @@ export class TerminalBackendRegistry implements TerminalBackendSource {
     if (typeof input.url !== "string" || !/^https?:\/\//.test(input.url)) {
       throw new Error("publishPort: url must be an http(s) URL");
     }
+    if (input.remoteUrl !== undefined && (typeof input.remoteUrl !== "string" || !/^https?:\/\//.test(input.remoteUrl))) {
+      throw new Error("publishPort: remoteUrl must be an http(s) URL");
+    }
     const forward: TerminalPortForward = {
       chatId: input.chatId,
       backend: backendId,
       remotePort: input.remotePort,
       url: input.url,
+      // Always filled, so every reader can name both without guessing: a
+      // browser placed on the machine (E7) opening the Dispatch host's
+      // forward would get a refused connection, or someone else's server.
+      remoteUrl: input.remoteUrl ?? defaultForwardRemoteUrl(input.url, input.remotePort),
       ...(input.label ? { label: input.label } : {}),
     };
     const key = `${input.chatId}\u0000${backendId}\u0000${input.remotePort}`;

@@ -1479,8 +1479,20 @@ const withdraw = ctx.terminals.publishPort("proxmox", {
 });
 ```
 
-Published ports appear in the terminal tool's results ("Forwarded ports"), in
-`terminal_output`, and in the Terminals panel. A plugin may publish only for
+Every forward has two URLs. `url` is the forward on the Dispatch host.
+`remoteUrl` is the same listener as a browser on the backend's own machine
+reaches it. That browser includes the MCP servers placed there (see "Hosting
+processes"); for them the forward is a port on the wrong machine.
+
+- If you omit `remoteUrl`, the host fills it in: `url` with the host swapped
+  for `localhost` and the port for `remotePort`, keeping the scheme and path.
+  `http://127.0.0.1:53211` becomes `http://localhost:5173`.
+- Pass it yourself when that guess is wrong, for example a listener bound to
+  one interface, or a dev server that only answers to one hostname.
+
+Published ports appear in the terminal tool's results ("Forwarded ports", as
+`here: <url> · there: <remoteUrl>`), in `terminal_output`, and in the
+Terminals panel. A plugin may publish only for
 backends it registered. Publishing the same chat + remote port again replaces
 the entry, and a stale `withdraw` does not remove its replacement.
 
