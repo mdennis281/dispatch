@@ -919,8 +919,10 @@ await ctx.shared?.holder("upgrade:cvx-mac");   // { instanceId?, role?, mine, ac
 - **Per plugin.** Keys and lock names are scoped to the plugin id, so one
   plugin cannot read or take another's.
 - **Values** are JSON, at most 1 MiB each. Keys are 1–256 characters.
-- **Versions.** Every write bumps a version. `compareAndSet(key, version, value)`
-  writes only if nobody wrote in between, and `null` means "only if absent".
+- **Versions.** Every write stamps a new version, never reused for the plugin,
+  even by a key that was deleted and created again. `compareAndSet(key,
+  version, value)` writes only if nobody wrote that key in between, and `null`
+  means "only if absent".
   It is atomic across BOTH instances: each write takes SQLite's write lock up
   front.
 - **Locks are leases.** The default is 30 s (1 s to 1 h). A lease is

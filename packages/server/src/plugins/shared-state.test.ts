@@ -59,9 +59,28 @@ describe("PluginSharedStore — two instances, one config root", () => {
     // `null` means "only if absent": the second creator loses.
     expect(a.compareAndSet("p", "new", null, "1", {}).ok).toBe(true);
     expect(b.compareAndSet("p", "new", null, "1", {}).ok).toBe(false);
-    // A conditional delete.
-    expect(b.compareAndSet("p", "new", 1, undefined, {})).toEqual({ ok: true, version: 0 });
+    // A conditional delete, against the version actually read.
+    expect(b.compareAndSet("p", "new", a.get("p", "new")!.version, undefined, {})).toEqual({ ok: true, version: 0 });
     expect(a.get("p", "new")).toBeUndefined();
+  });
+
+  it("a key deleted and created again never gets back a version a reader is holding (no ABA)", async () => {
+    const { a, b } = await twoInstances();
+    a.set("p", "k", JSON.stringify("X"), {});
+    const read = a.get("p", "k")!;
+    // The other instance deletes it and writes something new in its place.
+    expect(b.delete("p", "k")).toBe(true);
+    b.set("p", "k", JSON.stringify("Y"), {});
+    expect(b.get("p", "k")!.version).not.toBe(read.version);
+    // A's update computed from X must not land on top of Y.
+    const stale = a.compareAndSet("p", "k", read.version, JSON.stringify("f(X)"), {});
+    expect(stale.ok).toBe(false);
+    expect(a.get("p", "k")!.value).toBe("Y");
+    // The same through a conditional delete and recreate.
+    const v = a.get("p", "k")!.version;
+    expect(b.compareAndSet("p", "k", v, undefined, {}).ok).toBe(true);
+    expect(b.compareAndSet("p", "k", null, JSON.stringify("Z"), {}).ok).toBe(true);
+    expect(a.compareAndSet("p", "k", v, JSON.stringify("late"), {}).ok).toBe(false);
   });
 
   it("a lock held by one instance is refused to the other until released", async () => {

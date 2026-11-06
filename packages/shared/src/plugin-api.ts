@@ -132,7 +132,12 @@ export const PLUGIN_SHARED_LIMITS = {
 /** One `ctx.shared` value with what a compare-and-set needs. */
 export interface PluginSharedEntry<T = unknown> {
   value: T;
-  /** Starts at 1, +1 on every write. What `compareAndSet` compares. */
+  /**
+   * Changes on every write and is NEVER reused for this plugin — not even by a
+   * key deleted and created again — so a `compareAndSet` against a version you
+   * read can only pass if nobody wrote that key since. Increasing, but not by
+   * 1 per key: other keys' writes advance it too. What `compareAndSet` compares.
+   */
   version: number;
   /** Epoch ms of the last write. */
   updatedAt: number;

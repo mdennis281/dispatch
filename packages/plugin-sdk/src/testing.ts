@@ -409,11 +409,13 @@ async function withHostBudget(
 export interface TestSharedStore {
   values: Map<string, { value: unknown; version: number; updatedAt: number; updatedBy?: string }>;
   locks: Map<string, { token: string; instanceId?: string; role?: string; acquiredAt: number; expiresAt: number }>;
+  /** Each plugin's write counter — versions are never reused, as on the host. */
+  seq: Map<string, number>;
   now: () => number;
 }
 
 export function createTestSharedStore(opts: { now?: () => number } = {}): TestSharedStore {
-  return { values: new Map(), locks: new Map(), now: opts.now ?? (() => Date.now()) };
+  return { values: new Map(), locks: new Map(), seq: new Map(), now: opts.now ?? (() => Date.now()) };
 }
 
 /** The default `ctx.instance`: a test, in nobody's data dir. */
@@ -718,8 +720,10 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
       return JSON.parse(json) as unknown;
     };
     const write = (key: string, value: unknown): number => {
-      const prev = store.values.get(key);
-      const version = (prev?.version ?? 0) + 1;
+      // As on the host: one counter per plugin, so a key deleted and created
+      // again never gets back a version a reader may still hold.
+      const version = (store.seq.get(id) ?? 0) + 1;
+      store.seq.set(id, version);
       store.values.set(key, { value: copy(value), version, updatedAt: store.now(), ...(me ? { updatedBy: me.id } : {}) });
       return version;
     };

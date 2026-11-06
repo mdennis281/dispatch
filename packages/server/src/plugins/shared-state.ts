@@ -48,6 +48,13 @@ const SCHEMA = `
     updated_by  TEXT,
     PRIMARY KEY (plugin, key)
   );
+  -- Each plugin's write counter. A value's version is the counter at its last
+  -- write, so a key deleted and created again never gets back a version a
+  -- reader may still be holding (the ABA a restart-at-1 version allowed).
+  CREATE TABLE IF NOT EXISTS plugin_shared_seq (
+    plugin  TEXT    PRIMARY KEY,
+    seq     INTEGER NOT NULL
+  );
   CREATE TABLE IF NOT EXISTS plugin_shared_lock (
     plugin       TEXT    NOT NULL,
     name         TEXT    NOT NULL,
@@ -173,15 +180,26 @@ export class PluginSharedStore {
     });
   }
 
+  /**
+   * Must run inside {@link tx}: the counter bump and the row write are one
+   * step, or two writers could stamp the same version.
+   */
   private writeRow(db: DatabaseSync, plugin: string, key: string, json: string, by: SharedWriter): number {
-    const row = db
+    // Seeded past any version already stored, so a counter row lost or never
+    // written can never hand out a number a reader has seen.
+    const { seq } = db
       .prepare(
-        "INSERT INTO plugin_shared_kv (plugin, key, value, version, updated_at, updated_by) VALUES (?, ?, ?, 1, ?, ?) " +
-          "ON CONFLICT(plugin, key) DO UPDATE SET value = excluded.value, version = plugin_shared_kv.version + 1, " +
-          "updated_at = excluded.updated_at, updated_by = excluded.updated_by RETURNING version",
+        "INSERT INTO plugin_shared_seq (plugin, seq) " +
+          "VALUES (?, (SELECT COALESCE(MAX(version), 0) + 1 FROM plugin_shared_kv WHERE plugin = ?)) " +
+          "ON CONFLICT(plugin) DO UPDATE SET seq = plugin_shared_seq.seq + 1 RETURNING seq",
       )
-      .get(plugin, key, json, this.now(), by.instanceId ?? null) as { version: number };
-    return Number(row.version);
+      .get(plugin, plugin) as { seq: number };
+    db.prepare(
+      "INSERT INTO plugin_shared_kv (plugin, key, value, version, updated_at, updated_by) VALUES (?, ?, ?, ?, ?, ?) " +
+        "ON CONFLICT(plugin, key) DO UPDATE SET value = excluded.value, version = excluded.version, " +
+        "updated_at = excluded.updated_at, updated_by = excluded.updated_by",
+    ).run(plugin, key, json, seq, this.now(), by.instanceId ?? null);
+    return Number(seq);
   }
 
   delete(plugin: string, key: string): boolean {
@@ -301,6 +319,7 @@ export class PluginSharedStore {
     return this.tx((db) => {
       const n = Number(db.prepare("DELETE FROM plugin_shared_kv WHERE plugin = ?").run(plugin).changes);
       db.prepare("DELETE FROM plugin_shared_lock WHERE plugin = ?").run(plugin);
+      db.prepare("DELETE FROM plugin_shared_seq WHERE plugin = ?").run(plugin);
       return n;
     });
   }

@@ -462,7 +462,7 @@ export function PluginUninstallDialog({
                   Keeps <code className="cm-mono !text-2xs">{s.name}</code> — {s.alsoUsedBy.join(", ")} also uses it.
                 </span>
               ))}
-              {(preview.data.kvKeys > 0 || (preview.data.sharedKeys ?? 0) > 0 || preview.data.oauth.length > 0) && (
+              {(preview.data.kvKeys > 0 || preview.data.oauth.length > 0) && (
                 <span className="mt-0.5 block text-2xs text-faint">
                   Stored values and sign-ins are this Dispatch instance&apos;s; another instance keeps its own.
                 </span>

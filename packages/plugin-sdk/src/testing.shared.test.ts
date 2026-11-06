@@ -20,6 +20,12 @@ describe("createTestContext shared state", () => {
     expect((await stable.ctx.shared!.compareAndSet("k", 1, { a: 3 })).ok).toBe(false);
     expect(await stable.ctx.shared!.list()).toEqual(["k"]);
 
+    // No ABA: delete and recreate never hands back a version still held.
+    const read = await stable.ctx.shared!.entry("k");
+    await dev.ctx.shared!.delete("k");
+    await dev.ctx.shared!.set("k", { a: 9 });
+    expect((await stable.ctx.shared!.compareAndSet("k", read!.version, { a: 0 })).ok).toBe(false);
+
     const held = await stable.ctx.shared!.lock("l", { ttlMs: 5_000 });
     expect(await dev.ctx.shared!.lock("l")).toBeUndefined();
     expect(await dev.ctx.shared!.holder("l")).toMatchObject({ instanceId: "stable", mine: false });
