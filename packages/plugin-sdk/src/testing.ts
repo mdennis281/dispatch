@@ -396,8 +396,16 @@ export type TestMcpProcessEvent = "stalled" | "resumed" | "exit" | "error";
 
 /** Mirror of shared `defaultForwardRemoteUrl`. */
 function testRemoteUrl(url: string, remotePort: number): string {
-  const m = /^(https?:)\/\/[^/?#]*(.*)$/i.exec(url);
-  return m ? `${m[1]}//localhost:${remotePort}${m[2]}` : `http://localhost:${remotePort}`;
+  const head = url.slice(0, 8).toLowerCase();
+  const scheme = head.startsWith("https://") ? "https:" : head.startsWith("http://") ? "http:" : null;
+  if (!scheme) return `http://localhost:${remotePort}`;
+  const rest = url.slice(scheme.length + 2);
+  let end = rest.length;
+  for (const stop of ["/", "?", "#"]) {
+    const at = rest.indexOf(stop);
+    if (at !== -1 && at < end) end = at;
+  }
+  return `${scheme}//localhost:${remotePort}${rest.slice(end)}`;
 }
 
 /** Core's side of a `spawnProcess` handle: line framing, request ids, the contract events. */

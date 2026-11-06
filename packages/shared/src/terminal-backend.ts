@@ -540,10 +540,20 @@ export type TerminalPortForwardInput = Omit<TerminalPortForward, "backend">;
  * A `url` that does not parse gives `http://localhost:<remotePort>`.
  */
 export function defaultForwardRemoteUrl(url: string, remotePort: number): string {
-  // A regex, not `URL`: this package compiles with no DOM or Node globals. It
-  // only has to swap the authority, so scheme and path are kept byte for byte.
-  const m = /^(https?:)\/\/[^/?#]*(.*)$/i.exec(url);
-  return m ? `${m[1]}//localhost:${remotePort}${m[2]}` : `http://localhost:${remotePort}`;
+  // String slicing, not `URL` (this package compiles with no DOM or Node
+  // globals) and not a regex (CodeQL flagged `[^/?#]*(.*)` as polynomial on a
+  // plugin-supplied string). Only the authority is swapped; the scheme, path,
+  // query and fragment are kept byte for byte.
+  const head = url.slice(0, 8).toLowerCase();
+  const scheme = head.startsWith("https://") ? "https:" : head.startsWith("http://") ? "http:" : null;
+  if (!scheme) return `http://localhost:${remotePort}`;
+  const rest = url.slice(scheme.length + 2);
+  let end = rest.length;
+  for (const stop of ["/", "?", "#"]) {
+    const at = rest.indexOf(stop);
+    if (at !== -1 && at < end) end = at;
+  }
+  return `${scheme}//localhost:${remotePort}${rest.slice(end)}`;
 }
 
 /**
