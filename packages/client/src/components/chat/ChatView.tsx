@@ -55,6 +55,7 @@ import { transcriptView } from "./transcriptView.js";
 import { useChatMessages, useChatPage, useMessages } from "../../stores/messages.js";
 import { loadExemptions, loadOlderMessages, reloadChatMessages } from "../../stores/index.js";
 import { useChats } from "../../stores/chats.js";
+import { useDisplayStatus } from "../../stores/scheduler.js";
 import { useProjects } from "../../stores/projects.js";
 import { usePanels } from "../../stores/panels.js";
 import { useLayoutMode } from "../../stores/layout.js";
@@ -367,7 +368,7 @@ export function ChatView({ chat }: { chat: Chat }) {
     [chat.id, pushToast],
   );
 
-  const meta = statusMeta(chat.status, prSettled);
+  const meta = statusMeta(useDisplayStatus(chat.id, chat.status), prSettled);
   const running = chat.status === "running" || chat.status === "waiting";
   // The header's roster: every worktree this chat has cut and every PR it has
   // opened, not just the live ones. See `chatHeaderRefs` for the ordering.

@@ -5725,9 +5725,15 @@ export class SessionBroker {
       // A span of its own, so the chart says "waited N minutes for a slot"
       // rather than filing that time under the tool whose answer was ready.
       session.activity.blocked(MAIN_ACTOR, RESUME_SLOT_ID, "queued", "slot", this.now());
+      // "Back in the queue", never "waiting": the status stays `waiting` for
+      // the broker's sake (the turn is live, so a message still steers it), but
+      // the client draws this chat as Queued off the scheduler snapshot — and a
+      // label that said "waiting" beside that read as the same state as a chat
+      // parked in `watch_pr`, when this one's answer is ready and Run now
+      // would let it finish.
       this.setStatus(session, session.status, {
         state: "tool",
-        label: "waiting for a slot to resume",
+        label: "back in the queue for a slot",
       });
       this.pump();
     });

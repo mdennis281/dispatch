@@ -40,6 +40,12 @@ the hold costs nothing. The chat's status stays turn-live (`waiting`) because
 its turn IS still open — a message sent to it must steer, not start a new turn —
 and the scheduler panel lists it under Queued with a "resuming" tag.
 
+The client draws it as Queued everywhere else too (`displayStatus` in
+`stores/scheduler.ts`: sidebar, header, home, peer refs), and the activity
+label says "back in the queue for a slot". Drawn as Waiting, it could not be
+told apart from a chat still parked on CI — and the two want opposite things
+from the human: this one's answer is ready, and Run now lets it finish.
+
 The gate is applied in one place for tools: `buildCategoryServer` wraps every
 manager tool whose `classifyActivity` state is `blocked`-class. That is the same
 classification the slot cap counts by, so "this tool frees a slot" and "this
@@ -53,7 +59,7 @@ chat as blocked; without the reservation `drainQueue` would hand the same slot
 to a second chat in that gap, which is precisely the burst this rule exists to
 end.
 
-Two refinements from review:
+Refinements since:
 
 - **One entry per chat.** Two blocking calls returning together (a `watch_pr`
   and a `wait_for_chat` in one message) join the same `resume` entry; a second
@@ -63,9 +69,16 @@ Two refinements from review:
   free slot — it is a held answer, not an admission.
 - **Only a call that actually waited is gated.** `withSlotReacquire` lets a
   call that returned in under `SLOT_REACQUIRE_MIN_MS` (2s) through at once.
-  `resolve_thread` takes 200ms; holding its result for a slot would convoy the
-  chat behind whatever cold start was admitted in that window, at every quick
-  GitHub or spawn call. The brief overshoot is the pre-#358 burst, and cheap.
+  A `wait_for_chat` on a finished chat returns at once; holding its result for
+  a slot would convoy the chat behind whatever cold start was admitted in that
+  window, at every quick spawn or peer call. The brief overshoot is the
+  pre-#358 burst, and cheap.
+- **Only `watch_pr` blocks on GitHub.** `create_pr`, `approve_pr`,
+  `request_review`, `post_review` and `resolve_thread` are the agent's own
+  work and keep their slot (`tool`, not `waiting_remote`). As blocked-class
+  each released it, and a `create_pr` (push, open, request review) routinely
+  outlasts the 2s floor above — so at a full cap the chat that had just opened
+  its PR was re-queued behind cold starts for a call that was never a wait.
 
 Three things end a resume wait without a slot: the session aborting (stop,
 fork, kill — the turn is being torn down), the global pause being lifted (which

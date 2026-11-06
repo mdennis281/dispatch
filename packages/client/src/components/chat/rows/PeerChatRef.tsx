@@ -8,6 +8,7 @@ import { relTime } from "../../../lib/format.js";
 import { useChats } from "../../../stores/chats.js";
 import { useProjects } from "../../../stores/projects.js";
 import { selectChat } from "../../../stores/navigation.js";
+import { useDisplayStatus } from "../../../stores/scheduler.js";
 
 /** A title with its `**bold**` runs flattened, for a tooltip or a mono preview line. */
 export function plainTitle(title: string): string {
@@ -56,6 +57,9 @@ export function PeerChatRef({
   compact?: boolean;
 }) {
   const chat = usePeerChat(chatId);
+  // Above the early returns: a hook may not be skipped on the render where the
+  // peer is unknown and called on the next one where it has arrived.
+  const status = useDisplayStatus(chatId, chat?.status);
   if (!chat && compact) return null;
   if (!chat) {
     return (
@@ -68,7 +72,7 @@ export function PeerChatRef({
       </span>
     );
   }
-  const meta = statusMeta(chat.status);
+  const meta = statusMeta(status);
   return (
     <Button
       type="button"
@@ -104,6 +108,7 @@ export function PeerChatRef({
 export function PeerChatPanel({ chatId }: { chatId: string }) {
   const chat = usePeerChat(chatId);
   const projectName = usePeerChatProjectName(chat);
+  const status = useDisplayStatus(chatId, chat?.status);
   if (!chat) {
     return (
       <section className="flex items-center gap-3 rounded-md border border-line bg-inset px-3 py-2.5">
@@ -116,7 +121,7 @@ export function PeerChatPanel({ chatId }: { chatId: string }) {
       </section>
     );
   }
-  const meta = statusMeta(chat.status);
+  const meta = statusMeta(status);
   const facts = [projectName, meta.label, chat.updatedAt ? `active ${relTime(chat.updatedAt)}` : null]
     .filter(Boolean)
     .join(" · ");

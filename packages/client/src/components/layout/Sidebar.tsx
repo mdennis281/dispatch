@@ -88,7 +88,7 @@ import {
 import { useProjectMemories } from "../../stores/memory.js";
 import { useGit, useGitChangeCount } from "../../stores/git.js";
 import { useRunners } from "../../stores/runners.js";
-import { useScheduler } from "../../stores/scheduler.js";
+import { useDisplayStatus, useScheduler } from "../../stores/scheduler.js";
 import { useAttention } from "../../stores/attention.js";
 import { actions, loadOlderChats } from "../../lib/actions.js";
 import { createChatAndFocus, usePendingChat } from "../../stores/pendingChat.js";
@@ -933,7 +933,7 @@ function ChatRow({
   onClick: () => void;
 }) {
   const prSettled = useChats((s) => s.prSettled[chat.id] ?? false);
-  const meta = statusMeta(chat.status, prSettled, isUnstartedChat(chat));
+  const meta = statusMeta(useDisplayStatus(chat.id, chat.status), prSettled, isUnstartedChat(chat));
 
   // The action tray, when it was asked for by a HOLD rather than by hovering.
   //
@@ -1438,7 +1438,7 @@ function ReviewRow({
   // `unstarted` here too, though a reviewer is spawned mid-turn and almost never
   // sits unstarted: when one does, this row's text column is the only place that
   // can say so — the PR glyph has no dashed twin to swap in.
-  const meta = statusMeta(chat.status, false, isUnstartedChat(chat));
+  const meta = statusMeta(useDisplayStatus(chat.id, chat.status), false, isUnstartedChat(chat));
   const number = record?.number ?? (key ? parsePrRecordKey(key)?.number : undefined);
   const round = reviewRound(chat, record);
   const posted = reviewSummary(round);
@@ -1589,7 +1589,7 @@ function SpawnRow({
   const activityAt = useChats(
     (s) => s.lastActivity[chat.id] ?? chat.updatedAt ?? chat.createdAt,
   );
-  const meta = statusMeta(chat.status, false, isUnstartedChat(chat));
+  const meta = statusMeta(useDisplayStatus(chat.id, chat.status), false, isUnstartedChat(chat));
   const folded = foldedChildrenLabel(childChats);
 
   return (

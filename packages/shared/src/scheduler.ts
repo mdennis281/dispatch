@@ -115,7 +115,7 @@ export const SchedulerSnapshotSchema = z.object({
 export const QUEUE_TIER_LABELS: Record<QueueTier, string> = {
   0: "you answered — resumes first",
   1: "another chat is waiting on it",
-  2: "mid-turn, waiting for a slot to resume",
+  2: "mid-turn, back in the queue to resume",
   3: "waiting for a slot",
 };
 export type SchedulerSnapshot = z.infer<typeof SchedulerSnapshotSchema>;

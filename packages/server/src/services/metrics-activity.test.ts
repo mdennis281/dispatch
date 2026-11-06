@@ -103,6 +103,13 @@ describe("classifyActivity", () => {
     // A poll-until-condition loop: the work it watches is somebody else's span.
     ["Monitor", undefined, "sleeping"],
     ["mcp__dispatch-github__watch_pr", undefined, "waiting_remote"],
+    // The rest of the GitHub server is the agent's own work, seconds long — as
+    // blocked they gave up their slot and re-queued their answer behind the cap.
+    ["mcp__dispatch-github__create_pr", undefined, "tool"],
+    ["mcp__dispatch-github__approve_pr", undefined, "tool"],
+    ["mcp__dispatch-github__request_review", undefined, "tool"],
+    ["mcp__dispatch-github__post_review", undefined, "tool"],
+    ["mcp__dispatch-github__resolve_thread", undefined, "tool"],
     ["WebFetch", undefined, "waiting_remote"],
     ["Read", undefined, "tool"],
     ["mcp__playwright__browser_click", undefined, "tool"],
