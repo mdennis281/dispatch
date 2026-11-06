@@ -134,6 +134,87 @@ export function pluginToolQualifiedName(pluginId: string, tool: string): string 
   return `mcp__${pluginToolServerName(pluginId)}__${tool}`;
 }
 
+/** What the agent gets back from a plugin tool: MCP's `CallToolResult`, restricted to text and images. */
+export interface PluginToolCallResult {
+  content: PluginToolContent[];
+  isError?: boolean;
+}
+
+/** An error result, as the agent reads one. */
+export function pluginToolError(text: string): PluginToolCallResult {
+  return { content: [{ type: "text", text }], isError: true };
+}
+
+/**
+ * A handler's throw, as the agent gets it: the plugin's display name, then the
+ * message. In shared so the SDK's fake says exactly what the host says.
+ */
+export function pluginToolThrown(err: unknown, pluginName: string): PluginToolCallResult {
+  const msg = err instanceof Error ? err.message : String(err);
+  return pluginToolError(`${pluginName}: ${msg || "the tool failed"}`);
+}
+
+/**
+ * A handler's answer, as the agent gets it. Over-long text is CUT — once,
+ * with one notice, however many blocks it spans — because a tool that answered
+ * must not turn into one that failed. A malformed block or a bad image is an
+ * error, because there is nothing honest to cut it to.
+ *
+ * In shared so the host and the SDK's fake cannot disagree about it.
+ */
+export function normalizePluginToolResult(out: unknown, pluginName: string): PluginToolCallResult {
+  const L = PLUGIN_TOOL_LIMITS;
+  if (typeof out === "string") out = { content: [{ type: "text", text: out }] };
+  const result = out as { content?: unknown; isError?: unknown } | null;
+  if (!result || typeof result !== "object" || !Array.isArray(result.content)) {
+    return pluginToolError(`${pluginName}: the tool returned neither a string nor { content: [...] }`);
+  }
+  const content: PluginToolContent[] = [];
+  let total = 0;
+  let kept = 0;
+  let images = 0;
+  for (const block of result.content as Array<Record<string, unknown> | null>) {
+    if (block?.type === "text" && typeof block.text === "string") {
+      total += block.text.length;
+      const room = L.resultTextLength - kept;
+      // A block past the budget is still COUNTED, so the notice names the
+      // real size; it is dropped, not silently — see `cut` below.
+      if (room <= 0) continue;
+      const text = block.text.length > room ? block.text.slice(0, room) : block.text;
+      kept += text.length;
+      content.push({ type: "text", text });
+    } else if (block?.type === "image") {
+      const { data, mimeType } = block;
+      if (typeof mimeType !== "string" || !(PLUGIN_TOOL_IMAGE_TYPES as readonly string[]).includes(mimeType)) {
+        return pluginToolError(`${pluginName}: an image must be one of ${PLUGIN_TOOL_IMAGE_TYPES.join(", ")}`);
+      }
+      if (typeof data !== "string" || !data || data.startsWith("data:")) {
+        return pluginToolError(`${pluginName}: an image's data is base64, without a data: prefix`);
+      }
+      if (data.length > L.imageBase64Length) {
+        return pluginToolError(`${pluginName}: an image is over ${L.imageBase64Length} base64 characters`);
+      }
+      if (++images > L.resultImages) {
+        return pluginToolError(`${pluginName}: at most ${L.resultImages} images in one result`);
+      }
+      content.push({ type: "image", data, mimeType: mimeType as (typeof PLUGIN_TOOL_IMAGE_TYPES)[number] });
+    } else {
+      return pluginToolError(`${pluginName}: a result block is { type: "text", text } or { type: "image", data, mimeType }`);
+    }
+  }
+  if (total > kept) {
+    // ONE notice, at the end, whichever block the budget ran out in — a later
+    // block dropped whole (an exit code after a long log) is the case that
+    // must not vanish without a word.
+    content.push({
+      type: "text",
+      text: `[… cut: the result's text was ${total} characters; the limit is ${L.resultTextLength}]`,
+    });
+  }
+  if (!content.length) content.push({ type: "text", text: "" });
+  return { content, ...(result.isError === true ? { isError: true } : {}) };
+}
+
 /** A plugin tool's own name: lower snake case, as the agent sees it after the server. */
 export const PLUGIN_TOOL_NAME_PATTERN = /^[a-z][a-z0-9_]*$/;
 

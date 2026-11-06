@@ -79,6 +79,20 @@ export function isManagerServer(server: string | undefined): boolean {
 }
 
 /**
+ * Is this name in Dispatch's reserved `dispatch-` namespace — a category
+ * server, a plugin's tool server (`dispatch-plugin-<id>`), or anything Dispatch
+ * adds there later?
+ *
+ * The predicate for anything that ADMITS a configured server: a declared one
+ * under a reserved name never reaches a session. Not for deciding what a tool
+ * IS — a plugin's tool is not one of Dispatch's own, which is
+ * {@link isManagerServer}'s question.
+ */
+export function isReservedServerName(server: string | undefined): boolean {
+  return !!server && server.startsWith(MANAGER_SERVER_PREFIX);
+}
+
+/**
  * The same question, for READ paths that must still recognise history.
  *
  * Chat transcripts are re-rendered from stored rows, so a call recorded before

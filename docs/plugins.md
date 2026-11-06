@@ -1041,6 +1041,9 @@ ctx.tools?.register<{ path: string }>({
   MCP bridge on Codex and goose.
   - The server name uses the reserved `dispatch-` prefix, so neither a
     project's `mcpServers` nor any plugin's contributed servers can shadow it.
+    `mcp_add`, `dispatch mcp add` and plugin contributions all refuse the
+    whole namespace. A hand-edited `project.yaml` entry under that prefix is
+    dropped, with a config error.
   - The whole name may be at most 64 characters, the limit for a function name
     on Codex. `register` throws past it, naming the limit.
 - **Register in `activate()`.** A session takes the tools registered when it
@@ -1076,8 +1079,13 @@ ctx.tools?.register<{ path: string }>({
   characters. The same name twice throws.
 - **Feature-detect it.** `ctx.tools?.register` is absent on hosts before it.
 - **Testing.** `t.tools.list()`, `t.tools.get(name)` (the agent-facing name and
-  schema), and `t.tools.call(name, args, { chatId })`, which returns what the
-  agent would get. `register` throws on the same mistakes as the host.
+  schema), and `t.tools.call(name, args, { chatId })`.
+  - `call` returns what the agent would get. It runs through the host's own
+    normalizer, from `@dispatch/shared`: the same cut, the same image checks,
+    and the same `<plugin name>: <message>` on a throw.
+  - The plugin name comes from `createTestContext({ name })`, defaulting to the
+    id.
+  - `register` throws on the same mistakes as the host.
 
 #### Local ports
 

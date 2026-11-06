@@ -181,10 +181,33 @@ describe("PluginToolRegistry — what a session is served", () => {
     reg.register("remote-host", "Remote host", echo({ handler: () => "x".repeat(250_000) }));
     const client = await connect(reg.bind({ chatId: "c1" }).server("dispatch-plugin-remote-host")!);
     const r = (await client.callTool({ name: "machine_status", arguments: {} })) as CallToolResult;
-    const text = (r.content[0] as { text: string }).text;
     expect(r.isError).toBeUndefined();
-    expect(text.length).toBeLessThan(201_000);
-    expect(text).toMatch(/cut: the result was 250000 characters/);
+    expect((r.content[0] as { text: string }).text.length).toBe(200_000);
+    expect(r.content.map((b) => (b as { text: string }).text).join("")).toMatch(
+      /cut: the result's text was 250000 characters; the limit is 200000/,
+    );
+  });
+
+  it("says so when a LATER block is dropped whole, not just when one is cut", async () => {
+    // The review's case: a log exactly at the budget, then the exit code.
+    const reg = new PluginToolRegistry();
+    reg.register(
+      "remote-host",
+      "Remote host",
+      echo({
+        handler: () => ({
+          content: [
+            { type: "text", text: "x".repeat(200_000) },
+            { type: "text", text: "exit code 1" },
+          ],
+        }),
+      }),
+    );
+    const client = await connect(reg.bind({ chatId: "c1" }).server("dispatch-plugin-remote-host")!);
+    const r = (await client.callTool({ name: "machine_status", arguments: {} })) as CallToolResult;
+    const texts = r.content.map((b) => (b as { text: string }).text);
+    expect(texts[0]!.length).toBe(200_000);
+    expect(texts.at(-1)).toBe("[… cut: the result's text was 200011 characters; the limit is 200000]");
   });
 
   it("does not resolve a server name outside its prefix", () => {

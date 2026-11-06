@@ -26,17 +26,18 @@ import {
   type CallToolResult,
 } from "@modelcontextprotocol/sdk/types.js";
 import {
-  PLUGIN_TOOL_IMAGE_TYPES,
   PLUGIN_TOOL_LIMITS,
   PLUGIN_TOOL_NAME_PATTERN,
   PLUGIN_TOOL_SERVER_PREFIX,
   isToolAllowed,
+  normalizePluginToolResult,
+  pluginToolError,
+  pluginToolThrown,
   pluginToolQualifiedName,
   pluginToolServerName,
   type PluginTool,
   type PluginToolCall,
   type PluginToolInputSchema,
-  type PluginToolResult,
 } from "@dispatch/shared";
 
 interface RegisteredTool {
@@ -198,13 +199,12 @@ export class PluginToolRegistry {
     };
     try {
       const out = await tool.handler({ ...(args as Record<string, unknown> | undefined) }, call);
-      return normalizeResult(out, entry.name);
+      return normalizePluginToolResult(out, entry.name) as CallToolResult;
     } catch (err) {
       // The plugin's failure is the CALL's result, never the session's: an
       // exception escaping here would surface as a protocol error, which some
       // runtimes treat as the server being broken.
-      const msg = err instanceof Error ? err.message : String(err);
-      return errorResult(`${entry.name}: ${msg || "the tool failed"}`);
+      return pluginToolThrown(err, entry.name) as CallToolResult;
     }
   }
 
@@ -246,52 +246,5 @@ export class PluginToolRegistry {
 }
 
 function errorResult(text: string): CallToolResult {
-  return { content: [{ type: "text", text }], isError: true };
-}
-
-/**
- * The handler's answer, as MCP content. Over-long text is CUT and says so,
- * because a tool that answered must not turn into one that failed; a malformed
- * block or an oversized image is an error, because there is nothing honest to
- * cut it to.
- */
-function normalizeResult(out: PluginToolResult, pluginName: string): CallToolResult {
-  if (typeof out === "string") return { content: [{ type: "text", text: capText(out) }] };
-  if (!out || typeof out !== "object" || !Array.isArray(out.content)) {
-    return errorResult(`${pluginName}: the tool returned neither a string nor { content: [...] }`);
-  }
-  const content: CallToolResult["content"] = [];
-  let textBudget: number = PLUGIN_TOOL_LIMITS.resultTextLength;
-  let images = 0;
-  for (const block of out.content) {
-    if (block?.type === "text" && typeof block.text === "string") {
-      if (textBudget <= 0) continue;
-      const text = block.text.length > textBudget ? capText(block.text, textBudget) : block.text;
-      textBudget -= block.text.length;
-      content.push({ type: "text", text });
-    } else if (block?.type === "image") {
-      if (!(PLUGIN_TOOL_IMAGE_TYPES as readonly string[]).includes(block.mimeType)) {
-        return errorResult(`${pluginName}: an image must be one of ${PLUGIN_TOOL_IMAGE_TYPES.join(", ")}`);
-      }
-      if (typeof block.data !== "string" || !block.data || block.data.startsWith("data:")) {
-        return errorResult(`${pluginName}: an image's data is base64, without a data: prefix`);
-      }
-      if (block.data.length > PLUGIN_TOOL_LIMITS.imageBase64Length) {
-        return errorResult(`${pluginName}: an image is over ${PLUGIN_TOOL_LIMITS.imageBase64Length} base64 characters`);
-      }
-      if (++images > PLUGIN_TOOL_LIMITS.resultImages) {
-        return errorResult(`${pluginName}: at most ${PLUGIN_TOOL_LIMITS.resultImages} images in one result`);
-      }
-      content.push({ type: "image", data: block.data, mimeType: block.mimeType });
-    } else {
-      return errorResult(`${pluginName}: a result block is { type: "text", text } or { type: "image", data, mimeType }`);
-    }
-  }
-  if (!content.length) content.push({ type: "text", text: "" });
-  return { content, ...(out.isError ? { isError: true } : {}) };
-}
-
-function capText(text: string, max: number = PLUGIN_TOOL_LIMITS.resultTextLength): string {
-  if (text.length <= max) return text;
-  return `${text.slice(0, max)}\n\n[… cut: the result was ${text.length} characters, the limit is ${PLUGIN_TOOL_LIMITS.resultTextLength}]`;
+  return pluginToolError(text) as CallToolResult;
 }

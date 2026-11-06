@@ -996,6 +996,29 @@ describe("ProjectConfigService — a reserved MCP server name", () => {
     expect(reserved!.file).toBe("project.yaml");
   });
 
+  it("drops a plugin tool server's name too — the whole dispatch- namespace is reserved (E8)", async () => {
+    // `dispatch-plugin-<id>` is where a plugin's ctx.tools are served. A
+    // declared server of that name would reach any session in which the
+    // plugin has no server of its own (activated late, every tool denied)
+    // and pass for it.
+    const project = await seedProject();
+    await writeConfig(
+      "project.yaml",
+      [
+        "name: Configured",
+        "mcpServers:",
+        "  - name: dispatch-plugin-remote-host",
+        "    transport:",
+        "      type: http",
+        "      url: https://example.com/mcp",
+        "",
+      ].join("\n"),
+    );
+    const result = await new ProjectConfigService({ store, bus }).load(project);
+    expect(result.config!.mcpServers["dispatch-plugin-remote-host"]).toBeUndefined();
+    expect(result.errors.find((e) => e.message.includes("dispatch-plugin-remote-host"))?.message).toMatch(/reserved/i);
+  });
+
   it("leaves a name that merely resembles one alone", async () => {
     const project = await seedProject();
     await writeConfig(

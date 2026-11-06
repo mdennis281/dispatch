@@ -46,8 +46,8 @@ function reservedNameReason(name: string): string | null {
   // write time is the one moment that failure can be made visible.
   return (
     `"${name}" is reserved: the \`${MANAGER_SERVER_PREFIX}\` prefix belongs to Dispatch's own ` +
-    `tool servers (${MANAGER_SERVER_NAMES.join(", ")}), which are merged last and would ` +
-    `silently shadow yours. Pick another name.`
+    `tool servers (${MANAGER_SERVER_NAMES.join(", ")}, and dispatch-plugin-<id> for plugins' tools), ` +
+    `which are merged last and would silently shadow yours. Pick another name.`
   );
 }
 

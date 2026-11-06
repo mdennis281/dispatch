@@ -52,12 +52,15 @@ import type {
   WsServerEventType,
   PluginTool,
   PluginToolCall,
-  PluginToolContent,
+  PluginToolCallResult,
   PluginToolInputSchema,
 } from "@dispatch/shared";
 import {
   PLUGIN_TOOL_LIMITS,
   PLUGIN_TOOL_NAME_PATTERN,
+  normalizePluginToolResult,
+  pluginToolError,
+  pluginToolThrown,
   pluginToolQualifiedName,
   PLUGIN_SHARED_LIMITS,
   PLUGIN_APPROVAL_DEFAULT_TIMEOUT_SECONDS,
@@ -79,6 +82,8 @@ import type { PluginContext, PluginReply, PluginRequest } from "./index.js";
 
 export interface TestContextOptions {
   id?: string;
+  /** The manifest's display name, where the host shows one (a tool's error results). Default: `id`. */
+  name?: string;
   version?: string;
   /** Absolute path the plugin believes it lives at. Default `/plugins/<id>`. */
   dir?: string;
@@ -233,7 +238,7 @@ export interface TestContext {
       name: string,
       args?: Record<string, unknown>,
       call?: Partial<PluginToolCall>,
-    ): Promise<{ content: PluginToolContent[]; isError?: boolean }>;
+    ): Promise<PluginToolCallResult>;
   };
   /** The attention items `attention.list` reports. Push to simulate a pending question. */
   attention: AttentionItem[];
@@ -1275,18 +1280,18 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
       },
       call: async (name, args = {}, call = {}) => {
         const t = registeredTools.get(name);
-        if (!t) {
-          return { content: [{ type: "text", text: `The tool ${name} is no longer available` }], isError: true };
-        }
+        if (!t) return pluginToolError(`The tool ${name} is no longer available`);
         try {
           const out = await t.handler(args, {
             chatId: "test-chat",
             signal: new AbortController().signal,
             ...call,
           });
-          return typeof out === "string" ? { content: [{ type: "text", text: out }] } : out;
+          // The HOST's normalizer and error text, from shared: a result the
+          // host would cut or refuse is cut or refused here too.
+          return normalizePluginToolResult(out, opts.name ?? id);
         } catch (err) {
-          return { content: [{ type: "text", text: err instanceof Error ? err.message : String(err) }], isError: true };
+          return pluginToolThrown(err, opts.name ?? id);
         }
       },
     },

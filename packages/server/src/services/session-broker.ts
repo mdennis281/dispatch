@@ -278,6 +278,7 @@ import {
   PROVIDER_UNAVAILABLE,
   type ProviderUnavailable,
   isManagerServer,
+  isReservedServerName,
   managerToolQualifiedName,
   resolveChatPosture,
   resolveLayered,
@@ -5327,7 +5328,11 @@ export class SessionBroker {
       // A project that declares `dispatch-<category>` by hand must not shadow
       // or duplicate the real one.
       const mcpServers = Object.fromEntries(
-        Object.entries(setup.mcpServers).filter(([name]) => !isManagerServer(name)),
+        // The whole `dispatch-` namespace, not just the categories: a declared
+        // `dispatch-plugin-<id>` would otherwise reach a session in which that
+        // plugin has no tool server of its own (activated late, every tool
+        // denied by the mode) and pass for it.
+        Object.entries(setup.mcpServers).filter(([name]) => !isReservedServerName(name)),
       );
 
       let managerMcp: HarnessSessionSpec["managerMcp"];

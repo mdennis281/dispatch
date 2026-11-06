@@ -29,9 +29,36 @@ describe("createTestContext tools", () => {
         throw new Error("machine offline");
       },
     });
-    expect(await t.tools.call("remote_fetch")).toEqual({ content: [{ type: "text", text: "machine offline" }], isError: true });
+    // The host's text: the plugin's display name, then the message.
+    expect(await t.tools.call("remote_fetch")).toEqual({
+      content: [{ type: "text", text: "remote-host: machine offline" }],
+      isError: true,
+    });
     off();
     expect((await t.tools.call("remote_fetch")).isError).toBe(true);
+  });
+
+  it("normalizes results exactly as the host does: images checked, long text cut, the name from `name`", async () => {
+    const t = createTestContext({ id: "remote-host", name: "Remote hosts" });
+    let out: unknown = "x".repeat(300_000);
+    t.ctx.tools!.register({ name: "shot", description: "d", handler: () => out as never });
+    const long = await t.tools.call("shot");
+    expect(long.isError).toBeUndefined();
+    expect(long.content.at(-1)).toEqual({
+      type: "text",
+      text: "[… cut: the result's text was 300000 characters; the limit is 200000]",
+    });
+    out = { content: [{ type: "image", data: "AAA", mimeType: "image/tiff" }] };
+    expect((await t.tools.call("shot")).isError).toBe(true);
+    out = () => {};
+    t.ctx.tools!.register({
+      name: "boom",
+      description: "d",
+      handler: () => {
+        throw new Error("no");
+      },
+    });
+    expect((await t.tools.call("boom")).content).toEqual([{ type: "text", text: "Remote hosts: no" }]);
   });
 
   it("refuses what the host refuses", () => {
