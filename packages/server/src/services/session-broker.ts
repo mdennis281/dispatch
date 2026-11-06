@@ -7301,17 +7301,21 @@ export class SessionBroker {
           const by = decision === "approved" || decision === "denied" ? opts.by : undefined;
           const at = this.now();
           session.pendingPermissions.delete(requestId);
+          // The tool call waiting on the plugin resumes from here, so it takes
+          // the slot gate every answered card does (see `resolvePermission`) —
+          // and asks BEFORE the human-wait span is released. Releasing first
+          // opens a `generating` span, the chat reads as occupied, and the gate
+          // waves it through over the cap. A person's answer goes first (tier
+          // 0); a timeout or withdrawal is an ordinary resume. A teardown has
+          // no turn left to re-admit.
+          const admitted = opts.teardown
+            ? Promise.resolve()
+            : this.acquireSlot(session.chatId, { human: decision === "approved" || decision === "denied" });
           session.activity.unblocked(requestId, at);
           this.recordPluginApproval(session, requestId, pending, approval, decision, by, at, opts.teardown === true);
           const result = { decision, ...(by ? { by } : {}), at };
-          if (decision === "approved" || decision === "denied") {
-            // A person answered, so the turn continues from here — through the
-            // same slot gate every answered card takes (see `resolvePermission`).
-            const go = () => resolve(result);
-            void this.acquireSlot(session.chatId, { human: true }).then(go, go);
-          } else {
-            resolve(result);
-          }
+          const go = () => resolve(result);
+          void admitted.then(go, go);
         },
       };
       const onAbort = (): void => approval.close("cancelled");
