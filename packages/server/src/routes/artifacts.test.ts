@@ -73,6 +73,32 @@ describe("artifact routes", () => {
     expect(artifacts.errorsFor(chatId, meta.id, 2)).toEqual(["TypeError: boom"]);
   });
 
+  it("serves and patches the page's storage, refusing malformed and oversized writes", async () => {
+    const chatId = await makeChat();
+    const meta = await app.services.artifacts.create(chatId, { title: "Game", type: "html", content: "x" });
+    const url = `/api/chats/${chatId}/artifacts/${meta.id}/storage`;
+
+    const patched = await app.inject({ method: "PATCH", url, payload: { set: { save: "lvl2" } } });
+    expect(patched.statusCode).toBe(200);
+    expect(patched.json()).toEqual({ chars: 8 });
+
+    const got = await app.inject({ url });
+    expect(got.json()).toEqual({ entries: { save: "lvl2" }, chars: 8 });
+    expect(got.headers["cache-control"]).toBe("no-store");
+
+    // A body past Fastify's 1 MB default but inside the page's quota is accepted.
+    const big = await app.inject({ method: "PATCH", url, payload: { set: { blob: "y".repeat(2_000_000) } } });
+    expect(big.statusCode).toBe(200);
+    const over = await app.inject({ method: "PATCH", url, payload: { set: { more: "z".repeat(4_000_000) } } });
+    expect(over.statusCode).toBe(413);
+
+    expect((await app.inject({ method: "PATCH", url, payload: { set: { k: 5 } } })).statusCode).toBe(400);
+    expect(
+      (await app.inject({ method: "PATCH", url: `/api/chats/${chatId}/artifacts/nope/storage`, payload: { set: {} } }))
+        .statusCode,
+    ).toBe(404);
+  });
+
   it("answers 410 for an expired artifact and 404/400 for bad requests", async () => {
     const chatId = await makeChat();
     const { artifacts } = app.services;

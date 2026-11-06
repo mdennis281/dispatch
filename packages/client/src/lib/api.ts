@@ -33,6 +33,8 @@ import type {
   ChatMediaItem,
   ArtifactContent,
   ArtifactMeta,
+  ArtifactStorage,
+  ArtifactStoragePatch,
   ChatMessage,
   AgentConfig,
   AgentConfigInput,
@@ -765,6 +767,12 @@ export const api = {
       get<ArtifactContent>(
         `/api/chats/${id}/artifacts/${encodeURIComponent(artifactId)}${qs({ version })}`,
       ),
+    /** The artifact's persisted `localStorage` (per artifact, every version). */
+    artifactStorage: (id: string, artifactId: string) =>
+      get<ArtifactStorage>(`/api/chats/${id}/artifacts/${encodeURIComponent(artifactId)}/storage`),
+    /** One batch of the page's writes: `clear` first, then `set` (null removes). */
+    artifactStoragePatch: (id: string, artifactId: string, body: ArtifactStoragePatch) =>
+      patch<{ chars: number }>(`/api/chats/${id}/artifacts/${encodeURIComponent(artifactId)}/storage`, body),
     /** Runtime errors the viewer caught, so `artifact_read` can tell the agent. */
     artifactErrors: (id: string, artifactId: string, version: number, errors: string[]) =>
       post<void>(`/api/chats/${id}/artifacts/${encodeURIComponent(artifactId)}/errors`, { version, errors }),

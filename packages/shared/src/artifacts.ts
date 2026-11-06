@@ -34,6 +34,41 @@ export const ARTIFACT_TITLE_MAX = 120;
 export const ARTIFACT_MAX_ERRORS = 20;
 export const ARTIFACT_ERROR_MAX_CHARS = 2_000;
 
+/**
+ * Per-artifact `localStorage`, in UTF-16 code units of keys plus values — the
+ * unit and roughly the size Chromium gives a real origin, so a page tuned
+ * against a browser behaves the same here. Shared by every version of the
+ * artifact: a save game must survive the agent editing the game.
+ */
+export const ARTIFACT_STORAGE_MAX_CHARS = 5 * 1024 * 1024;
+/** One key's length. Longer than any sane key, short enough to keep a log line readable. */
+export const ARTIFACT_STORAGE_KEY_MAX = 1024;
+
+/** `GET /api/chats/:id/artifacts/:aid/storage` */
+export interface ArtifactStorage {
+  entries: Record<string, string>;
+  /** Keys plus values, in UTF-16 code units — what the quota is measured in. */
+  chars: number;
+}
+
+/**
+ * One batch of writes from the viewer. `clear` applies FIRST, then `set`; a
+ * `null` value removes the key. The order matters: a page that calls `clear()`
+ * then `setItem()` within one debounce window must end up with the new item.
+ */
+export const ArtifactStoragePatchSchema = z.object({
+  clear: z.boolean().optional(),
+  set: z.record(z.string().min(1).max(ARTIFACT_STORAGE_KEY_MAX), z.string().nullable()).default({}),
+});
+export type ArtifactStoragePatch = z.infer<typeof ArtifactStoragePatchSchema>;
+
+/** Size of a storage map in the quota's unit. */
+export function artifactStorageChars(entries: Record<string, string>): number {
+  let n = 0;
+  for (const [k, v] of Object.entries(entries)) n += k.length + v.length;
+  return n;
+}
+
 /** File extension a version is stored under. Only cosmetic — never served raw. */
 export function artifactExtension(type: ArtifactType, language?: string): string {
   if (type === "html") return "html";

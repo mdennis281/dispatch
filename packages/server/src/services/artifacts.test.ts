@@ -2,7 +2,12 @@ import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ARTIFACT_MAX_BYTES, ARTIFACT_MAX_VERSIONS, parseArtifactRef } from "@dispatch/shared";
+import {
+  ARTIFACT_MAX_BYTES,
+  ARTIFACT_MAX_VERSIONS,
+  ARTIFACT_STORAGE_MAX_CHARS,
+  parseArtifactRef,
+} from "@dispatch/shared";
 import { ArtifactError, ArtifactService } from "./artifacts.js";
 import { createArtifactTools, type ManagerMcpArtifacts } from "./mcp/artifact-tools.js";
 
@@ -133,6 +138,46 @@ describe("ArtifactService", () => {
     await edited;
     expect(report.artifacts).toBe(0);
     expect((await svc.read("c1", a.id)).content).toBe("fresh");
+  });
+});
+
+describe("artifact storage", () => {
+  it("round-trips, applies clear BEFORE set, and removes on null", async () => {
+    const { id } = await svc.create("c1", { title: "game", type: "html", content: "x" });
+    expect(await svc.readStorage("c1", id)).toEqual({ entries: {}, chars: 0 });
+    await svc.writeStorage("c1", id, { set: { save: "1", opts: "a" } });
+    await svc.writeStorage("c1", id, { clear: true, set: { save: "2" } });
+    expect((await svc.readStorage("c1", id)).entries).toEqual({ save: "2" });
+    const after = await svc.writeStorage("c1", id, { set: { save: null } });
+    expect(after).toEqual({ entries: {}, chars: 0 });
+    // Empty storage leaves no file behind.
+    expect(await readdir(join(root, "c1", "artifacts", id))).not.toContain("storage.json");
+  });
+
+  it("is shared by every version — a save survives the agent editing the game", async () => {
+    const { id } = await svc.create("c1", { title: "game", type: "html", content: "v1" });
+    await svc.writeStorage("c1", id, { set: { save: "level 4" } });
+    await svc.update("c1", id, { content: "v2" });
+    expect((await svc.readStorage("c1", id)).entries).toEqual({ save: "level 4" });
+  });
+
+  it("refuses a batch past the quota WHOLE, leaving the old save intact", async () => {
+    const { id } = await svc.create("c1", { title: "game", type: "html", content: "x" });
+    await svc.writeStorage("c1", id, { set: { save: "ok" } });
+    await expect(
+      svc.writeStorage("c1", id, { set: { other: "fine", big: "x".repeat(ARTIFACT_STORAGE_MAX_CHARS) } }),
+    ).rejects.toMatchObject({ code: "too_large" });
+    expect((await svc.readStorage("c1", id)).entries).toEqual({ save: "ok" });
+  });
+
+  it("goes with the content when retention expires the artifact", async () => {
+    const { id } = await svc.create("c1", { title: "game", type: "html", content: "x" });
+    await svc.writeStorage("c1", id, { set: { save: "1" } });
+    clock += 8 * DAY;
+    await svc.sweep(["c1"], 7 * DAY);
+    expect(await readdir(join(root, "c1", "artifacts", id))).toEqual(["meta.json"]);
+    await expect(svc.readStorage("c1", id)).rejects.toMatchObject({ code: "expired" });
+    await expect(svc.writeStorage("c1", id, { set: { save: "2" } })).rejects.toMatchObject({ code: "expired" });
   });
 });
 
