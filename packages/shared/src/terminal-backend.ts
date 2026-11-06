@@ -716,9 +716,11 @@ export function resolveTerminalBackend(input: {
  * sync and a local `pnpm install`, say) must not overlap, and the backend only
  * ever hears about its own runs through its hooks.
  *
- * A run is in flight from the moment the shell takes it until the shell is
- * free again. That covers time in `beforeRun`, a command the agent sent to the
- * background (until the command itself ends), and `afterRun`.
+ * A run is in flight from the moment the shell takes it until it is over: the
+ * shell has let go of it AND its backend's `afterRun` has settled. That covers
+ * time in `beforeRun`, a command the agent sent to the background (until the
+ * command itself ends), and `afterRun` — including the detached `afterRun` of
+ * a backgrounded or cancelled command, which runs after the shell is free.
  */
 export interface TerminalRunInFlight {
   /** The same id `beforeRun` / `afterRun` get for this run on a backend's own shell. */

@@ -1262,10 +1262,13 @@ const off = ctx.terminals.onRun?.((e) => { /* e.kind: "started" | "ended"; e.run
 - **Every location.** This plugin's backends, other plugins', and `local`. A
   shell that fell back to this machine reports `backend: "local"`, because
   that is where its command runs.
-- **In flight means the shell is taken.** A run starts when the shell takes
-  it, so before `beforeRun`, and ends when the shell is free again: after
-  `afterRun`, after a backgrounded command really exits, or the moment the
-  shell dies or is closed. A lock built on these events is never left held by
+- **In flight until it is over.** A run starts when the shell takes it, so
+  before `beforeRun`. It ends when the shell has let go of it AND any
+  `afterRun` has settled. That includes the detached `afterRun` of a
+  backgrounded or cancelled command, which runs after the shell is free (and
+  maybe busy with the next run): the run stays listed until its changes are
+  back. A shell that dies or is closed ends its runs, except one whose
+  `afterRun` is still syncing. A lock built on these events is never left held by
   a shell that is gone.
 - **Same `runId` as the hooks**, so `runs()` and a backend's own `beforeRun` /
   `afterRun` pair up.

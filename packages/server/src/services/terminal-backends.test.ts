@@ -2124,6 +2124,76 @@ describe("runs in flight, for a lock that spans shells (E28)", () => {
     expect(log.filter((e) => e.kind === "ended")).toHaveLength(2);
   });
 
+  /** A backend whose FIRST `afterRun` waits on `gate` — the sync still bringing changes back. */
+  function slowAfter() {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const afterCalls: string[] = [];
+    const backend = fakeBackend({
+      afterRun: async (info) => {
+        afterCalls.push(info.command);
+        if (afterCalls.length === 1) await gate;
+        return {};
+      },
+    });
+    return { backend, afterCalls, release };
+  }
+
+  it("a backgrounded command stays in flight until its DETACHED afterRun settles, even with the shell onto the next run", async () => {
+    const h = setup();
+    const { backend, afterCalls, release } = slowAfter();
+    h.registry.register(backend, "plug");
+    h.chats.set("c1", { terminalBackend: "box" });
+    const { log } = watch(h.svc);
+
+    const res = await h.svc.run({ chatId: "c1", name: "dev", command: "hang", cwd: "/w", background: true });
+    expect(res.backgrounded).toBe(true);
+    const [bg] = h.svc.runs();
+    const shell = backend.spawned[0]!;
+    const marker = shell.writes.join("").match(/CMTERMSENTINEL_[A-Za-z0-9_-]+/)![0];
+    shell.stdout.emit("data", Buffer.from(`${marker}|0|True|/srv/repo
+`));
+    await vi.waitFor(() => expect(afterCalls).toEqual(["hang"]));
+    // The command is over and the shell free — but its changes are still on
+    // their way back, so a lock must still see it.
+    expect(h.svc.listChat("c1")[0]!.busy).toBe(false);
+    expect(h.svc.runs().map((r) => r.runId)).toEqual([bg!.runId]);
+    expect(log.filter((e) => e.kind === "ended")).toEqual([]);
+
+    // The same shell takes the next command meanwhile; both are in flight.
+    const next = h.svc.run({ chatId: "c1", name: "dev", command: "say next", cwd: "/w" });
+    await next;
+    expect(h.svc.runs().map((r) => r.runId)).toEqual([bg!.runId]);
+
+    release();
+    await vi.waitFor(() => expect(h.svc.runs()).toEqual([]));
+    expect(log.filter((e) => e.kind === "ended").map((e) => e.runId)).toContain(bg!.runId);
+  });
+
+  it("a cancelled command stays in flight until its detached afterRun settles; a refused one ends at once", async () => {
+    const h = setup();
+    const { backend, afterCalls, release } = slowAfter();
+    h.registry.register(backend, "plug");
+    h.chats.set("c1", { terminalBackend: "box" });
+
+    const ac = new AbortController();
+    const running = h.svc.run({ chatId: "c1", name: "main", command: "hang", cwd: "/w", signal: ac.signal });
+    await vi.waitFor(() => expect(backend.spawned[0]?.writes.length ?? 0).toBeGreaterThan(0));
+    ac.abort();
+    await running;
+    await vi.waitFor(() => expect(afterCalls).toEqual(["hang"]));
+    expect(h.svc.runs()).toHaveLength(1);
+    release();
+    await vi.waitFor(() => expect(h.svc.runs()).toEqual([]));
+
+    const h2 = setup();
+    h2.registry.register(fakeBackend({ beforeRun: () => ({ refuse: "conflict" }), afterRun: () => ({}) }), "plug");
+    h2.chats.set("c1", { terminalBackend: "box" });
+    const r = await h2.svc.run({ chatId: "c1", name: "main", command: "say x", cwd: "/w" });
+    expect(r.refused).toBe(true);
+    expect(h2.svc.runs()).toEqual([]);
+  });
+
   it("a listener that throws breaks neither the run nor the other listeners", async () => {
     const h = setup();
     h.svc.onRun(() => {
