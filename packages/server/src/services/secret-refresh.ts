@@ -69,36 +69,46 @@ export class SecretRefresher {
       }
     }
 
-    for (const [projectId, names] of byProject) {
-      await projectConfig.reload(projectId);
-      report.projects.push(projectId);
-      const consumers = new Set([...names].flatMap((n) => projectConfig.secretConsumers(projectId, n)));
-      const mcp = [...consumers].filter((c) => c.startsWith("mcp:")).map((c) => c.slice(4));
-      const subApps = [...consumers].filter((c) => c.startsWith("subapp:")).map((c) => c.slice(7));
+    // Projects in PARALLEL, each into its own partial, merged back in order.
+    // `PUT /api/secrets` answers only after this, and every MCP refresh may
+    // spend up to MCP_REFRESH_WAIT_MS on a server that won't connect — serial,
+    // a global secret used by four projects was four of those back to back,
+    // which is past a reverse proxy's gateway timeout (the 504 this fixes).
+    const partials = await Promise.all(
+      [...byProject].map(async ([projectId, names]) => {
+        const part: SecretRefreshReport = structuredClone(EMPTY_REFRESH_REPORT);
+        await projectConfig.reload(projectId);
+        part.projects.push(projectId);
+        const consumers = new Set([...names].flatMap((n) => projectConfig.secretConsumers(projectId, n)));
+        const mcp = [...consumers].filter((c) => c.startsWith("mcp:")).map((c) => c.slice(4));
+        const subApps = [...consumers].filter((c) => c.startsWith("subapp:")).map((c) => c.slice(7));
 
-      report.mcpServers.push(...mcp.map((m) => `${projectId}/${m}`));
-      if (mcp.length) {
-        const live = await broker.refreshMcpServers(projectId, mcp);
-        report.chatsRefreshed.push(...live.refreshed);
-        report.chatsOnNextSession.push(...live.nextSession);
-      }
-
-      const fresh = projectConfig.getSubApps(projectId);
-      for (const id of subApps) {
-        for (const instance of runner.runningFor(projectId, id)) {
-          const restarted = await runner
-            .restart(instance, fresh.find((s) => s.id === id))
-            .catch((err) => {
-              console.warn(
-                `[Dispatch] could not restart sub-app ${id} after a secret change: ` +
-                  (err instanceof Error ? err.message : String(err)),
-              );
-              return null;
-            });
-          if (restarted) report.subAppsRestarted.push(`${projectId}/${id}`);
+        part.mcpServers.push(...mcp.map((m) => `${projectId}/${m}`));
+        if (mcp.length) {
+          const live = await broker.refreshMcpServers(projectId, mcp);
+          part.chatsRefreshed.push(...live.refreshed);
+          part.chatsOnNextSession.push(...live.nextSession);
         }
-      }
-    }
+
+        const fresh = projectConfig.getSubApps(projectId);
+        for (const id of subApps) {
+          for (const instance of runner.runningFor(projectId, id)) {
+            const restarted = await runner
+              .restart(instance, fresh.find((s) => s.id === id))
+              .catch((err) => {
+                console.warn(
+                  `[Dispatch] could not restart sub-app ${id} after a secret change: ` +
+                    (err instanceof Error ? err.message : String(err)),
+                );
+                return null;
+              });
+            if (restarted) part.subAppsRestarted.push(`${projectId}/${id}`);
+          }
+        }
+        return part;
+      }),
+    );
+    for (const part of partials) mergeInto(report, part);
     // Plugin servers expand from the GLOBAL store only (plugins are global), so
     // a project secret never reaches one. Nothing to reload first: their
     // definitions are read from the plugin, not from a project's config.
@@ -106,8 +116,14 @@ export class SecretRefresher {
       ...new Set(changed.filter((k) => k.scope === "global").flatMap((k) => this.deps.pluginMcpServersUsing?.(k.name) ?? [])),
     ];
     if (pluginServers.length && broker.liveProjectIds) {
-      for (const projectId of broker.liveProjectIds()) {
-        const live = await broker.refreshMcpServers(projectId, pluginServers);
+      // Parallel for the same reason as the project pass above.
+      const lives = await Promise.all(
+        broker.liveProjectIds().map(async (projectId) => ({
+          projectId,
+          live: await broker.refreshMcpServers(projectId, pluginServers),
+        })),
+      );
+      for (const { projectId, live } of lives) {
         if (!live.refreshed.length && !live.nextSession.length) continue;
         report.mcpServers.push(...pluginServers.map((m) => `${projectId}/${m}`));
         report.chatsRefreshed.push(...live.refreshed);
@@ -121,6 +137,10 @@ export class SecretRefresher {
     for (const key of changed) this.last.set(reportKey(key), report);
     return report;
   }
+}
+
+function mergeInto(into: SecretRefreshReport, part: SecretRefreshReport): void {
+  for (const k of Object.keys(into) as (keyof SecretRefreshReport)[]) into[k].push(...part[k]);
 }
 
 function reportKey(k: SecretKey): string {

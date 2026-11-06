@@ -1506,7 +1506,9 @@ const THREAD_MAP_CAP = 2_000;
 const IDLE_SWEEP_MS = 60_000;
 /**
  * How long a secret save waits on one chat's MCP reconnect before answering
- * anyway. Well under a reverse proxy's gateway timeout — see `refreshMcpServers`.
+ * anyway. Chats and projects are refreshed in parallel (`refreshMcpServers`,
+ * `SecretRefresher.refresh`), so this is roughly the whole save's worst case —
+ * well under a reverse proxy's gateway timeout.
  */
 export const MCP_REFRESH_WAIT_MS = 10_000;
 
