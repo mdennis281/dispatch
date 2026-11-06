@@ -2705,6 +2705,19 @@ export type WatchPrEvent =
    * after CI already finished from blocking for the entire quiet window.
    */
   | { type: "ci-passed"; names: string[] }
+  /**
+   * Every check has FINISHED and at least one of them failed: CI is over, and it
+   * is red. The counterpart of `ci-passed`, and needed for the same reason.
+   *
+   * `ci-failed` fires the moment a job goes red, usually while its siblings are
+   * still running, and is then deduped. An agent that read it and chose to wait
+   * for the rest (to re-run a flake once the run is over, say) called watch_pr
+   * again, and the run finishing was not news to anything here — so it sat out
+   * its whole quiet window with a settled red build in front of it
+   * (dispatch-plugins #43). Nothing on CI changes from here until somebody
+   * pushes or re-runs, so this is always the agent's move.
+   */
+  | { type: "ci-settled-red"; failing: string[] }
   /** This PR has no checks at all (see {@link NO_CHECKS_GRACE_MS}). Reported once. */
   | { type: "no-checks" }
   /**
@@ -2772,6 +2785,15 @@ export interface WatchPrState {
    * reports.
    */
   greenAt?: string;
+  /**
+   * Fingerprint of the settled-red check set last reported. Unlike
+   * {@link greenAt} it is NOT a once-only gate: a settled red build re-reports
+   * on the first poll of every call (see `ci-settled-red`), because a red run
+   * that is over cannot change by itself, and a watch that blocks on it is
+   * waiting for nothing. This only stops it re-firing on later polls of the
+   * same call.
+   */
+  redAt?: string;
   /** The "no checks configured" note has been delivered for this PR. */
   notedNoChecks?: boolean;
   /**
@@ -2882,6 +2904,9 @@ async function watchForPrActivity(
   const started = opts.now();
   const deadline = started + opts.timeoutMs;
   const aborted = (): boolean => opts.signals.some((s) => s?.aborted);
+  // Whether THIS call has reported the settled-red build yet. Per call, not per
+  // session: see `redAt`.
+  let redReported = false;
 
   for (;;) {
     if (aborted()) return { kind: "aborted" };
@@ -2926,7 +2951,33 @@ async function watchForPrActivity(
     // CI is green: every check has finished and none of them failed. A check
     // still queued/in_progress means the run isn't over, so keep waiting — the
     // agent must not be told "passing" while a job could still go red.
-    const allGreen = runs.length > 0 && !anyFailing && runs.every((c) => c.status === "completed");
+    const settled = runs.length > 0 && runs.every((c) => c.status === "completed");
+    const allGreen = settled && !anyFailing;
+    if (settled && anyFailing) {
+      const red = runs
+        .map((c) => `${c.name}:${c.conclusion ?? "completed"}`)
+        .sort()
+        .join("|");
+      // Reported once per CALL even when an earlier call already delivered the
+      // same red set: the agent called watch_pr while the build sits finished
+      // and red, and blocking there means waiting out the whole window for a
+      // change only the agent can cause. A call that started while jobs were
+      // still running fires once, the moment they finish.
+      if (!redReported || st.redAt !== red) {
+        redReported = true;
+        st.redAt = red;
+        events.push({
+          type: "ci-settled-red",
+          failing: runs
+            .filter((c) => c.conclusion != null && FAILING_CONCLUSIONS.has(c.conclusion))
+            .map((c) => c.name),
+        });
+      }
+    } else if (checks !== null) {
+      // A blind poll proves nothing either way. Anything else but settled-red (a re-run started, a new push) is a different
+      // build: the next time it settles red is news again.
+      st.redAt = undefined;
+    }
     if (allGreen) {
       const green = runs
         .map((c) => `${c.name}:${c.conclusion ?? "completed"}`)
@@ -3760,7 +3811,9 @@ export function createManagerTools(ctx: ManagerMcpContext) {
   const watchPr = tool(
     "watch_pr",
     "Watch a GitHub pull request and RETURN THE INSTANT it needs you — a CI check " +
-      "fails, ALL checks finish green, a new review comment/thread appears, or the " +
+      "fails, ALL checks finish green, ALL checks finish with any red (ciSettledRed — " +
+      "re-reported at once on every call until you push or re-run, since a finished " +
+      "build can't change by waiting), a new review comment/thread appears, or the " +
       "PR is merged/closed. This is the ONE correct way to wait on or react to a " +
       "PR: do NOT hand-roll a `gh pr view` / `gh pr checks` sleep loop, and do NOT " +
       "launch a background Bash or Monitor task to watch it. Safe to call AFTER CI " +
@@ -3981,6 +4034,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       const failing = events.filter((e) => e.type === "ci-failed");
       const comments = events.filter((e) => e.type === "review-comment");
       const passed = events.find((e) => e.type === "ci-passed");
+      const settledRed = events.find((e) => e.type === "ci-settled-red");
       const noChecks = events.some((e) => e.type === "no-checks");
       const stalled = events.find((e) => e.type === "review-stalled");
       const spentNews = events.find((e) => e.type === "reviews-spent");
@@ -4002,6 +4056,13 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       if (failing.length) parts.push(`${failing.length} failing check(s)`);
       if (comments.length) parts.push(`${comments.length} new review comment(s)`);
       if (passed) parts.push(`all ${passed.names.length} check(s) passing`);
+      if (settledRed) {
+        parts.push(
+          failing.length
+            ? "CI has finished"
+            : `CI finished red (${settledRed.failing.length} failing check(s))`,
+        );
+      }
       if (noChecks) parts.push("no CI checks configured");
       if (stalled) parts.push("no reviewer is queued");
       if (spentNews) {
@@ -4017,6 +4078,11 @@ export function createManagerTools(ctx: ManagerMcpContext) {
             return `  ✗ check "${e.name}" ${e.conclusion ?? "failing"}${e.url ? ` — ${e.url}` : ""}`;
           case "ci-passed":
             return `  ✓ checks passed: ${e.names.join(", ")}`;
+          case "ci-settled-red":
+            return (
+              `  ■ CI has finished and is red (${e.failing.join(", ")}) — nothing is still ` +
+              `running, so it stays red until a fix is pushed or the failed job is re-run`
+            );
           case "no-checks":
             return `  · no checks are reporting on this PR`;
           case "review-stalled":
@@ -4055,9 +4121,21 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       // Green (or an empty check list) is news, not a to-do list — telling the
       // agent to "address these" when nothing is wrong is what sends it hunting
       // for a problem that isn't there.
-      const needsWork = failing.length > 0 || comments.length > 0;
+      const needsWork = failing.length > 0 || comments.length > 0 || !!settledRed;
       const adviceParts: string[] = [];
-      if (needsWork) {
+      if (settledRed) {
+        // Said first and flatly, because the failure mode is an agent that
+        // decides to "wait for CI" on a run that has already ended.
+        adviceParts.push(
+          "CI is FINISHED and red, and waiting will not change it. Push a fix, or — if " +
+            "the failure is a flake unrelated to this PR — re-run the failed job " +
+            "(`gh run rerun <run-id> --failed`). Only then call watch_pr again: while CI " +
+            "sits finished and red, every watch_pr call returns straight away with this " +
+            "report. (Just pushed or re-run? GitHub can take a few seconds to show the new " +
+            "run — call again.)",
+        );
+      }
+      if (failing.length > 0 || comments.length > 0) {
         adviceParts.push(
           "Address these, then call `mcp__dispatch-github__resolve_thread` for each comment you " +
             "actually fixed (pass the thread id above, and a `reply` saying what you did) " +
@@ -4151,6 +4229,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
             state: s.state,
             done: false,
             checksPassing: !!passed,
+            ciSettledRed: !!settledRed,
             reviewStalled: !!stalled,
             // Separate from `reviewStalled` because the actions are opposite:
             // a stalled queue is fixed by `request_review`, a spent cap by
