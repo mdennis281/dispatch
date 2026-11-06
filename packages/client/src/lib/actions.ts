@@ -23,6 +23,7 @@ import type {
 import { ws } from "./ws.js";
 import { api } from "./api.js";
 import { useChats } from "../stores/chats.js";
+import { newClientId, usePendingSends } from "../stores/pendingSends.js";
 
 type Priority = "now" | "next" | "later";
 
@@ -66,6 +67,10 @@ export const actions = {
    * queue behind it, or interrupt it — and the server ignores it when nothing is
    * running. Omitted means steer, which is what this did before the field
    * existed.
+   *
+   * Pass `ghost: true` (the composer does) to draw the message in the
+   * transcript at once as a pending row until the server answers for it — see
+   * stores/pendingSends. Returns the send's `clientId` either way.
    */
   sendMessage(
     chatId: string,
@@ -76,9 +81,26 @@ export const actions = {
       effort?: Effort;
       priority?: Priority;
       sendMode?: SendMode;
+      ghost?: boolean;
     } = {},
-  ): void {
-    ws.send({
+  ): string {
+    const clientId = newClientId();
+    // Added BEFORE the frame goes out: in the mock and on a loopback socket the
+    // server's echo can be reduced before `ws.send` even returns, and a ghost
+    // added after its own row would never be cleared.
+    if (opts.ghost) {
+      usePendingSends.getState().add({
+        clientId,
+        chatId,
+        text: opts.text,
+        images: opts.images,
+        effort: opts.effort,
+        sendMode: opts.sendMode,
+        ts: Date.now(),
+        state: "sending",
+      });
+    }
+    const epoch = ws.send({
       type: "send-message",
       chatId,
       text: opts.text,
@@ -87,7 +109,31 @@ export const actions = {
       effort: opts.effort,
       priority: opts.priority,
       sendMode: opts.sendMode,
+      clientId,
     });
+    if (opts.ghost && epoch !== undefined) usePendingSends.getState().sentOn(chatId, clientId, epoch);
+    return clientId;
+  },
+
+  /**
+   * Send a failed ghost again, under the SAME `clientId` — so if the first
+   * attempt did reach the server after all, the server drops this one as a
+   * repeat instead of the agent getting the message twice.
+   */
+  retrySend(chatId: string, clientId: string): void {
+    const ghost = usePendingSends.getState().byChat[chatId]?.find((p) => p.clientId === clientId);
+    if (!ghost) return;
+    usePendingSends.getState().resend(chatId, clientId, undefined);
+    const epoch = ws.send({
+      type: "send-message",
+      chatId,
+      text: ghost.text,
+      images: ghost.images,
+      effort: ghost.effort,
+      sendMode: ghost.sendMode,
+      clientId,
+    });
+    if (epoch !== undefined) usePendingSends.getState().sentOn(chatId, clientId, epoch);
   },
 
   /** Queue a steering message while a turn is running. */

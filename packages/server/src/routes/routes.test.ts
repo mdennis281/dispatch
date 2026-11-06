@@ -1073,6 +1073,48 @@ describe("routes — WebSocket", () => {
     ws.close();
   });
 
+  it("echoes a send's clientId on its row and ack, and drops a retry of one already taken", async () => {
+    await boot(makeFakeQuery(() => [assistantText("echo"), resultMsg()]));
+    const projectId = await makeProject();
+    const chatId = (
+      await app.inject({ method: "POST", url: "/api/chats", payload: { projectId } })
+    ).json().id as string;
+    const ws = await connect(port);
+    await ws.waitFor((e) => e.type === "hello");
+    const seen: WsServerEvent[] = [];
+    bus.subscribe((e) => seen.push(e));
+
+    ws.send({ type: "send-message", chatId, text: "hi", clientId: "c-1" });
+    const user = await ws.waitFor(
+      (e) => e.type === "chat-message" && e.chatId === chatId && e.message.kind === "user",
+    );
+    expect(user.type === "chat-message" && user.message.kind === "user" && user.message.clientId).toBe("c-1");
+    await ws.waitFor((e) => e.type === "send-ack" && e.clientId === "c-1" && !e.error);
+    await ws.waitFor((e) => e.type === "chat-status" && e.chatId === chatId && e.status === "idle");
+
+    // The client lost its socket and retried under the same id: acknowledged
+    // again so its ghost clears, but the agent does not get the message twice.
+    ws.send({ type: "send-message", chatId, text: "hi", clientId: "c-1" });
+    await ws.waitFor(
+      (e) => e.type === "send-ack" && e.clientId === "c-1" && seen.filter((x) => x.type === "send-ack").length === 2,
+    );
+    const userRows = seen.filter(
+      (e) => e.type === "chat-message" && e.chatId === chatId && e.message.kind === "user",
+    );
+    expect(userRows).toHaveLength(1);
+    ws.close();
+  });
+
+  it("settles a refused send's ghost as failed with the reason", async () => {
+    await boot(makeFakeQuery(() => [resultMsg()]));
+    const ws = await connect(port);
+    await ws.waitFor((e) => e.type === "hello");
+    ws.send({ type: "send-message", chatId: "no-such-chat", text: "hi", clientId: "c-2" });
+    const ack = await ws.waitFor((e) => e.type === "send-ack" && e.clientId === "c-2");
+    expect(ack.type === "send-ack" && ack.error).toBeTruthy();
+    ws.close();
+  });
+
   it("set-title renames the chat and broadcasts chat-update", async () => {
     await boot(makeFakeQuery(() => [resultMsg()]));
     const projectId = await makeProject();

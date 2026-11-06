@@ -63,6 +63,7 @@ import {
   clearDraft,
   appendDraftImage,
 } from "../../lib/composerDrafts.js";
+import { usePendingSends } from "../../stores/pendingSends.js";
 import { pickPath } from "../files/filePicker.js";
 import { SlashMenu } from "./SlashMenu.js";
 import { useSlashCommands, slashKeyAction } from "./useSlashCommands.js";
@@ -662,6 +663,21 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     return () => cancelAnimationFrame(raf);
   }, [chat.id, editor, dictation.stop]);
 
+  // A failed send's "Edit" hands its text and attachments back here. Appended
+  // below whatever is already typed rather than replacing it: the user may have
+  // started the next message while the failed one sat in the transcript.
+  const restore = usePendingSends((s) => (s.restore?.chatId === chat.id ? s.restore : null));
+  useEffect(() => {
+    if (!restore || !editor) return;
+    usePendingSends.getState().clearRestore(restore.nonce);
+    if (restore.text) {
+      editor.commands.focus("end");
+      insertRichRef.current(editor.isEmpty ? restore.text : `\n${restore.text}`);
+    }
+    if (restore.images?.length) putAttachments([...attachmentsRef.current, ...restore.images]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `putAttachments` is re-created each render; the restore is the only trigger
+  }, [restore, editor]);
+
   /** Replace the attachment list and persist it alongside the current text. */
   const putAttachments = (next: ImageRef[]) => {
     attachmentsRef.current = next;
@@ -849,6 +865,9 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
       images: attachments.length ? attachments : undefined,
       effort: chat.effort,
       sendMode: mode,
+      // Drawn in the transcript at once, since the box clears right below and
+      // the real row can be seconds away on a chat whose session is asleep.
+      ghost: true,
     });
 
     // Sending ends the dictation that composed it — otherwise the tail of the

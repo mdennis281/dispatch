@@ -1421,6 +1421,12 @@ export interface SendOptions {
    * existed before the field. Ignored unless a turn is actually live.
    */
   sendMode?: SendMode;
+  /**
+   * The composer's id for this send, stamped on the user row so the sending tab
+   * can replace its pending ghost with it. Survives a parked send (it rides in
+   * `opts`), so a queued message's row still matches when it finally lands.
+   */
+  clientId?: string;
 }
 
 /** Host answer to a `permission-request`. */
@@ -2905,6 +2911,7 @@ export class SessionBroker {
       ...(o.peer ? { origin: "peer" as const, peer: o.peer } : {}),
       ...(o.channel ? { origin: "channel" as const, channel: o.channel } : {}),
       ...(parts ? { parts } : {}),
+      ...(o.clientId ? { clientId: o.clientId } : {}),
     });
 
     // A persona change can begin during memory, transcript, or image preparation.

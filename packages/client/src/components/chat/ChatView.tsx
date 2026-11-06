@@ -71,6 +71,8 @@ import {
   injectedContextSourceLabel,
 } from "../../lib/injectedContext.js";
 import { LatestSentContextModal } from "./rows/SentContext.js";
+import { PendingSendRows } from "./rows/PendingSendRows.js";
+import { useChatPendingSends } from "../../stores/pendingSends.js";
 
 /** A human "what is the agent doing" label from the live activity state. */
 function workingLabelFor(a: AgentActivity | undefined): string {
@@ -423,10 +425,15 @@ export function ChatView({ chat }: { chat: Chat }) {
     if (el) el.scrollTop = el.scrollHeight;
   }, [chat.id, rename.cancel]);
 
+  // Unconfirmed sends draw under the transcript (see PendingSendRows). Counted
+  // here so a first message into an empty chat shows as a ghost rather than
+  // behind the "No messages yet" placeholder, and so it is followed into view.
+  const ghostCount = useChatPendingSends(chat.id).length;
+
   // New content: only auto-follow if the reader is already pinned to the bottom.
   useEffect(() => {
     followBottom();
-  }, [messages.length, running, followBottom]);
+  }, [messages.length, ghostCount, running, followBottom]);
 
   /**
    * Keep the LIVE window bounded.
@@ -574,7 +581,7 @@ export function ChatView({ chat }: { chat: Chat }) {
   // rows. Extracted and unit-tested — see `transcriptView.ts` for the two cases
   // that were wrong when this logic lived inline here.
   const { view, banner: failedBanner } = transcriptView({
-    rowCount: messages.length,
+    rowCount: messages.length + ghostCount,
     running,
     load,
   });
@@ -877,6 +884,7 @@ export function ChatView({ chat }: { chat: Chat }) {
                   onCopy={(e) => clampSelectionToMessage(e.currentTarget)}
                 >
                   <MessageList chatId={chat.id} messages={messages} />
+                  <PendingSendRows chatId={chat.id} />
                   <StreamingTail
                     chatId={chat.id}
                     running={running}
