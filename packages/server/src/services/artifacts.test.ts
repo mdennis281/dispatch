@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -256,6 +256,22 @@ describe("artifact assets", () => {
     await expect(
       bare.create("c1", { title: "t", type: "html", content: "p", assets: await files({ "a.png": "x" }) }),
     ).rejects.toThrow(/Assets aren't available/);
+  });
+
+  it("stamps a stored or reused blob as fresh, whatever the source's mtime", async () => {
+    // Before the meta naming them is written, only mtime keeps new blobs from
+    // the GC — and Windows copyFile keeps the source's, which may be weeks old.
+    clock = Date.now();
+    const src = await files({ "old.png": "OLD" });
+    const monthAgo = new Date(clock - 30 * DAY);
+    await utimes(src[0]!.file, monthAgo, monthAgo);
+    await svc.create("c1", { title: "a", type: "html", content: "p", assets: src });
+    const blob = join(root, "c1", "artifact-blobs", sha("OLD"));
+    expect((await stat(blob)).mtimeMs).toBeGreaterThan(clock - 60_000);
+    // A dedup hit on an orphan that already looks old refreshes it too.
+    await utimes(blob, monthAgo, monthAgo);
+    await svc.create("c1", { title: "b", type: "html", content: "p", assets: src });
+    expect((await stat(blob)).mtimeMs).toBeGreaterThan(clock - 60_000);
   });
 
   it("collects blobs no live version names — but only once they are past the grace period", async () => {

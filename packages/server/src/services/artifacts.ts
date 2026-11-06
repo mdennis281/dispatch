@@ -15,7 +15,7 @@
  */
 import { createHash, randomBytes } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { copyFile, readdir, readFile, rename, rm, stat, writeFile, mkdir } from "node:fs/promises";
+import { copyFile, readdir, readFile, rename, rm, stat, utimes, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { nanoid } from "nanoid";
 import {
@@ -351,6 +351,14 @@ export class ArtifactService {
         const exists = await stat(final).then(() => true, () => false);
         if (exists) await rm(tmp, { force: true });
         else await rename(tmp, final);
+        // The GC's grace period reads mtime as "stored recently", and neither
+        // path above makes it true: Windows `copyFile` keeps the SOURCE's
+        // mtime (a texture last touched weeks ago lands looking weeks old),
+        // and a dedup hit leaves an existing blob — maybe an orphan the sweep
+        // hasn't reached — exactly as old as it was. Either way a sweep before
+        // this version's meta is written would delete bytes it is about to name.
+        const stamp = new Date(this.now());
+        await utimes(final, stamp, stamp);
         const size = (await stat(final)).size;
         manifest[p.path] = { sha256, size, type: artifactAssetType(p.path) };
       } catch (err) {
