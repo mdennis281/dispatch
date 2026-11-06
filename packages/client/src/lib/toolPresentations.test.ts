@@ -85,6 +85,21 @@ describe("tool presentation handlers", () => {
 });
 
 describe("groupTranscriptRows", () => {
+  it("leaves a published artifact as its own row, but groups it while running or failed", () => {
+    const shell = tool("Bash", { command: "ls" }, "sh");
+    const publish = tool("mcp__dispatch-artifacts__artifact_create", { title: "Page", type: "html" }, "pub");
+    const ok = {
+      kind: "tool_result", id: "r-pub", toolUseId: "pub", chatId: "chat", ts: 2, ok: true,
+      content: [{ type: "text", text: 'Published.\ndispatch-artifact:{"id":"abc","version":1,"title":"Page","type":"html"}' }],
+    } as ChatMessage;
+    // Its own row: inside a terminal frame the one "click to look" row is buried.
+    expect(groupTranscriptRows([shell, publish, ok]).map((i) => i.kind)).toEqual(["shell", "row"]);
+    // Still running → no ref yet → an ordinary Dispatch call in the frame.
+    expect(groupTranscriptRows([shell, publish]).map((i) => i.kind)).toEqual(["shell"]);
+    const failed = { ...ok, ok: false, isError: true, content: [{ type: "text", text: "too large" }] } as ChatMessage;
+    expect(groupTranscriptRows([shell, publish, failed]).map((i) => i.kind)).toEqual(["shell"]);
+  });
+
   it("groups handled shell calls across their folded results", () => {
     const a = tool("Bash", { command: "pwd" }, "a");
     const b = tool("mcp__dispatch-workspace__terminal", { command: "Get-Location" }, "b");

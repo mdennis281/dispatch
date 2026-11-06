@@ -171,6 +171,7 @@ import { classifyActivity } from "../metrics-activity.js";
 import { createChatTreeTools, type ManagerMcpChatTree } from "./chat-tree-tool.js";
 import { createChatArchiveTools, type ManagerMcpChatArchive } from "./chat-archive-tool.js";
 import { createAttentionTools, type ManagerMcpAttention } from "./attention-tools.js";
+import { createArtifactTools, type ManagerMcpArtifacts } from "./artifact-tools.js";
 import type { EventBus } from "../../bus.js";
 import type { ManagerMcpModes, ModeScope, WritableModeScope } from "./mode-editor.js";
 import { MODE_SCOPES } from "./mode-editor.js";
@@ -2209,6 +2210,8 @@ export interface ManagerMcpContext {
   secrets?: ManagerMcpSecrets;
   /** The project's issue tracker (omitted → no `issue_*` tools). */
   issues?: ManagerMcpIssues;
+  /** This chat's artifact store (omitted → no `artifact_*` tools). See artifact-tools.ts. */
+  artifacts?: ManagerMcpArtifacts;
   /** SubApp launcher for this session (omitted → no `run_subapp` tool). */
   runner?: ManagerMcpRunner;
   /**
@@ -8475,6 +8478,7 @@ ${JSON.stringify(r)}`);
     ...createChatTreeTools(ctx),
     ...createChatArchiveTools(ctx),
     ...createAttentionTools(ctx),
+    ...createArtifactTools(ctx),
     chatSetMode,
     chatSetPersona,
     projectInfo,
@@ -8511,6 +8515,10 @@ const TOOL_WIRE_NAME: Record<ManagerToolKey, ManagerToolName> = {
   issueCreate: "issue_create",
   issueComment: "issue_comment",
   issueUpdate: "issue_update",
+  artifactCreate: "artifact_create",
+  artifactUpdate: "artifact_update",
+  artifactRead: "artifact_read",
+  artifactList: "artifact_list",
   secretRequest: "secret_request",
   secretList: "secret_list",
   secretDelete: "secret_delete",
@@ -8676,6 +8684,10 @@ const MANAGER_TOOL_GATE: Record<ManagerToolName, ManagerToolBinding | null> = {
   issue_create: "issues",
   issue_comment: "issues",
   issue_update: "issues",
+  artifact_create: "artifacts",
+  artifact_update: "artifacts",
+  artifact_read: "artifacts",
+  artifact_list: "artifacts",
 };
 
 /** The session bindings that gate manager tools. */
@@ -8702,7 +8714,8 @@ export type ManagerToolBinding =
   | "archive"
   | "attention"
   | "secrets"
-  | "issues";
+  | "issues"
+  | "artifacts";
 
 /** Which bindings a session has — decides which tools are offered/available. */
 export type ManagerToolBindings = Partial<Record<ManagerToolBinding, boolean>>;
@@ -8795,6 +8808,12 @@ function boundTools(ctx: ManagerMcpContext): Record<ManagerToolName, boolean> {
     issue_create: Boolean(ctx.issues),
     issue_comment: Boolean(ctx.issues),
     issue_update: Boolean(ctx.issues),
+    // All four or none: an agent that can publish but not read back cannot see
+    // that its page threw, which is most of what makes iterating on one work.
+    artifact_create: Boolean(ctx.artifacts),
+    artifact_update: Boolean(ctx.artifacts),
+    artifact_read: Boolean(ctx.artifacts),
+    artifact_list: Boolean(ctx.artifacts),
     // Cross-chat MESSAGING — the write path. All four together: a chat that can
     // ask must be able to reply, or the other half of every conversation is a
     // chat holding an askId with no tool that takes one.

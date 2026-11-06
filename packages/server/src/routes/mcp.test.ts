@@ -96,6 +96,7 @@ describe("mcp-catalog — builder", () => {
         exemptions: true,
         secrets: true,
         issues: true,
+        artifacts: true,
       },
     });
 
@@ -160,6 +161,7 @@ describe("mcp-catalog — builder", () => {
     // every other tool has flattened params.
     const NO_ARG_TOOLS = new Set([
       "secret_list",
+      "artifact_list",
       "context_usage",
       "compact_context",
       "mcp_list",
@@ -562,7 +564,7 @@ describe("GET /api/projects/:projectId/mcp", () => {
       manager.tools.every(
         (t) =>
           t.params.length > 0 ||
-          ["context_usage", "compact_context", "mcp_list", "prewarm_mcp", "secret_list"].includes(t.name),
+          ["context_usage", "compact_context", "mcp_list", "prewarm_mcp", "secret_list", "artifact_list"].includes(t.name),
       ),
     ).toBe(true);
 

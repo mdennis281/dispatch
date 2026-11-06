@@ -36,6 +36,7 @@ export * from "./layered.js";
 export * from "./agent-context.js";
 export * from "./sent-context.js";
 export * from "./retention.js";
+export * from "./artifacts.js";
 export * from "./chat-posture.js";
 export * from "./file-tools.js";
 export * from "./fs-entry.js";

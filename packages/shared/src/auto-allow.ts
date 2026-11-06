@@ -74,6 +74,17 @@ export const DEFAULT_AUTO_ALLOW_TOOLS: readonly string[] = [
   "mcp__dispatch-issues__issue_list",
   "mcp__dispatch-issues__issue_read",
   "mcp__dispatch-secrets__secret_list",
+  // The artifact WRITES are here too, unlike every other write: they change
+  // nothing but this chat's own artifact pane, which the human is already
+  // looking at. A card per published page asks "may the agent show you this?"
+  // — the answer is the page itself. A `path` source reads a file, so it is
+  // CONFINED to the chat's cwd, project checkout and worktrees (see
+  // `readSource` in artifact-tools.ts): inside them `Read` doesn't prompt
+  // either, and outside them a prompt-free read of the disk would be a hole.
+  "mcp__dispatch-artifacts__artifact_create",
+  "mcp__dispatch-artifacts__artifact_update",
+  "mcp__dispatch-artifacts__artifact_read",
+  "mcp__dispatch-artifacts__artifact_list",
 ];
 
 /**

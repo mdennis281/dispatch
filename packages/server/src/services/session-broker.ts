@@ -204,6 +204,7 @@ import {
 } from "./mcp/manager-mcp.js";
 import { expandSecretsInMcpServers, type SecretKey, type SecretsService } from "./secrets.js";
 import type { IssueService } from "./issues/service.js";
+import type { ArtifactService } from "./artifacts.js";
 import type { SecretRefresher } from "./secret-refresh.js";
 import type { SpawnNestingVerdict } from "./chat-nesting.js";
 import { createMcpConfigEditor } from "./mcp/mcp-config-editor.js";
@@ -309,6 +310,7 @@ export function buildManagerToolsDirective(caps: {
   inspect?: boolean;
   secrets?: boolean;
   issues?: boolean;
+  artifacts?: boolean;
   bundledServers?: readonly string[];
   projectServers?: readonly string[];
 }): string {
@@ -342,6 +344,12 @@ export function buildManagerToolsDirective(caps: {
   }
   if (caps.issues) {
     lines.push("- `dispatch-issues` — read, comment on, label and close this project's tracker issues.");
+  }
+  if (caps.artifacts) {
+    lines.push(
+      "- `dispatch-artifacts` — publish a page, SVG, document or code listing the human views in a " +
+        "pane beside this chat; reach for it when something is meant to be looked at rather than read.",
+    );
   }
   if (caps.authoring) {
     lines.push(
@@ -1300,6 +1308,8 @@ export interface SessionBrokerOptions {
   secretRefresher?: () => SecretRefresher | undefined;
   /** The project's issue tracker behind `mcp__dispatch-issues__*`. */
   issues?: IssueService;
+  /** The artifact store behind `mcp__dispatch-artifacts__*`. */
+  artifacts?: ArtifactService;
   /** Git history of the memory dir: backs `mcp__dispatch-memory__memory_history`. Optional —
    *  without it that one tool reports itself unavailable and the rest still work. */
   memoryHistory?: MemoryHistoryService;
@@ -2449,6 +2459,7 @@ export class SessionBroker {
   private readonly memory?: MemoryService;
   private readonly secrets?: SecretsService;
   private readonly issues?: IssueService;
+  private readonly artifacts?: ArtifactService;
   private readonly secretRefresher?: () => SecretRefresher | undefined;
   private readonly memoryHistory?: MemoryHistoryService;
   private readonly authored?: AuthoredConfigService;
@@ -2620,6 +2631,7 @@ export class SessionBroker {
     this.memory = opts.memory;
     this.secrets = opts.secrets;
     this.issues = opts.issues;
+    this.artifacts = opts.artifacts;
     this.secretRefresher = opts.secretRefresher;
     this.memoryHistory = opts.memoryHistory;
     this.authored = opts.authored;
@@ -8726,6 +8738,25 @@ export class SessionBroker {
         this.issues && projectId
           ? { tracker: () => this.issues!.forProject(projectId) }
           : undefined,
+      // Bound to THIS chat: an artifact is published into the pane beside the
+      // conversation that made it, so there is no chat argument to get wrong.
+      artifacts: this.artifacts
+        ? {
+            create: (input) => this.artifacts!.create(session.chatId, input),
+            update: (id, change) => this.artifacts!.update(session.chatId, id, change),
+            read: (id, version) => this.artifacts!.read(session.chatId, id, version),
+            list: () => this.artifacts!.list(session.chatId),
+            ...(cwd ? { cwd } : {}),
+            // Where a `path` may point: the trees this chat already works in.
+            // Read per call, so a worktree created mid-session counts.
+            roots: async () => {
+              const chat = await this.store.getChat(session.chatId).catch(() => null);
+              return [cwd, project?.repoPath, ...(chat?.worktrees ?? [])].filter(
+                (p): p is string => typeof p === "string" && p.length > 0,
+              );
+            },
+          }
+        : undefined,
       secrets: this.secrets
         ? {
             request: (input, signal) => this.requestSecret(session.chatId, input, signal),
@@ -9113,6 +9144,7 @@ export class SessionBroker {
         memory: Boolean(this.memory && session.projectId),
         secrets: Boolean(this.secrets),
         issues: Boolean(this.issues && session.projectId),
+        artifacts: Boolean(this.artifacts),
         runner: Boolean(this.runner && this.worktrees),
         mcpConfig: Boolean(session.projectId),
         authoring: Boolean(this.authored),
