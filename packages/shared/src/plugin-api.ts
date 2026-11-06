@@ -24,6 +24,9 @@ import type {
   TerminalBackendUpdate,
   TerminalPortForward,
   TerminalPortForwardInput,
+  TerminalRunEvent,
+  TerminalRunFilter,
+  TerminalRunInFlight,
 } from "./terminal-backend.js";
 
 export interface PluginModule {
@@ -597,5 +600,23 @@ export interface PluginContext<Req = unknown, Reply = unknown> {
      * plugin did not register.
      */
     unregisterBackend(backendId: string): Promise<void>;
+    /**
+     * Every command a chat's managed shell is running right now, on ANY
+     * location — this plugin's backends, other plugins', and `local` — oldest
+     * first. For a lock that must span shells the backend does not serve: a
+     * checkout's foreground lock, say, which a local `pnpm install` in the same
+     * worktree has to respect too. `command` is filled in only for runs on this
+     * plugin's own backends. Synchronous: it reads core's live state.
+     * Optional only because hosts before it lack it.
+     */
+    runs?(filter?: TerminalRunFilter): TerminalRunInFlight[];
+    /**
+     * Hear each run start and end, anywhere — `ended` the moment the shell is
+     * free again (after `afterRun`, after a backgrounded command really exits,
+     * or when the shell dies or is closed). Same visibility rule as `runs`.
+     * Returns the unsubscribe; deactivation unsubscribes for you. A listener
+     * that throws is ignored. Optional only because hosts before it lack it.
+     */
+    onRun?(fn: (event: TerminalRunEvent) => void): () => void;
   };
 }

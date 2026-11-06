@@ -34,6 +34,9 @@ import {
   type TerminalPortForwardInput,
   type TerminalBackendStatusInput,
   type TerminalBackendUpdate,
+  type TerminalRunEvent,
+  type TerminalRunFilter,
+  type TerminalRunInFlight,
   type PluginApprovalResult,
   type PluginContext,
   type PluginInstance,
@@ -176,6 +179,15 @@ export interface PluginContextDeps {
     ports(chatId?: string): TerminalPortForward[];
     setStatus(id: string, status: TerminalBackendStatusInput): void;
     update(id: string, patch: TerminalBackendUpdate): void;
+  };
+  /**
+   * Where `ctx.terminals.runs` / `onRun` read from — the TerminalService,
+   * which is the only thing that knows what every shell is doing. Absent in a
+   * host built without one; then those two members are absent.
+   */
+  terminalRuns?: {
+    runs(filter?: TerminalRunFilter): TerminalRunInFlight[];
+    onRun(fn: (e: TerminalRunEvent) => void): () => void;
   };
 }
 
@@ -498,6 +510,23 @@ export function buildPluginContext(
         return terminals.unregister(backendId);
       },
     };
+    if (deps.terminalRuns) {
+      const source = deps.terminalRuns;
+      // A run on a shell this plugin does not serve is counted, not shown:
+      // `terminals` is consent to see the commands run on ITS backends, and a
+      // lock needs to know a run exists, never what it is.
+      const visible = (run: TerminalRunInFlight): TerminalRunInFlight => {
+        if (mine.has(run.backend)) return run;
+        const { command: _hidden, ...rest } = run;
+        return rest;
+      };
+      ctx.terminals.runs = (filter) => source.runs(filter).map(visible);
+      ctx.terminals.onRun = (fn) => {
+        const off = source.onRun((e) => fn({ ...e, run: visible(e.run) }));
+        owned.offs.push(off);
+        return off;
+      };
+    }
   }
 
   if (has("approvals") && deps.approvals) {

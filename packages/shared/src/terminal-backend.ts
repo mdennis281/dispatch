@@ -708,3 +708,58 @@ export function resolveTerminalBackend(input: {
   if (input.project) return { id: input.project, source: "project" };
   return { id: LOCAL_TERMINAL_BACKEND, source: "default" };
 }
+
+/**
+ * One command a chat's managed shell is running right now, on ANY location —
+ * `ctx.terminals.runs()` / `onRun`. What a backend needs to keep a lock that
+ * spans more than its own shells: two runs touching one checkout (a remote
+ * sync and a local `pnpm install`, say) must not overlap, and the backend only
+ * ever hears about its own runs through its hooks.
+ *
+ * A run is in flight from the moment the shell takes it until it is over: the
+ * shell has let go of it AND its backend's `afterRun` has settled. That covers
+ * time in `beforeRun`, a command the agent sent to the background (until the
+ * command itself ends), and `afterRun` — including the detached `afterRun` of
+ * a backgrounded or cancelled command, which runs after the shell is free.
+ */
+export interface TerminalRunInFlight {
+  /** The same id `beforeRun` / `afterRun` get for this run on a backend's own shell. */
+  runId: string;
+  chatId: string;
+  projectId?: string;
+  /** The terminal's name within its chat (`main`, `build`…). */
+  terminal: string;
+  /**
+   * Where it runs: a registered backend's id, or `local`. A shell that FELL
+   * BACK to this machine is `local` — that is where its command really runs.
+   */
+  backend: string;
+  /** The shell's working directory when the run started. */
+  cwd: string;
+  /**
+   * The command, only for runs on the asking plugin's OWN backends. A run
+   * anywhere else is reported (so a lock can count it) but not what it runs:
+   * the `terminals` capability is consent to see commands run THERE.
+   */
+  command?: string;
+  /** The agent handed it to the background; the shell stays busy until it ends. */
+  background: boolean;
+  /** Epoch ms the shell took it. */
+  startedAt: number;
+}
+
+/** A run starting or ending, as `ctx.terminals.onRun` reports it. */
+export interface TerminalRunEvent {
+  kind: "started" | "ended";
+  run: TerminalRunInFlight;
+  /** Epoch ms of the change. */
+  at: number;
+}
+
+/** Narrow `ctx.terminals.runs()`. Every field given must match. */
+export interface TerminalRunFilter {
+  chatId?: string;
+  projectId?: string;
+  /** A backend id, or `local`. */
+  backend?: string;
+}

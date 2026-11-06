@@ -1398,6 +1398,7 @@ export function createServices(
           },
         },
         terminals: terminalBackends,
+        terminalRuns: terminals,
       },
       // Plugin processes run through the SAME runner as sub-apps — port
       // allocation, log ring, env quarantine, `stopAll()` at shutdown.
