@@ -55,6 +55,20 @@ describe("addPlugin", () => {
     ]);
   });
 
+  it("lists the optional capabilities it grants, and notes the ones it does not know", () => {
+    const lines = consentLines({
+      id: "r",
+      name: "r",
+      version: "1.0.0",
+      dispatch: ">=1",
+      capabilities: ["routes"],
+      optionalCapabilities: ["approvals", "teleport"],
+    });
+    expect(lines).toContain("  capabilities: routes");
+    expect(lines).toContain("  optional capabilities (granted): approvals");
+    expect(lines.find((l) => l.startsWith("  note: "))).toMatch(/"teleport" is not known to this Dispatch/);
+  });
+
   it("refuses an invalid manifest BEFORE anything lands under the root", async () => {
     const bad = await source("bad", "id: bad\nname: [\n");
     await expect(addPlugin(configDir, bad)).rejects.toBeInstanceOf(CmError);

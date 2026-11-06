@@ -518,3 +518,14 @@ describe("createTestContext runner (E10/E26)", () => {
     expect((await t.ctx.runner!.reservedPorts()).map((p) => p.port)).toEqual([4318, 4319, 8765, 24678]);
   });
 });
+
+describe("createTestContext optionalCapabilities", () => {
+  it("grants the known ones on top of capabilities and ignores the rest, as the host does", () => {
+    const t = createTestContext({ capabilities: ["kv"], optionalCapabilities: ["approvals", "teleport"] });
+    expect(t.ctx.kv).toBeDefined();
+    expect(t.ctx.approvals).toBeDefined();
+    expect("teleport" in t.ctx).toBe(false);
+    // Leaving it out is how a plugin tests the host that lacks it.
+    expect(createTestContext({ capabilities: ["kv"] }).ctx.approvals).toBeUndefined();
+  });
+});

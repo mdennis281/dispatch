@@ -119,6 +119,23 @@ describe("discovery", () => {
   });
 });
 
+describe("optionalCapabilities", () => {
+  it("shows the known ones as granted and optional, and notes the unknown ones, on the details", async () => {
+    const r = await root();
+    await writePlugin(
+      r.configDir,
+      "opt",
+      "id: opt\nname: Opt\nversion: 1.0.0\ndispatch: '>=1'\ncapabilities: [kv]\noptionalCapabilities: [approvals, teleport]\n",
+    );
+    const { instance } = await app(r);
+    const row = (await list(instance)).find((p) => p.id === "opt")!;
+    expect(row.status).toBe("active");
+    expect(row.capabilities).toEqual(["kv", "approvals"]);
+    expect(row.optionalCapabilities).toEqual(["approvals"]);
+    expect(row.warnings?.join("\n")).toMatch(/"teleport" is not known to this Dispatch/);
+  });
+});
+
 describe("activation", () => {
   it("answers 503 on the prefix before activation and 200 after", async () => {
     const r = await root();

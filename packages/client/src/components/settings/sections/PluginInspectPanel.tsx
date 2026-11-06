@@ -259,6 +259,7 @@ export function InspectionReport({ report: r, onInstalled }: { report: PluginIns
                   {cap.name}
                 </Chip>
                 <span className="min-w-0 text-2xs leading-relaxed text-muted">
+                  {cap.optional && <span className="text-faint">Optional — used where this Dispatch has it. </span>}
                   {cap.line}
                   {cap.used === false && <span className="text-warn"> Not seen in the code.</span>}
                 </span>
@@ -671,8 +672,9 @@ function CollectionRow({
           {r.description && <p className="mt-0.5 line-clamp-2 text-2xs leading-relaxed text-muted">{r.description}</p>}
           <div className="mt-1 flex flex-wrap items-center gap-1">
             {r.capabilities.map((cap) => (
-              <Chip key={cap.name} tone="accent" title={cap.line}>
+              <Chip key={cap.name} tone="accent" title={cap.optional ? `Optional. ${cap.line}` : cap.line}>
                 {cap.name}
+                {cap.optional && " (optional)"}
               </Chip>
             ))}
             {r.secrets.length > 0 && <Chip tone="warn">{r.secrets.length} secret{r.secrets.length === 1 ? "" : "s"}</Chip>}

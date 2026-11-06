@@ -57,6 +57,7 @@ import {
   PLUGIN_APPROVAL_MAX_TIMEOUT_SECONDS,
   PLUGIN_CAPABILITIES,
   PLUGIN_RECONCILE_BUDGET_MS,
+  grantedPluginCapabilities,
   PLUGIN_SHUTDOWN_BUDGET_MS,
   SECRET_NAME_RE,
   SECRET_VALUE_MAX,
@@ -79,6 +80,14 @@ export interface TestContextOptions {
    * test the shape the host will actually deliver.
    */
   capabilities?: readonly PluginCapability[];
+  /**
+   * The manifest's `optionalCapabilities`, granted the way the host grants
+   * them: a name this SDK's host knows is added to `capabilities`; any other
+   * is ignored. Only meaningful alongside `capabilities` (the default already
+   * grants everything). To test the plugin on a host WITHOUT one of them,
+   * leave it out of both.
+   */
+  optionalCapabilities?: readonly string[];
   /** Initial `ctx.settings.get()`. */
   settings?: Record<string, unknown>;
   /**
@@ -531,7 +540,11 @@ function testMcpProcess(handle: TerminalProcessHandle): TestMcpProcess {
 
 export function createTestContext(opts: TestContextOptions = {}): TestContext {
   const id = opts.id ?? "test-plugin";
-  const caps = new Set<PluginCapability>(opts.capabilities ?? PLUGIN_CAPABILITIES);
+  const caps = new Set<PluginCapability>(
+    opts.capabilities
+      ? grantedPluginCapabilities({ capabilities: [...opts.capabilities], optionalCapabilities: [...(opts.optionalCapabilities ?? [])] })
+      : PLUGIN_CAPABILITIES,
+  );
   const has = (c: PluginCapability) => caps.has(c);
 
   const log: TestLogLine[] = [];

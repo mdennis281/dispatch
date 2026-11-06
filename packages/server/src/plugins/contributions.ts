@@ -42,6 +42,7 @@ import {
   type PluginManifest,
   type PluginProcess,
   type SkillConfig,
+  grantedPluginCapabilities,
 } from "@dispatch/shared";
 import { readInstructionsDir, readSkillsDir, type InstructionFile } from "../services/authored-config.js";
 import { readModesDir } from "../services/mcp/mode-editor.js";
@@ -118,7 +119,7 @@ export async function readPluginContributions(
   const c = manifest.contributes;
   if (!c) return EMPTY_CONTRIBUTIONS;
   const warnings: string[] = [];
-  const caps = new Set(manifest.capabilities ?? []);
+  const caps = new Set(grantedPluginCapabilities(manifest));
 
   const skills = c.skills ? readSkillsDir(resolve(dir, c.skills)) : [];
   const instructions = c.instructions ? await readInstructionsDir(resolve(dir, c.instructions)) : [];

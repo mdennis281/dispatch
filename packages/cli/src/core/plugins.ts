@@ -30,6 +30,9 @@ import {
   type PluginManifest,
   type PluginSettingsEntry,
   type PluginSource,
+  grantedPluginCapabilities,
+  optionalPluginCapabilities,
+  ignoredOptionalCapabilitiesNote,
 } from "@dispatch/shared";
 import { CmError } from "./manifest.js";
 
@@ -692,8 +695,12 @@ export function consentLines(m: PluginManifest): string[] {
   lines.push(`${m.name} v${m.version} (${m.id})${m.description ? ` — ${m.description}` : ""}`);
   lines.push(`  runs: ${[m.server && "server code (in-process)", m.client && "client code (in your browser)"].filter(Boolean).join(", ") || "nothing (contributions only)"}`);
   if (m.capabilities?.length) lines.push(`  capabilities: ${m.capabilities.join(", ")}`);
+  const optional = optionalPluginCapabilities(m);
+  if (optional.granted.length) lines.push(`  optional capabilities (granted): ${optional.granted.join(", ")}`);
+  const ignoredNote = ignoredOptionalCapabilitiesNote(optional.ignored);
+  if (ignoredNote) lines.push(`  note: ${ignoredNote}`);
   if (m.secrets?.length) {
-    const verb = m.capabilities?.includes("secrets:write") ? "read and write" : "read";
+    const verb = grantedPluginCapabilities(m).includes("secrets:write") ? "read and write" : "read";
     lines.push(`  secrets it may ${verb}: ${m.secrets.join(", ")}${m.secrets.some((s) => s.endsWith("*")) ? " (* = any name with that prefix)" : ""}`);
   }
   const contributes = Object.keys(m.contributes ?? {});

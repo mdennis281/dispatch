@@ -649,11 +649,17 @@ function PluginCard({
         <Chip mono tone="muted">
           {plugin.id}
         </Chip>
-        {plugin.capabilities.map((c) => (
-          <Chip key={c} tone="accent">
-            {c}
-          </Chip>
-        ))}
+        {plugin.capabilities.map((c) => {
+          // Declared under optionalCapabilities: granted the same, but the
+          // plugin runs without it on a Dispatch that lacks it.
+          const optional = plugin.optionalCapabilities?.includes(c);
+          return (
+            <Chip key={c} tone="accent" {...(optional ? { title: "Optional — granted because this Dispatch has it" } : {})}>
+              {c}
+              {optional && " (optional)"}
+            </Chip>
+          );
+        })}
         {plugin.secrets?.map((s) => (
           <Chip key={s} tone="warn" mono>
             secret:{s}

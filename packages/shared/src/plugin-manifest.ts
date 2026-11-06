@@ -183,6 +183,21 @@ const PluginManifestObjectSchema = z.object({
     )
     .optional(),
   capabilities: z.array(PluginCapabilitySchema).optional(),
+  /**
+   * Capabilities the plugin USES WHEN THE HOST HAS THEM. A name this host
+   * knows is granted exactly like one under `capabilities` (same consent line,
+   * shown as optional); a name it does not know is ignored with a note,
+   * where `capabilities` would make the whole manifest invalid.
+   *
+   * Why it exists: a plugin adopting a capability newer than some of the hosts
+   * it runs on (remote-host and `approvals`) was otherwise invalid on all of
+   * them. Older hosts strip this unknown top-level key, so the plugin loads
+   * there without it and can say "needs a newer Dispatch" for that feature.
+   * Plain strings on purpose — validating against {@link PLUGIN_CAPABILITIES}
+   * would refuse exactly the names this list is for. See
+   * {@link grantedPluginCapabilities}.
+   */
+  optionalCapabilities: z.array(z.string().min(1).max(64)).max(64).optional(),
   /** Contribution roots — consumed by workstream D; validated here so the shape is settled. */
   contributes: z
     .object({
@@ -213,10 +228,13 @@ export const PluginManifestSchema = PluginManifestObjectSchema.superRefine((m, c
   // `secrets:write` widens `ctx.secrets`; it is not a second, write-only
   // object. Requiring both keeps the consent card honest: the owner sees the
   // read line AND the write line, never a write that silently implies a read.
-  if (m.capabilities?.includes("secrets:write") && !m.capabilities.includes("secrets")) {
+  // Judged on what is GRANTED: an optional `secrets:write` still widens
+  // `ctx.secrets`, so it needs `secrets` from one list or the other.
+  const granted = grantedPluginCapabilities(m);
+  if (granted.includes("secrets:write") && !granted.includes("secrets")) {
     ctx.addIssue({
       code: "custom",
-      path: ["capabilities"],
+      path: [m.capabilities?.includes("secrets:write") ? "capabilities" : "optionalCapabilities"],
       message: "secrets:write extends secrets — declare both",
     });
   }
@@ -249,6 +267,57 @@ export const PluginManifestSchema = PluginManifestObjectSchema.superRefine((m, c
   }
 });
 export type PluginManifest = z.infer<typeof PluginManifestSchema>;
+
+type CapabilityLists = Pick<PluginManifest, "capabilities" | "optionalCapabilities">;
+const KNOWN_CAPABILITIES: ReadonlySet<string> = new Set(PLUGIN_CAPABILITIES);
+
+/**
+ * Every capability a manifest is GRANTED on this host: `capabilities`, plus
+ * each `optionalCapabilities` name this host knows. The one reader every
+ * gate uses — a site that read `capabilities` alone would deny an optional
+ * capability the consent screen showed as granted.
+ */
+export function grantedPluginCapabilities(m: CapabilityLists | undefined): PluginCapability[] {
+  const out = new Set<PluginCapability>(m?.capabilities ?? []);
+  for (const name of m?.optionalCapabilities ?? []) {
+    if (KNOWN_CAPABILITIES.has(name)) out.add(name as PluginCapability);
+  }
+  return [...out];
+}
+
+/**
+ * The `optionalCapabilities` split as this host reads them. `granted` leaves
+ * out a name also under `capabilities` (it is required, not optional);
+ * `ignored` is every name this host does not know, for the note that says so.
+ */
+export function optionalPluginCapabilities(m: CapabilityLists | undefined): {
+  granted: PluginCapability[];
+  ignored: string[];
+} {
+  const required = new Set<string>(m?.capabilities ?? []);
+  const granted = new Set<PluginCapability>();
+  const ignored = new Set<string>();
+  for (const name of m?.optionalCapabilities ?? []) {
+    if (!KNOWN_CAPABILITIES.has(name)) ignored.add(name);
+    else if (!required.has(name)) granted.add(name as PluginCapability);
+  }
+  return { granted: [...granted], ignored: [...ignored] };
+}
+
+/**
+ * The note for optional capabilities this host does not know — on the details
+ * row, the inspect card and the CLI's consent summary.
+ *
+ * It says the later grant will be SILENT on purpose. Nothing records what was
+ * consented to at install; the grant is recomputed from the manifest on every
+ * boot, so an upgrade that adds the name hands it over with no new card.
+ * Installing past this note is the consent to that.
+ */
+export function ignoredOptionalCapabilitiesNote(ignored: readonly string[]): string | undefined {
+  if (!ignored.length) return undefined;
+  const names = ignored.map((n) => `"${n}"`).join(", ");
+  return `optional ${ignored.length === 1 ? "capability" : "capabilities"} ${names} ${ignored.length === 1 ? "is" : "are"} not known to this Dispatch and ${ignored.length === 1 ? "was" : "were"} ignored — a newer Dispatch that knows ${ignored.length === 1 ? "it" : "them"} will grant ${ignored.length === 1 ? "it" : "them"} without asking again`;
+}
 
 /**
  * Does a manifest's `dispatch` range admit host API major `major`?
@@ -502,7 +571,10 @@ export const PluginInfoSchema = z.object({
    * activated — hot reload is out of scope, so the pane says "restart to apply".
    */
   needsRestart: z.boolean().optional(),
+  /** Every capability GRANTED — `optionalCapabilities` this host knows included. */
   capabilities: z.array(PluginCapabilitySchema),
+  /** Which of `capabilities` came from `optionalCapabilities`, so the details can mark them. */
+  optionalCapabilities: z.array(PluginCapabilitySchema).optional(),
   hasServer: z.boolean(),
   /** The client entry module's URL (`/plugins/<id>/<file>`), when the manifest has one. The SPA imports it as-is. */
   clientUrl: z.string().optional(),

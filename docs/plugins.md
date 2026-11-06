@@ -92,6 +92,7 @@ capabilities:                   # declared for the consent card; see "Capabiliti
   - routes
   - chats:write
   - process
+optionalCapabilities: [approvals] # granted where this host has them, ignored where not; see "Optional capabilities"
 contributes:
   modes: ./modes
   skills: ./skills
@@ -144,6 +145,44 @@ That is enforcement enough for code the owner chose to install; the point of
 the list is the consent summary and the Settings row, not containment. A
 contribution that needs a capability the manifest lacks (`mcpServers` without
 `mcp`) is dropped with a warning on the row.
+
+#### Optional capabilities
+
+`optionalCapabilities` lists capabilities the plugin uses **where the host has
+them**:
+
+```yaml
+capabilities: [routes, kv, terminals]
+optionalCapabilities: [approvals]   # elevation needs it; everything else works without
+```
+
+- **A name this host knows is granted exactly like one under `capabilities`.**
+  The same consent line and the same `ctx` member, with the same gate
+  everywhere. The install card and the plugin's details mark it *optional*.
+- **A name this host does not know is ignored**, and a note on the details
+  and the install card names it. The same name under `capabilities` makes the
+  whole manifest invalid. `capabilities` stays strict on purpose: it is what
+  the plugin cannot run without.
+- **Why it exists.** A plugin that adopts a capability newer than some of the
+  hosts it runs on would otherwise be invalid on all of them. Hosts from before
+  this key strip it as an unknown top-level key, so the plugin loads there
+  without the capability.
+- **Feature-detect the member.** `ctx.approvals` is `undefined` on a host that
+  lacks it, exactly as if it were never declared. Say "needs a newer Dispatch"
+  for the one feature, rather than failing the plugin.
+- **An ignored name is granted later without asking again.** Nothing
+  records what was granted at install: the grant is recomputed from the
+  manifest on every boot. So once Dispatch is upgraded to a version that knows
+  the name, the plugin gets it with no new consent card and no update diff,
+  because nothing on disk changed. The install-time note says so, and
+  installing past it is the consent. A plugin that wants a fresh card for a
+  future capability should ship an update that declares it once the
+  capability exists.
+- A name in both lists counts as required. An optional `secrets:write` still
+  needs `secrets`, because it widens `ctx.secrets`.
+- **Testing.** `createTestContext({ capabilities, optionalCapabilities })`
+  grants the known ones as the host does. Leave a name out of both lists to
+  test the host that lacks it.
 
 ## Lifecycle
 
