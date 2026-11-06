@@ -37,6 +37,8 @@ import type {
   TerminalPortForward,
   TerminalBackendStatusInput,
   TerminalBackendUpdate,
+  TerminalProcessHandle,
+  TerminalProcessSpawnInfo,
   TerminalRunInfo,
   TerminalSpawnInfo,
   WsServerEvent,
@@ -210,6 +212,19 @@ export interface TestContext {
       info: Partial<TerminalRunInfo> & { chatId: string; command: string },
     ): Promise<{ ran: boolean; refusal?: string; notices: string[] }>;
     /**
+     * Start a process through a backend's `spawnProcess`, as core's MCP relay
+     * does, and talk to it the way the relay will: newline-delimited JSON-RPC.
+     * Defaults: `purpose` "mcp", `name` "test", `cwd` "/repo", a fresh signal.
+     * Use it to check your handle keeps the reconnect contract — whole lines,
+     * `stalled` / `resumed` around a re-attach to the SAME process (no second
+     * `initialize` needed), and `exit` once it is gone (docs/plugins.md,
+     * "Hosting processes").
+     */
+    spawnProcess(
+      backendId: string,
+      info: Partial<TerminalProcessSpawnInfo> & { chatId: string },
+    ): Promise<TestMcpProcess>;
+    /**
      * Call a backend's `afterRun` as core would once it stops waiting on a
      * command. Defaults: `exitCode` 0, `outcome` "finished", `durationMs` 0.
      * Rejects when the hook throws — which core turns into a notice.
@@ -327,6 +342,129 @@ export const TEST_INSTANCE: PluginInstance = Object.freeze({
 });
 
 /** Build a fake context. See the module comment for what it is and is not. */
+/** A process started through `t.terminals.spawnProcess`, with core's side of the line protocol. */
+export interface TestMcpProcess {
+  handle: TerminalProcessHandle;
+  /**
+   * Send a JSON-RPC request; resolves with the reply (`result` or `error`).
+   * Rejects after `timeoutMs` (default 5 s), or when the handle exits first.
+   */
+  request(
+    method: string,
+    params?: unknown,
+    opts?: { timeoutMs?: number },
+  ): Promise<{ result?: unknown; error?: { code?: number; message?: string } }>;
+  notify(method: string, params?: unknown): void;
+  /** Requests and notifications the PROCESS sent toward the client, in order. */
+  fromProcess: Array<Record<string, unknown>>;
+  /** Lines on stdout that were not JSON. Core drops these; a test can assert there are none. */
+  garbage: string[];
+  /** The contract events the handle emitted, in order. */
+  events: Array<{ event: TestMcpProcessEvent; args: unknown[] }>;
+  /** Resolves with the arguments of the next `event` not yet consumed by an earlier `next`. */
+  next(event: Exclude<TestMcpProcessEvent, "error">): Promise<unknown[]>;
+}
+
+export type TestMcpProcessEvent = "stalled" | "resumed" | "exit" | "error";
+
+/** Core's side of a `spawnProcess` handle: line framing, request ids, the contract events. */
+function testMcpProcess(handle: TerminalProcessHandle): TestMcpProcess {
+  let buf = "";
+  let seq = 0;
+  let exited = false;
+  const waiting = new Map<string, { resolve: (m: Record<string, unknown>) => void; reject: (e: Error) => void }>();
+  const fromProcess: Array<Record<string, unknown>> = [];
+  const garbage: string[] = [];
+  const events: TestMcpProcess["events"] = [];
+  /** Per event, how far into `events` an earlier `next` has already consumed. */
+  const consumed = new Map<string, number>();
+  const nextWaiters: Array<{ event: string; resolve: (a: unknown[]) => void }> = [];
+  handle.stdout.on("data", (chunk) => {
+    buf += String(chunk);
+    for (;;) {
+      const nl = buf.indexOf("\n");
+      if (nl === -1) break;
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line) continue;
+      let msg: Record<string, unknown>;
+      try {
+        msg = JSON.parse(line) as Record<string, unknown>;
+      } catch {
+        garbage.push(line);
+        continue;
+      }
+      if (msg.method !== undefined) {
+        fromProcess.push(msg);
+        continue;
+      }
+      const w = waiting.get(String(msg.id));
+      if (w) {
+        waiting.delete(String(msg.id));
+        w.resolve(msg);
+      }
+    }
+  });
+  const record =
+    (event: TestMcpProcessEvent) =>
+    (...args: unknown[]) => {
+      events.push({ event, args });
+      const w = nextWaiters.find((n) => n.event === event);
+      if (w) {
+        nextWaiters.splice(nextWaiters.indexOf(w), 1);
+        consumed.set(event, events.length);
+        w.resolve(args);
+      }
+      if (event === "exit") {
+        exited = true;
+        for (const [id, pending] of waiting) {
+          waiting.delete(id);
+          pending.reject(new Error("the process exited before replying"));
+        }
+      }
+    };
+  const on = handle.on as (event: string, listener: (...args: unknown[]) => void) => unknown;
+  for (const e of ["stalled", "resumed", "exit", "error"] as const) on.call(handle, e, record(e));
+  const write = (msg: unknown) => handle.stdin.write(JSON.stringify(msg) + "\n");
+  return {
+    handle,
+    fromProcess,
+    garbage,
+    events,
+    request: (method, params, opts = {}) =>
+      new Promise((resolve, reject) => {
+        if (exited) return reject(new Error("the process has exited"));
+        const id = `test-${++seq}`;
+        const ms = opts.timeoutMs ?? 5_000;
+        const timer = setTimeout(() => {
+          waiting.delete(id);
+          reject(new Error(`no reply to ${method} within ${ms} ms`));
+        }, ms);
+        waiting.set(id, {
+          resolve: (m) => {
+            clearTimeout(timer);
+            resolve(m as { result?: unknown; error?: { code?: number; message?: string } });
+          },
+          reject: (e) => {
+            clearTimeout(timer);
+            reject(e);
+          },
+        });
+        write({ jsonrpc: "2.0", id, method, ...(params === undefined ? {} : { params }) });
+      }),
+    notify: (method, params) => write({ jsonrpc: "2.0", method, ...(params === undefined ? {} : { params }) }),
+    next: (event) => {
+      const from = consumed.get(event) ?? 0;
+      const at = events.findIndex((e, i) => i >= from && e.event === event);
+      if (at !== -1) {
+        consumed.set(event, at + 1);
+        return Promise.resolve(events[at]!.args);
+      }
+      return new Promise((resolve) => nextWaiters.push({ event, resolve }));
+    },
+  };
+}
+
 export function createTestContext(opts: TestContextOptions = {}): TestContext {
   const id = opts.id ?? "test-plugin";
   const caps = new Set<PluginCapability>(opts.capabilities ?? PLUGIN_CAPABILITIES);
@@ -745,6 +883,20 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
       chatDeleted: async (chatId, projectId) => {
         for (const p of terminalPorts.filter((f) => f.chatId === chatId)) terminalPorts.splice(terminalPorts.indexOf(p), 1);
         for (const b of terminalBackends.values()) await b.onChatDeleted?.({ chatId, projectId });
+      },
+      spawnProcess: async (backendId, info) => {
+        const b = backendOf(backendId);
+        if (typeof b.spawnProcess !== "function") {
+          throw new Error(`terminal backend "${backendId}" has no spawnProcess, so core never places a process on it`);
+        }
+        const handle = await b.spawnProcess({
+          purpose: "mcp",
+          name: "test",
+          cwd: "/repo",
+          signal: new AbortController().signal,
+          ...info,
+        });
+        return testMcpProcess(handle);
       },
       beforeRun: async (backendId, info) => {
         const b = backendOf(backendId);

@@ -292,7 +292,7 @@ function transportToMcpConfig(
     headers?: Record<string, string>;
   },
   missing?: Set<string>,
-  extras?: Pick<McpServerConfig, "ports" | "portRange" | "prewarm">,
+  extras?: Pick<McpServerConfig, "ports" | "portRange" | "prewarm" | "location">,
 ): McpServerConfig {
   // No `secrets` lookup on purpose: `${secret:NAME}` stays a PLACEHOLDER in the
   // loaded config. This result is persisted onto the project record, broadcast
@@ -306,6 +306,7 @@ function transportToMcpConfig(
     ...(extras?.ports !== undefined ? { ports: extras.ports } : {}),
     ...(extras?.portRange !== undefined ? { portRange: extras.portRange } : {}),
     ...(extras?.prewarm !== undefined ? { prewarm: str(extras.prewarm) } : {}),
+    ...(extras?.location !== undefined ? { location: extras.location } : {}),
   };
 
   if (transport.type === "stdio") {
@@ -827,6 +828,7 @@ export class ProjectConfigService {
         ports: server.ports,
         portRange: server.portRange,
         prewarm: server.prewarm,
+        location: server.location,
       });
       // Checked, never substituted — see `transportToMcpConfig`.
       const missingSecrets = new Set(

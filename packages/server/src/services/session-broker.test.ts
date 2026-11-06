@@ -6751,3 +6751,75 @@ describe("SessionBroker — compact threshold on the Claude loop", () => {
     expect(spawned).toHaveLength(1);
   });
 });
+
+describe("SessionBroker — MCP placement (E7)", () => {
+  const MAC = "remote-host/cvx-mac";
+
+  async function build(opts: { pin?: string; canHost?: boolean; overrides?: Record<string, string> }) {
+    const repo = await mkdtemp(join(tmpdir(), "cm-placement-repo-"));
+    tempDirs.push(repo);
+    await store.saveProject({
+      id: "p1", name: "P", repoPath: repo, worktreeRoot: join(repo, "..", "wt"),
+      defaultBranch: "main", subApps: [], createdAt: 1,
+    });
+    const placed: Array<{ backendId: string; name: string }> = [];
+    const { fn } = makeFakeQuery((t) => [assistantText(t), resultMsg()]);
+    const broker = makeBroker(fn, 6, {
+      projectConfig: {
+        getAgent: () => null,
+        getMode: () => null,
+        buildInstructionsInjection: () => null,
+        getMcpServers: () => ({}),
+        getSkills: () => [],
+        // Explicit, so the auto gate (a sub-app with a url) is not what is under test.
+        getBrowserConfig: () => ({ servers: ["playwright"], headless: true, engine: "chrome", viewport: "1280x800", location: "terminal" }),
+      } as never,
+      terminalBackends: {
+        size: 1,
+        chatIdle: () => {},
+        agentNote: async () => undefined,
+        ports: () => [],
+        canHostProcesses: (id: string) => id === MAC && opts.canHost !== false,
+        defaultBackendOf: (c: { terminalBackend?: string }) => c.terminalBackend,
+        labelOf: (id: string) => (id === MAC ? "CVX Mac" : undefined),
+      } as never,
+      mcpPlacement: {
+        socketPath: "\\.\pipe\dispatch-mcp-relay-test",
+        place: (backendId: string, spec: { name: string }) => {
+          placed.push({ backendId, name: spec.name });
+          return { token: "tok" };
+        },
+      } as never,
+    });
+    const chat = { ...chatFor("c1", "p1"), ...(opts.pin ? { terminalBackend: opts.pin } : {}), ...(opts.overrides ? { mcpLocations: opts.overrides } : {}) };
+    await store.saveChat(chat);
+    broker.create(chat);
+    const session = (broker as unknown as { sessions: Map<string, unknown> }).sessions.get("c1");
+    const options = await (
+      broker as unknown as { buildOptions(s: unknown): Promise<{ mcpServers: Record<string, { args?: string[] }>; append: string }> }
+    ).buildOptions(session);
+    return { options, placed };
+  }
+
+  it("a chat whose terminals run on a Mac gets its browser relayed there, and is told so", async () => {
+    const { options, placed } = await build({ pin: MAC });
+    expect(placed).toEqual([{ backendId: MAC, name: "playwright" }]);
+    expect(options.mcpServers.playwright!.args).toContain("--relay");
+    expect(options.append).toContain("# Where your MCP servers run");
+    expect(options.append).toContain("`playwright` run on CVX Mac (`remote-host/cvx-mac`)");
+  });
+
+  it("a local chat, or one on a backend that cannot host processes, keeps the local browser and no note", async () => {
+    for (const o of [{}, { pin: MAC, canHost: false }]) {
+      const { options, placed } = await build(o);
+      expect(placed).toEqual([]);
+      expect(options.mcpServers.playwright!.args).not.toContain("--relay");
+      expect(options.append).not.toContain("Where your MCP servers run");
+    }
+  });
+
+  it("the chat's own mcpLocations beats the project's browser.location", async () => {
+    const { placed } = await build({ pin: MAC, overrides: { playwright: "local" } });
+    expect(placed).toEqual([]);
+  });
+});

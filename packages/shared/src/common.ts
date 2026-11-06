@@ -268,6 +268,29 @@ export function formatBytes(n: number): string {
 }
 
 /**
+ * WHERE an MCP server runs, for `mcpServers.<name>.location`,
+ * `browser.location` and a chat's `mcpLocations` override:
+ *
+ * - `local` — a child of the agent's runtime on the Dispatch host, as always.
+ * - `terminal` — wherever this chat's terminals go by default (its pin, else
+ *   the project's `defaults.terminalBackend`). The browser servers' default,
+ *   so a chat working on a Mac drives a browser on that Mac, where its dev
+ *   server's `localhost` actually is.
+ * - a terminal backend id (`remote-host/cvx-mac`) — hosted there through the
+ *   backend's `spawnProcess`. Never falls back to local: a browser on the wrong
+ *   machine sees the wrong `localhost`, which is worse than an error.
+ *
+ * Read with the loose persisted-id grammar (`TERMINAL_BACKEND_REF_PATTERN`,
+ * repeated here because this module must not import that one), so an id
+ * written by a newer instance into the shared `config/` never fails the file.
+ */
+export const McpLocationSchema = z.string().regex(/^[^\s`]{1,128}$/);
+export type McpLocation = z.infer<typeof McpLocationSchema>;
+/** {@link McpLocationSchema}'s two words that are not backend ids. */
+export const MCP_LOCATION_LOCAL = "local";
+export const MCP_LOCATION_TERMINAL = "terminal";
+
+/**
  * MCP server config, forwarded verbatim to the SDK's `mcpServers`. Kept a loose
  * object (unknown keys preserved) so any SDK-supported transport shape passes
  * through unmodified from filesystem config.
@@ -310,6 +333,13 @@ export const McpServerConfigSchema = z.looseObject({
    * Best-effort: its failure never fails worktree creation.
    */
   prewarm: z.string().optional(),
+  /**
+   * Where a STDIO server runs — see {@link McpLocationSchema}. Default `local`,
+   * because a configured server's command and paths are this machine's; a
+   * server set elsewhere is run there exactly as written. A chat's
+   * `mcpLocations` entry overrides it.
+   */
+  location: McpLocationSchema.optional(),
 });
 export type McpServerConfig = z.infer<typeof McpServerConfigSchema>;
 
@@ -320,7 +350,7 @@ export type McpServerConfig = z.infer<typeof McpServerConfigSchema>;
 export const DEFAULT_MCP_PORT_RANGE: readonly [number, number] = [5400, 5499];
 
 /** Keys that are Dispatch's own and must not be forwarded to a harness SDK. */
-export const MCP_DISPATCH_ONLY_KEYS = ["ports", "portRange", "prewarm"] as const;
+export const MCP_DISPATCH_ONLY_KEYS = ["ports", "portRange", "prewarm", "location"] as const;
 
 /**
  * One checkout's claim on a set of ports for one MCP server. Persisted so the

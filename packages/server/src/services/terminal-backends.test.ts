@@ -1943,3 +1943,90 @@ describe("backend status and in-place updates (E1/E21)", () => {
     expect((await h.svc.run({ chatId: "c1", name: "t", command: "say ok", cwd: "/w" })).output).toBe("ok");
   });
 });
+
+describe("spawnProcess — hosting an MCP server on a backend (E7)", () => {
+  const info = (signal = new AbortController().signal) => ({
+    chatId: "c1",
+    purpose: "mcp" as const,
+    name: "playwright",
+    cwd: "/repo",
+    signal,
+  });
+  const fakeHandle = () => {
+    const h = new EventEmitter() as EventEmitter & { stdin: { write: () => boolean }; stdout: EventEmitter; kill: () => void; killed: boolean };
+    h.stdin = { write: () => true };
+    h.stdout = new EventEmitter();
+    h.killed = false;
+    h.kill = () => {
+      h.killed = true;
+    };
+    return h;
+  };
+
+  it("hands the spawn to a backend that can host processes", async () => {
+    const { registry } = setup();
+    const handle = fakeHandle();
+    const asked: unknown[] = [];
+    registry.register(
+      fakeBackend({
+        spawnProcess: async (i) => {
+          asked.push(i);
+          return handle as never;
+        },
+      }),
+    );
+    expect(registry.canHostProcesses("box")).toBe(true);
+    await expect(registry.spawnProcess("box", info())).resolves.toBe(handle);
+    expect(asked[0]).toMatchObject({ chatId: "c1", purpose: "mcp", name: "playwright" });
+  });
+
+  it("refuses at once for a backend without spawnProcess, an offline one, and an unregistered one", async () => {
+    const { registry } = setup();
+    registry.register(fakeBackend());
+    expect(registry.canHostProcesses("box")).toBe(false);
+    await expect(registry.spawnProcess("box", info())).rejects.toThrow(/Test box cannot host processes/);
+
+    registry.register(fakeBackend({ id: "mac", label: "CVX Mac", spawnProcess: async () => fakeHandle() as never }));
+    registry.setStatus("mac", { state: "offline", detail: "asleep" });
+    await expect(registry.spawnProcess("mac", info())).rejects.toThrow("CVX Mac is offline (asleep)");
+
+    await expect(registry.spawnProcess("gone", info())).rejects.toThrow(/gone is not available/);
+    expect(registry.canHostProcesses("gone")).toBe(false);
+  });
+
+  it("bounds the spawn by spawnTimeoutMs and kills a handle that arrives late", async () => {
+    const { registry } = setup();
+    const handle = fakeHandle();
+    let deliver!: () => void;
+    registry.register(
+      fakeBackend({
+        spawnTimeoutMs: 1_000,
+        spawnProcess: () =>
+          new Promise((resolve) => {
+            deliver = () => resolve(handle as never);
+          }),
+      }),
+    );
+    vi.useFakeTimers();
+    try {
+      const p = registry.spawnProcess("box", info());
+      const settled = expect(p).rejects.toThrow(/did not start it within 1 s/);
+      await vi.advanceTimersByTimeAsync(1_001);
+      await settled;
+    } finally {
+      vi.useRealTimers();
+    }
+    deliver();
+    await flush();
+    expect(handle.killed).toBe(true);
+  });
+
+  it("gives up when the caller aborts", async () => {
+    const { registry } = setup();
+    registry.register(fakeBackend({ spawnProcess: () => new Promise(() => {}) }));
+    const ac = new AbortController();
+    const p = registry.spawnProcess("box", info(ac.signal));
+    ac.abort();
+    await expect(p).rejects.toThrow("cancelled");
+  });
+});

@@ -236,7 +236,13 @@ function readMcpServersFile(
  */
 function transportToConfig(
   dir: string,
-  server: { transport: Record<string, unknown> & { type: string }; ports?: number; portRange?: [number, number]; prewarm?: string },
+  server: {
+    transport: Record<string, unknown> & { type: string };
+    ports?: number;
+    portRange?: [number, number];
+    prewarm?: string;
+    location?: string;
+  },
   missing: Set<string>,
 ): McpServerConfig {
   const opts = { onMissing: (name: string) => missing.add(name) };
@@ -246,6 +252,7 @@ function transportToConfig(
     ...(server.ports !== undefined ? { ports: server.ports } : {}),
     ...(server.portRange !== undefined ? { portRange: server.portRange } : {}),
     ...(server.prewarm !== undefined ? { prewarm: str(server.prewarm) } : {}),
+    ...(server.location !== undefined ? { location: server.location } : {}),
   };
   if (t.type === "stdio") {
     const cwd = str(t.cwd);

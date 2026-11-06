@@ -1403,6 +1403,94 @@ host's side, so a backend can be unit-tested with no server.
 (`{ ran, refusal?, notices }`, a throw counted as a refusal), and
 `t.terminals.afterRun(id, { chatId, command, exitCode? })` returns the notices.
 
+### Hosting processes (MCP servers on the machine)
+
+A backend may also host long-lived **stdio processes**: today, the MCP
+servers a chat's agent talks to. Implement the optional
+`spawnProcess(info): Promise<TerminalProcessHandle>`. A backend without it is
+never asked.
+
+**Which servers go where.** Core decides per session, and the backend never
+has to:
+
+| Setting | Values | Default |
+| --- | --- | --- |
+| `browser.location` (project.yaml) | `terminal` · `local` · a backend id | `terminal` |
+| `mcpServers.<name>.location` | same | `local` |
+| `Chat.mcpLocations[<name>]` (`PUT /api/chats/:id`) | same; beats both above | — |
+
+- `terminal` means the chat's default terminal location (its pin, else the
+  project's `defaults.terminalBackend`). So a chat working on a Mac drives a
+  browser ON the Mac, where the dev server it started answers on `localhost`.
+- A server that **follows** the terminal to a backend without `spawnProcess`
+  stays local, quietly.
+- A server that **names** a backend is never run locally instead. Every call
+  fails with the backend's reason until it can run there: a browser on the
+  wrong machine sees the wrong `localhost`.
+- Only stdio servers are placed. A change applies to the chat's next session.
+
+**What you are told** (`TerminalProcessSpawnInfo`):
+- `chatId`, `projectId`, `purpose: "mcp"`, `name` (the server's name), `cwd` /
+  `worktreePath` (LOCAL; map them as for a shell) and `signal`.
+- **`bundled`**, for the two browser servers Dispatch ships: `{ server,
+  package, version, bin, args, env? }`. Run that package at that **exact**
+  version with your own runtime; the tool list the agent sees was taken from
+  it.
+  - The `args` are path-free. Choose the output directory, profile and
+    downloads yourself (per chat), because the Dispatch host's paths mean
+    nothing on your side.
+- **Otherwise `command` / `args` / `env`**, a configured server, to run as
+  written.
+
+**The handle** is a `TerminalBackendHandle` minus `cwd`: newline-delimited
+JSON-RPC on `stdin`/`stdout`, `kill()`, `on("exit" | "error")`. A
+`ChildProcess` satisfies it.
+
+**The reconnect contract.** Core's relay enforces the half the agent's runtime
+sees. Yours is three events:
+
+| You emit | When | Core does |
+| --- | --- | --- |
+| `stalled` (`{ detail? }`) | the link dropped; the process is believed alive; you are re-attaching | Answers every call in flight with a JSON-RPC error that names the machine. Fails new calls AT ONCE, never queuing them. Drops any half line it held. |
+| `resumed` | re-attached to the **same** process, still initialized | Carries on. Sends NO second `initialize`. Drops late replies to the calls it already failed. |
+| `exit(code, reason?)` | the process is gone, or you gave up (`{ kind: "transport-lost" }`) | Fails what is waiting. Starts a NEW one on the next call, replaying the client's `initialize`, and tells the agent in that call's result that the old pages are gone. |
+
+So keep the process running across a dropped link, and resume stdout at a line
+boundary. Why this matters (measured 2026-11-06): when a stdio MCP server exits,
+- Claude Code respawns it, losing every open page silently;
+- Codex never respawns it, so its tools are dead for the rest of the thread.
+
+The local half is the same `lazy-browser-shim.mjs` that fronts the local
+browsers, in relay mode:
+- It answers `initialize` and `tools/list` from a cached manifest, so nothing
+  starts on your side until a tool is CALLED.
+- It never exits when the relay drops.
+
+**The frames are yours to rewrite.** You own the handle, so you see every line
+both ways. That is where a backend maps what crosses machines:
+- `roots/list` answers, so local paths become your paths;
+- file paths in results, fetched back or inlined;
+- files an upload call names, which must be on your side first.
+
+**Lifetime.**
+- One process per chat + `name`.
+- A session ending does not end it: with no session attached for 60 s, core
+  closes its stdin, then calls `kill()` 5 s later. A session restart inside
+  that window keeps the browser.
+- Deleting the chat, or unregistering the backend, kills it at once.
+- The spawn is bounded by your `spawnTimeoutMs`, like a shell. A handle that
+  arrives late is killed.
+
+**Testing.** `t.terminals.spawnProcess(id, { chatId, … })` starts one through
+your backend and returns core's side of the line protocol:
+- `request(method, params)` and `notify`;
+- `fromProcess` (what it sent the client);
+- `garbage` (non-JSON stdout);
+- `events` / `next("stalled" | "resumed" | "exit")`.
+
+Assert that a re-attach emits `stalled` → `resumed` and answers the next
+request with no second `initialize`.
+
 ## Client host
 
 The server serves the directory holding each enabled plugin's `client` entry,

@@ -58,7 +58,9 @@ import {
   type McpEnablementLayers,
   type McpServerConfig,
   type SubApp,
+  type TerminalBundledProcess,
 } from "@dispatch/shared";
+import { RELAY_TOKEN_ENV } from "./placement.js";
 
 const requireFrom = createRequire(import.meta.url);
 
@@ -362,6 +364,99 @@ export function buildBrowserMcpServers(
     };
   }
   return out;
+}
+
+/** Whether `name` is one of the two servers Dispatch bundles. */
+export function isBrowserMcpServer(name: string): name is BrowserMcpServer {
+  return (BROWSER_MCP_SERVERS as readonly string[]).includes(name);
+}
+
+/** The bundled package's own version, off its `package.json`. */
+function bundledVersion(pkg: string): string | null {
+  try {
+    const raw = requireFrom(`${pkg}/package.json`) as { version?: unknown };
+    return typeof raw.version === "string" ? raw.version : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * One bundled server, described for ANOTHER machine to run: package, version
+ * and the flags the `browser:` config implies, but none of this host's paths.
+ * The output directory is dropped on purpose; on the far side it is the
+ * backend's to choose, and a `C:\…\Temp` there would be nonsense.
+ *
+ * Null when the package isn't installed here: its version is what the cached
+ * tool list was taken from, and a placed server without one could advertise
+ * tools the far side's copy doesn't have.
+ */
+export function bundledProcessFor(
+  name: BrowserMcpServer,
+  config: BrowserMcpConfig | undefined,
+): TerminalBundledProcess | null {
+  const cfg = config ?? BrowserMcpConfigSchema.parse({});
+  const spec = SPECS[name];
+  const version = bundledVersion(spec.pkg);
+  if (!version) return null;
+  const args = spec.args(cfg, MANIFEST_KEY_OUTDIR);
+  const i = args.indexOf("--output-dir");
+  if (i !== -1) args.splice(i, 2);
+  return {
+    server: name,
+    package: spec.pkg,
+    version,
+    bin: spec.bin,
+    args,
+    ...(spec.env ? { env: { ...spec.env } } : {}),
+  };
+}
+
+/** Inputs for {@link relayMcpServer}. */
+export interface RelayMcpServerOptions {
+  /** Dispatch's relay socket (`McpPlacementService.socketPath`). */
+  socketPath: string;
+  /** The placed server's token, from `McpPlacementService.place`. */
+  token: string;
+  /**
+   * For a bundled server: its name and the portable spec. Gives the shim a
+   * manifest to answer `tools/list` from, so nothing starts over there until a
+   * tool is CALLED. The same laziness the local pair has. Keyed by the backend
+   * as well, because a different machine may run a different build.
+   */
+  bundled?: { backendId: string; process: TerminalBundledProcess };
+  chatId?: string;
+}
+
+/**
+ * The stdio entry a runtime is handed for a server placed on another machine:
+ * the same shim, in relay mode. It never spawns anything itself, and never
+ * exits because the far side went away (see `placement.ts`).
+ */
+export function relayMcpServer(opts: RelayMcpServerOptions): McpServerConfig {
+  const outDir = join(tmpdir(), "dispatch-browser-mcp", opts.chatId ?? "no-chat");
+  const manifest = opts.bundled
+    ? manifestPathFor(opts.bundled.process.server as BrowserMcpServer, [
+        "relay",
+        opts.bundled.backendId,
+        `${opts.bundled.process.package}@${opts.bundled.process.version}`,
+        ...opts.bundled.process.args,
+      ])
+    : undefined;
+  return {
+    type: "stdio",
+    command: process.execPath,
+    args: [
+      SHIM_ENTRY,
+      // Kept so ChatProcessService still recognises the shim as this chat's.
+      "--owner-dir",
+      outDir,
+      ...(manifest ? ["--manifest", manifest] : []),
+      "--relay",
+      opts.socketPath,
+    ],
+    env: { [RELAY_TOKEN_ENV]: opts.token },
+  };
 }
 
 /**

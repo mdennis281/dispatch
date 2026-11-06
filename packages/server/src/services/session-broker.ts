@@ -30,6 +30,8 @@ import { basename, extname, isAbsolute, join, resolve as resolvePath } from "nod
 import { readFile, realpath, stat } from "node:fs/promises";
 import { McpPortLeaseService, resolveMcpServers } from "./mcp-session.js";
 import { buildBrowserMcpServers, effectiveSubApps } from "./mcp/browser-mcp.js";
+import type { McpPlacementService } from "./mcp/placement.js";
+import { placeSessionMcpServers, placedMcpNote } from "./mcp/placement-session.js";
 import {
   mergeDeclaredMcpServers,
   selectPluginMcpServers,
@@ -1296,7 +1298,17 @@ export interface SessionBrokerOptions {
    * the forwarded ports terminal results list. Absent or empty ⇒ none of that.
    */
   terminalBackends?: Pick<TerminalBackendRegistry, "size" | "chatIdle" | "agentNote" | "ports"> &
-    Partial<Pick<TerminalBackendRegistry, "locations" | "checkLocation">>;
+    Partial<
+      Pick<
+        TerminalBackendRegistry,
+        "locations" | "checkLocation" | "canHostProcesses" | "defaultBackendOf" | "labelOf"
+      >
+    >;
+  /**
+   * The relay for MCP servers placed on another machine (E7). Absent ⇒ every
+   * server runs locally, whatever `location` says.
+   */
+  mcpPlacement?: Pick<McpPlacementService, "place" | "socketPath">;
   /** Per-project agent memory: injected at start + exposed as `mcp__dispatch-memory__remember|recall|forget`. */
   memory?: MemoryService;
   /**
@@ -2462,6 +2474,7 @@ export class SessionBroker {
   private idleSweep?: ReturnType<typeof setInterval>;
   private readonly terminals?: TerminalService;
   private readonly terminalBackends?: SessionBrokerOptions["terminalBackends"];
+  private readonly mcpPlacement?: SessionBrokerOptions["mcpPlacement"];
   private readonly memory?: MemoryService;
   private readonly secrets?: SecretsService;
   private readonly issues?: IssueService;
@@ -2634,6 +2647,7 @@ export class SessionBroker {
     }
     this.terminals = opts.terminals;
     this.terminalBackends = opts.terminalBackends;
+    this.mcpPlacement = opts.mcpPlacement;
     this.memory = opts.memory;
     this.secrets = opts.secrets;
     this.issues = opts.issues;
@@ -8260,6 +8274,43 @@ export class SessionBroker {
     session.managerMcp = { context, servers: createManagerMcpServers(context) };
   }
 
+  /** See `placeSessionMcpServers`. Never throws: a failure leaves every server local, and says so in the log. */
+  private async placeMcpServers(
+    session: LiveSession,
+    mcp: Pick<
+      Parameters<typeof placeSessionMcpServers>[0],
+      "cwd" | "servers" | "declared" | "bundled" | "browserConfig"
+    >,
+  ): Promise<ReturnType<typeof placeSessionMcpServers> | undefined> {
+    const placement = this.mcpPlacement;
+    const backends = this.terminalBackends;
+    if (!placement) return undefined;
+    try {
+      const chat = await this.store.getChat(session.chatId).catch(() => null);
+      return placeSessionMcpServers({
+        ...mcp,
+        chatId: session.chatId,
+        ...(session.projectId ? { projectId: session.projectId } : {}),
+        ...(session.worktreeCwd ? { worktreePath: session.worktreeCwd } : {}),
+        chatOverrides: chat?.mcpLocations,
+        terminalDefault:
+          backends?.defaultBackendOf?.({
+            terminalBackend: chat?.terminalBackend,
+            projectId: session.projectId,
+          }) ?? "local",
+        canHostProcesses: (id) => backends?.canHostProcesses?.(id) ?? false,
+        place: (id, spec) => placement.place(id, spec),
+        socketPath: placement.socketPath,
+        labelOf: (id) => backends?.labelOf?.(id),
+        onUnplaceable: (name, reason) =>
+          console.warn(`[Dispatch] MCP server "${name}" stays local: ${reason}.`),
+      });
+    } catch (err) {
+      console.warn(`[Dispatch] MCP placement failed for chat ${session.chatId}; every server stays local.`, err);
+      return undefined;
+    }
+  }
+
   private async buildOptions(session: LiveSession): Promise<SessionSetup> {
     await this.refreshInheritedPosture(session);
     const permissionMode = await this.resolvePermissionMode(session.modeId);
@@ -8589,9 +8640,10 @@ export class SessionBroker {
     // a model does by accident, and withholding browser automation costs a
     // chat whose entire job is looking at things the ability to look at
     // things. Michael's call; recording it so nobody re-derives the ban.
+    const browserConfig = projectId ? this.projectConfig?.getBrowserConfig?.(projectId) : undefined;
     const browserMcp = buildBrowserMcpServers({
       contextWindow,
-      config: projectId ? this.projectConfig?.getBrowserConfig?.(projectId) : undefined,
+      config: browserConfig,
       // Config-first, but see `effectiveSubApps` for why this can't be a `??`
       // chain: a cold config cache answers `[]`, and the session would come up
       // with no browser tools in a repo that declares three web sub-apps.
@@ -8612,22 +8664,24 @@ export class SessionBroker {
     // either by name. Selected against THEIR default (the plugin's toggle) here,
     // before the merged record is run through the same layers again with the
     // "declared ⇒ on" default — idempotent for anything that survived.
+    const mergedMcp = mergeDeclaredMcpServers({
+      bundled: browserMcp,
+      plugin: this.pluginMcpServersFor(mcpEnablement),
+      project: project?.mcpServers ?? {},
+      config: configMcp,
+    });
+    // By identity, before anything copies the entries: a project that declares
+    // its own `playwright` has shadowed the bundled one, and its `location`
+    // (not `browser.location`) is the one that applies.
+    const bundledMcp = new Set(Object.keys(browserMcp).filter((n) => mergedMcp[n] === browserMcp[n]));
     const declaredMcp = expandSecretsInMcpServers(
-      applyMcpEnablement(
-        mergeDeclaredMcpServers({
-          bundled: browserMcp,
-          plugin: this.pluginMcpServersFor(mcpEnablement),
-          project: project?.mcpServers ?? {},
-          config: configMcp,
-        }),
-        mcpEnablement,
-      ),
+      applyMcpEnablement(mergedMcp, mcpEnablement),
       // Filled in HERE, at the hand-off to the runtime, and nowhere upstream:
       // the config and project record carry the placeholder because they are
       // persisted and broadcast.
       projectId ? this.secrets?.resolverFor(projectId) : undefined,
     );
-    const externalMcp =
+    const resolvedMcp =
       projectId && cwd
         ? await resolveMcpServers(
             declaredMcp,
@@ -8641,6 +8695,26 @@ export class SessionBroker {
             this.mcpPorts,
           )
         : declaredMcp;
+    // Placement (E7): a stdio server set to run on another machine is handed
+    // to the runtime as the relay shim instead. Decided per session, like the
+    // rest of `mcpServers`: a changed location applies to the next session.
+    const placement =
+      this.mcpPlacement && cwd
+        ? await this.placeMcpServers(session, {
+            cwd,
+            servers: resolvedMcp,
+            declared: declaredMcp,
+            bundled: bundledMcp,
+            browserConfig,
+          })
+        : undefined;
+    const externalMcp = placement?.servers ?? resolvedMcp;
+    const placedNote = placedMcpNote(placement?.placed ?? []);
+    if (placedNote) {
+      append("mcp-location", "Where your MCP servers run", `# Where your MCP servers run
+
+${placedNote}`);
+    }
     // Where this project's manifest actually is, resolved ONCE for the two
     // bindings that write to it. Null when there is nowhere safe to write — a
     // `repo` pin with no usable checkout — in which case neither is bound rather
