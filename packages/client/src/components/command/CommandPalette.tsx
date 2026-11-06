@@ -52,6 +52,7 @@ import {
   Workflow,
 } from "lucide-react";
 import { actions } from "../../lib/actions.js";
+import { createChatAndFocus } from "../../stores/pendingChat.js";
 import { api } from "../../lib/api.js";
 import { openCodeViewer } from "../monaco/store.js";
 import { useChats } from "../../stores/chats.js";
@@ -175,32 +176,6 @@ function useProjectFileCommands(
   );
 }
 
-/**
- * Fire-and-focus a new chat (mirrors the sidebar's create+auto-select).
- *
- * No effort, mode or model is sent — see `startNewChat` in Sidebar.tsx: a
- * value pinned here shadows the project's and the app's defaults instead of
- * falling through to them.
- */
-function newChatAndFocus(projectId: string): void {
-  const before = new Set(useChats.getState().order);
-  actions.createChat({ projectId });
-  let done = false;
-  const unsub = useChats.subscribe((s) => {
-    const fresh = s.order.find((id) => !before.has(id));
-    if (fresh && !done) {
-      done = true;
-      unsub();
-      clearTimeout(timer);
-      selectChat(fresh);
-    }
-  });
-  const timer = setTimeout(() => {
-    done = true;
-    unsub();
-  }, 8000);
-}
-
 export function CommandPalette({
   open,
   onOpenChange,
@@ -258,7 +233,10 @@ export function CommandPalette({
         group: "Actions",
         icon: <Plus />,
         keywords: "create start task conversation",
-        run: () => newChatAndFocus(project.id),
+        // Project only — no effort, mode or model. See `startNewChat` in
+        // Sidebar.tsx: a value pinned here shadows the project's and the app's
+        // defaults instead of falling through to them.
+        run: () => createChatAndFocus({ projectId: project.id }),
       });
       // The cross-cutting catalog: worktrees + shells at chat / project / app
       // scope. Distinct from the per-chat right-panel tabs, which only ever

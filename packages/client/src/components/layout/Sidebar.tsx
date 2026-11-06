@@ -30,6 +30,7 @@ import {
   Skull,
   Copy,
   Globe,
+  Loader2,
   type LucideIcon,
 } from "lucide-react";
 import { GLOBAL_PROJECT_ID, isGlobalProject, parsePrRecordKey } from "@dispatch/shared";
@@ -90,6 +91,7 @@ import { useRunners } from "../../stores/runners.js";
 import { useScheduler } from "../../stores/scheduler.js";
 import { useAttention } from "../../stores/attention.js";
 import { actions, loadOlderChats } from "../../lib/actions.js";
+import { createChatAndFocus, usePendingChat } from "../../stores/pendingChat.js";
 import { cn } from "../../lib/cn.js";
 import { midTruncate, relTimeShort } from "../../lib/format.js";
 import { useFlipReorder } from "../../lib/useFlip.js";
@@ -1706,42 +1708,39 @@ function NavButton({
 /* ----------------------------------------------------------------- sidebar */
 
 /**
- * Fire-and-focus chat creation: dispatch create-chat for the current project
- * with no custom agent, and select the chat the moment its id streams back into
- * the store — no dialog. create-chat is fire-and-forget, so we watch the chats
- * store for the newly-appeared id (with an 8s safety net).
+ * The row a New chat will land in, drawn the instant the create is sent.
  *
- * Effort is deliberately NOT sent: the server resolves it from the app's
- * per-provider default (Settings → Chat), and an explicit value here WINS over
- * that chain — which is exactly how every new chat used to land on medium no
- * matter what the setting said. `modeId` is still whatever the caller pins (the
- * `+` button pins "auto"), so Settings → Default mode does NOT reach these — a
- * separate decision, since dropping the pin would change the un-configured
- * default from acceptEdits to ask.
+ * Highlighted as the selected row, because it IS what you just selected — the
+ * real row replaces it in the same commit and keeps the highlight. No
+ * `data-flip-id`: FLIP would track it as a row of its own and slide the real
+ * chat in from wherever the placeholder had been measured. Left untracked, the
+ * swap is one row becoming another in place.
+ *
+ * Same box model as `ChatRow` (`py-1.5`, a 15px marker slot, `gap-2.5`, two
+ * text lines), so the rows beneath don't jump when it is swapped for the real
+ * one.
  */
-function createChatAndFocus(input: { projectId: string; modeId?: string }): void {
-  const before = new Set(useChats.getState().order);
-  actions.createChat({
-    projectId: input.projectId,
-    modeId: input.modeId,
-  });
-
-  let done = false;
-  const finish = (id: string) => {
-    if (done) return;
-    done = true;
-    unsub();
-    clearTimeout(timer);
-    selectChat(id);
-  };
-  const unsub = useChats.subscribe((s) => {
-    const fresh = s.order.find((id) => !before.has(id));
-    if (fresh) finish(fresh);
-  });
-  const timer = setTimeout(() => {
-    done = true;
-    unsub();
-  }, 8000);
+function PendingChatRow() {
+  return (
+    <div
+      data-testid="pending-chat-row"
+      role="status"
+      aria-label="Creating chat"
+      className="relative flex w-full items-center gap-2.5 bg-accent-ghost/70 py-1.5 pl-2.5 pr-8"
+    >
+      <ActiveRail active />
+      <span className="flex size-[15px] shrink-0 items-center justify-center text-accent [&_svg]:size-3 [&_svg]:animate-spin">
+        <Loader2 />
+      </span>
+      {/* Two lines, mirroring ChatRow's title + `text-2xs` caption. A one-line
+          placeholder is ~14px shorter, so every row below it jumped on the
+          swap — the one jank this row exists to avoid. */}
+      <span className="min-w-0 flex-1 animate-pulse">
+        <span className="block truncate text-base font-semibold text-muted">New chat…</span>
+        <span className="mt-px block truncate text-2xs text-faint">Starting</span>
+      </span>
+    </div>
+  );
 }
 
 /**
@@ -1798,7 +1797,12 @@ export function Sidebar() {
   const runtimeByChat = useChatRuntime((s) => s.byChat);
   const refreshRuntime = useChatRuntime((s) => s.refresh);
   const refreshProcesses = useChatProcesses((s) => s.refresh);
-  const activeChatId = useChats((s) => s.activeChatId);
+  const selectedChatId = useChats((s) => s.activeChatId);
+  // A New chat in flight for THIS project. While it is, the placeholder holds
+  // the highlight and the previously-selected row gives it up — two lit rows
+  // would say two chats are selected.
+  const creating = usePendingChat((s) => (project ? s.byProject[project.id] !== undefined : false));
+  const activeChatId = creating ? null : selectedChatId;
   const runners = useRunners((s) => s.byId);
   const attentionItems = useAttention((s) => s.visible);
   const view = useView((s) => s.view);
@@ -1877,7 +1881,7 @@ export function Sidebar() {
   // New chat = instant create with defaults + auto-select (no dialog). Gated on a
   // selected project, so the trigger is disabled until there's somewhere to create.
   const startNewChat = () => {
-    if (!project) return;
+    if (!project || creating) return;
     setView("chat");
     dismissLeftDrawer();
     // Nothing but the project. Mode, effort and model resolve SERVER-SIDE
@@ -2070,7 +2074,7 @@ export function Sidebar() {
             edges of the sidebar, which it can't do from inside a padded box, and
             square rows with air between them read as a stack of cards. */}
         <div ref={chatListRef}>
-          {chatCount === 0 ? (
+          {chatCount === 0 && !creating ? (
             <p className="px-2.5 py-1.5 text-xs text-faint">
               {project ? "No chats yet." : "Select a project to see its chats."}
             </p>
@@ -2082,12 +2086,17 @@ export function Sidebar() {
             // from one queue to another as one element moving.
             CHAT_SECTIONS.map((section) => {
               const run = branches.filter((b) => b.section === section);
-              if (run.length === 0) return null;
+              // A brand-new chat files under "New", newest first, so that is
+              // where its placeholder goes — even when the section is otherwise
+              // empty and would not be drawn at all.
+              const placeholder = creating && section === "new";
+              if (run.length === 0 && !placeholder) return null;
               return (
                 <Fragment key={section}>
                   <SectionLabel className="px-2.5 pb-0.5 pt-2 first:pt-0 !text-[0.6rem]">
                     {SECTION_LABEL[section]}
                   </SectionLabel>
+                  {placeholder && <PendingChatRow />}
                   {run.map((branch) => (
                     <ChatBranchRows
                       key={branch.chat.id}
@@ -2113,13 +2122,17 @@ export function Sidebar() {
       <div className="cm-hairline-t pb-2.5">
         <button
           onClick={startNewChat}
-          disabled={!project}
+          // Disabled while a create is in flight: the click used to look dead
+          // for the half-second before the chat streamed in, so it got clicked
+          // again — and every extra click was another chat.
+          disabled={!project || creating}
+          aria-busy={creating || undefined}
           // Edge to edge and square, so the one action pinned under the list
           // belongs to the same column as the list. `bg-panel-2` still lifts it
           // off `surface` — it is a button, not a row you can land on.
           className="flex w-full items-center justify-center gap-1.5 bg-panel-2 py-2.5 text-sm font-medium text-secondary transition-colors hover:bg-active hover:text-primary disabled:pointer-events-none disabled:opacity-45 [&_svg]:size-3.5"
         >
-          <Plus />
+          {creating ? <Loader2 className="animate-spin" /> : <Plus />}
           New chat
         </button>
         {/* Build stamp, not a page-load clock: it says which bundle you're
