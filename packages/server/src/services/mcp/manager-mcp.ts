@@ -9019,9 +9019,12 @@ export function withSlotReacquire<T extends Pick<ManagerToolDefinition<never>, "
     // A call that returned quickly never really gave anything up — the slot it
     // released on the way in is at most briefly double-counted on the way out,
     // which is the pre-#358 burst and is cheap. Holding ITS result for a slot
-    // is not: `resolve_thread` takes 200ms, and a cold start admitted in that
-    // window would have kept the result waiting for its whole turn, at every
-    // quick GitHub or spawn call. Only a call that genuinely waited re-queues.
+    // is not: a `wait_for_chat` on a chat that already finished returns in
+    // milliseconds, and a cold start admitted in that window would have kept
+    // the result waiting for its whole turn, at every quick spawn or peer
+    // call. Only a call that genuinely waited re-queues. (The short GitHub
+    // calls this once had to absorb are no longer blocked-class at all — see
+    // `isRemoteWait` in metrics-activity.ts.)
     if (now() - started < SLOT_REACQUIRE_MIN_MS) return result;
     await ctx.broker
       .acquireSlot(ctx.chatId, { human, signal: combinedSignal(extraSignal(extra), ctx.signal) })

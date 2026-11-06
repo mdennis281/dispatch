@@ -139,15 +139,17 @@ function isRemoteWait(n: string, tool: string | undefined): boolean {
   return (
     n === "webfetch" ||
     n === "websearch" ||
-    // Everything on the GitHub category server blocks on github.com. Named
-    // individually rather than by category so adding a LOCAL tool there later
-    // doesn't silently start counting as network time.
-    tool === "watch_pr" ||
-    tool === "create_pr" ||
-    tool === "approve_pr" ||
-    tool === "request_review" ||
-    tool === "post_review" ||
-    tool === "resolve_thread"
+    // Of the GitHub tools, only `watch_pr` WAITS — it sits on CI and reviewers
+    // for as long as they take. `create_pr`, `approve_pr`, `request_review`,
+    // `post_review` and `resolve_thread` used to be listed here too, as "they
+    // block on github.com", and that cost real throughput: a blocked-class
+    // state gives up its slot, and `withSlotReacquire` holds any answer that
+    // took over 2s until it gets one back. A `create_pr` (push + open + request
+    // review) routinely takes longer than that, so at a full cap the chat that
+    // had just opened its PR sat "Waiting" behind cold starts for a call that
+    // was work all along. They are a few seconds of the agent's own work; they
+    // keep its slot.
+    tool === "watch_pr"
   );
 }
 
