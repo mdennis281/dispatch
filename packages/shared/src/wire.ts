@@ -572,6 +572,23 @@ export const PluginSettingsEventSchema = z.object({
   settings: z.record(z.string(), z.unknown()),
 });
 
+/**
+ * The server finished handling a `send-message` that carried a `clientId`.
+ *
+ * Needed beside the user row's own echo because not every accepted send writes
+ * a row right away: a mid-turn `queue`/`interrupt` send is parked in the
+ * broker with no row until the turn settles, and without this its pending
+ * ghost would sit in the transcript until then. `error` set means the send was
+ * refused and the text exists nowhere but the client's ghost.
+ */
+export const SendAckEventSchema = z.object({
+  type: z.literal("send-ack"),
+  chatId: z.string(),
+  clientId: z.string(),
+  /** Why the send failed; absent means the server accepted it. */
+  error: z.string().optional(),
+});
+
 /** An error surfaced to the client. */
 export const ErrorEventSchema = z.object({
   type: z.literal("error"),
@@ -658,6 +675,7 @@ export const WsServerEventSchema = z.discriminatedUnion("type", [
   UpdateAvailableEventSchema,
   RestartResumeEventSchema,
   NoticeEventSchema,
+  SendAckEventSchema,
   ErrorEventSchema,
   ServerShutdownEventSchema,
   SchedulerEventSchema,
@@ -711,6 +729,14 @@ export const SendMessageActionSchema = z.object({
    * running: there is no turn to hold behind or cut off.
    */
   sendMode: SendModeSchema.optional(),
+  /**
+   * The composer's own id for this send, echoed back on the user row it
+   * produces and on the `send-ack` that settles it. It is what lets the client
+   * draw the message the instant Send is pressed and swap it for the real row
+   * in place — matching on text instead would merge two identical "yes"es sent
+   * back to back, or leave a ghost behind when the server rewrote the text.
+   */
+  clientId: z.string().max(64).optional(),
 });
 
 /** Queue a steering message while a turn is running. */

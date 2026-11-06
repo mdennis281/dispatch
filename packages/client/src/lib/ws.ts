@@ -33,6 +33,7 @@ import {
 } from "@dispatch/shared";
 import { applyServerEvent, useConnection } from "../stores/index.js";
 import { sessionFetch, useAuth } from "../stores/auth.js";
+import { usePendingSends } from "../stores/pendingSends.js";
 
 function wsUrl(ticket?: string): string {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -105,6 +106,14 @@ export class WsClient {
    * knew about the failure.
    */
   private forcedReason: string | null = null;
+  /**
+   * Generation of the socket that is OPEN right now (null when none is). A
+   * frame written to a socket that then dies may or may not have reached the
+   * server; the generation is how a pending send knows it was on that socket
+   * rather than waiting in the outbox for the next one.
+   */
+  private openEpoch: number | null = null;
+  private epochSeq = 0;
 
   constructor(private opts: WsClientOptions = {}) {}
 
@@ -200,6 +209,7 @@ export class WsClient {
       if (this.socket !== socket) return;
       this.clearTimer("openTimer");
       useConnection.getState().setState("open");
+      this.openEpoch = ++this.epochSeq;
       // Deliberately NOT resetting `backoff` here — see `onMessage`. An open
       // socket proves the TCP handshake worked and nothing else.
       this.helloTimer = setTimeout(() => {
@@ -207,6 +217,7 @@ export class WsClient {
       }, HELLO_TIMEOUT_MS);
       // flush anything queued while offline
       for (const frame of this.outbox.splice(0)) socket.send(frame);
+      usePendingSends.getState().flushed(this.openEpoch);
     });
 
     socket.addEventListener("message", (ev) => {
@@ -246,6 +257,10 @@ export class WsClient {
     if (this.socket !== socket) return;
     this.socket = null;
     this.clearSocketTimers();
+    if (this.openEpoch !== null) {
+      usePendingSends.getState().lost(this.openEpoch);
+      this.openEpoch = null;
+    }
 
     const reason = info.reason || this.forcedReason || "";
     this.forcedReason = null;
@@ -452,16 +467,22 @@ export class WsClient {
 
   /* ----------------------------------------------------------------- send */
 
-  /** Send a client action (validated); queues while the socket is down. */
-  send(action: WsClientAction): void {
+  /**
+   * Send a client action (validated); queues while the socket is down.
+   *
+   * Returns the generation of the socket the frame was written to, or
+   * undefined when it was queued (or refused) — see {@link openEpoch}.
+   */
+  send(action: WsClientAction): number | undefined {
     const parsed = WsClientActionSchema.safeParse(action);
     if (!parsed.success) {
       console.warn("[ws] refusing to send invalid action", parsed.error.message);
-      return;
+      return undefined;
     }
     const frame = JSON.stringify(parsed.data);
     if (this.socket && this.socket.readyState === WebSocket.OPEN) {
       this.socket.send(frame);
+      return this.openEpoch ?? undefined;
     } else {
       // Cap the offline queue so a long outage with an eager clicker can't grow
       // it without bound; drop the oldest (least-relevant) frames first.
@@ -470,6 +491,7 @@ export class WsClient {
         this.outbox.splice(0, this.outbox.length - MAX_OUTBOX);
       }
       this.connect();
+      return undefined;
     }
   }
 

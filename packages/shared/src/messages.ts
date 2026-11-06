@@ -169,6 +169,12 @@ export const UserMessageRowSchema = z.object({
    * duplication buys back-compat with every row written before this existed.
    */
   parts: z.array(MessagePartSchema).optional(),
+  /**
+   * The sending composer's id for this message (`send-message.clientId`), so
+   * the tab that sent it can swap its pending ghost for this row in place.
+   * Absent on every row not typed into a composer.
+   */
+  clientId: z.string().optional(),
 });
 export type UserMessageRow = z.infer<typeof UserMessageRowSchema>;
 

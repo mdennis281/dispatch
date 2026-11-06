@@ -51,6 +51,22 @@ function emitError(
   services.bus.publish({ type: "error", chatId, message, detail, ...(code ? { code } : {}) });
 }
 
+/**
+ * Composer sends already taken, per server instance: `chatId:clientId` →
+ * whether it has finished. A Retry re-sends under the same id after a socket
+ * drop left the client unsure whether the first attempt arrived; when it did,
+ * delivering it again would hand the agent the same message twice. Bounded —
+ * a retry follows its original within seconds, not thousands of sends later.
+ */
+const seenSends = new WeakMap<Services, Map<string, "running" | "done">>();
+const SEEN_SENDS_MAX = 512;
+
+function sendsSeen(services: Services): Map<string, "running" | "done"> {
+  let m = seenSends.get(services);
+  if (!m) seenSends.set(services, (m = new Map()));
+  return m;
+}
+
 function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -464,20 +480,60 @@ export async function dispatchClientAction(
         // acknowledged no-ops at the service layer.
         return;
 
-      case "send-message":
-        await ensureSession(services, action.chatId);
-        await broker.sendMessage(
-          action.chatId,
-          action.text ?? (action.parts ? composeMessageText(action.parts) : ""),
-          {
-            priority: action.priority,
-            images: action.images as ImageRef[] | undefined,
-            parts: action.parts,
-            effort: action.effort,
-            sendMode: action.sendMode,
-          },
-        );
+      case "send-message": {
+        const seen = sendsSeen(services);
+        const { clientId } = action;
+        const key = clientId ? `${action.chatId}:${clientId}` : undefined;
+        if (key && clientId) {
+          const prior = seen.get(key);
+          // Still running: the original's own row/ack will settle the ghost.
+          if (prior === "running") return;
+          if (prior === "done") {
+            services.bus.publish({ type: "send-ack", chatId: action.chatId, clientId });
+            return;
+          }
+          seen.set(key, "running");
+          while (seen.size > SEEN_SENDS_MAX) seen.delete(seen.keys().next().value!);
+        }
+        try {
+          await ensureSession(services, action.chatId);
+          await broker.sendMessage(
+            action.chatId,
+            action.text ?? (action.parts ? composeMessageText(action.parts) : ""),
+            {
+              priority: action.priority,
+              images: action.images as ImageRef[] | undefined,
+              parts: action.parts,
+              effort: action.effort,
+              sendMode: action.sendMode,
+              clientId: action.clientId,
+            },
+          );
+        } catch (err) {
+          // Settle the sender's ghost as FAILED, then let the shared handler
+          // below toast it as before. The composer cleared its box on Send, so
+          // without this the ghost is the only copy of the text and would sit
+          // there "sending" forever.
+          if (key) seen.delete(key); // a failed send may be retried for real
+          if (clientId) {
+            services.bus.publish({
+              type: "send-ack",
+              chatId: action.chatId,
+              clientId,
+              error: errText(err),
+            });
+          }
+          throw err;
+        }
+        if (key) seen.set(key, "done");
+        // After the row (which settles the ghost by itself) — this is for the
+        // send that wrote none: one parked behind a live turn by `queue` or
+        // `interrupt`, which now shows as the composer's "waiting" chip instead.
+        if (clientId) {
+          services.bus.publish({ type: "send-ack", chatId: action.chatId, clientId });
+        }
         return;
+      }
 
       case "steer":
         await ensureSession(services, action.chatId);

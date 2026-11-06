@@ -49,6 +49,7 @@ import { useScheduler } from "./scheduler.js";
 import { useModels } from "./models.js";
 import { useSettings } from "./settings.js";
 import { useHarnesses } from "./harnesses.js";
+import { usePendingSends } from "./pendingSends.js";
 
 import {
   MOCK_PROJECTS,
@@ -163,6 +164,11 @@ function reduceServerEvent(evt: WsServerEvent): void {
       return;
 
     case "chat-message":
+      // Same tick as the append, so React commits the ghost's removal and the
+      // real row together — never both on screen, never neither.
+      if (evt.message.kind === "user" && evt.message.clientId) {
+        usePendingSends.getState().settle(evt.chatId, evt.message.clientId);
+      }
       useMessages.getState().append(evt.chatId, evt.message);
       // A chat streaming in the BACKGROUND has no viewport to disturb, so its
       // window can be capped right here — otherwise every chat that ran this
@@ -444,6 +450,11 @@ function reduceServerEvent(evt: WsServerEvent): void {
     // Same route: `plugins/settings.ts` (host.settings) and the Settings pane
     // each tap it; no store holds plugin settings.
     case "plugin-settings":
+      return;
+
+    case "send-ack":
+      if (evt.error) usePendingSends.getState().fail(evt.chatId, evt.clientId, evt.error);
+      else usePendingSends.getState().settle(evt.chatId, evt.clientId);
       return;
 
     case "error":
@@ -890,6 +901,9 @@ export async function ensureChatMessages(chatId: string): Promise<void> {
     );
     // A FULL page means the window is capped, so assume there's more above; a
     // short page proves we already hold the whole transcript.
+    // A send whose live echo fell into a reconnect gap is in this page; its
+    // ghost goes now, in the same tick, rather than sitting beside its own row.
+    usePendingSends.getState().reconcile(chatId, messages);
     useMessages.getState().setForChat(chatId, messages, {
       hasMore: messages.length >= TRANSCRIPT_PAGE_SIZE,
       load: "ready",
