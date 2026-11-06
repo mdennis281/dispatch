@@ -3,6 +3,7 @@
  *   GET    /api/chats?projectId=&all=  → Chat[] (newest N per project; see
  *                                     services/chat-load-cap.ts)
  *   GET    /api/chats/totals        → { totals, limit } — chats per project vs cap
+ *   GET    /api/chats/search?q=     → NDJSON ChatSearchFrame stream (palette search)
  *   POST   /api/chats               → create (registers a broker session)
  *   GET    /api/chats/:id           → Chat | 404
  *   PUT    /api/chats/:id           → merge metadata (title/mode/agent/effort…)
@@ -19,10 +20,11 @@
  *   POST   /api/chats/processes/kill → reap a branch's processes
  */
 import type { FastifyInstance } from "fastify";
-import { ChatSchema, type ChatMessage } from "@dispatch/shared";
+import { ChatSchema, type ChatMessage, type ChatSearchFrame } from "@dispatch/shared";
 import { createChat } from "./dispatch.js";
 import { ProviderUnavailableError, providerUnavailableBody } from "../harness/index.js";
 import { leanRows } from "../services/transcript-lean.js";
+import { searchChatsByAge } from "../services/chat-search.js";
 import { chatTotalsByProject, listCappedChats } from "../services/chat-load-cap.js";
 import { deleteChat } from "../services/chat-deletion.js";
 import { GLOBAL_MODE_ID, isGlobalProject } from "@dispatch/shared";
@@ -63,6 +65,50 @@ export function registerChatRoutes(app: FastifyInstance): void {
    * only — a static segment already beats a parametric one in the router.
    */
   app.get("/api/chats/totals", async () => chatTotalsByProject(store));
+
+  /**
+   * The command palette's transcript search, as a stream. One NDJSON frame per
+   * page of the age walk (see services/chat-search.ts), so the palette lists
+   * today's matches while last month's are still being read.
+   *
+   * The socket closing IS the cancel. The palette drops it the moment the
+   * query changes or the palette closes, and without that every keystroke of a
+   * typed query would leave a full-history scan running behind it.
+   */
+  app.get<{ Querystring: { q?: string } }>("/api/chats/search", async (req, reply) => {
+    const q = (req.query.q ?? "").trim();
+    if (!q) return reply.code(400).send({ error: "q required" });
+
+    reply.hijack();
+    const raw = reply.raw;
+    raw.writeHead(200, {
+      "content-type": "application/x-ndjson; charset=utf-8",
+      "cache-control": "no-store",
+      // A buffering proxy would hold every frame to the end, which turns a
+      // list that grows into one that appears all at once, late.
+      "x-accel-buffering": "no",
+    });
+    const send = (frame: ChatSearchFrame): void => {
+      if (!raw.writableEnded && !raw.destroyed) raw.write(`${JSON.stringify(frame)}
+`);
+    };
+    const abort = new AbortController();
+    raw.once("close", () => abort.abort());
+
+    try {
+      const walk = searchChatsByAge(
+        { listChats: () => store.listChats(), findChats: (fq) => app.services.inspect.findChats(fq) },
+        { query: q, signal: abort.signal },
+      );
+      for await (const frame of walk) send(frame);
+    } catch (err) {
+      if (!abort.signal.aborted) {
+        send({ type: "error", error: err instanceof Error ? err.message : String(err) });
+      }
+    } finally {
+      if (!raw.writableEnded) raw.end();
+    }
+  });
 
   app.post("/api/chats", async (req, reply) => {
     const body = (req.body ?? {}) as Record<string, unknown>;

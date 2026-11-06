@@ -149,6 +149,7 @@ import type {
   SystemResources,
   ChatProcessDetail,
   GrowthFrame,
+  ChatSearchFrame,
   GrowthProgress,
   GrowthReport,
   RetentionSettings,
@@ -735,6 +736,13 @@ export const api = {
      */
     totals: () =>
       get<{ totals: Record<string, number>; limit: number }>("/api/chats/totals"),
+    /**
+     * Search every chat's transcript, newest first, a day at a time — one frame
+     * per page as the server's walk reaches it. Abort `signal` to stop it: the
+     * server cancels its scan when the connection closes.
+     */
+    search: (q: string, onFrame: (frame: ChatSearchFrame) => void, signal?: AbortSignal) =>
+      stream<ChatSearchFrame>(`/api/chats/search${qs({ q })}`, onFrame, signal),
     get: (id: string) => get<Chat>(`/api/chats/${id}`),
     create: (body: { projectId: string; title?: string; modeId?: string; agentId?: string }) =>
       post<Chat>("/api/chats", body),
