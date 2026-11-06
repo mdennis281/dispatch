@@ -4,6 +4,12 @@ import type { ArtifactStorageWrite } from "./ArtifactFrame.js";
 
 /** How long to gather a page's writes before sending them as one PATCH. */
 const STORAGE_FLUSH_MS = 400;
+/**
+ * Browsers cap the bodies of in-flight `keepalive` requests at 64 KiB in total
+ * and reject past it. Kept under that with headroom; a bigger final batch goes
+ * as an ordinary request, which a closing tab may cancel.
+ */
+const KEEPALIVE_MAX_BYTES = 60 * 1024;
 
 interface Pending {
   clear?: true;
@@ -37,13 +43,18 @@ export function useArtifactStorage(chatId: string, id: string) {
   /** Which artifact `pending` belongs to — a flush after switching must still go to the old one. */
   const target = useRef({ chatId, id });
 
-  const flush = useCallback(() => {
+  const flush = useCallback((unloading = false) => {
     window.clearTimeout(timer.current);
     const batch = pending.current;
     pending.current = null;
     if (!batch) return;
     const { chatId: c, id: a } = target.current;
-    void api.chats.artifactStoragePatch(c, a, batch).catch((err: unknown) => {
+    // An ordinary fetch is cancelled when the page goes away — F5 within the
+    // debounce window would lose the save. `keepalive` survives that, up to the
+    // browser's 64 KiB budget; past it the request goes out normally and
+    // tab-close is best-effort. (Unmount needs neither: the page stays alive.)
+    const keepalive = unloading && new Blob([JSON.stringify(batch)]).size <= KEEPALIVE_MAX_BYTES;
+    void api.chats.artifactStoragePatch(c, a, batch, { keepalive }).catch((err: unknown) => {
       // The page's own shim enforces the quota, so a refusal here means the
       // artifact expired or the server is gone. Nothing for the page to do —
       // say so where a developer looking at a misbehaving save would look.
@@ -74,12 +85,14 @@ export function useArtifactStorage(chatId: string, id: string) {
     };
   }, [chatId, id, flush]);
 
-  // Unmount and tab-close both send what is waiting; a debounce window must
-  // never be the difference between a save and no save.
+  // Unmount and tab-close both send what is waiting. Unmount is reliable; a
+  // closing tab is reliable for batches under the keepalive budget (see
+  // `flush`), which a save written in the last 400ms almost always is.
   useEffect(() => {
-    window.addEventListener("pagehide", flush);
+    const onHide = () => flush(true);
+    window.addEventListener("pagehide", onHide);
     return () => {
-      window.removeEventListener("pagehide", flush);
+      window.removeEventListener("pagehide", onHide);
       flush();
     };
   }, [flush]);
@@ -96,7 +109,7 @@ export function useArtifactStorage(chatId: string, id: string) {
           ? { ...(write.clear ? { clear: true as const } : {}), set: { ...write.set } }
           : { ...pending.current, set: { ...pending.current.set, ...write.set } };
       window.clearTimeout(timer.current);
-      timer.current = window.setTimeout(flush, STORAGE_FLUSH_MS);
+      timer.current = window.setTimeout(() => flush(), STORAGE_FLUSH_MS);
     },
     [flush],
   );
