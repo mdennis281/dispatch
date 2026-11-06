@@ -99,10 +99,12 @@ async function readSource(ctx: ManagerMcpArtifacts, path: string): Promise<strin
 }
 
 const TYPE_GUIDE =
-  "'html' — a complete page, rendered in a sandboxed iframe: inline <script> and <style> run, but the " +
-  "page has NO network access (no CDN scripts, no fetch) and no access to Dispatch, so inline every " +
-  "library and asset it needs. 'svg' — one <svg> document. 'markdown' — a document. 'code' — a listing " +
-  "shown with highlighting (pass `language`).";
+  "'html' — a complete page, rendered in a sandboxed iframe. Inline <script>/<style>, WebGL/WebGL2, " +
+  "WebAudio, WebAssembly and Workers created from blob: URLs all work; fetch() works for data: and " +
+  "blob: URLs. localStorage works and persists per artifact across reloads and versions (5M " +
+  "characters); sessionStorage is per render. There is NO network (no CDN scripts, no http fetch), " +
+  "no IndexedDB and no access to Dispatch, so inline every library and asset it needs. 'svg' — one " +
+  "<svg> document. 'markdown' — a document. 'code' — a listing shown with highlighting (pass `language`).";
 
 const createShape = {
   title: z.string().min(1).max(ARTIFACT_TITLE_MAX).describe("Short title shown on the card and pane header."),

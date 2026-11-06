@@ -4,6 +4,8 @@
  *   GET  /api/chats/:id/artifacts                 → ArtifactMeta[] (newest edit first)
  *   GET  /api/chats/:id/artifacts/:aid?version=n  → ArtifactContent (410 once expired)
  *   POST /api/chats/:id/artifacts/:aid/errors     → record runtime errors the viewer caught
+ *   GET  /api/chats/:id/artifacts/:aid/storage    → ArtifactStorage (the page's localStorage)
+ *   PATCH /api/chats/:id/artifacts/:aid/storage   → apply { clear?, set } → { chars }
  *
  * Content is returned as JSON, never served as a document. The client puts it in
  * an `<iframe sandbox="allow-scripts" srcdoc>` — an opaque origin — so
@@ -13,7 +15,12 @@
  */
 import type { FastifyInstance, FastifyReply } from "fastify";
 import * as z from "zod";
-import { ARTIFACT_ERROR_MAX_CHARS, ARTIFACT_MAX_ERRORS, type ArtifactContent } from "@dispatch/shared";
+import {
+  ARTIFACT_ERROR_MAX_CHARS,
+  ARTIFACT_MAX_ERRORS,
+  ArtifactStoragePatchSchema,
+  type ArtifactContent,
+} from "@dispatch/shared";
 import { ArtifactError } from "../services/artifacts.js";
 
 const ErrorsBody = z.object({
@@ -25,6 +32,7 @@ function sendError(reply: FastifyReply, err: unknown) {
   if (err instanceof ArtifactError) {
     if (err.code === "expired") return reply.code(410).send({ error: "expired", expiredAt: err.expiredAt });
     if (err.code === "not_found") return reply.code(404).send({ error: err.message });
+    if (err.code === "too_large") return reply.code(413).send({ error: err.message });
     return reply.code(400).send({ error: err.message });
   }
   throw err;
@@ -67,6 +75,39 @@ export function registerArtifactRoutes(app: FastifyInstance): void {
       if (!(await chatExists(req.params.id))) return reply.code(404).send({ error: "chat not found" });
       artifacts.recordErrors(req.params.id, req.params.aid, body.data.version, body.data.errors);
       return reply.code(204).send();
+    },
+  );
+
+  // Storage is per ARTIFACT, not per version, and changes under the page's
+  // feet — so it is never folded into the (cacheable) content response.
+  app.get<{ Params: { id: string; aid: string } }>(
+    "/api/chats/:id/artifacts/:aid/storage",
+    async (req, reply) => {
+      if (!(await chatExists(req.params.id))) return reply.code(404).send({ error: "chat not found" });
+      try {
+        reply.header("cache-control", "no-store");
+        return await artifacts.readStorage(req.params.id, req.params.aid);
+      } catch (err) {
+        return sendError(reply, err);
+      }
+    },
+  );
+
+  app.patch<{ Params: { id: string; aid: string } }>(
+    "/api/chats/:id/artifacts/:aid/storage",
+    // A full 5M-character save is ~10 MB of JSON once escaped; Fastify's 1 MB
+    // default would refuse a page that is well inside its own quota.
+    { bodyLimit: 16 * 1024 * 1024 },
+    async (req, reply) => {
+      const body = ArtifactStoragePatchSchema.safeParse(req.body);
+      if (!body.success) return reply.code(400).send({ error: body.error.message });
+      if (!(await chatExists(req.params.id))) return reply.code(404).send({ error: "chat not found" });
+      try {
+        const { chars } = await artifacts.writeStorage(req.params.id, req.params.aid, body.data);
+        return { chars };
+      } catch (err) {
+        return sendError(reply, err);
+      }
     },
   );
 }

@@ -21,12 +21,16 @@ import {
   ARTIFACT_MAX_BYTES,
   ARTIFACT_MAX_ERRORS,
   ARTIFACT_MAX_VERSIONS,
+  ARTIFACT_STORAGE_MAX_CHARS,
   ARTIFACT_TITLE_MAX,
   ArtifactMetaSchema,
   applyArtifactEdit,
   artifactExtension,
+  artifactStorageChars,
   latestArtifactVersion,
   type ArtifactMeta,
+  type ArtifactStorage,
+  type ArtifactStoragePatch,
   type ArtifactType,
 } from "@dispatch/shared";
 import { KeyedMutex, isMissing, readJson, writeJsonAtomic } from "../store/fsq.js";
@@ -100,6 +104,15 @@ export class ArtifactService {
   }
   private metaPath(chatId: string, id: string): string {
     return join(this.artifactDir(chatId, id), "meta.json");
+  }
+  /**
+   * The artifact's `localStorage`. Beside the versions rather than in the meta:
+   * a game saving every few seconds must not rewrite the file every reader of
+   * the artifact parses. Retention's `expire` deletes it with the versions —
+   * anything that is not `meta.json` goes — so storage never outlives content.
+   */
+  private storagePath(chatId: string, id: string): string {
+    return join(this.artifactDir(chatId, id), "storage.json");
   }
   private versionPath(chatId: string, meta: ArtifactMeta, n: number): string {
     return join(this.artifactDir(chatId, meta.id), `v${n}.${artifactExtension(meta.type, meta.language)}`);
@@ -222,6 +235,65 @@ export class ArtifactService {
     // nobody names, never a meta naming a file that is gone.
     for (const v of dropped) await rm(this.versionPath(chatId, meta, v.n), { force: true }).catch(() => {});
     return next;
+  }
+
+  /* -------------------------------------------------------------- storage */
+
+  /** Live (not expired) meta, or the `ArtifactError` a storage call should fail with. */
+  private async liveMeta(chatId: string, id: string): Promise<ArtifactMeta> {
+    const meta = await this.getMeta(chatId, id);
+    if (!meta) throw new ArtifactError("not_found", `No artifact "${id}" in this chat.`);
+    if (meta.expiredAt !== undefined) {
+      throw new ArtifactError("expired", `Artifact "${id}" has expired.`, meta.expiredAt);
+    }
+    return meta;
+  }
+
+  private async readEntries(chatId: string, id: string): Promise<Record<string, string>> {
+    const raw = await readJson(this.storagePath(chatId, id)).catch(() => undefined);
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+      if (typeof v === "string") out[k] = v;
+    }
+    return out;
+  }
+
+  async readStorage(chatId: string, id: string): Promise<ArtifactStorage> {
+    await this.liveMeta(chatId, id);
+    const entries = await this.readEntries(chatId, id);
+    return { entries, chars: artifactStorageChars(entries) };
+  }
+
+  /**
+   * Apply one batch from the viewer: `clear` first, then `set` (null removes).
+   * Refused WHOLE when the result would exceed the quota — a half-applied batch
+   * is a save file with half a save in it. The page's own shim enforces the
+   * same quota synchronously, so in practice this only catches a page that
+   * bypassed it.
+   */
+  async writeStorage(chatId: string, id: string, patch: ArtifactStoragePatch): Promise<ArtifactStorage> {
+    return this.mutex.run(`${chatId}:${id}`, async () => {
+      await this.liveMeta(chatId, id);
+      const entries: Record<string, string> = patch.clear ? {} : await this.readEntries(chatId, id);
+      for (const [k, v] of Object.entries(patch.set)) {
+        if (v === null) delete entries[k];
+        else entries[k] = v;
+      }
+      const chars = artifactStorageChars(entries);
+      if (chars > ARTIFACT_STORAGE_MAX_CHARS) {
+        throw new ArtifactError(
+          "too_large",
+          `Artifact storage would be ${chars} characters; the quota is ${ARTIFACT_STORAGE_MAX_CHARS}.`,
+        );
+      }
+      if (Object.keys(entries).length === 0) {
+        await rm(this.storagePath(chatId, id), { force: true });
+      } else {
+        await writeJsonAtomic(this.storagePath(chatId, id), entries);
+      }
+      return { entries, chars };
+    });
   }
 
   /* --------------------------------------------------------------- errors */

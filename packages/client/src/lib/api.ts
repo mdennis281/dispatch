@@ -33,6 +33,8 @@ import type {
   ChatMediaItem,
   ArtifactContent,
   ArtifactMeta,
+  ArtifactStorage,
+  ArtifactStoragePatch,
   ChatMessage,
   AgentConfig,
   AgentConfigInput,
@@ -587,11 +589,14 @@ async function request<T>(
   method: string,
   path: string,
   body?: unknown,
+  /** `keepalive` lets a request outlive the page — see `artifactStoragePatch`. */
+  init?: Pick<RequestInit, "keepalive">,
 ): Promise<T> {
   const res = await sessionFetch(`${BASE}${path}`, {
     method,
     headers: body !== undefined ? { "content-type": "application/json" } : undefined,
     body: body !== undefined ? JSON.stringify(body) : undefined,
+    ...init,
   });
   if (!res.ok) {
     let detail: unknown;
@@ -772,6 +777,26 @@ export const api = {
     artifact: (id: string, artifactId: string, version?: number) =>
       get<ArtifactContent>(
         `/api/chats/${id}/artifacts/${encodeURIComponent(artifactId)}${qs({ version })}`,
+      ),
+    /** The artifact's persisted `localStorage` (per artifact, every version). */
+    artifactStorage: (id: string, artifactId: string) =>
+      get<ArtifactStorage>(`/api/chats/${id}/artifacts/${encodeURIComponent(artifactId)}/storage`),
+    /**
+     * One batch of the page's writes: `clear` first, then `set` (null removes).
+     * `keepalive` for the flush on `pagehide`, the one call that must outlive
+     * the page it was made from.
+     */
+    artifactStoragePatch: (
+      id: string,
+      artifactId: string,
+      body: ArtifactStoragePatch,
+      opts?: { keepalive?: boolean },
+    ) =>
+      request<{ chars: number }>(
+        "PATCH",
+        `/api/chats/${id}/artifacts/${encodeURIComponent(artifactId)}/storage`,
+        body,
+        opts?.keepalive ? { keepalive: true } : undefined,
       ),
     /** Runtime errors the viewer caught, so `artifact_read` can tell the agent. */
     artifactErrors: (id: string, artifactId: string, version: number, errors: string[]) =>

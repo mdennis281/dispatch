@@ -23,6 +23,7 @@ import { CodeBlock } from "../chat/CodeBlock.js";
 import { Markdown } from "../chat/Markdown.js";
 import { ArtifactFrame } from "./ArtifactFrame.js";
 import { artifactIcon } from "./artifactIcon.js";
+import { useArtifactStorage } from "./useArtifactStorage.js";
 
 type Loaded =
   | { state: "loading" }
@@ -82,6 +83,7 @@ export function ArtifactPane({ open }: { open: OpenArtifact }) {
 
   const data = loaded.state === "ok" ? loaded.data : null;
   const shownVersion = data?.version;
+  const storage = useArtifactStorage(chatId, id);
   const type = data?.meta.type;
 
   // The errors on screen are the ones the server already knew for this
@@ -211,7 +213,7 @@ export function ArtifactPane({ open }: { open: OpenArtifact }) {
       </div>
 
       <div className="relative min-h-0 flex-1">
-        {loaded.state === "loading" && (
+        {(loaded.state === "loading" || (data && !storage.ready && (data.meta.type === "html" || data.meta.type === "svg"))) && (
           <div className="flex h-full items-center justify-center">
             <Spinner />
           </div>
@@ -225,13 +227,15 @@ export function ArtifactPane({ open }: { open: OpenArtifact }) {
           </Notice>
         )}
         {loaded.state === "error" && <Notice tone="danger">{loaded.message}</Notice>}
-        {data && effectiveView === "preview" && (type === "html" || type === "svg") && (
+        {data && storage.ready && effectiveView === "preview" && (type === "html" || type === "svg") && (
           <ArtifactFrame
             key={`${data.version}:${reloadKey}`}
             type={type}
             content={data.content}
             title={data.meta.title}
+            storage={storage.mirror.current}
             onError={onFrameError}
+            onStorage={storage.onWrite}
           />
         )}
         {data && effectiveView === "preview" && type === "markdown" && (
