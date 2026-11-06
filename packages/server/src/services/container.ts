@@ -1359,8 +1359,11 @@ export function createServices(
     return instance ?? undefined;
   };
   // `ctx.shared`: one database in the CONFIG root, shared with the other
-  // instance on this machine. Opened lazily on first use.
-  const pluginShared = new PluginSharedStore(pluginSharedDbPath(config.configDir ?? config.dataDir));
+  // instance on this machine. Opened lazily on first use. A config with no
+  // directory at all (the container tests' bare `{ maxActiveSessions }`) has
+  // nowhere to put the file, so its plugins get no `ctx.shared`.
+  const sharedRoot = config.configDir ?? config.dataDir;
+  const pluginShared = sharedRoot ? new PluginSharedStore(pluginSharedDbPath(sharedRoot)) : undefined;
   const plugins: PluginService =
     overrides.plugins ??
     new PluginService({
@@ -2186,7 +2189,7 @@ export function createServices(
       // them are still up to deliver the stdin EOF that lets a browser close.
       await mcpPlacement.dispose().catch(() => {});
       await plugins.dispose().catch(() => {});
-      pluginShared.close();
+      pluginShared?.close();
       chatMessenger.dispose();
       chatCompletionNotices.dispose();
       // A sign-in CLI left running would hold its account's credentials file
