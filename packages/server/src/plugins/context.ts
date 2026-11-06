@@ -57,6 +57,7 @@ import type { MemoryService } from "../services/memory.js";
 import type { AttentionQueue } from "../services/attention.js";
 import type { ChatMessenger } from "../services/chat-messenger.js";
 import { PluginKv } from "./kv.js";
+import { buildPluginShared, type PluginSharedStore } from "./shared-state.js";
 import type { PluginOAuthService } from "./oauth.js";
 
 /** The server's narrowing of the shared context: route handlers see Fastify's request and reply. */
@@ -130,6 +131,11 @@ export interface PluginContextDeps {
   broker: PluginQuestionAnswerer;
   /** `ctx.approvals`. Absent in a context built without one; then the member is absent too. */
   approvals?: PluginApprover;
+  /**
+   * `ctx.shared`'s database in the config root. Absent in a context built
+   * without one; then the member is absent too.
+   */
+  sharedState?: PluginSharedStore;
   log: PluginLog;
   /** The plugin's cached settings — read live so `onChange` and `get` agree. */
   settings: () => Record<string, unknown>;
@@ -543,6 +549,15 @@ export function buildPluginContext(
 
   if (has("runner") && deps.runner) {
     ctx.runner = deps.runner;
+  }
+
+  if (has("shared") && deps.sharedState) {
+    const shared = buildPluginShared(deps.sharedState, id, instance);
+    ctx.shared = shared.api;
+    // Locks are leases and would expire on their own, but a plugin going down
+    // gives back what it holds NOW — the other instance should not wait out a
+    // TTL for a lock whose holder is gone for certain.
+    owned.offs.push(() => shared.dispose());
   }
 
   if (has("approvals") && deps.approvals) {

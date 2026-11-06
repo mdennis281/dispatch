@@ -29,6 +29,7 @@ import {
   type PluginSurface,
   type PluginUpdateDiff,
   grantedPluginCapabilities,
+  PLUGIN_SHARED_DB_FILENAME,
 } from "@dispatch/shared";
 import { CmError } from "./manifest.js";
 import {
@@ -336,6 +337,29 @@ export async function updatePlugins(
 
 /* ------------------------------------------------------------------ purge */
 
+/**
+ * Remove a plugin's `ctx.shared` rows from the config root's database. The
+ * table names are the server's (plugins/shared-state.ts); a file that never
+ * got them, or no file at all, is nothing to purge.
+ */
+async function purgeSharedState(configDir: string, id: string): Promise<number | undefined> {
+  const file = join(configDir, PLUGIN_SHARED_DB_FILENAME);
+  if (!existsSync(file)) return undefined;
+  const { DatabaseSync } = await import("node:sqlite");
+  const conn = new DatabaseSync(file);
+  try {
+    conn.exec("PRAGMA busy_timeout = 5000");
+    const has = (t: string) =>
+      conn.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = ?").get(t) !== undefined;
+    let n = 0;
+    if (has("plugin_shared_kv")) n = Number(conn.prepare("DELETE FROM plugin_shared_kv WHERE plugin = ?").run(id).changes);
+    if (has("plugin_shared_lock")) conn.prepare("DELETE FROM plugin_shared_lock WHERE plugin = ?").run(id);
+    return n;
+  } finally {
+    conn.close();
+  }
+}
+
 export interface PurgeResult {
   settings: boolean;
   /** Global secrets deleted. */
@@ -344,6 +368,8 @@ export interface PurgeResult {
   sharedSecrets: string[];
   /** This instance's rows, when its data dir was known. */
   kvKeys?: number;
+  /** `ctx.shared` keys removed — they live in the config root, shared by every instance. */
+  sharedKeys?: number;
   oauth?: string[];
   /** Why the per-instance rows were not touched. */
   stateSkipped?: string;
@@ -400,6 +426,8 @@ export async function purgePluginData(
   }
 
   const result: PurgeResult = { settings, secrets, sharedSecrets };
+  const shared = await purgeSharedState(configDir, id);
+  if (shared !== undefined) result.sharedKeys = shared;
   const db = opts.dataDir ? join(opts.dataDir, "state.db") : undefined;
   if (!db || !existsSync(db)) {
     result.stateSkipped = opts.dataDir

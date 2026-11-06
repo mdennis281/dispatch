@@ -116,6 +116,68 @@ export const PLUGIN_SHUTDOWN_BUDGET_MS = 5_000;
 /** Budget for one {@link PluginModule.reconcile}. Nothing waits for it but the plugin itself. */
 export const PLUGIN_RECONCILE_BUDGET_MS = 120_000;
 
+/** `ctx.shared`'s database, in the CONFIG root (beside config.json and secrets.json). */
+export const PLUGIN_SHARED_DB_FILENAME = "plugin-shared.db";
+/** `ctx.shared` limits: a key, a lock name, a value's JSON, and a lease. */
+export const PLUGIN_SHARED_LIMITS = {
+  keyLength: 256,
+  lockNameLength: 128,
+  valueBytes: 1024 * 1024,
+  minTtlMs: 1_000,
+  defaultTtlMs: 30_000,
+  maxTtlMs: 3_600_000,
+  maxWaitMs: 600_000,
+} as const;
+
+/** One `ctx.shared` value with what a compare-and-set needs. */
+export interface PluginSharedEntry<T = unknown> {
+  value: T;
+  /** Starts at 1, +1 on every write. What `compareAndSet` compares. */
+  version: number;
+  /** Epoch ms of the last write. */
+  updatedAt: number;
+  /** `ctx.instance.id` of the instance that wrote it, when known. */
+  updatedBy?: string;
+}
+
+export interface PluginSharedLockOptions {
+  /** Lease length. Default 30 s, 1 s – 1 h. A lease not renewed in time is free for anyone. */
+  ttlMs?: number;
+  /** How long to keep trying while someone else holds it. Default 0: try once. At most 10 min. */
+  waitMs?: number;
+  /** Renew the lease every third of `ttlMs` until released. Default true. */
+  autoRenew?: boolean;
+  /** Called once if the lease is lost — a renewal found it expired or taken. */
+  onLost?: () => void;
+  /** Stop waiting. Does not release a lock already held. */
+  signal?: HostAbortSignal;
+}
+
+/** A lease on a `ctx.shared` lock. */
+export interface PluginSharedLock {
+  readonly name: string;
+  readonly acquiredAt: number;
+  /** When the lease runs out unless renewed. Moves on each renewal. */
+  readonly expiresAt: number;
+  /** True once a renewal found the lease expired or taken: stop acting as the holder. */
+  readonly lost: boolean;
+  /** Extend the lease. False when it was already lost. */
+  renew(ttlMs?: number): Promise<boolean>;
+  /** Give it back. Safe to call twice. */
+  release(): Promise<void>;
+}
+
+/** Who holds a `ctx.shared` lock. */
+export interface PluginSharedLockHolder {
+  /** `ctx.instance.id` of the holding instance, when known. */
+  instanceId?: string;
+  role?: PluginInstance["role"];
+  /** The holder is this instance. (Possibly another `lock` call of this plugin's.) */
+  mine: boolean;
+  acquiredAt: number;
+  expiresAt: number;
+}
+
 export interface PluginLog {
   info(message: string): void;
   warn(message: string): void;
@@ -561,6 +623,49 @@ export interface PluginContext<Req = unknown, Reply = unknown> {
    */
   approvals?: {
     request(chatId: string, req: PluginApprovalRequest): Promise<PluginApprovalResult>;
+  };
+
+  /**
+   * `shared` — data and locks in the CONFIG root, so every Dispatch instance
+   * on the machine (stable and dev) sees the same ones and a plugin update
+   * keeps them. Per plugin: a plugin cannot reach another's keys or locks.
+   * Use it to coordinate work outside Dispatch that both instances could do —
+   * one agent per remote machine, one upgrade at a time. `ctx.kv` is the
+   * per-instance store; use that for anything else.
+   *
+   * A lock is a LEASE (default 30 s, auto-renewed while held), recorded with
+   * the holder's `instance.id`, so an instance that dies without releasing
+   * frees it when the lease runs out. Release what you take; deactivation
+   * releases whatever is still held.
+   */
+  shared?: {
+    get<T = unknown>(key: string): Promise<T | undefined>;
+    /** The value with its version, for a `compareAndSet`. */
+    entry<T = unknown>(key: string): Promise<PluginSharedEntry<T> | undefined>;
+    /** Write unconditionally (`undefined` deletes). Resolves to the new version (0 for a delete). */
+    set(key: string, value: unknown): Promise<number>;
+    /**
+     * Write only if the entry is still at `expectedVersion` — `null` for "only
+     * if it does not exist". `value` undefined deletes. Atomic across both
+     * instances. On a lost race resolves `{ ok: false, current }`.
+     */
+    compareAndSet(
+      key: string,
+      expectedVersion: number | null,
+      value: unknown,
+    ): Promise<{ ok: true; version: number } | { ok: false; current?: PluginSharedEntry }>;
+    /** True when there was a value. */
+    delete(key: string): Promise<boolean>;
+    list(prefix?: string): Promise<string[]>;
+    /**
+     * Take the lock `name`, waiting up to `waitMs` while another holder has it.
+     * Resolves the lease, or `undefined` when it could not be had in time.
+     * Not re-entrant: a second `lock` of a name this plugin already holds
+     * waits like anyone else's.
+     */
+    lock(name: string, opts?: PluginSharedLockOptions): Promise<PluginSharedLock | undefined>;
+    /** Who holds `name` now, if anyone. */
+    holder(name: string): Promise<PluginSharedLockHolder | undefined>;
   };
 
   /** `memory` */

@@ -122,6 +122,7 @@ const SERVER_MEMBERS: Record<string, { capability?: PluginCapability; methods?: 
   terminals: { capability: "terminals" },
   approvals: { capability: "approvals" },
   runner: { capability: "runner" },
+  shared: { capability: "shared" },
   projects: {},
 };
 

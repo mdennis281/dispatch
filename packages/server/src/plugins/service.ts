@@ -1157,6 +1157,7 @@ export class PluginService implements PluginContributionSource {
     const entry = (await this.store.getSettings()).plugins?.[id];
     const db = this.store.stateDb;
     const kvKeys = (db.prepare("SELECT COUNT(*) AS n FROM plugin_kv WHERE plugin = ?").get(id) as { n: number }).n;
+    const sharedKeys = this.ctxDeps.sharedState?.count(id) ?? 0;
     const oauth = (
       db.prepare("SELECT name FROM plugin_oauth_token WHERE plugin = ? ORDER BY name").all(id) as Array<{ name: string }>
     ).map((r) => r.name);
@@ -1191,6 +1192,9 @@ export class PluginService implements PluginContributionSource {
       data: {
         settings: entry?.enabled !== undefined || Object.keys(entry?.settings ?? {}).length > 0,
         kvKeys,
+        // Shared with the other instance: purging removes them for both. Only
+        // said when there are some, like a box nobody needs to read otherwise.
+        ...(sharedKeys ? { sharedKeys } : {}),
         secrets,
         sharedSecrets,
         oauth,
@@ -1248,6 +1252,11 @@ export class PluginService implements PluginContributionSource {
       const db = this.store.stateDb;
       db.prepare("DELETE FROM plugin_kv WHERE plugin = ?").run(id);
       db.prepare("DELETE FROM plugin_oauth_token WHERE plugin = ?").run(id);
+      try {
+        this.ctxDeps.sharedState?.purge(id);
+      } catch (err) {
+        this.fault(`plugin "${id}" uninstall: its shared state was not deleted`, err);
+      }
       const deleted: string[] = [];
       for (const name of preview.data.secrets) {
         try {
@@ -1257,7 +1266,13 @@ export class PluginService implements PluginContributionSource {
           this.fault(`plugin "${id}" uninstall: secret ${name} was not deleted`, err);
         }
       }
-      purged = { settings: preview.data.settings, kvKeys: preview.data.kvKeys, secrets: deleted, oauth: preview.data.oauth };
+      purged = {
+        settings: preview.data.settings,
+        kvKeys: preview.data.kvKeys,
+        ...(preview.data.sharedKeys !== undefined ? { sharedKeys: preview.data.sharedKeys } : {}),
+        secrets: deleted,
+        oauth: preview.data.oauth,
+      };
     }
     // The server half is gone. The browser half is not: a bundle an open tab
     // already imported has no unload hook (the same limit a toggle-off has),

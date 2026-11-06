@@ -63,6 +63,11 @@ export type {
   PluginApprovalRequest,
   PluginApprovalResult,
   PluginApprovalDecision,
+  // `ctx.shared` (docs/plugins.md → "Shared state and locks")
+  PluginSharedEntry,
+  PluginSharedLock,
+  PluginSharedLockHolder,
+  PluginSharedLockOptions,
   // providers — implement `Harness`, describe it with `ProviderDescriptor`,
   // hand both to `ctx.providers.register` (docs/plugins.md → "Providers")
   Harness,

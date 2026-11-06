@@ -305,6 +305,9 @@ function dataItems(p: PluginUninstallPreview): ReactNode[] {
   const out: ReactNode[] = [];
   if (p.data.settings) out.push("its settings and on/off toggle");
   if (p.data.kvKeys) out.push(`${p.data.kvKeys} stored value${p.data.kvKeys === 1 ? "" : "s"} (kv)`);
+  if (p.data.sharedKeys) {
+    out.push(`${p.data.sharedKeys} shared value${p.data.sharedKeys === 1 ? "" : "s"} (every instance on this machine)`);
+  }
   if (p.data.secrets.length) {
     out.push(
       <>
@@ -459,7 +462,7 @@ export function PluginUninstallDialog({
                   Keeps <code className="cm-mono !text-2xs">{s.name}</code> — {s.alsoUsedBy.join(", ")} also uses it.
                 </span>
               ))}
-              {(preview.data.kvKeys > 0 || preview.data.oauth.length > 0) && (
+              {(preview.data.kvKeys > 0 || (preview.data.sharedKeys ?? 0) > 0 || preview.data.oauth.length > 0) && (
                 <span className="mt-0.5 block text-2xs text-faint">
                   Stored values and sign-ins are this Dispatch instance&apos;s; another instance keeps its own.
                 </span>

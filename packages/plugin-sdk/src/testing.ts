@@ -52,6 +52,7 @@ import type {
   WsServerEventType,
 } from "@dispatch/shared";
 import {
+  PLUGIN_SHARED_LIMITS,
   PLUGIN_APPROVAL_DEFAULT_TIMEOUT_SECONDS,
   PLUGIN_APPROVAL_LIMITS,
   PLUGIN_APPROVAL_MAX_TIMEOUT_SECONDS,
@@ -112,6 +113,12 @@ export interface TestContextOptions {
    * leaves the member absent, as an older host does.
    */
   instance?: Partial<PluginInstance> | null;
+  /**
+   * The store behind `ctx.shared`. Pass ONE `createTestSharedStore()` to two
+   * contexts with different `instance.id`s to play stable and dev sharing a
+   * config root. Default: a fresh store of this context's own.
+   */
+  sharedStore?: TestSharedStore;
   projects?: PluginProjectSummary[];
   chats?: PluginChatSummary[];
   /** Pre-seeded kv rows. */
@@ -393,6 +400,22 @@ async function withHostBudget(
   }
 }
 
+/**
+ * An in-memory stand-in for the config root's `ctx.shared` database: versioned
+ * values and leased locks, keyed by plugin id like the real one. Share one
+ * between two `createTestContext` calls to test what two instances do.
+ * `now` is read for every lease decision, so a test can move time.
+ */
+export interface TestSharedStore {
+  values: Map<string, { value: unknown; version: number; updatedAt: number; updatedBy?: string }>;
+  locks: Map<string, { token: string; instanceId?: string; role?: string; acquiredAt: number; expiresAt: number }>;
+  now: () => number;
+}
+
+export function createTestSharedStore(opts: { now?: () => number } = {}): TestSharedStore {
+  return { values: new Map(), locks: new Map(), now: opts.now ?? (() => Date.now()) };
+}
+
 /** The default `ctx.instance`: a test, in nobody's data dir. */
 export const TEST_INSTANCE: PluginInstance = Object.freeze({
   id: "test-instance",
@@ -670,6 +693,136 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
         });
         entry.result = await Promise.race([scripted, withdrawn]);
         return entry.result;
+      },
+    };
+  }
+
+  if (has("shared")) {
+    const store = opts.sharedStore ?? createTestSharedStore();
+    const L = PLUGIN_SHARED_LIMITS;
+    const me = opts.instance === null ? undefined : { ...TEST_INSTANCE, ...opts.instance };
+    const k = (key: string) => {
+      if (typeof key !== "string" || !key || key.length > L.keyLength) throw new Error(`shared: a key is a string of 1–${L.keyLength} characters`);
+      return `${id}\u0000${key}`;
+    };
+    const ln = (name: string) => {
+      if (typeof name !== "string" || !name || name.length > L.lockNameLength) {
+        throw new Error(`shared: a lock name is a string of 1–${L.lockNameLength} characters`);
+      }
+      return `${id}\u0000${name}`;
+    };
+    const copy = (v: unknown) => {
+      const json = JSON.stringify(v);
+      if (json === undefined) throw new Error("shared: the value has no JSON form");
+      if (json.length > L.valueBytes) throw new Error(`shared: the value is over ${L.valueBytes} bytes as JSON`);
+      return JSON.parse(json) as unknown;
+    };
+    const write = (key: string, value: unknown): number => {
+      const prev = store.values.get(key);
+      const version = (prev?.version ?? 0) + 1;
+      store.values.set(key, { value: copy(value), version, updatedAt: store.now(), ...(me ? { updatedBy: me.id } : {}) });
+      return version;
+    };
+    const ttlOf = (t: number | undefined) => {
+      const ttl = t ?? L.defaultTtlMs;
+      if (!Number.isFinite(ttl) || ttl < L.minTtlMs || ttl > L.maxTtlMs) throw new Error(`shared: ttlMs must be between ${L.minTtlMs} and ${L.maxTtlMs}`);
+      return ttl;
+    };
+    ctx.shared = {
+      get: async (key) => {
+        const e = store.values.get(k(key));
+        return (e ? copy(e.value) : undefined) as never;
+      },
+      entry: async (key) => {
+        const e = store.values.get(k(key));
+        return e ? ({ ...e, value: copy(e.value) } as never) : undefined;
+      },
+      set: async (key, value) => {
+        const kk = k(key);
+        if (value === undefined) {
+          store.values.delete(kk);
+          return 0;
+        }
+        return write(kk, value);
+      },
+      compareAndSet: async (key, expected, value) => {
+        const kk = k(key);
+        const cur = store.values.get(kk);
+        if ((cur?.version ?? null) !== expected) return { ok: false, ...(cur ? { current: { ...cur, value: copy(cur.value) } } : {}) };
+        if (value === undefined) {
+          store.values.delete(kk);
+          return { ok: true, version: 0 };
+        }
+        return { ok: true, version: write(kk, value) };
+      },
+      delete: async (key) => store.values.delete(k(key)),
+      list: async (prefix = "") =>
+        [...store.values.keys()]
+          .filter((key) => key.startsWith(`${id}\u0000${prefix}`))
+          .map((key) => key.slice(id.length + 1))
+          .sort(),
+      lock: async (name, o = {}) => {
+        const key = ln(name);
+        const ttl = ttlOf(o.ttlMs);
+        const deadline = store.now() + (o.waitMs ?? 0);
+        for (;;) {
+          if (o.signal?.aborted) return undefined;
+          const held = store.locks.get(key);
+          if (!held || held.expiresAt <= store.now()) {
+            const row = {
+              token: `${Math.random()}`,
+              ...(me ? { instanceId: me.id, role: me.role } : {}),
+              acquiredAt: store.now(),
+              expiresAt: store.now() + ttl,
+            };
+            store.locks.set(key, row);
+            let lost = false;
+            let released = false;
+            const lease = {
+              name,
+              acquiredAt: row.acquiredAt,
+              get expiresAt() {
+                return row.expiresAt;
+              },
+              get lost() {
+                return lost;
+              },
+              renew: async (ms?: number) => {
+                const cur = store.locks.get(key);
+                if (released || lost || cur !== row || row.expiresAt <= store.now()) {
+                  if (!released && !lost) {
+                    lost = true;
+                    o.onLost?.();
+                  }
+                  return false;
+                }
+                row.expiresAt = store.now() + ttlOf(ms ?? ttl);
+                return true;
+              },
+              release: async () => {
+                if (released) return;
+                released = true;
+                if (store.locks.get(key) === row) store.locks.delete(key);
+              },
+            };
+            return lease;
+          }
+          if (store.now() >= deadline) return undefined;
+          // No real clock to wait on: a test moves `now` or releases the
+          // holder between polls.
+          await new Promise((r) => setTimeout(r, 5));
+        }
+      },
+      holder: async (name) => {
+        const held = store.locks.get(ln(name));
+        if (!held || held.expiresAt <= store.now()) return undefined;
+        return {
+          ...(held.instanceId ? { instanceId: held.instanceId } : {}),
+          ...(held.role ? { role: held.role as PluginInstance["role"] } : {}),
+          mine: !!me && held.instanceId === me.id,
+          acquiredAt: held.acquiredAt,
+          expiresAt: held.expiresAt,
+        };
       },
     };
   }

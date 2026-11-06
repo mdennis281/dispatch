@@ -115,6 +115,7 @@ import { ProviderLogins } from "./provider-logins.js";
 import { AccountLogins } from "./account-login.js";
 import { ManagerMcpBridge } from "./mcp/manager-http.js";
 import { PluginService } from "../plugins/service.js";
+import { PluginSharedStore, pluginSharedDbPath } from "../plugins/shared-state.js";
 import { findShippedPluginsRoot } from "../plugins/shipped.js";
 import { PluginInspector } from "../plugins/inspect/index.js";
 import { PluginUpdateWatcher, pluginUpdateHours } from "../plugins/inspect/watcher.js";
@@ -1357,6 +1358,9 @@ export function createServices(
     }
     return instance ?? undefined;
   };
+  // `ctx.shared`: one database in the CONFIG root, shared with the other
+  // instance on this machine. Opened lazily on first use.
+  const pluginShared = new PluginSharedStore(pluginSharedDbPath(config.configDir ?? config.dataDir));
   const plugins: PluginService =
     overrides.plugins ??
     new PluginService({
@@ -1393,6 +1397,7 @@ export function createServices(
         messenger: chatMessenger,
         broker,
         approvals: broker,
+        sharedState: pluginShared,
         pluginOAuth,
         // Announced on the bus either way: a chat's provider-unavailable state
         // is derived from the registered list, so an open tab re-reads it here
@@ -2181,6 +2186,7 @@ export function createServices(
       // them are still up to deliver the stdin EOF that lets a browser close.
       await mcpPlacement.dispose().catch(() => {});
       await plugins.dispose().catch(() => {});
+      pluginShared.close();
       chatMessenger.dispose();
       chatCompletionNotices.dispose();
       // A sign-in CLI left running would hold its account's credentials file

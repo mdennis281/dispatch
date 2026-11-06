@@ -173,6 +173,7 @@ async function cmdRemove(args: ParsedArgs): Promise<void> {
       purge.settings ? "its settings entry" : "",
       purge.secrets.length ? `secrets ${purge.secrets.join(", ")}` : "",
       purge.kvKeys ? `${purge.kvKeys} kv key(s)` : "",
+      purge.sharedKeys ? `${purge.sharedKeys} shared key(s) (every instance)` : "",
       purge.oauth?.length ? `OAuth tokens for ${purge.oauth.join(", ")}` : "",
     ].filter(Boolean);
     process.stdout.write(`  Purged: ${parts.length ? parts.join("; ") : "nothing was stored"}\n`);
