@@ -258,6 +258,19 @@ export { WATCH_PR_DEFAULT_TIMEOUT_SECONDS };
 export const NO_CHECKS_GRACE_MS = 60_000;
 
 /**
+ * How often `watch_pr` repeats a settled-red build that hasn't changed.
+ *
+ * Not zero: a red check the agent has deliberately left alone (a flaky,
+ * non-required job) would turn every call into an instant return, so the watch
+ * could never wait on a review or the merge. Also not the whole quiet window:
+ * sitting silent for 30 minutes on a finished red build is the bug this
+ * reminder exists to fix (dispatch-plugins #43). A gap also covers the seconds
+ * after a push, when the rollup can still show the OLD head's red checks:
+ * re-reporting those instantly would read as "your fix failed too".
+ */
+export const SETTLED_RED_REMIND_MS = 5 * 60_000;
+
+/**
  * How long a watch tolerates an EMPTY reviewer queue before reporting it once.
  *
  * A review request takes a moment to register after `create_pr` asks for it, and
@@ -2787,13 +2800,14 @@ export interface WatchPrState {
   greenAt?: string;
   /**
    * Fingerprint of the settled-red check set last reported. Unlike
-   * {@link greenAt} it is NOT a once-only gate: a settled red build re-reports
-   * on the first poll of every call (see `ci-settled-red`), because a red run
-   * that is over cannot change by itself, and a watch that blocks on it is
-   * waiting for nothing. This only stops it re-firing on later polls of the
-   * same call.
+   * {@link greenAt} it is NOT a once-only gate: an unchanged settled red build
+   * is repeated every {@link SETTLED_RED_REMIND_MS}, because a red run that is
+   * over cannot change by itself, and a watch that sits silent on it is waiting
+   * for nothing.
    */
   redAt?: string;
+  /** When {@link redAt} was last reported, for {@link SETTLED_RED_REMIND_MS}. */
+  redReportedAt?: number;
   /** The "no checks configured" note has been delivered for this PR. */
   notedNoChecks?: boolean;
   /**
@@ -2904,10 +2918,6 @@ async function watchForPrActivity(
   const started = opts.now();
   const deadline = started + opts.timeoutMs;
   const aborted = (): boolean => opts.signals.some((s) => s?.aborted);
-  // Whether THIS call has reported the settled-red build yet. Per call, not per
-  // session: see `redAt`.
-  let redReported = false;
-
   for (;;) {
     if (aborted()) return { kind: "aborted" };
     opts.onPoll?.();
@@ -2963,9 +2973,14 @@ async function watchForPrActivity(
       // and red, and blocking there means waiting out the whole window for a
       // change only the agent can cause. A call that started while jobs were
       // still running fires once, the moment they finish.
-      if (!redReported || st.redAt !== red) {
-        redReported = true;
+      const now = opts.now();
+      if (
+        st.redAt !== red ||
+        st.redReportedAt === undefined ||
+        now - st.redReportedAt >= SETTLED_RED_REMIND_MS
+      ) {
         st.redAt = red;
+        st.redReportedAt = now;
         events.push({
           type: "ci-settled-red",
           failing: runs
@@ -2977,6 +2992,7 @@ async function watchForPrActivity(
       // A blind poll proves nothing either way. Anything else but settled-red (a re-run started, a new push) is a different
       // build: the next time it settles red is news again.
       st.redAt = undefined;
+      st.redReportedAt = undefined;
     }
     if (allGreen) {
       const green = runs
@@ -3812,8 +3828,8 @@ export function createManagerTools(ctx: ManagerMcpContext) {
     "watch_pr",
     "Watch a GitHub pull request and RETURN THE INSTANT it needs you — a CI check " +
       "fails, ALL checks finish green, ALL checks finish with any red (ciSettledRed — " +
-      "re-reported at once on every call until you push or re-run, since a finished " +
-      "build can't change by waiting), a new review comment/thread appears, or the " +
+      "repeated every few minutes while it stays red, since a finished build can't " +
+      "change by waiting), a new review comment/thread appears, or the " +
       "PR is merged/closed. This is the ONE correct way to wait on or react to a " +
       "PR: do NOT hand-roll a `gh pr view` / `gh pr checks` sleep loop, and do NOT " +
       "launch a background Bash or Monitor task to watch it. Safe to call AFTER CI " +
@@ -4129,10 +4145,9 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         adviceParts.push(
           "CI is FINISHED and red, and waiting will not change it. Push a fix, or — if " +
             "the failure is a flake unrelated to this PR — re-run the failed job " +
-            "(`gh run rerun <run-id> --failed`). Only then call watch_pr again: while CI " +
-            "sits finished and red, every watch_pr call returns straight away with this " +
-            "report. (Just pushed or re-run? GitHub can take a few seconds to show the new " +
-            "run — call again.)",
+            "(`gh run rerun <run-id> --failed`), and only then call watch_pr again. A " +
+            "build left red is repeated every " +
+            `${SETTLED_RED_REMIND_MS / 60_000} minutes rather than waited out.`,
         );
       }
       if (failing.length > 0 || comments.length > 0) {
@@ -4141,7 +4156,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
             "actually fixed (pass the thread id above, and a `reply` saying what you did) " +
             "— an unresolved thread blocks the merge even after the code is fixed.",
         );
-      } else if (!stalled && !spent) {
+      } else if (!stalled && !spent && !settledRed) {
         adviceParts.push(
           review?.inProgress
             ? // "Merge it if you're ready" over a review that is still being
@@ -4202,7 +4217,9 @@ export function createManagerTools(ctx: ManagerMcpContext) {
             "reviewer back on the hook (do this once you've pushed your fixes, not before), " +
             "or land the PR if it's already been reviewed and there's nothing outstanding.",
         );
-      } else if (needsWork) {
+      } else if (needsWork && !settledRed) {
+        // Not after settled red: "it keeps watching" would contradict the advice
+        // above, which says the next move is a push or a re-run, not a wait.
         adviceParts.push(
           "Then call watch_pr again — it keeps watching (reporting only NEW activity) " +
             "until the PR merges.",

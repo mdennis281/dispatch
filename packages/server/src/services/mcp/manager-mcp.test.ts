@@ -41,6 +41,7 @@ import {
   type CopilotQuotaFacts,
   WAIT_CAP_SECONDS,
   PR_POLL_INTERVAL_MS,
+  SETTLED_RED_REMIND_MS,
   NO_CHECKS_GRACE_MS,
   REVIEW_QUEUE_GRACE_MS,
   REVIEW_ROUND_GRACE_MS,
@@ -783,22 +784,36 @@ describe("manager-mcp — watch_pr", () => {
       expect(resultText(second)).toContain("needs attention");
       expect(resultText(second)).not.toContain('"timedOut":true');
       expect(gh.calls.length).toBe(3);
+      // The red-only result must not ALSO say all is well — "Merge it" or "keeps
+      // watching" next to "push a fix" is a contradiction the agent resolves wrong.
+      expect(resultText(second)).toContain("FINISHED and red");
+      expect(resultText(second)).not.toContain("Merge it");
+      expect(resultText(second)).not.toContain("Nothing to fix");
+      expect(resultText(second)).not.toContain("keeps watching");
     });
 
-    it("re-reports a finished red build at once on every call instead of blocking", async () => {
+    it("repeats a red build left alone every few minutes — not instantly, not never", async () => {
       const gh = fakeGitHub([{ merge: OPEN, checks: [FAIL_BUILD, PASS_LINT] }]);
       const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
 
-      const first = await watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 600 }, {});
+      const first = await watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 1800 }, {});
       expect(resultText(first)).toContain('"type":"ci-settled-red"');
-      expect(resultText(first)).toContain("FINISHED and red");
 
-      // Nothing new — but nothing CAN change on a finished run without the agent.
-      const second = await watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 600 }, {});
+      // Re-called straight away (waiting on a review, or the rollup still shows the
+      // old head after a push): an instant return here would make it a hot loop.
+      const p = watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 1800 }, {});
+      await vi.advanceTimersByTimeAsync(SETTLED_RED_REMIND_MS - PR_POLL_INTERVAL_MS);
+      let settled = false;
+      void p.then(() => (settled = true));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toBe(false);
+
+      // …but it is not waited out for the whole window either.
+      await vi.advanceTimersByTimeAsync(PR_POLL_INTERVAL_MS);
+      const second = await p;
       expect(resultText(second)).toContain('"type":"ci-settled-red"');
       expect(resultText(second)).not.toContain('"type":"ci-failed"'); // still deduped
-      expect(gh.calls.length).toBe(2); // each call answered on its first poll
-      expect(vi.getTimerCount()).toBe(0);
+      expect(resultText(second)).not.toContain('"timedOut":true');
     });
 
     it("waits on a re-run, and reports when it settles red again", async () => {
