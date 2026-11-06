@@ -304,11 +304,19 @@ export function optionalPluginCapabilities(m: CapabilityLists | undefined): {
   return { granted: [...granted], ignored: [...ignored] };
 }
 
-/** The note for optional capabilities this host does not know — on the details row, the inspect card and the CLI's consent summary. */
+/**
+ * The note for optional capabilities this host does not know — on the details
+ * row, the inspect card and the CLI's consent summary.
+ *
+ * It says the later grant will be SILENT on purpose. Nothing records what was
+ * consented to at install; the grant is recomputed from the manifest on every
+ * boot, so an upgrade that adds the name hands it over with no new card.
+ * Installing past this note is the consent to that.
+ */
 export function ignoredOptionalCapabilitiesNote(ignored: readonly string[]): string | undefined {
   if (!ignored.length) return undefined;
   const names = ignored.map((n) => `"${n}"`).join(", ");
-  return `optional ${ignored.length === 1 ? "capability" : "capabilities"} ${names} ${ignored.length === 1 ? "is" : "are"} not known to this Dispatch and ${ignored.length === 1 ? "was" : "were"} ignored — a newer Dispatch may grant ${ignored.length === 1 ? "it" : "them"}`;
+  return `optional ${ignored.length === 1 ? "capability" : "capabilities"} ${names} ${ignored.length === 1 ? "is" : "are"} not known to this Dispatch and ${ignored.length === 1 ? "was" : "were"} ignored — a newer Dispatch that knows ${ignored.length === 1 ? "it" : "them"} will grant ${ignored.length === 1 ? "it" : "them"} without asking again`;
 }
 
 /**

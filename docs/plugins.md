@@ -170,6 +170,14 @@ optionalCapabilities: [approvals]   # elevation needs it; everything else works 
 - **Feature-detect the member.** `ctx.approvals` is `undefined` on a host that
   lacks it, exactly as if it were never declared. Say "needs a newer Dispatch"
   for the one feature, rather than failing the plugin.
+- **An ignored name is granted later without asking again.** Nothing
+  records what was granted at install: the grant is recomputed from the
+  manifest on every boot. So once Dispatch is upgraded to a version that knows
+  the name, the plugin gets it with no new consent card and no update diff,
+  because nothing on disk changed. The install-time note says so, and
+  installing past it is the consent. A plugin that wants a fresh card for a
+  future capability should ship an update that declares it once the
+  capability exists.
 - A name in both lists counts as required. An optional `secrets:write` still
   needs `secrets`, because it widens `ctx.secrets`.
 - **Testing.** `createTestContext({ capabilities, optionalCapabilities })`
