@@ -4,6 +4,7 @@ import {
   DEFAULT_MAX_CHATS_PER_PROJECT,
   DEFAULT_REVIEWER_CHAT_DAYS,
   DEFAULT_TOOL_IMAGE_DAYS,
+  DEFAULT_ARTIFACT_DAYS,
   MAX_CHATS_PER_PROJECT_CEILING,
   RETENTION_DAYS_CEILING,
 } from "@dispatch/shared";
@@ -83,10 +84,23 @@ export function RetentionSection({ draft, patch }: AppPaneProps) {
             onChange={(e) => set({ toolImageDays: numberField(e.target.value) })}
           />
         </Field>
+        <Field
+          label="Keep artifacts for"
+          hint={`days after their last edit — blank = ${DEFAULT_ARTIFACT_DAYS}`}
+          className="max-w-[12rem]"
+        >
+          <TextInput
+            inputMode="numeric"
+            value={r.artifactDays == null ? "" : String(r.artifactDays)}
+            max={RETENTION_DAYS_CEILING}
+            onChange={(e) => set({ artifactDays: numberField(e.target.value) })}
+          />
+        </Field>
         <p className="text-xs leading-relaxed text-muted">
-          Both windows delete something DERIVED from a conversation, never the conversation: a
-          reviewer chat once its findings are on GitHub, and images a tool returned. Images you
-          attached yourself are never expired.
+          These windows delete something DERIVED from a conversation, never the conversation: a
+          reviewer chat once its findings are on GitHub, images a tool returned, and the pages and
+          documents an agent published as artifacts. Images you attached yourself are never
+          expired.
         </p>
       </div>
 

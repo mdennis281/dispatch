@@ -13,6 +13,7 @@ import { FileRunGroup } from "./rows/FileRunGroup.js";
 import { PrRunGroup } from "./rows/PrRunGroup.js";
 import { IssueRunGroup } from "./rows/IssueRunGroup.js";
 import { DispatchToolCard } from "./rows/DispatchToolCard.js";
+import { ArtifactCard } from "../artifacts/ArtifactCard.js";
 import { SubagentCard } from "./rows/SubagentCard.js";
 import { ThinkingGroup } from "./rows/ThinkingGroup.js";
 import { PermissionCard } from "./rows/PermissionCard.js";
@@ -26,6 +27,7 @@ import {
   groupTranscriptRows,
   shellGroupPresentation,
   toolPresentation,
+  artifactRefOf,
   type TranscriptItem,
 } from "../../lib/toolPresentations.js";
 import {
@@ -195,6 +197,12 @@ export const MessageList = memo(function MessageList({ chatId, messages }: Messa
           // command nor a file, so it must not join a terminal or file run.
           if (isToolSearch(row) && parseToolSearchCall(row)) {
             return <ToolSearchCard key={row.id} use={row} result={result} />;
+          }
+          // A successful publish is a card that opens the pane; while running
+          // or after a failure it falls through to the ordinary Dispatch card.
+          const artifact = artifactRefOf(row, result);
+          if (artifact && result) {
+            return <ArtifactCard key={row.id} use={row} result={result} artifact={artifact} />;
           }
           const presentation = toolPresentation(row);
           if (presentation?.kind === "dispatch") {

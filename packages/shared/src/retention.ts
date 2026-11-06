@@ -9,7 +9,7 @@
  *    deleted, nothing is modified on disk. It bounds what `GET /api/chats`
  *    ships and therefore what the client holds; everything past it stays on
  *    disk, stays searchable through `chat_find`, and comes back on request.
- *  - `reviewerChatDays` / `toolImageDays` / `chatDeleteDays` are DELETION
+ *  - `reviewerChatDays` / `toolImageDays` / `artifactDays` / `chatDeleteDays` are DELETION
  *    windows, enforced by the server's retention sweep.
  *
  * Why a load cap is the primary answer rather than a count-based deletion
@@ -71,6 +71,15 @@ export const DEFAULT_REVIEWER_CHAT_DAYS = 14;
 export const DEFAULT_TOOL_IMAGE_DAYS = 30;
 
 /**
+ * Days an ARTIFACT outlives its last edit. Shorter than a tool image on
+ * purpose: an artifact is a working view — the page the agent built to show
+ * you something this week — and the thing it depicts usually lives on in the
+ * repo. Text, too, so even a busy install's week of them costs less disk than
+ * one screen recording.
+ */
+export const DEFAULT_ARTIFACT_DAYS = 7;
+
+/**
  * Days an idle chat may sit before the sweep deletes it outright. `0` is OFF,
  * and is the default.
  *
@@ -116,6 +125,7 @@ export const RetentionSettingsSchema = z.object({
     .optional(),
   reviewerChatDays: z.number().int().positive().max(RETENTION_DAYS_CEILING).optional(),
   toolImageDays: z.number().int().positive().max(RETENTION_DAYS_CEILING).optional(),
+  artifactDays: z.number().int().positive().max(RETENTION_DAYS_CEILING).optional(),
   /** `0` = never delete a chat by age. Otherwise at least {@link CHAT_DELETE_DAYS_MINIMUM}. */
   chatDeleteDays: z
     .number()
@@ -155,10 +165,12 @@ export interface ResolvedRetention {
   maxChatsPerProject: Layered<number>;
   reviewerChatDays: Layered<number>;
   toolImageDays: Layered<number>;
+  artifactDays: Layered<number>;
   chatDeleteDays: Layered<number>;
   /** The three windows in ms, for the sweep. `chatDeleteMs` is 0 when off. */
   reviewerChatMs: number;
   toolImageMs: number;
+  artifactMs: number;
   chatDeleteMs: number;
 }
 
@@ -185,15 +197,18 @@ export function resolveRetention(
   // settings pane reads uniform across all four fields.
   const reviewerChatDays = layer(undefined, app?.reviewerChatDays, DEFAULT_REVIEWER_CHAT_DAYS);
   const toolImageDays = layer(undefined, app?.toolImageDays, DEFAULT_TOOL_IMAGE_DAYS);
+  const artifactDays = layer(undefined, app?.artifactDays, DEFAULT_ARTIFACT_DAYS);
   const chatDeleteDays = layer(undefined, app?.chatDeleteDays, DEFAULT_CHAT_DELETE_DAYS);
 
   return {
     maxChatsPerProject,
     reviewerChatDays,
     toolImageDays,
+    artifactDays,
     chatDeleteDays,
     reviewerChatMs: reviewerChatDays.effective * DAY_MS,
     toolImageMs: toolImageDays.effective * DAY_MS,
+    artifactMs: artifactDays.effective * DAY_MS,
     chatDeleteMs: chatDeleteDays.effective * DAY_MS,
   };
 }

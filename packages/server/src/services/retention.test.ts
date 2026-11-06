@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Chat, PrRecord } from "@dispatch/shared";
 import { Store } from "../store/index.js";
+import { ArtifactService } from "./artifacts.js";
 import {
   AGED_CHAT_DELETE_LIMIT,
   RetentionService,
@@ -362,6 +363,47 @@ describe("configured windows", () => {
 
     expect(TOOL_IMAGE_RETENTION_MS).toBeGreaterThan(2 * DAY);
     expect((await service().sweep()).images.files).toBe(1);
+  });
+});
+
+describe("artifacts (rule 6)", () => {
+  function withArtifacts(artifacts: ArtifactService): RetentionService {
+    return new RetentionService({
+      store,
+      checkpoints: { sweepMissingWorktrees: async () => ({ rows: 0, refs: 0, skipped: 0 }) },
+      artifacts,
+      deleteChat: async () => {},
+      isBusy: () => false,
+      now: () => now,
+      log: (line) => logs.push(line),
+    });
+  }
+
+  it("expires artifacts past the 7-day default and keeps newer ones", async () => {
+    let clock = NOW - 8 * DAY;
+    const artifacts = new ArtifactService({ dirFor: (id) => store.chatArtifactsDir(id), now: () => clock });
+    await chat("art");
+    const old = await artifacts.create("art", { title: "old", type: "html", content: "<p>old</p>" });
+    clock = NOW - 6 * DAY;
+    const recent = await artifacts.create("art", { title: "new", type: "html", content: "<p>new</p>" });
+    clock = NOW;
+
+    const report = await withArtifacts(artifacts).sweep();
+    expect(report.artifacts).toMatchObject({ artifacts: 1, chats: 1 });
+    expect((await artifacts.getMeta("art", old.id))!.expiredAt).toBe(NOW);
+    expect((await artifacts.getMeta("art", recent.id))!.expiredAt).toBeUndefined();
+    expect(logs.some((l) => l.includes("expired 1 artifact"))).toBe(true);
+  });
+
+  it("uses the artifact window from settings rather than the default", async () => {
+    await store.saveSettings({ theme: "dark", retention: { artifactDays: 30 } });
+    let clock = NOW - 8 * DAY;
+    const artifacts = new ArtifactService({ dirFor: (id) => store.chatArtifactsDir(id), now: () => clock });
+    await chat("art");
+    const a = await artifacts.create("art", { title: "a", type: "svg", content: "<svg/>" });
+    clock = NOW;
+    expect((await withArtifacts(artifacts).sweep()).artifacts.artifacts).toBe(0);
+    expect((await artifacts.getMeta("art", a.id))!.expiredAt).toBeUndefined();
   });
 });
 

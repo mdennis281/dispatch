@@ -53,6 +53,7 @@ import { ViewportDebug } from "./components/layout/ViewportDebug.js";
 import { startViewportTracking } from "./stores/viewport.js";
 import { cn } from "./lib/cn.js";
 import { RegionErrorBoundary } from "./components/ErrorBoundary.js";
+import { ArtifactPaneHost } from "./components/artifacts/ArtifactPaneHost.js";
 
 /**
  * Empty state when no chat is open — including right after a project switch,
@@ -396,7 +397,15 @@ export default function App() {
             <AppSettingsView />
           ) : chat ? (
             <>
-              <ChatView chat={chat} />
+              {/* The transcript and the artifact pane share this box, which is
+                  `relative` so an expanded (or below-`lg`) pane can cover the
+                  transcript and ONLY the transcript — not the sidebar, and not
+                  the right panel, whose drawer is positioned against the row
+                  above and must stay that way. */}
+              <div className="relative flex min-w-0 flex-1">
+                <ChatView chat={chat} />
+                <ArtifactPaneHost chatId={chat.id} />
+              </div>
               {/* Below `lg` the right panel is off-canvas: a 360px sheet over the
                   transcript at `md`, the full main area at `sm`. It stays MOUNTED
                   either way — it holds scroll positions and a live orphan scan,

@@ -203,6 +203,7 @@ export function registerMcpRoutes(app: FastifyInstance): void {
       github: !!services.github,
       secrets: !!services.secrets,
       issues: !!services.issues,
+      artifacts: !!services.artifacts,
       terminals: !!services.terminals,
       memory: !!services.memory,
       runner: !!services.runner,

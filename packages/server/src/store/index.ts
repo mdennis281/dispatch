@@ -843,6 +843,14 @@ export class Store {
   chatAssetsDir(chatId: string) {
     return join(this.chatDir(chatId), "assets");
   }
+  /**
+   * Absolute path to a chat's artifacts dir. A SIBLING of `assets/`, never
+   * inside it: the asset route serves anything under `assets/` by name, and an
+   * artifact's HTML must only ever reach a browser through the sandboxed viewer.
+   */
+  chatArtifactsDir(chatId: string) {
+    return join(this.chatDir(chatId), "artifacts");
+  }
   private settingsFile() {
     return join(this.configDir, "config.json");
   }

@@ -23,6 +23,9 @@
  *      of what a receiver was sent and when; a week is long enough to debug a
  *      receiver and short enough that a chatty subscription cannot grow the
  *      state database without bound. Pending rows are never swept.
+ *   6. Artifact content whose last edit is older than the artifact window (7
+ *      days by default). The meta survives with `expiredAt`, so the transcript
+ *      card says "expired" instead of drawing a pane that 404s.
  *
  * Deliberately NOT here: metrics pruning (a manual button on purpose, see
  * services/metrics.ts), and `failed/` upgrade payloads, which belong to the
@@ -54,6 +57,7 @@ import {
 } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import type { CheckpointService } from "./checkpoint.js";
+import type { ArtifactService } from "./artifacts.js";
 import { formatBytes, mediaTypeFromName } from "./media-types.js";
 
 const DAY_MS = 24 * 60 * 60_000;
@@ -89,6 +93,8 @@ const ASSET_REF = /assets[\\/]+([A-Za-z0-9_-]+\.[A-Za-z0-9]+)/g;
 export interface RetentionDeps {
   store: Store;
   checkpoints: Pick<CheckpointService, "sweepMissingWorktrees">;
+  /** Rule 6. Optional so a test that is about another rule needn't build one. */
+  artifacts?: Pick<ArtifactService, "sweep">;
   /** The full chat-deletion path (services/chat-deletion.ts), never `store.deleteChat`. */
   deleteChat: (chatId: string) => Promise<void>;
   /** True while a chat has a live turn — a busy chat is never deleted under itself. */
@@ -105,11 +111,14 @@ export interface RetentionReport {
   agedChats: { deleted: string[]; skipped: number };
   /** Rule 5: settled webhook delivery rows past their seven days. */
   webhookDeliveries: { deleted: number };
+  /** Rule 6: artifacts whose content was deleted this pass. */
+  artifacts: { artifacts: number; bytes: number; chats: number };
 }
 
 export class RetentionService {
   private readonly store: Store;
   private readonly checkpoints: RetentionDeps["checkpoints"];
+  private readonly artifacts: RetentionDeps["artifacts"];
   private readonly deleteChat: RetentionDeps["deleteChat"];
   private readonly isBusy: RetentionDeps["isBusy"];
   private readonly now: () => number;
@@ -133,6 +142,7 @@ export class RetentionService {
   constructor(deps: RetentionDeps) {
     this.store = deps.store;
     this.checkpoints = deps.checkpoints;
+    this.artifacts = deps.artifacts;
     this.deleteChat = deps.deleteChat;
     this.isBusy = deps.isBusy;
     this.now = deps.now ?? Date.now;
@@ -247,7 +257,26 @@ export class RetentionService {
       this.log(`removed ${webhookDeliveries.deleted} webhook deliver${webhookDeliveries.deleted === 1 ? "y" : "ies"} older than 7 days`);
     }
 
-    return { checkpoints, reviewerChats: { deleted }, images, agedChats: aged, webhookDeliveries };
+    const noArtifacts = { artifacts: 0, bytes: 0, chats: 0 };
+    const artifacts = this.artifacts
+      ? await this.artifacts
+          .sweep(
+            chats.filter((c) => !gone.has(c.id)).map((c) => c.id),
+            policy.artifactMs,
+          )
+          .catch((err: unknown) => {
+            this.log(`artifact sweep failed: ${String(err)}`);
+            return noArtifacts;
+          })
+      : noArtifacts;
+    if (artifacts.artifacts) {
+      this.log(
+        `expired ${artifacts.artifacts} artifact(s), ${formatBytes(artifacts.bytes)}, ` +
+          `across ${artifacts.chats} chat(s)`,
+      );
+    }
+
+    return { checkpoints, reviewerChats: { deleted }, images, agedChats: aged, webhookDeliveries, artifacts };
   }
 
   /* ------------------------------------------------------ reviewer chats */

@@ -78,6 +78,7 @@ import { ResourceService } from "./resources.js";
 import { GitHubService } from "./github.js";
 import { CiService } from "./ci.js";
 import { IssueService } from "./issues/service.js";
+import { ArtifactService } from "./artifacts.js";
 import { IssueWatcher } from "./issue-watcher.js";
 import { ScheduleRunner, scheduleRunParts, scheduleRunTitle } from "./schedule-runner.js";
 import { Notifier } from "./notifier.js";
@@ -209,6 +210,8 @@ export interface Services extends ServiceBase {
   secrets: SecretsService;
   /** Which tracker a project's issues live in, and a provider-neutral handle on it. */
   issues: IssueService;
+  /** Pages, SVGs and documents agents publish into the pane beside a chat. */
+  artifacts: ArtifactService;
   /** Pushes a changed secret through config, live chats and running sub-apps. */
   secretRefresher: SecretRefresher;
   terminals: TerminalService;
@@ -564,6 +567,7 @@ export function createServices(
       getProject: (id) => store.getProject(id),
       getConfig: (id) => projectConfig.getIssues(id),
     });
+  const artifacts = new ArtifactService({ dirFor: (chatId) => store.chatArtifactsDir(chatId) });
   // Worktrees + subApp runner are constructed BEFORE the broker so the session
   // MCP's `run_subapp` tool can launch apps (and resolve/create worktrees).
   const worktrees = overrides.worktrees ?? new WorktreeService({ bus, store });
@@ -620,6 +624,7 @@ export function createServices(
       memory,
       secrets,
       issues,
+      artifacts,
       // Built below, after the broker it depends on; only ever called from a tool.
       secretRefresher: (): SecretRefresher => secretRefresher,
       memoryHistory,
@@ -746,6 +751,7 @@ export function createServices(
     new RetentionService({
       store,
       checkpoints,
+      artifacts,
       deleteChat: (chatId) => deleteChat(services, chatId),
       isBusy: (chatId) => {
         const status = broker.getStatus(chatId);
@@ -1703,6 +1709,7 @@ export function createServices(
     broker,
     secrets,
     issues,
+    artifacts,
     secretRefresher,
     terminals,
     terminalBackends,

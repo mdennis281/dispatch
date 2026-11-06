@@ -1,9 +1,14 @@
 import {
   fileToolAction,
+  isManagerServer,
   isManagerServerOrLegacy,
+  parseArtifactRef,
+  parseMcpToolName,
+  type ArtifactRef,
   type AssistantMessageRow,
   type ChatMessage,
   type FileToolAction,
+  type ToolResultRow,
   type ToolUseRow,
 } from "@dispatch/shared";
 import { parseMcpName, safeJson } from "./format.js";
@@ -217,6 +222,10 @@ const DISPATCH_COPY: Record<string, { title: string; activity: string; category:
   issue_create: { title: "Open issue", activity: "Opening issue", category: "issue" },
   issue_comment: { title: "Comment on issue", activity: "Commenting", category: "issue" },
   issue_update: { title: "Update issue", activity: "Updating issue", category: "issue" },
+  artifact_create: { title: "Publish artifact", activity: "Publishing artifact", category: "preview" },
+  artifact_update: { title: "Update artifact", activity: "Updating artifact", category: "preview" },
+  artifact_read: { title: "Read artifact", activity: "Reading artifact", category: "preview" },
+  artifact_list: { title: "List artifacts", activity: "Listing artifacts", category: "preview" },
   wait: { title: "Wait", activity: "Waiting", category: "wait" },
   wait_for_chat: { title: "Wait for chat", activity: "Waiting for chat", category: "peer" },
   spawn_chat: { title: "Spawn chat", activity: "Starting a chat", category: "peer" },
@@ -482,6 +491,14 @@ export function groupTranscriptRows(rows: ChatMessage[]): TranscriptItem[] {
       items.push({ kind: "row", row });
       continue;
     }
+    // A published artifact is a card of its own, never a line in a terminal
+    // frame: the frame would bury the one row whose whole point is "click to
+    // look at this". Still running, or failed, it groups like any other call.
+    if (row.kind === "tool_use" && artifactRefOf(row, resultsByUse.get(row.toolUseId))) {
+      flush();
+      items.push({ kind: "row", row });
+      continue;
+    }
     if (row.kind === "tool_use") {
       const presentation = toolPresentation(row);
       if (presentation) {
@@ -534,6 +551,20 @@ export function resultText(content: unknown): string {
 }
 
 /** Result text with manager transport metadata removed for transcript display. */
+const ARTIFACT_PUBLISHING_TOOLS = new Set(["artifact_create", "artifact_update"]);
+
+/**
+ * The artifact a SUCCESSFUL `artifact_create`/`artifact_update` produced, read
+ * from the ref line its result ends with — or null for anything else, including
+ * the same call while it is still running or after it failed.
+ */
+export function artifactRefOf(use: ToolUseRow, result: ToolResultRow | undefined): ArtifactRef | null {
+  if (!result || result.isError) return null;
+  const parsed = parseMcpToolName(use.name);
+  if (!parsed || !isManagerServer(parsed.server) || !ARTIFACT_PUBLISHING_TOOLS.has(parsed.tool)) return null;
+  return parseArtifactRef(resultText(result.content));
+}
+
 export function displayResultText(content: unknown): string {
   const lines = resultText(content).split(/\r?\n/);
   if (lines.length > 1 && /^\[[^\]]+\]\s+cwd=.*\sexit=\d+$/.test(lines[0]!.trim())) {

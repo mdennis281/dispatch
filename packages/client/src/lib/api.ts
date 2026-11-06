@@ -31,6 +31,8 @@ import type {
   Project,
   Chat,
   ChatMediaItem,
+  ArtifactContent,
+  ArtifactMeta,
   ChatMessage,
   AgentConfig,
   AgentConfigInput,
@@ -752,6 +754,20 @@ export const api = {
      */
     media: async (id: string) =>
       (await get<{ items: ChatMediaItem[] }>(`/api/chats/${id}/media`)).items,
+    /** The chat's artifacts, most recently edited first. */
+    artifacts: (id: string) => get<ArtifactMeta[]>(`/api/chats/${id}/artifacts`),
+    /**
+     * One version of an artifact (default: the newest). Content comes back as
+     * JSON on purpose — it is rendered into a sandboxed `srcdoc`, never loaded
+     * from a URL on this origin. A 410 means retention deleted it.
+     */
+    artifact: (id: string, artifactId: string, version?: number) =>
+      get<ArtifactContent>(
+        `/api/chats/${id}/artifacts/${encodeURIComponent(artifactId)}${qs({ version })}`,
+      ),
+    /** Runtime errors the viewer caught, so `artifact_read` can tell the agent. */
+    artifactErrors: (id: string, artifactId: string, version: number, errors: string[]) =>
+      post<void>(`/api/chats/${id}/artifacts/${encodeURIComponent(artifactId)}/errors`, { version, errors }),
     /**
      * A WINDOW of a chat's transcript, newest-first-biased and LEAN: bulky tool
      * payloads the collapsed cards don't render arrive clipped + flagged (see

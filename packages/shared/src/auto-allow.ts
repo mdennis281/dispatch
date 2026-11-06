@@ -74,6 +74,15 @@ export const DEFAULT_AUTO_ALLOW_TOOLS: readonly string[] = [
   "mcp__dispatch-issues__issue_list",
   "mcp__dispatch-issues__issue_read",
   "mcp__dispatch-secrets__secret_list",
+  // The artifact WRITES are here too, unlike every other write: they change
+  // nothing but this chat's own artifact pane, which the human is already
+  // looking at. A card per published page asks "may the agent show you this?"
+  // — the answer is the page itself. A `path` source reads a file, which is
+  // what `Read` above already does without asking.
+  "mcp__dispatch-artifacts__artifact_create",
+  "mcp__dispatch-artifacts__artifact_update",
+  "mcp__dispatch-artifacts__artifact_read",
+  "mcp__dispatch-artifacts__artifact_list",
 ];
 
 /**

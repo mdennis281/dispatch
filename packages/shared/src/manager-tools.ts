@@ -40,6 +40,7 @@ export const MANAGER_CATEGORIES = [
   "project",
   "secrets",
   "issues",
+  "artifacts",
 ] as const;
 
 /** One category of Dispatch tool — also the suffix of its server's name. */
@@ -216,6 +217,15 @@ export const MANAGER_TOOL_CATEGORY = {
   issue_create: "issues",
   issue_comment: "issues",
   issue_update: "issues",
+
+  /* artifacts — rendered pages, SVGs and documents the agent publishes for the
+     human to look at in a pane beside the chat. Its own category rather than
+     `workspace`: nothing here touches a tree or a process, and an agent looking
+     for "show the human something" should find it by name. */
+  artifact_create: "artifacts",
+  artifact_update: "artifacts",
+  artifact_read: "artifacts",
+  artifact_list: "artifacts",
 } as const satisfies Record<string, ManagerCategory>;
 
 /** Bare name of every tool Dispatch serves. */
@@ -341,6 +351,12 @@ export const MANAGER_TOOL_EXTERNAL: Record<ManagerToolName, boolean> = {
   issue_create: true,
   issue_comment: true,
   issue_update: true,
+
+  /* artifacts — published INTO the calling chat; with no chat there is no pane. */
+  artifact_create: false,
+  artifact_update: false,
+  artifact_read: false,
+  artifact_list: false,
 };
 
 /** Bare names of the tools in one category an integration may call. */
