@@ -40,6 +40,8 @@ export const PLUGIN_CAPABILITY_LINES: Record<z.infer<typeof PluginCapabilitySche
     "Asks you to approve or deny an action it is about to take, on a card in your chats — the same card a tool-call permission uses.",
   runner:
     "Sees which local ports your projects' sub-apps, its fellow plugins and Dispatch itself hold or reserve, and which project and chat each belongs to.",
+  shared:
+    "Keeps data and locks that every Dispatch instance on this machine shares, and that survive its updates.",
 };
 
 /** Where the inspected files came from, and exactly which commit. */

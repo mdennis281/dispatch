@@ -453,6 +453,8 @@ export const PluginUninstallPreviewSchema = z.object({
     settings: z.boolean(),
     /** Rows in THIS instance's `plugin_kv`. */
     kvKeys: z.number().int(),
+    /** Keys in `ctx.shared` — in the config root, so BOTH instances lose them. */
+    sharedKeys: z.number().int().optional(),
     /** Secrets the manifest lists that are stored (global scope) and no other installed plugin lists. */
     secrets: z.array(z.string()),
     /** Secrets it lists that another plugin lists too — kept, because deleting them would break that one. */
@@ -474,7 +476,13 @@ export const PluginUninstallResultSchema = z.object({
   needsRestart: z.boolean(),
   note: z.string().optional(),
   purged: z
-    .object({ settings: z.boolean(), kvKeys: z.number().int(), secrets: z.array(z.string()), oauth: z.array(z.string()) })
+    .object({
+      settings: z.boolean(),
+      kvKeys: z.number().int(),
+      sharedKeys: z.number().int().optional(),
+      secrets: z.array(z.string()),
+      oauth: z.array(z.string()),
+    })
     .optional(),
 });
 export type PluginUninstallResult = z.infer<typeof PluginUninstallResultSchema>;

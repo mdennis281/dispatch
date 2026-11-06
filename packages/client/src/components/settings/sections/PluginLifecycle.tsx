@@ -305,6 +305,9 @@ function dataItems(p: PluginUninstallPreview): ReactNode[] {
   const out: ReactNode[] = [];
   if (p.data.settings) out.push("its settings and on/off toggle");
   if (p.data.kvKeys) out.push(`${p.data.kvKeys} stored value${p.data.kvKeys === 1 ? "" : "s"} (kv)`);
+  if (p.data.sharedKeys) {
+    out.push(`${p.data.sharedKeys} shared value${p.data.sharedKeys === 1 ? "" : "s"} (every instance on this machine)`);
+  }
   if (p.data.secrets.length) {
     out.push(
       <>

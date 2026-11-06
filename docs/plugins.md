@@ -138,6 +138,7 @@ and a manifest whose range excludes it — or cannot be parsed — is listed as
 | `terminals` | `ctx.terminals.registerBackend/publishPort/ports` — see "Terminal backends" |
 | `approvals` | `ctx.approvals.request` — see "Approval requests" |
 | `runner` | `ctx.runner.list/reservedPorts` — see "Local ports" |
+| `shared` | `ctx.shared` — values and leased locks every instance on the machine shares; see "Shared state and locks" |
 
 A capability the manifest does not declare is simply absent from the context
 object the plugin receives — the members are typed optional for that reason.
@@ -801,6 +802,7 @@ export interface PluginContext<Req = unknown, Reply = unknown> {
   approvals?: {
     request(chatId: string, req: PluginApprovalRequest): Promise<PluginApprovalResult>;   // see "Approval requests"
   };
+  shared?: { get; entry; set; compareAndSet; delete; list; lock; holder };   // see "Shared state and locks"
   memory?: {
     recall(projectId: string, query?: string): Promise<string>;
     remember(projectId: string, m: { name: string; description: string; type: MemoryType; body: string }): Promise<void>;
@@ -892,6 +894,60 @@ wholesale by an update. So `secrets:write` adds `ctx.secrets.set(name, value)` a
   plugin directory, where there is no `node_modules`. Write TypeScript and
   bundle it with the SDK's `dispatchServerBuild`, or write dependency-free
   JavaScript (`examples/plugins/hello-server`).
+
+#### Shared state and locks
+
+`ctx.kv` is per INSTANCE: stable and dev each have their own `state.db`. A
+plugin that does work OUTSIDE Dispatch which either instance could do (one
+agent per remote machine, one upgrade at a time, one elevation per machine)
+needs a record both agree on. `shared` adds `ctx.shared`, kept in
+`<configDir>/plugin-shared.db`: every instance on the machine sees the same
+values and locks, and a plugin update keeps them.
+
+```ts
+await ctx.shared?.set("agent/cvx-mac", { version: "1.3.0" });   // → new version
+const e = await ctx.shared?.entry("agent/cvx-mac");              // { value, version, updatedAt, updatedBy? }
+const r = await ctx.shared?.compareAndSet("agent/cvx-mac", e.version, next);  // { ok: true, version } | { ok: false, current? }
+// get / delete / list(prefix) as with kv
+
+const lock = await ctx.shared?.lock("upgrade:cvx-mac", { ttlMs: 30_000, waitMs: 10_000 });
+if (!lock) return;                       // someone else has it, and kept it past waitMs
+try { /* … */ } finally { await lock.release(); }
+await ctx.shared?.holder("upgrade:cvx-mac");   // { instanceId?, role?, mine, acquiredAt, expiresAt } | undefined
+```
+
+- **Per plugin.** Keys and lock names are scoped to the plugin id, so one
+  plugin cannot read or take another's.
+- **Values** are JSON, at most 1 MiB each. Keys are 1–256 characters.
+- **Versions.** Every write stamps a new version, never reused for the plugin,
+  even by a key that was deleted and created again. `compareAndSet(key,
+  version, value)` writes only if nobody wrote that key in between, and `null`
+  means "only if absent".
+  It is atomic across BOTH instances: each write takes SQLite's write lock up
+  front.
+- **Locks are leases.** The default is 30 s (1 s to 1 h). A lease is
+  auto-renewed every third of its TTL while held, unless you pass
+  `autoRenew: false`, and is recorded with the holder's `instance.id` and
+  role. An instance that dies without releasing frees the lock when its lease
+  runs out, so a lock never needs a human to clear it.
+  - If a renewal finds the lease expired or taken, the lease is `lost`:
+    `renew()` returns false, `onLost` fires once, and `release()` leaves the
+    new holder alone. Stop acting as the holder.
+  - Locks are not re-entrant. A second `lock()` of a name you hold waits like
+    anyone else's.
+  - `signal` stops a wait.
+- **Teardown.** Deactivation releases every lease the plugin still holds, so
+  the other instance does not wait out a TTL for a holder that is certainly
+  gone.
+- **Uninstall with purge** removes the plugin's shared rows for EVERY instance,
+  and the confirm dialog says so. The CLI's `dispatch plugin uninstall --purge`
+  does the same.
+- **Mixed versions are the norm.** Stable and dev are different builds opening
+  one file, so its schema is additive-only. An older build keeps working
+  against a file a newer one has touched.
+- **Testing.** `createTestSharedStore({ now? })` is the shared root. Hand one
+  to two `createTestContext({ instance: { id }, sharedStore })` calls to play
+  stable and dev, and move `now` to let a lease run out.
 
 #### Approval requests
 
