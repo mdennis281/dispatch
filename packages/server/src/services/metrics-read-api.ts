@@ -31,7 +31,7 @@ import type {
 } from "@dispatch/shared";
 import type { MetricsService } from "./metrics.js";
 import { tokenLabeller, type TokenLedger } from "./metrics-tokens.js";
-import type { LimitLedger } from "./limit-ledger.js";
+import type { HeldReading, LimitLedger } from "./limit-ledger.js";
 
 type Settings = Parameters<typeof tokenLabeller>[0];
 type Scope = { from?: number; to?: number; filter?: MetricFilter };
@@ -58,7 +58,16 @@ export interface MetricsReadMethods {
   chatRuntime: [void, ChatRuntimeResponse];
   ledgerCounts: [void, { rows: number; spans: number }];
   tokens: [{ query: TokenQueryInput; settings: Settings }, TokenReport];
-  limits: [{ query: LimitQueryInput & { period: Parameters<LimitLedger["yieldPeriods"]>[2] }; settings: Settings }, LimitPart];
+  limits: [
+    {
+      query: LimitQueryInput & { period: Parameters<LimitLedger["yieldPeriods"]>[2] };
+      settings: Settings;
+      /** The OWNING ledger's held-back readings (see LimitLedger.heldReadings):
+       * in its memory, not the table, so they travel with the request. */
+      held: HeldReading[];
+    },
+    LimitPart,
+  ];
 }
 
 export type MetricsReadMethod = keyof MetricsReadMethods;
@@ -92,17 +101,19 @@ export function createReadMethods({ metrics, tokens, limits }: MetricsReadDeps):
     // Labels resolve against the settings AS THEY ARE NOW, so renaming an
     // account renames its history — the id is what the ledger stored.
     tokens: ({ query, settings }) => tokens.report(query, tokenLabeller(settings)),
-    limits: ({ query, settings }) => {
+    limits: ({ query, settings, held }) => {
       const label = tokenLabeller(settings);
       const account = (id: string) => label("subscription", id);
-      const yields = limits.yieldPeriods(query, account, query.period);
-      return {
-        windows: limits.windows(query, account),
-        yields: yields.rows,
-        yieldsTruncatedBefore: yields.truncatedBefore,
-        events: limits.events(query),
-        stats: limits.stats(),
-      };
+      return limits.withHeld(held, () => {
+        const yields = limits.yieldPeriods(query, account, query.period);
+        return {
+          windows: limits.windows(query, account),
+          yields: yields.rows,
+          yieldsTruncatedBefore: yields.truncatedBefore,
+          events: limits.events(query),
+          stats: limits.stats(),
+        };
+      });
     },
   };
 }

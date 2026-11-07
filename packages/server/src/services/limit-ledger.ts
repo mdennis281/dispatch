@@ -88,6 +88,16 @@ interface AccountState {
   known: boolean;
 }
 
+/**
+ * A reading the sampler held back as unchanged: in memory, never in the
+ * table. Plain data, so it can cross to the metrics worker (see
+ * {@link LimitLedger.heldReadings}).
+ */
+export interface HeldReading extends Seen {
+  subscriptionId: string;
+  windowId: string;
+}
+
 /** Labeller for account ids — supplied per request, settings move. */
 export type LimitAccountLabeller = (subscriptionId: string) => string;
 
@@ -104,6 +114,9 @@ VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`;
 
 export class LimitLedger {
   private readonly accounts = new Map<string, AccountState>();
+  /** Set for the duration of {@link withHeld}: held-back readings supplied by
+   * the ledger that owns them, read in place of this instance's own. */
+  private heldOverride: ReadonlyMap<string, ReadonlyMap<string, Seen>> | null = null;
 
   constructor(
     private readonly db: StateDb,
@@ -348,6 +361,53 @@ export class LimitLedger {
 
   /* ------------------------------------------------------------------ read */
 
+  /**
+   * Every reading currently held back as unchanged, as plain data.
+   *
+   * The reads below extend each line to these readings and count them as
+   * coverage, but they live only in THIS instance's memory. The metrics worker
+   * runs the reads on its own ledger, whose memory is empty, so without these
+   * an idle account's line would stop up to HOLD_MS short of now and read as
+   * "the sampler stopped". The route sends this snapshot along with the
+   * request; the worker reads through it with {@link withHeld}.
+   */
+  heldReadings(): HeldReading[] {
+    const out: HeldReading[] = [];
+    for (const [subscriptionId, acct] of this.accounts) {
+      for (const [windowId, w] of acct.windows) {
+        if (!w.stored) out.push({ subscriptionId, windowId, ts: w.ts, percent: w.percent, resetsAt: w.resetsAt });
+      }
+    }
+    return out;
+  }
+
+  /** Run reads against `held` (another ledger's {@link heldReadings}) instead
+   * of this instance's own in-memory state. */
+  withHeld<T>(held: readonly HeldReading[], fn: () => T): T {
+    const map = new Map<string, Map<string, Seen>>();
+    for (const h of held) {
+      let windows = map.get(h.subscriptionId);
+      if (!windows) map.set(h.subscriptionId, (windows = new Map()));
+      windows.set(h.windowId, { ts: h.ts, percent: h.percent, resetsAt: h.resetsAt });
+    }
+    const prev = this.heldOverride;
+    this.heldOverride = map;
+    try {
+      return fn();
+    } finally {
+      this.heldOverride = prev;
+    }
+  }
+
+  /** Held-back readings for one account: the override when one is set, else
+   * this instance's own unstored windows. */
+  private held(subscriptionId: string): ReadonlyMap<string, Seen> {
+    if (this.heldOverride) return this.heldOverride.get(subscriptionId) ?? new Map();
+    const out = new Map<string, Seen>();
+    for (const [id, w] of this.accounts.get(subscriptionId)?.windows ?? []) if (!w.stored) out.set(id, w);
+    return out;
+  }
+
   windows(q: LimitQueryInput, label: LimitAccountLabeller): LimitWindowSeries[] {
     const to = q.to ?? this.now() + 1;
     const from = q.from ?? 0;
@@ -409,9 +469,9 @@ export class LimitLedger {
     // as unchanged — otherwise an idle account's line stops up to HOLD_MS short
     // of now and reads as "the sampler stopped".
     for (const series of out.values()) {
-      const held = this.accounts.get(series.subscriptionId)?.windows.get(series.windowId);
+      const held = this.held(series.subscriptionId).get(series.windowId);
       const last = series.points.at(-1);
-      if (held && !held.stored && last && held.ts > last.ts && held.ts < to) {
+      if (held && last && held.ts > last.ts && held.ts < to) {
         series.points.push({ ts: held.ts, percent: held.percent, resetsAt: held.resetsAt });
       }
     }
@@ -677,8 +737,8 @@ export class LimitLedger {
     const out = new Map<string, [number, number][]>();
     for (const [sub, list] of stamps) {
       // Held-back reads are in memory, not the table; they are reads all the same.
-      for (const w of this.accounts.get(sub)?.windows.values() ?? []) {
-        if (!w.stored && w.ts < to && w.ts > list.at(-1)!) list.push(w.ts);
+      for (const w of this.held(sub).values()) {
+        if (w.ts < to && w.ts > list.at(-1)!) list.push(w.ts);
       }
       const last = list.at(-1)!;
       if (now - last <= COVER_GAP_MS && now > last) list.push(Math.min(now, to));

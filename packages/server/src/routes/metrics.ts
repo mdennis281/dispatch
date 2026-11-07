@@ -145,7 +145,7 @@ async function clientGone(req: FastifyRequest, reply: FastifyReply): Promise<boo
 const GONE = Symbol("client gone");
 
 export function registerMetricsRoutes(app: FastifyInstance): void {
-  const { metrics, growth, metricsReader, limitSampler } = app.services;
+  const { metrics, growth, metricsReader, limits, limitSampler } = app.services;
   const { store } = app.cm;
 
   /**
@@ -196,7 +196,13 @@ export function registerMetricsRoutes(app: FastifyInstance): void {
     const parsed = LimitQuerySchema.safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
     const settings = await store.getSettings().catch(() => null);
-    const part = await read(req, reply, "limits", { query: parsed.data, settings });
+    // The held-back readings live in THIS thread's ledger, not the table the
+    // worker reads, and the lines would stop short of now without them.
+    const part = await read(req, reply, "limits", {
+      query: parsed.data,
+      settings,
+      held: limits.heldReadings(),
+    });
     if (part === GONE) return reply;
     const { windows, yields, yieldsTruncatedBefore, events, stats } = part;
     const report: LimitReport = {

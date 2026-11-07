@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { LimitQuerySchema } from "@dispatch/shared";
 import { StateDb } from "../store/db.js";
 import { MetricsService } from "./metrics.js";
 import { TokenLedger } from "./metrics-tokens.js";
@@ -11,6 +12,7 @@ import { MetricsReadAborted, MetricsReader } from "./metrics-reader.js";
 let dir: string;
 let db: StateDb;
 let metrics: MetricsService;
+let limits: LimitLedger;
 let reader: MetricsReader;
 
 function makeReader(useWorker = true): MetricsReader {
@@ -18,7 +20,7 @@ function makeReader(useWorker = true): MetricsReader {
     db,
     metrics,
     tokens: new TokenLedger(db),
-    limits: new LimitLedger(db),
+    limits,
     useWorker,
     testHooks: true,
   });
@@ -28,6 +30,7 @@ beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "cm-reader-"));
   db = new StateDb(dir);
   metrics = new MetricsService({ db, flushMs: 0 });
+  limits = new LimitLedger(db);
   reader = makeReader();
 });
 afterEach(async () => {
@@ -124,6 +127,31 @@ describe("MetricsReader — the metrics worker thread", () => {
     expect(reader.onWorker).toBe(false);
     expect(await reader.call("ledgerCounts", undefined)).toEqual({ rows: 0, spans: 0 });
     expect(reader.threadId).not.toBe(first);
+  });
+
+  it("carries the sampler's held-back readings across to the worker (Limits)", async () => {
+    reader.start();
+    const MIN = 60_000;
+    const t0 = Date.now() - 2 * 60 * MIN;
+    const reading = {
+      windowId: "five_hour",
+      title: "5-hour session",
+      windowMinutes: 300,
+      percent: 10,
+      resetsAt: t0 + 4 * 60 * MIN,
+    };
+    limits.observe({ ts: t0, subscriptionId: "acct", provider: "claude", readings: [reading] });
+    // Unchanged, so held back: in THIS thread's ledger memory, not the table.
+    limits.observe({ ts: t0 + 10 * MIN, subscriptionId: "acct", provider: "claude", readings: [reading] });
+    const held = limits.heldReadings();
+    expect(held).toHaveLength(1);
+    const query = LimitQuerySchema.parse({});
+    const line = async (h: typeof held) =>
+      (await reader.call("limits", { query, settings: null, held: h })).windows[0]?.points.map((p) => p.ts);
+    // The worker's own ledger has an empty memory; the snapshot is what lets
+    // its line reach the newest reading, as the in-process read always did.
+    expect(await line(held)).toEqual([t0, t0 + 10 * MIN]);
+    expect(await line([])).toEqual([t0]);
   });
 
   it("runs the same table in-process when told not to use a worker", async () => {
