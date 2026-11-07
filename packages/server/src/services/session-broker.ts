@@ -6980,14 +6980,18 @@ export class SessionBroker {
     if (!session) {
       return { status: "unavailable", message: "No live session is available to ask through." };
     }
+    // Artifacts FIRST: resolving them is a pure lookup, while each screenshot is
+    // copied into the chat's assets under a fresh id. A typo'd artifact id
+    // checked afterwards left every already-copied screenshot orphaned, again
+    // on each retry.
+    const artifacts = await this.resolveReviewArtifacts(chatId, request.artifacts ?? []);
+    if (typeof artifacts === "string") return { status: "invalid", message: artifacts };
     const screenshots: ImageRef[] = [];
     for (const ref of request.screenshots) {
       const shot = await this.ingestReviewScreenshot(session, ref);
       if (typeof shot === "string") return { status: "invalid", message: shot };
       screenshots.push(shot);
     }
-    const artifacts = await this.resolveReviewArtifacts(chatId, request.artifacts ?? []);
-    if (typeof artifacts === "string") return { status: "invalid", message: artifacts };
     const review: HumanReviewPayload = {
       title: request.title,
       summary: request.summary,
