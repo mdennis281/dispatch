@@ -565,15 +565,16 @@
    * sized off these two, so a reading on line one is centred on the window
    * buttons and one on line two on the icons under them.
    *
-   * `padding-left` is the macOS case: there the buttons are the traffic lights,
-   * top-LEFT, and `titlebar-area-x` is how far in the drawable band starts. The
-   * lockup spans both lines, so it has to start there too. 0 on Windows.
+   * No `padding-left` for the macOS case. There the buttons are the traffic
+   * lights, top-LEFT, and indenting the whole bar by `titlebar-area-x` pushed
+   * the lockup right and left the 36px under the lights empty. Instead TopBar
+   * moves the lockup onto line two, under the lights (`controlsOnLeft`), and
+   * that column reserves the lights' width on line one itself.
    */
   .cm-topbar-tall {
     --tb-l1: max(var(--dp-titlebar-h), 1.75rem);
     --tb-l2: 2.25rem;
     height: calc(var(--tb-l1) + var(--tb-l2));
-    padding-left: var(--dp-titlebar-x);
   }
   /*
    * The column under the window buttons, at least as wide as they are.

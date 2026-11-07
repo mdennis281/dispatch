@@ -741,3 +741,108 @@ test("the top bar is a two-line title bar with the overlay, and one short row wi
   await page.getByRole("button", { name: /^Search or run a command/ }).first().click();
   await expect(page.getByRole("dialog", { name: "Command palette" })).toBeVisible();
 });
+
+/**
+ * On macOS the window buttons are top-LEFT, where the tall lockup goes.
+ *
+ * Chromium's overlay reached macOS, where the traffic lights take the top-left
+ * corner and `titlebar-area-x` is how wide they are. The bar used to indent
+ * itself by that width, which pushed the lockup right and left the line-two
+ * slot under the lights empty. Now the lockup moves INTO that slot, shrunk to
+ * fit one line, and the bar stays exactly as tall as on Windows.
+ *
+ * Simulated the same way as above, plus `navigator.windowControlsOverlay`,
+ * because `controlsOnLeft` reads the side off the overlay's own rect. Rough
+ * macOS numbers: lights in the left ~78px of a ~40px band, Chromium's
+ * extension and app-menu buttons in the right ~100px.
+ */
+const MAC_STRIP_H = 40;
+const MAC_LIGHTS_W = 78;
+const MAC_RIGHT_W = 100;
+
+test("with the traffic lights top-left, the lockup sits under them and the bar does not grow", async ({
+  page,
+}) => {
+  await page.addInitScript(
+    ({ x, h, right }) => {
+      const real = window.matchMedia.bind(window);
+      window.matchMedia = (q: string) =>
+        q.includes("window-controls-overlay")
+          ? ({
+              matches: true,
+              media: q,
+              addEventListener() {},
+              removeEventListener() {},
+              addListener() {},
+              removeListener() {},
+              onchange: null,
+              dispatchEvent: () => false,
+            } as unknown as MediaQueryList)
+          : real(q);
+      Object.defineProperty(navigator, "windowControlsOverlay", {
+        configurable: true,
+        value: {
+          visible: true,
+          getTitlebarAreaRect: () =>
+            new DOMRect(x, 0, window.innerWidth - x - right, h),
+        },
+      });
+    },
+    { x: MAC_LIGHTS_W, h: MAC_STRIP_H, right: MAC_RIGHT_W },
+  );
+  await openChat(page);
+  await page.addStyleTag({
+    content: `:root {
+      --dp-titlebar-h: ${MAC_STRIP_H}px;
+      --dp-titlebar-x: ${MAC_LIGHTS_W}px;
+      --dp-titlebar-w: calc(100vw - ${MAC_LIGHTS_W + MAC_RIGHT_W}px);
+    }`,
+  });
+
+  for (const width of [1440, 960, 800]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.waitForTimeout(150);
+
+    const report = await page.evaluate(
+      ({ stripH, lightsW, rightW }) => {
+        const header = document.querySelector("header")!;
+        const vw = document.documentElement.clientWidth;
+        const rect = (el: Element) => el.getBoundingClientRect();
+        const name = (el: Element) => el.getAttribute("aria-label") ?? el.tagName;
+        const mark = header.querySelector("svg.dispatch-mark");
+        const controls = Array.from(header.querySelectorAll("button, a")).filter(
+          (el) => rect(el).width > 0,
+        );
+        const m = mark ? rect(mark) : null;
+        // The bar's two lines: the OS band, then 2.25rem. Same as Windows.
+        const expected = Math.max(stripH, 28) + 36;
+        return {
+          sameHeight: Math.abs(Math.round(rect(header).height) - expected) <= 1,
+          // On line two, starting under the lights rather than beside them.
+          markUnderLights: !!m && m.top >= stripH && m.left < lightsW,
+          // Fits line two without spilling past the bar's bottom edge.
+          markInsideBar: !!m && m.bottom <= rect(header).bottom,
+          underLights: controls
+            .filter((el) => rect(el).left < lightsW && rect(el).top < stripH)
+            .map(name),
+          underRightControls: controls
+            .filter((el) => rect(el).right > vw - rightW && rect(el).top < stripH)
+            .map(name),
+        };
+      },
+      { stripH: MAC_STRIP_H, lightsW: MAC_LIGHTS_W, rightW: MAC_RIGHT_W },
+    );
+
+    expect(report, `at ${width}px`).toEqual({
+      sameHeight: true,
+      markUnderLights: true,
+      markInsideBar: true,
+      underLights: [],
+      underRightControls: [],
+    });
+    await page.screenshot({
+      path: join(artifacts, `titlebar-wco-mac-${width}.png`),
+      clip: { x: 0, y: 0, width, height: 120 },
+    });
+  }
+});
