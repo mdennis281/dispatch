@@ -32,7 +32,7 @@ import {
 } from "../../lib/toolPresentations.js";
 import {
   continuedAssistantIds,
-  isLimitSentence,
+  isLimitNotice,
   stackThinkingAcrossHidden,
   undividedItemIndices,
 } from "../../lib/messageGrouping.js";
@@ -48,7 +48,7 @@ import { useChats } from "../../stores/chats.js";
 function currentErrorRowId(rows: ChatMessage[]): string | undefined {
   for (let i = rows.length - 1; i >= 0; i--) {
     const r = rows[i]!;
-    if (r.kind === "result" && r.isError && !isLimitSentence(r.result)) return r.id;
+    if (r.kind === "result" && r.isError && !isLimitNotice(r.result)) return r.id;
     if (r.kind === "notice" && r.level === "error") return r.id;
   }
   return undefined;
@@ -177,7 +177,7 @@ export const MessageList = memo(function MessageList({ chatId, messages }: Messa
           // errored result that follows. The result becomes the pause card
           // (with the schedule + cancel), so the bare echo is dropped. Only a
           // message that is nothing BUT the sentence qualifies.
-          if (isLimitSentence(row.text)) return null;
+          if (isLimitNotice(row.text)) return null;
           return (
             <AssistantRow
               key={row.id}
@@ -239,7 +239,7 @@ export const MessageList = memo(function MessageList({ chatId, messages }: Messa
         case "result":
           // A turn killed by a usage limit isn't a failure, it's a pause — and
           // the chat has already scheduled itself to continue.
-          if (row.isError && isLimitSentence(row.result)) {
+          if (row.isError && isLimitNotice(row.result)) {
             return <LimitPausedCard key={row.id} row={row} reason={row.result!} />;
           }
           return (
