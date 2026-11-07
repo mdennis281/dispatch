@@ -6,11 +6,12 @@
  * lives here once and every fetch derives from it, rather than each card owning
  * a copy that can drift out of step with the one beside it.
  *
- * `load()` is generation-guarded: the controls are chips and dropdowns, so a
- * fast series of clicks has several requests in flight at once and the LAST one
- * clicked is not reliably the last one to land. Without the guard the page
- * settles on whichever response was slowest, which shows numbers for a filter
- * the user can see is not selected.
+ * Loads go through `lib/latestLoad.ts`: debounced, the superseded batch
+ * aborted, and generation-guarded. The controls are chips and dropdowns, so a
+ * fast series of clicks used to put several batches in flight at once, and the
+ * LAST one clicked is not reliably the last one to land. Without the guard the
+ * page settles on whichever response was slowest, which shows numbers for a
+ * filter the user can see is not selected.
  */
 import { create } from "zustand";
 import type {
@@ -23,6 +24,7 @@ import type {
   MetricTotalsResponse,
 } from "@dispatch/shared";
 import { api } from "../lib/api.js";
+import { heldFresh, latestLoad, REMOUNT_FRESH_MS } from "../lib/latestLoad.js";
 
 /**
  * The chart forms the view offers.
@@ -106,7 +108,12 @@ interface MetricsStore {
   /** Add/remove one value from a dimension's filter (the chips are toggles). */
   toggleFilter: (dim: MetricDimension, value: string) => void;
   clearFilter: (dim?: MetricDimension) => void;
+  /** Re-run every query now (the Reload button). */
   load: () => Promise<void>;
+  /** A mount's load: skipped while the held result for this query is fresh. */
+  loadIfStale: () => Promise<void>;
+  /** Abandon whatever is pending or in flight — the subpage unmounted. */
+  cancel: () => void;
 }
 
 /** Resolve the selected preset into an absolute window. */
@@ -117,29 +124,58 @@ function windowFor(rangeId: string): { from?: number; to?: number } {
   return { from: to - preset.ms, to: to + 1 };
 }
 
+/** What a set of results answers, for "do I already hold this?". */
+function queryKey(s: Pick<MetricsStore, "rangeId" | "filter" | "groupBy" | "bucket" | "limit">) {
+  return JSON.stringify([s.rangeId, s.filter, s.groupBy, s.bucket, s.limit]);
+}
+
 /**
- * Bumped by every `load()`; a response whose generation is stale is dropped.
- * Module-level rather than store state so writing it never re-renders anything.
+ * What the window+filter-only reads answer. Facets and the activity tail take
+ * no group-by, bucket or limit, so a change to those leaves them as they were.
  */
-let generation = 0;
+function scopeKey(s: Pick<MetricsStore, "rangeId" | "filter">) {
+  return JSON.stringify([s.rangeId, s.filter]);
+}
 
 export const useMetrics = create<MetricsStore>((set, get) => {
-  /** Re-run every query. Debounced by the caller, guarded by `generation`. */
-  const load = async (): Promise<void> => {
-    const gen = ++generation;
-    const { rangeId, filter, groupBy, bucket, limit, series } = get();
+  /**
+   * The scope the held facets were read for, and the scope + time of the held
+   * activity tail; null forces a fetch.
+   *
+   * Facets cost the most of the four reads (a grouping query per dimension
+   * plus a whole-ledger COUNT) and depend only on window + filter, yet they
+   * were refetched for a group-by, bucket or top-N change too. They are pick
+   * lists, so holding them while the scope is unchanged costs nothing visible.
+   * The tail is shown beside the chart, so it is held only briefly: long enough
+   * to cover a burst of clicks, not so long that it visibly lags the chart's
+   * window. Both are set only once they LAND, so a superseded load leaves the
+   * next one to fetch them. Closure variables rather than store state so
+   * writing them never re-renders anything.
+   */
+  let facetsFor: string | null = null;
+  let tailFor: { key: string; at: number } | null = null;
+
+  /** Every query, guarded and cancellable — see `lib/latestLoad.ts`. */
+  const loader = latestLoad(async ({ signal, current, landed }) => {
+    const state = get();
+    const { rangeId, filter, groupBy, bucket, limit, series } = state;
     set({ refetching: true, loading: series === null, error: null });
     const scope = { ...windowFor(rangeId), filter };
+    const scopeId = scopeKey(state);
+    const keepFacets = facetsFor === scopeId && state.facets !== null;
+    const keepTail = heldFresh(tailFor, scopeId);
     try {
       // One round trip each, in parallel: they read the same window, and a
       // sequential chain would make the page settle four times.
       const [seriesRes, totalsRes, facetsRes, recentRes] = await Promise.all([
-        api.metrics.series({ ...scope, groupBy, bucket, limit }),
-        api.metrics.totals({ ...scope, groupBy, bucket, limit }),
-        api.metrics.facets(scope),
-        api.metrics.recent({ ...scope, limit: 50 }),
+        api.metrics.series({ ...scope, groupBy, bucket, limit }, signal),
+        api.metrics.totals({ ...scope, groupBy, bucket, limit }, signal),
+        keepFacets ? state.facets! : api.metrics.facets(scope, signal),
+        keepTail ? state.recent : api.metrics.recent({ ...scope, limit: 50 }, signal),
       ]);
-      if (gen !== generation) return; // a newer query is already in flight
+      if (!current()) return; // a newer query is already in flight
+      facetsFor = scopeId;
+      if (!keepTail) tailFor = { key: scopeId, at: Date.now() };
       set({
         series: seriesRes,
         totals: totalsRes,
@@ -149,20 +185,31 @@ export const useMetrics = create<MetricsStore>((set, get) => {
         loading: false,
         refetching: false,
       });
+      landed(queryKey(state));
     } catch (err) {
-      if (gen !== generation) return;
+      if (!current()) return;
       set({
         error: err instanceof Error ? err.message : "Could not load metrics.",
         loading: false,
         refetching: false,
       });
     }
+  });
+
+  /** Re-run EVERY query now, the scope-only ones included — the Reload button. */
+  const load = (): Promise<void> => {
+    facetsFor = null;
+    tailFor = null;
+    return loader.run();
   };
 
-  /** Apply a change and immediately re-query — every control is live. */
+  /**
+   * Apply a change and re-query once the controls settle. `refetching` goes up
+   * at once so the page dims on the click rather than 250 ms after it.
+   */
   const applyAndLoad = (patch: Partial<MetricsStore>) => {
-    set(patch);
-    void load();
+    set({ ...patch, refetching: true });
+    loader.schedule();
   };
 
   return {
@@ -213,5 +260,11 @@ export const useMetrics = create<MetricsStore>((set, get) => {
     },
 
     load,
+    loadIfStale: () =>
+      loader.fresh(queryKey(get()), REMOUNT_FRESH_MS) ? Promise.resolve() : load(),
+    cancel: () => {
+      loader.cancel();
+      set({ loading: false, refetching: false });
+    },
   };
 });

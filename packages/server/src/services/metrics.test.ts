@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { StateDb } from "../store/db.js";
+import { SPAN_LONG_MS, SPAN_LONG_SQL, StateDb } from "../store/db.js";
 import {
   LEGACY_MANAGER_SERVER,
   LEGACY_MANAGER_TOOL_PREFIX,
@@ -694,6 +694,85 @@ describe("MetricsService — span facets and retention", () => {
     metrics.openSpan(span({ startTs: NOW - 10 * DAY, toolUseId: "running" }));
     expect(metrics.prune(NOW - 5 * DAY)).toBe(1);
     expect(metrics.stats().spans).toBe(2);
+  });
+});
+
+describe("MetricsService — the window's lower bound (spanWhere)", () => {
+  // The overlap read used to have no index-usable lower bound and walked the
+  // whole ledger on every query. It now looks in three places — started within
+  // SPAN_LONG_MS of the window, still open, or long — and each case below is a
+  // span that must land in exactly the right one of them, or in none.
+  const from = NOW - DAY;
+  const to = NOW;
+  const ids = () =>
+    metrics
+      .recentSpans({ from, to })
+      .map((s) => s.identifier)
+      .sort();
+
+  it("keeps a span that straddles the window's start, clipped to it", () => {
+    metrics.recordSpans([
+      span({ identifier: "straddle", startTs: from - HOUR, endTs: from + HOUR, toolUseId: "s" }),
+    ]);
+    expect(ids()).toEqual(["straddle"]);
+    expect(metrics.spanSummary({ from, to }).attributedMs).toBe(HOUR);
+  });
+
+  it("keeps a span still open from long before the window", () => {
+    metrics.openSpan(span({ identifier: "open", startTs: NOW - 3 * DAY, toolUseId: "o" }));
+    expect(ids()).toEqual(["open"]);
+    expect(metrics.spanSummary({ from, to }).attributedMs).toBe(DAY);
+  });
+
+  it("drops a span that ended before the window", () => {
+    metrics.recordSpans([
+      span({ identifier: "gone", startTs: NOW - 3 * DAY, endTs: NOW - 2 * DAY, toolUseId: "g" }),
+      // Inside the start_ts look-back, but still over before `from`.
+      span({ identifier: "near", startTs: from - 2 * HOUR, endTs: from - HOUR, toolUseId: "n" }),
+    ]);
+    expect(ids()).toEqual([]);
+    expect(metrics.spanSummary({ from, to }).spans).toBe(0);
+  });
+
+  it("keeps a span longer than SPAN_LONG_MS that started well before the window", () => {
+    // The case a fixed look-back alone would lose silently: three days long,
+    // started far outside the start_ts range, ending 30 minutes into the window.
+    expect(2 * DAY + 30 * MIN).toBeGreaterThan(SPAN_LONG_MS);
+    metrics.recordSpans([
+      span({ identifier: "long", startTs: NOW - 3 * DAY, endTs: from + 30 * MIN, toolUseId: "l" }),
+    ]);
+    expect(ids()).toEqual(["long"]);
+    expect(metrics.spanSummary({ from, to }).attributedMs).toBe(30 * MIN);
+    expect(metrics.spanTotals({ from, to, groupBy: "identifier" }).ms).toBe(30 * MIN);
+  });
+
+  it("lists recent spans newest-first across all three branches, honouring the limit", () => {
+    // recentSpans reads the start_ts range first and only then the open/long
+    // rows that started before it, so the merge must still come out in order.
+    metrics.recordSpans([
+      span({ identifier: "fresh", startTs: NOW - HOUR, endTs: NOW - 30 * MIN, toolUseId: "f" }),
+      span({ identifier: "long", startTs: NOW - 3 * DAY, endTs: from + MIN, toolUseId: "l" }),
+    ]);
+    metrics.openSpan(span({ identifier: "open", startTs: NOW - 4 * DAY, toolUseId: "o" }));
+    expect(metrics.recentSpans({ from, to }).map((s) => s.identifier)).toEqual([
+      "fresh",
+      "long",
+      "open",
+    ]);
+    expect(metrics.recentSpans({ from, to, limit: 2 }).map((s) => s.identifier)).toEqual([
+      "fresh",
+      "long",
+    ]);
+  });
+
+  it("finds long spans through their partial index", () => {
+    // SQLite uses a partial index only when the query repeats its WHERE
+    // verbatim. This fails if SPAN_LONG_SQL and migration 20 ever drift apart,
+    // which would quietly put the full-ledger scan back.
+    const plan = db
+      .prepare(`EXPLAIN QUERY PLAN SELECT seq FROM metric_span WHERE ${SPAN_LONG_SQL} AND start_ts < ?`)
+      .all(NOW) as { detail: string }[];
+    expect(plan.map((r) => r.detail).join(" ")).toContain("metric_span_long");
   });
 });
 

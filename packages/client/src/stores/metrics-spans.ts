@@ -1,10 +1,11 @@
 /**
  * The Runtime subpage's state: one query, five responses.
  *
- * The same shape as `stores/metrics.ts`, deliberately — same generation guard,
- * same "every control re-queries itself", same hold-the-previous-render refetch
- * flag — so the two halves of the Metrics screen behave identically under a
- * fast series of clicks.
+ * The same shape as `stores/metrics.ts`, deliberately — same debounced,
+ * aborting, generation-guarded loader (`lib/latestLoad.ts`), same "every
+ * control re-queries itself", same facets-only-when-the-scope-moved rule, same
+ * hold-the-previous-render refetch flag — so the two halves of the Metrics
+ * screen behave identically under a fast series of clicks.
  *
  * A SEPARATE store rather than a `measure` field on the usage one, for the same
  * reason the API has separate paths: the two ledgers have different dimensions.
@@ -34,6 +35,7 @@ import type {
   MetricSpanTotalsResponse,
 } from "@dispatch/shared";
 import { api } from "../lib/api.js";
+import { heldFresh, latestLoad, REMOUNT_FRESH_MS } from "../lib/latestLoad.js";
 import { RANGE_PRESETS, type ChartKind } from "./metrics.js";
 
 interface SpanMetricsStore {
@@ -79,7 +81,12 @@ interface SpanMetricsStore {
   /** Add/remove one value from a dimension's filter (the chips are toggles). */
   toggleFilter: (dim: MetricSpanDimension, value: string) => void;
   clearFilter: (dim?: MetricSpanDimension) => void;
+  /** Re-run every query now (the Reload button). */
   load: () => Promise<void>;
+  /** A mount's load: skipped while the held result for this query is fresh. */
+  loadIfStale: () => Promise<void>;
+  /** Abandon whatever is pending or in flight — the subpage unmounted. */
+  cancel: () => void;
 }
 
 /** The breakdown table's sortable columns. */
@@ -100,30 +107,53 @@ function windowFor(rangeId: string): { from?: number; to?: number } {
   return { from: to - preset.ms, to: to + 1 };
 }
 
+/** What a set of results answers, for "do I already hold this?". */
+function queryKey(s: Pick<SpanMetricsStore, "rangeId" | "filter" | "groupBy" | "bucket" | "limit">) {
+  return JSON.stringify([s.rangeId, s.filter, s.groupBy, s.bucket, s.limit]);
+}
+
 /**
- * Bumped by every `load()`; a response whose generation is stale is dropped.
- * Module-level rather than store state so writing it never re-renders anything.
+ * What the window+filter-only reads answer. Summary, facets and the activity
+ * tail take no group-by, bucket or limit, so a change to those three leaves
+ * them exactly as they were — re-running them was most of the batch.
  */
-let generation = 0;
+function scopeKey(s: Pick<SpanMetricsStore, "rangeId" | "filter">) {
+  return JSON.stringify([s.rangeId, s.filter]);
+}
 
 export const useSpanMetrics = create<SpanMetricsStore>((set, get) => {
-  /** Re-run every query. Guarded by `generation`. */
-  const load = async (): Promise<void> => {
-    const gen = ++generation;
-    const { rangeId, filter, groupBy, bucket, limit, series } = get();
+  /**
+   * The scope the held facets were read for, and the scope + time of the held
+   * summary and tail; null forces a fetch. Same policy as `stores/metrics.ts`:
+   * facets are pick lists and are held while the scope is unchanged; the hero
+   * row and tail sit beside the chart, so they are held only briefly. Set only
+   * once they LAND, so a superseded load leaves the next one to fetch them.
+   */
+  let facetsFor: string | null = null;
+  let windowedFor: { key: string; at: number } | null = null;
+
+  /** Every query, guarded and cancellable — see `lib/latestLoad.ts`. */
+  const loader = latestLoad(async ({ signal, current, landed }) => {
+    const state = get();
+    const { rangeId, filter, groupBy, bucket, limit, series } = state;
     set({ refetching: true, loading: series === null, error: null });
     const scope = { ...windowFor(rangeId), filter };
+    const scopeId = scopeKey(state);
+    const keepFacets = facetsFor === scopeId && state.facets !== null;
+    const keepWindowed = heldFresh(windowedFor, scopeId) && state.summary !== null;
     try {
       // One round trip each, in parallel: they read the same window, and a
       // sequential chain would make the page settle five times.
       const [seriesRes, totalsRes, summaryRes, facetsRes, recentRes] = await Promise.all([
-        api.metrics.spans.series({ ...scope, groupBy, bucket, limit }),
-        api.metrics.spans.totals({ ...scope, groupBy, bucket, limit }),
-        api.metrics.spans.summary(scope),
-        api.metrics.spans.facets(scope),
-        api.metrics.spans.recent({ ...scope, limit: 50 }),
+        api.metrics.spans.series({ ...scope, groupBy, bucket, limit }, signal),
+        api.metrics.spans.totals({ ...scope, groupBy, bucket, limit }, signal),
+        keepWindowed ? state.summary! : api.metrics.spans.summary(scope, signal),
+        keepFacets ? state.facets! : api.metrics.spans.facets(scope, signal),
+        keepWindowed ? state.recent : api.metrics.spans.recent({ ...scope, limit: 50 }, signal),
       ]);
-      if (gen !== generation) return; // a newer query is already in flight
+      if (!current()) return; // a newer query is already in flight
+      facetsFor = scopeId;
+      if (!keepWindowed) windowedFor = { key: scopeId, at: Date.now() };
       set({
         series: seriesRes,
         totals: totalsRes,
@@ -134,20 +164,31 @@ export const useSpanMetrics = create<SpanMetricsStore>((set, get) => {
         loading: false,
         refetching: false,
       });
+      landed(queryKey(state));
     } catch (err) {
-      if (gen !== generation) return;
+      if (!current()) return;
       set({
         error: err instanceof Error ? err.message : "Could not load runtime metrics.",
         loading: false,
         refetching: false,
       });
     }
+  });
+
+  /** Re-run EVERY query now, the scope-only ones included — the Reload button. */
+  const load = (): Promise<void> => {
+    facetsFor = null;
+    windowedFor = null;
+    return loader.run();
   };
 
-  /** Apply a change and immediately re-query — every control is live. */
+  /**
+   * Apply a change and re-query once the controls settle. `refetching` goes up
+   * at once so the page dims on the click rather than 250 ms after it.
+   */
   const applyAndLoad = (patch: Partial<SpanMetricsStore>) => {
-    set(patch);
-    void load();
+    set({ ...patch, refetching: true });
+    loader.schedule();
   };
 
   return {
@@ -211,5 +252,11 @@ export const useSpanMetrics = create<SpanMetricsStore>((set, get) => {
     },
 
     load,
+    loadIfStale: () =>
+      loader.fresh(queryKey(get()), REMOUNT_FRESH_MS) ? Promise.resolve() : load(),
+    cancel: () => {
+      loader.cancel();
+      set({ loading: false, refetching: false });
+    },
   };
 });

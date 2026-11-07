@@ -55,7 +55,7 @@
  * never interpolates a value into SQL regardless — see `MetricsService.where` —
  * but a schema at the door means the error names the field.)
  */
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import * as z from "zod";
 import {
   type GrowthFrame,
@@ -104,12 +104,42 @@ const SpanRecentSchema = SpanScopeSchema.extend({
   limit: z.number().int().min(1).max(500).default(100),
 });
 
+/**
+ * Yield once, then say whether the client that sent this request has gone.
+ *
+ * WHY. Every read below is synchronous SQLite on the event loop and cannot be
+ * interrupted once it starts, so the only saving left is not STARTING one
+ * nobody will read. The Metrics page aborts a superseded batch (see the
+ * client's `lib/latestLoad.ts`), but the batch's other requests had usually
+ * already been parsed and were queued behind the first query, so each still
+ * ran to completion: the request log's 71 s stall was batches like that stacked
+ * end to end. The yield is what makes the check worth anything — it lets the
+ * poll phase deliver the closes that arrived while the previous query held the
+ * loop, so a request queued behind it sees its own socket already gone.
+ *
+ * The SOCKET is checked rather than `req.raw.destroyed`: the request stream
+ * has been fully read by the time a handler runs, and whether an ended
+ * IncomingMessage reports itself destroyed differs between Node versions. A
+ * socket is only closed or half-closed here when the client went away.
+ *
+ * On true the reply is hijacked: there is nobody to answer, and Fastify writing
+ * a response to a dead socket would only log an error per skipped read.
+ */
+async function clientGone(req: FastifyRequest, reply: FastifyReply): Promise<boolean> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const socket = req.raw.socket as { destroyed?: boolean; readableEnded?: boolean } | undefined;
+  if (!socket?.destroyed && !socket?.readableEnded) return false;
+  reply.hijack();
+  return true;
+}
+
 export function registerMetricsRoutes(app: FastifyInstance): void {
   const { metrics, growth, tokens, limits, limitSampler } = app.services;
 
   app.post<{ Body: unknown }>("/api/metrics/limits", async (req, reply) => {
     const parsed = LimitQuerySchema.safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+    if (await clientGone(req, reply)) return reply;
     const settings = await store.getSettings().catch(() => null);
     const label = tokenLabeller(settings);
     const stats = limits.stats();
@@ -131,6 +161,7 @@ export function registerMetricsRoutes(app: FastifyInstance): void {
   app.post<{ Body: unknown }>("/api/metrics/tokens", async (req, reply) => {
     const parsed = TokenQuerySchema.safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+    if (await clientGone(req, reply)) return reply;
     // Labels resolve against the settings AS THEY ARE NOW, so renaming an
     // account renames its history — the id is what the ledger stored.
     const settings = await store.getSettings().catch(() => null);
@@ -140,54 +171,63 @@ export function registerMetricsRoutes(app: FastifyInstance): void {
   app.post<{ Body: unknown }>("/api/metrics/series", async (req, reply) => {
     const parsed = MetricQuerySchema.safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+    if (await clientGone(req, reply)) return reply;
     return metrics.series(parsed.data);
   });
 
   app.post<{ Body: unknown }>("/api/metrics/totals", async (req, reply) => {
     const parsed = TotalsSchema.safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+    if (await clientGone(req, reply)) return reply;
     return metrics.totals(parsed.data);
   });
 
   app.post<{ Body: unknown }>("/api/metrics/facets", async (req, reply) => {
     const parsed = ScopeSchema.safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+    if (await clientGone(req, reply)) return reply;
     return metrics.facets(parsed.data);
   });
 
   app.post<{ Body: unknown }>("/api/metrics/recent", async (req, reply) => {
     const parsed = RecentSchema.safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+    if (await clientGone(req, reply)) return reply;
     return metrics.recent(parsed.data);
   });
 
   app.post<{ Body: unknown }>("/api/metrics/spans/series", async (req, reply) => {
     const parsed = MetricSpanQuerySchema.safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+    if (await clientGone(req, reply)) return reply;
     return metrics.spanSeries(parsed.data);
   });
 
   app.post<{ Body: unknown }>("/api/metrics/spans/totals", async (req, reply) => {
     const parsed = SpanTotalsSchema.safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+    if (await clientGone(req, reply)) return reply;
     return metrics.spanTotals(parsed.data);
   });
 
   app.post<{ Body: unknown }>("/api/metrics/spans/summary", async (req, reply) => {
     const parsed = SpanScopeSchema.safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+    if (await clientGone(req, reply)) return reply;
     return metrics.spanSummary(parsed.data);
   });
 
   app.post<{ Body: unknown }>("/api/metrics/spans/facets", async (req, reply) => {
     const parsed = SpanScopeSchema.safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+    if (await clientGone(req, reply)) return reply;
     return metrics.spanFacets(parsed.data);
   });
 
   app.post<{ Body: unknown }>("/api/metrics/spans/recent", async (req, reply) => {
     const parsed = SpanRecentSchema.safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+    if (await clientGone(req, reply)) return reply;
     return metrics.recentSpans(parsed.data);
   });
 

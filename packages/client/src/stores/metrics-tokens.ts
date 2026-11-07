@@ -2,7 +2,8 @@
  * The Tokens tab's state — one query, one response.
  *
  * Shaped like `stores/metrics.ts` (a shared window + filter, every control
- * re-queries, generation-guarded loads) but with ONE request where that store
+ * re-queries, debounced/aborting/generation-guarded loads via
+ * `lib/latestLoad.ts`) but with ONE request where that store
  * makes four: the token ledger is one row per turn × model, small enough that
  * the server answers chart, table and pick-lists together, and one response
  * cannot disagree with itself the way four racing ones can.
@@ -16,6 +17,7 @@ import type {
   TokenReport,
 } from "@dispatch/shared";
 import { api } from "../lib/api.js";
+import { latestLoad, REMOUNT_FRESH_MS } from "../lib/latestLoad.js";
 import { RANGE_PRESETS, type ChartKind } from "./metrics.js";
 
 interface TokenMetricsStore {
@@ -40,7 +42,12 @@ interface TokenMetricsStore {
   setChart: (c: ChartKind) => void;
   toggleFilter: (dim: TokenDimension, value: string) => void;
   clearFilter: (dim?: TokenDimension) => void;
+  /** Re-run the query now (the Reload button). */
   load: () => Promise<void>;
+  /** A mount's load: skipped while the held result for this query is fresh. */
+  loadIfStale: () => Promise<void>;
+  /** Abandon whatever is pending or in flight — the subpage unmounted. */
+  cancel: () => void;
 }
 
 function windowFor(rangeId: string): { from?: number; to?: number } {
@@ -50,38 +57,43 @@ function windowFor(rangeId: string): { from?: number; to?: number } {
   return { from: to - preset.ms, to: to + 1 };
 }
 
-/** See `stores/metrics.ts` — the last click must win, not the slowest reply. */
-let generation = 0;
+/** What a report answers, for "do I already hold this?". */
+function queryKey(
+  s: Pick<TokenMetricsStore, "rangeId" | "filter" | "groupBy" | "measure" | "bucket" | "limit">,
+) {
+  return JSON.stringify([s.rangeId, s.filter, s.groupBy, s.measure, s.bucket, s.limit]);
+}
 
 export const useTokenMetrics = create<TokenMetricsStore>((set, get) => {
-  const load = async (): Promise<void> => {
-    const gen = ++generation;
-    const { rangeId, filter, groupBy, measure, bucket, limit, report } = get();
+  /** See `stores/metrics.ts` — the last click must win, not the slowest reply. */
+  const loader = latestLoad(async ({ signal, current, landed }) => {
+    const state = get();
+    const { rangeId, filter, groupBy, measure, bucket, limit, report } = state;
     set({ refetching: true, loading: report === null, error: null });
     try {
-      const res = await api.metrics.tokens({
-        ...windowFor(rangeId),
-        filter,
-        groupBy,
-        measure,
-        bucket,
-        limit,
-      });
-      if (gen !== generation) return;
+      const res = await api.metrics.tokens(
+        { ...windowFor(rangeId), filter, groupBy, measure, bucket, limit },
+        signal,
+      );
+      if (!current()) return;
       set({ report: res, loading: false, refetching: false });
+      landed(queryKey(state));
     } catch (err) {
-      if (gen !== generation) return;
+      if (!current()) return;
       set({
         error: err instanceof Error ? err.message : "Could not load token usage.",
         loading: false,
         refetching: false,
       });
     }
-  };
+  });
 
+  const load = (): Promise<void> => loader.run();
+
+  /** Apply a change and re-query once the controls settle. */
   const applyAndLoad = (patch: Partial<TokenMetricsStore>) => {
-    set(patch);
-    void load();
+    set({ ...patch, refetching: true });
+    loader.schedule();
   };
 
   return {
@@ -126,5 +138,11 @@ export const useTokenMetrics = create<TokenMetricsStore>((set, get) => {
     },
 
     load,
+    loadIfStale: () =>
+      loader.fresh(queryKey(get()), REMOUNT_FRESH_MS) ? Promise.resolve() : load(),
+    cancel: () => {
+      loader.cancel();
+      set({ loading: false, refetching: false });
+    },
   };
 });

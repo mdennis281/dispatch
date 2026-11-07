@@ -65,7 +65,7 @@ import {
   unionUnder,
   type UnionRow,
 } from "./metrics-spans.js";
-import type { StateDb } from "../store/db.js";
+import { SPAN_LONG_MS, SPAN_LONG_SQL, type StateDb } from "../store/db.js";
 
 /**
  * The states that are the agent actually running — everything outside the
@@ -1176,6 +1176,22 @@ export class MetricsService {
    *
    * `live` is what an open span's missing end is read as — now, clamped by the
    * window's own end downstream.
+   *
+   * The overlap test alone (`start_ts < to AND COALESCE(end_ts, live) > from`)
+   * has no lower bound an index can use, so every read walked the whole ledger:
+   * 1–2 s per query on 900k spans, ~17 queries per Runtime click, all on the
+   * event loop. The `seq IN (…)` narrows it first to the three places an
+   * overlapping span can be (see SPAN_LONG_MS for why that set is complete):
+   *   1. started in `[from - SPAN_LONG_MS, to)`, by `metric_span_start`;
+   *   2. still open and started earlier, by `metric_span_open`;
+   *   3. longer than SPAN_LONG_MS and started earlier, by `metric_span_long`.
+   * A closed span that started before `from - SPAN_LONG_MS` and is not long
+   * ended before `from`, so it could never overlap.
+   *
+   * A sub-select rather than an OR: with no `sqlite_stat1` (the live store has
+   * none) the planner ignored a three-way OR and kept the full `start_ts < ?`
+   * scan, and with a state filter it split the OR onto `metric_span_state` and
+   * got slower than before. The sub-select pins each branch to its index.
    */
   private spanWhere(
     from: number,
@@ -1183,8 +1199,27 @@ export class MetricsService {
     live: number,
     filter: MetricSpanFilter | undefined,
   ): Where {
-    const clauses = ["start_ts < ?", "COALESCE(end_ts, ?) > ?"];
-    const params: (string | number)[] = [to, live, from];
+    const lo = spanLookback(from, to);
+    const rest = this.spanOverlapAndFilter(from, live, filter);
+    return {
+      sql: `seq IN (SELECT seq FROM metric_span WHERE start_ts >= ? AND start_ts < ?
+        UNION ALL SELECT seq FROM metric_span WHERE end_ts IS NULL AND start_ts < ?
+        UNION ALL SELECT seq FROM metric_span WHERE ${SPAN_LONG_SQL} AND start_ts < ?)
+        AND ${rest.sql}`,
+      params: [lo, to, lo, lo, ...rest.params],
+    };
+  }
+
+  /** The overlap test's upper half plus the dimension filter — everything in a
+   * span read except the start_ts window, which {@link spanWhere} and
+   * {@link recentSpans} each bound their own way. */
+  private spanOverlapAndFilter(
+    from: number,
+    live: number,
+    filter: MetricSpanFilter | undefined,
+  ): Where {
+    const clauses = ["COALESCE(end_ts, ?) > ?"];
+    const params: (string | number)[] = [live, from];
     for (const dim of SPAN_DIMENSIONS) {
       const values = filter?.[dim];
       if (!values || values.length === 0) continue;
@@ -1531,18 +1566,47 @@ export class MetricsService {
     this.flush();
     const { from, to } = this.window(opts);
     const live = this.now();
-    const w = this.spanWhere(from, to, live, opts.filter);
     const limit = Math.min(Math.max(1, opts.limit ?? 100), 500);
-    const rows = this.db
+    const lo = spanLookback(from, to);
+    const rest = this.spanOverlapAndFilter(from, live, opts.filter);
+    // NOT through spanWhere's `seq IN (…)`. Newest-first with a LIMIT is the
+    // one read that was already cheap: it walks metric_span_start backwards
+    // from `to` and stops at the 50th match (~1 ms). The sub-select would
+    // materialise and sort the whole window first (~400 ms at 7 days). Every
+    // span that started in [lo, to) is newer than every open or long one that
+    // started before `lo`, so the range is read first, newest-first and
+    // early-stopping, and the other two branches only fill whatever is left.
+    const recent = this.db
       .prepare(
-        `SELECT * FROM metric_span WHERE ${w.sql} ORDER BY start_ts DESC, seq DESC LIMIT ?`,
+        `SELECT * FROM metric_span WHERE start_ts >= ? AND start_ts < ? AND ${rest.sql}
+         ORDER BY start_ts DESC, seq DESC LIMIT ?`,
       )
-      .all(...w.params, limit) as Record<string, unknown>[];
-    return rows.map(rowToSpan);
+      .all(lo, to, ...rest.params, limit) as Record<string, unknown>[];
+    const older =
+      recent.length < limit
+        ? (this.db
+            .prepare(
+              `SELECT * FROM metric_span WHERE seq IN (
+                 SELECT seq FROM metric_span WHERE end_ts IS NULL AND start_ts < ?
+                 UNION ALL SELECT seq FROM metric_span WHERE ${SPAN_LONG_SQL} AND start_ts < ?)
+               AND ${rest.sql} ORDER BY start_ts DESC, seq DESC LIMIT ?`,
+            )
+            .all(lo, lo, ...rest.params, limit - recent.length) as Record<string, unknown>[])
+        : [];
+    return [...recent, ...older].map(rowToSpan);
   }
 }
 
 /* --------------------------------------------------------------- helpers */
+
+/**
+ * The earliest start a CLOSED, not-long span can have and still overlap a
+ * window opening at `from` (see SPAN_LONG_MS). Capped at `to` so a degenerate
+ * window never yields a range whose bounds are crossed.
+ */
+function spanLookback(from: number, to: number): number {
+  return Math.min(to, from - SPAN_LONG_MS);
+}
 
 /**
  * SQL that snaps `ts` to the start of its bucket, back in epoch ms.

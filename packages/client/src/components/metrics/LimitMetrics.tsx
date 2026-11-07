@@ -316,12 +316,12 @@ function YieldTable({ yields, period }: { yields: LimitYield[]; period: LimitPer
 /* ----------------------------------------------------------------- subpage */
 
 export function LimitMetrics() {
-  const { report, rangeId, setRange, period, setPeriod, load, loading, refetching, error } =
+  const { report, rangeId, setRange, period, setPeriod, load, poll, loading, refetching, error } =
     useLimitMetrics();
 
   useEffect(() => {
     void load();
-    const t = setInterval(() => void load(), POLL_MS);
+    const t = setInterval(() => void poll(), POLL_MS);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

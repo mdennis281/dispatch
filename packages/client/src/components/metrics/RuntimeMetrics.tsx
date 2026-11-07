@@ -325,18 +325,25 @@ export function RuntimeMetrics() {
     setSort,
     toggleFilter,
     clearFilter,
-    load,
+    loadIfStale,
+    cancel,
   } = useSpanMetrics();
 
   const palette = useChartPalette();
   const labels = useSpanLabels();
   const label = useSpanLabel(groupBy);
 
-  // One load on mount. Every control re-queries itself (see the store), so
-  // there is deliberately no dependency array chasing the query here — that
-  // would fire a second request for every change the setters already made.
+  // One load on mount, skipped when the store already holds this exact query
+  // from under 30 s ago: a tab flip re-mounts the subpage, and re-running the
+  // whole batch to redraw the numbers already on screen was pure cost.
+  // Every control re-queries itself (see the store), so there is deliberately
+  // no dependency array chasing the query here — that would fire a second
+  // request for every change the setters already made.
   useEffect(() => {
-    void load();
+    void loadIfStale();
+    // Leaving the page abandons a batch still in flight, so the server skips
+    // the reads nobody is going to look at (see `lib/latestLoad.ts`).
+    return cancel;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
