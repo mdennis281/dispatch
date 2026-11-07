@@ -231,12 +231,13 @@ export function latestArtifactVersion(meta: Pick<ArtifactMeta, "versions">): num
  */
 export const ARTIFACT_REF_TAG = "dispatch-artifact:";
 
-export interface ArtifactRef {
-  id: string;
-  version: number;
-  title: string;
-  type: ArtifactType;
-}
+export const ArtifactRefSchema = z.object({
+  id: z.string().min(1),
+  version: z.number().int().positive(),
+  title: z.string(),
+  type: ArtifactTypeSchema,
+});
+export type ArtifactRef = z.infer<typeof ArtifactRefSchema>;
 
 export function formatArtifactRef(ref: ArtifactRef): string {
   return `${ARTIFACT_REF_TAG}${JSON.stringify(ref)}`;

@@ -23,6 +23,7 @@ import {
 } from "./session-broker.js";
 import { EFFORT_THINKING_TOKENS, type QueryFn } from "@dispatch/plugin-claude/harness";
 import { GitHubService } from "./github.js";
+import { ArtifactService } from "./artifacts.js";
 import { MemoryService } from "./memory.js";
 import { MetricsService } from "./metrics.js";
 import { MetricsBackfill } from "./metrics-backfill.js";
@@ -1335,6 +1336,7 @@ describe("SessionBroker — permissions", () => {
         title: request.title,
         summary: request.summary,
         screenshots: [],
+        artifacts: [],
         previewUrl: request.previewUrl,
       });
       // The queue row names what's being asked, not the fallback card's whole body.
@@ -1400,6 +1402,43 @@ describe("SessionBroker — permissions", () => {
       broker.answerQuestion(reqId, { answer: HUMAN_REVIEW_ANSWERS.approve });
       await expect(verdictP).resolves.toEqual({ status: "reviewed", verdict: "approve" });
       await rm(shots, { recursive: true, force: true });
+    });
+
+    it("pins attached artifacts to the version current when the card goes up", async () => {
+      const artifacts = new ArtifactService({ dirFor: (id) => store.chatArtifactsDir(id) });
+      const broker = makeBroker(makeFakeQuery(() => [resultMsg()]).fn, 6, { artifacts });
+      await store.saveChat(chatFor("c1"));
+      broker.create(chatFor("c1"));
+      const made = await artifacts.create("c1", { title: "Pricing page", type: "html", content: "<p>v1</p>" });
+      await artifacts.update("c1", made.id, { content: "<p>v2</p>" });
+
+      const reqP = nextPermissionId();
+      const verdictP = broker.requestHumanReview("c1", { ...request, artifacts: [made.id] });
+      const reqId = await reqP;
+
+      const raised = events.find(
+        (e): e is Extract<WsServerEvent, { type: "permission-request" }> =>
+          e.type === "permission-request" && e.request.id === reqId,
+      );
+      expect((raised?.request.input.review as { artifacts: unknown }).artifacts).toEqual([
+        { id: made.id, version: 2, title: "Pricing page", type: "html" },
+      ]);
+      broker.answerQuestion(reqId, { answer: HUMAN_REVIEW_ANSWERS.approve });
+      await expect(verdictP).resolves.toEqual({ status: "reviewed", verdict: "approve" });
+    });
+
+    it("refuses an artifact id this chat doesn't have — before any card is raised", async () => {
+      const artifacts = new ArtifactService({ dirFor: (id) => store.chatArtifactsDir(id) });
+      const broker = makeBroker(makeFakeQuery(() => [resultMsg()]).fn, 6, { artifacts });
+      await store.saveChat(chatFor("c1"));
+      broker.create(chatFor("c1"));
+
+      for (const bad of ["nope", "../../escape"]) {
+        const res = await broker.requestHumanReview("c1", { ...request, artifacts: [bad] });
+        expect(res).toMatchObject({ status: "invalid" });
+        expect((res as { message: string }).message).toContain(`No artifact "${bad}"`);
+      }
+      expect(events.some((e) => e.type === "permission-request")).toBe(false);
     });
 
     it("accepts a WebM clip as review evidence, typed by its bytes", async () => {
