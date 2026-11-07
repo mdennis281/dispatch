@@ -24,6 +24,7 @@ import {
 import { RowShell } from "./RowShell.js";
 import { MediaGroup } from "./MediaGroup.js";
 import { Button } from "../../ui/Button.js";
+import { RowButton } from "../../ui/RowButton.js";
 import { Chip, type Tone } from "../../ui/Chip.js";
 import { cn } from "../../../lib/cn.js";
 import { actions } from "../../../lib/actions.js";
@@ -171,9 +172,8 @@ function EvidenceArtifacts({ chatId, artifacts }: { chatId: string; artifacts: A
         const Icon = artifactIcon(a.type);
         const newest = latest[`${chatId}:${a.id}`] ?? a.version;
         return (
-          <button
+          <RowButton
             key={a.id}
-            type="button"
             onClick={() => openArtifact(chatId, a.id, a.version)}
             className={cn(
               "group/art inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-md border border-accent-line bg-accent-ghost px-2.5 py-1 text-sm text-accent-hi transition-colors hover:border-accent/60",
@@ -187,7 +187,7 @@ function EvidenceArtifacts({ chatId, artifacts }: { chatId: string; artifacts: A
               {newest > a.version && ` · newer: v${newest}`}
             </span>
             <ChevronRight className="opacity-70 transition-transform group-hover/art:translate-x-0.5" />
-          </button>
+          </RowButton>
         );
       })}
     </div>
