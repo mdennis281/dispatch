@@ -22,7 +22,7 @@ import {
 } from "../../stores/view.js";
 import { openWorkspace } from "../../stores/workspace.js";
 import { useLayout } from "../../stores/layout.js";
-import { useWindowControlsOverlay } from "../../lib/windowControls.js";
+import { controlsOnLeft, useWindowControlsOverlay } from "../../lib/windowControls.js";
 
 /**
  * The top bar. Two shapes, and they are deliberately NOT the same height.
@@ -109,9 +109,25 @@ interface BarProps {
  * buttons, off the edge.
  */
 function TitleBar({ compact, onSearch }: BarProps) {
+  // macOS: the window buttons are top-LEFT, exactly where the tall lockup goes.
+  // Rather than indenting the lockup past them, which wasted the line-two slot
+  // under the lights, the lockup shrinks to fit line two and sits in that slot.
+  // The bar's height stays the same.
+  const lightsLeft = controlsOnLeft();
   return (
     <header className="cm-titlebar cm-topbar-tall @container/topbar flex shrink-0 overflow-hidden border-b border-line bg-surface">
-      <BrandLockup size="tall" />
+      {lightsLeft ? (
+        // `min-w` is the lights' width, so even if the lockup were narrower the
+        // readings to its right could never slide under them on line one.
+        <div className="flex min-w-(--dp-titlebar-x) shrink-0 flex-col">
+          <div aria-hidden className="h-(--tb-l1)" />
+          <div className="flex flex-1 items-center pl-2">
+            <BrandLockup size="under" />
+          </div>
+        </div>
+      ) : (
+        <BrandLockup size="tall" />
+      )}
       <div aria-hidden className="min-w-16 flex-1" />
       <div className="flex shrink-0 @max-[57rem]/topbar:hidden">
         <ResourceMeter layout="stacked" />

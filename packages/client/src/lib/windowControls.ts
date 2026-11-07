@@ -108,3 +108,29 @@ export function useWindowControlsOverlay(): boolean {
   }, []);
   return overlay;
 }
+
+/**
+ * Are the window buttons on the LEFT? True for the macOS traffic lights (and a
+ * Linux desktop configured that way), false on Windows and whenever the
+ * overlay is down.
+ *
+ * Read off the overlay's own geometry rather than sniffing the platform: the
+ * drawable band starts after the buttons, so `x > 0` IS "they sit to the left",
+ * whichever OS put them there.
+ *
+ * Not reactive to `geometrychange`, on purpose. A resize changes the band's
+ * WIDTH, never which side the buttons are on, and that event fires per frame
+ * during a drag (see the header comment). The one change that matters, the
+ * overlay coming and going with fullscreen, already re-renders every caller
+ * through `useWindowControlsOverlay`.
+ */
+export function controlsOnLeft(): boolean {
+  if (!wcoMatches() || typeof navigator === "undefined") return false;
+  const wco = (
+    navigator as Navigator & {
+      windowControlsOverlay?: { getTitlebarAreaRect?: () => DOMRect };
+    }
+  ).windowControlsOverlay;
+  const rect = wco?.getTitlebarAreaRect?.();
+  return !!rect && rect.x > 0;
+}

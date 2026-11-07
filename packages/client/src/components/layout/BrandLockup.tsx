@@ -56,6 +56,11 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
  * tried, and an address permanently in the corner of the app is noise — it is
  * one hover away, in the card.
  *
+ * `under` is the same installed window on macOS, where the traffic lights take
+ * the top-left corner `tall` would span. It is line two only, under the lights:
+ * a 28px mark in a 32px hit area, so it fits the 36px line without the bar
+ * growing.
+ *
  * THE WORD STAYS for every state except `open`, after the dot. "Reconnecting…"
  * and "Offline" are what this indicator exists for, and an amber dot on its own
  * is easy to read as the brand's own colour. Only the good news is silent.
@@ -73,7 +78,7 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
  * top-left corner of the app, which the pointer crosses on its way to the
  * sidebar constantly.
  */
-export type LockupSize = "tall" | "row" | "mark";
+export type LockupSize = "tall" | "under" | "row" | "mark";
 
 export function BrandLockup({ size }: { size: LockupSize }) {
   const state = useConnection((s) => s.state);
@@ -162,7 +167,7 @@ export function BrandLockup({ size }: { size: LockupSize }) {
       {size === "tall" && (
         <span className="text-xl font-semibold tracking-tight text-primary">Dispatch</span>
       )}
-      {size === "row" && (
+      {(size === "row" || size === "under") && (
         <span className="text-base font-semibold tracking-tight text-primary">Dispatch</span>
       )}
       <StatusDot tone={c.tone} pulse={c.pulse} size={size === "tall" ? 8 : 7} />
@@ -208,13 +213,19 @@ function HomeToggle({ size }: { size: LockupSize }) {
         className={cn(
           "flex shrink-0 items-center justify-center rounded-md transition-colors hover:bg-hover",
           // Bare padding rather than a fixed box: the mark is 48px in the
-          // installed title bar and 32px everywhere else, and the hit area
-          // should follow it rather than crop it.
-          size === "tall" ? "p-0.5" : "p-1",
+          // installed title bar (28px under macOS's traffic lights) and 32px
+          // everywhere else, and the hit area should follow it rather than
+          // crop it.
+          size === "tall" || size === "under" ? "p-0.5" : "p-1",
           home && "bg-active",
         )}
       >
-        <DispatchMark className={cn("shrink-0", size === "tall" ? "size-12" : "size-8")} />
+        <DispatchMark
+          className={cn(
+            "shrink-0",
+            size === "tall" ? "size-12" : size === "under" ? "size-7" : "size-8",
+          )}
+        />
       </button>
     </Tooltip>
   );
