@@ -33,6 +33,7 @@
  * the two measures exist to prevent.
  */
 import { useEffect, useMemo } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { Clock, Database } from "lucide-react";
 import type { MetricSpan, MetricSpanDimension, MetricState } from "@dispatch/shared";
 import {
@@ -45,6 +46,7 @@ import { Select } from "../ui/Select.js";
 import { Spinner } from "../ui/Spinner.js";
 import {
   CHART_KIND_LABELS,
+  isBarChart,
   isTimeChart,
   type ChartKind,
 } from "../../stores/metrics.js";
@@ -52,7 +54,7 @@ import { SPAN_SORT_LABELS, useSpanMetrics, type SpanSort } from "../../stores/me
 import { ChartLegend, MetricsChart, type ChartShareRow } from "./MetricsChart.js";
 import { FacetRow } from "./MetricsFilters.js";
 import { TimeSplit } from "./TimeSplit.js";
-import { Card, Hero, StatTile, ago, count } from "./chrome.js";
+import { Card, CoarseNote, Hero, StatTile, ago, count } from "./chrome.js";
 import {
   axisDuration,
   durationTicks,
@@ -93,14 +95,6 @@ const GROUPABLE: MetricSpanDimension[] = [
   "detail",
   "source",
 ];
-
-/** Bucket widths as the note below the picker says them. */
-const BUCKET_LABELS: Record<string, string> = {
-  hour: "hourly",
-  day: "daily",
-  week: "weekly",
-  month: "monthly",
-};
 
 const CHART_KINDS: ChartKind[] = [
   "line",
@@ -302,6 +296,8 @@ function SpanTail() {
 /* -------------------------------------------------------------------- page */
 
 export function RuntimeMetrics() {
+  // Field-selected and shallow-compared — see `UsageMetrics`. Without a
+  // selector every store write re-rendered the page and the chart with it.
   const {
     series,
     totals,
@@ -314,6 +310,7 @@ export function RuntimeMetrics() {
     bucket,
     limit,
     sort,
+    coarsened,
     loading,
     refetching,
     error,
@@ -327,7 +324,35 @@ export function RuntimeMetrics() {
     clearFilter,
     loadIfStale,
     cancel,
-  } = useSpanMetrics();
+  } = useSpanMetrics(
+    useShallow((s) => ({
+      series: s.series,
+      totals: s.totals,
+      summary: s.summary,
+      facets: s.facets,
+      filter: s.filter,
+      rangeId: s.rangeId,
+      chart: s.chart,
+      groupBy: s.groupBy,
+      bucket: s.bucket,
+      limit: s.limit,
+      sort: s.sort,
+      coarsened: s.coarsened,
+      loading: s.loading,
+      refetching: s.refetching,
+      error: s.error,
+      setRange: s.setRange,
+      setChart: s.setChart,
+      setGroupBy: s.setGroupBy,
+      setBucket: s.setBucket,
+      setLimit: s.setLimit,
+      setSort: s.setSort,
+      toggleFilter: s.toggleFilter,
+      clearFilter: s.clearFilter,
+      loadIfStale: s.loadIfStale,
+      cancel: s.cancel,
+    })),
+  );
 
   const palette = useChartPalette();
   const labels = useSpanLabels();
@@ -348,26 +373,33 @@ export function RuntimeMetrics() {
   }, []);
 
   const timeForm = isTimeChart(chart);
-  // The server coarsens a bucket the window can't accommodate, so the width it
-  // USED can differ from the pick.
-  const coarsened = !!series && bucket !== "auto" && series.bucket !== bucket;
   const color = useMemo(
     () => (key: string, i: number) => spanColorFor(palette, groupBy, key, i),
     [palette, groupBy],
   );
 
-  const legend = timeForm
-    ? (series?.series ?? []).map((s) => ({ key: s.key, label: s.label, total: s.total }))
-    : (totals?.totals ?? []).map((t) => ({ key: t.key, label: t.label, total: t.ms }));
+  // Memoised so the memo'd chart and legend see the same arrays until the
+  // data under them actually changes.
+  const legend = useMemo(
+    () =>
+      timeForm
+        ? (series?.series ?? []).map((s) => ({ key: s.key, label: s.label, total: s.total }))
+        : (totals?.totals ?? []).map((t) => ({ key: t.key, label: t.label, total: t.ms })),
+    [timeForm, series, totals],
+  );
 
-  const shareRows: ChartShareRow[] = (totals?.totals ?? []).map((t) => ({
-    key: t.key,
-    label: t.label,
-    value: t.ms,
-    // The share form plots ATTRIBUTED time, so its tooltip carries the row's
-    // busy figure — the one thing the wedge itself cannot say.
-    note: `busy ${formatDuration(t.busyMs)} · ${count(t.actors)} actor${t.actors === 1 ? "" : "s"}`,
-  }));
+  const shareRows: ChartShareRow[] = useMemo(
+    () =>
+      (totals?.totals ?? []).map((t) => ({
+        key: t.key,
+        label: t.label,
+        value: t.ms,
+        // The share form plots ATTRIBUTED time, so its tooltip carries the row's
+        // busy figure — the one thing the wedge itself cannot say.
+        note: `busy ${formatDuration(t.busyMs)} · ${count(t.actors)} actor${t.actors === 1 ? "" : "s"}`,
+      })),
+    [totals],
+  );
 
   const busyMs = summary?.busyMs ?? 0;
   const attributedMs = summary?.attributedMs ?? 0;
@@ -498,17 +530,10 @@ export function RuntimeMetrics() {
               </>
             }
             note={
-              // Never let the page bound what it shows without saying so. Both
-              // of these are the chart quietly showing less than was asked for,
-              // and an unexplained one reads as "that's all there was".
-              timeForm && (series?.truncated || coarsened)
-                ? [
-                    series?.truncated ? `${series.truncated} more folded into Other` : null,
-                    coarsened ? `bucketed ${BUCKET_LABELS[series!.bucket]} to fit` : null,
-                  ]
-                    .filter(Boolean)
-                    .join(" · ")
-                : null
+              // Never let the page bound what it shows without saying so — an
+              // unexplained fold reads as "that's all there was". (A coarsened
+              // bucket says so under the chart; see `CoarseNote`.)
+              timeForm && series?.truncated ? `${series.truncated} more folded into Other` : null
             }
           >
             <div className="p-3">
@@ -536,6 +561,7 @@ export function RuntimeMetrics() {
                   color={color}
                 />
               </div>
+              {timeForm && <CoarseNote coarsened={coarsened} bars={isBarChart(chart)} />}
             </div>
           </Card>
 

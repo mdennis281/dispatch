@@ -27,8 +27,10 @@
 import {
   GROWTH_GENERATED_KEY,
   METRIC_OTHER_KEY,
+  coarsenWidth,
   extensionLabel,
   languageOf,
+  type BucketCoarsening,
   type GrowthPoint,
   type GrowthReport,
 } from "@dispatch/shared";
@@ -75,6 +77,8 @@ export interface GrowthSeries {
 
 export interface GrowthShape {
   bucket: GrowthBucketWidth;
+  /** Set when the picked bucket was too fine for the range and was stepped up. */
+  coarsened: BucketCoarsening | null;
   /** Bucket starts, oldest → newest, contiguous. */
   buckets: number[];
   /** Ranked, capped at `limit` with the tail folded into Other. */
@@ -99,6 +103,24 @@ export interface GrowthShape {
 }
 
 const DAY = 86_400_000;
+
+/**
+ * Commits dated before this are not trusted to START the chart. Git itself is
+ * from 2005, and the dates that land earlier in practice are a zeroed clock
+ * (1970) or a mangled rebase — one such commit used to stretch "All time" back
+ * 55 years and, at Daily, build ~20,000 buckets × 2 bars per series. History
+ * imported from an older VCS can genuinely predate it; those commits are still
+ * COUNTED (they fold into the baseline like anything before the range), they
+ * just are not plotted.
+ */
+export const PLAUSIBLE_COMMIT_FROM = Date.UTC(2005, 0, 1);
+
+/** The first point that is a believable start for the chart, or undefined. */
+export function firstPlausible(points: readonly GrowthPoint[]): number | undefined {
+  // Points arrive oldest first, so this is normally the first one — but a
+  // bogus date sorts to the front, which is exactly the case being skipped.
+  return points.find((p) => p.ts >= PLAUSIBLE_COMMIT_FROM)?.ts;
+}
 
 /* ---------------------------------------------------------------- buckets */
 
@@ -170,9 +192,14 @@ export function shapeGrowth(report: GrowthReport, opts: GrowthShapeOptions): Gro
 
   /* ---- the range ---- */
 
-  const first = report.points[0]?.ts ?? now;
+  const first = firstPlausible(report.points) ?? now;
   const from = opts.from === null ? first : Math.max(first, opts.from);
-  const width = opts.bucket === "auto" ? autoBucket(now - from) : opts.bucket;
+  // An explicit pick is stepped up past ~200 buckets (see `metrics-coarsen`):
+  // the churn chart draws two bars per series per bucket, so Daily × All time
+  // on a few years of history was tens of thousands of SVG rects.
+  const picked = opts.bucket === "auto" ? autoBucket(now - from) : opts.bucket;
+  const fit = coarsenWidth(picked, from, now);
+  const width = fit.width as GrowthBucketWidth;
 
   // Contiguous buckets from the range start to now, so a quiet month is a
   // flat stretch on the curve rather than a missing one.
@@ -286,6 +313,7 @@ export function shapeGrowth(report: GrowthReport, opts: GrowthShapeOptions): Gro
 
   return {
     bucket: width,
+    coarsened: fit.coarsened,
     buckets,
     series,
     size,

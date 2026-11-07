@@ -49,6 +49,17 @@ function readPalette(): ChartPalette {
   };
 }
 
+function samePalette(a: ChartPalette, b: ChartPalette): boolean {
+  return (
+    a.other === b.other &&
+    a.grid === b.grid &&
+    a.surface === b.surface &&
+    a.ink === b.ink &&
+    a.series.length === b.series.length &&
+    a.series.every((c, i) => c === b.series[i])
+  );
+}
+
 /**
  * The active palette, re-read when the theme flips.
  *
@@ -63,7 +74,14 @@ export function useChartPalette(): ChartPalette {
     // The attribute is written synchronously by the store's `applyTheme`, but
     // the stylesheet cascade settles on the next frame — reading in the same
     // tick returns the OUTGOING theme's values.
-    const id = requestAnimationFrame(() => setPalette(readPalette()));
+    //
+    // Kept by IDENTITY when nothing changed. This runs on every mount, and a
+    // fresh-but-equal object re-rendered every memoised chart one frame after
+    // it first drew — the whole page twice for one paint.
+    const id = requestAnimationFrame(() => {
+      const next = readPalette();
+      setPalette((prev) => (samePalette(prev, next) ? prev : next));
+    });
     return () => cancelAnimationFrame(id);
   }, [resolved]);
   return palette;

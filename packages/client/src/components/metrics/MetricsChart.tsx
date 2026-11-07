@@ -30,7 +30,7 @@
  * `format`, `label` and `color`. Neither page can silently borrow the other's
  * units, and neither has to fork the marks to avoid it.
  */
-import { useMemo } from "react";
+import { memo, useMemo } from "react";
 import {
   Area,
   AreaChart,
@@ -204,7 +204,23 @@ interface TimeProps {
   color: ChartColorer;
 }
 
-function TimeChart({ kind, data, palette, label, format, formatTick, ticker, color }: TimeProps) {
+/**
+ * Memoised, as are the share form, the legend and the entry point: a store
+ * write that changes nothing plotted (a `refetching` flip, a chat upsert) used
+ * to re-render every Recharts mark — thousands of rects on a fine bucket. The
+ * callers hold their props stable (memoised rows, labellers and colourers) so
+ * that a re-render here means the data actually moved.
+ */
+const TimeChart = memo(function TimeChart({
+  kind,
+  data,
+  palette,
+  label,
+  format,
+  formatTick,
+  ticker,
+  color,
+}: TimeProps) {
   const rows = useMemo(() => toRows(data), [data]);
   const tick = useMemo(() => tickFor(data.bucket), [data.bucket]);
   const keys = data.series;
@@ -368,7 +384,7 @@ function TimeChart({ kind, data, palette, label, format, formatTick, ticker, col
       </BarChart>
     </ResponsiveContainer>
   );
-}
+});
 
 /* ------------------------------------------------------------- share charts */
 
@@ -383,9 +399,21 @@ interface ShareProps {
   color: ChartColorer;
 }
 
-function ShareChart({ kind, rows, palette, label, format, formatTick, ticker, color }: ShareProps) {
-  const total = rows.reduce((n, r) => n + r.value, 0);
-  const ticks = ticker?.(rows.reduce((max, r) => Math.max(max, r.value), 0));
+const ShareChart = memo(function ShareChart({
+  kind,
+  rows,
+  palette,
+  label,
+  format,
+  formatTick,
+  ticker,
+  color,
+}: ShareProps) {
+  const total = useMemo(() => rows.reduce((n, r) => n + r.value, 0), [rows]);
+  const ticks = useMemo(
+    () => ticker?.(rows.reduce((max, r) => Math.max(max, r.value), 0)),
+    [ticker, rows],
+  );
 
   const tooltip = (
     <Tooltip
@@ -478,7 +506,7 @@ function ShareChart({ kind, rows, palette, label, format, formatTick, ticker, co
       </BarChart>
     </ResponsiveContainer>
   );
-}
+});
 
 /* ------------------------------------------------------------------ legend */
 
@@ -487,7 +515,7 @@ function ShareChart({ kind, rows, palette, label, format, formatTick, ticker, co
  * so nothing on this page relies on colour-matching alone. A single series
  * needs no legend: there is one colour and the card's title already names it.
  */
-export function ChartLegend({
+export const ChartLegend = memo(function ChartLegend({
   entries,
   label,
   format,
@@ -516,11 +544,11 @@ export function ChartLegend({
       ))}
     </ul>
   );
-}
+});
 
 /* ------------------------------------------------------------------- entry */
 
-export function MetricsChart({
+export const MetricsChart = memo(function MetricsChart({
   kind,
   time,
   share,
@@ -581,4 +609,4 @@ export function MetricsChart({
       )}
     </div>
   );
-}
+});

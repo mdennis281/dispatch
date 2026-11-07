@@ -17,6 +17,10 @@
  * it groups by exactly one thing. The unbound form is what the filter row
  * wants, because it renders one picker PER dimension and a hook called in a
  * loop is not a hook.
+ *
+ * Every resolver is MEMOISED on what it reads. The charts are `React.memo`'d
+ * and take the labeller as a prop, so a fresh closure per render would redraw
+ * every Recharts mark on every store write — a `refetching` flip included.
  */
 import {
   METRIC_ACTIVITY_CLASS_LABELS,
@@ -27,6 +31,8 @@ import {
   type MetricDimension,
   type MetricSpanDimension,
 } from "@dispatch/shared";
+import { useMemo } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { useChats } from "../../stores/chats.js";
 import { useProjects } from "../../stores/projects.js";
 
@@ -50,26 +56,32 @@ export type DimLabeller<D extends string> = (dim: D, key: string, fallback?: str
 export function useMetricLabels(): DimLabeller<MetricDimension> {
   const projects = useProjects((s) => s.projects);
   const agents = useProjects((s) => s.agents);
-  return (dim, key, fallback) => {
-    const raw = fallback ?? key;
-    if (key === "" || key === METRIC_OTHER_KEY) return raw;
-    switch (dim) {
-      case "projectId":
-        return projects.find((p) => p.id === key)?.name ?? raw;
-      case "agent":
-        return agents.find((a) => a.id === key)?.name ?? raw;
-      case "category":
-        return METRIC_CATEGORY_LABELS[key as keyof typeof METRIC_CATEGORY_LABELS] ?? raw;
-      default:
-        return raw;
-    }
-  };
+  return useMemo<DimLabeller<MetricDimension>>(
+    () => (dim, key, fallback) => {
+      const raw = fallback ?? key;
+      if (key === "" || key === METRIC_OTHER_KEY) return raw;
+      switch (dim) {
+        case "projectId":
+          return projects.find((p) => p.id === key)?.name ?? raw;
+        case "agent":
+          return agents.find((a) => a.id === key)?.name ?? raw;
+        case "category":
+          return METRIC_CATEGORY_LABELS[key as keyof typeof METRIC_CATEGORY_LABELS] ?? raw;
+        default:
+          return raw;
+      }
+    },
+    [projects, agents],
+  );
 }
 
 /** The usage resolver, bound to the one dimension a chart is grouped by. */
 export function useMetricLabel(dim: MetricDimension): MetricLabeller {
   const labels = useMetricLabels();
-  return (key, fallback) => labels(dim, key, fallback);
+  return useMemo<MetricLabeller>(
+    () => (key, fallback) => labels(dim, key, fallback),
+    [labels, dim],
+  );
 }
 
 /**
@@ -93,36 +105,56 @@ export function useMetricLabel(dim: MetricDimension): MetricLabeller {
 export function useSpanLabels(): DimLabeller<MetricSpanDimension> {
   const projects = useProjects((s) => s.projects);
   const agents = useProjects((s) => s.agents);
-  const chats = useChats((s) => s.byId);
-  return (dim, key, fallback) => {
-    const raw = fallback ?? key;
-    // The empty key is a REAL group (the main loop, the default agent, an
-    // unclassified column), not a missing one — the server has already spelled
-    // out what it means for this dimension, so never overwrite that.
-    if (key === "" || key === METRIC_OTHER_KEY) return raw;
-    switch (dim) {
-      case "state":
-        return METRIC_STATE_LABELS[key as keyof typeof METRIC_STATE_LABELS] ?? raw;
-      case "class":
-        return (
-          METRIC_ACTIVITY_CLASS_LABELS[key as keyof typeof METRIC_ACTIVITY_CLASS_LABELS] ?? raw
-        );
-      case "projectId":
-        return projects.find((p) => p.id === key)?.name ?? raw;
-      case "agent":
-        return agents.find((a) => a.id === key)?.name ?? raw;
-      case "chatId": {
-        const title = chats[key]?.title;
-        return title ? stripTitleMarks(title) : raw;
+  // Titles only, compared shallowly. Subscribing to `byId` itself re-rendered
+  // the whole Runtime page on every chat upsert — and a running chat upserts
+  // on every status and activity tick, which is precisely while someone is
+  // watching this page.
+  const titles = useChats(useShallow(chatTitles));
+  return useMemo<DimLabeller<MetricSpanDimension>>(
+    () => (dim, key, fallback) => {
+      const raw = fallback ?? key;
+      // The empty key is a REAL group (the main loop, the default agent, an
+      // unclassified column), not a missing one — the server has already spelled
+      // out what it means for this dimension, so never overwrite that.
+      if (key === "" || key === METRIC_OTHER_KEY) return raw;
+      switch (dim) {
+        case "state":
+          return METRIC_STATE_LABELS[key as keyof typeof METRIC_STATE_LABELS] ?? raw;
+        case "class":
+          return (
+            METRIC_ACTIVITY_CLASS_LABELS[key as keyof typeof METRIC_ACTIVITY_CLASS_LABELS] ?? raw
+          );
+        case "projectId":
+          return projects.find((p) => p.id === key)?.name ?? raw;
+        case "agent":
+          return agents.find((a) => a.id === key)?.name ?? raw;
+        case "chatId": {
+          const title = titles[key];
+          return title ? stripTitleMarks(title) : raw;
+        }
+        default:
+          return raw;
       }
-      default:
-        return raw;
-    }
-  };
+    },
+    [projects, agents, titles],
+  );
+}
+
+/** id → title for every chat the client holds. */
+function chatTitles(s: ReturnType<typeof useChats.getState>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const id in s.byId) {
+    const t = s.byId[id]!.title;
+    if (t) out[id] = t;
+  }
+  return out;
 }
 
 /** The runtime resolver, bound to the one dimension a chart is grouped by. */
 export function useSpanLabel(dim: MetricSpanDimension): MetricLabeller {
   const labels = useSpanLabels();
-  return (key, fallback) => labels(dim, key, fallback);
+  return useMemo<MetricLabeller>(
+    () => (key, fallback) => labels(dim, key, fallback),
+    [labels, dim],
+  );
 }

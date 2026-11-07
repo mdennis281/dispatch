@@ -14,7 +14,8 @@
  * Bucketing it would average a reset away — the one thing this page exists to
  * show.
  */
-import { useEffect, useMemo } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { AlertTriangle, Clock, Coins, Info } from "lucide-react";
 import {
   LIMIT_EVENT_LABELS,
@@ -24,6 +25,7 @@ import {
   type LimitWindowSeries,
   type LimitYield,
 } from "@dispatch/shared";
+import { Button } from "../ui/Button.js";
 import { Select } from "../ui/Select.js";
 import { Spinner } from "../ui/Spinner.js";
 import { RANGE_PRESETS } from "../../stores/metrics.js";
@@ -35,6 +37,19 @@ import { cn } from "../../lib/cn.js";
 
 /** The page re-reads this often while open; the sampler itself is slower. */
 const POLL_MS = 60_000;
+
+/**
+ * How many yield rows the table renders at once. The server sends up to 2,000
+ * (hourly periods × accounts over a long range), and rendering them all —
+ * eight cells each, inside a `<details>` most people never open — was most of
+ * the page's DOM. Newest first, so the first page is the one anyone reads.
+ */
+const YIELD_PAGE = 500;
+
+/** Hoisted: a fresh `[]` per render would defeat every memo below it. */
+const NO_EVENTS: LimitEvent[] = [];
+const NO_YIELDS: LimitYield[] = [];
+const NO_WINDOWS: LimitWindowSeries[] = [];
 
 const isUnexpected = (e: LimitEvent) => UNEXPECTED_LIMIT_EVENTS.includes(e.kind);
 
@@ -83,7 +98,7 @@ const W = 1000;
 const H = 180;
 const PAD = { l: 34, r: 8, t: 8, b: 20 };
 
-function AccountChart({
+const AccountChart = memo(function AccountChart({
   windows,
   events,
   from,
@@ -182,7 +197,7 @@ function AccountChart({
       </div>
     </div>
   );
-}
+});
 
 /* ------------------------------------------------------------------ yields */
 
@@ -242,7 +257,9 @@ function PerPointCell({ y, role }: { y: LimitYield; role: Role }) {
 const active = (y: LimitYield) => y.tokens.total > 0 || y.windows.some((w) => w.points > 0);
 
 function YieldTable({ yields, period }: { yields: LimitYield[]; period: LimitPeriod }) {
-  const rows = yields.filter(active);
+  const all = useMemo(() => yields.filter(active), [yields]);
+  const [shown, setShown] = useState(YIELD_PAGE);
+  const rows = all.length > shown ? all.slice(0, shown) : all;
   if (!rows.length) {
     return <p className="px-3 py-3 text-xs text-muted">Nothing yet — this fills in as accounts are used.</p>;
   }
@@ -309,6 +326,14 @@ function YieldTable({ yields, period }: { yields: LimitYield[]; period: LimitPer
           </tbody>
         </table>
       </div>
+      {all.length > rows.length && (
+        <div className="flex items-center gap-2 px-2 pb-1 text-2xs text-faint">
+          Showing the newest {count(rows.length)} of {count(all.length)} periods
+          <Button variant="link" onClick={() => setShown((n) => n + YIELD_PAGE)}>
+            Show {count(Math.min(YIELD_PAGE, all.length - rows.length))} more
+          </Button>
+        </div>
+      )}
     </div>
   );
 }
@@ -316,22 +341,56 @@ function YieldTable({ yields, period }: { yields: LimitYield[]; period: LimitPer
 /* ----------------------------------------------------------------- subpage */
 
 export function LimitMetrics() {
+  // Field-selected and shallow-compared — see `UsageMetrics`.
   const { report, rangeId, setRange, period, setPeriod, load, poll, loading, refetching, error } =
-    useLimitMetrics();
+    useLimitMetrics(
+      useShallow((s) => ({
+        report: s.report,
+        rangeId: s.rangeId,
+        setRange: s.setRange,
+        period: s.period,
+        setPeriod: s.setPeriod,
+        load: s.load,
+        poll: s.poll,
+        loading: s.loading,
+        refetching: s.refetching,
+        error: s.error,
+      })),
+    );
 
   useEffect(() => {
     void load();
-    const t = setInterval(() => void poll(), POLL_MS);
-    return () => clearInterval(t);
+    // No polling while the tab is hidden: nobody is looking, and each poll is
+    // a full read on the server. Coming back catches up at once rather than
+    // showing a figure up to a minute stale.
+    const t = setInterval(() => {
+      if (!document.hidden) void poll();
+    }, POLL_MS);
+    const onVisible = () => {
+      if (!document.hidden) void poll();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // "Now" is taken when a REPORT lands, not on every render: a fresh
+  // `Date.now()` per render changed `to` on every re-render, which re-ran
+  // each chart's tick memo and handed the yield chart new props for nothing.
+  // The range is part of the key so a range switch re-anchors immediately.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const to = useMemo(() => Date.now(), [report, rangeId]);
   const preset = RANGE_PRESETS.find((r) => r.id === rangeId);
-  const to = Date.now();
   const from = preset?.ms ? to - preset.ms : (report?.oldest ?? to - 86_400_000);
-  const events = report?.events ?? [];
-  const unexpected = events.filter(isUnexpected);
-  const resets = events.filter((e) => e.kind === "reset" || e.kind === "early_reset");
+  const events = report?.events ?? NO_EVENTS;
+  const unexpected = useMemo(() => events.filter(isUnexpected), [events]);
+  const resets = useMemo(
+    () => events.filter((e) => e.kind === "reset" || e.kind === "early_reset"),
+    [events],
+  );
 
   const accounts = useMemo(() => {
     const ids = new Set<string>();
@@ -434,8 +493,8 @@ export function LimitMetrics() {
             note="API value per point of each window · a turn's spend is spread over the time it ran · hover a bar for its figures"
           >
             <YieldChart
-              yields={report?.yields ?? []}
-              windows={report?.windows ?? []}
+              yields={report?.yields ?? NO_YIELDS}
+              windows={report?.windows ?? NO_WINDOWS}
               period={report?.period ?? period}
               from={from}
               to={to}
@@ -445,7 +504,7 @@ export function LimitMetrics() {
               <summary className="cursor-pointer select-none px-3 py-2 text-2xs text-muted hover:text-secondary">
                 Per-period table
               </summary>
-              <YieldTable yields={report?.yields ?? []} period={report?.period ?? period} />
+              <YieldTable yields={report?.yields ?? NO_YIELDS} period={report?.period ?? period} />
             </details>
           </Card>
 

@@ -24,7 +24,7 @@
  * hue: the direction is already carried by which side of the axis they sit on,
  * and a red/green pair would put a status colour on a category.
  */
-import { useMemo } from "react";
+import { memo, useMemo } from "react";
 import {
   Area,
   AreaChart,
@@ -59,7 +59,18 @@ interface Props {
   height?: number;
 }
 
-export function GrowthChart({ measure, shape, palette, color, height = 300 }: Props) {
+/**
+ * Memoised: the Growth store writes a progress frame every ~120 ms during a
+ * walk, and on Reload the previous report stays on screen under it — so an
+ * unmemoised chart redrew every bar of the old report a dozen times a second.
+ */
+export const GrowthChart = memo(function GrowthChart({
+  measure,
+  shape,
+  palette,
+  color,
+  height = 300,
+}: Props) {
   const tick = useMemo(() => tickFor(shape.bucket), [shape.bucket]);
   const { series, buckets } = shape;
 
@@ -257,4 +268,4 @@ export function GrowthChart({ measure, shape, palette, color, height = 300 }: Pr
       </BarChart>
     </ResponsiveContainer>
   );
-}
+});
