@@ -66,6 +66,7 @@ import {
   type UnionRow,
 } from "./metrics-spans.js";
 import { SPAN_LONG_MS, SPAN_LONG_SQL, type StateDb } from "../store/db.js";
+import { HOUR_MS, floorHour, invalidateRollups, rollupFrontier } from "./metrics-rollup.js";
 
 /**
  * The states that are the agent actually running — everything outside the
@@ -109,6 +110,10 @@ const COLUMN: Record<MetricDimension, string> = {
 };
 
 const DIMENSIONS = Object.keys(COLUMN) as MetricDimension[];
+
+/** Every dimension column of the event ledger — the rollup's key, and what a
+ * usage read's source selects so any filter or group-by can run over it. */
+const USAGE_COLUMNS = "category, identifier, detail, project_id, chat_id, agent, subagent, model, harness, source";
 
 /**
  * Dimensions the filter UI does NOT offer as a pick-list. Both are unbounded —
@@ -289,6 +294,12 @@ interface Where {
   params: (string | number)[];
 }
 
+/** The `clipped` CTE a span read opens with; `mid` is the rolled-up stretch
+ * `[h1, h2)` when the read is mixed, null when it is raw throughout. */
+interface SpanPlan extends Where {
+  mid: { h1: number; h2: number } | null;
+}
+
 /**
  * Where a metric row lands when it names a Dispatch tool that no longer exists.
  *
@@ -327,6 +338,7 @@ export class MetricsService {
   private spanCloses = new Map<string, BufferedClose>();
   /** Keys this process opened and hasn't closed — what the heartbeat is for. */
   private readonly openKeys = new Set<string>();
+  private readonly memos = new Map<string, { stamp: string; value: unknown }>();
 
   constructor(deps: MetricsServiceDeps) {
     this.db = deps.db;
@@ -640,23 +652,23 @@ export class MetricsService {
    * only the column name comes from {@link COLUMN}, so nothing a client sends
    * ever reaches the SQL text.
    */
-  private where(from: number, to: number, filter: MetricFilter | undefined): Where {
-    const clauses = ["ts >= ?", "ts < ?"];
+  private where(from: number, to: number, filter: MetricFilter | undefined, col = "ts"): Where {
+    const clauses = [`${col} >= ?`, `${col} < ?`];
     const params: (string | number)[] = [from, to];
     for (const dim of DIMENSIONS) {
       const values = filter?.[dim];
       if (!values || values.length === 0) continue;
-      const col = COLUMN[dim];
+      const column = COLUMN[dim];
       // An explicit "" selects rows where the column is NULL. "(default agent)"
       // is a real group in every chart, so it has to be a selectable one too.
       const hasNull = values.includes("");
       const concrete = values.filter((v) => v !== "");
       const parts: string[] = [];
       if (concrete.length) {
-        parts.push(`${col} IN (${concrete.map(() => "?").join(",")})`);
+        parts.push(`${column} IN (${concrete.map(() => "?").join(",")})`);
         params.push(...concrete);
       }
-      if (hasNull) parts.push(`${col} IS NULL`);
+      if (hasNull) parts.push(`${column} IS NULL`);
       clauses.push(`(${parts.join(" OR ")})`);
     }
     return { sql: clauses.join(" AND "), params };
@@ -672,6 +684,43 @@ export class MetricsService {
   }
 
   /**
+   * Every usage row in a window, as `(t, <dimensions>, n, last)` — the one
+   * source the Usage reads aggregate over.
+   *
+   * Whole hours below the rollup frontier come from `metric_hour` (one row per
+   * hour × dimension tuple, `n` rows each); the partial hours at either end,
+   * and anything past the frontier, come from `metric` with `n = 1`. Counts,
+   * distinct chats and latest-ts are all exact over that union, because every
+   * dimension is in the rollup's key — see services/metrics-rollup.ts. A 90-day
+   * read used to walk ~570k raw rows; it now walks the rollup plus two edge
+   * hours.
+   *
+   * Call inside `db.read()`: the frontier and the rows it licenses must be
+   * read from the same snapshot.
+   */
+  private usageRows(from: number, to: number, filter: MetricFilter | undefined): Where {
+    const raw = (a: number, b: number): Where => {
+      const w = this.where(a, b, filter);
+      return {
+        sql: `SELECT ts AS t, ${USAGE_COLUMNS}, 1 AS n, ts AS last FROM metric WHERE ${w.sql}`,
+        params: w.params,
+      };
+    };
+    const h1 = Math.ceil(from / HOUR_MS) * HOUR_MS;
+    const h2 = Math.min(floorHour(to), rollupFrontier(this.db));
+    if (h2 <= h1) return raw(from, to);
+    const left = raw(from, h1);
+    const mid = this.where(h1, h2, filter, "hour");
+    const right = raw(h2, to);
+    return {
+      sql: `${left.sql}
+        UNION ALL SELECT hour AS t, ${USAGE_COLUMNS}, n, last FROM metric_hour WHERE ${mid.sql}
+        UNION ALL ${right.sql}`,
+      params: [...left.params, ...mid.params, ...right.params],
+    };
+  }
+
+  /**
    * The time chart. Buckets are GAP-FILLED, so a quiet day renders as a zero
    * rather than as a straight line drawn between its neighbours.
    */
@@ -681,15 +730,19 @@ export class MetricsService {
     const bucket = resolveBucket(query.bucket ?? "auto", from, to);
     const empty: MetricSeriesResponse = { buckets: [], bucket, series: [], total: 0, truncated: 0 };
 
-    const w = this.where(from, to, query.filter);
     const groupCol = query.groupBy ? COLUMN[query.groupBy] : null;
-    const rows = this.db
-      .prepare(
-        `SELECT ${bucketSql(bucket)} AS b, ${groupCol ? `COALESCE(${groupCol}, '')` : "''"} AS g,
-                COUNT(*) AS c
-         FROM metric WHERE ${w.sql} GROUP BY b, g`,
-      )
-      .all(...w.params) as { b: number; g: string; c: number }[];
+    // Every bucket width is a whole number of UTC hours, so bucketing a rollup
+    // row by its hour lands it exactly where its raw rows would have gone.
+    const rows = this.db.read(() => {
+      const src = this.usageRows(from, to, query.filter);
+      return this.db
+        .prepare(
+          `SELECT ${bucketSql(bucket, "t")} AS b, ${groupCol ? `COALESCE(${groupCol}, '')` : "''"} AS g,
+                  SUM(n) AS c
+           FROM (${src.sql}) GROUP BY b, g`,
+        )
+        .all(...src.params) as { b: number; g: string; c: number }[];
+    });
     if (rows.length === 0) return empty;
 
     // Rank the groups by total and keep the top `limit`; the rest fold into one
@@ -745,16 +798,25 @@ export class MetricsService {
   totals(query: MetricQueryInput & { groupBy: MetricDimension }): MetricTotalsResponse {
     this.flush();
     const { from, to } = this.window(query);
-    const w = this.where(from, to, query.filter);
     const col = COLUMN[query.groupBy];
-    const rows = this.db
-      .prepare(
-        `SELECT COALESCE(${col}, '') AS g, COUNT(*) AS c,
-                COUNT(DISTINCT chat_id) AS chats, MAX(ts) AS last
-         FROM metric WHERE ${w.sql}
-         GROUP BY g ORDER BY c DESC, g ASC`,
-      )
-      .all(...w.params) as { g: string; c: number; chats: number; last: number }[];
+    const { rows, reach } = this.db.read(() => {
+      const src = this.usageRows(from, to, query.filter);
+      const rows = this.db
+        .prepare(
+          `SELECT COALESCE(${col}, '') AS g, SUM(n) AS c,
+                  COUNT(DISTINCT chat_id) AS chats, MAX(last) AS last
+           FROM (${src.sql})
+           GROUP BY g ORDER BY c DESC, g ASC`,
+        )
+        .all(...src.params) as { g: string; c: number; chats: number; last: number }[];
+      // Counted across the whole filtered set rather than folded out of `rows`:
+      // one chat shows up under many groups, so a sum over-reports its reach and
+      // a max under-reports it.
+      const reach = this.db
+        .prepare(`SELECT COUNT(DISTINCT chat_id) AS chats FROM (${src.sql})`)
+        .get(...src.params) as { chats: number } | undefined;
+      return { rows, reach };
+    });
 
     const limit = query.limit ?? 8;
     const totals = rows.slice(0, limit).map((r) => ({
@@ -777,12 +839,6 @@ export class MetricsService {
         lastAt: rest.reduce((max, r) => Math.max(max, Number(r.last)), 0),
       });
     }
-    // Counted across the whole filtered set rather than folded out of `rows`:
-    // one chat shows up under many groups, so a sum over-reports its reach and
-    // a max under-reports it.
-    const reach = this.db
-      .prepare(`SELECT COUNT(DISTINCT chat_id) AS chats FROM metric WHERE ${w.sql}`)
-      .get(...w.params) as { chats: number } | undefined;
     return {
       totals,
       total: rows.reduce((sum, r) => sum + Number(r.c), 0),
@@ -800,36 +856,65 @@ export class MetricsService {
   facets(opts: { from?: number; to?: number; filter?: MetricFilter } = {}): MetricFacetsResponse {
     this.flush();
     const { from, to } = this.window(opts);
-    const facets: MetricFacetsResponse["facets"] = {};
-    for (const dim of DIMENSIONS) {
-      if (UNFACETED.has(dim)) continue;
-      // Each dimension's options are computed WITHOUT its own filter applied, so
-      // selecting "agent: X" doesn't make every other agent vanish from the list
-      // you'd need in order to change your mind.
-      const filter = { ...(opts.filter ?? {}) };
-      delete filter[dim];
-      const w = this.where(from, to, filter);
-      const rows = this.db
-        .prepare(
-          // `v ASC` is a tie-break, not a nicety. Without it SQLite may return
-          // equal-count values in any order, so a pick-list would reshuffle
-          // between loads — and worse, at the LIMIT boundary the tie decides
-          // which values are in the list at all. Matches `totals()`, which
-          // already breaks its ties the same way.
-          `SELECT COALESCE(${COLUMN[dim]}, '') AS v, COUNT(*) AS c FROM metric
-           WHERE ${w.sql} GROUP BY v ORDER BY c DESC, v ASC LIMIT ${FACET_LIMIT}`,
-        )
-        .all(...w.params) as { v: string; c: number }[];
-      facets[dim] = rows.map((r) => ({ value: r.v, count: Number(r.c) }));
-    }
-    const span = this.db.prepare("SELECT MIN(ts) AS lo, MAX(ts) AS hi, COUNT(*) AS n FROM metric").get() as
-      | { lo: number | null; hi: number | null; n: number }
-      | undefined;
-    return {
-      facets,
-      range: { from: span?.lo ?? null, to: span?.hi ?? null },
-      rows: Number(span?.n ?? 0),
-    };
+    return this.db.read(() => {
+      const facets: MetricFacetsResponse["facets"] = {};
+      for (const dim of DIMENSIONS) {
+        if (UNFACETED.has(dim)) continue;
+        // Each dimension's options are computed WITHOUT its own filter applied, so
+        // selecting "agent: X" doesn't make every other agent vanish from the list
+        // you'd need in order to change your mind.
+        const filter = { ...(opts.filter ?? {}) };
+        delete filter[dim];
+        const src = this.usageRows(from, to, filter);
+        const rows = this.db
+          .prepare(
+            // `v ASC` is a tie-break, not a nicety. Without it SQLite may return
+            // equal-count values in any order, so a pick-list would reshuffle
+            // between loads — and worse, at the LIMIT boundary the tie decides
+            // which values are in the list at all. Matches `totals()`, which
+            // already breaks its ties the same way.
+            `SELECT COALESCE(${COLUMN[dim]}, '') AS v, SUM(n) AS c FROM (${src.sql})
+             GROUP BY v ORDER BY c DESC, v ASC LIMIT ${FACET_LIMIT}`,
+          )
+          .all(...src.params) as { v: string; c: number }[];
+        facets[dim] = rows.map((r) => ({ value: r.v, count: Number(r.c) }));
+      }
+      const span = this.memo(
+        "range:metric",
+        () =>
+          this.db.prepare("SELECT MIN(ts) AS lo, MAX(ts) AS hi, COUNT(*) AS n FROM metric").get() as
+            | { lo: number | null; hi: number | null; n: number }
+            | undefined,
+      );
+      return {
+        facets,
+        range: { from: span?.lo ?? null, to: span?.hi ?? null },
+        rows: Number(span?.n ?? 0),
+      };
+    });
+  }
+
+  /**
+   * Remember a whole-ledger read until the database changes.
+   *
+   * The facets' `range` is `MIN/MAX/COUNT` over an entire table — 50–120 ms
+   * warm on the live ledger and several times that cold, paid on every facet
+   * refresh, for a figure that only moves when a row is written.
+   * `PRAGMA data_version` changes whenever ANOTHER connection commits — on the
+   * worker, every write the main thread or the rollup builder makes;
+   * `total_changes()` covers this connection's own, which data_version
+   * deliberately ignores.
+   */
+  private memo<T>(key: string, compute: () => T): T {
+    const v = this.db
+      .prepare("SELECT (SELECT data_version FROM pragma_data_version) AS dv, total_changes() AS tc")
+      .get() as { dv: number; tc: number } | undefined;
+    const stamp = `${v?.dv ?? 0}:${v?.tc ?? 0}`;
+    const hit = this.memos.get(key);
+    if (hit && hit.stamp === stamp) return hit.value as T;
+    const value = compute();
+    this.memos.set(key, { stamp, value });
+    return value;
   }
 
   /** The most recent matching rows — the activity tail under the charts. */
@@ -844,6 +929,18 @@ export class MetricsService {
       .prepare(`SELECT * FROM metric WHERE ${w.sql} ORDER BY ts DESC, seq DESC LIMIT ?`)
       .all(...w.params, limit) as Record<string, unknown>[];
     return rows.map(rowToEvent);
+  }
+
+  /** Write health alone — the half of {@link stats} that lives in this
+   * process's memory rather than in the database, so the route can take the
+   * counts from the worker and these from the thread that owns the buffer. */
+  bufferStats(): { buffered: number; dropped: number; spansBuffered: number; openSpans: number } {
+    return {
+      buffered: this.buffer.length,
+      dropped: this.dropped,
+      spansBuffered: this.spanBuffer.length + this.spanCloses.size,
+      openSpans: this.openKeys.size,
+    };
   }
 
   /** Ledger size + write health, for the page footer. */
@@ -1026,6 +1123,11 @@ export class MetricsService {
   prune(before: number): number {
     this.flush();
     return this.db.tx(() => {
+      // FIRST, so the rollup triggers see a frontier of 0 and stay quiet:
+      // left armed they would log every one of a few hundred thousand deleted
+      // rows as dirty, only for the worker to recompute hours that a rebuild
+      // from scratch serves faster. Reads go raw until the rebuild catches up.
+      invalidateRollups(this.db);
       const events = this.db.prepare("DELETE FROM metric WHERE ts < ?").run(before);
       // A span is history once it ENDED before the cut-off. One still running,
       // or one that started last month and is still going, is not.
@@ -1218,8 +1320,19 @@ export class MetricsService {
     live: number,
     filter: MetricSpanFilter | undefined,
   ): Where {
-    const clauses = ["COALESCE(end_ts, ?) > ?"];
-    const params: (string | number)[] = [live, from];
+    const f = this.spanFilter(filter);
+    return {
+      sql: f.sql ? `COALESCE(end_ts, ?) > ? AND ${f.sql}` : "COALESCE(end_ts, ?) > ?",
+      params: [live, from, ...f.params],
+    };
+  }
+
+  /** Just the dimension filter, as `AND`-joined clauses ("" when there is
+   * none). Column names are shared by `metric_span` and `metric_span_hour`, so
+   * this narrows either. */
+  private spanFilter(filter: MetricSpanFilter | undefined): Where {
+    const clauses: string[] = [];
+    const params: (string | number)[] = [];
     for (const dim of SPAN_DIMENSIONS) {
       const values = filter?.[dim];
       if (!values || values.length === 0) continue;
@@ -1238,35 +1351,226 @@ export class MetricsService {
   }
 
   /**
-   * The CTE every span read opens with: matching rows, CLIPPED to the window.
+   * The CTE every span read opens with: `clipped`, the window's spans as
+   * `(g, state, chat_id, run_id, still_open, s, e, ms, n, src)`. Readers SUM
+   * `ms` (attributed time inside the window) and `n` (spans counted), take
+   * `MAX(e)` for recency, and union `[s, e)` per actor where `src = 0`.
    *
-   * Clipping here rather than in each query is what lets the four readers below
-   * be simple sums — by the time they see a row, `e - s` is already the part of
-   * it that belongs to this window and nothing else. `MAX(e0, s0)` is a floor at
-   * zero for the pathological row whose end precedes its start.
+   * RAW, when the rollup cannot cover a whole hour of the window: one row per
+   * span, CLIPPED to the window. Clipping here rather than in each query is
+   * what lets the readers be simple sums — `e - s` is already the part of the
+   * span that belongs to this window. `MAX(e0, s0)` floors the pathological
+   * row whose end precedes its start.
+   *
+   * MIXED, otherwise. The window is cut at `h1` (the first hour boundary
+   * strictly after `from`) and `h2` (the last one at or before `to`, never
+   * past the rollup frontier):
+   *   - closed spans overlapping [from, h1): raw, clipped to it, n = 1;
+   *   - closed spans overlapping [h2, to): raw, clipped to it, n = 1 only if
+   *     they STARTED there (one that started earlier was counted already).
+   *     "Overlapping" is the raw test exactly — a span ENDING on h2 is not in
+   *     it, or its empty piece would conjure a chart bucket the raw read has
+   *     no row for. And when `to` IS h2 the edge is empty and yields nothing,
+   *     for the same reason;
+   *   - open spans: raw, clipped to the whole window, n = 1 — never rolled up;
+   *   - the closed spans' slices in [h1, h2): `metric_span_hour`, `src = 1`.
+   * Every closed span is counted once, by the slice its clipped start falls
+   * in, and its time is split across slices that partition the window — so
+   * every sum equals the raw one. `h1` is STRICTLY after `from` because the
+   * raw overlap test drops a zero-length span sitting exactly on `from`, while
+   * the rollup files it under that hour.
+   *
+   * Call inside `db.read()`.
    */
-  private clipped(
+  private spanPlan(
     from: number,
     to: number,
     live: number,
     filter: MetricSpanFilter | undefined,
     groupExpr: string,
-  ): Where {
-    const w = this.spanWhere(from, to, live, filter);
+  ): SpanPlan {
     // COALESCE, because "" IS the NULL group everywhere else in the feature —
     // `spanLabelFor` renders it, and a filter chip sends it back to select the
     // NULL rows. Without it the commonest group of all leaks out as a literal
     // null: `run_id` is NULL for every main-loop span, so grouping by run would
     // key the whole main loop on nothing.
-    const sql = `WITH raw AS (
-      SELECT COALESCE(${groupExpr}, '') AS g, state, chat_id, run_id,
-             CASE WHEN end_ts IS NULL THEN 1 ELSE 0 END AS still_open,
-             MAX(start_ts, ?) AS s0, MIN(COALESCE(end_ts, ?), ?) AS e0
-      FROM metric_span WHERE ${w.sql}
-    ), clipped AS (
-      SELECT g, state, chat_id, run_id, still_open, s0 AS s, MAX(e0, s0) AS e FROM raw
-    )`;
-    return { sql, params: [from, live, to, ...w.params] };
+    const g = `COALESCE(${groupExpr}, '')`;
+    const h1 = floorHour(from) + HOUR_MS;
+    const h2 = Math.min(floorHour(to), rollupFrontier(this.db));
+    if (h2 <= h1) {
+      const w = this.spanWhere(from, to, live, filter);
+      return {
+        sql: `WITH raw AS (
+          SELECT ${g} AS g, state, chat_id, run_id,
+                 CASE WHEN end_ts IS NULL THEN 1 ELSE 0 END AS still_open,
+                 MAX(start_ts, ?) AS s0, MIN(COALESCE(end_ts, ?), ?) AS e0
+          FROM metric_span WHERE ${w.sql}
+        ), clipped AS (
+          SELECT g, state, chat_id, run_id, still_open, s0 AS s, MAX(e0, s0) AS e,
+                 MAX(e0, s0) - s0 AS ms, 1 AS n, 0 AS src FROM raw
+        )`,
+        params: [from, live, to, ...w.params],
+        mid: null,
+      };
+    }
+    const f = this.spanFilter(filter);
+    const and = f.sql ? ` AND ${f.sql}` : "";
+    const left = this.spanWhere(from, h1, live, filter);
+    const rlo = h2 - SPAN_LONG_MS;
+    const cols = `${g} AS g, state, chat_id, run_id, start_ts, end_ts`;
+    return {
+      sql: `WITH lr AS (
+        SELECT ${cols} FROM metric_span WHERE ${left.sql} AND end_ts IS NOT NULL
+      ), rr AS (
+        SELECT ${cols} FROM metric_span
+         WHERE seq IN (SELECT seq FROM metric_span WHERE start_ts >= ? AND start_ts < ?
+                       UNION ALL SELECT seq FROM metric_span WHERE ${SPAN_LONG_SQL} AND start_ts < ?)
+           AND end_ts IS NOT NULL AND (end_ts > ? OR start_ts >= ?) AND ? < ?${and}
+      ), op AS (
+        SELECT ${cols} FROM metric_span WHERE end_ts IS NULL AND start_ts < ? AND ? > ?${and}
+      ), pieces AS (
+        SELECT g, state, chat_id, run_id, 0 AS still_open, MAX(start_ts, ?) AS s,
+               MIN(end_ts, ?) AS e0, 1 AS n FROM lr
+        UNION ALL
+        SELECT g, state, chat_id, run_id, 0, MAX(start_ts, ?), MIN(end_ts, ?),
+               CASE WHEN start_ts >= ? THEN 1 ELSE 0 END FROM rr
+        UNION ALL
+        SELECT g, state, chat_id, run_id, 1, MAX(start_ts, ?), MIN(?, ?), 1 FROM op
+      ), clipped AS (
+        SELECT g, state, chat_id, run_id, still_open, s, MAX(e0, s) AS e, MAX(e0, s) - s AS ms, n,
+               0 AS src FROM pieces
+        UNION ALL
+        SELECT ${g}, state, chat_id, run_id, 0, hour, last, ms, n, 1 FROM metric_span_hour
+         WHERE hour >= ? AND hour < ?${and}
+      )`,
+      params: [
+        ...left.params,
+        rlo, to, rlo, h2, h2, h2, to, ...f.params,
+        to, live, from, ...f.params,
+        from, h1,
+        h2, to, h2,
+        from, live, to,
+        h1, h2, ...f.params,
+      ],
+      mid: { h1, h2 },
+    };
+  }
+
+  /**
+   * Busy time (wall clock, each actor's intervals unioned) for a plan, split
+   * into what JS must union and what the rollup already knows.
+   *
+   * `rows` are the RAW intervals, sorted for {@link unionByGroup}; `roll` is
+   * the rollup's share, per group plus "everything" and the fold of every
+   * group NOT in `kept`. The two halves cover disjoint time per actor, so a
+   * group's busy time is `union(rows)[g] + roll.byGroup[g]` — exactly what one
+   * raw union over the whole window gives.
+   *
+   * The rollup's share is the sum of `metric_span_seg` segments holding at
+   * least one selected row (see metrics-rollup.ts for why that is the exact
+   * union). One wrinkle: an OPEN span is not in the rollup, and the union of
+   * an open interval with stored segments can't be recovered from lengths. So
+   * for any actor with an open span reaching into [h1, h2), the hours from its
+   * start on are taken out of the rollup's share and that actor's closed spans
+   * there are read raw instead. Open spans are a handful at any moment.
+   */
+  private spanBusy(
+    plan: SpanPlan,
+    live: number,
+    filter: MetricSpanFilter | undefined,
+    groupExpr: string,
+    kept: ReadonlySet<string> | null,
+  ): { rows: UnionRow[]; roll: { byGroup: Map<string, number>; all: number; other: number } } {
+    const roll = { byGroup: new Map<string, number>(), all: 0, other: 0 };
+    if (!plan.mid) {
+      const rows = this.db
+        .prepare(
+          `${plan.sql} SELECT g, COALESCE(chat_id, '') AS c, COALESCE(run_id, '') AS r, s, e
+           FROM clipped ORDER BY g, c, r, s`,
+        )
+        .all(...plan.params) as UnionRow[];
+      return { rows, roll };
+    }
+    const { h1, h2 } = plan.mid;
+    const g = `COALESCE(${groupExpr}, '')`;
+    const f = this.spanFilter(filter);
+    const and = f.sql ? ` AND ${f.sql}` : "";
+    const rows = this.db
+      .prepare(
+        `${plan.sql} SELECT g, COALESCE(chat_id, '') AS c, COALESCE(run_id, '') AS r, s, e
+         FROM clipped WHERE src = 0`,
+      )
+      .all(...plan.params) as UnionRow[];
+
+    // Actors whose open span reaches into the rolled-up hours, and from which
+    // hour on. `s` is already clipped to `from`, which is < h1.
+    const open = this.db
+      .prepare(
+        `${plan.sql} SELECT chat_id, run_id, MIN(s) AS s FROM clipped
+         WHERE still_open = 1 AND s < ? GROUP BY chat_id, run_id`,
+      )
+      .all(...plan.params, h2) as { chat_id: string | null; run_id: string | null; s: number }[];
+    const exclude: string[] = [];
+    const excludeParams: (string | number | null)[] = [];
+    for (const o of open) {
+      const hx = Math.max(h1, floorHour(Number(o.s)));
+      const lo = hx - SPAN_LONG_MS;
+      const extra = this.db
+        .prepare(
+          `SELECT ${g} AS g, COALESCE(chat_id, '') AS c, COALESCE(run_id, '') AS r,
+                  MAX(start_ts, ?) AS s, MAX(MIN(end_ts, ?), MAX(start_ts, ?)) AS e
+             FROM metric_span
+            WHERE seq IN (SELECT seq FROM metric_span
+                           WHERE chat_id IS ? AND run_id IS ? AND start_ts >= ? AND start_ts < ?
+                          UNION ALL SELECT seq FROM metric_span
+                           WHERE ${SPAN_LONG_SQL} AND start_ts < ? AND chat_id IS ? AND run_id IS ?)
+              AND end_ts IS NOT NULL AND end_ts > ?${and}`,
+        )
+        .all(hx, h2, hx, o.chat_id, o.run_id, lo, h2, lo, o.chat_id, o.run_id, hx, ...f.params) as UnionRow[];
+      rows.push(...extra);
+      exclude.push("(chat_id IS ? AND run_id IS ? AND hour >= ?)");
+      excludeParams.push(o.chat_id, o.run_id, hx);
+    }
+    rows.sort((a, b) =>
+      a.g < b.g ? -1 : a.g > b.g ? 1 : a.c < b.c ? -1 : a.c > b.c ? 1 : a.r < b.r ? -1 : a.r > b.r ? 1 : a.s - b.s,
+    );
+
+    // The selected rollup rows, as a sub-select every busy query below joins
+    // to its segments through.
+    const sel = `SELECT id, ${g} AS g FROM metric_span_hour
+                  WHERE hour >= ? AND hour < ?${and}${exclude.length ? ` AND NOT (${exclude.join(" OR ")})` : ""}`;
+    const selParams = [h1, h2, ...f.params, ...excludeParams] as (string | number | null)[];
+    // DISTINCT (segment, group): a segment counts once per group that has a
+    // row active in it, however many of that group's rows it holds.
+    for (const r of this.db
+      .prepare(
+        `SELECT x.g AS g, SUM(sg.dur) AS busy FROM (
+           SELECT DISTINCT k.seg_id AS seg, r.g AS g FROM (${sel}) r
+             JOIN metric_span_seg_key k ON k.row_id = r.id) x
+         JOIN metric_span_seg sg ON sg.id = x.seg GROUP BY x.g`,
+      )
+      .all(...selParams) as { g: string; busy: number }[]) {
+      roll.byGroup.set(r.g, Number(r.busy ?? 0));
+    }
+    const segSum = (where: string, params: (string | number | null)[]): number =>
+      Number(
+        (
+          this.db
+            .prepare(
+              `SELECT SUM(dur) AS busy FROM metric_span_seg WHERE id IN (
+                 SELECT k.seg_id FROM (${sel}) r JOIN metric_span_seg_key k ON k.row_id = r.id ${where})`,
+            )
+            .get(...selParams, ...params) as { busy: number | null } | undefined
+        )?.busy ?? 0,
+      );
+    roll.all = roll.byGroup.size <= 1 ? [...roll.byGroup.values()].reduce((a, b) => a + b, 0) : segSum("", []);
+    if (kept) {
+      const keys = [...kept];
+      roll.other = keys.length
+        ? segSum(`WHERE r.g NOT IN (${keys.map(() => "?").join(",")})`, keys)
+        : roll.all;
+    }
+    return { rows, roll };
   }
 
   /**
@@ -1278,7 +1582,8 @@ export class MetricsService {
    * a recursive walk, so those few come back as rows and are distributed here.
    * The alternative — banking every span whole against the bucket it started in
    * — is wrong by exactly the amount that matters, because the spans that
-   * straddle are the long ones.
+   * straddle are the long ones. A rollup row always lies inside its own hour,
+   * and every bucket is whole hours, so rollup rows are always "contained".
    */
   spanSeries(query: MetricSpanQueryInput): MetricSpanSeriesResponse {
     this.flush();
@@ -1286,23 +1591,26 @@ export class MetricsService {
     const live = this.now();
     const bucket = resolveBucket(query.bucket ?? "auto", from, to);
     const groupExpr = query.groupBy ? SPAN_COLUMN[query.groupBy] : "''";
-    const cte = this.clipped(from, to, live, query.filter, groupExpr);
     // The bucket a clipped span starts in, and the one its LAST millisecond
     // falls in. Equal ⇒ it fits in one bucket. `MAX(s, e - 1)` keeps a
     // zero-length span (a tool whose call and result arrived in the same tick)
     // on the contained side instead of sending it round the split for 0 ms.
     const startB = bucketSql(bucket, "s");
     const endB = bucketSql(bucket, "MAX(s, e - 1)");
-
-    const contained = this.db
-      .prepare(
-        `${cte.sql} SELECT g, ${startB} AS b, SUM(e - s) AS ms, COUNT(*) AS n
-         FROM clipped WHERE ${startB} = ${endB} GROUP BY g, b`,
-      )
-      .all(...cte.params) as { g: string; b: number; ms: number; n: number }[];
-    const straddling = this.db
-      .prepare(`${cte.sql} SELECT g, s, e FROM clipped WHERE ${startB} <> ${endB}`)
-      .all(...cte.params) as { g: string; s: number; e: number }[];
+    const { contained, straddling } = this.db.read(() => {
+      const cte = this.spanPlan(from, to, live, query.filter, groupExpr);
+      return {
+        contained: this.db
+          .prepare(
+            `${cte.sql} SELECT g, ${startB} AS b, SUM(ms) AS ms, SUM(n) AS n
+             FROM clipped WHERE ${startB} = ${endB} GROUP BY g, b`,
+          )
+          .all(...cte.params) as { g: string; b: number; ms: number; n: number }[],
+        straddling: this.db
+          .prepare(`${cte.sql} SELECT g, s, e, n FROM clipped WHERE ${startB} <> ${endB}`)
+          .all(...cte.params) as { g: string; s: number; e: number; n: number }[],
+      };
+    });
 
     const empty: MetricSpanSeriesResponse = {
       buckets: [],
@@ -1330,7 +1638,7 @@ export class MetricsService {
       hi = Math.max(hi, Number(r.b));
     }
     for (const r of straddling) {
-      seen(r.g, r.e - r.s, 1);
+      seen(r.g, r.e - r.s, Number(r.n));
       lo = Math.min(lo, bucketStart(r.s, bucket));
       hi = Math.max(hi, bucketStart(Math.max(r.s, r.e - 1), bucket));
     }
@@ -1397,36 +1705,41 @@ export class MetricsService {
     this.flush();
     const { from, to } = this.window(query);
     const live = this.now();
-    const cte = this.clipped(from, to, live, query.filter, SPAN_COLUMN[query.groupBy]);
-    const rows = this.db
-      .prepare(
-        `${cte.sql} SELECT g, SUM(e - s) AS ms, COUNT(*) AS n,
-                COUNT(DISTINCT chat_id) AS chats, ${ACTOR_COUNT_SQL} AS actors, MAX(e) AS last
-         FROM clipped GROUP BY g ORDER BY ms DESC, g ASC`,
-      )
-      .all(...cte.params) as {
-      g: string;
-      ms: number;
-      n: number;
-      chats: number;
-      actors: number;
-      last: number;
-    }[];
-    const unionRows = this.db
-      .prepare(
-        `${cte.sql} SELECT g, COALESCE(chat_id, '') AS c, COALESCE(run_id, '') AS r, s, e
-         FROM clipped ORDER BY g, c, r, s`,
-      )
-      .all(...cte.params) as UnionRow[];
-    const busy = unionByGroup(unionRows);
-
+    const groupExpr = SPAN_COLUMN[query.groupBy];
     const limit = query.limit ?? 8;
+    const { rows, reach, busy } = this.db.read(() => {
+      const cte = this.spanPlan(from, to, live, query.filter, groupExpr);
+      const rows = this.db
+        .prepare(
+          `${cte.sql} SELECT g, SUM(ms) AS ms, SUM(n) AS n,
+                  COUNT(DISTINCT chat_id) AS chats, ${ACTOR_COUNT_SQL} AS actors, MAX(e) AS last
+           FROM clipped GROUP BY g ORDER BY ms DESC, g ASC`,
+        )
+        .all(...cte.params) as {
+        g: string;
+        ms: number;
+        n: number;
+        chats: number;
+        actors: number;
+        last: number;
+      }[];
+      const reach = this.db
+        .prepare(
+          `${cte.sql} SELECT COUNT(DISTINCT chat_id) AS chats, ${ACTOR_COUNT_SQL} AS actors FROM clipped`,
+        )
+        .get(...cte.params) as { chats: number; actors: number } | undefined;
+      const kept = rows.length > limit ? new Set(rows.slice(0, limit).map((r) => r.g)) : null;
+      return { rows, reach, busy: this.spanBusy(cte, live, query.filter, groupExpr, kept) };
+    });
+    const unionRows = busy.rows;
+    const busyByGroup = unionByGroup(unionRows);
+
     const head = rows.slice(0, limit);
     const totals = head.map((r) => ({
       key: r.g,
       label: spanLabelFor(r.g, query.groupBy),
       ms: Number(r.ms),
-      busyMs: busy.get(r.g) ?? 0,
+      busyMs: (busyByGroup.get(r.g) ?? 0) + (busy.roll.byGroup.get(r.g) ?? 0),
       count: Number(r.n),
       chats: Number(r.chats),
       actors: Number(r.actors),
@@ -1442,22 +1755,17 @@ export class MetricsService {
         // RE-UNIONED across the folded groups rather than summed from them: one
         // actor can appear in several, and adding their wall clocks would report
         // it twice. Same trap the `chats` column below sidesteps by taking a max.
-        busyMs: unionUnder(unionRows, METRIC_OTHER_KEY, (g) => !kept.has(g)),
+        busyMs: unionUnder(unionRows, METRIC_OTHER_KEY, (g) => !kept.has(g)) + busy.roll.other,
         count: rest.reduce((sum, r) => sum + Number(r.n), 0),
         chats: rest.reduce((max, r) => Math.max(max, Number(r.chats)), 0),
         actors: rest.reduce((max, r) => Math.max(max, Number(r.actors)), 0),
         lastAt: rest.reduce((max, r) => Math.max(max, Number(r.last)), 0),
       });
     }
-    const reach = this.db
-      .prepare(
-        `${cte.sql} SELECT COUNT(DISTINCT chat_id) AS chats, ${ACTOR_COUNT_SQL} AS actors FROM clipped`,
-      )
-      .get(...cte.params) as { chats: number; actors: number } | undefined;
     return {
       totals,
       ms: rows.reduce((sum, r) => sum + Number(r.ms), 0),
-      busyMs: unionUnder(unionRows, ""),
+      busyMs: unionUnder(unionRows, "") + busy.roll.all,
       groups: rows.length,
       chats: Number(reach?.chats ?? 0),
       actors: Number(reach?.actors ?? 0),
@@ -1471,26 +1779,25 @@ export class MetricsService {
     this.flush();
     const { from, to } = this.window(opts);
     const live = this.now();
-    const cte = this.clipped(from, to, live, opts.filter, "''");
-    const byState = this.db
-      .prepare(
-        `${cte.sql} SELECT state, SUM(e - s) AS ms, COUNT(*) AS n, SUM(still_open) AS open
-         FROM clipped GROUP BY state`,
-      )
-      .all(...cte.params) as { state: MetricState; ms: number; n: number; open: number }[];
-    const reach = this.db
-      .prepare(
-        `${cte.sql} SELECT COUNT(DISTINCT chat_id) AS chats, ${ACTOR_COUNT_SQL} AS actors FROM clipped`,
-      )
-      .get(...cte.params) as { chats: number; actors: number } | undefined;
-    // One group, so SQL's own ordering is already actor-then-time and the union
-    // is a single pass with no sort on this side.
-    const unionRows = this.db
-      .prepare(
-        `${cte.sql} SELECT g, COALESCE(chat_id, '') AS c, COALESCE(run_id, '') AS r, s, e
-         FROM clipped ORDER BY c, r, s`,
-      )
-      .all(...cte.params) as UnionRow[];
+    const { byState, reach, busy } = this.db.read(() => {
+      const cte = this.spanPlan(from, to, live, opts.filter, "''");
+      return {
+        byState: this.db
+          .prepare(
+            `${cte.sql} SELECT state, SUM(ms) AS ms, SUM(n) AS n, SUM(still_open) AS open
+             FROM clipped GROUP BY state`,
+          )
+          .all(...cte.params) as { state: MetricState; ms: number; n: number; open: number }[],
+        reach: this.db
+          .prepare(
+            `${cte.sql} SELECT COUNT(DISTINCT chat_id) AS chats, ${ACTOR_COUNT_SQL} AS actors FROM clipped`,
+          )
+          .get(...cte.params) as { chats: number; actors: number } | undefined,
+        // One group, so the rows are already actor-then-time and the union is
+        // a single pass.
+        busy: this.spanBusy(cte, live, opts.filter, "''", null),
+      };
+    });
 
     const states: MetricSpanSummary["byState"] = {};
     const classes: Partial<Record<MetricActivityClass, number>> = {};
@@ -1509,7 +1816,7 @@ export class MetricsService {
     return {
       from,
       to,
-      busyMs: unionByGroup(unionRows).get("") ?? 0,
+      busyMs: (unionByGroup(busy.rows).get("") ?? 0) + busy.roll.all,
       attributedMs,
       byState: states,
       byClass: classes,
@@ -1527,36 +1834,82 @@ export class MetricsService {
     this.flush();
     const { from, to } = this.window(opts);
     const live = this.now();
-    const facets: MetricSpanFacetsResponse["facets"] = {};
-    for (const dim of SPAN_DIMENSIONS) {
-      if (SPAN_UNFACETED.has(dim)) continue;
-      // A dimension's own filter is dropped before computing its options, so
-      // picking one value doesn't hide the others you'd need to change your mind.
-      const filter = { ...(opts.filter ?? {}) };
-      delete filter[dim];
-      const w = this.spanWhere(from, to, live, filter);
-      const rows = this.db
+    return this.db.read(() => {
+      const facets: MetricSpanFacetsResponse["facets"] = {};
+      for (const dim of SPAN_DIMENSIONS) {
+        if (SPAN_UNFACETED.has(dim)) continue;
+        // A dimension's own filter is dropped before computing its options, so
+        // picking one value doesn't hide the others you'd need to change your mind.
+        const filter = { ...(opts.filter ?? {}) };
+        delete filter[dim];
+        // `SUM(n)` over the plan counts each span in the window once — the
+        // same number the raw `COUNT(*)` over the overlap test gave.
+        const cte = this.spanPlan(from, to, live, filter, SPAN_COLUMN[dim]);
+        const rows = this.db
+          .prepare(
+            `${cte.sql} SELECT g AS v, SUM(n) AS c FROM clipped
+             GROUP BY v ORDER BY c DESC, v ASC LIMIT ${FACET_LIMIT}`,
+          )
+          .all(...cte.params) as { v: string; c: number }[];
+        facets[dim] = rows.map((r) => ({ value: r.v, count: Number(r.c) }));
+      }
+      const range = this.spanRange();
+      // An open span's effective end is NOW, exactly as every read treats it —
+      // falling back to its START would leave the range short of the present for
+      // as long as anything is running, which is when someone is most likely to
+      // be looking.
+      const hi = range.open ? Math.max(live, range.maxEnd ?? live) : range.maxEnd;
+      return {
+        facets,
+        range: { from: range.lo, to: hi },
+        rows: range.n,
+      };
+    });
+  }
+
+  /**
+   * The span ledger's extent, for the facets' `range`: earliest start, latest
+   * closed end, row count, and whether anything is open (whose end is "now",
+   * applied by the caller so the memo never freezes the clock).
+   *
+   * `MAX(end_ts)` has no index, so the obvious query scans the table. With
+   * the rollup it doesn't have to: a slice in a later hour always ends later
+   * than any slice in an earlier one, so the latest end among sealed spans is
+   * in the newest rolled-up hour; a span ending past the frontier either
+   * started within SPAN_LONG_MS of it or is long, and both are indexed.
+   */
+  private spanRange(): { lo: number | null; maxEnd: number | null; n: number; open: boolean } {
+    return this.memo("range:span", () => {
+      const base = this.db
         .prepare(
-          `SELECT COALESCE(${SPAN_COLUMN[dim]}, '') AS v, COUNT(*) AS c FROM metric_span
-           WHERE ${w.sql} GROUP BY v ORDER BY c DESC, v ASC LIMIT ${FACET_LIMIT}`,
+          `SELECT MIN(start_ts) AS lo, COUNT(*) AS n,
+                  EXISTS (SELECT 1 FROM metric_span WHERE end_ts IS NULL) AS open
+             FROM metric_span`,
         )
-        .all(...w.params) as { v: string; c: number }[];
-      facets[dim] = rows.map((r) => ({ value: r.v, count: Number(r.c) }));
-    }
-    // An open span's effective end is NOW, exactly as every read treats it —
-    // falling back to its START would leave the range short of the present for
-    // as long as anything is running, which is when someone is most likely to
-    // be looking.
-    const range = this.db
-      .prepare(
-        "SELECT MIN(start_ts) AS lo, MAX(COALESCE(end_ts, ?)) AS hi, COUNT(*) AS n FROM metric_span",
-      )
-      .get(live) as { lo: number | null; hi: number | null; n: number } | undefined;
-    return {
-      facets,
-      range: { from: range?.lo ?? null, to: range?.hi ?? null },
-      rows: Number(range?.n ?? 0),
-    };
+        .get() as { lo: number | null; n: number; open: number } | undefined;
+      const S = rollupFrontier(this.db);
+      const end = (
+        S > 0
+          ? this.db
+              .prepare(
+                `SELECT MAX(
+                   COALESCE((SELECT MAX(last) FROM metric_span_hour
+                              WHERE hour = (SELECT MAX(hour) FROM metric_span_hour WHERE hour < ?)), 0),
+                   COALESCE((SELECT MAX(end_ts) FROM metric_span WHERE start_ts >= ?), 0),
+                   COALESCE((SELECT MAX(end_ts) FROM metric_span
+                              WHERE ${SPAN_LONG_SQL} AND start_ts < ?), 0)) AS hi`,
+              )
+              .get(S, S - SPAN_LONG_MS, S - SPAN_LONG_MS)
+          : this.db.prepare("SELECT MAX(end_ts) AS hi FROM metric_span").get()
+      ) as { hi: number | null } | undefined;
+      const maxEnd = end?.hi === null || end?.hi === undefined || Number(end.hi) === 0 ? null : Number(end.hi);
+      return {
+        lo: base?.lo ?? null,
+        maxEnd,
+        n: Number(base?.n ?? 0),
+        open: Number(base?.open ?? 0) === 1,
+      };
+    });
   }
 
   /** The most recent matching spans — the runtime activity tail. */

@@ -657,6 +657,152 @@ const MIGRATIONS: ReadonlyArray<string> = [
   `
   CREATE INDEX metric_span_long ON metric_span(start_ts) WHERE ${SPAN_LONG_SQL};
   `,
+  // 21 — hourly rollups of both ledgers, so a 30- or 90-day Metrics read stops
+  // walking hundreds of thousands of raw rows on every click. The whole design
+  // (what is exact, why busy time needs segments, who writes what) is in
+  // services/metrics-rollup.ts; this is only its storage.
+  //
+  // CREATED EMPTY, deliberately. Filling them here would put a full pass over
+  // both ledgers (1.5M rows on the live install) on the boot path, before
+  // `listen()` — the failure boot-path-must-not-scan-metric-span records. The
+  // metrics worker builds them in the background instead, and every read falls
+  // back to raw rows for any hour at or past `sealed_to` until it has.
+  `
+  -- One row. Every hour before sealed_to is rolled up and maintained;
+  -- sealing_to is the far edge of a seal the worker has started but not yet
+  -- committed, so the triggers below already flag changes inside it.
+  CREATE TABLE metric_rollup_state (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    sealed_to  INTEGER NOT NULL,
+    sealing_to INTEGER NOT NULL,
+    version    INTEGER NOT NULL
+  );
+  INSERT INTO metric_rollup_state (id, sealed_to, sealing_to, version) VALUES (1, 0, 0, 0);
+
+  -- Usage: one row per hour × every dimension the event ledger filters or
+  -- groups on, so any filter + group-by the raw table answers, this answers
+  -- too. Columns keep the raw table's names (and its NULLs) so the same
+  -- WHERE builder runs against both.
+  CREATE TABLE metric_hour (
+    hour       INTEGER NOT NULL,
+    category   TEXT    NOT NULL,
+    identifier TEXT    NOT NULL,
+    detail     TEXT,
+    project_id TEXT,
+    chat_id    TEXT,
+    agent      TEXT,
+    subagent   TEXT,
+    model      TEXT,
+    harness    TEXT,
+    source     TEXT    NOT NULL,
+    n          INTEGER NOT NULL,
+    last       INTEGER NOT NULL
+  );
+  CREATE INDEX metric_hour_hour ON metric_hour(hour);
+
+  -- Runtime: one row per hour × actor × every span dimension. ms is the
+  -- attributed time inside the hour, n the spans that STARTED in it (so a
+  -- span crossing six hours is counted once), last the latest clipped end.
+  CREATE TABLE metric_span_hour (
+    id         INTEGER PRIMARY KEY,
+    hour       INTEGER NOT NULL,
+    chat_id    TEXT,
+    run_id     TEXT,
+    state      TEXT    NOT NULL,
+    identifier TEXT    NOT NULL,
+    detail     TEXT,
+    project_id TEXT,
+    agent      TEXT,
+    subagent   TEXT,
+    model      TEXT,
+    harness    TEXT,
+    source     TEXT    NOT NULL,
+    ms         INTEGER NOT NULL,
+    n          INTEGER NOT NULL,
+    last       INTEGER NOT NULL
+  );
+  CREATE INDEX metric_span_hour_hour ON metric_span_hour(hour, chat_id, run_id);
+
+  -- Busy time. Within one actor-hour, the timeline is cut wherever the set of
+  -- active rows changes; a segment is one distinct SET with its total length.
+  -- The union of any selection of rows is the sum of the segments that hold
+  -- at least one selected row, which is what makes busy time exact for every
+  -- filter and group-by (see metrics-rollup.ts).
+  CREATE TABLE metric_span_seg (
+    id      INTEGER PRIMARY KEY,
+    hour    INTEGER NOT NULL,
+    chat_id TEXT,
+    run_id  TEXT,
+    dur     INTEGER NOT NULL
+  );
+  CREATE INDEX metric_span_seg_hour ON metric_span_seg(hour, chat_id, run_id);
+  CREATE TABLE metric_span_seg_key (
+    row_id INTEGER NOT NULL,
+    seg_id INTEGER NOT NULL,
+    PRIMARY KEY (row_id, seg_id)
+  ) WITHOUT ROWID;
+
+  -- Raw rows changed inside an hour that is already rolled up. Written by the
+  -- triggers below, consumed by the worker. A read that finds one below
+  -- sealed_to does not trust the rollup at all, so a stale hour is never
+  -- served as current.
+  CREATE TABLE metric_rollup_dirty (
+    kind    TEXT    NOT NULL,
+    chat_id TEXT,
+    run_id  TEXT,
+    lo      INTEGER NOT NULL,
+    hi      INTEGER NOT NULL
+  );
+
+  -- TRIGGERS rather than a call in MetricsService.flush, because flush is not
+  -- the only writer: recoverOpenSpans closes spans at boot, the legacy
+  -- migrations rewrite columns, prune deletes. A trigger sees every one of
+  -- them, including any added later by someone who never read this. They only
+  -- record WHERE something changed; the recompute happens off the main thread.
+  CREATE TRIGGER metric_rollup_ins AFTER INSERT ON metric
+  WHEN NEW.ts < (SELECT MAX(sealed_to, sealing_to) FROM metric_rollup_state)
+  BEGIN
+    INSERT INTO metric_rollup_dirty (kind, lo, hi) VALUES ('u', NEW.ts, NEW.ts);
+  END;
+  CREATE TRIGGER metric_rollup_del AFTER DELETE ON metric
+  WHEN OLD.ts < (SELECT MAX(sealed_to, sealing_to) FROM metric_rollup_state)
+  BEGIN
+    INSERT INTO metric_rollup_dirty (kind, lo, hi) VALUES ('u', OLD.ts, OLD.ts);
+  END;
+  CREATE TRIGGER metric_rollup_upd AFTER UPDATE ON metric
+  WHEN MIN(OLD.ts, NEW.ts) < (SELECT MAX(sealed_to, sealing_to) FROM metric_rollup_state)
+  BEGIN
+    INSERT INTO metric_rollup_dirty (kind, lo, hi) VALUES ('u', OLD.ts, OLD.ts), ('u', NEW.ts, NEW.ts);
+  END;
+  -- Spans only matter once CLOSED: an open span is never rolled up (its end
+  -- is "now", which moves), so opening one inside a sealed hour changes
+  -- nothing until it closes.
+  CREATE TRIGGER metric_span_rollup_ins AFTER INSERT ON metric_span
+  WHEN NEW.end_ts IS NOT NULL
+   AND NEW.start_ts < (SELECT MAX(sealed_to, sealing_to) FROM metric_rollup_state)
+  BEGIN
+    INSERT INTO metric_rollup_dirty (kind, chat_id, run_id, lo, hi)
+    VALUES ('s', NEW.chat_id, NEW.run_id, NEW.start_ts, MAX(NEW.end_ts, NEW.start_ts));
+  END;
+  CREATE TRIGGER metric_span_rollup_del AFTER DELETE ON metric_span
+  WHEN OLD.end_ts IS NOT NULL
+   AND OLD.start_ts < (SELECT MAX(sealed_to, sealing_to) FROM metric_rollup_state)
+  BEGIN
+    INSERT INTO metric_rollup_dirty (kind, chat_id, run_id, lo, hi)
+    VALUES ('s', OLD.chat_id, OLD.run_id, OLD.start_ts, MAX(OLD.end_ts, OLD.start_ts));
+  END;
+  CREATE TRIGGER metric_span_rollup_upd AFTER UPDATE ON metric_span
+  WHEN MIN(OLD.start_ts, NEW.start_ts) < (SELECT MAX(sealed_to, sealing_to) FROM metric_rollup_state)
+   AND (OLD.end_ts IS NOT NULL OR NEW.end_ts IS NOT NULL)
+  BEGIN
+    INSERT INTO metric_rollup_dirty (kind, chat_id, run_id, lo, hi)
+    SELECT 's', OLD.chat_id, OLD.run_id, OLD.start_ts, MAX(OLD.end_ts, OLD.start_ts)
+     WHERE OLD.end_ts IS NOT NULL;
+    INSERT INTO metric_rollup_dirty (kind, chat_id, run_id, lo, hi)
+    SELECT 's', NEW.chat_id, NEW.run_id, NEW.start_ts, MAX(NEW.end_ts, NEW.start_ts)
+     WHERE NEW.end_ts IS NOT NULL;
+  END;
+  `,
 ];
 
 /** Schema version a database must be at for this build to use it. */
@@ -669,14 +815,40 @@ export const SCHEMA_VERSION = MIGRATIONS.length;
  * temp dir they may never write to; creating a WAL database (three files) per
  * construction would be pure waste. The handle opens on first real use.
  */
+export interface StateDbOptions {
+  /**
+   * Open read-only, never migrate, never write. The metrics worker's query
+   * connection (services/metrics-worker.ts): it runs on another thread against
+   * a file the main thread owns, so a schema step or a stray write from there
+   * would race the owner. The main thread migrates before the worker starts;
+   * a reader that finds any other version refuses to open rather than read
+   * tables whose shape it does not know.
+   */
+  readOnly?: boolean;
+  /**
+   * Run `PRAGMA optimize` when this handle closes (see {@link StateDb.close}).
+   * Only the main thread's handle sets it: it is the one that lives for the
+   * process and sees the whole workload the planner should be tuned for.
+   */
+  optimizeOnClose?: boolean;
+}
+
 export class StateDb {
   readonly file: string;
   private db: DatabaseSync | null = null;
   private readonly stmts = new Map<string, StatementSync>();
   private txDepth = 0;
 
-  constructor(private readonly dataDir: string) {
+  constructor(
+    private readonly dataDir: string,
+    private readonly opts: StateDbOptions = {},
+  ) {
     this.file = stateDbPath(dataDir);
+  }
+
+  /** The state root this handle's file lives in — what a worker re-opens. */
+  get root(): string {
+    return this.dataDir;
   }
 
   /** Whether the handle is open. Used by tests and by `close()`'s idempotence. */
@@ -687,6 +859,7 @@ export class StateDb {
   /** Open (if needed), apply pragmas, bring the schema up to date. Idempotent. */
   open(): DatabaseSync {
     if (this.db) return this.db;
+    if (this.opts.readOnly) return this.openReadOnly();
     mkdirSync(this.dataDir, { recursive: true });
     const db = new DatabaseSync(this.file);
     // WAL is the whole reason two processes can now share a state root at all:
@@ -715,6 +888,23 @@ export class StateDb {
       this.close();
       throw err;
     }
+    return db;
+  }
+
+  private openReadOnly(): DatabaseSync {
+    const db = new DatabaseSync(this.file, { readOnly: true });
+    // A reader still waits rather than failing when a checkpoint briefly holds
+    // the lock it needs to open its snapshot.
+    db.exec("PRAGMA busy_timeout = 5000");
+    const row = db.prepare("PRAGMA user_version").get() as { user_version: number };
+    if (Number(row.user_version ?? 0) !== MIGRATIONS.length) {
+      db.close();
+      throw new Error(
+        `${this.file} is at schema version ${row.user_version}, expected ${MIGRATIONS.length}; ` +
+          `a read-only handle never migrates, so the owner must open it first.`,
+      );
+    }
+    this.db = db;
     return db;
   }
 
@@ -759,6 +949,36 @@ export class StateDb {
 
   exec(sql: string): void {
     this.open().exec(sql);
+  }
+
+  /**
+   * Run `fn` against ONE consistent snapshot of the database.
+   *
+   * A metrics read is several statements — a raw edge, the rolled-up middle,
+   * the rollup's own frontier — and with the rollup worker committing on
+   * another connection, two statements in autocommit can see two different
+   * databases: the frontier from before a seal and the rows from after it.
+   * A deferred transaction pins every statement to the snapshot of the first.
+   *
+   * Inside an open transaction it just runs `fn`: that one already is a
+   * snapshot.
+   */
+  read<T>(fn: () => T): T {
+    const db = this.open();
+    if (this.txDepth > 0) return fn();
+    db.exec("BEGIN DEFERRED");
+    this.txDepth = 1;
+    try {
+      return fn();
+    } finally {
+      this.txDepth = 0;
+      try {
+        db.exec("COMMIT");
+      } catch {
+        // A read transaction has nothing to commit; COMMIT failing means it was
+        // already ended, and there is nothing to report.
+      }
+    }
   }
 
   /**
@@ -825,6 +1045,22 @@ export class StateDb {
     // Statements hold references into the connection; dropping them first keeps
     // close() from failing on a still-live statement.
     this.stmts.clear();
+    if (this.opts.optimizeOnClose && !this.opts.readOnly) {
+      // SQLite's own advice: optimize as a connection closes, when it knows
+      // which tables this workload actually queried. The live store had NO
+      // sqlite_stat1 at all, so the planner guessed — and guessed wrong on the
+      // metrics reads (see metric-span-window-reads-need-subselect-not-or).
+      // Once stats exist this is ~0 ms; the first time it samples (~1 s on the
+      // live ledger), which is why it is here on shutdown and not on open,
+      // where it would sit on the boot path. The metrics worker separately
+      // runs a FULL analyze of the metric tables once, because a sampled
+      // estimate of `metric_span_state` came out 150x too selective.
+      try {
+        this.db.exec("PRAGMA optimize");
+      } catch {
+        /* advisory: a failed optimize must never fail a shutdown */
+      }
+    }
     try {
       this.db.close();
     } finally {
