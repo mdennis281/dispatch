@@ -39,11 +39,50 @@ export interface SessionLimit {
   clock: string;
 }
 
-/** The sentence shape: "You've hit your session limit", "usage limit", … */
-const LIMIT_RE = /\b(?:hit|reached)\s+your\s+[\w\s-]*\blimit\b/i;
-/** "resets 4:50pm (America/Chicago)" / "resets at 16:50" / "resets 4pm". */
+/**
+ * The sentence shape: "You've hit your session limit", "usage limit", …
+ *
+ * Bounded, because `\s+your\s+[\w\s-]*` lets three adjacent runs share the
+ * same whitespace, which backtracks polynomially on a long run of it (CodeQL
+ * js/polynomial-redos) — and this now runs on every errored turn's text via
+ * `isLimitSentence`. The longest real qualifier is a few words.
+ */
+const LIMIT_RE = /\b(?:hit|reached)\s{1,3}your\s{1,3}[\w -]{0,40}\blimit\b/i;
+/**
+ * "resets 4:50pm (America/Chicago)" / "resets at 16:50" / "resets 4pm" /
+ * "resets Nov 11, 6pm (America/Chicago)".
+ *
+ * The optional month-and-day is the WEEKLY limit's shape. Without it the regex
+ * demanded a digit straight after "resets", so the weekly sentence parsed as no
+ * limit at all: the turn ended as a plain `failed`, and neither failover to the
+ * configured fallback account nor the park-and-resume ever ran.
+ *
+ * Every whitespace run is BOUNDED ({1,3}) rather than `\s+`/`\s*`. Adjacent
+ * unbounded runs separated only by optional groups backtrack polynomially on a
+ * long run of whitespace (CodeQL js/polynomial-redos), and this runs on
+ * provider text we don't control. Real sentences use one space.
+ */
 const RESET_RE =
-  /\bresets?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:\(([A-Za-z0-9_+\-/]+)\))?/i;
+  /\bresets?\s{1,3}(?:(?:at|on)\s{1,3})?(?:([A-Za-z]{3,9})\.?\s{1,3}(\d{1,2})(?:st|nd|rd|th)?,?\s{1,3}(?:at\s{1,3})?)?(\d{1,2})(?::(\d{2}))?\s{0,3}(am|pm)?\s{0,3}(?:\(([A-Za-z0-9_+\-/]{1,64})\))?/i;
+
+const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+
+/** "Nov" / "November" / "sept" → 1-12, or null for a word that isn't a month. */
+function monthOf(word: string): number | null {
+  const i = MONTHS.indexOf(word.slice(0, 3).toLowerCase());
+  return i < 0 ? null : i + 1;
+}
+
+/**
+ * Is this a usage-limit sentence at all, whether or not its reset time reads?
+ *
+ * Separate from `parseSessionLimit` because the two questions have different
+ * consumers: failover only needs to know the account is out (it assumes an hour
+ * when no reset is given), while parking the chat needs an instant to wait for.
+ */
+export function isLimitSentence(text: string | undefined): boolean {
+  return !!text && LIMIT_RE.test(text);
+}
 
 /**
  * A zone's UTC offset (ms) at a given instant. Intl is the only DST-correct
@@ -116,9 +155,10 @@ function to24h(hour: number, meridiem: string | undefined): number {
 /**
  * Parse a usage-limit sentence into the instant the window reopens.
  *
- * The sentence gives a wall clock and (usually) a zone but no date, so the
- * answer is the NEXT time that clock comes around — "resets 4:50pm" seen at
- * 5pm means 4:50pm tomorrow, not four hours ago.
+ * The session sentence gives a wall clock and (usually) a zone but no date, so
+ * the answer is the NEXT time that clock comes around — "resets 4:50pm" seen at
+ * 5pm means 4:50pm tomorrow, not four hours ago. The weekly sentence adds a
+ * month and day, which is used as given.
  *
  * Returns null when the text isn't a limit notice or carries no readable time,
  * which is the signal to leave the row rendering as an ordinary error.
@@ -131,14 +171,21 @@ export function parseSessionLimit(
   if (!text || !LIMIT_RE.test(text)) return null;
   const m = RESET_RE.exec(text);
   if (!m) return null;
+  const [, monthWord, dayStr, hourStr, minuteStr, meridiem, namedZone] = m;
 
-  const rawHour = Number(m[1]);
-  const minute = m[2] ? Number(m[2]) : 0;
+  const rawHour = Number(hourStr);
+  const minute = minuteStr ? Number(minuteStr) : 0;
   if (!Number.isFinite(rawHour) || rawHour > 23 || minute > 59) return null;
-  const hour = to24h(rawHour, m[3]);
-  const clock = m[3] ? `${rawHour}:${String(minute).padStart(2, "0")}${m[3].toLowerCase()}` : `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+  const hour = to24h(rawHour, meridiem);
+  const clock = meridiem ? `${rawHour}:${String(minute).padStart(2, "0")}${meridiem.toLowerCase()}` : `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
 
-  const zone = m[4] ?? fallbackZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone ?? "UTC";
+  // A date that names no real month ("resets Soon 5, 4pm") is not a date we can
+  // trust, and guessing one would schedule a resume at a made-up instant.
+  const month = monthWord ? monthOf(monthWord) : null;
+  const day = dayStr ? Number(dayStr) : null;
+  if (monthWord && (month === null || day === null || day < 1 || day > 31)) return null;
+
+  const zone = namedZone ?? fallbackZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone ?? "UTC";
   let timeZone = zone;
   let today;
   try {
@@ -149,10 +196,18 @@ export function parseSessionLimit(
     today = zonedParts(timeZone, now);
   }
 
+  if (month !== null && day !== null) {
+    // The sentence names the day, so trust it — but it names no YEAR, so a
+    // date already behind us ("resets Jan 2" seen on Dec 30) is next year's.
+    let at = zonedToEpoch(timeZone, today.year, month, day, hour, minute);
+    if (at <= now) at = zonedToEpoch(timeZone, today.year + 1, month, day, hour, minute);
+    return { resetsAt: at, timeZone: namedZone ?? undefined, clock };
+  }
+
   let at = zonedToEpoch(timeZone, today.year, today.month, today.day, hour, minute);
   if (at <= now) {
     const next = zonedParts(timeZone, at + 24 * 60 * 60_000);
     at = zonedToEpoch(timeZone, next.year, next.month, next.day, hour, minute);
   }
-  return { resetsAt: at, timeZone: m[4] ?? undefined, clock };
+  return { resetsAt: at, timeZone: namedZone ?? undefined, clock };
 }

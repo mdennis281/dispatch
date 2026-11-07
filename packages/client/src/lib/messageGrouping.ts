@@ -1,4 +1,4 @@
-import { parseSessionLimit, type AssistantMessageRow } from "@dispatch/shared";
+import { isLimitSentence, type AssistantMessageRow } from "@dispatch/shared";
 import type { TranscriptItem, TranscriptThinkingItem } from "./toolPresentations.js";
 
 /**
@@ -8,10 +8,13 @@ import type { TranscriptItem, TranscriptThinkingItem } from "./toolPresentations
  * Lives here because it decides which assistant rows render NOTHING, which is
  * exactly what {@link continuedAssistantIds} has to know to judge adjacency.
  */
-export function isLimitSentence(text: string | undefined): boolean {
+export function isLimitNotice(text: string | undefined): boolean {
   const t = text?.trim();
   if (!t || t.includes("\n")) return false;
-  return parseSessionLimit(t, Date.now()) !== null;
+  // The shared test, NOT `parseSessionLimit`: the server fails a chat over on
+  // a limit whose reset time won't read, so gating on a readable time here
+  // left that chat showing a red error row after it had already moved on.
+  return isLimitSentence(t);
 }
 
 /** Same speaker, same badges — anything else deserves its own header. */
@@ -41,7 +44,7 @@ export function continuedAssistantIds(
   for (const item of items) {
     const row = item.kind === "row" ? item.row : null;
     if (row?.kind === "assistant") {
-      if (isLimitSentence(row.text)) continue;
+      if (isLimitNotice(row.text)) continue;
       if (prev && sameSpeaker(prev, row)) ids.add(row.id);
       prev = row;
       continue;
@@ -121,7 +124,7 @@ export function undividedItemIndices(
       out.add(j);
       const above = items[j]!;
       const dropped =
-        above.kind === "row" && above.row.kind === "assistant" && isLimitSentence(above.row.text);
+        above.kind === "row" && above.row.kind === "assistant" && isLimitNotice(above.row.text);
       if (!isHidden(above) && !dropped) break;
     }
   }
