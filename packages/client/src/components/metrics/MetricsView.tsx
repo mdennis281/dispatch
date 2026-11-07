@@ -146,11 +146,19 @@ export function MetricsView() {
           {count(rows)} {unit}
         </span>
         <div className="flex-1" />
-        {/* Disabled while busy: every tab's busy flag means a read of the
-            CURRENT query is already running, so another click adds nothing but
-            load — and on the ledger tabs each one was a full batch of
-            synchronous SQLite holding up every other route. */}
-        <IconButton size="sm" tip="Reload" disabled={busy} onClick={() => void reload()}>
+        {/* Disabled while busy on every tab but Growth: there, busy means a
+            read of the CURRENT query is already running, so another click adds
+            nothing but load — and on the ledger tabs each one was a full batch
+            of synchronous SQLite holding up every other route. Growth is the
+            exception because its Reload ABORTS the walk in flight and starts
+            again: a walk stalled for minutes is exactly when it is needed, and
+            the walk is async git, not the event-loop path. */}
+        <IconButton
+          size="sm"
+          tip="Reload"
+          disabled={busy && !growth}
+          onClick={() => void reload()}
+        >
           <RefreshCw className={cn(busy && "animate-spin")} />
         </IconButton>
       </div>
