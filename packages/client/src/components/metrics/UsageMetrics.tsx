@@ -22,6 +22,7 @@
  * span half and answers in milliseconds; see `RuntimeMetrics.tsx`.
  */
 import { useEffect, useMemo } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { Database } from "lucide-react";
 import type { MetricDimension } from "@dispatch/shared";
 import {
@@ -34,13 +35,14 @@ import { Select } from "../ui/Select.js";
 import { Spinner } from "../ui/Spinner.js";
 import {
   CHART_KIND_LABELS,
+  isBarChart,
   isTimeChart,
   useMetrics,
   type ChartKind,
 } from "../../stores/metrics.js";
 import { ChartLegend, MetricsChart, type ChartShareRow } from "./MetricsChart.js";
 import { FacetRow } from "./MetricsFilters.js";
-import { Card, Hero, StatTile, ago, compact, count } from "./chrome.js";
+import { Card, CoarseNote, Hero, StatTile, ago, compact, count } from "./chrome.js";
 import { useMetricLabel, useMetricLabels } from "./labels.js";
 import { colorFor, useChartPalette } from "./palette.js";
 import { cn } from "../../lib/cn.js";
@@ -68,14 +70,6 @@ const GROUPABLE: MetricDimension[] = [
   "detail",
   "source",
 ];
-
-/** Bucket widths as the note below the picker says them. */
-const BUCKET_LABELS: Record<string, string> = {
-  hour: "hourly",
-  day: "daily",
-  week: "weekly",
-  month: "monthly",
-};
 
 const CHART_KINDS: ChartKind[] = [
   "line",
@@ -205,6 +199,9 @@ function Activity() {
 /* ----------------------------------------------------------------- subpage */
 
 export function UsageMetrics() {
+  // Field-selected and shallow-compared. With no selector every `set` in the
+  // store — `refetching` going up and down on each click included —
+  // re-rendered this whole page and, through it, the chart.
   const {
     series,
     totals,
@@ -215,6 +212,7 @@ export function UsageMetrics() {
     groupBy,
     bucket,
     limit,
+    coarsened,
     loading,
     refetching,
     error,
@@ -227,7 +225,32 @@ export function UsageMetrics() {
     clearFilter,
     loadIfStale,
     cancel,
-  } = useMetrics();
+  } = useMetrics(
+    useShallow((s) => ({
+      series: s.series,
+      totals: s.totals,
+      facets: s.facets,
+      filter: s.filter,
+      rangeId: s.rangeId,
+      chart: s.chart,
+      groupBy: s.groupBy,
+      bucket: s.bucket,
+      limit: s.limit,
+      coarsened: s.coarsened,
+      loading: s.loading,
+      refetching: s.refetching,
+      error: s.error,
+      setRange: s.setRange,
+      setChart: s.setChart,
+      setGroupBy: s.setGroupBy,
+      setBucket: s.setBucket,
+      setLimit: s.setLimit,
+      toggleFilter: s.toggleFilter,
+      clearFilter: s.clearFilter,
+      loadIfStale: s.loadIfStale,
+      cancel: s.cancel,
+    })),
+  );
 
   const palette = useChartPalette();
   const labels = useMetricLabels();
@@ -248,25 +271,32 @@ export function UsageMetrics() {
   }, []);
 
   const timeForm = isTimeChart(chart);
-  // The server coarsens a bucket the window can't accommodate (hourly over two
-  // years is ~17,500 points), so the width it USED can differ from the pick.
-  const coarsened = !!series && bucket !== "auto" && series.bucket !== bucket;
   const color = useMemo(
     () => (key: string, i: number) => colorFor(palette, key, i),
     [palette],
   );
 
-  const legend = timeForm
-    ? (series?.series ?? []).map((s) => ({ key: s.key, label: s.label, total: s.total }))
-    : (totals?.totals ?? []).map((t) => ({ key: t.key, label: t.label, total: t.count }));
+  // Memoised so the memo'd chart and legend see the same arrays until the
+  // data under them actually changes.
+  const legend = useMemo(
+    () =>
+      timeForm
+        ? (series?.series ?? []).map((s) => ({ key: s.key, label: s.label, total: s.total }))
+        : (totals?.totals ?? []).map((t) => ({ key: t.key, label: t.label, total: t.count })),
+    [timeForm, series, totals],
+  );
   const windowTotal = timeForm ? (series?.total ?? 0) : (totals?.total ?? 0);
 
-  const shareRows: ChartShareRow[] = (totals?.totals ?? []).map((t) => ({
-    key: t.key,
-    label: t.label,
-    value: t.count,
-    note: `${count(t.chats)} chat${t.chats === 1 ? "" : "s"}`,
-  }));
+  const shareRows: ChartShareRow[] = useMemo(
+    () =>
+      (totals?.totals ?? []).map((t) => ({
+        key: t.key,
+        label: t.label,
+        value: t.count,
+        note: `${count(t.chats)} chat${t.chats === 1 ? "" : "s"}`,
+      })),
+    [totals],
+  );
 
   return (
     <div className="mx-auto flex max-w-[1100px] flex-col gap-3 p-3">
@@ -358,17 +388,10 @@ export function UsageMetrics() {
               </>
             }
             note={
-              // Never let the page bound what it shows without saying so. Both
-              // of these are the chart quietly showing less than was asked for,
-              // and an unexplained one reads as "that's all there was".
-              timeForm && (series?.truncated || coarsened)
-                ? [
-                    series?.truncated ? `${series.truncated} more folded into Other` : null,
-                    coarsened ? `bucketed ${BUCKET_LABELS[series!.bucket]} to fit` : null,
-                  ]
-                    .filter(Boolean)
-                    .join(" · ")
-                : null
+              // Never let the page bound what it shows without saying so — an
+              // unexplained fold reads as "that's all there was". (A coarsened
+              // bucket says so under the chart; see `CoarseNote`.)
+              timeForm && series?.truncated ? `${series.truncated} more folded into Other` : null
             }
           >
             <div className="p-3">
@@ -384,6 +407,7 @@ export function UsageMetrics() {
               <div className="mt-3">
                 <ChartLegend entries={legend} label={label} format={count} color={color} />
               </div>
+              {timeForm && <CoarseNote coarsened={coarsened} bars={isBarChart(chart)} />}
             </div>
           </Card>
 

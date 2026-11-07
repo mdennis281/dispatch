@@ -25,7 +25,7 @@
  *               partly watched, or some of its spend unpriced); dashed when
  *               its period is still running.
  */
-import { useMemo } from "react";
+import { memo, useMemo } from "react";
 import {
   LIMIT_PERIOD_HOURS,
   limitPeriodEnd,
@@ -344,7 +344,12 @@ function Key() {
   );
 }
 
-export function YieldChart({
+/**
+ * Memoised, with `from`/`to` now stable per report on the page: `to` used to be
+ * `Date.now()` per render, so `buildRows` re-ran and every cell redrew on every
+ * store write, the minute poll's `refetching` flips included.
+ */
+export const YieldChart = memo(function YieldChart({
   yields,
   windows,
   period,
@@ -394,4 +399,4 @@ export function YieldChart({
       <Key />
     </div>
   );
-}
+});

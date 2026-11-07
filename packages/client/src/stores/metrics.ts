@@ -15,6 +15,7 @@
  */
 import { create } from "zustand";
 import type {
+  BucketCoarsening,
   MetricBucket,
   MetricDimension,
   MetricEvent,
@@ -25,6 +26,7 @@ import type {
 } from "@dispatch/shared";
 import { api } from "../lib/api.js";
 import { heldFresh, latestLoad, REMOUNT_FRESH_MS } from "../lib/latestLoad.js";
+import { metricRequest, metricWindow } from "./metrics-window.js";
 
 /**
  * The chart forms the view offers.
@@ -46,6 +48,11 @@ export type ChartKind =
 /** True when this form plots the time series rather than the window's totals. */
 export function isTimeChart(kind: ChartKind): boolean {
   return kind !== "ranked-bar" && kind !== "donut";
+}
+
+/** True when this form draws bars per bucket — what the coarsening note counts. */
+export function isBarChart(kind: ChartKind): boolean {
+  return kind === "stacked-bar" || kind === "grouped-bar";
 }
 
 export const CHART_KIND_LABELS: Record<ChartKind, string> = {
@@ -92,6 +99,8 @@ interface MetricsStore {
   facets: MetricFacetsResponse | null;
   recent: MetricEvent[];
   ledgerRows: number;
+  /** Set when the picked bucket was too fine for the window and was stepped up. */
+  coarsened: BucketCoarsening | null;
 
   /** True during the FIRST load only — later loads dim the existing render
    *  instead of replacing it, so the frame never jumps. */
@@ -114,14 +123,6 @@ interface MetricsStore {
   loadIfStale: () => Promise<void>;
   /** Abandon whatever is pending or in flight — the subpage unmounted. */
   cancel: () => void;
-}
-
-/** Resolve the selected preset into an absolute window. */
-function windowFor(rangeId: string): { from?: number; to?: number } {
-  const preset = RANGE_PRESETS.find((r) => r.id === rangeId) ?? RANGE_PRESETS[2]!;
-  if (preset.ms === null) return {};
-  const to = Date.now();
-  return { from: to - preset.ms, to: to + 1 };
 }
 
 /** What a set of results answers, for "do I already hold this?". */
@@ -155,26 +156,53 @@ export const useMetrics = create<MetricsStore>((set, get) => {
   let facetsFor: string | null = null;
   let tailFor: { key: string; at: number } | null = null;
 
+  /**
+   * The oldest row in the ledger, from the last facets response — "All time"
+   * starts there (see `metrics-window.ts`). Whole-ledger, so it holds across
+   * filters; it only ever moves if rows are pruned, and a stale value then
+   * merely starts the window a little early.
+   */
+  let ledgerFrom: number | null = null;
+
   /** Every query, guarded and cancellable — see `lib/latestLoad.ts`. */
   const loader = latestLoad(async ({ signal, current, landed }) => {
     const state = get();
-    const { rangeId, filter, groupBy, bucket, limit, series } = state;
+    const { rangeId, filter, groupBy, limit, series } = state;
     set({ refetching: true, loading: series === null, error: null });
-    const scope = { ...windowFor(rangeId), filter };
     const scopeId = scopeKey(state);
-    const keepFacets = facetsFor === scopeId && state.facets !== null;
+    let keepFacets = facetsFor === scopeId && state.facets !== null;
     const keepTail = heldFresh(tailFor, scopeId);
     try {
+      // "All time" with no ledger range yet: read the facets FIRST. Their
+      // `range` is what the window starts at, and the bucket is sized from
+      // that window — guessing 0 would size it for a 56-year window, so auto
+      // would pick months for a two-week-old ledger and "daily" would be
+      // coarsened all the way to monthly.
+      // It is not wasted: the same response stands in for the batch's facets.
+      let facetsPre: MetricFacetsResponse | null = null;
+      if (rangeId === "all" && ledgerFrom === null && !keepFacets) {
+        facetsPre = await api.metrics.facets(
+          { ...metricWindow(rangeId, null), filter },
+          signal,
+        );
+        if (!current()) return;
+        ledgerFrom = facetsPre.range.from;
+        keepFacets = true;
+      }
+      const req = metricRequest(rangeId, state.bucket, ledgerFrom);
+      const scope = { from: req.from, to: req.to, filter };
+      const bucket = req.bucket;
       // One round trip each, in parallel: they read the same window, and a
       // sequential chain would make the page settle four times.
       const [seriesRes, totalsRes, facetsRes, recentRes] = await Promise.all([
         api.metrics.series({ ...scope, groupBy, bucket, limit }, signal),
         api.metrics.totals({ ...scope, groupBy, bucket, limit }, signal),
-        keepFacets ? state.facets! : api.metrics.facets(scope, signal),
+        keepFacets ? (facetsPre ?? state.facets!) : api.metrics.facets(scope, signal),
         keepTail ? state.recent : api.metrics.recent({ ...scope, limit: 50 }, signal),
       ]);
       if (!current()) return; // a newer query is already in flight
       facetsFor = scopeId;
+      ledgerFrom = facetsRes.range.from;
       if (!keepTail) tailFor = { key: scopeId, at: Date.now() };
       set({
         series: seriesRes,
@@ -182,6 +210,7 @@ export const useMetrics = create<MetricsStore>((set, get) => {
         facets: facetsRes,
         recent: recentRes,
         ledgerRows: facetsRes.rows,
+        coarsened: req.coarsened,
         loading: false,
         refetching: false,
       });
@@ -225,6 +254,7 @@ export const useMetrics = create<MetricsStore>((set, get) => {
     facets: null,
     recent: [],
     ledgerRows: 0,
+    coarsened: null,
     loading: false,
     refetching: false,
     error: null,

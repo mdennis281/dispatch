@@ -1,6 +1,13 @@
 import { describe, it, expect } from "vitest";
 import { GROWTH_GENERATED_KEY, METRIC_OTHER_KEY, type GrowthReport } from "@dispatch/shared";
-import { autoBucket, bucketStart, lineStep, lineTicks, shapeGrowth } from "./growth-shape.js";
+import {
+  PLAUSIBLE_COMMIT_FROM,
+  autoBucket,
+  bucketStart,
+  lineStep,
+  lineTicks,
+  shapeGrowth,
+} from "./growth-shape.js";
 
 const DAY = 86_400_000;
 /** 2024-03-01T00:00Z, a Friday. */
@@ -190,5 +197,60 @@ describe("lineTicks", () => {
 
   it("still yields a zero tick for an empty window", () => {
     expect(lineTicks(0, 0)).toEqual([0, 1]);
+  });
+});
+
+describe("shapeGrowth — bounded buckets", () => {
+  const base = { split: "none" as const, includeGenerated: false, limit: 8 };
+
+  it("steps an explicit Daily up when the range is years long, and says so", () => {
+    const start = D0 - 3 * 365 * DAY;
+    const r = report(
+      [
+        { ts: start, commits: 1, additions: 10, deletions: 0, keys: { ".ts": { additions: 10, deletions: 0 } } },
+        ...SAMPLE.points,
+      ],
+      SAMPLE.totals,
+    );
+    const s = shapeGrowth(r, { ...base, from: null, bucket: "day", now: D0 + 20 * DAY });
+    expect(s.bucket).toBe("week");
+    expect(s.buckets.length).toBeLessThanOrEqual(200);
+    expect(s.coarsened).toMatchObject({ shown: "week", wanted: "day" });
+    expect(s.coarsened!.wantedBuckets).toBeGreaterThan(1000);
+  });
+
+  it("leaves a Daily pick that fits alone", () => {
+    const s = shapeGrowth(SAMPLE, { ...base, from: null, bucket: "day", now: D0 + 20 * DAY });
+    expect(s.bucket).toBe("day");
+    expect(s.coarsened).toBeNull();
+  });
+
+  it("does not start All time at a bogus 1970 commit, but still counts its lines", () => {
+    const r = report(
+      [
+        { ts: 0, commits: 1, additions: 7, deletions: 0, keys: { ".ts": { additions: 7, deletions: 0 } } },
+        ...SAMPLE.points,
+      ],
+      { ...SAMPLE.totals, ".ts": { additions: 107, deletions: 40, files: 3 } },
+    );
+    const now = D0 + 20 * DAY;
+    const s = shapeGrowth(r, { ...base, from: null, bucket: "day", now });
+    // Starts at the first plausible commit — 21 daily buckets, not ~20,000.
+    expect(s.buckets[0]).toBe(D0);
+    expect(s.bucket).toBe("day");
+    expect(s.coarsened).toBeNull();
+    // The 1970 commit's 7 lines are in the baseline, so the curve still ends
+    // at the true size.
+    expect(s.size[0]!.at(-1)).toBe(s.linesNow);
+    expect(s.linesAtStart).toBe(7);
+  });
+
+  it("treats a history with nothing plausible as starting now", () => {
+    const r = report(
+      [{ ts: PLAUSIBLE_COMMIT_FROM - DAY, commits: 1, additions: 3, deletions: 0, keys: { ".ts": { additions: 3, deletions: 0 } } }],
+      { ".ts": { additions: 3, deletions: 0, files: 1 } },
+    );
+    const s = shapeGrowth(r, { ...base, from: null, bucket: "day", now: D0 });
+    expect(s.buckets).toEqual([D0]);
   });
 });

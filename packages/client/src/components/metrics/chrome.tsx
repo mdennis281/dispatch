@@ -8,6 +8,7 @@
  * only in what they put in it.
  */
 import type { ReactNode } from "react";
+import { METRIC_BUCKET_ADJECTIVE, type BucketCoarsening } from "@dispatch/shared";
 
 const num = new Intl.NumberFormat();
 
@@ -104,5 +105,28 @@ export function Card({
       )}
       {children}
     </section>
+  );
+}
+
+/**
+ * The line under a chart whose bucket was stepped up to stay readable —
+ * "Showing weekly — daily would be 1,825 bars". The chart is drawing less than
+ * was asked for, and an unexplained coarser axis reads as a broken control.
+ * `bars` picks the noun: a line chart has points, not bars.
+ */
+export function CoarseNote({
+  coarsened,
+  bars,
+}: {
+  coarsened: BucketCoarsening | null;
+  bars: boolean;
+}) {
+  if (!coarsened) return null;
+  const { shown, wanted, wantedBuckets } = coarsened;
+  return (
+    <p className="mt-2 text-2xs text-faint">
+      Showing {METRIC_BUCKET_ADJECTIVE[shown]} — {METRIC_BUCKET_ADJECTIVE[wanted]} would be{" "}
+      {count(wantedBuckets)} {bars ? "bars" : "points"}
+    </p>
   );
 }

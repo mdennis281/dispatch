@@ -13,6 +13,7 @@
  *     table keyed by the chart's one dimension could only ever answer half of it.
  */
 import { useEffect, useMemo } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { Info } from "lucide-react";
 import {
   METRIC_OTHER_KEY,
@@ -25,12 +26,17 @@ import {
 import { Button } from "../ui/Button.js";
 import { Select } from "../ui/Select.js";
 import { Spinner } from "../ui/Spinner.js";
-import { CHART_KIND_LABELS, isTimeChart, type ChartKind } from "../../stores/metrics.js";
+import {
+  CHART_KIND_LABELS,
+  isBarChart,
+  isTimeChart,
+  type ChartKind,
+} from "../../stores/metrics.js";
 import { useTokenMetrics } from "../../stores/metrics-tokens.js";
 import { useProjects } from "../../stores/projects.js";
 import { ChartLegend, MetricsChart, type ChartShareRow } from "./MetricsChart.js";
 import { FacetRow } from "./MetricsFilters.js";
-import { Card, Hero, StatTile, ago, compact, count } from "./chrome.js";
+import { Card, CoarseNote, Hero, StatTile, ago, compact, count } from "./chrome.js";
 import type { DimLabeller } from "./labels.js";
 import { colorFor, useChartPalette } from "./palette.js";
 import { cn } from "../../lib/cn.js";
@@ -59,6 +65,9 @@ const usdFmt = new Intl.NumberFormat(undefined, {
   currency: "USD",
 });
 
+/** Hoisted so the memo'd chart and legend get a stable formatter per measure. */
+const formatUsd = (v: number) => usdFmt.format(v);
+
 /** Dollars, or a dash for a group nobody priced — unpriced is not free. */
 function usd(v: number | null): string {
   return v === null ? "—" : usdFmt.format(v);
@@ -72,11 +81,15 @@ function usd(v: number | null): string {
 function useTokenLabels(): DimLabeller<TokenDimension> {
   const projects = useProjects((s) => s.projects);
   const facets = useTokenMetrics((s) => s.report?.facets);
-  return (dim, key, fallback) => {
-    if (key === METRIC_OTHER_KEY) return fallback ?? "Other";
-    if (dim === "projectId" && key) return projects.find((p) => p.id === key)?.name ?? key;
-    return fallback ?? facets?.[dim]?.find((f) => f.value === key)?.label ?? (key || "(none)");
-  };
+  // Memoised: the charts are `React.memo`'d and take this as a prop.
+  return useMemo<DimLabeller<TokenDimension>>(
+    () => (dim, key, fallback) => {
+      if (key === METRIC_OTHER_KEY) return fallback ?? "Other";
+      if (dim === "projectId" && key) return projects.find((p) => p.id === key)?.name ?? key;
+      return fallback ?? facets?.[dim]?.find((f) => f.value === key)?.label ?? (key || "(none)");
+    },
+    [projects, facets],
+  );
 }
 
 /* ------------------------------------------------------------------- table */
@@ -157,6 +170,7 @@ function Breakdown() {
 /* ----------------------------------------------------------------- subpage */
 
 export function TokenMetrics() {
+  // Field-selected and shallow-compared — see `UsageMetrics`.
   const {
     report,
     filter,
@@ -166,6 +180,7 @@ export function TokenMetrics() {
     measure,
     bucket,
     limit,
+    coarsened,
     loading,
     refetching,
     error,
@@ -179,10 +194,38 @@ export function TokenMetrics() {
     clearFilter,
     loadIfStale,
     cancel,
-  } = useTokenMetrics();
+  } = useTokenMetrics(
+    useShallow((s) => ({
+      report: s.report,
+      filter: s.filter,
+      rangeId: s.rangeId,
+      chart: s.chart,
+      groupBy: s.groupBy,
+      measure: s.measure,
+      bucket: s.bucket,
+      limit: s.limit,
+      coarsened: s.coarsened,
+      loading: s.loading,
+      refetching: s.refetching,
+      error: s.error,
+      setRange: s.setRange,
+      setChart: s.setChart,
+      setGroupBy: s.setGroupBy,
+      setMeasure: s.setMeasure,
+      setBucket: s.setBucket,
+      setLimit: s.setLimit,
+      toggleFilter: s.toggleFilter,
+      clearFilter: s.clearFilter,
+      loadIfStale: s.loadIfStale,
+      cancel: s.cancel,
+    })),
+  );
   const palette = useChartPalette();
   const labels = useTokenLabels();
-  const label = (key: string, fallback?: string) => labels(groupBy, key, fallback);
+  const label = useMemo(
+    () => (key: string, fallback?: string) => labels(groupBy, key, fallback),
+    [labels, groupBy],
+  );
 
   // One load on mount, skipped when the store already holds this exact query
   // from under 30 s ago: a tab flip re-mounts the subpage, and re-running the
@@ -199,15 +242,31 @@ export function TokenMetrics() {
   }, []);
 
   const color = useMemo(() => (key: string, i: number) => colorFor(palette, key, i), [palette]);
-  const format = measure === "cost" ? (v: number) => usdFmt.format(v) : compact;
+  const format = measure === "cost" ? formatUsd : compact;
   const timeForm = isTimeChart(chart);
-  const series = report?.series ?? [];
-  const share: ChartShareRow[] = series.map((s) => ({
-    key: s.key,
-    label: s.label,
-    value: s.total,
-    note: TOKEN_MEASURE_LABELS[measure],
-  }));
+  // Everything handed to the chart is memoised on the report. The `time`
+  // object in particular used to be a fresh literal each render, which
+  // defeated the chart's own `useMemo(toRows)` and rebuilt every row of every
+  // bucket on every store write.
+  const series = useMemo(() => report?.series ?? [], [report]);
+  const time = useMemo(
+    () => (report ? { buckets: report.buckets, bucket: report.bucket, series } : null),
+    [report, series],
+  );
+  const share: ChartShareRow[] = useMemo(
+    () =>
+      series.map((s) => ({
+        key: s.key,
+        label: s.label,
+        value: s.total,
+        note: TOKEN_MEASURE_LABELS[measure],
+      })),
+    [series, measure],
+  );
+  const legend = useMemo(
+    () => series.map((s) => ({ key: s.key, label: s.label, total: s.total })),
+    [series],
+  );
   const t = report?.totals;
 
   return (
@@ -317,7 +376,7 @@ export function TokenMetrics() {
             <div className="p-3">
               <MetricsChart
                 kind={chart}
-                time={report ? { buckets: report.buckets, bucket: report.bucket, series } : null}
+                time={time}
                 share={share}
                 label={label}
                 format={format}
@@ -325,17 +384,9 @@ export function TokenMetrics() {
                 height={300}
               />
               <div className="mt-3">
-                <ChartLegend
-                  entries={series.map((s) => ({
-                    key: s.key,
-                    label: s.label,
-                    total: s.total,
-                  }))}
-                  label={label}
-                  format={format}
-                  color={color}
-                />
+                <ChartLegend entries={legend} label={label} format={format} color={color} />
               </div>
+              {timeForm && <CoarseNote coarsened={coarsened} bars={isBarChart(chart)} />}
             </div>
           </Card>
 

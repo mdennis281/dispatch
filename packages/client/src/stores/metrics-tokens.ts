@@ -10,6 +10,7 @@
  */
 import { create } from "zustand";
 import type {
+  BucketCoarsening,
   MetricBucket,
   TokenDimension,
   TokenFilter,
@@ -18,7 +19,8 @@ import type {
 } from "@dispatch/shared";
 import { api } from "../lib/api.js";
 import { latestLoad, REMOUNT_FRESH_MS } from "../lib/latestLoad.js";
-import { RANGE_PRESETS, type ChartKind } from "./metrics.js";
+import type { ChartKind } from "./metrics.js";
+import { metricRequest } from "./metrics-window.js";
 
 interface TokenMetricsStore {
   rangeId: string;
@@ -30,6 +32,8 @@ interface TokenMetricsStore {
   chart: ChartKind;
 
   report: TokenReport | null;
+  /** Set when the picked bucket was too fine for the window and was stepped up. */
+  coarsened: BucketCoarsening | null;
   loading: boolean;
   refetching: boolean;
   error: string | null;
@@ -50,13 +54,6 @@ interface TokenMetricsStore {
   cancel: () => void;
 }
 
-function windowFor(rangeId: string): { from?: number; to?: number } {
-  const preset = RANGE_PRESETS.find((r) => r.id === rangeId) ?? RANGE_PRESETS[2]!;
-  if (preset.ms === null) return {};
-  const to = Date.now();
-  return { from: to - preset.ms, to: to + 1 };
-}
-
 /** What a report answers, for "do I already hold this?". */
 function queryKey(
   s: Pick<TokenMetricsStore, "rangeId" | "filter" | "groupBy" | "measure" | "bucket" | "limit">,
@@ -68,15 +65,29 @@ export const useTokenMetrics = create<TokenMetricsStore>((set, get) => {
   /** See `stores/metrics.ts` — the last click must win, not the slowest reply. */
   const loader = latestLoad(async ({ signal, current, landed }) => {
     const state = get();
-    const { rangeId, filter, groupBy, measure, bucket, limit, report } = state;
+    const { rangeId, filter, groupBy, measure, limit, report } = state;
     set({ refetching: true, loading: report === null, error: null });
+    // "All time" starts at the token ledger's oldest row, which every report
+    // carries. Before the first report there is none, and `from` 0 is still
+    // all time — the server anchors auto sizing at the oldest row itself, and
+    // an explicit fine bucket on a first-ever "All time" load is not a state
+    // the page can reach (it opens on 30 days).
+    const req = metricRequest(rangeId, state.bucket, report?.oldest ?? null);
     try {
       const res = await api.metrics.tokens(
-        { ...windowFor(rangeId), filter, groupBy, measure, bucket, limit },
+        {
+          ...(rangeId === "all" && report?.oldest == null ? {} : { from: req.from }),
+          to: req.to,
+          filter,
+          groupBy,
+          measure,
+          bucket: req.bucket,
+          limit,
+        },
         signal,
       );
       if (!current()) return;
-      set({ report: res, loading: false, refetching: false });
+      set({ report: res, coarsened: req.coarsened, loading: false, refetching: false });
       landed(queryKey(state));
     } catch (err) {
       if (!current()) return;
@@ -108,6 +119,7 @@ export const useTokenMetrics = create<TokenMetricsStore>((set, get) => {
     chart: "stacked-bar",
 
     report: null,
+    coarsened: null,
     loading: false,
     refetching: false,
     error: null,

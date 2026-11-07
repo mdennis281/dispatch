@@ -24,8 +24,9 @@
  * anyone who wants the raw numstat — it is a view toggle, not a re-walk.
  */
 import { useEffect, useMemo, useState } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { GitCommitHorizontal, FolderGit2, Layers } from "lucide-react";
-import { METRIC_OTHER_KEY, type GrowthReport } from "@dispatch/shared";
+import { METRIC_BUCKET_ADJECTIVE, METRIC_OTHER_KEY, type GrowthReport } from "@dispatch/shared";
 import { Button } from "../ui/Button.js";
 import { Select } from "../ui/Select.js";
 import { useProjects, useRealProjects } from "../../stores/projects.js";
@@ -38,8 +39,9 @@ import {
 } from "../../stores/growth.js";
 import { GrowthChart } from "./GrowthChart.js";
 import { ChartLegend } from "./MetricsChart.js";
-import { Card, Hero, StatTile, ago, compact, count } from "./chrome.js";
+import { Card, CoarseNote, Hero, StatTile, ago, compact, count } from "./chrome.js";
 import {
+  firstPlausible,
   shapeGrowth,
   type GrowthBucket,
   type GrowthMeasure,
@@ -49,11 +51,8 @@ import {
 import { colorFor, useChartPalette } from "./palette.js";
 import { cn } from "../../lib/cn.js";
 
-const BUCKET_LABELS: Record<string, string> = {
-  day: "daily",
-  week: "weekly",
-  month: "monthly",
-};
+/** The growth series already carry their display label. Hoisted: a stable prop. */
+const growthLabel = (key: string, fallback?: string) => fallback ?? key;
 
 /** A signed figure for a delta tile: "+1,204" / "−86" / "0". */
 function signed(n: number): string {
@@ -298,8 +297,22 @@ export function GrowthMetrics() {
   const bucket = useGrowth((s) => s.bucket);
   const includeGenerated = useGrowth((s) => s.includeGenerated);
   const limit = useGrowth((s) => s.limit);
+  // The actions alone, shallow-compared. A bare `useGrowth()` subscribed this
+  // page to EVERY write — including the walk's progress frame every ~120 ms —
+  // and re-shaped and redrew the held report under the progress bar each time.
   const { open, setRange, setMeasure, setSplit, setBucket, setIncludeGenerated, setLimit, leave } =
-    useGrowth();
+    useGrowth(
+      useShallow((s) => ({
+        open: s.open,
+        setRange: s.setRange,
+        setMeasure: s.setMeasure,
+        setSplit: s.setSplit,
+        setBucket: s.setBucket,
+        setIncludeGenerated: s.setIncludeGenerated,
+        setLimit: s.setLimit,
+        leave: s.leave,
+      })),
+    );
 
   // Which repo to open with: the active project, else the first. Keyed on that
   // DEFAULT rather than on the store's pick, so a project chosen from the
@@ -338,6 +351,14 @@ export function GrowthMetrics() {
     [report, rangeId, split, bucket, includeGenerated, limit],
   );
 
+  const legend = useMemo(
+    () => shape?.series.map((s) => ({ key: s.key, label: s.label, total: s.now })) ?? [],
+    [shape],
+  );
+
+  // The same plausibility floor the chart uses: a zeroed commit clock made the
+  // hint read "since Jan 1970" over a chart that (rightly) starts years later.
+  const sinceTs = report ? (firstPlausible(report.points) ?? report.firstTs) : 0;
   const project = projects.find((p) => p.id === projectId);
   const net = shape ? shape.addedInRange - shape.deletedInRange : 0;
   const allTime = rangeId === "all";
@@ -400,7 +421,7 @@ export function GrowthMetrics() {
                     {includeGenerated ? "" : " · lockfiles & build output excluded"}
                     <br />
                     {count(report.commits)} commits by {count(report.authors)} author
-                    {report.authors === 1 ? "" : "s"} since {monthYear.format(new Date(report.firstTs))}
+                    {report.authors === 1 ? "" : "s"} since {monthYear.format(new Date(sinceTs))}
                     {" · walked "}
                     {ago(report.generatedAt)} in {elapsed(report.elapsedMs)}
                   </>
@@ -474,7 +495,7 @@ export function GrowthMetrics() {
             }
             note={[
               shape.folded ? `${shape.folded} more folded into Other` : null,
-              bucket === "auto" ? `bucketed ${BUCKET_LABELS[shape.bucket]}` : null,
+              bucket === "auto" ? `bucketed ${METRIC_BUCKET_ADJECTIVE[shape.bucket]}` : null,
             ]
               .filter(Boolean)
               .join(" · ") || null}
@@ -485,12 +506,14 @@ export function GrowthMetrics() {
               </div>
               <div className="mt-3">
                 <ChartLegend
-                  entries={shape.series.map((s) => ({ key: s.key, label: s.label, total: s.now }))}
-                  label={(_k, fallback) => fallback ?? _k}
+                  entries={legend}
+                  label={growthLabel}
                   format={count}
                   color={color}
                 />
               </div>
+              {/* "Size" is an area, so it has points; "churn" draws bars. */}
+              <CoarseNote coarsened={shape.coarsened} bars={measure === "churn"} />
             </div>
           </Card>
 

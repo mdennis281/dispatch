@@ -25,6 +25,7 @@
  */
 import { create } from "zustand";
 import type {
+  BucketCoarsening,
   MetricBucket,
   MetricSpan,
   MetricSpanDimension,
@@ -36,7 +37,8 @@ import type {
 } from "@dispatch/shared";
 import { api } from "../lib/api.js";
 import { heldFresh, latestLoad, REMOUNT_FRESH_MS } from "../lib/latestLoad.js";
-import { RANGE_PRESETS, type ChartKind } from "./metrics.js";
+import type { ChartKind } from "./metrics.js";
+import { metricRequest, metricWindow } from "./metrics-window.js";
 
 interface SpanMetricsStore {
   /* ---- the query every card on the subpage shares ---- */
@@ -64,6 +66,8 @@ interface SpanMetricsStore {
   facets: MetricSpanFacetsResponse | null;
   recent: MetricSpan[];
   ledgerRows: number;
+  /** Set when the picked bucket was too fine for the window and was stepped up. */
+  coarsened: BucketCoarsening | null;
 
   /** True during the FIRST load only — later loads dim the existing render
    *  instead of replacing it, so the frame never jumps. */
@@ -99,14 +103,6 @@ export const SPAN_SORT_LABELS: Record<SpanSort, string> = {
   count: "Spans",
 };
 
-/** Resolve the selected preset into an absolute window. */
-function windowFor(rangeId: string): { from?: number; to?: number } {
-  const preset = RANGE_PRESETS.find((r) => r.id === rangeId) ?? RANGE_PRESETS[1]!;
-  if (preset.ms === null) return {};
-  const to = Date.now();
-  return { from: to - preset.ms, to: to + 1 };
-}
-
 /** What a set of results answers, for "do I already hold this?". */
 function queryKey(s: Pick<SpanMetricsStore, "rangeId" | "filter" | "groupBy" | "bucket" | "limit">) {
   return JSON.stringify([s.rangeId, s.filter, s.groupBy, s.bucket, s.limit]);
@@ -132,27 +128,45 @@ export const useSpanMetrics = create<SpanMetricsStore>((set, get) => {
   let facetsFor: string | null = null;
   let windowedFor: { key: string; at: number } | null = null;
 
+  /** The oldest span in the ledger, for "All time" — see `stores/metrics.ts`. */
+  let ledgerFrom: number | null = null;
+
   /** Every query, guarded and cancellable — see `lib/latestLoad.ts`. */
   const loader = latestLoad(async ({ signal, current, landed }) => {
     const state = get();
-    const { rangeId, filter, groupBy, bucket, limit, series } = state;
+    const { rangeId, filter, groupBy, limit, series } = state;
     set({ refetching: true, loading: series === null, error: null });
-    const scope = { ...windowFor(rangeId), filter };
     const scopeId = scopeKey(state);
-    const keepFacets = facetsFor === scopeId && state.facets !== null;
+    let keepFacets = facetsFor === scopeId && state.facets !== null;
     const keepWindowed = heldFresh(windowedFor, scopeId) && state.summary !== null;
     try {
+      // "All time" with no ledger range yet reads the facets first, for the
+      // window's start — same reasoning as `stores/metrics.ts`.
+      let facetsPre: MetricSpanFacetsResponse | null = null;
+      if (rangeId === "all" && ledgerFrom === null && !keepFacets) {
+        facetsPre = await api.metrics.spans.facets(
+          { ...metricWindow(rangeId, null), filter },
+          signal,
+        );
+        if (!current()) return;
+        ledgerFrom = facetsPre.range.from;
+        keepFacets = true;
+      }
+      const req = metricRequest(rangeId, state.bucket, ledgerFrom);
+      const scope = { from: req.from, to: req.to, filter };
+      const bucket = req.bucket;
       // One round trip each, in parallel: they read the same window, and a
       // sequential chain would make the page settle five times.
       const [seriesRes, totalsRes, summaryRes, facetsRes, recentRes] = await Promise.all([
         api.metrics.spans.series({ ...scope, groupBy, bucket, limit }, signal),
         api.metrics.spans.totals({ ...scope, groupBy, bucket, limit }, signal),
         keepWindowed ? state.summary! : api.metrics.spans.summary(scope, signal),
-        keepFacets ? state.facets! : api.metrics.spans.facets(scope, signal),
+        keepFacets ? (facetsPre ?? state.facets!) : api.metrics.spans.facets(scope, signal),
         keepWindowed ? state.recent : api.metrics.spans.recent({ ...scope, limit: 50 }, signal),
       ]);
       if (!current()) return; // a newer query is already in flight
       facetsFor = scopeId;
+      ledgerFrom = facetsRes.range.from;
       if (!keepWindowed) windowedFor = { key: scopeId, at: Date.now() };
       set({
         series: seriesRes,
@@ -161,6 +175,7 @@ export const useSpanMetrics = create<SpanMetricsStore>((set, get) => {
         facets: facetsRes,
         recent: recentRes,
         ledgerRows: facetsRes.rows,
+        coarsened: req.coarsened,
         loading: false,
         refetching: false,
       });
@@ -215,6 +230,7 @@ export const useSpanMetrics = create<SpanMetricsStore>((set, get) => {
     facets: null,
     recent: [],
     ledgerRows: 0,
+    coarsened: null,
     loading: false,
     refetching: false,
     error: null,
