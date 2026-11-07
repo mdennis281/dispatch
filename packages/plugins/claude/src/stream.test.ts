@@ -346,6 +346,23 @@ describe("ClaudeStreamDecoder", () => {
     expect(quoted[0]).not.toHaveProperty("limit");
   });
 
+  it("carries the weekly limit, whose reset names a date", () => {
+    // This sentence once parsed as no limit at all, so the chat failed instead
+    // of failing over to its configured fallback account.
+    const reason = "You've hit your weekly limit · resets Nov 11, 6pm (America/Chicago)";
+    const out = decoder().decode(msg({ type: "result", subtype: "success", is_error: true, result: reason }));
+    expect(out[0]).toMatchObject({ type: "turn-end", ok: false, limit: { reason } });
+    expect((out[0] as { limit?: { resetsAt?: number } }).limit?.resetsAt).toEqual(expect.any(Number));
+  });
+
+  it("still reports a limit whose reset time it cannot read", () => {
+    // Failover needs only "this account is out"; it must not hang on the clock.
+    const reason = "You've hit your weekly limit · resets sometime next week";
+    const out = decoder().decode(msg({ type: "result", subtype: "success", is_error: true, result: reason }));
+    expect(out[0]).toMatchObject({ type: "turn-end", ok: false, limit: { reason } });
+    expect((out[0] as { limit?: { resetsAt?: number } }).limit?.resetsAt).toBeUndefined();
+  });
+
   it("emits a task-notification row for a settled background task", () => {
     const d = decoder();
     const out = d.decode(

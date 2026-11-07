@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseSessionLimit, composeMessageText, type Chat, type MessagePart } from "@dispatch/shared";
+import { isLimitSentence, parseSessionLimit, composeMessageText, type Chat, type MessagePart } from "@dispatch/shared";
 import { Store } from "../store/index.js";
 import { EventBus } from "../bus.js";
 import { ResumeScheduler, RESUME_PROMPT, FAILOVER_PROMPT } from "./resume-scheduler.js";
@@ -62,6 +62,43 @@ describe("parseSessionLimit", () => {
       NOON_CT,
     );
     expect(limit?.resetsAt).toBeGreaterThan(NOON_CT);
+  });
+
+  it("reads the WEEKLY sentence, which puts a date before the clock", () => {
+    // Verbatim from a chat that failed instead of falling back: the regex
+    // wanted a digit straight after "resets" and saw "Nov".
+    const weekly = "You've hit your weekly limit · resets Nov 11, 6pm (America/Chicago)";
+    // Seen on 2026-11-07 at 2:18pm CST (UTC-6).
+    const seen = Date.parse("2026-11-07T20:18:00.000Z");
+    const limit = parseSessionLimit(weekly, seen)!;
+    expect(limit).not.toBeNull();
+    expect(limit.clock).toBe("6:00pm");
+    expect(limit.timeZone).toBe("America/Chicago");
+    // The named day, not the next 6pm — that would resume four days early.
+    expect(limit.resetsAt).toBe(Date.parse("2026-11-12T00:00:00.000Z"));
+  });
+
+  it("accepts the dated shape's variants and rolls a past date into next year", () => {
+    const at = (s: string, now = NOON_CT) => parseSessionLimit(s, now)?.resetsAt;
+    expect(at("You've hit your weekly limit · resets Aug 4, 9:30am (America/Chicago)")).toBe(
+      Date.parse("2026-08-04T14:30:00.000Z"),
+    );
+    expect(at("You've hit your weekly limit · resets August 4 at 9:30am (America/Chicago)")).toBe(
+      Date.parse("2026-08-04T14:30:00.000Z"),
+    );
+    // Dec 30 CST, resetting Jan 2: the sentence has no year, so it's next year's.
+    const dec30 = Date.parse("2026-12-30T18:00:00.000Z");
+    expect(at("You've hit your weekly limit · resets Jan 2, 6pm (America/Chicago)", dec30)).toBe(
+      Date.parse("2027-01-03T00:00:00.000Z"),
+    );
+    // A word that isn't a month is not a date to schedule against.
+    expect(at("You've hit your weekly limit · resets Soon 5, 6pm (America/Chicago)")).toBeUndefined();
+  });
+
+  it("calls a sentence a limit even when its reset time won't read", () => {
+    expect(isLimitSentence("You've hit your weekly limit · resets whenever")).toBe(true);
+    expect(isLimitSentence("Error: connection reset")).toBe(false);
+    expect(isLimitSentence(undefined)).toBe(false);
   });
 });
 
