@@ -226,8 +226,7 @@ export class MetricsReader {
       // The worker's handle is read-only and refuses a schema it doesn't
       // match, so the owner migrates first.
       this.opts.db.open();
-      const { url, execArgv } = workerEntry();
-      worker = new Worker(url, { workerData: data, ...(execArgv ? { execArgv } : {}) });
+      worker = startWorker(data);
     } catch (err) {
       console.error("[Dispatch] metrics worker unavailable; reading in-process:", err);
       this.fallback = createReadMethods(this.opts);
@@ -269,18 +268,25 @@ export class MetricsReader {
 }
 
 /**
- * Where the worker's entry lives, and how to load it.
+ * Start the worker thread.
  *
- * Built (`dist/*.js`), it is a sibling `.js` file and needs nothing. From
- * source it is a `.ts` file: under `tsx watch` (pnpm dev) the thread inherits
- * tsx's loader through `process.execArgv`, but under vitest there is no such
- * flag to inherit, so tsx's loader is passed explicitly.
+ * Built (`dist/*.js`), the entry is a sibling `.js` file and needs nothing.
+ * From source it is a `.ts` file, which needs tsx — and tsx is REGISTERED
+ * INSIDE the thread, through its API, rather than passed as `--import` in
+ * `execArgv`. The flag was the first version: it worked on Windows under
+ * Node 24 and 25, and on the Linux CI runner the thread came up without the
+ * loader and died on the first parameter property, under Node's own
+ * strip-only TypeScript. Registering from inside the thread doesn't depend on
+ * how any given runner propagates CLI flags. Registering again under
+ * `tsx watch`, whose flags the thread also inherits, is harmless.
  */
-function workerEntry(): { url: URL; execArgv?: string[] } {
+function startWorker(workerData: MetricsWorkerData): Worker {
   const here = import.meta.url;
-  if (!here.endsWith(".ts")) return { url: new URL("./metrics-worker.js", here) };
-  const url = new URL("./metrics-worker.ts", here);
-  if (process.execArgv.some((a) => a.includes("tsx"))) return { url };
-  const loader = pathToFileURL(createRequire(here).resolve("tsx")).href;
-  return { url, execArgv: [...process.execArgv, "--import", loader] };
+  if (!here.endsWith(".ts")) return new Worker(new URL("./metrics-worker.js", here), { workerData });
+  const api = pathToFileURL(createRequire(here).resolve("tsx/esm/api")).href;
+  const entry = new URL("./metrics-worker.ts", here).href;
+  const boot = `import(${JSON.stringify(api)})
+    .then((t) => (t.register ?? t.default.register)())
+    .then(() => import(${JSON.stringify(entry)}));`;
+  return new Worker(boot, { eval: true, workerData });
 }
