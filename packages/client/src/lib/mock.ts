@@ -683,6 +683,10 @@ export const MOCK_MESSAGES: Record<string, ChatMessage[]> = {
             { id: "shot_desktop", path: mockShot("Desktop · 125%", 640, 400), mimeType: "image/svg+xml", alt: "desktop-125.png" },
             { id: "shot_phone", path: mockShot("Phone · 390px", 390, 700), mimeType: "image/svg+xml", alt: "phone-390.png" },
           ],
+          artifacts: [
+            { id: "art_layout", version: 3, title: "Settings modal — spacing options", type: "html" },
+            { id: "art_notes", version: 1, title: "Viewport test matrix", type: "markdown" },
+          ],
           previewUrl: "http://localhost:5174/#settings",
           prUrl: "https://github.com/mdennis281/hivebreak/pull/231",
         },

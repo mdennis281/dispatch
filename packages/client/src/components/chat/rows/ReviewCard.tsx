@@ -1,6 +1,7 @@
 import { useState } from "react";
 import {
   Check,
+  ChevronRight,
   ExternalLink,
   GitPullRequest,
   MonitorPlay,
@@ -14,6 +15,7 @@ import {
   HUMAN_REVIEW_ANSWERS,
   composeMessageText,
   parseHumanReviewAnswer,
+  type ArtifactRef,
   type HumanReviewPayload,
   type HumanReviewVerdict,
   type MessagePart,
@@ -22,6 +24,7 @@ import {
 import { RowShell } from "./RowShell.js";
 import { MediaGroup } from "./MediaGroup.js";
 import { Button } from "../../ui/Button.js";
+import { RowButton } from "../../ui/RowButton.js";
 import { Chip, type Tone } from "../../ui/Chip.js";
 import { cn } from "../../../lib/cn.js";
 import { actions } from "../../../lib/actions.js";
@@ -29,6 +32,8 @@ import { classifyReach } from "../../../lib/connectionDiagnosis.js";
 import { useChats } from "../../../stores/chats.js";
 import { attentionCardId } from "../../attention/focus.js";
 import { rowHarnessLabel } from "../../../lib/harness.js";
+import { useArtifactView } from "../../../stores/artifacts.js";
+import { artifactIcon, artifactTypeLabel } from "../../artifacts/artifactIcon.js";
 
 /** How a settled verdict reads on the card: chip word, chip tone, footer sentence. */
 const SETTLED: Record<HumanReviewVerdict, { chip: string; tone: Tone; said: string }> = {
@@ -147,6 +152,44 @@ function EvidenceLinks({ review }: { review: HumanReviewPayload }) {
       {hostOnly && (
         <span className="text-xs text-muted">The preview runs on the host machine — it may not open from here.</span>
       )}
+    </div>
+  );
+}
+
+/**
+ * The attached artifacts, each opening the pane on the version the card was
+ * raised against — not the latest. The agent may keep editing while the human
+ * looks, and the verdict is about what was put in front of them. A newer
+ * version is flagged so a reviewer who notices the drift can ask about it.
+ */
+function EvidenceArtifacts({ chatId, artifacts }: { chatId: string; artifacts: ArtifactRef[] }) {
+  const openArtifact = useArtifactView((s) => s.openArtifact);
+  const latest = useArtifactView((s) => s.latest);
+  if (!artifacts.length) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      {artifacts.map((a) => {
+        const Icon = artifactIcon(a.type);
+        const newest = latest[`${chatId}:${a.id}`] ?? a.version;
+        return (
+          <RowButton
+            key={a.id}
+            onClick={() => openArtifact(chatId, a.id, a.version)}
+            className={cn(
+              "group/art inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-md border border-accent-line bg-accent-ghost px-2.5 py-1 text-sm text-accent-hi transition-colors hover:border-accent/60",
+              "[&_svg]:size-3.5 [&_svg]:shrink-0",
+            )}
+          >
+            <Icon />
+            <span className="truncate font-medium">{a.title}</span>
+            <span className="cm-mono shrink-0 !text-2xs opacity-80">
+              {artifactTypeLabel(a.type)} · v{a.version}
+              {newest > a.version && ` · newer: v${newest}`}
+            </span>
+            <ChevronRight className="opacity-70 transition-transform group-hover/art:translate-x-0.5" />
+          </RowButton>
+        );
+      })}
     </div>
   );
 }
@@ -274,6 +317,7 @@ export function ReviewCard({ row, review }: ReviewCardProps) {
             {review.summary}
           </p>
           <EvidenceLinks review={review} />
+          <EvidenceArtifacts chatId={row.chatId} artifacts={review.artifacts} />
           {review.screenshots.length > 0 && (
             <MediaGroup chatId={row.chatId} assets={review.screenshots} variant="fill" />
           )}

@@ -17,6 +17,7 @@
  */
 import * as z from "zod";
 import { ImageRefSchema } from "./common.js";
+import { ArtifactRefSchema } from "./artifacts.js";
 
 /**
  * Hard cap on the agent's prose. The whole point of the card is that it is
@@ -30,6 +31,8 @@ export const HUMAN_REVIEW_SUMMARY_MAX = 400;
 export const HUMAN_REVIEW_TITLE_MAX = 80;
 /** More than this is a gallery nobody walks; pick the shots that decide it. */
 export const HUMAN_REVIEW_MAX_SCREENSHOTS = 6;
+/** Same reasoning: the artifacts that decide it, not every one the chat made. */
+export const HUMAN_REVIEW_MAX_ARTIFACTS = 4;
 
 export const HUMAN_REVIEW_VERDICTS = ["approve", "iterate", "stop"] as const;
 export type HumanReviewVerdict = (typeof HUMAN_REVIEW_VERDICTS)[number];
@@ -58,6 +61,13 @@ export const HumanReviewPayloadSchema = z.object({
   summary: z.string().min(1),
   /** Already ingested into the chat's assets by the time the card sees them. */
   screenshots: z.array(ImageRefSchema).default([]),
+  /**
+   * Artifacts in this chat, each PINNED to the version that was current when
+   * the card went up. The agent can keep editing while the human looks, and an
+   * Approve given to v3 must not read as an approval of a v4 nobody saw.
+   * Defaulted so a row written before this field existed still parses.
+   */
+  artifacts: z.array(ArtifactRefSchema).default([]),
   previewUrl: z.string().regex(HTTP_URL_RE).optional(),
   prUrl: z.string().regex(HTTP_URL_RE).optional(),
 });

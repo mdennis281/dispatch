@@ -38,8 +38,15 @@ describe("readHumanReview", () => {
   const review = { title: "T", summary: "S", screenshots: [], previewUrl: "http://localhost:5173" };
 
   it("returns the payload of a review card and null for a plain question", () => {
-    expect(readHumanReview({ questions: [], review })).toEqual(review);
+    // A row written before artifacts could ride a review still parses, with none.
+    expect(readHumanReview({ questions: [], review })).toEqual({ ...review, artifacts: [] });
     expect(readHumanReview({ questions: [] })).toBeNull();
+  });
+
+  it("carries attached artifacts and drops a review whose artifact ref is malformed", () => {
+    const artifacts = [{ id: "a1", version: 2, title: "Pricing", type: "html" }];
+    expect(readHumanReview({ review: { ...review, artifacts } })?.artifacts).toEqual(artifacts);
+    expect(readHumanReview({ review: { ...review, artifacts: [{ id: "a1", version: 0 }] } })).toBeNull();
   });
 
   it("rejects a non-http link, which would otherwise land in an href", () => {

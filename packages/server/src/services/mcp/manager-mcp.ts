@@ -111,6 +111,7 @@ import {
   isWritableScope,
   HTTP_URL_RE,
   HUMAN_REVIEW_ANSWERS,
+  HUMAN_REVIEW_MAX_ARTIFACTS,
   HUMAN_REVIEW_MAX_SCREENSHOTS,
   HUMAN_REVIEW_SUMMARY_MAX,
   HUMAN_REVIEW_TITLE_MAX,
@@ -317,6 +318,8 @@ export interface ManagerHumanReviewRequest {
   summary: string;
   /** Screenshot paths (or http(s) image URLs) exactly as the agent passed them. */
   screenshots: string[];
+  /** Artifact ids in this chat, as the agent passed them; pinned to a version by the broker. */
+  artifacts?: string[];
   previewUrl?: string;
   prUrl?: string;
 }
@@ -1461,6 +1464,7 @@ export function humanReviewQuestion(review: HumanReviewPayload): ManagerAskQuest
     review.screenshots.length
       ? `${review.screenshots.length} screenshot${review.screenshots.length === 1 ? "" : "s"} attached.`
       : null,
+    ...review.artifacts.map((a) => `Artifact: ${a.title} (v${a.version})`),
   ].filter((line): line is string => line !== null);
   if (links.length) lines.push(links.join("\n"));
   return {
@@ -3538,8 +3542,8 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       "Stop work — each can carry a comment. Use it when you aren't confident the change is right " +
       "(anything visual especially), or when the human asked to see it before it merges — instead " +
       "of merging, and instead of ending your turn with a link they may never open. SHOW, don't " +
-      "tell: attach screenshots and/or the URL of a running dev server (start one with " +
-      "run_subapp). The human skims this card, so the summary is capped at " +
+      "tell: attach screenshots, the URL of a running dev server (start one with run_subapp), " +
+      "and/or artifacts you published with artifact_create. The human skims this card, so the summary is capped at " +
       `${HUMAN_REVIEW_SUMMARY_MAX} characters: what changed and what you're unsure about, nothing ` +
       "else. Act on the verdict you get back. If this call errors or times out before they " +
       "answer, that is NOT a verdict: don't merge, say you're waiting on their review and end " +
@@ -3574,6 +3578,15 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         .regex(HTTP_URL_RE)
         .optional()
         .describe("A running dev server the human can click through — the URL run_subapp gave you."),
+      artifacts: z
+        .array(z.string().min(1))
+        .max(HUMAN_REVIEW_MAX_ARTIFACTS)
+        .optional()
+        .describe(
+          "Ids of artifacts in THIS chat (what artifact_create returned) for the human to open " +
+            "from the card. Each is pinned to its current version, so publish the final edit " +
+            "BEFORE asking — a later artifact_update is not what they approved.",
+        ),
       prUrl: z
         .string()
         .regex(HTTP_URL_RE)
@@ -3582,12 +3595,13 @@ export function createManagerTools(ctx: ManagerMcpContext) {
     },
     async (args, extra): Promise<CallToolResult> => {
       const screenshots = args.screenshots ?? [];
-      if (!screenshots.length && !args.previewUrl && !args.prUrl) {
+      const artifacts = args.artifacts ?? [];
+      if (!screenshots.length && !artifacts.length && !args.previewUrl && !args.prUrl) {
         // A summary alone asks the human to take your word for it — which is the
         // thing this card exists to avoid. That's a question, and has a tool.
         return textResult(
-          "request_human_review needs something to look at: screenshots, a previewUrl of a " +
-            "running dev server, or at least the prUrl. For a question that needs no evidence, " +
+          "request_human_review needs something to look at: screenshots, artifacts, a " +
+            "previewUrl of a running dev server, or at least the prUrl. For a question that needs no evidence, " +
             "use ask_user.",
           true,
         );
@@ -3598,6 +3612,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
           title: args.title,
           summary: args.summary,
           screenshots,
+          artifacts,
           previewUrl: args.previewUrl,
           prUrl: args.prUrl,
         },

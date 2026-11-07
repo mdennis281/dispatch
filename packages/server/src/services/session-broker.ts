@@ -145,6 +145,7 @@ import {
   parseInlineMedia,
   QUESTION_NOTES_SEPARATOR,
   readHumanReview,
+  type ArtifactRef,
   type HumanReviewPayload,
   EMPTY_REFRESH_REPORT,
   SECRET_ANSWERS,
@@ -6979,6 +6980,12 @@ export class SessionBroker {
     if (!session) {
       return { status: "unavailable", message: "No live session is available to ask through." };
     }
+    // Artifacts FIRST: resolving them is a pure lookup, while each screenshot is
+    // copied into the chat's assets under a fresh id. A typo'd artifact id
+    // checked afterwards left every already-copied screenshot orphaned, again
+    // on each retry.
+    const artifacts = await this.resolveReviewArtifacts(chatId, request.artifacts ?? []);
+    if (typeof artifacts === "string") return { status: "invalid", message: artifacts };
     const screenshots: ImageRef[] = [];
     for (const ref of request.screenshots) {
       const shot = await this.ingestReviewScreenshot(session, ref);
@@ -6989,6 +6996,7 @@ export class SessionBroker {
       title: request.title,
       summary: request.summary,
       screenshots,
+      artifacts,
       ...(request.previewUrl ? { previewUrl: request.previewUrl } : {}),
       ...(request.prUrl ? { prUrl: request.prUrl } : {}),
     };
@@ -7022,6 +7030,30 @@ export class SessionBroker {
       );
     }
     return { status: "reviewed", ...verdict };
+  }
+
+  /**
+   * The artifacts a review names, each pinned to its CURRENT version — or, as a
+   * string, why one can't be shown. Refused rather than dropped for the same
+   * reason as a missing screenshot: a card without the thing the agent meant to
+   * show gets approved by someone who never saw it. Only this chat's artifacts
+   * resolve, because the card opens them through this chat's pane.
+   */
+  private async resolveReviewArtifacts(chatId: string, ids: string[]): Promise<ArtifactRef[] | string> {
+    if (!ids.length) return [];
+    if (!this.artifacts) return "Artifacts are not enabled on this Dispatch, so none can be attached.";
+    const out: ArtifactRef[] = [];
+    for (const raw of new Set(ids.map((id) => id.trim()))) {
+      const meta = await this.artifacts.getMeta(chatId, raw).catch(() => null);
+      if (!meta) return `No artifact "${raw}" in this chat — pass the id artifact_create returned.`;
+      if (meta.expiredAt !== undefined) {
+        return `Artifact "${raw}" has expired and its content was deleted — publish it again first.`;
+      }
+      const version = meta.versions.at(-1)?.n;
+      if (version === undefined) return `Artifact "${raw}" has no versions to show.`;
+      out.push({ id: meta.id, version, title: meta.title, type: meta.type });
+    }
+    return out;
   }
 
   /**

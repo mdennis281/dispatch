@@ -215,6 +215,7 @@ describe("manager-mcp — request_human_review", () => {
     title: "New review card",
     summary: "Verdict buttons under the evidence.",
     screenshots: ["C:/shots/card.png"],
+    artifacts: undefined as string[] | undefined,
     previewUrl: "http://localhost:5173",
     prUrl: undefined,
   };
@@ -247,6 +248,7 @@ describe("manager-mcp — request_human_review", () => {
         title: args.title,
         summary: args.summary,
         screenshots: args.screenshots,
+        artifacts: [],
         previewUrl: args.previewUrl,
         prUrl: undefined,
       },
@@ -273,6 +275,26 @@ describe("manager-mcp — request_human_review", () => {
     expect(res.isError).toBe(true);
     expect(resultText(res)).toContain("needs something to look at");
     expect(raised).toBe(false);
+  });
+
+  it("counts an artifact alone as something to look at", async () => {
+    let request: unknown;
+    const broker: ManagerMcpBroker = {
+      ...fakeBroker({ c1: "running" }),
+      requestHumanReview: async (_chatId, req) => {
+        request = req;
+        return { status: "reviewed", verdict: "approve" };
+      },
+    };
+    const { requestHumanReview } = createManagerTools({ chatId: "c1", bus, broker });
+
+    const res = await requestHumanReview.handler(
+      { ...args, screenshots: undefined, previewUrl: undefined, artifacts: ["a1"] },
+      {},
+    );
+
+    expect(res.isError).toBeFalsy();
+    expect(request).toMatchObject({ artifacts: ["a1"], screenshots: [] });
   });
 
   it("caps the summary in the schema the agent sees, so an essay is rejected rather than clipped", () => {
@@ -327,6 +349,7 @@ describe("manager-mcp — request_human_review", () => {
       title: "New review card",
       summary: "Verdict buttons under the evidence.",
       screenshots: [{ id: "s1", path: "assets/s1.png" }],
+      artifacts: [{ id: "a1", version: 3, title: "Pricing page", type: "html" }],
       previewUrl: "http://localhost:5173",
     });
     expect(q.options.map((o) => o.label)).toEqual([
@@ -337,6 +360,7 @@ describe("manager-mcp — request_human_review", () => {
     expect(q.header.length).toBeLessThanOrEqual(24);
     expect(q.question).toContain("Preview: http://localhost:5173");
     expect(q.question).toContain("1 screenshot attached.");
+    expect(q.question).toContain("Artifact: Pricing page (v3)");
   });
 });
 
