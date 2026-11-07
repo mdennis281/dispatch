@@ -146,7 +146,11 @@ export function MetricsView() {
           {count(rows)} {unit}
         </span>
         <div className="flex-1" />
-        <IconButton size="sm" tip="Reload" onClick={() => void reload()}>
+        {/* Disabled while busy: every tab's busy flag means a read of the
+            CURRENT query is already running, so another click adds nothing but
+            load — and on the ledger tabs each one was a full batch of
+            synchronous SQLite holding up every other route. */}
+        <IconButton size="sm" tip="Reload" disabled={busy} onClick={() => void reload()}>
           <RefreshCw className={cn(busy && "animate-spin")} />
         </IconButton>
       </div>
@@ -154,7 +158,9 @@ export function MetricsView() {
       {/* Only the active subpage is mounted, so a tab flip re-runs that half's
           mount load. That is deliberate rather than wasteful: the window is
           relative to `Date.now()`, so a "last 7 days" render held from an hour
-          ago is quietly answering a different question than its own label. */}
+          ago is quietly answering a different question than its own label.
+          Under 30 s old it is the same answer, so the ledger tabs skip it then
+          (`loadIfStale`). */}
       <ScrollArea className="min-h-0 flex-1">
         {limits ? (
           <LimitMetrics />

@@ -589,8 +589,9 @@ async function request<T>(
   method: string,
   path: string,
   body?: unknown,
-  /** `keepalive` lets a request outlive the page — see `artifactStoragePatch`. */
-  init?: Pick<RequestInit, "keepalive">,
+  /** `keepalive` lets a request outlive the page — see `artifactStoragePatch`.
+   *  `signal` cancels it — see `lib/latestLoad.ts`. */
+  init?: Pick<RequestInit, "keepalive" | "signal">,
 ): Promise<T> {
   const res = await sessionFetch(`${BASE}${path}`, {
     method,
@@ -663,7 +664,8 @@ async function stream<T>(
   }
   if (carry.trim()) onFrame(JSON.parse(carry) as T);
 }
-const post = <T>(path: string, body?: unknown) => request<T>("POST", path, body);
+const post = <T>(path: string, body?: unknown, signal?: AbortSignal) =>
+  request<T>("POST", path, body, signal ? { signal } : undefined);
 const put = <T>(path: string, body?: unknown) => request<T>("PUT", path, body);
 const patch = <T>(path: string, body?: unknown) => request<T>("PATCH", path, body);
 const del = <T>(path: string, body?: unknown) => request<T>("DELETE", path, body);
@@ -1937,21 +1939,26 @@ export const api = {
    * would hit the URL length limit the first time someone selects thirty tools.
    */
   metrics: {
-    series: (query: MetricQueryInput) => post<MetricSeriesResponse>("/api/metrics/series", query),
-    totals: (query: MetricQueryInput & { groupBy: MetricDimension }) =>
-      post<MetricTotalsResponse>("/api/metrics/totals", query),
-    facets: (scope: { from?: number; to?: number; filter?: MetricFilter }) =>
-      post<MetricFacetsResponse>("/api/metrics/facets", scope),
-    recent: (scope: { from?: number; to?: number; filter?: MetricFilter; limit?: number }) =>
-      post<MetricEvent[]>("/api/metrics/recent", scope),
+    series: (query: MetricQueryInput, signal?: AbortSignal) =>
+      post<MetricSeriesResponse>("/api/metrics/series", query, signal),
+    totals: (query: MetricQueryInput & { groupBy: MetricDimension }, signal?: AbortSignal) =>
+      post<MetricTotalsResponse>("/api/metrics/totals", query, signal),
+    facets: (scope: { from?: number; to?: number; filter?: MetricFilter }, signal?: AbortSignal) =>
+      post<MetricFacetsResponse>("/api/metrics/facets", scope, signal),
+    recent: (
+      scope: { from?: number; to?: number; filter?: MetricFilter; limit?: number },
+      signal?: AbortSignal,
+    ) => post<MetricEvent[]>("/api/metrics/recent", scope, signal),
     stats: () => get<{ rows: number; buffered: number; dropped: number }>("/api/metrics/stats"),
     /** Total runtime per chat, all time — one small object for every chat. */
     chatRuntime: () => get<ChatRuntimeResponse>("/api/metrics/chat-runtime"),
     prune: (before: number) => post<{ deleted: number }>("/api/metrics/prune", { before }),
     /** Tokens and cost by account × model — the Tokens tab, in one read. */
-    tokens: (query: TokenQueryInput) => post<TokenReport>("/api/metrics/tokens", query),
+    tokens: (query: TokenQueryInput, signal?: AbortSignal) =>
+      post<TokenReport>("/api/metrics/tokens", query, signal),
     /** Every account's limit windows over time, plus resets and anomalies. */
-    limits: (query: LimitQueryInput) => post<LimitReport>("/api/metrics/limits", query),
+    limits: (query: LimitQueryInput, signal?: AbortSignal) =>
+      post<LimitReport>("/api/metrics/limits", query, signal),
 
     /* The RUNTIME half — the same window, answered in milliseconds.
      *
@@ -1961,20 +1968,24 @@ export const api = {
      * anyway. `summary` has no counterpart at all — it is the hero row, and
      * there is no honest single-number equivalent for a count ledger. */
     spans: {
-      series: (query: MetricSpanQueryInput) =>
-        post<MetricSpanSeriesResponse>("/api/metrics/spans/series", query),
-      totals: (query: MetricSpanQueryInput & { groupBy: MetricSpanDimension }) =>
-        post<MetricSpanTotalsResponse>("/api/metrics/spans/totals", query),
-      summary: (scope: { from?: number; to?: number; filter?: MetricSpanFilter }) =>
-        post<MetricSpanSummary>("/api/metrics/spans/summary", scope),
-      facets: (scope: { from?: number; to?: number; filter?: MetricSpanFilter }) =>
-        post<MetricSpanFacetsResponse>("/api/metrics/spans/facets", scope),
-      recent: (scope: {
-        from?: number;
-        to?: number;
-        filter?: MetricSpanFilter;
-        limit?: number;
-      }) => post<MetricSpan[]>("/api/metrics/spans/recent", scope),
+      series: (query: MetricSpanQueryInput, signal?: AbortSignal) =>
+        post<MetricSpanSeriesResponse>("/api/metrics/spans/series", query, signal),
+      totals: (
+        query: MetricSpanQueryInput & { groupBy: MetricSpanDimension },
+        signal?: AbortSignal,
+      ) => post<MetricSpanTotalsResponse>("/api/metrics/spans/totals", query, signal),
+      summary: (
+        scope: { from?: number; to?: number; filter?: MetricSpanFilter },
+        signal?: AbortSignal,
+      ) => post<MetricSpanSummary>("/api/metrics/spans/summary", scope, signal),
+      facets: (
+        scope: { from?: number; to?: number; filter?: MetricSpanFilter },
+        signal?: AbortSignal,
+      ) => post<MetricSpanFacetsResponse>("/api/metrics/spans/facets", scope, signal),
+      recent: (
+        scope: { from?: number; to?: number; filter?: MetricSpanFilter; limit?: number },
+        signal?: AbortSignal,
+      ) => post<MetricSpan[]>("/api/metrics/spans/recent", scope, signal),
     },
   },
 

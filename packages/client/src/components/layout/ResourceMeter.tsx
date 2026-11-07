@@ -158,7 +158,7 @@ export function ResourceMeter({ layout }: { layout: GaugeLayout }) {
   const cpuHistory = useResources((s) => s.cpuHistory);
   const memHistory = useResources((s) => s.memHistory);
   const snapshot = useResources((s) => s.snapshot);
-  const refreshSnapshot = useResources((s) => s.refreshSnapshot);
+  const subscribeSnapshot = useResources((s) => s.subscribeSnapshot);
   const view = useView((s) => s.view);
 
   const [open, setOpen] = useState(false);
@@ -167,12 +167,11 @@ export function ResourceMeter({ layout }: { layout: GaugeLayout }) {
   // it stays open. Nothing scans the process table on this widget's behalf
   // until someone actually asks to see the breakdown. `HoverCard` owns the
   // hovering and the placement; this is the part that is ours.
-  useEffect(() => {
-    if (!open) return;
-    void refreshSnapshot();
-    const tick = setInterval(() => void refreshSnapshot(), 5_000);
-    return () => clearInterval(tick);
-  }, [open, refreshSnapshot]);
+  //
+  // Through the store's shared subscription rather than a timer of its own:
+  // hovering the pill on the Resources page used to run a second 5 s poll
+  // beside the page's, doubling the snapshot requests for the same answer.
+  useEffect(() => (open ? subscribeSnapshot() : undefined), [open, subscribeSnapshot]);
 
   // Nothing at all until the first reading lands — a pill showing "—/—" for a
   // second on every load is worse than one that arrives a second late.

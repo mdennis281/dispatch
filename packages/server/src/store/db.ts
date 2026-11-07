@@ -39,6 +39,36 @@ export function stateDbPath(dataDir: string): string {
 }
 
 /**
+ * A span longer than this is "long": migration 20 gives such rows their own
+ * partial index, `metric_span_long`, and `MetricsService.spanWhere` reads them
+ * from it.
+ *
+ * Why it exists: a window read must find every span that OVERLAPS the window,
+ * and `start_ts < to AND end_ts > from` cannot be answered from the start_ts
+ * index. With `to = now`, the only usable bound matches the whole table, and on
+ * a 900k-span ledger every Runtime query took 1–2 s (the 71 s stalls in the
+ * request log were ~17 of those per click, back to back on the event loop).
+ * Spans are NOT bounded at write time (a `queued` span measured 24 h, and a turn
+ * waiting on a human can run for days), so the read is split instead: spans
+ * that started within this distance of the window come from a start_ts range,
+ * still-open ones from `metric_span_open`, and the rare long ones from this
+ * index. A span is in at least one of the three whatever its length.
+ *
+ * 6 h because the live ledger had ~70 spans over it out of 900k, so the long
+ * index stays tiny while the range scan only reaches 6 h before the window.
+ *
+ * NEVER CHANGE THIS VALUE IN PLACE. SQLite uses a partial index only when the
+ * query repeats its WHERE expression verbatim, so a new value needs a new
+ * migration that rebuilds the index. Results stay correct either way; a
+ * mismatch only costs the speed back.
+ */
+export const SPAN_LONG_MS = 6 * 60 * 60 * 1000;
+
+/** The partial-index predicate for {@link SPAN_LONG_MS}, shared by migration 20
+ * and every query that needs the planner to pick that index. */
+export const SPAN_LONG_SQL = `end_ts - start_ts > ${SPAN_LONG_MS}`;
+
+/**
  * Schema steps, applied in order and tracked by `PRAGMA user_version`.
  *
  * APPEND ONLY. `user_version` is the count of steps already applied, so
@@ -621,6 +651,11 @@ const MIGRATIONS: ReadonlyArray<string> = [
   `
   DROP INDEX IF EXISTS metric_span_chat;
   CREATE INDEX metric_span_chat_state ON metric_span(chat_id, state, end_ts, start_ts);
+  `,
+  // 20 — spans longer than SPAN_LONG_MS, so a window read can find them
+  // without scanning the ledger. See SPAN_LONG_MS for the whole story.
+  `
+  CREATE INDEX metric_span_long ON metric_span(start_ts) WHERE ${SPAN_LONG_SQL};
   `,
 ];
 

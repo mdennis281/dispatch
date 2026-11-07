@@ -99,6 +99,11 @@ interface ResourceStore {
 export const useResources = create<ResourceStore>((set, get) => {
   let snapshotTimer: ReturnType<typeof setInterval> | undefined;
   let subscribers = 0;
+  /** The snapshot read currently out, if any — see `refreshSnapshot`. */
+  let snapshotInFlight: Promise<void> | undefined;
+  /** Forced rescans still out; `refetching` stays up until this is zero. */
+  let forcedInFlight = 0;
+  let systemInFlight = false;
 
   return {
     system: null,
@@ -110,10 +115,18 @@ export const useResources = create<ResourceStore>((set, get) => {
     refetching: false,
 
     refreshSystem: async () => {
+      // Skip a tick while the last one is still out. The read itself is
+      // ~0.2 ms, but a metrics batch that holds the event loop for 70 s (the
+      // request log has one) lets this 2 s poll queue up to thirty-five
+      // requests behind it, each holding a browser connection the page needs
+      // for something else.
+      if (systemInFlight) return;
+      systemInFlight = true;
       // A failed read keeps the last one rather than blanking the widget: a
       // stale figure is off by one poll, an empty one reads as "no data" and
       // sends someone looking for a problem that isn't there.
       const res = await api.resources.system().catch(() => null);
+      systemInFlight = false;
       if (!res) return;
       // `cpuPct` is null until the server has two samples to derive a rate
       // from, and a null must not enter the buffer as a zero — the sparkline
@@ -132,12 +145,33 @@ export const useResources = create<ResourceStore>((set, get) => {
       }));
     },
 
-    refreshSnapshot: async (fresh = false) => {
-      if (fresh) set({ refetching: true });
-      const res = await api.resources.snapshot(fresh).catch(() => null);
-      // `refetching` clears on failure too — a spinner that never stops is a
-      // worse lie than a table that did not change.
-      set(res ? { snapshot: res, loading: false, refetching: false } : { loading: false, refetching: false });
+    refreshSnapshot: (fresh = false) => {
+      // A poll tick while a read is still out is SKIPPED, not stacked. The
+      // interval fired regardless, so whenever the server was slow (a long
+      // process scan, or a metrics batch holding the event loop) every 5 s
+      // added another request to the queue, each holding one of the browser's
+      // six connections to this origin, until the rest of the UI was waiting
+      // behind them too. A forced read still goes: it asks for a NEW scan, which
+      // the in-flight one may predate, and the Reload button that sends it is
+      // disabled while it runs, so those cannot stack either.
+      if (!fresh && snapshotInFlight) return snapshotInFlight;
+      if (fresh) {
+        forcedInFlight += 1;
+        set({ refetching: true });
+      }
+      const req = (async () => {
+        const res = await api.resources.snapshot(fresh).catch(() => null);
+        if (fresh) forcedInFlight -= 1;
+        // `refetching` clears on failure too — a spinner that never stops is a
+        // worse lie than a table that did not change. But only once no forced
+        // read is left: a poll landing mid-rescan must not stop its spinner.
+        const refetching = forcedInFlight > 0;
+        set(res ? { snapshot: res, loading: false, refetching } : { loading: false, refetching });
+      })().finally(() => {
+        if (snapshotInFlight === req) snapshotInFlight = undefined;
+      });
+      snapshotInFlight = req;
+      return req;
     },
 
     loadDetail: async (chatId) => {
