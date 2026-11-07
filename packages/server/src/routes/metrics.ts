@@ -50,6 +50,12 @@
  * length limit the first time someone selects thirty tools. A JSON body is the
  * shape the data already has. Nothing here mutates except `prune`, which says so.
  *
+ * Every read runs on the METRICS WORKER THREAD (services/metrics-reader.ts),
+ * not here. `node:sqlite` is synchronous: a 7-day Runtime batch held this
+ * server's event loop for ~9 s, and every chat, terminal and websocket frame
+ * waited behind it. Only `prune` (a write) and `growth` (git, not SQLite)
+ * stay on the main thread.
+ *
  * Every body is zod-parsed before it reaches the service, so an unknown
  * dimension is a 400 here rather than a column name deeper in. (The service
  * never interpolates a value into SQL regardless — see `MetricsService.where` —
@@ -69,7 +75,8 @@ import {
   TokenQuerySchema,
   type LimitReport,
 } from "@dispatch/shared";
-import { tokenLabeller } from "../services/metrics-tokens.js";
+import type { MetricsReadMethod, MetricsReadMethods } from "../services/metrics-read-api.js";
+import { MetricsReadAborted } from "../services/metrics-reader.js";
 
 /** The window + filter every read shares. */
 const ScopeSchema = z.object({
@@ -133,110 +140,160 @@ async function clientGone(req: FastifyRequest, reply: FastifyReply): Promise<boo
   return true;
 }
 
+/** What {@link registerMetricsRoutes}' `read` returns when there is nobody
+ * left to answer. */
+const GONE = Symbol("client gone");
+
 export function registerMetricsRoutes(app: FastifyInstance): void {
-  const { metrics, growth, tokens, limits, limitSampler } = app.services;
+  const { metrics, growth, metricsReader, limits, limitSampler } = app.services;
+  const { store } = app.cm;
+
+  /**
+   * Run one read on the metrics worker, abandoning it if the client goes.
+   *
+   * The response's `close` is the signal: it fires on a disconnect before we
+   * have answered (and again, harmlessly, after we have — hence the
+   * `writableFinished` test). An abandoned request still queued is dropped
+   * without running; one already running stops at its next statement.
+   */
+  async function read<K extends MetricsReadMethod>(
+    req: FastifyRequest,
+    reply: FastifyReply,
+    method: K,
+    arg: MetricsReadMethods[K][0],
+  ): Promise<MetricsReadMethods[K][1] | typeof GONE> {
+    if (await clientGone(req, reply)) return GONE;
+    const abort = new AbortController();
+    const onClose = () => {
+      if (!reply.raw.writableFinished) abort.abort();
+    };
+    reply.raw.once("close", onClose);
+    try {
+      return await metricsReader.call(method, arg, abort.signal);
+    } catch (err) {
+      if (err instanceof MetricsReadAborted || abort.signal.aborted) {
+        reply.hijack();
+        return GONE;
+      }
+      throw err;
+    } finally {
+      reply.raw.off("close", onClose);
+    }
+  }
+
+  /** {@link read}, for a route whose answer IS the read's result. */
+  async function answer<K extends MetricsReadMethod>(
+    req: FastifyRequest,
+    reply: FastifyReply,
+    method: K,
+    arg: MetricsReadMethods[K][0],
+  ): Promise<MetricsReadMethods[K][1] | FastifyReply> {
+    const value = await read(req, reply, method, arg);
+    return value === GONE ? reply : value;
+  }
 
   app.post<{ Body: unknown }>("/api/metrics/limits", async (req, reply) => {
     const parsed = LimitQuerySchema.safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
-    if (await clientGone(req, reply)) return reply;
     const settings = await store.getSettings().catch(() => null);
-    const label = tokenLabeller(settings);
-    const stats = limits.stats();
-    const yields = limits.yieldPeriods(parsed.data, (id) => label("subscription", id), parsed.data.period);
+    // The held-back readings live in THIS thread's ledger, not the table the
+    // worker reads, and the lines would stop short of now without them.
+    const part = await read(req, reply, "limits", {
+      query: parsed.data,
+      settings,
+      held: limits.heldReadings(),
+    });
+    if (part === GONE) return reply;
+    const { windows, yields, yieldsTruncatedBefore, events, stats } = part;
     const report: LimitReport = {
-      windows: limits.windows(parsed.data, (id) => label("subscription", id)),
-      yields: yields.rows,
-      yieldsTruncatedBefore: yields.truncatedBefore,
+      windows,
+      yields,
+      yieldsTruncatedBefore,
       period: parsed.data.period,
-      events: limits.events(parsed.data),
+      events,
+      // In-memory sampler state: it lives on this thread, not in the database.
       accounts: limitSampler.status(),
       sampleRows: stats.rows,
       oldest: stats.oldest,
     };
     return report;
   });
-  const { store } = app.cm;
 
   app.post<{ Body: unknown }>("/api/metrics/tokens", async (req, reply) => {
     const parsed = TokenQuerySchema.safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
-    if (await clientGone(req, reply)) return reply;
-    // Labels resolve against the settings AS THEY ARE NOW, so renaming an
-    // account renames its history — the id is what the ledger stored.
+    // The settings travel with the query: the labeller built from them is a
+    // function, and a function can't cross to the worker.
     const settings = await store.getSettings().catch(() => null);
-    return tokens.report(parsed.data, tokenLabeller(settings));
+    return answer(req, reply, "tokens", { query: parsed.data, settings });
   });
 
   app.post<{ Body: unknown }>("/api/metrics/series", async (req, reply) => {
     const parsed = MetricQuerySchema.safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
-    if (await clientGone(req, reply)) return reply;
-    return metrics.series(parsed.data);
+    return answer(req, reply, "series", parsed.data);
   });
 
   app.post<{ Body: unknown }>("/api/metrics/totals", async (req, reply) => {
     const parsed = TotalsSchema.safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
-    if (await clientGone(req, reply)) return reply;
-    return metrics.totals(parsed.data);
+    return answer(req, reply, "totals", parsed.data);
   });
 
   app.post<{ Body: unknown }>("/api/metrics/facets", async (req, reply) => {
     const parsed = ScopeSchema.safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
-    if (await clientGone(req, reply)) return reply;
-    return metrics.facets(parsed.data);
+    return answer(req, reply, "facets", parsed.data);
   });
 
   app.post<{ Body: unknown }>("/api/metrics/recent", async (req, reply) => {
     const parsed = RecentSchema.safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
-    if (await clientGone(req, reply)) return reply;
-    return metrics.recent(parsed.data);
+    return answer(req, reply, "recent", parsed.data);
   });
 
   app.post<{ Body: unknown }>("/api/metrics/spans/series", async (req, reply) => {
     const parsed = MetricSpanQuerySchema.safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
-    if (await clientGone(req, reply)) return reply;
-    return metrics.spanSeries(parsed.data);
+    return answer(req, reply, "spanSeries", parsed.data);
   });
 
   app.post<{ Body: unknown }>("/api/metrics/spans/totals", async (req, reply) => {
     const parsed = SpanTotalsSchema.safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
-    if (await clientGone(req, reply)) return reply;
-    return metrics.spanTotals(parsed.data);
+    return answer(req, reply, "spanTotals", parsed.data);
   });
 
   app.post<{ Body: unknown }>("/api/metrics/spans/summary", async (req, reply) => {
     const parsed = SpanScopeSchema.safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
-    if (await clientGone(req, reply)) return reply;
-    return metrics.spanSummary(parsed.data);
+    return answer(req, reply, "spanSummary", parsed.data);
   });
 
   app.post<{ Body: unknown }>("/api/metrics/spans/facets", async (req, reply) => {
     const parsed = SpanScopeSchema.safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
-    if (await clientGone(req, reply)) return reply;
-    return metrics.spanFacets(parsed.data);
+    return answer(req, reply, "spanFacets", parsed.data);
   });
 
   app.post<{ Body: unknown }>("/api/metrics/spans/recent", async (req, reply) => {
     const parsed = SpanRecentSchema.safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
-    if (await clientGone(req, reply)) return reply;
-    return metrics.recentSpans(parsed.data);
+    return answer(req, reply, "recentSpans", parsed.data);
   });
 
   // GET, unlike every read above: it takes no query at all. The whole ledger,
   // grouped by chat — see `MetricsService.chatRuntime` for why it isn't
   // `spans/totals` with a `groupBy`.
-  app.get("/api/metrics/chat-runtime", async () => metrics.chatRuntime());
+  app.get("/api/metrics/chat-runtime", async (req, reply) => answer(req, reply, "chatRuntime", undefined));
 
-  app.get("/api/metrics/stats", async () => metrics.stats());
+  // The two COUNT(*)s run on the worker; the buffer figures are this
+  // thread's, since that is where the write buffer lives.
+  app.get("/api/metrics/stats", async (req, reply) => {
+    const counts = await read(req, reply, "ledgerCounts", undefined);
+    if (counts === GONE) return reply;
+    return { ...metrics.bufferStats(), ...counts };
+  });
 
   app.post<{ Body: unknown }>("/api/metrics/prune", async (req, reply) => {
     const parsed = PruneSchema.safeParse(req.body ?? {});

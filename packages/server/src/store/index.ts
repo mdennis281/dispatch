@@ -737,7 +737,7 @@ export class Store {
     configDir?: string,
   ) {
     this.configDir = configDir ?? dataDir;
-    this.db = new StateDb(dataDir);
+    this.db = new StateDb(dataDir, { optimizeOnClose: true });
   }
 
   /**

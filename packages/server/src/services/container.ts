@@ -106,6 +106,7 @@ import { FileIndexService } from "./file-index.js";
 import { MetricsService } from "./metrics.js";
 import { MetricsBackfill } from "./metrics-backfill.js";
 import { TokenLedger } from "./metrics-tokens.js";
+import { MetricsReader } from "./metrics-reader.js";
 import { TokenBackfill } from "./metrics-tokens-backfill.js";
 import { LimitLedger } from "./limit-ledger.js";
 import { LimitSampler } from "./limit-sampler.js";
@@ -185,6 +186,13 @@ export interface ServiceOverrides {
   metrics?: MetricsService;
   metricsBackfill?: MetricsBackfill;
   tokens?: TokenLedger;
+  /**
+   * Run Metrics-route reads on the metrics worker thread. Defaults to on,
+   * except under vitest: every suite that builds services would otherwise
+   * start a thread (and a tsx loader inside it) it never reads from. The
+   * worker has its own suite, metrics-reader.test.ts.
+   */
+  metricsWorker?: boolean;
   fsExplorer?: FsExplorerService;
   trunkSync?: TrunkSyncService;
   prReviewWatcher?: PrReviewWatcher;
@@ -308,6 +316,8 @@ export interface Services extends ServiceBase {
   tokens: TokenLedger;
   /** Every account's limit windows over time, and their resets — Metrics → Limits. */
   limits: LimitLedger;
+  /** Where the Metrics routes' reads run: the metrics worker thread. */
+  metricsReader: MetricsReader;
   /** The one schedule that reads every account's limits into {@link limits}. */
   limitSampler: LimitSampler;
   /** Directory listings, stats, drives/mounts and writes for the file explorer. */
@@ -858,6 +868,13 @@ export function createServices(
   tokens.onRecord = (lines) => {
     for (const id of new Set(lines.map((l) => l.subscriptionId))) limitSampler.nudge(id);
   };
+  const metricsReader = new MetricsReader({
+    db: store.stateDb,
+    metrics,
+    tokens,
+    limits,
+    useWorker: overrides.metricsWorker ?? !process.env.VITEST,
+  });
   // "Is there a newer Dispatch than this one." Inert on a payload built from
   // source: with no release-manifest.json there is nothing to compare against.
   // The channel subscription is read/written through the settings store because
@@ -1812,6 +1829,7 @@ export function createServices(
     metricsBackfill,
     tokens,
     limits,
+    metricsReader,
     limitSampler,
     trunkSync,
     prReviewWatcher,
@@ -1895,6 +1913,11 @@ export function createServices(
       // so nothing is lost before this — it only decides how promptly the buffer
       // reaches the disk.
       safeStart("metrics", () => metrics.start());
+      // AFTER metrics.start(): crash recovery has closed the last run's open
+      // spans by now, so the rollup build begins from a settled ledger. The
+      // thread starts the background rollup build straight away; reads fall
+      // back to raw rows for whatever it hasn't reached.
+      safeStart("metrics reader", () => metricsReader.start());
       // Reconstruct history from the transcripts, ONCE (see MetricsBackfill
       // for the three guards). Deliberately not awaited: on a long-lived install
       // this walks every chat that ever existed, and boot must not wait for it.
@@ -2219,6 +2242,10 @@ export function createServices(
       // flushes + disarms — the database handle belongs to `Store`, which closes
       // it in its own teardown.
       metrics.dispose();
+      // After the final flush, so nothing is left for it to read; awaited so the
+      // thread and its two connections are gone before `Store` closes the file
+      // (an open handle makes `data/` unmovable on Windows).
+      await metricsReader.dispose().catch(() => {});
       if (terminalSweep) clearInterval(terminalSweep);
       terminalSweep = undefined;
       // Before the shells are reaped below: a sweep landing mid-teardown would
