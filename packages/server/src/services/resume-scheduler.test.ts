@@ -100,6 +100,15 @@ describe("parseSessionLimit", () => {
     expect(isLimitSentence("Error: connection reset")).toBe(false);
     expect(isLimitSentence(undefined)).toBe(false);
   });
+
+  it("stays linear on a long whitespace run (CodeQL polynomial-redos)", () => {
+    const tabs = "\t".repeat(50_000);
+    const started = performance.now();
+    isLimitSentence(`hit your${tabs}x`);
+    parseSessionLimit(`You've hit your weekly limit · resets${tabs}x`, NOON_CT);
+    parseSessionLimit(`You've hit your weekly limit · resets Nov 11,${tabs}x`, NOON_CT);
+    expect(performance.now() - started).toBeLessThan(500);
+  });
 });
 
 describe("ResumeScheduler", () => {

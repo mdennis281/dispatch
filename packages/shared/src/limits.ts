@@ -39,8 +39,15 @@ export interface SessionLimit {
   clock: string;
 }
 
-/** The sentence shape: "You've hit your session limit", "usage limit", … */
-const LIMIT_RE = /\b(?:hit|reached)\s+your\s+[\w\s-]*\blimit\b/i;
+/**
+ * The sentence shape: "You've hit your session limit", "usage limit", …
+ *
+ * Bounded, because `\s+your\s+[\w\s-]*` lets three adjacent runs share the
+ * same whitespace, which backtracks polynomially on a long run of it (CodeQL
+ * js/polynomial-redos) — and this now runs on every errored turn's text via
+ * `isLimitSentence`. The longest real qualifier is a few words.
+ */
+const LIMIT_RE = /\b(?:hit|reached)\s{1,3}your\s{1,3}[\w -]{0,40}\blimit\b/i;
 /**
  * "resets 4:50pm (America/Chicago)" / "resets at 16:50" / "resets 4pm" /
  * "resets Nov 11, 6pm (America/Chicago)".
@@ -49,9 +56,14 @@ const LIMIT_RE = /\b(?:hit|reached)\s+your\s+[\w\s-]*\blimit\b/i;
  * demanded a digit straight after "resets", so the weekly sentence parsed as no
  * limit at all: the turn ended as a plain `failed`, and neither failover to the
  * configured fallback account nor the park-and-resume ever ran.
+ *
+ * Every whitespace run is BOUNDED ({1,3}) rather than `\s+`/`\s*`. Adjacent
+ * unbounded runs separated only by optional groups backtrack polynomially on a
+ * long run of whitespace (CodeQL js/polynomial-redos), and this runs on
+ * provider text we don't control. Real sentences use one space.
  */
 const RESET_RE =
-  /\bresets?\s+(?:at\s+|on\s+)?(?:([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(?:at\s+)?)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:\(([A-Za-z0-9_+\-/]+)\))?/i;
+  /\bresets?\s{1,3}(?:(?:at|on)\s{1,3})?(?:([A-Za-z]{3,9})\.?\s{1,3}(\d{1,2})(?:st|nd|rd|th)?,?\s{1,3}(?:at\s{1,3})?)?(\d{1,2})(?::(\d{2}))?\s{0,3}(am|pm)?\s{0,3}(?:\(([A-Za-z0-9_+\-/]{1,64})\))?/i;
 
 const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
 
