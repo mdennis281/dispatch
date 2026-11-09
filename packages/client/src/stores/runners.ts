@@ -1,5 +1,4 @@
 import { create } from "zustand";
-import { useShallow } from "zustand/react/shallow";
 import type { RunnerInstance, RunnerLogLine } from "@dispatch/shared";
 
 export type { RunnerLogLine } from "@dispatch/shared";
@@ -68,15 +67,4 @@ export function belongsToChat(
   const active =
     r.status === "starting" || r.status === "running" || r.status === "stopping";
   return active && !!projectId && r.projectId === projectId;
-}
-
-/** Selector: runners scoped to a chat (right-panel "Apps"). */
-export function useChatRunners(chatId: string | null): RunnerInstance[] {
-  return useRunners(
-    useShallow((s) =>
-      s.order
-        .map((id) => s.byId[id]!)
-        .filter((r): r is RunnerInstance => !!r && (!chatId || r.chatId === chatId)),
-    ),
-  );
 }

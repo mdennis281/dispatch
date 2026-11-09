@@ -3,7 +3,7 @@ export type { ButtonProps } from "./Button.js";
 export { IconButton } from "./IconButton.js";
 export { RowButton } from "./RowButton.js";
 export { Tooltip } from "./Tooltip.js";
-export { Panel, PanelHeader, SectionLabel } from "./Panel.js";
+export { Panel, SectionLabel } from "./Panel.js";
 export { Chip, Badge } from "./Chip.js";
 export type { Tone } from "./Chip.js";
 export { StatusDot, statusMeta } from "./StatusDot.js";

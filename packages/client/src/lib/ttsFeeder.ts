@@ -109,12 +109,16 @@ export function createTtsFeeder(deps: TtsFeederDeps): () => void {
   };
 }
 
-let stop: (() => void) | null = null;
+let started = false;
 
-/** Start the feeder against the real stores. Idempotent. */
+/**
+ * Start the feeder against the real stores. Idempotent. It lives as long as
+ * the page: nothing ever tears the shell down, so the disposer is not kept.
+ */
 export function startTtsFeeder(): void {
-  if (stop) return;
-  stop = createTtsFeeder({
+  if (started) return;
+  started = true;
+  createTtsFeeder({
     activeChatId: () => useChats.getState().activeChatId,
     engine: () => {
       const def = activeTtsEngine(useEngines.getState());
@@ -140,9 +144,4 @@ export function startTtsFeeder(): void {
         if (s.speakReplies !== prev.speakReplies) fn();
       }),
   });
-}
-
-export function stopTtsFeeder(): void {
-  stop?.();
-  stop = null;
 }
