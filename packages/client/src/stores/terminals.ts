@@ -1,5 +1,4 @@
 import { create } from "zustand";
-import { useShallow } from "zustand/react/shallow";
 import {
   isReadableTerminalBackendId,
   type TerminalBackendInfo,
@@ -167,15 +166,4 @@ export function nextShellName(taken: readonly string[], base = "shell"): string 
     const candidate = `${base} ${n}`;
     if (!used.has(candidate)) return candidate;
   }
-}
-
-/** Selector: terminals scoped to a chat (right-panel "Terminals"). */
-export function useChatTerminals(chatId: string | null): TerminalInfo[] {
-  return useTerminals(
-    useShallow((s) =>
-      s.order
-        .map((id) => s.byId[id]!)
-        .filter((t): t is TerminalInfo => !!t && (!chatId || t.chatId === chatId)),
-    ),
-  );
 }

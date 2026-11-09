@@ -139,11 +139,3 @@ export const useAttention = create<AttentionStore>((set) => {
     setFilter: (filter) => set((s) => ({ filter, ...slice(s.items, filter) })),
   };
 });
-
-/** Count of visible items that actually block work (permissions + questions). */
-export function useAttentionCount(): number {
-  return useAttention(
-    (s) =>
-      s.visible.filter((i) => i.kind === "permission" || i.kind === "question").length,
-  );
-}
