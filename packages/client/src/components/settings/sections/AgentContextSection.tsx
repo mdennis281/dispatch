@@ -11,6 +11,7 @@
  * turn forever. A blank field is always "the default", never zero — see
  * `numberField`.
  */
+import { numberField } from "../../../lib/format.js";
 import { useEffect, useState } from "react";
 import {
   DEFAULT_HOUSE_RULES_LIMIT,
@@ -28,11 +29,6 @@ import { Field, TextInput } from "../../sidebar/Modal.js";
 import { HouseRulesEditor } from "../HouseRulesEditor.js";
 import type { AppPaneProps } from "./types.js";
 
-/** Digits only; `undefined` for an empty box — blank means "the default". */
-function numberField(raw: string): number | undefined {
-  const n = parseInt(raw.replace(/[^\d]/g, ""), 10);
-  return Number.isFinite(n) ? n : undefined;
-}
 
 /** ~4 chars per token is close enough to make a budget legible as a cost. */
 function approxTokens(chars: number): string {

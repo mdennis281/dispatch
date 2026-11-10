@@ -10,7 +10,7 @@ import {
 import { hasWindows, usageKey, useUsage } from "../../stores/usage.js";
 import { useSubscriptions } from "../../stores/subscriptions.js";
 import { useChats } from "../../stores/chats.js";
-import { untilShort, relTime } from "../../lib/format.js";
+import { clampPct, untilShort, relTime } from "../../lib/format.js";
 import { cn } from "../../lib/cn.js";
 import { HoverCard } from "../ui/HoverCard.js";
 import { Spinner } from "../ui/Spinner.js";
@@ -25,7 +25,6 @@ function tone(pct: number): { text: string; bar: string } {
   return { text: "text-accent-hi", bar: "bg-accent" };
 }
 
-const clampPct = (p: number) => Math.max(0, Math.min(100, p));
 
 /**
  * One window as ONE line: title, bar, percent, reset. The old row was three

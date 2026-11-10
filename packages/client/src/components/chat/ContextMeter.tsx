@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Layers, Eraser, Loader2, AlertTriangle } from "lucide-react";
 import { COMPACT_FOCUS_MAX, type ContextUsage } from "@dispatch/shared";
 import { useContextTokens, useContextWindow } from "../../stores/messages.js";
-import { compactTokens } from "../../lib/format.js";
+import { clampPct, compactTokens } from "../../lib/format.js";
 import { Tooltip } from "../ui/Tooltip.js";
 import { Popover } from "../ui/Popover.js";
 import { api } from "../../lib/api.js";
@@ -31,7 +31,6 @@ function tone(pct: number): { text: string; bar: string } {
   return { text: "text-secondary", bar: "bg-accent" };
 }
 
-const clampPct = (p: number) => Math.max(0, Math.min(100, p));
 
 export interface ContextMeterProps {
   chatId: string;

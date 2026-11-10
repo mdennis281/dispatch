@@ -5,6 +5,7 @@
  * `monaco-editor` never touches the initial bundle. Fetch/loading/empty/error
  * states render without pulling Monaco at all.
  */
+import { formatBytes } from "@dispatch/shared";
 import { Suspense, lazy, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -52,17 +53,12 @@ const EMPTY_FILE: WorktreeFileContent = {
   truncated: false,
 };
 
-function fmtBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-}
 
 function fmtPreviewLimit(n: number): string {
   if (n >= 1024 * 1024 && n % (1024 * 1024) === 0) {
     return `${n / (1024 * 1024)} MB`;
   }
-  return fmtBytes(n);
+  return formatBytes(n);
 }
 
 function baseName(p: string): string {
@@ -333,7 +329,7 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
             <StateNote
               icon={<FileWarning className="text-warn" />}
               title="Binary file"
-              detail={`${fmtBytes(working?.size ?? 0)} — not shown as text.`}
+              detail={`${formatBytes(working?.size ?? 0)} — not shown as text.`}
             />
           ) : !editable && !working?.exists && !modifiedText && (effectiveMode !== "diff" || !originalText) ? (
             // …but in diff mode with content at base, this is a DELETION — fall
@@ -371,7 +367,7 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
         <div className="flex h-8 shrink-0 items-center gap-3 border-t border-line px-3 text-2xs text-faint">
           <span className="uppercase tracking-[0.08em]">{language}</span>
           {(image || (working && !workingBinary)) && (
-            <span className="tabular-nums">{fmtBytes(image?.size ?? working?.size ?? 0)}</span>
+            <span className="tabular-nums">{formatBytes(image?.size ?? working?.size ?? 0)}</span>
           )}
           {effectiveMode === "diff" && (
             <span className="text-muted">

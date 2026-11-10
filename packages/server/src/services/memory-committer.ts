@@ -46,7 +46,11 @@ export type ExecFn = (
   opts: { cwd: string },
 ) => Promise<ExecResult>;
 
-const realExec: ExecFn = async (file, args, opts) => {
+/**
+ * The production ExecFn. Exported so trunk-sync and memory-history take this
+ * one instead of each carrying a byte-identical copy that could drift.
+ */
+export const realExec: ExecFn = async (file, args, opts) => {
   try {
     const r = await execBinary(file, args, {
       cwd: opts.cwd,
