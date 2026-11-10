@@ -133,7 +133,12 @@ export interface PrReviewRegistry {
    */
   snapshot(repo: string, number: number): Promise<PrSnapshot | null>;
   /** Record that Dispatch's own reviewer was asked (idempotent per head sha). */
-  requestReviewAgent(repo: string, number: number, by: string): Promise<unknown>;
+  requestReviewAgent(
+    repo: string,
+    number: number,
+    by: string,
+    opts?: { fromQueue?: boolean },
+  ): Promise<unknown>;
   /** Take the review job, or null because there isn't one. See the registry. */
   claimReviewAgent(
     repo: string,
@@ -603,7 +608,9 @@ export class PrReviewWatcher {
     if (policy.login) {
       const login = policy.login.toLowerCase();
       if (snapshot.requested.some((r) => r.toLowerCase() === login)) {
-        await registry.requestReviewAgent(snapshot.repo, snapshot.number, policy.login);
+        await registry.requestReviewAgent(snapshot.repo, snapshot.number, policy.login, {
+          fromQueue: true,
+        });
       }
     }
 

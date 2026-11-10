@@ -108,7 +108,12 @@ export type RequestReviewAgentReason =
   /** Every allowed round is claimed. Nothing will serve another one. */
   | "rounds-spent"
   /** Already armed at this head and still unserved — the earlier one stands. */
-  | "already-queued";
+  | "already-queued"
+  /**
+   * GitHub's queue still lists the reviewer, but this head has already been
+   * reviewed. Only ever returned for `fromQueue` requests — see there.
+   */
+  | "already-reviewed";
 
 export interface RequestReviewAgentResult {
   armed: boolean;
@@ -334,7 +339,15 @@ export class PrRegistry {
     repo: string,
     number: number,
     by: string,
-    opts: { maxRounds?: number } = {},
+    opts: {
+      maxRounds?: number;
+      /**
+       * The request was READ off GitHub's reviewer queue by the sweep, rather
+       * than made by someone just now (`create_pr`, `request_review`, the row's
+       * button). See the `already-reviewed` refusal below.
+       */
+      fromQueue?: boolean;
+    } = {},
   ): Promise<RequestReviewAgentResult> {
     const key = prRecordKey(repo, number);
     const prev = await this.store.getPrRecord(key);
@@ -361,6 +374,23 @@ export class PrRegistry {
     // in flight ends on its own, a spent cap never does.
     if (sha && state?.reviewedSha === sha && !state.postedAt) {
       return { armed: false, reason: "in-flight", record: prev };
+    }
+    // A queue entry at a head that has ALREADY been reviewed is the request that
+    // round served, not a new one. GitHub clears the reviewer from the queue only
+    // when the review is submitted, and the sweep reads that queue off a row that
+    // is up to a poll behind — on bayou-boys#325 it re-read `dispatch-review` as
+    // requested right after round 1 posted, armed `requestedAt` at the reviewed
+    // head, and `claimReviewAgent` (which never re-serves a reviewed head) left
+    // it there forever. `prReviewAgentView` read that as `queued`, so `watch_pr`
+    // sat out its full 30-minute window on a reviewer that had finished.
+    //
+    // Safe to refuse for this source only. The local sources fire ONCE, so the
+    // stale-head case above has to arm for them; a queue entry is re-observed
+    // every pass, so a real re-request after a push arms on the first pass that
+    // sees the new head. And arming here could never spawn anything anyway — the
+    // claim refuses the same head — so the write's only effect was the lie.
+    if (opts.fromQueue && sha && state?.reviewedSha === sha) {
+      return { armed: false, reason: "already-reviewed", record: prev };
     }
     // Every allowed round is claimed. Same rule `claimReviewAgent` refuses on —
     // spelled here too because a request the sweep will silently drop reads to
