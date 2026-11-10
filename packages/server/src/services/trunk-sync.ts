@@ -11,28 +11,13 @@
  * the checkout is actually sitting on the trunk, and never fatally — this is
  * housekeeping, not a step anything else waits on.
  */
-import { execBinary } from "./exec-binary.js";
 import { isAbsolute, relative } from "node:path";
 import { resolveWorkflow, type Project, type WorkflowSyncMain } from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
 import type { Store } from "../store/index.js";
 import { KeyedMutex } from "../store/fsq.js";
 import { readCurrentBranch } from "./workflow.js";
-import type { ExecFn, ExecResult } from "./memory-committer.js";
-
-const realExec: ExecFn = async (file, args, opts) => {
-  try {
-    const r = await execBinary(file, args, {
-      cwd: opts.cwd,
-      reject: false,
-      stripFinalNewline: true,
-      windowsHide: true,
-    });
-    return { stdout: r.stdout ?? "", stderr: r.stderr ?? "", exitCode: r.exitCode ?? 0 };
-  } catch (err) {
-    return { stdout: "", stderr: err instanceof Error ? err.message : String(err), exitCode: 1 };
-  }
-};
+import { realExec, type ExecFn, type ExecResult } from "./memory-committer.js";
 
 /** Resolves a project's repo-relative memory dir (see MemoryCommitter). */
 export interface MemoryPathResolver {

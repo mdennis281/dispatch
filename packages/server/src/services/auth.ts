@@ -1,4 +1,5 @@
-import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
+import { safeEqual } from "./safe-equal.js";
 import { mkdir, readFile, rename, rmdir, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { hash as argonHash, verify as argonVerify } from "@node-rs/argon2";
@@ -220,11 +221,6 @@ function b64url(input: Uint8Array | string): string {
 }
 function digest(value: string): string {
   return createHash("sha256").update(value).digest("base64url");
-}
-function safeEqual(a: string, b: string): boolean {
-  const aa = Buffer.from(a);
-  const bb = Buffer.from(b);
-  return aa.length === bb.length && timingSafeEqual(aa, bb);
 }
 function normalizeUsername(value: string): string {
   return value.trim().normalize("NFKC").toLocaleLowerCase("en-US");

@@ -17,24 +17,9 @@
  * that's an `available: false` with a reason the agent can read, never an error.
  */
 import { isAbsolute, relative } from "node:path";
-import { execBinary } from "./exec-binary.js";
 import type { Store } from "../store/index.js";
-import type { ExecFn, ExecResult, MemoryDirResolver } from "./memory-committer.js";
+import { realExec, type ExecFn, type ExecResult, type MemoryDirResolver } from "./memory-committer.js";
 import { slugifyMemoryName } from "./memory.js";
-
-const realExec: ExecFn = async (file, args, opts) => {
-  try {
-    const r = await execBinary(file, args, {
-      cwd: opts.cwd,
-      reject: false,
-      stripFinalNewline: true,
-      windowsHide: true,
-    });
-    return { stdout: r.stdout ?? "", stderr: r.stderr ?? "", exitCode: r.exitCode ?? 0 };
-  } catch (err) {
-    return { stdout: "", stderr: err instanceof Error ? err.message : String(err), exitCode: 1 };
-  }
-};
 
 /** What one commit did to one memory file. */
 export type MemoryChangeKind = "added" | "modified" | "deleted" | "renamed" | "other";

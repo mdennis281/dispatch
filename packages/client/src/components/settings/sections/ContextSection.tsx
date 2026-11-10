@@ -10,16 +10,10 @@ import { Switch } from "../../ui/Switch.js";
 import { positiveTokenLimit } from "../../../lib/harness.js";
 import { api } from "../../../lib/api.js";
 import { useProviderRegistered } from "../../../lib/providerAvailability.js";
-import { compactTokens } from "../../../lib/format.js";
+import { compactTokens, numberField } from "../../../lib/format.js";
 import { cn } from "../../../lib/cn.js";
 import type { AppPaneProps } from "./types.js";
 
-/** Digits only, and `undefined` for an empty box — a blank field means "the
- *  default", which is not the same answer as zero. */
-function numberField(raw: string): number | undefined {
-  const n = parseInt(raw.replace(/[^\d]/g, ""), 10);
-  return Number.isFinite(n) ? n : undefined;
-}
 
 /**
  * One model's compact threshold as a slider over its context window. The far

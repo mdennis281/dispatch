@@ -31,7 +31,8 @@
  * NEVER log a token or a code. They enter {@link token} and {@link revoke} as
  * fields of a parsed body and are hashed on the first line that touches them.
  */
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { safeEqual } from "./safe-equal.js";
 import {
   OFFERABLE_INTEGRATION_SCOPES,
   OAUTH_ACCESS_TOKEN_SECONDS,
@@ -215,12 +216,6 @@ const DAY_MS = 24 * 60 * 60_000;
  */
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("base64url");
-}
-
-function safeEqual(a: string, b: string): boolean {
-  const aa = Buffer.from(a);
-  const bb = Buffer.from(b);
-  return aa.length === bb.length && timingSafeEqual(aa, bb);
 }
 
 function isLoopbackHost(hostname: string): boolean {

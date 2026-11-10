@@ -8,15 +8,10 @@ import {
   MAX_CHATS_PER_PROJECT_CEILING,
   RETENTION_DAYS_CEILING,
 } from "@dispatch/shared";
+import { numberField } from "../../../lib/format.js";
 import { Field, TextInput } from "../../sidebar/Modal.js";
 import type { AppPaneProps } from "./types.js";
 
-/** Digits only, and `undefined` for an empty box — blank means "the default",
- *  which for several of these fields is NOT the same answer as zero. */
-function numberField(raw: string): number | undefined {
-  const n = parseInt(raw.replace(/[^\d]/g, ""), 10);
-  return Number.isFinite(n) ? n : undefined;
-}
 
 /**
  * How much history Dispatch loads, and how long it keeps.

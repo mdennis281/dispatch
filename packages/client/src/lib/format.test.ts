@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { countdown, dur } from "./format.js";
+import { clampPct, countdown, dur, numberField } from "./format.js";
 
 describe("dur", () => {
   it("keeps sub-second and sub-minute spans as they were", () => {
@@ -45,5 +45,31 @@ describe("countdown", () => {
   it("hands anything past a minute back to untilShort", () => {
     expect(countdown(now + 90_000, now)).toBe("1m");
     expect(countdown(now + 3_600_000, now)).toBe("1h");
+  });
+});
+
+describe("numberField", () => {
+  it("reads the digits out of whatever was typed", () => {
+    expect(numberField("42")).toBe(42);
+    expect(numberField("1,000")).toBe(1000);
+  });
+
+  it("is undefined for a cleared box, never zero — blank means the default", () => {
+    expect(numberField("")).toBeUndefined();
+    expect(numberField("abc")).toBeUndefined();
+    expect(numberField("0")).toBe(0);
+  });
+});
+
+describe("clampPct", () => {
+  it("bounds a bar width to 0–100", () => {
+    expect(clampPct(-5)).toBe(0);
+    expect(clampPct(42.5)).toBe(42.5);
+    expect(clampPct(140)).toBe(100);
+  });
+
+  it("turns a 0/0 NaN into an empty bar, and x/0 into a full one", () => {
+    expect(clampPct(NaN)).toBe(0);
+    expect(clampPct(Infinity)).toBe(100);
   });
 });

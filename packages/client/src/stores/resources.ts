@@ -24,6 +24,7 @@
  * hands back a disposer; the timer exists exactly while at least one caller
  * holds one.
  */
+import { clampPct } from "../lib/format.js";
 import { create } from "zustand";
 import {
   SHARED_PAGE_FACTOR,
@@ -330,8 +331,6 @@ export function cpuSplit(
   };
 }
 
-const clampPct = (p: number): number =>
-  Number.isFinite(p) ? Math.max(0, Math.min(100, p)) : 0;
 
 /**
  * How old a snapshot may be before its Dispatch figures stop being shown.

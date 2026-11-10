@@ -16,6 +16,7 @@
  * clearing a field tells you where the value will come from instead of leaving
  * you to guess.
  */
+import { numberField } from "../../lib/format.js";
 import { useEffect, useRef, useState } from "react";
 import { Check, Layers2, Replace } from "lucide-react";
 import {
@@ -34,10 +35,6 @@ import { Field, TextInput } from "../sidebar/Modal.js";
 import { HouseRulesEditor } from "../settings/HouseRulesEditor.js";
 import { cn } from "../../lib/cn.js";
 
-function numberField(raw: string): number | undefined {
-  const n = parseInt(raw.replace(/[^\d]/g, ""), 10);
-  return Number.isFinite(n) ? n : undefined;
-}
 
 const MODES: { id: HouseRulesMode; label: string; hint: string; icon: typeof Layers2 }[] = [
   {

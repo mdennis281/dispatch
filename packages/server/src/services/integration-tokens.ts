@@ -18,7 +18,7 @@
  * function argument and is hashed on the first line.
  */
 import { stat } from "node:fs/promises";
-import { timingSafeEqual } from "node:crypto";
+import { safeEqual } from "./safe-equal.js";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import {
   INTEGRATION_RATE_LIMIT_PER_MINUTE,
@@ -316,12 +316,6 @@ export class IntegrationTokenService {
     this.data = null;
     return count;
   }
-}
-
-function safeEqual(a: string, b: string): boolean {
-  const aa = Buffer.from(a);
-  const bb = Buffer.from(b);
-  return aa.length === bb.length && timingSafeEqual(aa, bb);
 }
 
 /* ----------------------------------------------------------------- routes */

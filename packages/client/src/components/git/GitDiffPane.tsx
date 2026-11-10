@@ -22,7 +22,7 @@ import {
   Image as ImageIcon,
   Rows2,
 } from "lucide-react";
-import { GIT_REV_EMPTY } from "@dispatch/shared";
+import { GIT_REV_EMPTY, formatBytes } from "@dispatch/shared";
 import { api, gitFileRawUrl, type WorktreeFileContent } from "../../lib/api.js";
 import { sessionFetch } from "../../stores/auth.js";
 import { languageForPath, isImagePath } from "../monaco/lang.js";
@@ -46,11 +46,6 @@ const EMPTY_FILE: WorktreeFileContent = {
   truncated: false,
 };
 
-function fmtBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-}
 
 export function GitDiffPane({
   repoPath,
@@ -208,7 +203,7 @@ export function GitDiffPane({
           <Note
             icon={<FileWarning className="text-warn" />}
             title="Binary file"
-            detail={`${fmtBytes(right?.size || left?.size || 0)} — not shown as text.`}
+            detail={`${formatBytes(right?.size || left?.size || 0)} — not shown as text.`}
           />
         ) : (
           <Suspense

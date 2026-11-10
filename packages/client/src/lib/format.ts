@@ -169,3 +169,24 @@ export function safeJson(v: unknown, space = 2): string {
     return String(v);
   }
 }
+
+/**
+ * A numeric settings field's raw text → the number to store, or `undefined`.
+ *
+ * Blank (or all non-digits) is `undefined` on purpose: every field this feeds
+ * treats an absent value as "use the default", so clearing the box must never
+ * save a zero. Four settings panes each carried their own copy of this.
+ */
+export function numberField(raw: string): number | undefined {
+  const n = parseInt(raw.replace(/[^\d]/g, ""), 10);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+/**
+ * Clamp to a 0–100 bar width. NaN (a 0/0 ratio) clamps to 0 — `Math.min`
+ * would pass it straight through and render `width: NaN%`. Infinity (x/0)
+ * still reads as full, which is what an over-limit meter should show.
+ */
+export function clampPct(p: number): number {
+  return Number.isNaN(p) ? 0 : Math.max(0, Math.min(100, p));
+}
