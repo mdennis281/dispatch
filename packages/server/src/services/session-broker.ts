@@ -617,6 +617,7 @@ function makeGithubBinding(
             "already-queued":
               "Dispatch's own reviewer was already asked at this commit and is still queued",
             "in-flight": "Dispatch's own reviewer is part-way through a round on this commit",
+            "already-reviewed": "Dispatch's own reviewer has already reviewed this commit",
             "rounds-spent":
               "Dispatch's own reviewer has spent every round it gets on this PR — pass " +
               "`extraRounds` if you genuinely need another",

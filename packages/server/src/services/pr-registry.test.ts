@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Chat, PRRef, WsServerEvent } from "@dispatch/shared";
+import { prReviewAgentView, type Chat, type PRRef, type WsServerEvent } from "@dispatch/shared";
 import { EventBus } from "../bus.js";
 import { Store } from "../store/index.js";
 import {
@@ -492,6 +492,31 @@ describe("PrRegistry — Dispatch's own reviewer", () => {
     // compares against the CURRENT head, not the one the request was armed at.
     await reg.record(snapshot({ headRefOid: "sha-2" }), { chatId: "c1" });
     expect(await reg.claimReviewAgent(REPO, 42, { maxRounds: 3 })).not.toBeNull();
+  });
+
+  // bayou-boys#325: the round posted, the sweep then re-read the reviewer as
+  // still in GitHub's queue, and armed a request at the reviewed head. The claim
+  // never re-serves a reviewed head, so the row read `queued` until the next
+  // push, and `watch_pr` waited out 30 minutes on a reviewer that had finished.
+  it("a GitHub-queue request at an already-reviewed head is not a new request", async () => {
+    const reg = makeRegistry();
+    await reg.record(snapshot({ headRefOid: "sha-1" }), { chatId: "c1" });
+    await reg.requestReviewAgent(REPO, 42, "bot", { fromQueue: true });
+    await reg.claimReviewAgent(REPO, 42, { maxRounds: 3 });
+    await reg.noteReviewChat(REPO, 42, "chat-9");
+    await reg.notePostedReview(REPO, 42, { chatId: "chat-9" });
+
+    const res = await reg.requestReviewAgent(REPO, 42, "bot", { fromQueue: true });
+    expect(res).toMatchObject({ armed: false, reason: "already-reviewed" });
+    const row = await store.getPrRecord(KEY);
+    expect(row?.reviewAgent?.requestedAt).toBeUndefined();
+    expect(prReviewAgentView(row?.reviewAgent)?.phase).toBe("reviewed");
+
+    // A push is still a new request: the entry is re-observed every pass, so it
+    // arms on the first one that sees the new head.
+    await reg.record(snapshot({ headRefOid: "sha-2" }), { chatId: "c1" });
+    const after = await reg.requestReviewAgent(REPO, 42, "bot", { fromQueue: true });
+    expect(after).toMatchObject({ armed: true });
   });
 
   // `extraRounds` exists first and foremost for a reviewer chat that died
