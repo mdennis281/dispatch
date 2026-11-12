@@ -813,7 +813,11 @@ export class PluginService implements PluginContributionSource {
    */
   private linkFor(caller: PluginRecord, providerId: string, use: string): unknown {
     const provider = this.records.get(providerId);
-    if (!provider?.manifest || provider.phase !== "active" || provider.withdrawing || provider.shutDown) return undefined;
+    // Not `shutDown`: a server stop sets that on every plugin before the first
+    // hook runs, and a consumer's `onShutdown` — which runs BEFORE its
+    // provider's — must still be able to reach it. `withdrawing` is set when
+    // the provider's own turn to go down comes.
+    if (!provider?.manifest || provider.phase !== "active" || provider.withdrawing) return undefined;
     if (this.dependencyInfo(caller).find((d) => d.id === providerId)?.state !== "ok") return undefined;
     const factory = provider.exports?.get(use);
     if (!factory) return undefined;
@@ -936,6 +940,9 @@ export class PluginService implements PluginContributionSource {
     timer.unref?.();
     try {
       for (const wave of this.shutdownWaves(targets)) {
+        // This wave's plugins are going down; every plugin that uses them has
+        // had its hook. From here they hand out no new links.
+        for (const rec of wave) rec.withdrawing = true;
         await Promise.all(
           wave.map(async (rec) => {
             const mod = rec.module!;

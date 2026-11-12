@@ -1945,6 +1945,9 @@ export function createTestHost(plugins: readonly TestHostPlugin[]): TestHost {
       const signal = new AbortController().signal;
       const deadline = Date.now() + PLUGIN_SHUTDOWN_BUDGET_MS;
       for (const wave of waves.filter(Boolean)) {
+        // As the host: a wave's plugins stop handing out links when their turn
+        // comes, not before — their consumers' hooks ran with them reachable.
+        for (const id of wave) void links.withdraw(id, () => false);
         await Promise.all(wave.map((id) => byId.get(id)!.module.onShutdown?.({ reason: "stop", deadline, signal })));
       }
       for (const id of [...running].reverse()) await down(id);

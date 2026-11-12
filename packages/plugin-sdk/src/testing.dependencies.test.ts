@@ -294,6 +294,33 @@ describe("createTestHost — parity with the host", () => {
     ]);
   });
 
+  it("stop: a consumer's hook can still OPEN a link; the provider stops handing out when its own turn comes", async () => {
+    const log: string[] = [];
+    let consCtx: import("./index.js").PluginContext | undefined;
+    const host = createTestHost([
+      {
+        manifest: { id: "prov", provides: { machines: [1] } },
+        module: {
+          activate: (ctx) => ctx.provides!.serve("machines", 1, () => ({ release: () => "released" })),
+          onShutdown: () => void log.push(`prov:onShutdown:get=${typeof consCtx!.dependencies!.get("prov", "machines", 1)}`),
+        },
+      },
+      {
+        manifest: { id: "cons", dependencies: { prov: { uses: ["machines@1"] } } },
+        module: {
+          activate: (ctx) => void (consCtx = ctx),
+          onShutdown: () => {
+            const api = consCtx!.dependencies!.get<{ release(): string }>("prov", "machines", 1);
+            log.push(`cons:onShutdown:${api?.release() ?? "no provider"}`);
+          },
+        },
+      },
+    ]);
+    await host.start();
+    await host.stop();
+    expect(log).toEqual(["cons:onShutdown:released", "prov:onShutdown:get=undefined"]);
+  });
+
   it("blocks what requires a missing, failed or unserving provider; starts what only likes it", async () => {
     const host = createTestHost([
       { manifest: { id: "needs-missing", dependencies: { nowhere: { uses: ["x@1"] } } }, module: { activate: () => {} } },

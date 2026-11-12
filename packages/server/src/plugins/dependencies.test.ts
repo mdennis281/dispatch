@@ -634,6 +634,31 @@ describe("ctx.provides / ctx.dependencies", () => {
     ]);
   });
 
+  it("on a server stop a consumer's hook can still OPEN a link; the provider stops handing out when its own turn comes", async () => {
+    const base = await paths();
+    await writePlugin(base.configDir, "prov", { provides: "  machines: [1]" });
+    await writePlugin(base.configDir, "cons", { dependencies: "  prov:\n    uses: [machines@1]" });
+    const log: string[] = [];
+    let consCtx: PluginContext | undefined;
+    const h = await host(base, {
+      prov: {
+        activate: (ctx) => ctx.provides!.serve("machines", 1, () => ({ release: () => "released" })),
+        onShutdown: () => void log.push(`prov:onShutdown:get=${typeof consCtx!.dependencies!.get("prov", "machines", 1)}`),
+      },
+      cons: {
+        // Holds nothing from activate: proxmox-terminal reaching remote-host only to release its machines.
+        activate: (ctx) => void (consCtx = ctx),
+        onShutdown: () => {
+          const api = consCtx!.dependencies!.get<{ release(): string }>("prov", "machines", 1);
+          log.push(`cons:onShutdown:${api?.release() ?? "no provider"}`);
+        },
+      },
+    });
+    await h.svc.dispose();
+    // The SDK's createTestHost asserts this same sequence (testing.dependencies.test.ts).
+    expect(log).toEqual(["cons:onShutdown:released", "prov:onShutdown:get=undefined"]);
+  });
+
   it("switching a REQUIRED provider off takes the consumer down first, its link open until its teardown is done", async () => {
     const base = await paths();
     const log: string[] = [];
