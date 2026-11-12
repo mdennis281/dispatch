@@ -311,6 +311,8 @@ describe("refusals", () => {
     await writePlugin(base.configDir, "proxmox-terminal", { dependencies: "  remote-host:\n    uses: [machines@1]\n    optional: true" });
     const log: string[] = [];
     const h = await host(base, { "remote-host": logged("remote-host", log), "proxmox-terminal": logged("proxmox-terminal", log) });
+    // The dialog can say so before the click, not only after it.
+    expect((await h.svc.uninstallPreview("remote-host")).usedBy).toEqual(["proxmox-terminal"]);
     await expect(h.svc.uninstall("remote-host")).rejects.toMatchObject({
       status: 409,
       message: expect.stringContaining(`"remote-host" is used by "proxmox-terminal"`),

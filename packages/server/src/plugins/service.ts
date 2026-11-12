@@ -71,6 +71,8 @@ import {
   resolvePluginDependencies,
   type PluginDependencyInfo,
   type PluginDependencyResolution,
+  type PluginDependencyNode,
+  type PluginManifest,
   openPluginLink,
   pluginLinkClosedReason,
   PluginRevokedError,
@@ -171,6 +173,12 @@ interface PluginRecord extends DiscoveredPlugin {
   reconciling?: Promise<void>;
   /** Snapshot of the plugin's static contributions, read once at `load()`. */
   contributions: PluginContributions;
+  /**
+   * The manifest of the files an install put on disk while this one's old
+   * code is still loaded (`filesReplaced`) — what {@link PluginService.dependencyNodes}
+   * judges the next install against. The running code keeps `manifest`.
+   */
+  installedManifest?: PluginManifest;
   /** What it serves (`ctx.provides.serve`), by `name@major`. Accepted only while its `activate` runs. */
   exports?: Map<string, PluginExportFactory>;
   /** Its `activate` resolved: `exports` is final, and a declared export missing from it reads `not-served`. */
@@ -455,17 +463,31 @@ export class PluginService implements PluginContributionSource {
 
   /** Re-resolve every plugin's dependencies against what is installed and switched on now. */
   private resolve(): void {
-    this.resolution = resolvePluginDependencies(
-      [...this.records.values()].map((r) => ({
-        id: r.id,
-        ...(r.manifest?.version ? { version: r.manifest.version } : {}),
-        valid: !!r.manifest && !r.incompatible,
-        enabled: r.enabled,
-        builtin: r.builtin,
-        ...(r.manifest?.dependencies ? { dependencies: r.manifest.dependencies } : {}),
-        ...(r.manifest?.provides ? { provides: r.manifest.provides } : {}),
-      })),
-    );
+    this.resolution = resolvePluginDependencies([...this.records.values()].map((r) => this.nodeOf(r, r.manifest)));
+  }
+
+  private nodeOf(r: PluginRecord, manifest: PluginManifest | undefined): PluginDependencyNode & { name?: string } {
+    return {
+      id: r.id,
+      ...(manifest?.name ? { name: manifest.name } : {}),
+      ...(manifest?.version ? { version: manifest.version } : {}),
+      valid: !!manifest && !r.incompatible,
+      enabled: r.enabled,
+      builtin: r.builtin,
+      ...(manifest?.dependencies ? { dependencies: manifest.dependencies } : {}),
+      ...(manifest?.provides ? { provides: manifest.provides } : {}),
+    };
+  }
+
+  /**
+   * Every installed plugin as the NEXT boot will read it — what an install
+   * or update is judged against (inspect/dependencies.ts). The files on disk,
+   * not the code still loaded: right after the pane replaces remote-host
+   * 0.9.2 with 0.10.0, the proxmox-terminal it installs next needs ">=0.10"
+   * and must find 0.10.0, though 0.9.2 runs until the restart.
+   */
+  dependencyNodes(): Array<PluginDependencyNode & { name?: string }> {
+    return [...this.records.values()].map((r) => this.nodeOf(r, r.installedManifest ?? r.manifest));
   }
 
   /**
@@ -1570,6 +1592,8 @@ export class PluginService implements PluginContributionSource {
     const entry = settings.plugins?.[id];
     if (existing) {
       existing.filesReplaced = true;
+      const onDisk = (await discoverPlugins(this.configDir)).find((p) => p.id === id);
+      existing.installedManifest = onDisk?.manifest;
       // An install replaces a link with a copy, and records where it came from.
       existing.linked = false;
       existing.source = entry?.source;
@@ -1661,6 +1685,9 @@ export class PluginService implements PluginContributionSource {
       ...(linkTarget ? { linkTarget } : {}),
       active: rec.phase === "active",
       hasClient: !!rec.manifest?.client,
+      // Named up front, so the dialog can say why Uninstall is refused before
+      // the owner clicks it rather than after.
+      usedBy: this.dependentsOf(id).map((r) => r.id),
       data: {
         settings: entry?.enabled !== undefined || Object.keys(entry?.settings ?? {}).length > 0,
         kvKeys,

@@ -66,7 +66,12 @@ export function pluginUpdateHours(env: NodeJS.ProcessEnv = process.env): number 
   return Number.isFinite(n) && n >= 0 ? clampPluginUpdateHours(n) : 6;
 }
 
-/** Would `auto` install this? Nothing new asked for, the same plugin, and installable. */
+/**
+ * Would `auto` install this? Nothing new asked for, the same plugin,
+ * installable — which includes having what it needs of other plugins — and
+ * breaking no installed plugin that uses it. A breaking update needs the
+ * owner's typed confirmation, which a background pass never has.
+ */
 export function autoApplicable(check: PluginUpdateCheck): boolean {
   return (
     check.status === "available" &&
@@ -74,8 +79,35 @@ export function autoApplicable(check: PluginUpdateCheck): boolean {
     !!check.diff &&
     check.diff.escalations.length === 0 &&
     !!check.inspection?.installable &&
+    !check.inspection.breaks?.length &&
     check.inspection.id === check.id
   );
+}
+
+/**
+ * Rows with each provider moved ahead of what uses it, otherwise in the
+ * order given, so a pass that auto-installs remote-host 0.11 checks
+ * proxmox-terminal after it — and judges proxmox's update against the
+ * remote-host it will meet. A loop is walked once, where it is first met.
+ */
+export function providersFirst(rows: readonly PluginInfo[]): PluginInfo[] {
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  const out: PluginInfo[] = [];
+  const placed = new Set<string>();
+  const visiting = new Set<string>();
+  const place = (r: PluginInfo): void => {
+    if (placed.has(r.id) || visiting.has(r.id)) return;
+    visiting.add(r.id);
+    for (const d of r.dependencies ?? []) {
+      const provider = byId.get(d.id);
+      if (provider) place(provider);
+    }
+    visiting.delete(r.id);
+    placed.add(r.id);
+    out.push(r);
+  };
+  for (const r of rows) place(r);
+  return out;
 }
 
 export class PluginUpdateWatcher {
@@ -145,7 +177,7 @@ export class PluginUpdateWatcher {
   }
 
   private async pass(): Promise<void> {
-    const rows = this.opts.list().filter((p) => p.origin === "url");
+    const rows = providersFirst(this.opts.list().filter((p) => p.origin === "url"));
     const seen = new Set<string>();
     const found: PluginUpdateCheck[] = [];
     for (const p of rows) {

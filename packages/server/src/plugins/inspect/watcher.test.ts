@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from "vitest";
 import type { PluginAutoUpdate, PluginInfo, PluginUpdateCheck, PluginUpdateResult } from "@dispatch/shared";
-import { MAX_PLUGIN_UPDATE_HOURS, PluginUpdateWatcher, autoApplicable, pluginUpdateHours } from "./watcher.js";
+import { MAX_PLUGIN_UPDATE_HOURS, PluginUpdateWatcher, autoApplicable, pluginUpdateHours, providersFirst } from "./watcher.js";
 
 const SHA_A = "a".repeat(40);
 const SHA_B = "b".repeat(40);
@@ -82,6 +82,18 @@ describe("autoApplicable", () => {
     expect(autoApplicable(available("p", { installable: false }))).toBe(false);
     expect(autoApplicable({ ...available("p"), inspection: { id: "other", installable: true } as PluginUpdateCheck["inspection"] })).toBe(false);
     expect(autoApplicable({ id: "p", status: "up-to-date", origin: "url", checkedAt: 1 })).toBe(false);
+  });
+  it("never takes an update that breaks an installed plugin using this one — that needs the owner's typed yes", () => {
+    const c = available("p");
+    expect(autoApplicable({ ...c, inspection: { ...c.inspection!, breaks: [{ id: "proxmox-terminal", detail: "x" }] } })).toBe(false);
+  });
+});
+
+describe("providersFirst", () => {
+  it("moves each provider ahead of what uses it and otherwise keeps the order it was given", () => {
+    const uses = (id: string, dep: string): PluginInfo => ({ ...row(id), dependencies: [{ id: dep, uses: ["m@1"], optional: true, state: "ok", detail: "" }] });
+    const order = providersFirst([row("zeta"), uses("aaa-proxmox", "remote-host"), row("beta"), row("remote-host")]).map((r) => r.id);
+    expect(order).toEqual(["zeta", "remote-host", "aaa-proxmox", "beta"]);
   });
 });
 
