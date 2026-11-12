@@ -295,7 +295,7 @@ describe("switching a provider off", () => {
     expect(status(h.svc, "mid")).toBe("blocked");
     expect(status(h.svc, "top")).toBe("blocked");
     expect(h.svc.get("mid")?.error).toBe("needs base, which was switched off");
-    // An optional dependent is not taken down for it (C2 tells it instead).
+    // An optional dependent is not taken down for it (`onLost` tells it instead).
     expect(status(h.svc, "fan")).toBe("active");
     expect(h.svc.get("fan")?.dependencies?.[0]?.state).toBe("disabled");
     // The toggles of the dependents were not touched.
