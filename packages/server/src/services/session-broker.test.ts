@@ -1680,22 +1680,31 @@ describe("SessionBroker — permissions", () => {
       };
       broker.plugins = { modes: () => [], mcpServers: () => [] };
       const session = (broker as unknown as { sessions: Map<string, Record<string, unknown>> }).sessions.get("c1")!;
-      // ssh-mcp with a host but no credentials yet: the runtime's swap never settles.
-      session.harnessSession = { updateMcpServers: vi.fn(() => new Promise<void>(() => {})) };
-      // Only the deadline's clock — faking setImmediate too would freeze the fs I/O.
-      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      // The clock goes fake AT the hand-over, not before: `refreshMcpServers`
+      // arms its deadline synchronously right after `updateMcpServers` returns,
+      // so that is the first timer it sets. Everything before it — real store
+      // I/O, whose contention retries back off on setTimeout — keeps the real
+      // clock. Faking earlier and stepping until the deadline fired raced that
+      // I/O: under a loaded runner it outlasted the bounded steps and the
+      // assertion read `undefined` (#505).
+      let handedOver!: () => void;
+      const handed = new Promise<void>((resolve) => (handedOver = resolve));
+      session.harnessSession = {
+        updateMcpServers: vi.fn(() => {
+          vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+          handedOver();
+          // ssh-mcp with a host but no credentials yet: the runtime's swap never settles.
+          return new Promise<void>(() => {});
+        }),
+      };
       try {
-        let settled: unknown;
-        void broker.refreshMcpServers(projectId, ["box"]).then((r) => (settled = r));
-        // The deadline is armed only after real store I/O, so one advance can
-        // land before the timer exists — keep stepping until it fires, bounded
-        // so a regression to an unbounded wait fails instead of hanging the run.
-        for (let i = 0; i < 50 && !settled; i++) {
-          await new Promise((r) => setImmediate(r));
-          await vi.advanceTimersByTimeAsync(MCP_REFRESH_WAIT_MS);
-        }
+        const refresh = broker.refreshMcpServers(projectId, ["box"]);
+        await handed;
+        await vi.advanceTimersByTimeAsync(MCP_REFRESH_WAIT_MS);
         // Handed over, still reconnecting — reported refreshed, not left hanging.
-        expect(settled).toEqual({ refreshed: ["c1"], nextSession: [] });
+        // A regression to an unbounded wait leaves this pending, and the test's
+        // own (real-clock) timeout fails it rather than hanging the run.
+        await expect(refresh).resolves.toEqual({ refreshed: ["c1"], nextSession: [] });
       } finally {
         vi.useRealTimers();
       }
