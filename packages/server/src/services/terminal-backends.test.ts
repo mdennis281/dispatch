@@ -19,6 +19,7 @@ import type {
   TerminalSpawnInfo,
   WsServerEvent,
 } from "@dispatch/shared";
+import { createPluginMembrane } from "@dispatch/shared";
 import { EventBus } from "../bus.js";
 import { StateDb } from "../store/db.js";
 import { TerminalService, type ShellProcess } from "./terminal.js";
@@ -2222,5 +2223,130 @@ describe("runs in flight, for a lock that spans shells (E28)", () => {
     off();
     await h.svc.run({ chatId: "c1", name: "main", command: "say again", cwd: "/w" });
     expect(log).toHaveLength(2);
+  });
+});
+
+/**
+ * proxmox-terminal will reach its shells through remote-host's API, so what
+ * core holds — the backend, its handles, the listeners core passes into them
+ * — crossed a plugin membrane, and goes inert when either plugin goes down.
+ * Core must ride that out: no throw into `attach()` (it has no try/catch),
+ * no TypeError for a notice, no late shell attached.
+ */
+describe("a backend reached through another plugin's API", () => {
+  /** The provider's half: plain-object handles, so every function on them crosses and can be revoked. */
+  function provided() {
+    const shells: FakeShell[] = [];
+    let release: () => void = () => {};
+    let held = false;
+    const backend = {
+      id: "proxmox",
+      label: "Proxmox",
+      shell: "bash" as const,
+      spawn: async (_info: TerminalSpawnInfo) => {
+        if (held) await new Promise<void>((r) => (release = r));
+        const sh = new FakeShell("/srv/repo");
+        shells.push(sh);
+        return {
+          stdin: { write: (chunk: string) => sh.stdin.write(chunk) },
+          stdout: sh.stdout,
+          stderr: sh.stderr,
+          kill: () => sh.kill(),
+          on: (event: string, fn: (...args: unknown[]) => void) => {
+            sh.on(event, fn);
+          },
+        };
+      },
+    };
+    const membrane = createPluginMembrane({
+      provider: { id: "remote-host", name: "Remote host" },
+      caller: { id: "proxmox-terminal", name: "Proxmox terminal" },
+      export: "machines@1",
+    });
+    const api = membrane.wrapApi({ backend: () => backend });
+    return {
+      membrane,
+      backend: api.backend() as unknown as TerminalBackend,
+      shells,
+      hold: () => void (held = true),
+      release: () => release(),
+    };
+  }
+
+  function pinned(h: Harness, p: ReturnType<typeof provided>): void {
+    h.registry.register(p.backend, "proxmox-terminal");
+    h.chats.set("c1", { terminalBackend: "proxmox" });
+    h.registry.notePin("c1", "proxmox");
+  }
+
+  const noticeAbout = (text: string) =>
+    events.some((e) => e.type === "notice" && "text" in e && typeof e.text === "string" && e.text.includes(text));
+
+  it("works through the membrane while the link is open", async () => {
+    const h = setup();
+    const p = provided();
+    pinned(h, p);
+    const res = await h.svc.run({ chatId: "c1", name: "main", command: "say through", cwd: "/w" });
+    expect(res.output).toBe("through");
+    expect(p.shells).toHaveLength(1);
+  });
+
+  it("a spawn in flight when the link closes is refused cleanly, and the late shell is never attached", async () => {
+    const h = setup();
+    const p = provided();
+    pinned(h, p);
+    p.hold();
+    const running = h.svc.run({ chatId: "c1", name: "main", command: "say hi", cwd: "/w" });
+    for (let i = 0; i < 5; i++) await flush();
+    p.membrane.revoke("Remote host is no longer running");
+    p.release();
+    const res = await running;
+    // The default policy falls back locally — and says why, in words.
+    expect(res.output).toContain("hi");
+    expect(h.local).toHaveLength(1);
+    expect(noticeAbout("Remote host is no longer running")).toBe(true);
+    // The provider's shell did arrive, but late: core wired nothing to it.
+    expect(p.shells).toHaveLength(1);
+    expect(p.shells[0]!.listenerCount("exit")).toBe(0);
+  });
+
+  it("a spawn after the link closed gets no shell back, and core says so instead of a TypeError", async () => {
+    const h = setup();
+    const p = provided();
+    pinned(h, p);
+    p.membrane.revoke();
+    const res = await h.svc.run({ chatId: "c1", name: "main", command: "say local", cwd: "/w" });
+    expect(res.output).toContain("local");
+    expect(h.local).toHaveLength(1);
+    expect(p.shells).toHaveLength(0);
+    expect(noticeAbout("it handed back no shell")).toBe(true);
+    expect(events.some((e) => e.type === "notice" && JSON.stringify(e).includes("TypeError"))).toBe(false);
+  });
+
+  it("an attached shell whose link closes: late events and core's calls on the stale handle do nothing and throw nothing", async () => {
+    const h = setup();
+    const p = provided();
+    pinned(h, p);
+    await h.svc.run({ chatId: "c1", name: "main", command: "say up", cwd: "/w" });
+    const sh = p.shells[0]!;
+    p.membrane.revoke();
+    // The provider emitting into the listeners core passed it: inert.
+    expect(() => sh.emit("exit", 0)).not.toThrow();
+    expect(() => sh.emit("error", new Error("socket closed"))).not.toThrow();
+    // Core closing the terminal calls kill on the stale handle: inert too.
+    const id = h.svc.listChat("c1")[0]!.id;
+    expect(() => h.svc.kill(id)).not.toThrow();
+    expect(sh.killed).toBe(false);
+  });
+
+  it("in the order core closes links — the provider's teardown first — the exit reaches core before the link closes", async () => {
+    const h = setup();
+    const p = provided();
+    pinned(h, p);
+    await h.svc.run({ chatId: "c1", name: "main", command: "say up", cwd: "/w" });
+    // remote-host's teardown kills its shells; only then is the link revoked.
+    p.shells[0]!.kill();
+    p.membrane.revoke();
+    expect(h.svc.listChat("c1")[0]!.status).toBe("exited");
   });
 });

@@ -1130,6 +1130,11 @@ export class TerminalService {
       const raw = await settleWithin(spawned, timeoutMs, placeholder.abort, (cut) => {
         term.cutConnect = cut;
       });
+      // A backend reached through another plugin's API goes inert, not
+      // throwing, once that plugin goes down (shared `createPluginMembrane`):
+      // its `spawn` then hands back `undefined`, and reading `.cwd` off that
+      // made the human's notice a TypeError.
+      if (!raw || typeof raw !== "object") throw new Error("it handed back no shell");
       const declared = (raw as { cwd?: unknown }).cwd;
       remoteCwd = typeof declared === "string" && declared ? declared : undefined;
       handle = withoutPid(raw);

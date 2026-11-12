@@ -9,9 +9,10 @@
  * against it needs no test-only seam — and a test that passes here has
  * exercised the same code the host will call.
  *
- * What it does NOT do: enforce the 30 s activate budget, run two plugins at
- * once, or persist anything. Those are the host's job and its test suite's.
- * Verify against a real instance before shipping (docs/plugins.md → "Testing").
+ * What it does NOT do: enforce the 30 s activate budget or persist anything.
+ * Those are the host's job and its test suite's. Two plugins that depend on
+ * each other run together under {@link createTestHost}. Verify against a real
+ * instance before shipping (docs/plugins.md → "Testing").
  */
 import type {
   AttentionItem,
@@ -54,6 +55,15 @@ import type {
   PluginToolCall,
   PluginToolCallResult,
   PluginToolInputSchema,
+  MembraneParty,
+  PluginCaller,
+  PluginDependencySpec,
+  PluginDependencyStatus,
+  PluginDependent,
+  PluginExportFactory,
+  PluginLinkCaller,
+  PluginMembrane,
+  PluginStatus,
 } from "@dispatch/shared";
 import {
   PLUGIN_TOOL_LIMITS,
@@ -77,6 +87,12 @@ import {
   compilePluginSettingsSchema,
   pluginSecretAllowed,
   sameSettingsValue,
+  PluginRevokedError,
+  blockedReason,
+  liveDependencyState,
+  openPluginLink,
+  pluginLinkClosedReason,
+  resolvePluginDependencies,
 } from "@dispatch/shared";
 import type { PluginContext, PluginReply, PluginRequest } from "./index.js";
 
@@ -155,6 +171,25 @@ export interface TestContextOptions {
   readChat?: (chatId: string, view: string) => string;
   /** What `chats.state` returns. Default: idle, not dormant, nothing pending. */
   stateOf?: (chatId: string) => PluginChatState | null;
+  /**
+   * The plugins this one uses, as `ctx.dependencies` will find them:
+   * `{ "remote-host": { machines: { 1: fakeApi } } }`. Given, the member
+   * exists (as it does for a manifest that declares `dependencies`) and every
+   * export listed is a declared `uses` — a `get` of anything else THROWS, as
+   * on the host. `get` hands the API over through the host's own link
+   * (shared `openPluginLink`), so revocation, inert callbacks and error
+   * tagging behave as in production. A FUNCTION is the export's factory and
+   * is called with the `PluginCaller` the host would pass; `null` declares an
+   * export nobody serves (`get` → undefined, `state` → `missing` when nothing
+   * of that plugin is served, `not-served` otherwise).
+   */
+  dependencies?: Record<string, Record<string, Record<number, object | ((caller: PluginCaller) => object) | null>>>;
+  /** Which of `dependencies` are optional — only what `ctx.dependencies.state(id).optional` reports. */
+  optionalDependencies?: readonly string[];
+  /** The manifest's `provides`, `{ machines: [1] }`. Given, `ctx.provides` exists and `serve` is checked against it. */
+  provides?: Record<string, readonly number[]>;
+  /** What `ctx.provides.dependents()` returns. Default: nobody. */
+  dependents?: PluginDependent[];
 }
 
 export interface TestRouteCall {
@@ -356,6 +391,37 @@ export interface TestContext {
   };
   /** How many listeners the bus currently holds — zero after a clean deactivate. */
   listenerCount(): number;
+  /** What `ctx.provides.serve` was handed, by `name@major`. */
+  served: ReadonlyMap<string, PluginExportFactory>;
+  /**
+   * Call this plugin's export `name@major` the way plugin `callerId` gets it:
+   * from the factory it served, through the membrane, with a `PluginCaller`
+   * built like the host's (`capabilities` default to none). The same object
+   * per caller until that link closes. The first call SEALS the exports, as
+   * the host does when `activate` resolves: `serve` throws from then on.
+   * Throws when nothing serves it.
+   */
+  callAs<T = unknown>(
+    callerId: string,
+    name: string,
+    major: number,
+    caller?: { name?: string; version?: string; capabilities?: readonly PluginCapability[] },
+  ): T;
+  /**
+   * Close every link `id` is in, the way the host does once a plugin is down:
+   * the API's methods throw `PluginRevokedError`, everything else that
+   * crossed goes inert, a call in flight rejects, `caller.signal` aborts. For
+   * a dependency, `get` then returns undefined and `state` reads `disabled`;
+   * for a caller of `callAs`, it is that consumer going away.
+   */
+  revoke(id: string): void;
+  /**
+   * Play dependency `id` going down while this plugin stays up: its `onLost`
+   * listeners run (awaited), `get` stops handing it out, then {@link revoke}.
+   * Rejects with the first error a listener threw — the host would log it
+   * and carry on, which is easy to miss.
+   */
+  lose(id: string): Promise<void>;
 }
 
 interface Route {
@@ -595,6 +661,114 @@ function testMcpProcess(handle: TerminalProcessHandle): TestMcpProcess {
     },
   };
 }
+
+/* --------------------------------------------------- plugin dependencies */
+
+interface TestLink {
+  provider: MembraneParty;
+  caller: MembraneParty;
+  membrane: PluginMembrane;
+  api: unknown;
+  abort: AbortController;
+}
+
+/**
+ * The links between plugins, kept the way the host keeps them (server
+ * `PluginService`): one per caller and export, opened on first use through
+ * shared `openPluginLink`, closed when either side goes down.
+ */
+class TestLinkTable {
+  private readonly exports = new Map<string, Map<string, PluginExportFactory>>();
+  private readonly sealed = new Set<string>();
+  private readonly down = new Set<string>();
+  private readonly links = new Map<string, TestLink>();
+  /** consumer → provider → listeners */
+  private readonly lost = new Map<string, Map<string, Set<() => unknown>>>();
+
+  served(provider: string): Map<string, PluginExportFactory> {
+    let mine = this.exports.get(provider);
+    if (!mine) this.exports.set(provider, (mine = new Map()));
+    return mine;
+  }
+  serve(provider: string, name: string, major: number, factory: unknown): void {
+    const use = `${name}@${major}`;
+    if (typeof factory !== "function") throw new TypeError(`serve("${name}", ${major}) needs a factory function`);
+    if (this.sealed.has(provider)) throw new Error(`serve() is accepted only while activate() runs — ${use} was not served`);
+    const mine = this.served(provider);
+    if (mine.has(use)) throw new Error(`${use} is already served`);
+    mine.set(use, factory as PluginExportFactory);
+  }
+  seal(provider: string): void {
+    this.sealed.add(provider);
+  }
+  isSealed(provider: string): boolean {
+    return this.sealed.has(provider);
+  }
+  /** A provider whose `activate` threw: what it served before throwing is gone with it. */
+  discard(provider: string): void {
+    this.exports.delete(provider);
+  }
+  isDown(provider: string): boolean {
+    return this.down.has(provider);
+  }
+  open(caller: PluginLinkCaller, provider: MembraneParty, use: string): unknown {
+    if (this.down.has(provider.id)) return undefined;
+    const factory = this.exports.get(provider.id)?.get(use);
+    if (!factory) return undefined;
+    const key = `${provider.id}\0${caller.id}\0${use}`;
+    const open = this.links.get(key);
+    if (open && !open.membrane.revoked) return open.api;
+    const abort = new AbortController();
+    const { api, membrane } = openPluginLink({ provider, caller, export: use, factory, signal: abort.signal });
+    this.links.set(key, { provider, caller: { id: caller.id, name: caller.name }, membrane, api, abort });
+    return api;
+  }
+  onLost(consumer: string, provider: string, fn: () => unknown): () => void {
+    let byProvider = this.lost.get(consumer);
+    if (!byProvider) this.lost.set(consumer, (byProvider = new Map()));
+    let fns = byProvider.get(provider);
+    if (!fns) byProvider.set(provider, (fns = new Set()));
+    fns.add(fn);
+    return () => {
+      fns.delete(fn);
+    };
+  }
+  /** `provider` is going down: stop handing it out, and tell every consumer still up that asked. */
+  async withdraw(provider: string, isUp: (consumer: string) => boolean = () => true): Promise<unknown[]> {
+    this.down.add(provider);
+    const errors: unknown[] = [];
+    for (const [consumer, byProvider] of this.lost) {
+      if (consumer === provider || !isUp(consumer)) continue;
+      const fns = [...(byProvider.get(provider) ?? [])];
+      const results = await Promise.allSettled(fns.map((fn) => Promise.resolve().then(() => fn())));
+      for (const r of results) if (r.status === "rejected") errors.push(r.reason);
+    }
+    return errors;
+  }
+  /** Close every link `id` is in, as consumer or provider. */
+  close(id: string): void {
+    this.lost.delete(id);
+    for (const [key, link] of this.links) {
+      if (link.provider.id !== id && link.caller.id !== id) continue;
+      this.links.delete(key);
+      const why = pluginLinkClosedReason(link.provider.id === id ? "provider" : "caller", link.provider, link.caller);
+      link.membrane.revoke(why);
+      link.abort.abort(new PluginRevokedError(link.provider.id, why));
+    }
+  }
+  /** Back up (a test host starting a plugin again is not a thing; a fake dependency coming back is). */
+  restore(provider: string): void {
+    this.down.delete(provider);
+  }
+}
+
+/** What {@link createTestHost} binds into a plugin's context in place of the single-plugin fakes. */
+interface HostBinding {
+  links: TestLinkTable;
+  dependencies?: NonNullable<PluginContext["dependencies"]>;
+  provides?: NonNullable<PluginContext["provides"]>;
+}
+const HOST_BINDINGS = new WeakMap<TestContextOptions, HostBinding>();
 
 export function createTestContext(opts: TestContextOptions = {}): TestContext {
   const id = opts.id ?? "test-plugin";
@@ -1216,6 +1390,20 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
     return b;
   };
 
+  // `ctx.dependencies` / `ctx.provides` — from createTestHost when this
+  // context is one of its plugins, else the single-plugin fakes. Either way
+  // only when declared, as the host builds them only for a manifest that
+  // declares the key.
+  const bound = HOST_BINDINGS.get(opts);
+  const links = bound?.links ?? new TestLinkTable();
+  if (bound) {
+    if (bound.dependencies) ctx.dependencies = bound.dependencies;
+    if (bound.provides) ctx.provides = bound.provides;
+  } else {
+    if (opts.dependencies) ctx.dependencies = fakeDependencies(opts, id, [...caps], links);
+    if (opts.provides) ctx.provides = fakeProvides(opts, id, links);
+  }
+
   return {
     ctx,
     publish: (evt) => {
@@ -1398,5 +1586,368 @@ export function createTestContext(opts: TestContextOptions = {}): TestContext {
         ),
     },
     listenerCount: () => listeners.size,
+    served: links.served(id),
+    callAs: <T = unknown>(
+      callerId: string,
+      name: string,
+      major: number,
+      who: { name?: string; version?: string; capabilities?: readonly PluginCapability[] } = {},
+    ): T => {
+      // The host lets a dependent in only once `activate` has resolved.
+      links.seal(id);
+      const use = `${name}@${major}`;
+      const api = links.open(
+        { id: callerId, name: who.name ?? callerId, version: who.version ?? "0.0.0", capabilities: [...(who.capabilities ?? [])] },
+        { id, name: opts.name ?? id },
+        use,
+      );
+      if (api === undefined) throw new Error(`"${id}" does not serve ${use}${links.isDown(id) ? " any more" : ""}`);
+      return api as T;
+    },
+    revoke: (other) => {
+      void links.withdraw(other, () => false);
+      links.close(other);
+    },
+    lose: async (other) => {
+      const errors = await links.withdraw(other, (consumer) => consumer === id);
+      links.close(other);
+      if (errors.length) throw errors[0];
+    },
+  };
+}
+
+/** The host's refusal for a dependency the manifest does not declare. Returns its declared `uses`. */
+function declaredUses(self: string, declared: ReadonlyMap<string, readonly string[]>, other: string): readonly string[] {
+  const uses = declared.get(other);
+  if (!uses) throw new Error(`"${self}" does not declare a dependency on "${other}" in its plugin.yaml`);
+  return uses;
+}
+
+/** The host's refusal for an export the manifest does not list under `uses`. */
+function checkUse(self: string, uses: readonly string[], other: string, use: string): void {
+  if (!uses.includes(use)) throw new Error(`"${self}" does not list ${use} under dependencies.${other}.uses in its plugin.yaml`);
+}
+
+/** `ctx.dependencies` for one plugin under test, over fake providers built from `opts.dependencies`. */
+function fakeDependencies(
+  opts: TestContextOptions,
+  id: string,
+  capabilities: PluginCapability[],
+  links: TestLinkTable,
+): NonNullable<PluginContext["dependencies"]> {
+  const self: PluginLinkCaller = { id, name: opts.name ?? id, version: opts.version ?? "0.0.0", capabilities };
+  const optional = new Set(opts.optionalDependencies ?? []);
+  const declared = new Map<string, string[]>();
+  for (const [other, byName] of Object.entries(opts.dependencies ?? {})) {
+    const uses: string[] = [];
+    for (const [name, byMajor] of Object.entries(byName)) {
+      for (const [major, value] of Object.entries(byMajor)) {
+        uses.push(`${name}@${major}`);
+        if (value === null || value === undefined) continue;
+        links.serve(other, name, Number(major), typeof value === "function" ? value : () => value);
+      }
+    }
+    // A fake provider is already up: its `activate` is over, nothing more is served.
+    links.seal(other);
+    declared.set(other, uses);
+  }
+  return {
+    get: <T = unknown>(other: string, name: string, major: number): T | undefined => {
+      const use = `${name}@${major}`;
+      checkUse(id, declaredUses(id, declared, other), other, use);
+      return links.open(self, { id: other, name: other }, use) as T | undefined;
+    },
+    state: (other): PluginDependencyStatus => {
+      const uses = [...declaredUses(id, declared, other)];
+      const base = { id: other, uses, optional: optional.has(other) };
+      if (links.isDown(other)) return { ...base, state: "disabled", detail: `${other} is switched off` };
+      const missing = uses.filter((u) => !links.served(other).has(u));
+      if (missing.length === uses.length) return { ...base, state: "missing", detail: `${other} is not installed` };
+      if (missing.length) return { ...base, state: "not-served", detail: `${other} did not serve ${missing.join(", ")}` };
+      return { ...base, state: "ok", detail: "" };
+    },
+    onLost: (other, fn) => {
+      declaredUses(id, declared, other);
+      if (typeof fn !== "function") throw new TypeError("onLost needs a function");
+      return links.onLost(id, other, fn);
+    },
+  };
+}
+
+/** `ctx.provides` for one plugin under test: `serve` checked against `opts.provides`, collected in `t.served`. */
+function fakeProvides(opts: TestContextOptions, id: string, links: TestLinkTable): NonNullable<PluginContext["provides"]> {
+  const provided = opts.provides ?? {};
+  return {
+    serve: (name, major, factory) => {
+      if (!provided[name]?.includes(major)) throw new Error(`"${id}" does not declare provides.${name}: [${major}] in its plugin.yaml`);
+      links.serve(id, name, major, factory);
+    },
+    dependents: () => (opts.dependents ?? []).map((d) => ({ ...d, uses: [...d.uses] })),
+  };
+}
+
+/* ------------------------------------------------------------ test host */
+
+/** One plugin under {@link createTestHost}: its manifest's identity and keys, and its real module. */
+export interface TestHostPlugin {
+  manifest: {
+    id: string;
+    name?: string;
+    version?: string;
+    capabilities?: readonly PluginCapability[];
+    dependencies?: Record<string, PluginDependencySpec>;
+    provides?: Record<string, readonly number[]>;
+    /** Default true. A plugin switched off is never activated, as on the host. */
+    enabled?: boolean;
+  };
+  module: PluginModule;
+  /** Everything else `createTestContext` takes, for this plugin's context. */
+  options?: Omit<
+    TestContextOptions,
+    "id" | "name" | "version" | "capabilities" | "dependencies" | "optionalDependencies" | "provides" | "dependents"
+  >;
+}
+
+export interface TestHost {
+  /** The activation order the host's resolver chose: each plugin after what it uses, ties by id. */
+  readonly order: readonly string[];
+  /** Activate every plugin in `order`, as the host's boot does: blocked ones are skipped, a throw is an `error`. */
+  start(): Promise<void>;
+  /** A plugin's fake context — its `kv`, `routes`, `terminalBackends`… as `createTestContext` gives them. */
+  context(id: string): TestContext;
+  status(id: string): Extract<PluginStatus, "active" | "error" | "blocked" | "disabled">;
+  /** Why it is `blocked` or `error`, in the host's words. */
+  reason(id: string): string | undefined;
+  /**
+   * Switch `id` off as the host does: whatever REQUIRES it goes down first,
+   * deepest first, as a `disable`, and ends `blocked`; optional dependents
+   * hear `onLost` while it is still up; then it goes down, and only then are
+   * its links closed.
+   */
+  disable(id: string): Promise<void>;
+  /** A server stop: `onShutdown("stop")` consumers before providers, then `deactivate` in reverse order, closing links. */
+  stop(): Promise<void>;
+}
+
+/**
+ * Run several REAL plugin modules together, linked as the host links them
+ * (docs/plugins.md → "Dependencies"): resolved with the host's own
+ * `resolvePluginDependencies`, activated in its order, each `serve` sealed
+ * when its `activate` resolves, every `get` through shared `openPluginLink`,
+ * and the host's teardown order on `disable` and `stop`. For the contract
+ * between a provider and its consumer — remote-host's `machines@1` and
+ * proxmox-terminal's forwarder — rather than either alone.
+ *
+ * Each plugin gets a `createTestContext` of its own, so everything else (its
+ * kv, routes, backends) is the single-plugin fake, inspectable through
+ * `context(id)`.
+ */
+export function createTestHost(plugins: readonly TestHostPlugin[]): TestHost {
+  const links = new TestLinkTable();
+  const byId = new Map(plugins.map((p) => [p.manifest.id, p]));
+  type Status = ReturnType<TestHost["status"]>;
+  const state = new Map<string, { status: Status; running: boolean; activating: boolean; reason?: string }>();
+  for (const p of plugins) {
+    state.set(p.manifest.id, { status: p.manifest.enabled === false ? "disabled" : "active", running: false, activating: false });
+  }
+  const resolution = resolvePluginDependencies(
+    plugins.map((p) => ({
+      id: p.manifest.id,
+      version: p.manifest.version ?? "0.0.0",
+      valid: true,
+      enabled: p.manifest.enabled !== false,
+      ...(p.manifest.dependencies ? { dependencies: p.manifest.dependencies } : {}),
+      ...(p.manifest.provides ? { provides: Object.fromEntries(Object.entries(p.manifest.provides).map(([k, v]) => [k, [...v]])) } : {}),
+    })),
+  );
+  const nameOf = (id: string) => byId.get(id)?.manifest.name ?? id;
+  const capabilitiesOf = (id: string): PluginCapability[] => [...(byId.get(id)?.manifest.capabilities ?? [])];
+  const phaseOf = (id: string) => {
+    const s = state.get(id)!;
+    if (s.activating) return "activating" as const;
+    if (s.running) return "active" as const;
+    if (s.status === "error") return "error" as const;
+    if (s.status === "blocked") return "blocked" as const;
+    return "inactive" as const;
+  };
+  const live = (consumer: string): PluginDependencyStatus[] =>
+    (resolution.dependencies.get(consumer) ?? []).map((d) => {
+      const s = state.get(d.id);
+      return liveDependencyState(
+        d,
+        s && { phase: phaseOf(d.id), enabled: s.status !== "disabled", ...(s.reason ? { error: s.reason } : {}) },
+        links.isSealed(d.id) ? links.served(d.id) : undefined,
+      );
+    });
+
+  const contexts = new Map<string, TestContext>();
+  for (const p of plugins) {
+    const id = p.manifest.id;
+    const opts: TestContextOptions = {
+      ...p.options,
+      id,
+      name: nameOf(id),
+      version: p.manifest.version ?? "0.0.0",
+      capabilities: capabilitiesOf(id),
+    };
+    const binding: HostBinding = { links };
+    const declared = new Map(Object.entries(p.manifest.dependencies ?? {}).map(([k, v]) => [k, v.uses]));
+    if (declared.size) {
+      binding.dependencies = {
+        get: <T = unknown>(other: string, name: string, major: number): T | undefined => {
+          const use = `${name}@${major}`;
+          checkUse(id, declaredUses(id, declared, other), other, use);
+          const me = state.get(id)!;
+          if (!me.running && !me.activating) return undefined;
+          if (!state.get(other)?.running) return undefined;
+          if (live(id).find((d) => d.id === other)?.state !== "ok") return undefined;
+          return links.open({ id, name: nameOf(id), version: opts.version!, capabilities: capabilitiesOf(id) }, { id: other, name: nameOf(other) }, use) as
+            | T
+            | undefined;
+        },
+        state: (other) => {
+          declaredUses(id, declared, other);
+          const d = live(id).find((x) => x.id === other);
+          return d && { ...d, uses: [...d.uses] };
+        },
+        onLost: (other, fn) => {
+          declaredUses(id, declared, other);
+          if (typeof fn !== "function") throw new TypeError("onLost needs a function");
+          return links.onLost(id, other, fn);
+        },
+      };
+    }
+    const provided = p.manifest.provides ?? {};
+    if (Object.keys(provided).length) {
+      binding.provides = {
+        serve: (name, major, factory) => {
+          if (!provided[name]?.includes(major)) throw new Error(`"${id}" does not declare provides.${name}: [${major}] in its plugin.yaml`);
+          if (!state.get(id)!.activating) throw new Error(`serve() is accepted only while activate() runs — ${name}@${major} was not served`);
+          links.serve(id, name, major, factory);
+        },
+        dependents: () =>
+          plugins
+            .filter((q) => q.manifest.id !== id && q.manifest.dependencies && Object.hasOwn(q.manifest.dependencies, id))
+            .map((q) => ({
+              id: q.manifest.id,
+              installed: true as const,
+              status: state.get(q.manifest.id)!.status,
+              uses: [...q.manifest.dependencies![id]!.uses],
+            }))
+            .sort((a, b) => a.id.localeCompare(b.id)),
+      };
+    }
+    HOST_BINDINGS.set(opts, binding);
+    contexts.set(id, createTestContext(opts));
+  }
+
+  const must = (id: string) => {
+    const s = state.get(id);
+    if (!s) throw new Error(`no plugin "${id}" in this test host — have: ${[...state.keys()].join(", ")}`);
+    return s;
+  };
+
+  /** One plugin down, the host's way: onLost to whoever still runs, its hook, deactivate, then its links. */
+  const down = async (id: string, reason?: PluginShutdownReason): Promise<void> => {
+    const s = must(id);
+    const mod = byId.get(id)!.module;
+    if (s.running) await links.withdraw(id, (consumer) => state.get(consumer)?.running === true);
+    if (reason && mod.onShutdown) {
+      await mod.onShutdown({ reason, deadline: Date.now() + PLUGIN_SHUTDOWN_BUDGET_MS, signal: new AbortController().signal });
+    }
+    await mod.deactivate?.();
+    links.close(id);
+    s.running = false;
+  };
+
+  /** Everything that REQUIRES `id`, directly or through another, deepest first. */
+  const requiredDependentsOf = (id: string): string[] => {
+    const needs = new Set<string>();
+    const walk = (provider: string) => {
+      for (const p of plugins) {
+        const spec = p.manifest.dependencies?.[provider];
+        if (!spec || spec.optional || needs.has(p.manifest.id) || p.manifest.id === id) continue;
+        needs.add(p.manifest.id);
+        walk(p.manifest.id);
+      }
+    };
+    walk(id);
+    return [...resolution.order].reverse().filter((x) => needs.has(x));
+  };
+
+  return {
+    order: resolution.order,
+    context: (id) => {
+      must(id);
+      return contexts.get(id)!;
+    },
+    status: (id) => must(id).status,
+    reason: (id) => must(id).reason,
+    start: async () => {
+      for (const id of resolution.order) {
+        const s = state.get(id)!;
+        if (s.status === "disabled" || s.running) continue;
+        const early = resolution.blocked.get(id);
+        const unmet = early
+          ? undefined
+          : live(id).find((d) => !d.optional && (d.state !== "ok" || !state.get(d.id)?.running));
+        if (early || unmet) {
+          s.status = "blocked";
+          s.reason = early ?? blockedReason(unmet!.state === "ok" ? { ...unmet!, state: "failed", detail: `${unmet!.id} has not started` } : unmet!);
+          continue;
+        }
+        s.activating = true;
+        try {
+          await byId.get(id)!.module.activate(contexts.get(id)!.ctx);
+          links.seal(id);
+          s.running = true;
+          s.status = "active";
+        } catch (err) {
+          s.status = "error";
+          s.reason = err instanceof Error ? err.message : String(err);
+          links.discard(id);
+          links.close(id);
+        } finally {
+          s.activating = false;
+        }
+      }
+    },
+    disable: async (id) => {
+      const s = must(id);
+      for (const dep of requiredDependentsOf(id)) {
+        const d = state.get(dep)!;
+        if (d.running) await down(dep, "disable");
+        if (d.status !== "disabled") {
+          d.status = "blocked";
+          d.reason = byId.get(dep)!.manifest.dependencies?.[id]
+            ? `needs ${id}, which was switched off`
+            : `needs a plugin that needs ${id}, which was switched off`;
+        }
+      }
+      if (s.running) await down(id, "disable");
+      s.status = "disabled";
+    },
+    stop: async () => {
+      const running = resolution.order.filter((id) => state.get(id)!.running);
+      // Consumers' hooks before their providers', as the host's shutdown waves run them.
+      const depth = new Map<string, number>();
+      const depthOf = (id: string, seen = new Set<string>()): number => {
+        if (depth.has(id)) return depth.get(id)!;
+        if (seen.has(id)) return 0;
+        seen.add(id);
+        let d = 0;
+        for (const c of running) if (byId.get(c)!.manifest.dependencies?.[id]) d = Math.max(d, depthOf(c, seen) + 1);
+        depth.set(id, d);
+        return d;
+      };
+      const waves: string[][] = [];
+      for (const id of running) (waves[depthOf(id)] ??= []).push(id);
+      const signal = new AbortController().signal;
+      const deadline = Date.now() + PLUGIN_SHUTDOWN_BUDGET_MS;
+      for (const wave of waves.filter(Boolean)) {
+        await Promise.all(wave.map((id) => byId.get(id)!.module.onShutdown?.({ reason: "stop", deadline, signal })));
+      }
+      for (const id of [...running].reverse()) await down(id);
+    },
   };
 }

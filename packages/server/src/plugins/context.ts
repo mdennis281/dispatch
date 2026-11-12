@@ -210,6 +210,13 @@ export interface PluginContextDeps {
     runs(filter?: TerminalRunFilter): TerminalRunInFlight[];
     onRun(fn: (e: TerminalRunEvent) => void): () => void;
   };
+  /**
+   * `ctx.dependencies` / `ctx.provides`, already bound to THIS plugin by the
+   * service — which is what knows the other plugins, their phases and the
+   * links between them. Handed out only when the manifest declares the key.
+   */
+  dependencies?: NonNullable<PluginContext["dependencies"]>;
+  provides?: NonNullable<PluginContext["provides"]>;
 }
 
 /** What the host must tear down when the plugin goes away. */
@@ -636,6 +643,12 @@ export function buildPluginContext(
       },
     };
   }
+
+  // Only for a manifest that declares them: a plugin that never said it uses
+  // another must find no way in. The owner's consent at install covers what
+  // the manifest lists and nothing else.
+  if (deps.dependencies && Object.keys(manifest.dependencies ?? {}).length) ctx.dependencies = deps.dependencies;
+  if (deps.provides && Object.keys(manifest.provides ?? {}).length) ctx.provides = deps.provides;
 
   return ctx;
 }

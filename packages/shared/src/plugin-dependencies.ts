@@ -481,11 +481,14 @@ export function blockedReason(d: PluginDependencyStatus): string {
 /**
  * Fold what only the running host knows into a resolved verdict: a provider
  * that was `ok` on paper but failed to activate, or is blocked, or was
- * switched off since boot. `phase` is the provider's live phase.
+ * switched off since boot, or came up without serving what is used of it.
+ * `phase` is the provider's live phase; `served`, once its `activate` has
+ * resolved, the `name@major` exports it served.
  */
 export function liveDependencyState(
   resolved: PluginDependencyStatus,
   provider: { phase: "pending" | "activating" | "active" | "error" | "inactive" | "blocked"; enabled: boolean; error?: string } | undefined,
+  served?: { has(use: string): boolean },
 ): PluginDependencyStatus {
   if (resolved.state !== "ok" || !provider) return resolved;
   if (!provider.enabled) return { ...resolved, state: "disabled", detail: `${resolved.id} is switched off` };
@@ -496,5 +499,11 @@ export function liveDependencyState(
     return { ...resolved, state: "blocked", detail: `${resolved.id} is blocked${provider.error ? `: ${provider.error}` : ""}` };
   }
   if (provider.phase === "inactive") return { ...resolved, state: "disabled", detail: `${resolved.id} is not running` };
+  if (provider.phase === "active" && served) {
+    // Declaring an export is a promise; serving it is the provider's code
+    // keeping it. One that did not is as unusable as one that is missing.
+    const missing = resolved.uses.filter((u) => !served.has(u));
+    if (missing.length) return { ...resolved, state: "not-served", detail: `${resolved.id} did not serve ${missing.join(", ")}` };
+  }
   return resolved;
 }

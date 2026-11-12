@@ -151,6 +151,16 @@ export type {
   QuestionAnswer,
   ChatStatus,
   MemoryType,
+  // `ctx.dependencies` / `ctx.provides` (docs/plugins.md → "Dependencies")
+  PluginCaller,
+  PluginDependent,
+  PluginExportFactory,
+  PluginDependencyState,
+  PluginDependencyStatus,
+  // The errors a link throws — TYPES only: match them with the guards below,
+  // never `instanceof`, which fails across two bundled copies of a class.
+  PluginCallError,
+  PluginRevokedError,
 } from "@dispatch/shared";
 
 /*
@@ -234,4 +244,25 @@ export function definePlugin(mod: {
 /** The client twin of {@link definePlugin}: `activate(host)` typed against `ClientHost`. */
 export function defineClientPlugin(mod: ClientPluginModule): ClientPluginModule {
   return mod;
+}
+
+/**
+ * The link to a dependency closed — it, or this plugin, went down — and a
+ * method of its API was called (`code: "revoked"`). By shape, not
+ * `instanceof`: the class the host throws is not the copy a bundled plugin
+ * would import.
+ */
+export function isPluginRevokedError(err: unknown): err is import("@dispatch/shared").PluginRevokedError {
+  const e = err as { name?: unknown; code?: unknown } | null;
+  return !!e && typeof e === "object" && e.name === "PluginRevokedError" && e.code === "revoked";
+}
+
+/**
+ * Another plugin's code threw while this one was calling it (or the reverse,
+ * for a callback). `plugin` names whose code threw; `code` is the thrower's
+ * own, which is what a contract matches on.
+ */
+export function isPluginCallError(err: unknown): err is import("@dispatch/shared").PluginCallError {
+  const e = err as { name?: unknown; plugin?: unknown } | null;
+  return !!e && typeof e === "object" && e.name === "PluginCallError" && typeof e.plugin === "string";
 }

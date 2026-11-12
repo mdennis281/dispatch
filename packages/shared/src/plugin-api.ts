@@ -18,6 +18,8 @@ import type { QuestionAnswer, WsServerEvent, WsServerEventType } from "./wire.js
 import type { Harness, HostAbortSignal } from "./harness.js";
 import type { ProviderDescriptor } from "./providers.js";
 import type { PluginApprovalDecision } from "./plugin-approval.js";
+import type { PluginDependencyStatus } from "./plugin-dependencies.js";
+import type { PluginCapability, PluginStatus } from "./plugin-manifest.js";
 import type {
   TerminalBackend,
   TerminalBackendStatusInput,
@@ -663,6 +665,44 @@ export interface PluginRunnerView {
 }
 
 /**
+ * Who is calling an export — what a provider's `serve` factory receives, once
+ * per consumer. Core builds it from the consumer's validated manifest: a
+ * plugin cannot present itself as another.
+ */
+export interface PluginCaller {
+  readonly id: string;
+  readonly name: string;
+  readonly version: string;
+  /** What the consumer was GRANTED. A provider gates on these: remote-host refuses a caller without `terminals`. */
+  readonly capabilities: readonly PluginCapability[];
+  /**
+   * Aborts when the consumer goes down or this provider does — after both
+   * sides' teardown, when the link is already closed. End what you made for
+   * this caller: a shell that finishes spawning after it aborted is never
+   * delivered, so kill it.
+   */
+  readonly signal: HostAbortSignal;
+}
+
+/** Called once per consumer, on its first `ctx.dependencies.get`; returns the API it gets. Synchronous. */
+export type PluginExportFactory<T extends object = object> = (caller: PluginCaller) => T;
+
+/** One installed plugin that declares a dependency on this one — `ctx.provides.dependents()`. */
+export interface PluginDependent {
+  id: string;
+  /** Always true: listed while it is installed, whatever its state. */
+  installed: true;
+  status: PluginStatus;
+  /**
+   * The exports it declares it uses, `machines@1`. EMPTY for an installed
+   * plugin whose manifest cannot be read right now — possibly one of yours in
+   * the middle of an update. Listed so that a provider never takes "not
+   * here" for "gone" and deletes what it keeps for it.
+   */
+  uses: string[];
+}
+
+/**
  * The context. Members gated by a capability (see docs/plugins.md →
  * "Capabilities") are OPTIONAL here because they are genuinely absent from the
  * object a plugin receives when its manifest does not declare the capability.
@@ -985,5 +1025,55 @@ export interface PluginContext<Req = unknown, Reply = unknown> {
      * that throws is ignored. Optional only because hosts before it lack it.
      */
     onRun?(fn: (event: TerminalRunEvent) => void): () => void;
+  };
+
+  /**
+   * The plugins this one calls (docs/plugins.md → "Dependencies"). Present
+   * only when the manifest declares `dependencies`, and absent on hosts
+   * before them — feature-detect.
+   */
+  dependencies?: {
+    /**
+     * The API `id` serves as `name@major`, or `undefined` when it cannot be
+     * used RIGHT NOW: not installed, off, failed, blocked, going down, or it
+     * did not serve that export. Checked live on every call; the API object
+     * for one export is the same object every time, until the link closes.
+     * Throws for an export the manifest does not list under `uses` — the
+     * owner's consent covers those and nothing else.
+     *
+     * Once the link closes (either plugin went down) the API's own methods
+     * throw `PluginRevokedError` (`code: "revoked"`); anything else that came
+     * across — a handle, a callback — does nothing. A call still in flight
+     * rejects with `PluginRevokedError`. Its other errors arrive as
+     * `PluginCallError` (`plugin`, `export`, the thrower's `code`).
+     */
+    get<T = unknown>(id: string, name: string, major: number): T | undefined;
+    /** Its state and the sentence explaining it, live. Throws for an id the manifest does not declare. */
+    state(id: string): PluginDependencyStatus | undefined;
+    /**
+     * `id` is going down while this plugin stays up — an OPTIONAL dependency
+     * switched off. Called before its `onShutdown`, while the link is still
+     * open: stop using it and drop what you got from `get`. A required
+     * dependency never fires this — this plugin goes down first. Returns the
+     * unsubscribe; deactivation unsubscribes for you.
+     */
+    onLost(id: string, fn: () => void | Promise<void>): () => void;
+  };
+
+  /**
+   * What this plugin exports to others. Present only when the manifest
+   * declares `provides`, and absent on hosts before them.
+   */
+  provides?: {
+    /**
+     * Serve `name@major` (declared under `provides`). Accepted only while
+     * `activate` runs; after that the exports are fixed, and one never
+     * served reads `not-served` to the plugins that use it. `factory` runs
+     * once per consumer, on its first `get`, and must return the API
+     * synchronously. Throws for an undeclared export or a second `serve`.
+     */
+    serve<T extends object>(name: string, major: number, factory: PluginExportFactory<T>): void;
+    /** Every installed plugin that declares a dependency on this one, in any state, by id. */
+    dependents(): PluginDependent[];
   };
 }

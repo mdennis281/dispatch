@@ -73,6 +73,7 @@ export * from "./global-chat.js";
 export * from "./auto-allow.js";
 export * from "./plugin-manifest.js";
 export * from "./plugin-dependencies.js";
+export * from "./plugin-membrane.js";
 export * from "./plugin-settings.js";
 export * from "./terminal-backend.js";
 export * from "./plugin-api.js";

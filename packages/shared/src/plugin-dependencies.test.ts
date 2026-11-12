@@ -212,6 +212,16 @@ describe("liveDependencyState", () => {
     expect(liveDependencyState(ok, { phase: "inactive", enabled: true }).state).toBe("disabled");
     expect(liveDependencyState(ok, { phase: "blocked", enabled: true }).state).toBe("blocked");
   });
+  it("a provider that came up without serving a used export is not-served, naming what is missing", () => {
+    const served = new Set(["machines@2"]);
+    expect(liveDependencyState(ok, { phase: "active", enabled: true }, served)).toMatchObject({
+      state: "not-served",
+      detail: "remote-host did not serve machines@1",
+    });
+    expect(liveDependencyState(ok, { phase: "active", enabled: true }, new Set(["machines@1"]))).toBe(ok);
+    // Not known until its activate resolved: no `served`, no verdict.
+    expect(liveDependencyState(ok, { phase: "active", enabled: true }, undefined)).toBe(ok);
+  });
 });
 
 describe("the manifest's dependencies and provides", () => {

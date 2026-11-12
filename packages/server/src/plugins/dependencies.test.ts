@@ -1,8 +1,9 @@
 /**
  * Plugin dependencies through the real plugin host: activation in dependency
  * order (not id order), blocking on a required dependency that is missing,
- * off, failed or on a cycle, the cascade when a provider is switched off, and
- * the refusals that keep an uninstall from destroying what a dependent made.
+ * off, failed, unserved or on a cycle, the cascade when a provider is switched
+ * off, the refusals that keep an uninstall from destroying what a dependent
+ * made — and `ctx.provides` / `ctx.dependencies`, the links between them.
  *
  * Modules are injected through `importModule`; the manifests on disk are real.
  */
@@ -10,7 +11,14 @@ import { afterEach, describe, expect, it } from "vitest";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { PluginModule, TerminalBackend } from "@dispatch/shared";
+import {
+  PluginCallError,
+  PluginRevokedError,
+  type PluginCaller,
+  type PluginContext,
+  type PluginModule,
+  type TerminalBackend,
+} from "@dispatch/shared";
 import { EventBus } from "../bus.js";
 import { Store } from "../store/index.js";
 import { TerminalBackendRegistry } from "../services/terminal-backends.js";
@@ -57,11 +65,16 @@ async function writePlugin(configDir: string, id: string, spec: PluginSpec = {})
   await writeFile(join(dir, "server", "index.js"), "export function activate() {}\n");
 }
 
-/** A module that writes every lifecycle call to a shared log as `<id>:<call>`. */
-function logged(id: string, log: string[], extra: Partial<PluginModule> = {}): PluginModule {
+/**
+ * A module that writes every lifecycle call to a shared log as `<id>:<call>`,
+ * and serves `serves` (`name@major`) with an empty API — a declared export
+ * nobody serves reads `not-served` and blocks what requires it.
+ */
+function logged(id: string, log: string[], extra: Partial<PluginModule> = {}, serves: string[] = []): PluginModule {
   return {
-    activate: () => {
+    activate: (ctx) => {
       log.push(`${id}:activate`);
+      serveAll(ctx, serves);
     },
     deactivate: () => {
       log.push(`${id}:deactivate`);
@@ -71,6 +84,13 @@ function logged(id: string, log: string[], extra: Partial<PluginModule> = {}): P
     },
     ...extra,
   };
+}
+
+function serveAll(ctx: PluginContext, uses: string[]): void {
+  for (const use of uses) {
+    const [name, major] = use.split("@");
+    ctx.provides!.serve(name!, Number(major), () => ({}));
+  }
 }
 
 async function paths(): Promise<{ configDir: string; dataDir: string }> {
@@ -143,7 +163,7 @@ describe("activation order", () => {
     const log: string[] = [];
     const h = await host(base, {
       "aaa-consumer": logged("aaa-consumer", log),
-      "zzz-provider": logged("zzz-provider", log),
+      "zzz-provider": logged("zzz-provider", log, {}, ["machines@1"]),
       "mmm-plain": logged("mmm-plain", log),
     });
     expect(log.filter((l) => l.endsWith(":activate"))).toEqual([
@@ -248,10 +268,11 @@ describe("switching a provider off", () => {
       },
     };
     const h = await host(base, {
-      base: logged("base", log),
+      base: logged("base", log, {}, ["b@1"]),
       mid: logged("mid", log, {
         activate: (ctx) => {
           log.push("mid:activate");
+          ctx.provides!.serve("m", 1, () => ({}));
           ctx.terminals!.registerBackend(backend);
         },
       }),
@@ -362,8 +383,8 @@ describe("shutdown hooks", () => {
           log.push("aaa-consumer:end");
         },
       }),
-      "zzz-mid": logged("zzz-mid", log, { onShutdown: undefined }),
-      "zzz-provider": logged("zzz-provider", log, { onShutdown: () => void log.push("zzz-provider:start") }),
+      "zzz-mid": logged("zzz-mid", log, { onShutdown: undefined }, ["m@1"]),
+      "zzz-provider": logged("zzz-provider", log, { onShutdown: () => void log.push("zzz-provider:start") }, ["b@1"]),
       "mmm-plain": logged("mmm-plain", log, { onShutdown: () => void log.push("mmm-plain:start") }),
     });
     log.length = 0;
@@ -372,5 +393,294 @@ describe("shutdown hooks", () => {
     expect(log.indexOf("zzz-provider:start")).toBeGreaterThan(log.indexOf("aaa-consumer:end"));
     // An unrelated plugin does not wait for anyone.
     expect(log.indexOf("mmm-plain:start")).toBeLessThan(log.indexOf("aaa-consumer:end"));
+  });
+});
+
+/** A provider + consumer pair whose ctx members the test keeps, to drive the links from outside. */
+function pair(log: string[], opts: { optional?: boolean; consumerCaps?: string[] } = {}) {
+  const ctxs: Record<string, PluginContext> = {};
+  const callers: PluginCaller[] = [];
+  let listener: (() => void) | undefined;
+  const provider: PluginModule = {
+    activate: (ctx) => {
+      ctxs.prov = ctx;
+      ctx.provides!.serve("machines", 1, (caller) => {
+        callers.push(caller);
+        caller.signal.addEventListener("abort", () => log.push(`prov:signal-aborted:${caller.id}`));
+        return {
+          ping: () => "pong",
+          whoami: () => caller.id,
+          subscribe: (fn: () => void) => {
+            listener = fn;
+          },
+          boom: () => {
+            throw Object.assign(new Error("no route to host"), { code: "unreachable" });
+          },
+        };
+      });
+    },
+    onShutdown: (e) => void log.push(`prov:onShutdown:${e.reason}`),
+    deactivate: () => {
+      log.push("prov:deactivate");
+      // Its teardown still talks to the consumer: the link must be open.
+      listener?.();
+    },
+  };
+  type Machines = { ping(): string; whoami(): string; subscribe(fn: () => void): void; boom(): never };
+  const held: { api?: Machines } = {};
+  const consumer: PluginModule = {
+    activate: (ctx) => {
+      ctxs.cons = ctx;
+      held.api = ctx.dependencies!.get<Machines>("prov", "machines", 1);
+      held.api?.subscribe(() => log.push("cons:callback"));
+      ctx.dependencies!.onLost("prov", () => {
+        log.push("cons:onLost");
+        log.push(`cons:onLost:get=${typeof ctx.dependencies!.get("prov", "machines", 1)}`);
+        log.push(`cons:onLost:ping=${held.api!.ping()}`);
+      });
+    },
+    onShutdown: (e) => {
+      log.push(`cons:onShutdown:${e.reason}`);
+      log.push(`cons:onShutdown:ping=${held.api!.ping()}`);
+    },
+    deactivate: () => void log.push("cons:deactivate"),
+  };
+  return {
+    ctxs,
+    callers,
+    held,
+    modules: { prov: provider, cons: consumer },
+    write: async (configDir: string) => {
+      await writePlugin(configDir, "prov", { provides: "  machines: [1]" });
+      await writePlugin(configDir, "cons", {
+        caps: opts.consumerCaps ?? [],
+        dependencies: `  prov:\n    uses: [machines@1]${opts.optional ? "\n    optional: true" : ""}`,
+      });
+    },
+  };
+}
+
+describe("ctx.provides / ctx.dependencies", () => {
+  it("hands a consumer the provider's API, built once for it with its identity, through the membrane", async () => {
+    const base = await paths();
+    const log: string[] = [];
+    const p = pair(log, { consumerCaps: ["events"] });
+    await p.write(base.configDir);
+    await writePlugin(base.configDir, "plain");
+    let plainCtx: PluginContext | undefined;
+    await host(base, { ...p.modules, plain: { activate: (ctx) => void (plainCtx = ctx) } });
+
+    const api = p.held.api!;
+    expect(api.ping()).toBe("pong");
+    expect(api.whoami()).toBe("cons");
+    // The same object every time, and the factory ran once.
+    expect(p.ctxs.cons!.dependencies!.get("prov", "machines", 1)).toBe(api);
+    expect(p.callers).toHaveLength(1);
+    const caller = p.callers[0]!;
+    expect(caller).toMatchObject({ id: "cons", name: "cons", version: "1.0.0", capabilities: ["events"] });
+    expect(Object.isFrozen(caller)).toBe(true);
+    expect(caller.signal.aborted).toBe(false);
+    // Errors arrive tagged with the plugin whose code threw.
+    expect(() => api.boom()).toThrow(PluginCallError);
+    expect(() => api.boom()).toThrow("prov: no route to host");
+
+    expect(p.ctxs.cons!.dependencies!.state("prov")).toMatchObject({ state: "ok", uses: ["machines@1"] });
+    // Only what the manifest declared, and only for a manifest that declares it.
+    expect(() => p.ctxs.cons!.dependencies!.get("prov", "machines", 2)).toThrow(/does not list machines@2/);
+    expect(() => p.ctxs.cons!.dependencies!.get("other", "machines", 1)).toThrow(/does not declare a dependency on "other"/);
+    expect(p.ctxs.cons!.provides).toBeUndefined();
+    expect(p.ctxs.prov!.dependencies).toBeUndefined();
+    expect(plainCtx!.dependencies).toBeUndefined();
+    expect(plainCtx!.provides).toBeUndefined();
+    expect(p.ctxs.prov!.provides!.dependents()).toEqual([{ id: "cons", installed: true, status: "active", uses: ["machines@1"] }]);
+  });
+
+  it("accepts serve() only while activate runs, only for declared exports, once each", async () => {
+    const base = await paths();
+    await writePlugin(base.configDir, "prov", { provides: "  machines: [1, 2]" });
+    await writePlugin(base.configDir, "needs-v2", { dependencies: "  prov:\n    uses: [machines@2]" });
+    await writePlugin(base.configDir, "likes-v2", { dependencies: "  prov:\n    uses: [machines@2]\n    optional: true" });
+    const errors: string[] = [];
+    let provCtx: PluginContext | undefined;
+    let likesCtx: PluginContext | undefined;
+    const log: string[] = [];
+    const h = await host(base, {
+      prov: {
+        activate: (ctx) => {
+          provCtx = ctx;
+          ctx.provides!.serve("machines", 1, () => ({}));
+          for (const attempt of [
+            () => ctx.provides!.serve("machines", 1, () => ({})),
+            () => ctx.provides!.serve("other", 1, () => ({})),
+            () => ctx.provides!.serve("machines", 3, () => ({})),
+          ]) {
+            try {
+              attempt();
+            } catch (err) {
+              errors.push((err as Error).message);
+            }
+          }
+        },
+      },
+      "needs-v2": logged("needs-v2", log),
+      "likes-v2": { activate: (ctx) => void (likesCtx = ctx) },
+    });
+    expect(errors).toEqual([
+      "machines@1 is already served",
+      `"prov" does not declare provides.other: [1] in its plugin.yaml`,
+      `"prov" does not declare provides.machines: [3] in its plugin.yaml`,
+    ]);
+    expect(() => provCtx!.provides!.serve("machines", 2, () => ({}))).toThrow(/only while activate\(\) runs/);
+    // A declared export it never served: what requires it is blocked, saying so…
+    expect(status(h.svc, "needs-v2")).toBe("blocked");
+    expect(h.svc.get("needs-v2")?.error).toBe("needs prov (machines@2): prov did not serve machines@2");
+    expect(log).toEqual([]);
+    // …and what only likes it starts without it.
+    expect(status(h.svc, "likes-v2")).toBe("active");
+    expect(likesCtx!.dependencies!.get("prov", "machines", 2)).toBeUndefined();
+    expect(likesCtx!.dependencies!.state("prov")?.state).toBe("not-served");
+  });
+
+  it("a provider whose activate throws serves nothing, even what it served before throwing", async () => {
+    const base = await paths();
+    await writePlugin(base.configDir, "prov", { provides: "  machines: [1]" });
+    await writePlugin(base.configDir, "likes", { dependencies: "  prov:\n    uses: [machines@1]\n    optional: true" });
+    let likesCtx: PluginContext | undefined;
+    await host(base, {
+      prov: {
+        activate: (ctx) => {
+          ctx.provides!.serve("machines", 1, () => ({ ping: () => "half-built" }));
+          throw new Error("boom");
+        },
+      },
+      likes: { activate: (ctx) => void (likesCtx = ctx) },
+    });
+    expect(likesCtx!.dependencies!.get("prov", "machines", 1)).toBeUndefined();
+    expect(likesCtx!.dependencies!.state("prov")?.state).toBe("failed");
+  });
+
+  it("switching a provider off: an optional dependent hears first, and the link closes only after the provider's teardown", async () => {
+    const base = await paths();
+    const log: string[] = [];
+    const p = pair(log, { optional: true });
+    await p.write(base.configDir);
+    const h = await host(base, p.modules);
+    const api = p.held.api!;
+    log.length = 0;
+
+    await h.svc.setEnabled("prov", false);
+    expect(log).toEqual([
+      "cons:onLost",
+      // Withdrawn from `get` the moment its dependents are told…
+      "cons:onLost:get=undefined",
+      // …but what they already hold works until the provider is down.
+      "cons:onLost:ping=pong",
+      "prov:onShutdown:disable",
+      "prov:deactivate",
+      // The provider's teardown calling back into the consumer still lands.
+      "cons:callback",
+      "prov:signal-aborted:cons",
+    ]);
+    expect(status(h.svc, "cons")).toBe("active");
+    let caught: unknown;
+    try {
+      api.ping();
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(PluginRevokedError);
+    expect(caught).toMatchObject({ code: "revoked", plugin: "prov", message: "prov is no longer running" });
+    expect(p.ctxs.cons!.dependencies!.get("prov", "machines", 1)).toBeUndefined();
+    expect(p.ctxs.cons!.dependencies!.state("prov")?.state).toBe("disabled");
+  });
+
+  it("a consumer going down keeps its link through its own shutdown, then closes it and aborts caller.signal", async () => {
+    const base = await paths();
+    const log: string[] = [];
+    const p = pair(log);
+    await p.write(base.configDir);
+    const h = await host(base, p.modules);
+    const api = p.held.api!;
+    const consCtx = p.ctxs.cons!;
+    log.length = 0;
+
+    await h.svc.setEnabled("cons", false);
+    expect(log).toEqual(["cons:onShutdown:disable", "cons:onShutdown:ping=pong", "cons:deactivate", "prov:signal-aborted:cons"]);
+    expect(p.callers[0]!.signal.aborted).toBe(true);
+    expect(() => api.ping()).toThrow(PluginRevokedError);
+    // A context kept past its plugin's teardown opens nothing new.
+    expect(consCtx.dependencies!.get("prov", "machines", 1)).toBeUndefined();
+    expect(status(h.svc, "prov")).toBe("active");
+    // The provider's onLost never fired: it was the consumer that went.
+    expect(log).not.toContain("cons:onLost");
+  });
+
+  it("on shutdown the consumer goes first, with its link open, and the provider sees its caller go", async () => {
+    const base = await paths();
+    const log: string[] = [];
+    const p = pair(log);
+    await p.write(base.configDir);
+    const h = await host(base, p.modules);
+    log.length = 0;
+    await h.svc.dispose();
+    // The SDK's createTestHost asserts this same sequence (testing.dependencies.test.ts).
+    expect(log).toEqual([
+      "cons:onShutdown:stop",
+      "cons:onShutdown:ping=pong",
+      "prov:onShutdown:stop",
+      "cons:deactivate",
+      "prov:signal-aborted:cons",
+      "prov:deactivate",
+    ]);
+  });
+
+  it("switching a REQUIRED provider off takes the consumer down first, its link open until its teardown is done", async () => {
+    const base = await paths();
+    const log: string[] = [];
+    const p = pair(log);
+    await p.write(base.configDir);
+    const h = await host(base, p.modules);
+    log.length = 0;
+    await h.svc.setEnabled("prov", false);
+    // The SDK's createTestHost asserts this same sequence (testing.dependencies.test.ts).
+    expect(log).toEqual([
+      "cons:onShutdown:disable",
+      "cons:onShutdown:ping=pong",
+      "cons:deactivate",
+      "prov:signal-aborted:cons",
+      "prov:onShutdown:disable",
+      "prov:deactivate",
+    ]);
+    expect(h.svc.get("cons")).toMatchObject({ status: "blocked", error: "needs prov, which was switched off" });
+  });
+
+  it("dependents() lists every installed dependent in any state — an unreadable manifest too, with no uses", async () => {
+    const base = await paths();
+    await writePlugin(base.configDir, "prov", { provides: "  machines: [1]" });
+    await writePlugin(base.configDir, "aaa-likes", { dependencies: "  prov:\n    uses: [machines@1]\n    optional: true" });
+    await writePlugin(base.configDir, "bbb-stuck", {
+      dependencies: "  prov:\n    uses: [machines@1]\n  missing-one:\n    uses: [x@1]",
+    });
+    await writePlugin(base.configDir, "ccc-unrelated");
+    await mkdir(join(base.configDir, "plugins", "ddd-broken"), { recursive: true });
+    await writeFile(join(base.configDir, "plugins", "ddd-broken", "plugin.yaml"), "id: [unclosed\n");
+    let provCtx: PluginContext | undefined;
+    await host(base, {
+      prov: {
+        activate: (ctx) => {
+          provCtx = ctx;
+          ctx.provides!.serve("machines", 1, () => ({}));
+        },
+      },
+      "aaa-likes": { activate: () => {} },
+      "bbb-stuck": { activate: () => {} },
+      "ccc-unrelated": { activate: () => {} },
+    });
+    expect(provCtx!.provides!.dependents()).toEqual([
+      { id: "aaa-likes", installed: true, status: "active", uses: ["machines@1"] },
+      { id: "bbb-stuck", installed: true, status: "blocked", uses: ["machines@1"] },
+      // Maybe a dependent in the middle of an update: never read as "gone".
+      { id: "ddd-broken", installed: true, status: "invalid", uses: [] },
+    ]);
   });
 });
