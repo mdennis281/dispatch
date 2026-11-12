@@ -507,3 +507,104 @@ export function liveDependencyState(
   }
   return resolved;
 }
+
+/* ---------------------------------------------------------- at install */
+
+/** Where one dependency of a plugin being installed would come from. */
+export type PluginInstallSource = "installed" | "collection" | "missing";
+
+/** {@link PluginDependencyStatus}, as installing the candidate would leave it, and where it resolved. */
+export interface PluginInstallDependency extends PluginDependencyStatus {
+  from: PluginInstallSource;
+  /** The manifest's `version` range for it, verbatim. */
+  range?: string;
+  /** The version that satisfies it — installed, or the collection member's. */
+  found?: string;
+}
+
+/** What installing a plugin would mean for the dependency graph. */
+export interface PluginInstallJudgement {
+  dependencies: PluginInstallDependency[];
+  /** Installed plugins that work now and would not after this (a replace that drops a major, or leaves a range). */
+  breaks: Array<{ id: string; detail: string }>;
+  /** Why it cannot be installed, or undefined. Always starts with "needs ". */
+  refusal?: string;
+}
+
+/** States a dependency may be left in by an install without refusing it: the owner can fix them in place. */
+const FIXABLE_IN_PLACE: ReadonlySet<PluginDependencyState> = new Set(["ok", "disabled", "blocked", "failed", "not-served"]);
+
+/**
+ * Judge `candidate` against what is installed, the way the next boot's
+ * resolver will — it IS that resolver, run over the graph the install would
+ * leave. A dependency may come from (design §1.4, in this order):
+ *
+ *   1. what is already installed, from any origin;
+ *   2. a member of the same collection at the same sha (`collection`), which
+ *      the caller installs alongside it, provider first;
+ *   3. nowhere else. A manifest never names a URL to fetch: that would let one
+ *      author pull code in through another's consent card.
+ *
+ * A REQUIRED dependency that neither satisfies refuses the install, except
+ * where the owner can put it right without installing anything (switched
+ * off, blocked behind something else). `installed` holds every installed
+ * plugin; the candidate's own id, if installed, is what it replaces.
+ */
+export function judgeInstallDependencies(
+  candidate: PluginDependencyNode,
+  installed: readonly PluginDependencyNode[],
+  collection: readonly PluginDependencyNode[] = [],
+): PluginInstallJudgement {
+  const others = installed.filter((n) => n.id !== candidate.id);
+  const afterInstall = resolvePluginDependencies([...others, candidate]);
+  const siblings = new Map(
+    collection
+      .filter((n) => n.id !== candidate.id)
+      // A sibling replacing an installed copy keeps that copy's toggle.
+      .map((n) => [n.id, { ...n, enabled: others.find((o) => o.id === n.id)?.enabled ?? true }]),
+  );
+  const withSiblings = siblings.size
+    ? resolvePluginDependencies([...others.filter((n) => !siblings.has(n.id)), ...siblings.values(), candidate])
+    : afterInstall;
+  const byId = new Map(others.map((n) => [n.id, n]));
+
+  const dependencies: PluginInstallDependency[] = (afterInstall.dependencies.get(candidate.id) ?? []).map((d) => {
+    const range = candidate.dependencies?.[d.id]?.version;
+    const extra = { ...(range ? { range } : {}) };
+    if (d.state === "ok") return { ...d, ...extra, from: "installed", ...(byId.get(d.id)?.version ? { found: byId.get(d.id)!.version } : {}) };
+    const viaSibling = withSiblings.dependencies.get(candidate.id)?.find((x) => x.id === d.id);
+    const sibling = siblings.get(d.id);
+    if (sibling && viaSibling?.state === "ok") {
+      const was = byId.get(d.id);
+      const v = sibling.version ? ` v${sibling.version}` : "";
+      return {
+        ...viaSibling,
+        ...extra,
+        from: "collection",
+        ...(sibling.version ? { found: sibling.version } : {}),
+        detail: was
+          ? `in this collection:${v}, replacing the installed v${was.version ?? "?"} (${d.detail}) — installed with it`
+          : `in this collection:${v} — installed with it`,
+      };
+    }
+    return { ...d, ...extra, from: byId.has(d.id) ? "installed" : "missing", ...(byId.get(d.id)?.version ? { found: byId.get(d.id)!.version } : {}) };
+  });
+
+  // A replace that pulls the floor out from under an installed dependent.
+  const breaks: PluginInstallJudgement["breaks"] = [];
+  if (byId.size !== installed.length) {
+    const before = resolvePluginDependencies(installed);
+    for (const n of others) {
+      if (!n.dependencies?.[candidate.id]) continue;
+      const was = before.dependencies.get(n.id)?.find((x) => x.id === candidate.id);
+      const now = afterInstall.dependencies.get(n.id)?.find((x) => x.id === candidate.id);
+      if (was?.state === "ok" && now && now.state !== "ok") breaks.push({ id: n.id, detail: now.detail });
+    }
+  }
+
+  const stop = dependencies.find((d) => !d.optional && !FIXABLE_IN_PLACE.has(d.state));
+  const refusal = stop
+    ? `${blockedReason(stop)}${stop.state === "missing" ? ` — install ${stop.id} first, or install this from a collection that has it` : ""}`
+    : undefined;
+  return { dependencies, breaks, ...(refusal ? { refusal } : {}) };
+}
