@@ -114,6 +114,8 @@ export function registerPluginRoutes(app: FastifyInstance): void {
       return await plugins.setEnabled(req.params.id, parsed.data.enabled);
     } catch (err) {
       if (err instanceof PluginNotFound) return reply.code(404).send({ error: err.message });
+      // Switching off something still starting, or something a starting plugin needs.
+      if (err instanceof PluginLifecycleError) return reply.code(err.status).send({ error: err.message });
       throw err;
     }
   });
