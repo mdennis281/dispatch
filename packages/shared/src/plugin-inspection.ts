@@ -12,7 +12,8 @@
  * See docs/plugins.md → "Inspecting a plugin before installing it".
  */
 import * as z from "zod";
-import { PluginCapabilitySchema, PluginStatusSchema } from "./plugin-manifest.js";
+import { PluginCapabilitySchema, PluginDependencyInfoSchema, PluginStatusSchema } from "./plugin-manifest.js";
+import { parsePluginUse } from "./plugin-dependencies.js";
 
 /**
  * One plain-language line per capability — what declaring it LETS the plugin
@@ -45,6 +46,53 @@ export const PLUGIN_CAPABILITY_LINES: Record<z.infer<typeof PluginCapabilitySche
   shared:
     "Keeps data and locks that every Dispatch instance on this machine shares, and that survive its updates.",
 };
+
+/** `machines@1, events@2` as the card says it: "its `machines` API v1, its `events` API v2". */
+function describeUses(uses: readonly string[]): string {
+  return uses
+    .map((u) => {
+      const p = parsePluginUse(u);
+      return p ? `its \`${p.name}\` API v${p.major}` : u;
+    })
+    .join(", ");
+}
+
+/**
+ * The consent sentence for one dependency, worded for the owner deciding
+ * whether to install the plugin that declares it. `name` is the provider's
+ * display name when it is known (installed, or in the same collection).
+ */
+export function pluginDependencyLine(d: { id: string; uses: readonly string[]; optional?: boolean }, name?: string): string {
+  const who = name && name !== d.id ? `${name} (${d.id})` : d.id;
+  const optional = d.optional ? " Optional: it runs without it, with less." : "";
+  return `Uses ${who} — ${describeUses(d.uses)}. ${name ?? d.id} acts on what this plugin hands it.${optional}`;
+}
+
+/** The consent sentence for a provider: what other plugins may call of it. Undefined when it exports nothing. */
+export function pluginProvidesLine(provides: Readonly<Record<string, readonly number[]>> | undefined): string | undefined {
+  const parts = Object.entries(provides ?? {}).map(([name, majors]) => `\`${name}\` ${majors.map((m) => `v${m}`).join(" and ")}`);
+  return parts.length ? `Lets other plugins use: ${parts.join(", ")}.` : undefined;
+}
+
+/** One declared dependency in a report: where it would resolve if installed now, and the consent sentence. */
+export const PluginInspectionDependencySchema = PluginDependencyInfoSchema.extend({
+  /**
+   * `installed` — something installed satisfies it (or is the one in a bad state, `state` says which);
+   * `collection` — a member of the same collection at the same sha does, and is installed with it;
+   * `missing` — nothing does.
+   */
+  from: z.enum(["installed", "collection", "missing"]),
+  /** The manifest's `version` range for it, verbatim. */
+  range: z.string().optional(),
+  /** The version that satisfies it. */
+  found: z.string().optional(),
+  /** Its display name, when it is installed or in the collection. */
+  name: z.string().optional(),
+  line: z.string(),
+  /** The collection member to install with it — `from: "collection"` only. */
+  subdir: z.string().optional(),
+});
+export type PluginInspectionDependency = z.infer<typeof PluginInspectionDependencySchema>;
 
 /** Where the inspected files came from, and exactly which commit. */
 export const PluginInspectionSourceSchema = z.object({
@@ -207,6 +255,23 @@ export const PluginInspectionSchema = z.object({
   /** Everything else worth reading before Install, most important first. */
   warnings: z.array(z.string()),
 
+  /**
+   * The plugins it uses (`dependencies:` in its manifest), judged against
+   * what is installed NOW — and, for a collection member, its siblings at the
+   * same sha. A required one nothing satisfies makes it not `installable`.
+   */
+  dependencies: z.array(PluginInspectionDependencySchema).optional(),
+  /** What it exports to other plugins, `name@major`. */
+  provides: z.array(z.string()).optional(),
+  /** {@link pluginProvidesLine}. */
+  providesLine: z.string().optional(),
+  /**
+   * Installed plugins that use it today and would not after this install
+   * replaced it — a dropped major, a version outside their range. Install
+   * and Update refuse while this is non-empty unless the owner confirms it.
+   */
+  breaks: z.array(z.object({ id: z.string(), detail: z.string() })).optional(),
+
   /** The same id already under `<configDir>/plugins/`, and how its version compares. */
   installed: z
     .object({
@@ -233,6 +298,8 @@ export const PluginInstallRequestSchema = z.object({
    * URL names; omitted, the URL's own directory is the plugin.
    */
   subdir: z.string().max(512).optional(),
+  /** The owner typed the confirmation: this replace breaks the installed plugins the report's `breaks` names. */
+  allowBreaking: z.boolean().optional(),
 });
 
 /** What `POST /api/plugins/install` answers. */

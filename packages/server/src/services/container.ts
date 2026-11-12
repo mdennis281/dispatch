@@ -1477,6 +1477,7 @@ export function createServices(
       hostInfo: (id) => plugins.get(id),
       noteInstalled: (id) => plugins.noteInstalled(id),
       recordSource: (id, source) => plugins.recordSource(id, source),
+      dependencyNodes: () => plugins.dependencyNodes(),
     });
   const pluginUpdates: PluginUpdateWatcher =
     overrides.pluginUpdates ??

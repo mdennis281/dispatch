@@ -30,6 +30,8 @@ import { coerceNumber, displayValue, fieldsFromSchema, type SettingsField } from
 import { PluginInspectPanel } from "./PluginInspectPanel.js";
 import { PluginSourceLine, PluginUninstallDialog, PluginUpdatePanel, type CheckState } from "./PluginLifecycle.js";
 import { CatalogManager, CatalogPluginReport, catalogMemberFor, catalogStateLine } from "./PluginCatalogs.js";
+import { CardDependencies, DisableDependentsDialog } from "./PluginDependencies.js";
+import { dependentsReach } from "./pluginDependencyPlan.js";
 
 /**
  * Settings → Plugins: a LIST — what is installed, then what the catalogs
@@ -207,7 +209,11 @@ export function PluginsSection() {
           <BackBar onBack={back} />
           <PluginCard
             plugin={p}
+            all={plugins ?? []}
             onChange={replace}
+            // Switching a provider off stops its required users at once, so
+            // their rows are re-read rather than left saying "Active".
+            onToggled={load}
             check={checks[p.id]}
             onCheck={() => void check(p.id)}
             onRemoved={(res) => removed(p, res)}
@@ -424,7 +430,11 @@ function InstalledRow({
           {update && <Chip tone="accent">{update}</Chip>}
           {p.pendingCleanups && <Chip tone="warn">cleanups stuck</Chip>}
         </div>
-        {p.description && <p className="mt-0.5 truncate text-xs text-muted">{p.description}</p>}
+        {p.status === "blocked" && p.error ? (
+          <p className="mt-0.5 truncate text-xs text-warn">{p.error}</p>
+        ) : (
+          p.description && <p className="mt-0.5 truncate text-xs text-muted">{p.description}</p>
+        )}
       </div>
       <ChevronRight className="size-4 shrink-0 text-faint" />
     </RowButton>
@@ -555,13 +565,19 @@ function statusOf(plugin: PluginInfo): { tone: DotTone; label: string } {
 
 function PluginCard({
   plugin,
+  all,
   onChange,
+  onToggled,
   check,
   onCheck,
   onRemoved,
 }: {
   plugin: PluginInfo;
+  /** Every installed plugin: who uses this one, by name. */
+  all: readonly PluginInfo[];
   onChange: (next: PluginInfo) => void;
+  /** After a toggle reached other plugins too. */
+  onToggled?: () => void;
   check?: CheckState;
   onCheck: () => void;
   onRemoved: (result: PluginUninstallResult) => void;
@@ -571,18 +587,29 @@ function PluginCard({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [uninstalling, setUninstalling] = useState(false);
+  const [confirmOff, setConfirmOff] = useState(false);
   const status = statusOf(plugin);
+  const reach = dependentsReach(plugin.id, all);
   // Invalid and incompatible plugins cannot be turned on; the toggle would
   // promise an activation that can never happen.
   const toggleable = plugin.status !== "invalid" && plugin.status !== "incompatible";
 
-  const toggle = async (enabled: boolean) => {
+  const toggle = async (enabled: boolean, confirmed = false) => {
+    // Switching off a plugin others use is allowed, never silent: the confirm
+    // names who stops and who carries on with less.
+    if (!enabled && !confirmed && (reach.stops.length || reach.degrades.length)) {
+      setConfirmOff(true);
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
       onChange(await api.plugins.setEnabled(plugin.id, enabled));
+      setConfirmOff(false);
+      if (!enabled && (reach.stops.length || reach.degrades.length)) onToggled?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      setConfirmOff(false);
     } finally {
       setBusy(false);
     }
@@ -692,7 +719,8 @@ function PluginCard({
           </span>
         )}
       </div>
-      {check && <PluginUpdatePanel plugin={plugin} check={check} onUpdated={(row) => row && onChange(row)} />}
+      <CardDependencies plugin={plugin} all={all} />
+      {check && <PluginUpdatePanel plugin={plugin} check={check} all={all} onRecheck={onCheck} onUpdated={(row) => row && onChange(row)} />}
 
       {plugin.settingsSchema !== undefined && plugin.status !== "invalid" && (
         <PluginSettingsForm plugin={plugin} onChange={onChange} />
@@ -747,6 +775,15 @@ function PluginCard({
           )}
         </div>
       </div>
+      <DisableDependentsDialog
+        plugin={plugin}
+        stops={reach.stops}
+        degrades={reach.degrades}
+        open={confirmOff}
+        busy={busy}
+        onCancel={() => setConfirmOff(false)}
+        onConfirm={() => void toggle(false, true)}
+      />
       <PluginUninstallDialog
         plugin={plugin}
         open={uninstalling}

@@ -348,6 +348,55 @@ describe("declared vs used", () => {
     expect(labels(r)).not.toContain("attention.answer");
   });
 
+  it("checks calls into other plugins against dependencies: and provides:, export by export", async () => {
+    const dir = await writeDir({
+      "plugin.yaml": [
+        "id: p",
+        "name: P",
+        "version: 1.0.0",
+        "dispatch: '>=1'",
+        "server: ./server/index.js",
+        "dependencies:",
+        "  remote-host:",
+        "    uses: [machines@1]",
+        "    optional: true",
+        "provides:",
+        "  status: [1]",
+        "",
+      ].join("\n"),
+      "server/index.js": [
+        "export function activate(ctx) {",
+        "  const m = ctx.dependencies?.get<MachinesV1>('remote-host', 'machines', 1);",
+        "  const n = ctx.dependencies!.get(\"remote-host\", \"machines\", 2);",
+        "  const o = ctx.dependencies?.get('elsewhere', 'x', 1);",
+        "  ctx.provides?.serve('status', 1, () => ({}));",
+        "  ctx.provides!.serve(\"status\", 2, () => ({}));",
+        "}",
+      ].join("\n"),
+    });
+    const r = await inspectPluginDir(dir, { source: SOURCE, fetched: FETCHED });
+    expect(labels(r)).toEqual(
+      expect.arrayContaining([
+        'dependencies.get("remote-host", "machines", 1)',
+        'dependencies.get("remote-host", "machines", 2)',
+        'dependencies.get("elsewhere", "x", 1)',
+        'provides.serve("status", 1)',
+        'provides.serve("status", 2)',
+      ]),
+    );
+    const w = r.warnings.join("\n");
+    expect(w).toContain("The code calls remote-host's machines@2, but dependencies.remote-host.uses does not list it");
+    expect(w).toContain("The code calls elsewhere's x@1, but dependencies: does not list elsewhere");
+    expect(w).toContain("The code serves status@2, but provides: does not declare it");
+    expect(w).not.toContain("machines@1");
+    // No capability is involved: the manifest keys are the grant.
+    expect(r.mismatches.undeclared).toEqual([]);
+    expect(r.provides).toEqual(["status@1"]);
+    // Optional, so nothing installed is not a refusal.
+    expect(r.installable).toBe(true);
+    expect(r.dependencies?.[0]).toMatchObject({ id: "remote-host", optional: true, from: "missing", state: "missing" });
+  });
+
   it("tells a secret write from a read, and checks written names against prefix entries", async () => {
     const plugin = (caps: string) =>
       writeDir({

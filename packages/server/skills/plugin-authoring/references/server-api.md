@@ -217,6 +217,38 @@ in-process declares `capabilities.managerTransport: "in-process"` and gets
 plain `McpServer`s in `spec.managerMcp.servers` (Claude wraps them for the
 Agent SDK in `manager-servers.ts`); any other transport gets an HTTP grant.
 
+### Using another plugin: `ctx.dependencies` / `ctx.provides`
+
+Full contract: `docs/plugins.md` → "Dependencies". The short version:
+
+```ts
+// provider, during activate — only then; the exports are sealed when activate resolves
+ctx.provides!.serve("machines", 1, (caller) => makeApi(caller)); // once per consumer, synchronous
+// consumer
+const m = ctx.dependencies?.get<MachinesV1>("remote-host", "machines", 1); // undefined unless usable NOW
+ctx.dependencies?.onLost("remote-host", () => …); // an OPTIONAL dependency is going down
+```
+
+- Each exists only when the manifest declares the key (`dependencies:` / `provides:`).
+  `get` THROWS for an export `uses` does not list, `serve` for one `provides` does not
+  declare — the Inspect report warns about both from the scan.
+- **Call `get` where you use it, not once in `activate`.** It is checked live: the
+  provider may be off, blocked, failed or going down, and the API object stops working
+  when the link closes (its methods throw `PluginRevokedError`; everything else that
+  crossed goes inert). Match errors with the SDK's `isPluginRevokedError` /
+  `isPluginCallError`, never `instanceof`.
+- `caller` carries the consumer's GRANTED `id`, `version`, `capabilities` and a
+  `signal` that aborts when either side goes down — end what you made for it then.
+- A required dependency that is not usable means you never activate (`blocked`, with
+  the reason on your row). An optional one means you start without it and get `onLost`
+  when it goes; your Proxmox lifecycle (or whatever) keeps running.
+- **Breaking your export is a new major.** A provider update that drops a major a
+  consumer uses is refused until the owner types the plugin's id; serve `[1, 2]` while
+  consumers move across.
+- Test with `createTestContext({ dependencies: { "remote-host": { machines: { 1: fake } } } })`
+  (`t.revoke` / `t.lose` play it going away) or `{ provides: { machines: [1] } }`
+  (`t.served`, `t.callAs`); `createTestHost([...])` runs a provider and consumer together.
+
 ### Routes
 
 - Routes are a **table** the host consults per request behind one wildcard

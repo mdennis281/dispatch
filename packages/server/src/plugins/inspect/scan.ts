@@ -230,6 +230,17 @@ export function scanText(src: string): Array<Omit<Hit, "index"> & { line: number
       add({ kind: "api", label: `${member}.${method}${arg}`, capability, index: m.index! });
     }
   }
+  // Calls into another plugin, with their literal arguments, so the report
+  // can check each against `dependencies:` / `provides:` — a `get` of an
+  // export the manifest does not list THROWS, and so does a `serve` of one it
+  // does not declare. No capability: the manifest keys are the grant.
+  const num = String.raw`\s*,\s*(\d{1,3})`;
+  for (const m of text.matchAll(new RegExp(`${A}${DOT}dependencies${DOT}get\\s*(?:<[^<>()]{0,80}>)?\\s*\\(\\s*${str(1)}\\s*,\\s*${str(3)}${num}`, "g"))) {
+    add({ kind: "api", label: `dependencies.get("${m[2]}", "${m[4]}", ${m[5]})`, index: m.index! });
+  }
+  for (const m of text.matchAll(new RegExp(`${A}${DOT}provides${DOT}serve\\s*(?:<[^<>()]{0,80}>)?\\s*\\(\\s*${str(1)}${num}`, "g"))) {
+    add({ kind: "api", label: `provides.serve("${m[2]}", ${m[3]})`, index: m.index! });
+  }
   for (const m of text.matchAll(new RegExp(`${A}${DOT}emit\\s*\\(`, "g"))) {
     add({ kind: "event", label: "emit — sends plugin-events to the browser", index: m.index! });
   }

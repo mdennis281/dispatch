@@ -21,6 +21,13 @@ capabilities:                   # what the plugin touches; gates members of ctx;
   - chats:write
   - process
 optionalCapabilities: [approvals] # granted where the host knows them, IGNORED (with a note) where it does not
+dependencies:                   # other plugins whose API this one calls — see server-api.md → "Using another plugin"
+  remote-host:                  # a plugin id, never your own
+    uses: [machines@1]          # <export>@<major>; at least one; the consent card lists them
+    version: ">=0.10.0"         # optional semver range over remote-host's `version` — a floor, not the contract
+    optional: true              # default false: a required one that is not usable BLOCKS this plugin
+provides:                       # what other plugins may call of this one
+  clones: [1]                   # the majors served; [1, 2] while moving consumers across
 contributes:                    # see contributions.md
   modes: ./modes
   skills: ./skills
@@ -63,6 +70,11 @@ oauth:                          # see external-api.md → "OAuth client flow"
   URL path segment of the callback.
 - A `contributes.processes` entry with `singleton: true` must declare `ports` — the port
   is how the second instance finds the first (see contributions.md).
+- **`dependencies` are keyed by plugin, not by interface.** There is no "any plugin
+  that provides `machines`": the owner consents to THIS plugin using THAT one. A
+  `uses` entry matches `<name>@<major>` (`/^[a-z][a-z0-9-]{0,31}@[1-9]\d{0,2}$/`);
+  at most 8 dependencies and 8 exports. Hosts older than the keys strip them, so
+  feature-detect `ctx.dependencies` / `ctx.provides`.
 
 ## Capabilities
 

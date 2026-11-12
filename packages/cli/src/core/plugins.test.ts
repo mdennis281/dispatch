@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import {
   addPlugin,
@@ -67,6 +68,21 @@ describe("addPlugin", () => {
     expect(lines).toContain("  capabilities: routes");
     expect(lines).toContain("  optional capabilities (granted): approvals");
     expect(lines.find((l) => l.startsWith("  note: "))).toMatch(/"teleport" is not known to this Dispatch/);
+  });
+
+  it("says what it uses of other plugins and what it offers them, in the app's own sentences", () => {
+    const lines = consentLines({
+      id: "proxmox-terminal",
+      name: "Proxmox terminal",
+      version: "0.2.0",
+      dispatch: ">=1",
+      dependencies: { "remote-host": { uses: ["machines@1"], optional: true } },
+      provides: { clones: [1, 2] },
+    });
+    expect(lines).toContain(
+      "  Uses remote-host — its `machines` API v1. remote-host acts on what this plugin hands it. Optional: it runs without it, with less.",
+    );
+    expect(lines).toContain("  Lets other plugins use: `clones` v1 and v2.");
   });
 
   it("refuses an invalid manifest BEFORE anything lands under the root", async () => {
@@ -151,6 +167,89 @@ describe("addPlugin", () => {
   });
 });
 
+describe("replacing an installed plugin", () => {
+  /** `hello` again, from another directory, at `version`. */
+  async function variant(dirName: string, version: string): Promise<string> {
+    const dir = join(root, dirName, "hello");
+    await mkdir(join(dir, "server"), { recursive: true });
+    await writeFile(join(dir, "plugin.yaml"), MANIFEST("hello").replace("1.2.3", version));
+    await writeFile(join(dir, "server", "index.js"), "export function activate() {}\n");
+    return dir;
+  }
+  const installedVersions = async () => (await discoverPlugins(configDir)).map((p) => [p.id, p.manifest?.version]);
+
+  it("keeps the installed copy when the new one fails to copy part-way", async () => {
+    // The slot used to be emptied BEFORE the copy: a copy that then failed
+    // left no plugin at all — and every plugin that depends on it blocked.
+    await addPlugin(configDir, await source("hello"));
+    const bad = await variant("bad", "2.0.0");
+    const gone = join(root, "gone");
+    await mkdir(gone);
+    // A dangling link: `cp` dereferences it and fails after starting.
+    await symlink(gone, join(bad, "assets"), process.platform === "win32" ? "junction" : "dir");
+    await rm(gone, { recursive: true });
+
+    await expect(addPlugin(configDir, bad, { force: true })).rejects.toThrow();
+    expect(await installedVersions()).toEqual([["hello", "1.2.3"]]);
+    // Neither the half copy nor an aside entry is left behind.
+    expect(await readdir(join(configDir, "plugins"))).toEqual(["hello"]);
+  });
+
+  it("runs the check before anything moves: a refusal changes nothing, warnings come back on the result", async () => {
+    await addPlugin(configDir, await source("hello"));
+    const next = await variant("next", "2.0.0");
+    const refuse = () => {
+      throw new CmError("hello: needs remote-host (machines@1): too old");
+    };
+    await expect(addPlugin(configDir, next, { force: true, check: refuse })).rejects.toThrow(/too old/);
+    expect(await installedVersions()).toEqual([["hello", "1.2.3"]]);
+
+    const seen: string[] = [];
+    const result = await addPlugin(configDir, next, {
+      force: true,
+      check: (m) => {
+        seen.push(m.version);
+        return ["careful"];
+      },
+    });
+    expect(seen).toEqual(["2.0.0"]);
+    expect(result).toMatchObject({ outcome: "replaced", warnings: ["careful"] });
+    expect(await installedVersions()).toEqual([["hello", "2.0.0"]]);
+    expect(await readdir(join(configDir, "plugins"))).toEqual(["hello"]);
+  });
+
+  it("puts back a copy left aside by a process killed between the two renames, and clears its leftovers", async () => {
+    await addPlugin(configDir, await source("hello"));
+    await addPlugin(configDir, await source("other"));
+    const plugins = join(configDir, "plugins");
+    // A pid that is certainly not running: a child that has already exited.
+    const dead = spawnSync(process.execPath, ["-e", ""]).pid;
+    const { rename: mv } = await import("node:fs/promises");
+    // hello: killed after the first rename — no `hello`, the old copy aside, the new one staged.
+    await mv(join(plugins, "hello"), join(plugins, `.hello.${dead}.old`));
+    await mkdir(join(plugins, `.hello.${dead}.tmp`));
+    // other: killed after the swap, before the aside was deleted.
+    await mkdir(join(plugins, `.other.${dead}.old`));
+    // A live process's staging is an install in flight: not ours to touch.
+    await mkdir(join(plugins, `.other.${process.ppid}.tmp`));
+
+    expect((await discoverPlugins(configDir)).map((p) => [p.id, p.manifest?.version])).toEqual([
+      ["hello", "1.2.3"],
+      ["other", "1.2.3"],
+    ]);
+    expect((await readdir(plugins)).sort()).toEqual([`.other.${process.ppid}.tmp`, "hello", "other"]);
+  });
+
+  it("unlinks a linked plugin it replaces — the working directory is never emptied", async () => {
+    const work = await source("hello");
+    await linkPlugin(configDir, work);
+    const copy = await addPlugin(configDir, await variant("release", "2.0.0"), { force: true });
+    expect((await lstat(copy.dir)).isSymbolicLink()).toBe(false);
+    expect(existsSync(join(work, "plugin.yaml"))).toBe(true);
+    expect(existsSync(join(work, "server", "index.js"))).toBe(true);
+  });
+});
+
 describe("linkPlugin / removePlugin", () => {
   it("links a working directory and unlinks it without touching the source", async () => {
     const src = await source("dev");
@@ -183,6 +282,15 @@ describe("discoverPlugins", () => {
     expect(found.map((p) => p.id)).toEqual(["broken", "ok"]);
     expect(found[0]!.error).toMatch(/does not match its directory/);
     expect(found[1]!.manifest?.name).toBe("ok");
+  });
+
+  it("skips dot-entries: an install mid-swap is not a second, invalid copy", async () => {
+    await addPlugin(configDir, await source("ok"));
+    for (const name of [".ok.1234.tmp", ".ok.1234.old"]) {
+      await mkdir(join(configDir, "plugins", name), { recursive: true });
+      await writeFile(join(configDir, "plugins", name, "plugin.yaml"), MANIFEST("ok"));
+    }
+    expect((await discoverPlugins(configDir)).map((p) => p.id)).toEqual(["ok"]);
   });
 
   it("returns nothing when the root does not exist", async () => {
@@ -242,7 +350,9 @@ describe("collections", () => {
     await source("alpha");
     await source("beta");
     await writeFile(join(root, "src", "dispatch-plugins.yaml"), "plugins:\n  - beta\n");
-    expect(await listCollectionMembers(join(root, "src"))).toEqual([{ path: "beta", id: "beta", name: "beta", version: "1.2.3" }]);
+    expect(await listCollectionMembers(join(root, "src"))).toEqual([
+      { path: "beta", id: "beta", name: "beta", version: "1.2.3", manifest: expect.objectContaining({ id: "beta", capabilities: ["routes", "kv"] }) },
+    ]);
     expect((await collectionIn(join(root, "src"))).errors).toEqual([]);
   });
 });

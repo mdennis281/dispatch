@@ -186,8 +186,8 @@ export function registerPluginRoutes(app: FastifyInstance): void {
       return reply.code(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
     }
     try {
-      const { url, sha, replace, subdir } = parsed.data;
-      return await app.services.pluginInspector.install(url, sha, !!replace, subdir);
+      const { url, sha, replace, subdir, allowBreaking } = parsed.data;
+      return await app.services.pluginInspector.install(url, sha, !!replace, subdir, !!allowBreaking);
     } catch (err) {
       return inspectFailure(reply, err);
     }
@@ -211,7 +211,7 @@ export function registerPluginRoutes(app: FastifyInstance): void {
     const parsed = PluginUpdateRequestSchema.safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues.map((i) => i.message).join("; ") });
     try {
-      return await app.services.pluginInspector.update(req.params.id, parsed.data.sha);
+      return await app.services.pluginInspector.update(req.params.id, parsed.data.sha, !!parsed.data.allowBreaking);
     } catch (err) {
       return inspectFailure(reply, err);
     }

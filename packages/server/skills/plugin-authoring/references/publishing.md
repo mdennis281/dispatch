@@ -13,12 +13,13 @@ project opts out of a plugin's MCP server through its ordinary `mcpEnabled` map.
 
 ```
 dispatch plugin init <id> [--server|--client|--both] [--name <n>] [--dir <parent>] [--sdk <path>]
-dispatch plugin add <path | git-url | .tgz>   validate in the SOURCE, then copy to plugins/<id> (tmp dir + rename, so an
-                                        interrupted copy never leaves a half-plugin); prints the consent summary
+dispatch plugin add <path | git-url | .tgz>   validate in the SOURCE, then copy to plugins/<id> (tmp dir, then an atomic
+                                        swap, so a failed copy leaves the old plugin in place); prints the consent summary
+        [--plugin <path|id>]... [--all] [--with-deps[=all]] [--allow-breaking]
 dispatch plugin link <path>                   junction (Windows) / symlink a working directory — edits are live on the next restart
 dispatch plugin list | enable <id> | disable <id>
-dispatch plugin update [<id>] [--check] [--yes]   follow the recorded source (git installs only)
-dispatch plugin remove <id> [--purge] [--data-dir <dir>]
+dispatch plugin update [<id>] [--check] [--yes] [--allow-breaking]   follow the recorded source (git installs only)
+dispatch plugin remove <id> [--purge] [--data-dir <dir>]   refused while another plugin uses it; --force removes it anyway
       --config-dir <dir>   (or DISPATCH_CONFIG_DIR)    -f, --force   replace an installed plugin    --json
 ```
 
@@ -74,6 +75,15 @@ plugins:
 Paths only — names, versions and capabilities come from each `plugin.yaml`.
 Each plugin installs and updates on its own; tag releases per plugin
 (`hass-v1.2.0`) so tag-following users only see their plugin's releases.
+
+**Ship a provider in the same collection as what uses it.** A dependency is
+resolved from what is installed, then from **the same collection at the same
+commit** — never from a URL a manifest names. So with both in one repository,
+ticking `proxmox-terminal` in Inspect ticks `remote-host` for the owner (locked,
+"Needed by …"), Install posts the provider first, and the CLI's
+`--plugin proxmox-terminal --with-deps` does the same. In separate repositories
+the owner has to install the provider first, by hand. An optional dependency is
+pre-ticked as "recommended" and can be unticked (`--with-deps=all` on the CLI).
 
 ## How your users get updates
 

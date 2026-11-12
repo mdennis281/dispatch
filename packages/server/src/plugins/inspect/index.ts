@@ -46,6 +46,7 @@ import {
 import type { TarExtractResult } from "./tar.js";
 import { compareVersions, inspectPluginDir, type InstalledLookup } from "./inspect.js";
 import { PluginInspectError, browseUrl, parsePluginUrl } from "./url.js";
+import { judgeCollection, judgeReportDependencies, nodeOfReport, type NamedDependencyNode } from "./dependencies.js";
 
 export { PluginInspectError } from "./url.js";
 export { DEFAULT_FETCH_LIMITS, type FetchDeps, type FetchLimits } from "./fetch.js";
@@ -64,6 +65,11 @@ export interface PluginInspectorOptions {
   recordSource: (id: string, source: PluginGitSource) => Promise<void>;
   fetchDeps?: FetchDeps;
   limits?: FetchLimits;
+  /**
+   * Every installed plugin as the next boot will read it (`PluginService.dependencyNodes`):
+   * what a report's dependencies are judged against. Absent, nothing is.
+   */
+  dependencyNodes?: () => readonly NamedDependencyNode[];
 }
 
 export interface PluginInstallOutcome {
@@ -135,7 +141,21 @@ export class PluginInspector {
       fetched: { files: f.extract.files, bytes: f.extract.bytes, skipped: f.extract.skipped },
       installed: (id) => this.installed(id),
       builtin: (id) => this.opts.hostInfo(id)?.builtin === true,
+      dependencyNodes: () => this.opts.dependencyNodes?.() ?? [],
     });
+  }
+
+  /**
+   * A cached report with its dependencies judged as of NOW, against what is
+   * installed and the other members of its collection (`siblings`, itself
+   * included or not). For the catalog, whose reports are hours old.
+   */
+  judged(report: PluginInspection, siblings: readonly { subdir: string; report?: PluginInspection }[] = []): PluginInspection {
+    const others = siblings.flatMap((s) => {
+      const node = s.report && s.report.id !== report.id ? nodeOfReport(s.report) : undefined;
+      return node ? [{ node, subdir: s.subdir }] : [];
+    });
+    return judgeReportDependencies(report, this.opts.dependencyNodes?.() ?? [], others);
   }
 
   /**
@@ -255,6 +275,9 @@ export class PluginInspector {
     }
     return {
       kind: "collection",
+      // Each member judged again with the others as siblings: a consumer whose
+      // provider is listed beside it is installable, provider first.
+      ...{ plugins: judgeCollection(plugins, this.opts.dependencyNodes?.() ?? []) },
       source: {
         url,
         host: f.parsed.host,
@@ -269,7 +292,6 @@ export class PluginInspector {
       ...(listing.description ? { description: listing.description } : {}),
       listedBy: listing.listedBy,
       manifestErrors,
-      plugins,
     };
   }
 
@@ -280,7 +302,7 @@ export class PluginInspector {
    * posts a sha it never inspected gets exactly the checks an inspect would
    * have shown it.
    */
-  async install(url: string, sha: string, replace: boolean, subdir?: string): Promise<PluginInstallOutcome> {
+  async install(url: string, sha: string, replace: boolean, subdir?: string, allowBreaking = false): Promise<PluginInstallOutcome> {
     const f = await fetchPlugin(url, {
       pinSha: sha,
       ...(subdir !== undefined ? { member: subdir } : {}),
@@ -288,7 +310,7 @@ export class PluginInspector {
       deps: this.opts.fetchDeps,
     });
     try {
-      return await this.installFetched(f, url, { replace });
+      return await this.installFetched(f, url, { replace, allowBreaking });
     } finally {
       await rm(f.scratch, { recursive: true, force: true }).catch(() => {});
     }
@@ -303,11 +325,18 @@ export class PluginInspector {
   private async installFetched(
     f: FetchedPlugin,
     url: string,
-    opts: { replace: boolean; expectId?: string },
+    opts: { replace: boolean; expectId?: string; allowBreaking?: boolean },
   ): Promise<PluginInstallOutcome> {
+    // Judged against what is installed NOW and nothing else — not the
+    // collection it was picked from: a pane installing a pair posts the
+    // provider first, so by the consumer's turn the provider is installed.
     const report = await this.report(f, url);
     if (!report.installable || !report.id) {
       throw new PluginInspectError(`not installable: ${report.refusal ?? "the manifest has no id"}`, 409);
+    }
+    if (report.breaks?.length && !opts.allowBreaking) {
+      const names = report.breaks.map((b) => `"${b.id}" (${b.detail})`).join(", ");
+      throw new PluginInspectError(`replacing "${report.id}" with this version breaks ${names} — confirm to install it anyway`, 409);
     }
     const id = report.id;
     if (opts.expectId && id !== opts.expectId) {
@@ -498,7 +527,7 @@ export class PluginInspector {
    * the plugin id OUTSIDE its directory, so replacing the directory keeps
    * every one of them — nothing here has to carry them across.
    */
-  async update(id: string, sha: string): Promise<PluginUpdateResult> {
+  async update(id: string, sha: string, allowBreaking = false): Promise<PluginUpdateResult> {
     const { source, reason } = this.gitSource(id);
     if (!source) throw new PluginInspectError(reason!, 409);
     if (source.refKind === "sha") throw new PluginInspectError(`"${id}" is pinned to ${source.sha.slice(0, 7)}`, 409);
@@ -513,7 +542,7 @@ export class PluginInspector {
     }
     const f = await this.fetchTarget(source, t.ref, sha);
     try {
-      const res = await this.installFetched(f, source.url, { replace: true, expectId: id });
+      const res = await this.installFetched(f, source.url, { replace: true, expectId: id, allowBreaking });
       return {
         id,
         fromSha: source.sha,

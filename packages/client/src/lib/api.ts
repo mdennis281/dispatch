@@ -1693,19 +1693,26 @@ export const api = {
     inspect: (url: string) => post<PluginInspectResult>("/api/plugins/inspect", { url }),
     /**
      * Install exactly the inspected `sha`. `replace` confirms overwriting an installed copy; `subdir`
-     * picks one plugin of a collection (its report's `source.subdir`). Owner only.
+     * picks one plugin of a collection (its report's `source.subdir`). `allowBreaking` is the owner's
+     * typed confirmation that a replace may break the installed plugins its report's `breaks` names.
+     * Owner only.
      */
-    install: (url: string, sha: string, replace = false, subdir?: string) =>
+    install: (url: string, sha: string, replace = false, subdir?: string, allowBreaking = false) =>
       post<PluginInstallResult & { plugin?: PluginInfo }>("/api/plugins/install", {
         url,
         sha,
         replace,
         ...(subdir !== undefined ? { subdir } : {}),
+        ...(allowBreaking ? { allowBreaking: true } : {}),
       }),
     /** Resolve the recorded source against its remote; when newer, the target's report and its diff. Owner only. */
     checkUpdate: (id: string) => post<PluginUpdateCheck>(`/api/plugins/${encodeURIComponent(id)}/check-update`),
-    /** Install the target `checkUpdate` showed. Refused (409) if the ref moved since. Owner only. */
-    update: (id: string, sha: string) => post<PluginUpdateResult>(`/api/plugins/${encodeURIComponent(id)}/update`, { sha }),
+    /**
+     * Install the target `checkUpdate` showed. Refused (409) if the ref moved since, or if it breaks
+     * an installed plugin using it and `allowBreaking` (the typed confirmation) is not set. Owner only.
+     */
+    update: (id: string, sha: string, allowBreaking = false) =>
+      post<PluginUpdateResult>(`/api/plugins/${encodeURIComponent(id)}/update`, { sha, ...(allowBreaking ? { allowBreaking: true } : {}) }),
     /** What the background update check does with this plugin: off, notify, or auto (safe updates only). Owner only. */
     setAutoUpdate: (id: string, policy: PluginAutoUpdate) =>
       put<PluginInfo>(`/api/plugins/${encodeURIComponent(id)}/auto-update`, { policy }),

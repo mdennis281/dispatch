@@ -191,10 +191,15 @@ export function resolveUpdateTarget(source: Pick<PluginGitSource, "ref" | "refKi
 export type PluginSurface = Pick<
   PluginInspection,
   "version" | "capabilities" | "secrets" | "oauth" | "contributions" | "mismatches" | "hooks" | "entries"
->;
+> & {
+  /** What it uses of other plugins. Only these fields are compared. */
+  dependencies?: ReadonlyArray<{ id: string; uses: readonly string[]; optional: boolean; range?: string }>;
+  /** What it exports, `name@major`. */
+  provides?: readonly string[];
+};
 
 export const PluginChangeSchema = z.object({
-  kind: z.enum(["capability", "secret", "oauth", "mcpServer", "process", "mismatch", "entry", "contribution", "hook"]),
+  kind: z.enum(["capability", "dependency", "provides", "secret", "oauth", "mcpServer", "process", "mismatch", "entry", "contribution", "hook"]),
   change: z.enum(["added", "removed", "changed"]),
   /** As the card shows it: `chats:write`, `secret:GITHUB_TOKEN`, `mcp:search`, `bus.on("chat-status")`. */
   label: z.string(),
@@ -216,7 +221,18 @@ export const PluginUpdateDiffSchema = z.object({
 });
 export type PluginUpdateDiff = z.infer<typeof PluginUpdateDiffSchema>;
 
-const ESCALATION_ORDER: PluginChange["kind"][] = ["capability", "secret", "oauth", "mcpServer", "process", "mismatch", "entry", "contribution"];
+const ESCALATION_ORDER: PluginChange["kind"][] = [
+  "capability",
+  "dependency",
+  "provides",
+  "secret",
+  "oauth",
+  "mcpServer",
+  "process",
+  "mismatch",
+  "entry",
+  "contribution",
+];
 
 function commandLine(x: { command?: string; args?: string[]; url?: string; transport?: string }): string {
   return x.command ? [x.command, ...(x.args ?? [])].join(" ") : (x.url ?? x.transport ?? "");
@@ -229,8 +245,10 @@ function commandLine(x: { command?: string; args?: string[]; url?: string; trans
  * install and did not consent to on this one: a new capability, a new secret,
  * a new OAuth client or new scopes on an existing one, a new or re-pointed MCP
  * server or process (it runs different code), a newly undeclared use, a
- * server or browser half where there was none, and a new instruction file
- * (injected into every session). Everything else is a plain change.
+ * server or browser half where there was none, a new instruction file
+ * (injected into every session), a new dependency or a newly used export of
+ * one (this plugin now acts through another), and a new export (other
+ * plugins may now act through this one). Everything else is a plain change.
  */
 export function diffPluginSurfaces(from: PluginSurface, to: PluginSurface): PluginUpdateDiff {
   const out: PluginChange[] = [];
@@ -243,6 +261,38 @@ export function diffPluginSurfaces(from: PluginSurface, to: PluginSurface): Plug
     if (!fromCaps.has(c)) push({ kind: "capability", change: "added", label: c, detail: PLUGIN_CAPABILITY_LINES[c], escalation: true });
   }
   for (const c of fromCaps) if (!toCaps.has(c)) push({ kind: "capability", change: "removed", label: c, escalation: false });
+
+  const fromDeps = new Map((from.dependencies ?? []).map((d) => [d.id, d]));
+  const toDeps = new Map((to.dependencies ?? []).map((d) => [d.id, d]));
+  for (const [id, d] of toDeps) {
+    const was = fromDeps.get(id);
+    const kind = d.optional ? "optional" : "required";
+    if (!was) {
+      push({ kind: "dependency", change: "added", label: `uses:${id}`, detail: `${kind}: ${d.uses.join(", ")}`, escalation: true });
+      continue;
+    }
+    const newUses = d.uses.filter((u) => !was.uses.includes(u));
+    if (newUses.length) {
+      push({ kind: "dependency", change: "changed", label: `uses:${id}`, detail: `now also uses ${newUses.join(", ")}`, escalation: true });
+    } else if (was.optional !== d.optional || was.range !== d.range || d.uses.length < was.uses.length) {
+      const how = [
+        was.optional !== d.optional ? `now ${kind}` : "",
+        was.range !== d.range ? `version ${d.range ?? "any"} (was ${was.range ?? "any"})` : "",
+        d.uses.length < was.uses.length ? `uses ${d.uses.join(", ")}` : "",
+      ].filter(Boolean);
+      push({ kind: "dependency", change: "changed", label: `uses:${id}`, detail: how.join("; "), escalation: false });
+    }
+  }
+  for (const id of fromDeps.keys()) if (!toDeps.has(id)) push({ kind: "dependency", change: "removed", label: `uses:${id}`, escalation: false });
+
+  const fromProvides = new Set(from.provides ?? []);
+  const toProvides = new Set(to.provides ?? []);
+  for (const e of toProvides) {
+    if (!fromProvides.has(e)) push({ kind: "provides", change: "added", label: `provides:${e}`, detail: "other plugins may call it", escalation: true });
+  }
+  for (const e of fromProvides) {
+    if (!toProvides.has(e)) push({ kind: "provides", change: "removed", label: `provides:${e}`, detail: "a plugin using it stops working", escalation: false });
+  }
 
   const fromSecrets = new Set(from.secrets);
   const toSecrets = new Set(to.secrets);
@@ -421,6 +471,8 @@ export type PluginUpdateStatus = z.infer<typeof PluginUpdateStatusSchema>;
 /** `POST /api/plugins/:id/update` — the target the owner was shown. Refused if the ref has moved on since. */
 export const PluginUpdateRequestSchema = z.object({
   sha: z.string().regex(/^[0-9a-f]{40}$/, "sha must be a full 40-character commit hash"),
+  /** The owner typed the confirmation: this update breaks the installed plugins its report's `breaks` names. */
+  allowBreaking: z.boolean().optional(),
 });
 
 export const PluginUpdateResultSchema = z.object({
@@ -447,6 +499,12 @@ export const PluginUninstallPreviewSchema = z.object({
   /** Its server half is running now — Uninstall deactivates it first. */
   active: z.boolean(),
   hasClient: z.boolean(),
+  /**
+   * Installed plugins that declare a dependency on it, required or optional.
+   * Uninstall is refused while this is non-empty — removing them first would
+   * run THEIR uninstall hooks, so it is never done for you.
+   */
+  usedBy: z.array(z.string()).optional(),
   /** What the "also delete its data" box would remove. */
   data: z.object({
     /** A `plugins.<id>` entry with settings or a toggle exists in config.json. */

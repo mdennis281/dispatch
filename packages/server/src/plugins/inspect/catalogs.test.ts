@@ -78,6 +78,8 @@ function harness(
         update: async (fn) => (settings = fn(settings)),
       },
       inspector: {
+        // Nothing installed declares dependencies here; judging is inspect/dependencies.test.ts's.
+        judged: (r) => r,
         inspect: async (url) => {
           fetched.push(url);
           const a = answers[url];

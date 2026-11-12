@@ -29,7 +29,10 @@ import {
   referencedSecrets,
   type PluginCapability,
   type PluginInspection,
+  type PluginInspectionDependency,
   type PluginInspectionSource,
+  pluginDependencyLine,
+  pluginProvidesLine,
   type PluginManifest,
   type PluginStatus,
   grantedPluginCapabilities,
@@ -40,6 +43,7 @@ import { assertValidServerName } from "@dispatch/cli/core";
 import { readInstructionsDir, readSkillsDir } from "../../services/authored-config.js";
 import { readModesDir } from "../../services/mcp/mode-editor.js";
 import { SCAN_NOTE, runtimeNpmImports, scanFiles } from "./scan.js";
+import { judgeReportDependencies, type NamedDependencyNode } from "./dependencies.js";
 
 /** Scan budget — separate from the fetch caps because it is about CPU, not disk. */
 export const SCAN_LIMITS = { maxFiles: 400, maxFileBytes: 2 * 1024 * 1024, maxTotalBytes: 16 * 1024 * 1024 };
@@ -65,6 +69,11 @@ export interface InspectDirOptions {
    * so the report refuses it up front instead of letting it look installed.
    */
   builtin?: (id: string) => boolean;
+  /**
+   * Every installed plugin, as the next boot will read it — what this
+   * report's dependencies are judged against. Absent, nothing is installed.
+   */
+  dependencyNodes?: () => readonly NamedDependencyNode[];
 }
 
 class Confined {
@@ -541,6 +550,22 @@ export async function inspectPluginDir(dir: string, opts: InspectDirOptions): Pr
   if (unwritable.length) {
     warnings.push(`The code writes secret(s) not listed under secrets: ${unwritable.join(", ")} — ctx.secrets.set/delete would throw for them`);
   }
+  // A call into another plugin the manifest does not cover throws at run
+  // time (`ctx.dependencies.get` / `ctx.provides.serve` refuse what is not
+  // declared — the consent card is the grant), so say it here, by export.
+  for (const h of hooks) {
+    const got = /^dependencies\.get\("([^"]+)", "([^"]+)", (\d+)\)$/.exec(h.label);
+    if (got) {
+      const use = `${got[2]}@${got[3]}`;
+      const spec = m?.dependencies?.[got[1]!];
+      if (!spec) warnings.push(`The code calls ${got[1]}'s ${use}, but dependencies: does not list ${got[1]} — ctx.dependencies.get would throw`);
+      else if (!spec.uses.includes(use)) warnings.push(`The code calls ${got[1]}'s ${use}, but dependencies.${got[1]}.uses does not list it — ctx.dependencies.get would throw`);
+    }
+    const served = /^provides\.serve\("([^"]+)", (\d+)\)$/.exec(h.label);
+    if (served && !m?.provides?.[served[1]!]?.includes(Number(served[2]))) {
+      warnings.push(`The code serves ${served[1]}@${served[2]}, but provides: does not declare it — ctx.provides.serve would throw`);
+    }
+  }
   // A prefix covers names that do not exist yet — say which family, so the
   // owner is not reading `FOO_*` as one key.
   for (const p of declaredSecrets.filter((s) => s.endsWith("*"))) {
@@ -594,7 +619,23 @@ export async function inspectPluginDir(dir: string, opts: InspectDirOptions): Pr
         ? `"${m.id}" is a built-in plugin and cannot be replaced`
         : undefined;
 
-  return {
+  // Unjudged here: `judgeReportDependencies` decides where each comes from
+  // (and may refuse), against what is installed — and, for a collection
+  // member, again with its siblings.
+  const dependencies: PluginInspectionDependency[] = Object.entries(m?.dependencies ?? {}).map(([depId, spec]) => ({
+    id: depId,
+    uses: spec.uses,
+    optional: !!spec.optional,
+    ...(spec.version ? { range: spec.version } : {}),
+    state: "missing",
+    detail: "",
+    from: "missing",
+    line: pluginDependencyLine({ id: depId, uses: spec.uses, optional: !!spec.optional }),
+  }));
+  const provides = Object.entries(m?.provides ?? {}).flatMap(([name, majors]) => majors.map((n) => `${name}@${n}`));
+  const providesLine = pluginProvidesLine(m?.provides);
+
+  const report: PluginInspection = {
     source: opts.source,
     fetched: opts.fetched,
     valid,
@@ -617,6 +658,10 @@ export async function inspectPluginDir(dir: string, opts: InspectDirOptions): Pr
     hooks,
     mismatches: { undeclared, unused },
     warnings,
+    ...(dependencies.length ? { dependencies } : {}),
+    ...(provides.length ? { provides } : {}),
+    ...(providesLine ? { providesLine } : {}),
     ...(installed ? { installed } : {}),
   };
+  return judgeReportDependencies(report, opts.dependencyNodes?.() ?? []);
 }

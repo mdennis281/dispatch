@@ -43,7 +43,7 @@ import type { PluginInspector } from "./index.js";
 const HOUR = 3_600_000;
 
 export interface PluginCatalogServiceOptions {
-  inspector: Pick<PluginInspector, "inspect" | "installedState">;
+  inspector: Pick<PluginInspector, "inspect" | "installedState" | "judged">;
   settings: {
     get: () => Promise<AppSettings>;
     update: (fn: (current: AppSettings) => AppSettings) => Promise<AppSettings>;
@@ -284,8 +284,12 @@ export class PluginCatalogService {
     const row = entry?.result ? entriesOf(entry.result).find((e) => e.subdir === subdir) : undefined;
     if (!row) throw new PluginInspectError(`"${c.label}" lists no plugin at ${subdir || "(root)"}`, 404);
     if (!row.report) throw new PluginInspectError(row.error ?? `no report for ${subdir}`, 404);
-    const installed = await this.opts.inspector.installedState(row.report);
-    const { installed: _stale, ...rest } = row.report;
+    // Dependencies judged as of now, too, with the catalog's other members as
+    // siblings: a provider installed since the refresh makes its consumer
+    // installable, and one removed since makes it not.
+    const report = this.opts.inspector.judged(row.report, entriesOf(entry!.result!));
+    const installed = await this.opts.inspector.installedState(report);
+    const { installed: _stale, ...rest } = report;
     return { ...rest, ...(installed ? { installed } : {}) };
   }
 
@@ -297,7 +301,7 @@ export class PluginCatalogService {
   private async view(c: CatalogConfig): Promise<PluginCatalog> {
     const e = c.enabled ? this.usable(c) : undefined;
     const r = e?.result;
-    const plugins: PluginCatalogMember[] = r ? await Promise.all(entriesOf(r).map((m) => this.memberRow(m))) : [];
+    const plugins: PluginCatalogMember[] = r ? await Promise.all(entriesOf(r).map((m, _i, all) => this.memberRow(m, all))) : [];
     const collection = r && isPluginCollection(r) ? r : undefined;
     return {
       id: c.id,
@@ -318,8 +322,8 @@ export class PluginCatalogService {
     };
   }
 
-  private async memberRow(m: PluginCollectionEntry): Promise<PluginCatalogMember> {
-    const r = m.report;
+  private async memberRow(m: PluginCollectionEntry, all: readonly PluginCollectionEntry[]): Promise<PluginCatalogMember> {
+    const r = m.report ? this.opts.inspector.judged(m.report, all) : undefined;
     if (!r) return { subdir: m.subdir, capabilities: [], installable: false, warnings: 0, error: m.error ?? "unreadable" };
     const installed = await this.opts.inspector.installedState(r);
     return {

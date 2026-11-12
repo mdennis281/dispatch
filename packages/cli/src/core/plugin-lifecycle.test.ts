@@ -122,6 +122,28 @@ describe("update", () => {
     expect((await readPluginEntries(configDir)).hello?.source).toMatchObject({ sha: next, ref: "main" });
   });
 
+  it("goes provider first, and holds an update that would break a plugin using it until --allow-breaking", async () => {
+    const PROVIDES = (majors: string) => `${V1}provides:\n  machines: ${majors}\n`;
+    await commit(PROVIDES("[1]"), "v1");
+    await setPluginSource(configDir, "hello", (await addPlugin(configDir, bare)).source);
+    // Sorts before its provider by id: the order below is the dependency's, not the name's.
+    const user = join(root, "aaa-user");
+    await mkdir(user);
+    await writeFile(join(user, "plugin.yaml"), "id: aaa-user\nname: U\nversion: 1.0.0\ndispatch: '>=1'\ndependencies:\n  hello:\n    uses: [machines@1]\n");
+    await addPlugin(configDir, user);
+    await commit(PROVIDES("[2]"), "drop machines@1");
+
+    const held = await updatePlugins(configDir, { acceptEscalations: true });
+    expect(held.map((r) => r.id)).toEqual(["hello", "aaa-user"]);
+    expect(held[0]).toMatchObject({ status: "available", message: expect.stringMatching(/breaks aaa-user .*--allow-breaking/) });
+    expect(held[0]!.updated).toBeUndefined();
+    expect(await readFile(join(configDir, "plugins", "hello", "plugin.yaml"), "utf8")).toContain("machines: [1]");
+
+    const [done] = await updatePlugins(configDir, { acceptEscalations: true, allowBreaking: true });
+    expect(done).toMatchObject({ id: "hello", updated: true, message: "replacing hello breaks aaa-user — allowed by --allow-breaking" });
+    expect(await readFile(join(configDir, "plugins", "hello", "plugin.yaml"), "utf8")).toContain("machines: [2]");
+  });
+
   it("says why there is nothing to check for a local or unknown source", async () => {
     await writeFile(join(work, "plugin.yaml"), V1);
     await addPlugin(configDir, work);

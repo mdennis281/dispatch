@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   compareSemver,
   isValidSemverRange,
+  judgeInstallDependencies,
   liveDependencyState,
   parsePluginUse,
   resolvePluginDependencies,
@@ -251,5 +252,70 @@ describe("the manifest's dependencies and provides", () => {
     // What an older host does: the same object schema, minus these keys, non-strict.
     const m = PluginManifestSchema.parse({ ...base, somethingNewer: { a: 1 } });
     expect((m as Record<string, unknown>).somethingNewer).toBeUndefined();
+  });
+});
+
+describe("judgeInstallDependencies", () => {
+  const consumer = (extra: Partial<PluginDependencyNode> = {}) =>
+    node("proxmox-terminal", {
+      version: "0.2.0",
+      dependencies: { "remote-host": { uses: ["machines@1"], version: ">=0.10.0" } },
+      ...extra,
+    });
+  const provider = (version: string, extra: Partial<PluginDependencyNode> = {}) =>
+    node("remote-host", { version, provides: { machines: [1] }, ...extra });
+
+  it("takes an installed provider first, and says which version satisfied it", () => {
+    const j = judgeInstallDependencies(consumer(), [provider("0.10.2")]);
+    expect(j.refusal).toBeUndefined();
+    expect(j.dependencies).toEqual([
+      { id: "remote-host", uses: ["machines@1"], optional: false, state: "ok", detail: "", from: "installed", range: ">=0.10.0", found: "0.10.2" },
+    ]);
+  });
+
+  it("takes a collection sibling when nothing installed will do — replacing an old copy if need be", () => {
+    const fresh = judgeInstallDependencies(consumer(), [], [provider("0.10.0")]);
+    expect(fresh.refusal).toBeUndefined();
+    expect(fresh.dependencies[0]).toMatchObject({ from: "collection", state: "ok", found: "0.10.0", detail: "in this collection: v0.10.0 — installed with it" });
+
+    const old = judgeInstallDependencies(consumer(), [provider("0.9.2")], [provider("0.10.0")]);
+    expect(old.dependencies[0]).toMatchObject({ from: "collection", found: "0.10.0" });
+    expect(old.dependencies[0]!.detail).toContain("replacing the installed v0.9.2");
+  });
+
+  it("refuses a required dependency that nothing satisfies, saying where it must come from", () => {
+    const missing = judgeInstallDependencies(consumer(), []);
+    expect(missing.dependencies[0]).toMatchObject({ from: "missing", state: "missing" });
+    expect(missing.refusal).toBe(
+      "needs remote-host (machines@1): remote-host is not installed — install remote-host first, or install this from a collection that has it",
+    );
+    const tooOld = judgeInstallDependencies(consumer(), [provider("0.9.2")]);
+    expect(tooOld.dependencies[0]).toMatchObject({ from: "installed", state: "incompatible", found: "0.9.2" });
+    expect(tooOld.refusal).toContain("0.9.2 is installed; this needs >=0.10.0");
+    // A sibling that does not satisfy either does not rescue it — and the
+    // refusal says what is wrong with the sibling, not "install it first".
+    const badSibling = judgeInstallDependencies(consumer(), [], [provider("0.9.0")]);
+    expect(badSibling.dependencies[0]).toMatchObject({ from: "missing", state: "incompatible" });
+    expect(badSibling.refusal).toBe("needs remote-host (machines@1): in this collection, remote-host 0.9.0 is what it has; this needs >=0.10.0");
+  });
+
+  it("never refuses for an optional dependency, or for one the owner can switch back on", () => {
+    const optional = consumer({ dependencies: { "remote-host": { uses: ["machines@1"], optional: true } } });
+    expect(judgeInstallDependencies(optional, []).refusal).toBeUndefined();
+    const off = judgeInstallDependencies(consumer(), [provider("0.10.0", { enabled: false })]);
+    expect(off.refusal).toBeUndefined();
+    expect(off.dependencies[0]).toMatchObject({ state: "disabled", from: "installed" });
+  });
+
+  it("names the installed dependents a provider replacement would break, and only those it breaks", () => {
+    const installed = [consumer(), provider("0.10.0"), node("other", { dependencies: { "remote-host": { uses: ["machines@1"], optional: true } } })];
+    // Drops machines@1: both dependents lose it.
+    const dropped = judgeInstallDependencies(provider("1.0.0", { provides: { machines: [2] } }), installed);
+    expect(dropped.breaks.map((b) => b.id)).toEqual(["proxmox-terminal", "other"]);
+    expect(dropped.breaks[0]!.detail).toContain("does not provide machines@1");
+    // A compatible bump breaks nothing.
+    expect(judgeInstallDependencies(provider("0.10.1"), installed).breaks).toEqual([]);
+    // A fresh install (nothing replaced) cannot break anything.
+    expect(judgeInstallDependencies(provider("0.10.0"), [consumer()]).breaks).toEqual([]);
   });
 });
