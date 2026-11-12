@@ -96,6 +96,17 @@ export function skippedFor(pick: CollectionPick, failed: ReadonlySet<string>, pi
 }
 
 /**
+ * The picks that REPLACE an installed copy whose report says the replace
+ * breaks installed plugins using it. The server refuses each of those (409)
+ * without `allowBreaking`, so the pane must have the owner type it through
+ * before Install — a provider ticked FOR a consumer has no Install bar of its
+ * own to confirm it on.
+ */
+export function breakingPicks(plan: readonly CollectionPick[]): CollectionPick[] {
+  return plan.filter((p) => p.replace && !!p.entry.report?.breaks?.length);
+}
+
+/**
  * Who switching `id` off (or removing it) reaches, among installed plugins:
  * `stops` need it — and so does whatever requires THEM, through any chain of
  * required uses; `degrades` can use it and keep running with less.

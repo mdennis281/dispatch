@@ -144,6 +144,7 @@ export async function discoverPlugins(configDir: string): Promise<DiscoveredPlug
  * an installed plugin gets.
  */
 export async function discoverPluginsAt(root: string): Promise<DiscoveredPlugin[]> {
+  await recoverInterruptedSwaps(root);
   let names: string[];
   try {
     names = await readdir(root);
@@ -152,9 +153,9 @@ export async function discoverPluginsAt(root: string): Promise<DiscoveredPlugin[
   }
   const found: DiscoveredPlugin[] = [];
   for (const name of names.sort()) {
-    // `.<id>.<pid>.tmp` / `.old` are an install mid-swap (see `swapInto`). A
-    // boot that lands in that window must not list them as a second, invalid
-    // copy of the plugin whose manifest id does not match its directory.
+    // `.<id>.<pid>.tmp` / `.old` are an install mid-swap (see `swapInto`) in a
+    // live process — a dead one's were recovered above. They are not a second,
+    // invalid copy of the plugin whose manifest id does not match its directory.
     if (name.startsWith(".")) continue;
     const dir = join(root, name);
     // `stat`, not `readdir`'s dirent: a linked plugin is a junction or
@@ -536,9 +537,12 @@ async function claimSlot(root: string, id: string, force: boolean): Promise<bool
 /**
  * Move a fully-written `staged` entry into `<root>/<id>`: the old entry is
  * renamed aside first and deleted only once the new one is in, and put back
- * if that fails. Two renames in one directory, so there is no moment a reader
- * finds neither copy — a provider is never briefly missing under the plugins
- * that use it.
+ * if that fails. The copy — the slow part, and the one that fails — happens
+ * before anything moves, so a failed replace leaves the installed plugin as it
+ * was. What remains is the gap between two renames in one directory: a
+ * process killed exactly there (Windows has no SIGTERM, so a hard kill is a
+ * real case) leaves the old copy aside as `.<id>.<pid>.old`, and
+ * `recoverInterruptedSwaps` puts it back on the next discovery or add.
  */
 async function swapInto(root: string, id: string, staged: string, replacing: boolean): Promise<void> {
   const target = join(root, id);
@@ -558,6 +562,54 @@ async function swapInto(root: string, id: string, staged: string, replacing: boo
   // A link is unlinked, never followed: the old entry may be a `link`ed
   // working directory, which a recursive delete would empty.
   await removeEntry(aside).catch(() => {});
+}
+
+const SWAP_ENTRY = /^\.([a-z0-9][a-z0-9-]{0,39})\.(\d+)\.(tmp|old)$/;
+
+/** Whether `pid` is a running process — `kill(pid, 0)` signals nothing, it only checks. */
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM: it exists, it just is not ours to signal.
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/**
+ * Clean up after an install that died mid-swap (see `swapInto`), in a process
+ * that is no longer running: an `.old` whose plugin directory is missing is
+ * renamed back — the swap never finished, so the old copy is the installed
+ * one — and every other leftover (a half-copied `.tmp`, an `.old` whose
+ * replacement did land) is deleted. Entries of a LIVE process are an install
+ * in flight, CLI and server side by side, and are left alone. Best-effort:
+ * nothing here may stop discovery.
+ */
+export async function recoverInterruptedSwaps(root: string): Promise<void> {
+  let names: string[];
+  try {
+    names = await readdir(root);
+  } catch {
+    return;
+  }
+  const stale = names
+    .map((n) => SWAP_ENTRY.exec(n))
+    .filter((m): m is RegExpExecArray => !!m && Number(m[2]) !== process.pid && !alive(Number(m[2])))
+    // Restores before deletes, newest pid's aside first if there are several.
+    .sort((a, b) => (a[3] === b[3] ? Number(b[2]) - Number(a[2]) : a[3] === "old" ? -1 : 1));
+  for (const m of stale) {
+    const entry = join(root, m[0]);
+    try {
+      if (m[3] === "old" && !(await exists(join(root, m[1]!)))) {
+        await rename(entry, join(root, m[1]!));
+        continue;
+      }
+      await removeEntry(entry);
+    } catch {
+      /* best-effort: the next pass tries again */
+    }
+  }
 }
 
 async function exists(path: string): Promise<boolean> {
@@ -616,6 +668,7 @@ export async function addPlugin(
     // skip the "already installed" check and let `--force` delete the wrong
     // plugin.
     const id = found.manifest!.id;
+    await recoverInterruptedSwaps(root);
     const replaced = await claimSlot(root, id, !!opts.force);
     const warnings = (await opts.check?.(found.manifest!)) ?? [];
     const target = join(root, id);
@@ -670,6 +723,7 @@ export async function linkPlugin(
   await mkdir(root, { recursive: true });
   // Manifest id, not the checkout's directory name — see `addPlugin`.
   const id = found.manifest!.id;
+  await recoverInterruptedSwaps(root);
   const replaced = await claimSlot(root, id, !!opts.force);
   const target = join(root, id);
   const tmp = join(root, `.${id}.${process.pid}.tmp`);

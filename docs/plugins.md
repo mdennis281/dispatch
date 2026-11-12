@@ -368,7 +368,11 @@ graph the install would leave.
   then delete the aside — put back if the rename fails. It used to delete the
   old copy before copying, so a failed copy left no plugin at all: a way round
   "refuse uninstall of a provider". A linked old entry is unlinked, never
-  emptied. Discovery skips dot-entries, so a boot mid-swap sees one copy.
+  emptied. The copy happens before anything moves; only a process killed
+  between the two renames can leave the old copy aside (`.<id>.<pid>.old`),
+  and the next discovery or add of a process that is not that one puts it
+  back and clears dead installs' leftovers. A live process's dot-entries are
+  an install in flight: discovery skips them.
 - **Update.** A new dependency, a newly used export and a new `provides` entry
   are escalations, so `auto` never installs them. Neither does it install an
   update with `breaks`. The background pass checks providers before what uses

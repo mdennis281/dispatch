@@ -84,6 +84,7 @@ export function BreakingConfirm({
   id,
   breaks,
   action,
+  lead,
   busy,
   onConfirm,
   onCancel,
@@ -91,13 +92,17 @@ export function BreakingConfirm({
   id: string;
   breaks: ReadonlyArray<{ id: string; detail: string }>;
   action: string;
+  /** Why this replace is happening at all, when it is not the plugin the owner clicked. */
+  lead?: string;
   busy?: boolean;
   onConfirm: () => void;
-  onCancel: () => void;
+  /** Absent where backing out means unticking something, not pressing Cancel. */
+  onCancel?: () => void;
 }) {
   const [typed, setTyped] = useState("");
   return (
     <div className="space-y-1.5 rounded-md border border-danger/30 bg-danger-ghost px-2.5 py-2" data-testid="plugin-breaking-confirm">
+      {lead && <p className="text-2xs leading-relaxed text-secondary">{lead}</p>}
       <p className="text-xs font-medium text-danger">
         This breaks {breaks.map((b) => b.id).join(", ")}
       </p>
@@ -121,9 +126,11 @@ export function BreakingConfirm({
           aria-label={`Type ${id} to confirm`}
           onChange={(e) => setTyped(e.target.value)}
         />
-        <Button variant="ghost" size="sm" onClick={onCancel} disabled={busy}>
-          Cancel
-        </Button>
+        {onCancel && (
+          <Button variant="ghost" size="sm" onClick={onCancel} disabled={busy}>
+            Cancel
+          </Button>
+        )}
         <Button variant="danger" size="sm" disabled={busy || typed.trim() !== id} onClick={onConfirm}>
           {action}
         </Button>

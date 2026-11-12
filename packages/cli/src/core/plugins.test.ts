@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { lstat, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import {
   addPlugin,
@@ -215,6 +216,28 @@ describe("replacing an installed plugin", () => {
     expect(result).toMatchObject({ outcome: "replaced", warnings: ["careful"] });
     expect(await installedVersions()).toEqual([["hello", "2.0.0"]]);
     expect(await readdir(join(configDir, "plugins"))).toEqual(["hello"]);
+  });
+
+  it("puts back a copy left aside by a process killed between the two renames, and clears its leftovers", async () => {
+    await addPlugin(configDir, await source("hello"));
+    await addPlugin(configDir, await source("other"));
+    const plugins = join(configDir, "plugins");
+    // A pid that is certainly not running: a child that has already exited.
+    const dead = spawnSync(process.execPath, ["-e", ""]).pid;
+    const { rename: mv } = await import("node:fs/promises");
+    // hello: killed after the first rename — no `hello`, the old copy aside, the new one staged.
+    await mv(join(plugins, "hello"), join(plugins, `.hello.${dead}.old`));
+    await mkdir(join(plugins, `.hello.${dead}.tmp`));
+    // other: killed after the swap, before the aside was deleted.
+    await mkdir(join(plugins, `.other.${dead}.old`));
+    // A live process's staging is an install in flight: not ours to touch.
+    await mkdir(join(plugins, `.other.${process.ppid}.tmp`));
+
+    expect((await discoverPlugins(configDir)).map((p) => [p.id, p.manifest?.version])).toEqual([
+      ["hello", "1.2.3"],
+      ["other", "1.2.3"],
+    ]);
+    expect((await readdir(plugins)).sort()).toEqual([`.other.${process.ppid}.tmp`, "hello", "other"]);
   });
 
   it("unlinks a linked plugin it replaces — the working directory is never emptied", async () => {

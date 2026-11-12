@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { PluginCollectionEntry, PluginInfo, PluginInspection, PluginInspectionDependency } from "@dispatch/shared";
-import { collectionPicks, dependentsReach, skippedFor } from "./pluginDependencyPlan.js";
+import { breakingPicks, collectionPicks, dependentsReach, skippedFor } from "./pluginDependencyPlan.js";
 
 const dep = (id: string, subdir: string | undefined, extra: Partial<PluginInspectionDependency> = {}): PluginInspectionDependency => ({
   id,
@@ -64,6 +64,15 @@ describe("collectionPicks", () => {
     const rh = entry("remote-host", [dep("base", "plugins/base")]);
     const picks = collectionPicks([PROXMOX, rh, base], new Set([PROXMOX.subdir]));
     expect(picks.map((p) => p.entry.report!.id)).toEqual(["base", "remote-host", "proxmox-terminal"]);
+  });
+});
+
+describe("breakingPicks", () => {
+  it("is the replaced provider whose own report breaks an installed user — nothing else", () => {
+    const old = entry("remote-host", [], true);
+    (old.report as { breaks?: unknown }).breaks = [{ id: "z", detail: "remote-host 1.0.0 does not provide machines@1" }];
+    expect(breakingPicks(collectionPicks([PROXMOX, old], new Set([PROXMOX.subdir]))).map((p) => p.entry.subdir)).toEqual([old.subdir]);
+    expect(breakingPicks(collectionPicks([PROXMOX, entry("remote-host", [], true)], new Set([PROXMOX.subdir])))).toEqual([]);
   });
 });
 

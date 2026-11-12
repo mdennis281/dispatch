@@ -26,7 +26,7 @@ import { StatusDot } from "../../ui/StatusDot.js";
 import { api } from "../../../lib/api.js";
 import { fieldsFromSchema } from "./pluginSettingsForm.js";
 import { BreakingConfirm, ReportDependencies } from "./PluginDependencies.js";
-import { collectionPicks, skippedFor, type CollectionPick } from "./pluginDependencyPlan.js";
+import { breakingPicks, collectionPicks, skippedFor, type CollectionPick } from "./pluginDependencyPlan.js";
 
 /**
  * Settings → Plugins → Inspect from URL (#399).
@@ -164,7 +164,16 @@ function verdict(r: PluginInspection): { tone: "success" | "warn" | "danger"; la
   return { tone: "success", label: `Compatible · API ${r.compatibility.hostApi}` };
 }
 
-export function InspectionReport({ report: r, onInstalled }: { report: PluginInspection; onInstalled: () => void }) {
+export function InspectionReport({
+  report: r,
+  onInstalled,
+  siblings,
+}: {
+  report: PluginInspection;
+  onInstalled: () => void;
+  /** The other members of its collection, when it was opened from one — their reports say what installing them would break. */
+  siblings?: readonly PluginCollectionEntry[];
+}) {
   const v = verdict(r);
   const c = r.contributions;
   const contributionCount =
@@ -359,7 +368,7 @@ export function InspectionReport({ report: r, onInstalled }: { report: PluginIns
         </p>
       </Section>
 
-      <InstallBar report={r} onInstalled={onInstalled} />
+      <InstallBar report={r} onInstalled={onInstalled} siblings={siblings} />
     </div>
   );
 }
@@ -375,11 +384,23 @@ function EntryChip({ side, entry }: { side: "server" | "client"; entry: { path: 
 
 /* --------------------------------------------------------------- install */
 
-function InstallBar({ report: r, onInstalled }: { report: PluginInspection; onInstalled: () => void }) {
+function InstallBar({
+  report: r,
+  onInstalled,
+  siblings,
+}: {
+  report: PluginInspection;
+  onInstalled: () => void;
+  siblings?: readonly PluginCollectionEntry[];
+}) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
-  const [confirmingBreak, setConfirmingBreak] = useState(false);
+  // Which typed confirm is open: this plugin's own breaking replace ("self"),
+  // or a provider's (its subdir) that has to be replaced first.
+  const [confirming, setConfirming] = useState<string | null>(null);
+  const [allowed, setAllowed] = useState<ReadonlySet<string>>(new Set());
+  const [intent, setIntent] = useState(false);
   const inst = r.installed;
   const short = r.source.sha.slice(0, 7);
   const breaks = r.breaks ?? [];
@@ -388,8 +409,25 @@ function InstallBar({ report: r, onInstalled }: { report: PluginInspection; onIn
   // so the consumer posted alone would be refused.
   const withIt = (r.dependencies ?? []).filter((d) => d.from === "collection" && d.subdir !== undefined && !d.optional);
   const withNames = withIt.map((d) => d.name ?? d.id).join(" and ");
+  // A provider installed first may itself be a breaking replace. Its report —
+  // a sibling's — says so; the server refuses it without the owner's typed
+  // confirmation, which only this bar can ask for.
+  const providerBreaks = withIt.flatMap((d) => {
+    const sib = siblings?.find((s) => s.subdir === d.subdir)?.report;
+    return sib?.breaks?.length ? [{ key: d.subdir!, id: sib.id ?? d.id, name: d.name ?? d.id, breaks: sib.breaks }] : [];
+  });
 
-  const install = async (replace: boolean, allowBreaking = false) => {
+  /** Walk the confirms this install needs, one at a time, then install. */
+  const proceed = (replace: boolean, allowedNow: ReadonlySet<string>, selfOk: boolean) => {
+    setIntent(replace);
+    const next = providerBreaks.find((p) => !allowedNow.has(p.key));
+    if (next) return setConfirming(next.key);
+    if (replace && breaks.length && !selfOk) return setConfirming("self");
+    setConfirming(null);
+    void install(replace, selfOk, allowedNow);
+  };
+
+  const install = async (replace: boolean, allowBreaking: boolean, allowedProviders: ReadonlySet<string>) => {
     if (replace && !allowBreaking && !confirm(`Replace the installed ${r.name ?? r.id} (v${inst?.version ?? "?"}) with v${r.version} at ${short}?`)) return;
     setBusy(true);
     setError(null);
@@ -397,8 +435,19 @@ function InstallBar({ report: r, onInstalled }: { report: PluginInspection; onIn
       const also: string[] = [];
       for (const d of withIt) {
         // replace: the report already said when this replaces an older copy.
-        const dep = await api.plugins.install(r.source.url, r.source.sha, true, d.subdir);
-        also.push(dep.id);
+        try {
+          const dep = await api.plugins.install(r.source.url, r.source.sha, true, d.subdir, allowedProviders.has(d.subdir!));
+          also.push(dep.id);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          // Opened without its siblings (a catalog member): the break was not
+          // known up front, and this bar cannot confirm another plugin's replace.
+          throw new Error(
+            /\bbreaks\b/.test(msg)
+              ? `${d.name ?? d.id} has to be installed first, and replacing the installed copy ${msg.replace(/^.*?breaks/, "breaks")}. Install ${d.name ?? d.id} from its own report, where you can confirm that — then install this.`
+              : `${d.name ?? d.id} (installed first): ${msg}`,
+          );
+        }
       }
       // `subdir` always: for a collection member the URL names the collection,
       // and only this says which of its plugins was being read.
@@ -406,7 +455,7 @@ function InstallBar({ report: r, onInstalled }: { report: PluginInspection; onIn
       setDone(
         `${res.outcome === "replaced" ? "Updated" : "Installed"} ${[...also, res.id].join(" and ")} at ${short}. Restart Dispatch to load ${also.length ? "them" : "it"} — plugins are not hot-reloaded.`,
       );
-      setConfirmingBreak(false);
+      setConfirming(null);
       onInstalled();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -426,7 +475,13 @@ function InstallBar({ report: r, onInstalled }: { report: PluginInspection; onIn
     );
   } else if (!inst) {
     action = (
-      <Button variant="primary" size="sm" leftIcon={busy ? <Spinner size={12} /> : <Download />} disabled={busy} onClick={() => void install(false)}>
+      <Button
+        variant="primary"
+        size="sm"
+        leftIcon={busy ? <Spinner size={12} /> : <Download />}
+        disabled={busy || !!confirming}
+        onClick={() => proceed(false, allowed, false)}
+      >
         {busy ? "Installing…" : withIt.length ? `Install with ${withNames}` : "Install"}
       </Button>
     );
@@ -443,8 +498,8 @@ function InstallBar({ report: r, onInstalled }: { report: PluginInspection; onIn
         variant={inst.comparison === "newer" ? "primary" : "default"}
         size="sm"
         leftIcon={busy ? <Spinner size={12} /> : <Download />}
-        disabled={busy || confirmingBreak}
-        onClick={() => (breaks.length ? setConfirmingBreak(true) : void install(true))}
+        disabled={busy || !!confirming}
+        onClick={() => proceed(true, allowed, false)}
       >
         {busy ? "Installing…" : label}
       </Button>
@@ -465,16 +520,35 @@ function InstallBar({ report: r, onInstalled }: { report: PluginInspection; onIn
         </p>
         {action}
       </div>
-      {confirmingBreak && !done && r.id && (
+      {confirming === "self" && !done && r.id && (
         <BreakingConfirm
           id={r.id}
           breaks={breaks}
           action={inst?.comparison === "newer" ? "Update" : "Replace"}
           busy={busy}
-          onConfirm={() => void install(true, true)}
-          onCancel={() => setConfirmingBreak(false)}
+          onConfirm={() => proceed(true, allowed, true)}
+          onCancel={() => setConfirming(null)}
         />
       )}
+      {!done &&
+        providerBreaks
+          .filter((p) => p.key === confirming)
+          .map((p) => (
+            <BreakingConfirm
+              key={p.key}
+              id={p.id}
+              breaks={p.breaks}
+              lead={`${p.name} is installed first, replacing the installed copy — and that replace breaks a plugin using it.`}
+              action={`Replace ${p.name}`}
+              busy={busy}
+              onConfirm={() => {
+                const next = new Set(allowed).add(p.key);
+                setAllowed(next);
+                proceed(intent, next, false);
+              }}
+              onCancel={() => setConfirming(null)}
+            />
+          ))}
       <InlineError message={error} />
       {done && (
         <p className="flex items-start gap-1.5 text-xs text-success [&_svg]:mt-0.5 [&_svg]:size-3.5 [&_svg]:shrink-0">
@@ -510,6 +584,7 @@ type RowState = { phase: "installing" } | { phase: "done"; message: string } | {
 function CollectionReport({ report: c, onInstalled }: { report: PluginCollectionInspection; onInstalled: () => void }) {
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [declined, setDeclined] = useState<Set<string>>(new Set());
+  const [allowed, setAllowed] = useState<ReadonlySet<string>>(new Set());
   const [open, setOpen] = useState<string | null>(null);
   const [rows, setRows] = useState<Record<string, RowState>>({});
   const [busy, setBusy] = useState(false);
@@ -523,6 +598,10 @@ function CollectionReport({ report: c, onInstalled }: { report: PluginCollection
     declined,
   );
   const planned = new Map(plan.map((p) => [p.entry.subdir, p]));
+  // A provider replaced for a ticked plugin, whose replace breaks an installed
+  // user: typed through here, since the server refuses it otherwise.
+  const breaking = breakingPicks(plan);
+  const unconfirmed = breaking.filter((p) => !allowed.has(p.entry.subdir));
   const chosen = plan.map((p) => p.entry);
   const grants = [...new Set(chosen.flatMap((e) => e.report?.capabilities.map((cap) => cap.name) ?? []))].sort();
 
@@ -560,7 +639,7 @@ function CollectionReport({ report: c, onInstalled }: { report: PluginCollection
       }
       setRows((r) => ({ ...r, [e.subdir]: { phase: "installing" } }));
       try {
-        const res = await api.plugins.install(c.source.url, c.source.sha, p.replace, e.subdir);
+        const res = await api.plugins.install(c.source.url, c.source.sha, p.replace, e.subdir, allowed.has(e.subdir));
         any = true;
         setRows((r) => ({ ...r, [e.subdir]: { phase: "done", message: `${res.outcome === "replaced" ? "Replaced" : "Installed"} ${res.id}` } }));
       } catch (err) {
@@ -570,6 +649,7 @@ function CollectionReport({ report: c, onInstalled }: { report: PluginCollection
     }
     setPicked(new Set());
     setDeclined(new Set());
+    setAllowed(new Set());
     setBusy(false);
     if (any) onInstalled();
   };
@@ -634,9 +714,21 @@ function CollectionReport({ report: c, onInstalled }: { report: PluginCollection
             onOpen={() => setOpen((o) => (o === e.subdir ? null : e.subdir))}
             state={rows[e.subdir]}
             onInstalled={onInstalled}
+            siblings={c.plugins}
           />
         ))}
       </ul>
+
+      {unconfirmed[0] && !busy && (
+        <BreakingConfirm
+          key={unconfirmed[0].entry.subdir}
+          id={unconfirmed[0].entry.report!.id ?? unconfirmed[0].entry.subdir}
+          breaks={unconfirmed[0].entry.report!.breaks!}
+          lead={`${unconfirmed[0].entry.report!.name ?? unconfirmed[0].entry.subdir} is replaced for ${unconfirmed[0].neededBy.join(" and ")} — and that replace breaks a plugin using it. Confirm it, or untick what needs it.`}
+          action="Allow"
+          onConfirm={() => setAllowed((prev) => new Set(prev).add(unconfirmed[0]!.entry.subdir))}
+        />
+      )}
 
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="min-w-0 flex-1 basis-48 text-2xs leading-relaxed text-muted">
@@ -652,7 +744,7 @@ function CollectionReport({ report: c, onInstalled }: { report: PluginCollection
           variant="primary"
           size="sm"
           leftIcon={busy ? <Spinner size={12} /> : <Download />}
-          disabled={busy || !chosen.length}
+          disabled={busy || !chosen.length || unconfirmed.length > 0}
           onClick={() => void installSelected()}
         >
           {busy ? "Installing…" : chosen.length ? `Install ${chosen.length}` : "Install"}
@@ -672,6 +764,7 @@ function CollectionRow({
   onOpen,
   state,
   onInstalled,
+  siblings,
 }: {
   entry: PluginCollectionEntry;
   selectable: boolean;
@@ -683,6 +776,7 @@ function CollectionRow({
   onOpen: () => void;
   state?: RowState;
   onInstalled: () => void;
+  siblings: readonly PluginCollectionEntry[];
 }) {
   const r = e.report;
   const rel = e.subdir.split("/").pop() || "(root)";
@@ -792,6 +886,7 @@ function CollectionRow({
                 : r
             }
             onInstalled={onInstalled}
+            siblings={siblings}
           />
         </div>
       )}
