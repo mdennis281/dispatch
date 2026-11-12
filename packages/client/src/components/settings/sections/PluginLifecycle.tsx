@@ -6,6 +6,7 @@ import { Button } from "../../ui/Button.js";
 import { Chip } from "../../ui/Chip.js";
 import { Spinner } from "../../ui/Spinner.js";
 import { api } from "../../../lib/api.js";
+import { BreakingConfirm } from "./PluginDependencies.js";
 
 /**
  * Settings → Plugins, after install (#409): where a plugin came from, Check
@@ -132,14 +133,22 @@ export function PluginUpdatePanel({
   plugin,
   check,
   onUpdated,
+  all = [],
+  onRecheck,
 }: {
   plugin: PluginInfo;
   check: CheckState;
   onUpdated: (row: PluginInfo | undefined) => void;
+  /** Every installed plugin — to find the provider an "Update both" updates first. */
+  all?: readonly PluginInfo[];
+  /** Check THIS plugin again — after its provider updated, its own update is judged anew. */
+  onRecheck?: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
+  const [confirmingBreak, setConfirmingBreak] = useState(false);
+  const [providerCheck, setProviderCheck] = useState<CheckState | null>(null);
 
   if (check === "checking") {
     return (
@@ -175,13 +184,31 @@ export function PluginUpdatePanel({
     ? `Update available: a new commit${d?.toVersion ? ` of v${d.toVersion}` : ""}`
     : `Update available: v${d?.fromVersion ?? "?"} → v${d?.toVersion}`;
   const buttonLabel = sameVersion ? `Update to ${shortSha(t.sha)}` : `Update to v${t.version}`;
+  const breaks = r?.breaks ?? [];
+  // The new version needs more of a provider than the installed copy offers
+  // (too old, or without the export): offered as "Update both" — the
+  // provider's own update first, with its own diff, then this one, judged
+  // again against the provider it will meet.
+  const stale = !installable ? r?.dependencies?.find((dep) => !dep.optional && dep.from === "installed" && dep.state === "incompatible") : undefined;
+  const provider = stale ? all.find((p) => p.id === stale.id && p.origin === "url") : undefined;
 
-  const update = async () => {
+  const checkProvider = async () => {
+    if (!provider) return;
+    setProviderCheck("checking");
+    try {
+      setProviderCheck(await api.plugins.checkUpdate(provider.id));
+    } catch (e) {
+      setProviderCheck({ id: provider.id, status: "error", origin: "url", message: e instanceof Error ? e.message : String(e), checkedAt: Date.now() });
+    }
+  };
+
+  const update = async (allowBreaking = false) => {
     setBusy(true);
     setError(null);
     try {
-      const res = await api.plugins.update(plugin.id, t.sha);
+      const res = await api.plugins.update(plugin.id, t.sha, allowBreaking);
       setDone(`Updated to ${t.version ? `v${t.version} at ` : ""}${shortSha(res.sha)}. Restart Dispatch to load it — plugins are not hot-reloaded.`);
+      setConfirmingBreak(false);
       onUpdated(res.plugin);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -219,6 +246,19 @@ export function PluginUpdatePanel({
         </p>
       )}
 
+      {breaks.length > 0 && (
+        <section data-testid="plugin-update-breaks">
+          <DiffHeading count={breaks.length}>
+            <span className="text-danger">Breaks</span>
+          </DiffHeading>
+          {breaks.map((b) => (
+            <div key={b.id} className="flex flex-wrap items-baseline gap-x-2 py-0.5 text-2xs leading-relaxed">
+              <span className="cm-mono !text-2xs text-danger">{b.id}</span>
+              <span className="min-w-0 text-muted">{b.detail} — it stops until it is updated too</span>
+            </div>
+          ))}
+        </section>
+      )}
       {d && d.escalations.length > 0 && (
         <section data-testid="plugin-update-escalations">
           <DiffHeading count={d.escalations.length}>
@@ -269,18 +309,49 @@ export function PluginUpdatePanel({
               ? `Installs exactly ${shortSha(t.sha)}. Settings, kv, secrets and OAuth sign-ins are kept.`
               : `Cannot update: ${r?.refusal ?? (r?.id !== plugin.id ? "it is a different plugin" : "the new version is not installable")}.`}
         </p>
-        {!done && (
+        {!done && provider && !providerCheck && (
+          <Button variant="primary" size="sm" leftIcon={<Download />} onClick={() => void checkProvider()}>
+            Update both
+          </Button>
+        )}
+        {!done && !provider && (
           <Button
-            variant={d?.escalations.length ? "danger" : "primary"}
+            variant={d?.escalations.length || breaks.length ? "danger" : "primary"}
             size="sm"
             leftIcon={busy ? <Spinner size={12} /> : <Download />}
-            disabled={busy || !installable}
-            onClick={() => void update()}
+            disabled={busy || !installable || confirmingBreak}
+            onClick={() => (breaks.length ? setConfirmingBreak(true) : void update())}
           >
             {busy ? "Updating…" : buttonLabel}
           </Button>
         )}
       </div>
+      {confirmingBreak && !done && (
+        <BreakingConfirm
+          id={plugin.id}
+          breaks={breaks}
+          action="Update"
+          busy={busy}
+          onConfirm={() => void update(true)}
+          onCancel={() => setConfirmingBreak(false)}
+        />
+      )}
+      {provider && providerCheck && (
+        <div className="space-y-1 border-l-2 border-line pl-2" data-testid="plugin-update-provider-first">
+          <p className="text-2xs leading-relaxed text-secondary">
+            First {provider.name}, which this version needs newer ({stale!.detail}). Then check {plugin.name} again.
+          </p>
+          <PluginUpdatePanel
+            plugin={provider}
+            check={providerCheck}
+            all={all}
+            onUpdated={(row) => {
+              onUpdated(row);
+              onRecheck?.();
+            }}
+          />
+        </div>
+      )}
       <InlineError message={error} />
       {done && (
         <p className="flex items-start gap-1.5 text-xs text-success [&_svg]:mt-0.5 [&_svg]:size-3.5 [&_svg]:shrink-0">
@@ -373,6 +444,10 @@ export function PluginUninstallDialog({
 
   const link = preview?.removes === "link";
   const data = preview ? dataItems(preview) : [];
+  // Refused by the server too (409). Removing the users first is the owner's
+  // call, never done for them: their own uninstall hooks run, and may destroy
+  // what they made.
+  const usedBy = preview?.usedBy ?? [];
 
   return (
     <Modal
@@ -392,7 +467,7 @@ export function PluginUninstallDialog({
           <Button variant="ghost" onClick={close} disabled={busy}>
             Cancel
           </Button>
-          <Button variant="danger" onClick={() => void run()} disabled={busy || !preview}>
+          <Button variant="danger" onClick={() => void run()} disabled={busy || !preview || usedBy.length > 0}>
             {busy ? "Removing…" : link ? "Unlink" : purge ? "Uninstall and delete data" : "Uninstall"}
           </Button>
         </>
@@ -406,6 +481,17 @@ export function PluginUninstallDialog({
         )
       ) : (
         <div className="space-y-3 text-sm" data-testid="plugin-uninstall-preview">
+          {usedBy.length > 0 && (
+            <div className="rounded-md border border-danger/30 bg-danger-ghost px-2.5 py-2 text-xs leading-relaxed" data-testid="plugin-uninstall-used-by">
+              <p className="font-medium text-danger">
+                Used by {usedBy.join(", ")}
+              </p>
+              <p className="text-secondary">
+                Uninstall {usedBy.length === 1 ? "it" : "them"} first — {usedBy.length === 1 ? "its" : "their"} own uninstall runs{" "}
+                {usedBy.length === 1 ? "its" : "their"} clean-up — or switch {plugin.name} off instead.
+              </p>
+            </div>
+          )}
           <div>
             <p className="mb-1 text-xs font-medium text-secondary">This removes</p>
             <ul className="list-disc space-y-0.5 pl-4 text-xs">
