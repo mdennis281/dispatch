@@ -290,44 +290,17 @@ export interface PluginDependencyResolution {
 export function resolvePluginDependencies(nodes: readonly PluginDependencyNode[]): PluginDependencyResolution {
   const byId = new Map(nodes.map((n) => [n.id, n]));
   const edgesOf = (n: PluginDependencyNode) => Object.keys(n.dependencies ?? {}).filter((d) => byId.has(d) && d !== n.id);
+  const requiredEdgesOf = (n: PluginDependencyNode) => edgesOf(n).filter((d) => !n.dependencies![d]!.optional);
 
-  // Strongly connected components (Tarjan). Small graphs — a handful of
-  // plugins — so recursion depth is not a concern.
-  let index = 0;
-  const idx = new Map<string, number>();
-  const low = new Map<string, number>();
-  const onStack = new Set<string>();
-  const stack: string[] = [];
-  const componentOf = new Map<string, number>();
-  const components: string[][] = [];
-  const strong = (id: string): void => {
-    idx.set(id, index);
-    low.set(id, index);
-    index++;
-    stack.push(id);
-    onStack.add(id);
-    for (const dep of edgesOf(byId.get(id)!).sort()) {
-      if (!idx.has(dep)) {
-        strong(dep);
-        low.set(id, Math.min(low.get(id)!, low.get(dep)!));
-      } else if (onStack.has(dep)) {
-        low.set(id, Math.min(low.get(id)!, idx.get(dep)!));
-      }
-    }
-    if (low.get(id) === idx.get(id)) {
-      const comp: string[] = [];
-      let w: string;
-      do {
-        w = stack.pop()!;
-        onStack.delete(w);
-        componentOf.set(w, components.length);
-        comp.push(w);
-      } while (w !== id);
-      components.push(comp.sort());
-    }
-  };
-  for (const id of [...byId.keys()].sort()) if (!idx.has(id)) strong(id);
-  const inCycle = (a: string, b: string) => componentOf.get(a) === componentOf.get(b) && a !== b;
+  // Two sets of strongly connected components. Over EVERY edge, for the
+  // order: an optional dependency still starts first when it can. Over
+  // REQUIRED edges only, for blocking: a cycle that an optional use closes
+  // can be started (p optionally uses q, q requires p: p, then q), and
+  // blocking q for it would stop a plugin over a use it never needed.
+  const all = stronglyConnected([...byId.keys()], (id) => edgesOf(byId.get(id)!));
+  const required = stronglyConnected([...byId.keys()], (id) => requiredEdgesOf(byId.get(id)!));
+  const { componentOf, components } = all;
+  const sameComponent = (scc: typeof all, a: string, b: string) => a !== b && scc.componentOf.get(a) === scc.componentOf.get(b);
 
   // Topological order over the components (Kahn), the ready set ordered by
   // each component's smallest id.
@@ -348,7 +321,7 @@ export function resolvePluginDependencies(nodes: readonly PluginDependencyNode[]
   while (ready.length) {
     ready.sort((a, b) => components[a]![0]!.localeCompare(components[b]![0]!));
     const c = ready.shift()!;
-    order.push(...components[c]!);
+    order.push(...requiredFirst(components[c]!));
     for (const u of compUsers[c]!) if (--waiting[u]! === 0) ready.push(u);
   }
 
@@ -376,11 +349,38 @@ export function resolvePluginDependencies(nodes: readonly PluginDependencyNode[]
   for (const list of dependents.values()) list.sort();
   return { order, dependencies, blocked, dependents };
 
+  /**
+   * One component's members in an order that starts each after what it
+   * REQUIRES (ties by id). Only an optional use closes the loop, so this
+   * always exists — except on a required cycle, whose members are blocked
+   * and go in id order.
+   */
+  function requiredFirst(members: string[]): string[] {
+    if (members.length === 1) return members;
+    const inside = new Set(members);
+    const needs = new Map(members.map((m) => [m, new Set(requiredEdgesOf(byId.get(m)!).filter((d) => inside.has(d)))]));
+    const out: string[] = [];
+    while (out.length < members.length) {
+      const next = members.find((m) => !out.includes(m) && [...needs.get(m)!].every((d) => out.includes(d)));
+      if (!next) return [...out, ...members.filter((m) => !out.includes(m))];
+      out.push(next);
+    }
+    return out;
+  }
+
   function verdict(node: PluginDependencyNode, depId: string, spec: PluginDependencySpec): { state: PluginDependencyState; detail: string } {
     const p = byId.get(depId);
     if (depId === node.id) return { state: "cycle", detail: `"${node.id}" cannot depend on itself` };
     if (!p) return { state: "missing", detail: `${depId} is not installed` };
-    if (inCycle(node.id, depId)) return { state: "cycle", detail: `dependency cycle: ${cyclePath(node.id, depId)}` };
+    if (!spec.optional && sameComponent(required, node.id, depId)) {
+      return { state: "cycle", detail: `dependency cycle: ${cyclePath(node.id, depId, true)}` };
+    }
+    // An optional use that closes a loop is the one that gives: the other
+    // side starts after this plugin, so it is never there to use at start.
+    // Reported, and — being optional — it blocks nothing.
+    if (spec.optional && sameComponent(all, node.id, depId)) {
+      return { state: "cycle", detail: `dependency cycle: ${cyclePath(node.id, depId, false)} (an optional use, so ${node.id} starts without it)` };
+    }
     if (node.builtin && !p.builtin) {
       return { state: "incompatible", detail: `${depId} is not built in, and a built-in plugin can only depend on built-in plugins` };
     }
@@ -403,17 +403,19 @@ export function resolvePluginDependencies(nodes: readonly PluginDependencyNode[]
 
   /**
    * `a → b → … → a`: the shortest way back to `from` once it depends on `to`
-   * (breadth-first over dependency edges inside their shared component).
+   * (breadth-first over dependency edges — required ones only, when it is a
+   * required cycle being named — inside their shared component).
    */
-  function cyclePath(from: string, to: string): string {
-    const comp = componentOf.get(from);
+  function cyclePath(from: string, to: string, requiredOnly: boolean): string {
+    const scc = requiredOnly ? required : all;
+    const comp = scc.componentOf.get(from);
     const prev = new Map<string, string | null>([[to, null]]);
     const queue = [to];
     while (queue.length) {
       const cur = queue.shift()!;
       if (cur === from) break;
-      for (const next of edgesOf(byId.get(cur)!).sort()) {
-        if (componentOf.get(next) !== comp || prev.has(next)) continue;
+      for (const next of (requiredOnly ? requiredEdgesOf : edgesOf)(byId.get(cur)!).sort()) {
+        if (scc.componentOf.get(next) !== comp || prev.has(next)) continue;
         prev.set(next, cur);
         queue.push(next);
       }
@@ -423,6 +425,52 @@ export function resolvePluginDependencies(nodes: readonly PluginDependencyNode[]
     for (let cur: string | null | undefined = from; cur != null; cur = prev.get(cur)) back.push(cur);
     return [from, ...back.reverse()].join(" → ");
   }
+}
+
+/**
+ * Strongly connected components (Tarjan) of the graph `ids` / `edges`. Small
+ * graphs — a handful of plugins — so recursion depth is not a concern.
+ * Members of each component are sorted; components come out in Tarjan's order.
+ */
+function stronglyConnected(
+  ids: readonly string[],
+  edges: (id: string) => string[],
+): { componentOf: Map<string, number>; components: string[][] } {
+  let index = 0;
+  const idx = new Map<string, number>();
+  const low = new Map<string, number>();
+  const onStack = new Set<string>();
+  const stack: string[] = [];
+  const componentOf = new Map<string, number>();
+  const components: string[][] = [];
+  const strong = (id: string): void => {
+    idx.set(id, index);
+    low.set(id, index);
+    index++;
+    stack.push(id);
+    onStack.add(id);
+    for (const dep of edges(id).sort()) {
+      if (!idx.has(dep)) {
+        strong(dep);
+        low.set(id, Math.min(low.get(id)!, low.get(dep)!));
+      } else if (onStack.has(dep)) {
+        low.set(id, Math.min(low.get(id)!, idx.get(dep)!));
+      }
+    }
+    if (low.get(id) === idx.get(id)) {
+      const comp: string[] = [];
+      let w: string;
+      do {
+        w = stack.pop()!;
+        onStack.delete(w);
+        componentOf.set(w, components.length);
+        comp.push(w);
+      } while (w !== id);
+      components.push(comp.sort());
+    }
+  };
+  for (const id of [...ids].sort()) if (!idx.has(id)) strong(id);
+  return { componentOf, components };
 }
 
 /** "needs remote-host, which is switched off" — the blocked row's sentence. */

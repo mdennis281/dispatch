@@ -345,3 +345,32 @@ describe("waiting for terminal backends", () => {
     await all;
   });
 });
+
+describe("shutdown hooks", () => {
+  it("run a consumer's before what it uses — even through a plugin with no hook — and unrelated ones alongside", async () => {
+    const base = await paths();
+    await writePlugin(base.configDir, "aaa-consumer", { dependencies: "  zzz-mid:\n    uses: [m@1]" });
+    await writePlugin(base.configDir, "zzz-mid", { provides: "  m: [1]", dependencies: "  zzz-provider:\n    uses: [b@1]" });
+    await writePlugin(base.configDir, "zzz-provider", { provides: "  b: [1]" });
+    await writePlugin(base.configDir, "mmm-plain");
+    const log: string[] = [];
+    const h = await host(base, {
+      "aaa-consumer": logged("aaa-consumer", log, {
+        onShutdown: async () => {
+          log.push("aaa-consumer:start");
+          await sleep(60);
+          log.push("aaa-consumer:end");
+        },
+      }),
+      "zzz-mid": logged("zzz-mid", log, { onShutdown: undefined }),
+      "zzz-provider": logged("zzz-provider", log, { onShutdown: () => void log.push("zzz-provider:start") }),
+      "mmm-plain": logged("mmm-plain", log, { onShutdown: () => void log.push("mmm-plain:start") }),
+    });
+    log.length = 0;
+    await h.svc.shutdown("stop");
+    // The provider's hook waits for the consumer's, which still had it to call.
+    expect(log.indexOf("zzz-provider:start")).toBeGreaterThan(log.indexOf("aaa-consumer:end"));
+    // An unrelated plugin does not wait for anyone.
+    expect(log.indexOf("mmm-plain:start")).toBeLessThan(log.indexOf("aaa-consumer:end"));
+  });
+});

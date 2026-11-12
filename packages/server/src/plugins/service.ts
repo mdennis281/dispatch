@@ -696,9 +696,11 @@ export class PluginService implements PluginContributionSource {
 
   /**
    * Run `onShutdown` for each record that is active, has one, and has not had
-   * it this activation — all IN PARALLEL on one shared budget. An overrun
-   * aborts the signal, is logged by plugin, and is otherwise ignored: the
-   * caller (a Restart, a toggle) carries on regardless. Never rejects.
+   * it this activation — on one shared budget, IN PARALLEL except where one
+   * uses another: a plugin's hook waits for the hooks of every plugin that
+   * depends on it (`shutdownWaves`). An overrun aborts the signal, is logged
+   * by plugin, and is otherwise ignored: the caller (a Restart, a toggle)
+   * carries on regardless. Never rejects.
    */
   private async runShutdownHooks(recs: PluginRecord[], reason: PluginShutdownReason): Promise<void> {
     const targets = recs.filter((r) => r.phase === "active" && !r.shutDown && r.module?.onShutdown);
@@ -716,31 +718,70 @@ export class PluginService implements PluginContributionSource {
     const timer = setTimeout(() => ac.abort(new Error(`onShutdown budget of ${budget}ms exceeded`)), budget);
     timer.unref?.();
     try {
-      await Promise.all(
-        targets.map(async (rec) => {
-          const mod = rec.module!;
-          try {
-            await withBudget(
-              Promise.resolve().then(() => mod.onShutdown!({ reason, deadline, signal: ac.signal })),
-              budget,
-              `onShutdown(${reason})`,
-            );
-          } catch (err) {
-            if (err instanceof BudgetExceeded) {
-              // Not a crash — a plugin that did not return in time. Named in
-              // the log so the owner can tell whose hook made a restart slow.
-              this.log(`[dispatch] plugin "${rec.id}" onShutdown(${reason}) overran its ${budget / 1000}s budget — moving on without it`);
-            } else {
-              this.fault(`plugin "${rec.id}" onShutdown(${reason}) failed`, err);
+      for (const wave of this.shutdownWaves(targets)) {
+        await Promise.all(
+          wave.map(async (rec) => {
+            const mod = rec.module!;
+            try {
+              await withBudget(
+                Promise.resolve().then(() => mod.onShutdown!({ reason, deadline, signal: ac.signal })),
+                // What is LEFT of the shared budget: a later wave is not given
+                // more time because an earlier one used some.
+                Math.max(0, deadline - Date.now()),
+                `onShutdown(${reason})`,
+              );
+            } catch (err) {
+              if (err instanceof BudgetExceeded) {
+                // Not a crash — a plugin that did not return in time. Named in
+                // the log so the owner can tell whose hook made a restart slow.
+                this.log(`[dispatch] plugin "${rec.id}" onShutdown(${reason}) overran its ${budget / 1000}s budget — moving on without it`);
+              } else {
+                this.fault(`plugin "${rec.id}" onShutdown(${reason}) failed`, err);
+              }
             }
-          }
-        }),
-      );
+          }),
+        );
+      }
     } finally {
       clearTimeout(timer);
       // Anything still running past this point is told to stop.
       if (!ac.signal.aborted) ac.abort(new Error("shutdown pass finished"));
     }
+  }
+
+  /**
+   * `recs` grouped for {@link runShutdownHooks}: each wave after every wave
+   * holding a plugin that depends on it (required or optional), so a
+   * consumer's hook — proxmox-terminal releasing its machines — still finds
+   * the provider it calls on its feet. Plugins with no dependency between
+   * them share a wave, so a shutdown is no slower than before for them.
+   * Depth is measured over every RUNNING plugin, hook or not: in A → B → C
+   * with no hook on B, A's hook may still reach C through B.
+   */
+  private shutdownWaves(recs: PluginRecord[]): PluginRecord[][] {
+    const running = [...this.records.values()].filter((r) => r.phase === "active");
+    const depth = new Map<string, number>();
+    const visiting = new Set<string>();
+    // How many running plugins stand on top of this one, at most.
+    const depthOf = (rec: PluginRecord): number => {
+      const known = depth.get(rec.id);
+      if (known !== undefined) return known;
+      // An optional use that closes a loop: count it once, never forever.
+      if (visiting.has(rec.id)) return 0;
+      visiting.add(rec.id);
+      let d = 0;
+      for (const r of running) {
+        if (r.id !== rec.id && r.manifest?.dependencies && Object.hasOwn(r.manifest.dependencies, rec.id)) {
+          d = Math.max(d, depthOf(r) + 1);
+        }
+      }
+      visiting.delete(rec.id);
+      depth.set(rec.id, d);
+      return d;
+    };
+    const waves: PluginRecord[][] = [];
+    for (const rec of recs) (waves[depthOf(rec)] ??= []).push(rec);
+    return waves.filter((w) => w.length);
   }
 
   /**

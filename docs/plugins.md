@@ -295,9 +295,11 @@ is `blocked`. It never activates this process, its `error` names the dependency
 and why, and it contributes nothing — no skills, instructions, modes, MCP
 servers, routes or client bundle — because what it contributes may lean on what
 is missing. Every plugin on a cycle of required dependencies is blocked, with
-the cycle named. A built-in may depend only on built-ins. An OPTIONAL
-dependency never blocks: the plugin starts without it and its row says what is
-missing.
+the cycle named. A loop that an OPTIONAL use closes is not one: the optional
+use is the one that gives — its row reads `cycle`, it blocks nothing, and the
+plugin it points at starts after it. A built-in may depend only on built-ins.
+An OPTIONAL dependency never blocks: the plugin starts without it and its row
+says what is missing.
 
 **Switching a provider off** (`PUT /api/plugins/:id/enabled`):
 
@@ -318,8 +320,9 @@ something else. Uninstall them first, or switch the provider off. An uninstall
 is also refused while the plugin is still starting at boot — it would run none
 of its hooks.
 
-**Shutdown.** `dispose()` deactivates in reverse dependency order, a consumer
-before what it uses. Chats waiting on a terminal backend or a provider at boot
+**Shutdown.** `onShutdown` hooks run a consumer's before the hook of anything it
+uses, all on the one shared budget (see "Cleanup lifecycle"), and `dispose()`
+then deactivates in reverse dependency order, a consumer before what it uses. Chats waiting on a terminal backend or a provider at boot
 (`activationSettled`) are released as soon as every plugin that could register
 one has had its turn, not after everything installed.
 
@@ -482,7 +485,9 @@ export default definePlugin({
 | `uninstall` | Settings → Plugins → Uninstall | destroy EVERYTHING — nothing will ever reconcile it again |
 
 On a server shutdown every active plugin's hook runs **in parallel** on one
-shared budget, `PLUGIN_SHUTDOWN_BUDGET_MS` (5 s), alongside the shell reap and
+shared budget, `PLUGIN_SHUTDOWN_BUDGET_MS` (5 s) — except that a plugin's hook
+waits for those of the plugins that depend on it (see "Dependencies"), and
+gets what is left of the budget — alongside the shell reap and
 before `app.close()` — it is `installShutdown`, not `dispose()`, that asks,
 because only it knows a restart from a stop. Past the budget `signal` aborts,
 the host logs `plugin "<id>" onShutdown(<reason>) overran its 5s budget —

@@ -162,13 +162,32 @@ describe("resolvePluginDependencies", () => {
     expect(r.blocked.has("a") && r.blocked.has("b") && r.blocked.has("c")).toBe(true);
     // Downstream of a cycle: blocked, because what it needs is.
     expect(r.blocked.get("after")).toContain("a is blocked");
-    // An optional edge closing a cycle is reported but blocks nobody who has only that one.
-    expect(r.dependencies.get("p")![0]!.state).toBe("cycle");
+    // An optional edge closing a cycle is the one that gives: it is reported,
+    // and blocks nobody. `q` REQUIRES `p`, and without the optional edge back
+    // there is no cycle — so `p` starts, then `q`.
+    expect(r.dependencies.get("p")![0]).toMatchObject({
+      state: "cycle",
+      detail: "dependency cycle: p → q → p (an optional use, so p starts without it)",
+    });
     expect(r.blocked.has("p")).toBe(false);
-    expect(r.blocked.has("q")).toBe(true);
+    expect(r.blocked.has("q")).toBe(false);
+    expect(r.dependencies.get("q")![0]!.state).toBe("ok");
+    expect(r.order.indexOf("p")).toBeLessThan(r.order.indexOf("q"));
     // Every node is still in the order exactly once.
     expect([...r.order].sort()).toEqual(["a", "after", "b", "c", "p", "q"]);
     expect(r.order.indexOf("after")).toBeGreaterThan(r.order.indexOf("a"));
+  });
+
+  it("inside a loop an optional use closes, starts each plugin after what it requires — not in id order", () => {
+    const r = resolvePluginDependencies([
+      // `zz-host` sorts last but is required by `aa-term`; `zz-host` only likes `aa-term` back.
+      node("zz-host", { provides: { m: [1] }, dependencies: { "aa-term": { uses: ["t@1"], optional: true } } }),
+      node("aa-term", { provides: { t: [1] }, dependencies: { "zz-host": { uses: ["m@1"] } } }),
+    ]);
+    expect(r.order).toEqual(["zz-host", "aa-term"]);
+    expect(r.blocked.size).toBe(0);
+    expect(r.dependencies.get("aa-term")![0]!.state).toBe("ok");
+    expect(r.dependencies.get("zz-host")![0]!.state).toBe("cycle");
   });
 
   it("lets a built-in depend only on built-ins", () => {
