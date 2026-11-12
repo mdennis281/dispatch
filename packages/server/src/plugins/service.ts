@@ -71,6 +71,12 @@ import {
   resolvePluginDependencies,
   type PluginDependencyInfo,
   type PluginDependencyResolution,
+  openPluginLink,
+  pluginLinkClosedReason,
+  PluginRevokedError,
+  type PluginDependent,
+  type PluginExportFactory,
+  type PluginMembrane,
 } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import type { PluginContext } from "@dispatch/shared";
@@ -165,7 +171,34 @@ interface PluginRecord extends DiscoveredPlugin {
   reconciling?: Promise<void>;
   /** Snapshot of the plugin's static contributions, read once at `load()`. */
   contributions: PluginContributions;
+  /** What it serves (`ctx.provides.serve`), by `name@major`. Accepted only while its `activate` runs. */
+  exports?: Map<string, PluginExportFactory>;
+  /** Its `activate` resolved: `exports` is final, and a declared export missing from it reads `not-served`. */
+  exportsSealed?: boolean;
+  /**
+   * It is going down and its optional dependents have been told (`onLost`):
+   * `ctx.dependencies.get` of it hands out nothing new from here on, though
+   * the links already open stay open until its teardown is done.
+   */
+  withdrawing?: boolean;
+  /** This activation's `ctx.dependencies.onLost` listeners, by provider id. */
+  lostListeners?: Map<string, Set<() => unknown>>;
 }
+
+/** One consumer's link to one export of one provider. */
+interface PluginLink {
+  provider: string;
+  caller: string;
+  use: string;
+  membrane: PluginMembrane;
+  /** The provider's API as the consumer holds it — the same object for every `get` until the link closes. */
+  api: unknown;
+  /** `caller.signal`. */
+  abort: AbortController;
+}
+
+/** A provider that came up serving nothing. */
+const NOTHING_SERVED: ReadonlySet<string> = new Set();
 
 export interface PluginServiceOptions {
   /** The config root — plugins live under `<configDir>/plugins/`. */
@@ -285,6 +318,8 @@ export class PluginService implements PluginContributionSource {
    * activation ORDER is taken from the one computed at `load()`.
    */
   private resolution: PluginDependencyResolution = { order: [], dependencies: new Map(), blocked: new Map(), dependents: new Map() };
+  /** Open consumer → provider links, by provider, caller and `name@major`. */
+  private readonly links = new Map<string, PluginLink>();
   /**
    * Settles once no plugin that could still register a PROVIDER is waiting to
    * activate. Created up front rather than derived from `activating`, which
@@ -458,6 +493,7 @@ export class PluginService implements PluginContributionSource {
       return liveDependencyState(
         d,
         p && { phase: p.phase, enabled: p.enabled, error: p.phase === "error" ? p.activationError : p.blockedReason },
+        p?.exportsSealed ? (p.exports ?? NOTHING_SERVED) : undefined,
       );
     });
   }
@@ -599,11 +635,17 @@ export class PluginService implements PluginContributionSource {
     const manifest = rec.manifest!;
     rec.phase = "activating";
     rec.activationError = undefined;
+    rec.exports = undefined;
+    rec.exportsSealed = false;
+    rec.withdrawing = false;
+    rec.lostListeners = undefined;
     const log = this.loggerFor(rec.id);
     if (!manifest.server) {
       // Contributions-only or client-only: nothing to run on this side —
       // except the processes it declared, which start on activation whether
-      // or not there is a module to call.
+      // or not there is a module to call. Nothing to serve with, either: a
+      // `provides` here reads `not-served` to whatever uses it.
+      rec.exportsSealed = true;
       rec.phase = "active";
       await this.autostartProcesses(rec, log);
       return;
@@ -628,6 +670,7 @@ export class PluginService implements PluginContributionSource {
           setSettings: (patch) => this.writeSettings(rec, (stored) => applySettingsPatch(stored, patch)),
           processes: this.processHost?.for(rec.id),
           runner: this.runnerView,
+          ...this.dependencyBindings(rec, owned),
         },
         owned,
       );
@@ -641,10 +684,14 @@ export class PluginService implements PluginContributionSource {
         // wait for an activate in flight (a hung one would hold the shutdown
         // for its whole budget), so the late arrival tears itself down here.
         this.teardown(rec);
+        this.closeLinks(rec);
         await this.stopProcesses(rec);
         rec.phase = "inactive";
         return;
       }
+      // What it serves is fixed from here: its dependents start after this,
+      // and "what remote-host offers" must be a fact by then, not a race.
+      rec.exportsSealed = true;
       rec.phase = "active";
       log.info(`active (v${manifest.version})`);
       // Detached: a reconcile talks to whatever the plugin manages remotely and
@@ -654,16 +701,23 @@ export class PluginService implements PluginContributionSource {
     } catch (err) {
       rec.phase = "error";
       rec.activationError = describe(err);
+      // A half-activated provider serves nothing: an export it registered
+      // before throwing may close over state that never finished.
+      rec.exports = undefined;
       this.fault(`plugin "${rec.id}" failed to activate`, err);
       // Whatever it registered before throwing is as dead as the plugin —
-      // its processes included.
+      // its processes included, and any link it opened to a dependency.
       this.teardown(rec);
+      this.closeLinks(rec);
       await this.stopProcesses(rec);
     }
   }
 
   private async deactivateOne(rec: PluginRecord, reason?: PluginShutdownReason): Promise<void> {
     rec.reconcileAbort?.abort(new Error("the plugin is going down"));
+    // Its optional dependents hear first, while everything still works: they
+    // stop calling it and switch to whatever they do without it.
+    if (rec.phase === "active") await this.notifyLost(rec);
     if (reason) await this.runShutdownHooks([rec], reason);
     if (rec.phase === "active" && rec.module?.deactivate) {
       try {
@@ -676,8 +730,175 @@ export class PluginService implements PluginContributionSource {
     }
     this.teardown(rec);
     await this.settled(rec);
+    // Only now: a backend's `dispose()`, or the shells its teardown ended
+    // reporting their `exit`, may still have been talking over a link.
+    this.closeLinks(rec);
     await this.stopProcesses(rec);
     rec.phase = "inactive";
+  }
+
+  /**
+   * `ctx.dependencies` and `ctx.provides` for one activation of `rec`. Each
+   * member checks it belongs to the CURRENT activation, so a context kept
+   * past its plugin's teardown opens nothing.
+   */
+  private dependencyBindings(rec: PluginRecord, owned: OwnedResources): Pick<PluginContextDeps, "dependencies" | "provides"> {
+    const manifest = rec.manifest!;
+    const current = () => rec.owned === owned && !!rec.module;
+    const out: Pick<PluginContextDeps, "dependencies" | "provides"> = {};
+    const declared = manifest.dependencies ?? {};
+    if (Object.keys(declared).length) {
+      const spec = (id: string) => {
+        if (!Object.hasOwn(declared, id)) {
+          throw new Error(`"${rec.id}" does not declare a dependency on "${id}" in its plugin.yaml`);
+        }
+        return declared[id]!;
+      };
+      out.dependencies = {
+        get: <T>(id: string, name: string, major: number): T | undefined => {
+          const use = `${name}@${major}`;
+          // The consent card listed these and nothing else.
+          if (!spec(id).uses.includes(use)) {
+            throw new Error(`"${rec.id}" does not list ${use} under dependencies.${id}.uses in its plugin.yaml`);
+          }
+          if (!current()) return undefined;
+          return this.linkFor(rec, id, use) as T | undefined;
+        },
+        state: (id) => {
+          spec(id);
+          const d = this.dependencyInfo(rec).find((x) => x.id === id);
+          return d && { ...d, uses: [...d.uses] };
+        },
+        onLost: (id, fn) => {
+          spec(id);
+          if (typeof fn !== "function") throw new TypeError("onLost needs a function");
+          if (!current()) return () => {};
+          const byProvider = (rec.lostListeners ??= new Map());
+          const fns = byProvider.get(id) ?? new Set();
+          byProvider.set(id, fns);
+          fns.add(fn);
+          return () => {
+            fns.delete(fn);
+          };
+        },
+      };
+    }
+    const provided = manifest.provides ?? {};
+    if (Object.keys(provided).length) {
+      out.provides = {
+        serve: (name, major, factory) => {
+          const use = `${name}@${major}`;
+          if (!provided[name]?.includes(major)) {
+            throw new Error(`"${rec.id}" does not declare provides.${name}: [${major}] in its plugin.yaml`);
+          }
+          if (typeof factory !== "function") throw new TypeError(`serve("${name}", ${major}) needs a factory function`);
+          if (rec.owned !== owned || rec.phase !== "activating" || rec.exportsSealed) {
+            throw new Error(`serve() is accepted only while activate() runs — ${use} was not served`);
+          }
+          const exports = (rec.exports ??= new Map());
+          if (exports.has(use)) throw new Error(`${use} is already served`);
+          exports.set(use, factory as PluginExportFactory);
+        },
+        dependents: () => this.dependentsView(rec.id),
+      };
+    }
+    return out;
+  }
+
+  /**
+   * The API `provider` serves as `use`, for `caller` — opened on first use
+   * and the same object after that, until either side goes down. Undefined
+   * whenever it cannot be used RIGHT NOW: judged live, never from the boot
+   * picture, so a provider switched off a moment ago is never handed out.
+   */
+  private linkFor(caller: PluginRecord, providerId: string, use: string): unknown {
+    const provider = this.records.get(providerId);
+    // Not `shutDown`: a server stop sets that on every plugin before the first
+    // hook runs, and a consumer's `onShutdown` — which runs BEFORE its
+    // provider's — must still be able to reach it. `withdrawing` is set when
+    // the provider's own turn to go down comes.
+    if (!provider?.manifest || provider.phase !== "active" || provider.withdrawing) return undefined;
+    if (this.dependencyInfo(caller).find((d) => d.id === providerId)?.state !== "ok") return undefined;
+    const factory = provider.exports?.get(use);
+    if (!factory) return undefined;
+    const key = `${providerId}\0${caller.id}\0${use}`;
+    const open = this.links.get(key);
+    if (open && !open.membrane.revoked) return open.api;
+    const abort = new AbortController();
+    const { api, membrane } = openPluginLink({
+      provider: { id: provider.id, name: provider.manifest.name },
+      // From the consumer's VALIDATED manifest and its grant, never from
+      // anything the consumer passes: a provider gates on this.
+      caller: {
+        id: caller.id,
+        name: caller.manifest!.name,
+        version: caller.manifest!.version,
+        capabilities: grantedPluginCapabilities(caller.manifest),
+      },
+      export: use,
+      factory,
+      signal: abort.signal,
+    });
+    const link: PluginLink = { provider: provider.id, caller: caller.id, use, membrane, api, abort };
+    this.links.set(key, link);
+    return link.api;
+  }
+
+  /**
+   * Close every link `rec` is in, as consumer or provider: the API's methods
+   * start throwing `revoked`, everything else that crossed goes inert, and
+   * the provider's `caller.signal` aborts so it can end what it made for
+   * that caller. Never undone; a later `get` opens a fresh link if both are
+   * up again (they cannot be in this process — there is no hot reload).
+   */
+  private closeLinks(rec: PluginRecord): void {
+    rec.lostListeners = undefined;
+    const party = (id: string) => ({ id, name: this.records.get(id)?.manifest?.name ?? id });
+    for (const [key, link] of this.links) {
+      if (link.provider !== rec.id && link.caller !== rec.id) continue;
+      this.links.delete(key);
+      const why = pluginLinkClosedReason(link.provider === rec.id ? "provider" : "caller", party(link.provider), party(link.caller));
+      link.membrane.revoke(why);
+      link.abort.abort(new PluginRevokedError(link.provider, why));
+    }
+  }
+
+  /**
+   * `provider` is going down: tell every running plugin that asked
+   * (`ctx.dependencies.onLost`), and stop handing it out. Bounded like the
+   * rest of a deactivation; a listener that throws or hangs is reported and
+   * left behind.
+   */
+  private async notifyLost(provider: PluginRecord): Promise<void> {
+    provider.withdrawing = true;
+    const calls: Array<Promise<unknown>> = [];
+    for (const r of this.records.values()) {
+      if (r.id === provider.id || (r.phase !== "active" && r.phase !== "activating")) continue;
+      for (const fn of r.lostListeners?.get(provider.id) ?? []) {
+        calls.push(
+          Promise.resolve()
+            .then(() => fn())
+            .catch((err: unknown) => this.fault(`plugin "${r.id}" onLost("${provider.id}") failed`, err)),
+        );
+      }
+    }
+    if (!calls.length) return;
+    await withBudget(Promise.allSettled(calls), this.deactivateBudgetMs, "onLost").catch((err: unknown) => {
+      this.fault(`plugin "${provider.id}" dependents' onLost did not finish`, err);
+    });
+  }
+
+  /** `ctx.provides.dependents()` — installed, any state; an unreadable manifest is listed too, with no `uses`. */
+  private dependentsView(id: string): PluginDependent[] {
+    return [...this.records.values()]
+      .filter((r) => r.id !== id && (!r.manifest || Object.hasOwn(r.manifest.dependencies ?? {}, id)))
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .map((r) => ({
+        id: r.id,
+        installed: true as const,
+        status: this.statusOf(r),
+        uses: [...(r.manifest?.dependencies?.[id]?.uses ?? [])],
+      }));
   }
 
   /**
@@ -719,6 +940,9 @@ export class PluginService implements PluginContributionSource {
     timer.unref?.();
     try {
       for (const wave of this.shutdownWaves(targets)) {
+        // This wave's plugins are going down; every plugin that uses them has
+        // had its hook. From here they hand out no new links.
+        for (const rec of wave) rec.withdrawing = true;
         await Promise.all(
           wave.map(async (rec) => {
             const mod = rec.module!;

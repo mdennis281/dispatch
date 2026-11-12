@@ -322,9 +322,102 @@ of its hooks.
 
 **Shutdown.** `onShutdown` hooks run a consumer's before the hook of anything it
 uses, all on the one shared budget (see "Cleanup lifecycle"), and `dispose()`
-then deactivates in reverse dependency order, a consumer before what it uses. Chats waiting on a terminal backend or a provider at boot
+then deactivates in reverse dependency order, a consumer before what it uses.
+Chats waiting on a terminal backend or a provider at boot
 (`activationSettled`) are released as soon as every plugin that could register
 one has had its turn, not after everything installed.
+
+#### Calling it: `ctx.provides` and `ctx.dependencies`
+
+```ts
+// provider (remote-host), during activate
+ctx.provides!.serve("machines", 1, (caller) => makeMachinesApi(caller));
+
+// consumer (proxmox-terminal)
+const machines = ctx.dependencies?.get<MachinesV1>("remote-host", "machines", 1); // undefined unless usable NOW
+ctx.dependencies?.state("remote-host");           // { state, detail, optional, uses }
+ctx.dependencies?.onLost("remote-host", () => …); // an optional dependency is going down
+```
+
+Each member exists only when the manifest declares its key, and is absent on
+hosts older than it. Feature-detect.
+
+- **`serve(name, major, factory)`** is accepted only while `activate` runs.
+  When it resolves the exports are sealed, and a declared export never served
+  reads `not-served`, which blocks whatever requires it. `factory` runs once per
+  consumer, on that consumer's first `get`. It must return the API object
+  synchronously, and is handed a frozen `PluginCaller`:
+  - `id`, `name`, `version` and `capabilities`: what the consumer was GRANTED,
+    taken from its validated manifest, so the provider can gate on them
+    (remote-host refuses a caller without `terminals`);
+  - `signal`, which aborts when either side goes down. End what you made for
+    that caller then: a shell that finishes spawning after the abort is never
+    delivered, so kill it.
+- **`get(id, name, major)`** throws for an export the manifest does not list
+  under `uses`: the owner consented to those and nothing else. Otherwise it
+  is checked live on every call, and returns `undefined` while the provider is
+  missing, off, failed, blocked, going down, or did not serve that export. The
+  API object is the same on every call until the link closes.
+- **`dependents()`** lists every installed plugin that declares a dependency
+  on this one, in any state. A plugin whose manifest cannot be read right now
+  is listed too, with no `uses`: it may be mid-update, so its absence from the
+  list is never proof it has gone.
+
+**The membrane.** What crosses between the two goes through shared
+`createPluginMembrane` (`packages/shared/src/plugin-membrane.ts`). Functions,
+and the plain objects and arrays around them, are wrapped in both directions,
+up to 4 levels deep. Class instances, streams, Buffers, Dates, Maps and
+AbortSignals pass through untouched, because a Proxy breaks a stream's `pipe`
+and `#private` fields. A contract that needs something revocable makes it a
+plain object of functions. Methods run against the real object, so `this`
+works, and a sync method stays sync.
+
+**When the link closes** (either side went down):
+
+- The API's own methods throw `PluginRevokedError` (`code: "revoked"`), so the
+  consumer finds out at its entry points.
+- Everything else that crossed goes inert: it does nothing and returns
+  `undefined`. That covers a handle, a callback either way, and a listener core
+  passed in. A throw there would land in code that never expected one: core's
+  `attach()` has no try/catch, and a throw inside a provider's `emit` from a
+  socket handler is uncaught. Data properties stay readable.
+- A call still in flight rejects with `PluginRevokedError`, and its result is
+  dropped.
+
+The order matters. Links close only after a plugin's teardown has settled,
+including the `dispose()` of a backend it registered, so the exits its shells
+report still reach core. Optional dependents get `onLost` first, before the
+provider's `onShutdown`, while everything still works. A required dependent is
+already down by then.
+
+**Errors** cross as `PluginCallError`, which carries:
+
+- `plugin`: whose code threw. That is the provider for its methods and the
+  consumer for its callbacks;
+- `export`;
+- the thrower's own `code`, which is what a contract matches on;
+- message and stack, and nothing else.
+
+There is no `cause`, and a non-Error throwable becomes `"<name> threw a non-Error
+(<type>)"`: key material crosses here, and the crash log serialises whatever
+it is given. The membrane never logs, serialises or stores anything that
+crosses it. Match errors with the SDK's `isPluginRevokedError` /
+`isPluginCallError`, never `instanceof`, which fails across two bundled copies
+of a class.
+
+**Testing.** The SDK has two ways in:
+
+- `createTestContext({ dependencies: { "remote-host": { machines: { 1: fakeApi } } } })`
+  hands the fake out through the same link code the host uses. A function
+  value is the factory, and `null` declares an export nobody serves.
+  `t.revoke(id)` and `t.lose(id)` play a dependency going away.
+- `createTestContext({ provides: { machines: [1] } })` collects `serve` in
+  `t.served`. `t.callAs(callerId, "machines", 1)` calls the export as a given
+  consumer would.
+
+`createTestHost([{ manifest, module }, …])` runs real modules together: in the
+host's resolver order, with sealing, `disable` cascades and `stop` waves.
+Use it for the contract between a provider and its consumer.
 
 ### Plugin settings
 
@@ -541,7 +634,8 @@ So `onChatDeleted` must resolve only once the destroy was **accepted**, reject
 when it was not, and be idempotent: a retry may arrive for a chat already
 cleaned up, or for one this backend never served.
 
-**Testing it.** `createTestContext()` plays the host's side:
+**Testing it.** `createTestContext()` plays the host's side (two plugins that
+depend on each other: `createTestHost`, see "Dependencies"):
 `t.lifecycle.shutdown(mod, reason, { budgetMs? })` calls `onShutdown` then
 `deactivate` and returns `{ overran, error?, elapsedMs }`;
 `t.lifecycle.reconcile(mod, chats)` calls `reconcile`; `t.terminals.chatDeleted`
