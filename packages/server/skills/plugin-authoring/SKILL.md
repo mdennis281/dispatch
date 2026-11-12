@@ -1,6 +1,6 @@
 ---
 name: plugin-authoring
-description: Build, change or debug a Dispatch plugin, or connect an outside program to Dispatch. Use whenever the task is a plugin (a server module under <configDir>/plugins/<id>/, a client bundle in the SPA), adding a composer control, a settings section, a right-panel tab, a chat badge, a dictation or TTS engine, contributing a mode / skill / instruction / persona / MCP server / managed process from outside the repo, adding an agent runtime (provider) or a terminal backend (running chats' managed terminals in a container or on another machine), wiring an external bot or connector (integration tokens, scopes, the external MCP mount, the REST surface, outbound webhooks, OAuth as server or client), running `dispatch plugin init|add|link`, or a plugin that is listed as invalid / incompatible / error in Settings → Plugins. Covers `@dispatch/plugin-sdk`, `plugin.yaml`, `PluginContext`, `ClientHost`, `createTestContext`, and verifying on a throwaway instance.
+description: Build, change or debug a Dispatch plugin, or connect an outside program to Dispatch. Use whenever the task is a plugin (a server module under <configDir>/plugins/<id>/, a client bundle in the SPA), adding a composer control, a settings section, a right-panel tab, a chat badge, a dictation or TTS engine, contributing a mode / skill / instruction / persona / MCP server / managed process from outside the repo, adding an agent runtime (provider) or a terminal backend (running chats' managed terminals in a container or on another machine), one plugin calling another's API (`dependencies:` / `provides:`, `ctx.dependencies`, a plugin `blocked` by a dependency), wiring an external bot or connector (integration tokens, scopes, the external MCP mount, the REST surface, outbound webhooks, OAuth as server or client), running `dispatch plugin init|add|link`, or a plugin that is listed as invalid / incompatible / error in Settings → Plugins. Covers `@dispatch/plugin-sdk`, `plugin.yaml`, `PluginContext`, `ClientHost`, `createTestContext`, and verifying on a throwaway instance.
 ---
 
 # Writing a Dispatch plugin
@@ -22,6 +22,7 @@ plugin means restarting Dispatch.**
 | Code that reacts to events, serves routes, talks to chats, keeps state | A **server** plugin | [references/server-api.md](references/server-api.md) |
 | A composer control, settings section, panel tab, chat badge, toast, dictation/TTS engine | A **client** plugin (usually with a server half for anything secret or persistent) | [references/client-host.md](references/client-host.md) |
 | A mode, skill, instruction, persona, MCP server or managed process shipped as a unit | A **contributions-only** plugin | [references/contributions.md](references/contributions.md) |
+| To call another plugin's API, or let others call yours | `dependencies:` / `provides:` in the manifest, `ctx.dependencies` / `ctx.provides` in a server plugin | [references/server-api.md](references/server-api.md) → "Using another plugin" |
 
 Everything else: [manifest.md](references/manifest.md) (every `plugin.yaml` field and
 why the validator refuses what it refuses), [testing.md](references/testing.md) (unit

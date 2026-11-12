@@ -327,6 +327,81 @@ Chats waiting on a terminal backend or a provider at boot
 (`activationSettled`) are released as soon as every plugin that could register
 one has had its turn, not after everything installed.
 
+#### Installing, updating and removing
+
+**Where a dependency may come from** at install, in this order: what is
+installed (any origin), then a member of **the same collection at the same
+sha**, installed with it. Never anywhere else — a manifest never names a URL to
+fetch, because that would let one author pull code in through another's consent
+card. The judgement is shared `judgeInstallDependencies`
+(`packages/shared/src/plugin-dependencies.ts`): the boot resolver run over the
+graph the install would leave.
+
+- **The report** (`PluginInspection`) carries `dependencies` — each with
+  `from` (`installed` / `collection` / `missing`), the resolver's `state` and
+  `detail`, the manifest's `range`, the version `found`, the collection
+  member's `subdir`, and `line`, the consent sentence ("Uses Remote host
+  (remote-host) — its `machines` API v1. Remote host acts on what this plugin
+  hands it.") — plus `provides` / `providesLine` ("Lets other plugins use:
+  `machines` v1.") and `breaks`.
+- **Refused** (`installable: false`, a refusal starting `needs `): a REQUIRED
+  dependency nothing satisfies — absent, out of range, not offering the
+  export, or a collection copy that will not do either (the refusal says
+  what is wrong with that copy). Not refused: a provider that is merely
+  switched off, blocked, failed or not serving — the owner fixes those in
+  place, and the plugin lands blocked until then.
+- **`breaks`** lists installed plugins that work now and would not after this
+  replace (it drops a major they use, or leaves their range).
+  `POST /api/plugins/install` and `POST /api/plugins/:id/update` refuse it
+  (409) unless the body says `allowBreaking: true`; the pane asks the owner to
+  type the plugin's id first. A cached report is judged again on every read, so
+  a provider installed since makes its consumer installable without a re-fetch.
+- **The server's install judges against what is installed only**, never the
+  collection it was picked from: a pair is posted provider first. The pane does
+  that for you — ticking a plugin ticks what it requires from the same
+  collection (locked, "Needed by …") and what it can optionally use
+  ("Recommended", which may be unticked); **Install N** posts providers first,
+  and a provider that fails takes what requires it out of the run. A member's
+  own report's Install bar does the same ("Install with Remote host").
+- **Replace is an atomic swap** (`addPlugin`, `packages/cli/src/core/plugins.ts`):
+  copy to `.<id>.<pid>.tmp`, rename the old entry aside, rename the new one in,
+  then delete the aside — put back if the rename fails. It used to delete the
+  old copy before copying, so a failed copy left no plugin at all: a way round
+  "refuse uninstall of a provider". A linked old entry is unlinked, never
+  emptied. Discovery skips dot-entries, so a boot mid-swap sees one copy.
+- **Update.** A new dependency, a newly used export and a new `provides` entry
+  are escalations, so `auto` never installs them. Neither does it install an
+  update with `breaks`. The background pass checks providers before what uses
+  them, so a consumer's update is judged against the provider it will meet.
+  A consumer update that needs more of its provider than the installed one
+  offers is offered as **Update both**: the provider's own update check and
+  diff first, then the consumer checked again.
+- **Uninstall** is refused while anything uses it (above); the preview's
+  `usedBy` lets the dialog say so before the click.
+- **The scan** warns when the code calls `ctx.dependencies.get` for an export
+  `uses` does not list, or `ctx.provides.serve` for one `provides` does not
+  declare — both throw at run time.
+
+**The CLI** (`packages/cli/src/core/plugin-deps.ts`) uses the same judgement
+over `<configDir>/plugins/`:
+
+- `add <collection> --plugin proxmox-terminal` is refused with "needs
+  remote-host (machines@1): add --plugin plugins/remote-host, or --with-deps".
+  `--with-deps` adds what the picks require from the same collection,
+  transitively and only where nothing installed satisfies it; `--with-deps=all`
+  adds optional ones too. Providers are added first, and each add is judged
+  against what is installed at that moment.
+- A replace that breaks an installed plugin needs `--allow-breaking` (on `add`
+  and `update`); `update` goes provider first.
+- **The CLI cannot see built-in plugins** (they ship in the app payload), and a
+  user plugin may depend on one. So a required dependency that is simply
+  absent is a warning there, not a refusal: the plugin shows `blocked` until it
+  arrives. Everything it can see for certain refuses, as the app does.
+- `list` shows `blocked` with the reason; `disable` names what stops and what
+  runs with less; `remove` is refused while plugins use it, and `--force`
+  removes it anyway and says which are now blocked. The consent lines `add`
+  prints carry the same uses/provides sentences as the app.
+
 #### Calling it: `ctx.provides` and `ctx.dependencies`
 
 ```ts
@@ -648,10 +723,12 @@ rejects when the hook does. The budgets are exported from
 dispatch plugin init <id> [--server|--client|--both] [--name <n>] [--dir <parent>] [--sdk <path>]
 dispatch plugin add <path | git-url | tarball>   validate in the source, copy into plugins/<id>, print the consent summary
         [--plugin <path|id>]... [--all]          pick from a collection (see "Several plugins in one repository")
+        [--with-deps[=all]] [--allow-breaking]   what the picks need from it, provider first (see "Dependencies")
 dispatch plugin link <path>                      junction/symlink a working directory (development)
 dispatch plugin list | enable <id> | disable <id>
 dispatch plugin update [<id>] [--check] [--yes]  follow the recorded source; --yes accepts an update that asks for more
-dispatch plugin remove <id> [--purge] [--data-dir <dir>]
+        [--allow-breaking]                       …and one that breaks a plugin using it
+dispatch plugin remove <id> [--purge] [--data-dir <dir>] [--force]   --force: even while other plugins use it
 ```
 
 `add` claims the slot by the manifest's id (not the source directory's name),
@@ -726,7 +803,9 @@ one. Pasting its URL answers with a `PluginCollectionInspection`
 and, per member, the **full** single-plugin report its own URL would give. The
 pane renders that as a pick list (verdict, capability chips, warning count per
 row; the whole report one click away), and **Install N** posts
-`POST /api/plugins/install { url, sha, subdir }` once per ticked row.
+`POST /api/plugins/install { url, sha, subdir }` once per ticked row — providers
+first, with what a ticked row requires from the collection ticked for it (see
+"Dependencies").
 
 Membership is `dispatch-plugins.yaml` at the collection root when there is one,
 otherwise every directory with a `plugin.yaml`, outermost first (a plugin that
