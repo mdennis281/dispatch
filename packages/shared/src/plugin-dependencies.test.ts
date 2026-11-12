@@ -292,8 +292,11 @@ describe("judgeInstallDependencies", () => {
     const tooOld = judgeInstallDependencies(consumer(), [provider("0.9.2")]);
     expect(tooOld.dependencies[0]).toMatchObject({ from: "installed", state: "incompatible", found: "0.9.2" });
     expect(tooOld.refusal).toContain("0.9.2 is installed; this needs >=0.10.0");
-    // A sibling that does not satisfy either does not rescue it.
-    expect(judgeInstallDependencies(consumer(), [], [provider("0.9.0")]).refusal).toContain("needs remote-host");
+    // A sibling that does not satisfy either does not rescue it — and the
+    // refusal says what is wrong with the sibling, not "install it first".
+    const badSibling = judgeInstallDependencies(consumer(), [], [provider("0.9.0")]);
+    expect(badSibling.dependencies[0]).toMatchObject({ from: "missing", state: "incompatible" });
+    expect(badSibling.refusal).toBe("needs remote-host (machines@1): in this collection, remote-host 0.9.0 is what it has; this needs >=0.10.0");
   });
 
   it("never refuses for an optional dependency, or for one the owner can switch back on", () => {

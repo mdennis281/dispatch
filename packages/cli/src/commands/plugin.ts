@@ -11,7 +11,7 @@
  * layout a source checkout runs with.
  */
 import { resolve } from "node:path";
-import { PLUGIN_API_VERSION } from "@dispatch/shared";
+import { PLUGIN_API_VERSION, resolvePluginDependencies } from "@dispatch/shared";
 import type { PluginChange } from "@dispatch/shared";
 import {
   addPlugin,
@@ -24,8 +24,18 @@ import {
   removePlugin,
   setPluginEnabled,
   setPluginSource,
+  type CollectionMember,
 } from "../core/plugins.js";
 import { checkPluginUpdates, purgePluginData, updatePlugins, type CliUpdateCheck } from "../core/plugin-lifecycle.js";
+import {
+  dependencyCheck,
+  dependentsOf,
+  installedDependencyNodes,
+  memberNamed,
+  parseWithDeps,
+  planCollectionAdd,
+  stillLacking,
+} from "../core/plugin-deps.js";
 import { initPlugin, type PluginScaffoldKind } from "../core/plugin-init.js";
 import { CmError } from "../core/manifest.js";
 import { all, flag, has, parseArgs, type ParsedArgs } from "../core/args.js";
@@ -58,22 +68,54 @@ const RESTART_NOTE = "  Restart Dispatch to apply (plugins are read at boot; not
 async function cmdAdd(args: ParsedArgs): Promise<void> {
   const [source] = args.positionals;
   if (!source) {
-    throw new CmError("Usage: dispatch plugin add <path | git-url | tarball> [--plugin <path|id>]... [--all] [--force]");
+    throw new CmError(
+      "Usage: dispatch plugin add <path | git-url | tarball> [--plugin <path|id>]... [--all] [--with-deps[=all]] [--force] [--allow-breaking]",
+    );
   }
   const configDir = configDirOf(args);
-  // A collection: each pick is its own add — its own clone, validation and
-  // recorded source — so one bad member cannot half-install the others.
-  const picks: Array<string | undefined> = has(args, "all")
-    ? (await listCollectionMembers(source)).map((m) => m.path)
-    : all(args, "plugin").length
-      ? all(args, "plugin")
-      : [undefined];
-  if (!picks.length) throw new CmError(`no plugins found in ${source}`);
-  const results = [];
+  const withDeps = parseWithDeps(flag(args, "with-deps"));
+  const named = all(args, "plugin");
+  // A collection: planned as a whole first — what each pick needs from the
+  // same collection, provider first — then each pick is its own add, with
+  // its own copy, validation and recorded source, so one bad member cannot
+  // half-install the others.
+  let picks: Array<{ plugin?: string; member?: CollectionMember }> = [{}];
   const failed: Array<{ plugin: string; error: string }> = [];
-  for (const plugin of picks) {
+  let notes: string[] = [];
+  let adding = new Set<string>();
+  if (has(args, "all") || named.length) {
+    const members = await listCollectionMembers(source);
+    const wanted = has(args, "all") ? members.map((m) => ({ plugin: m.path, member: m })) : named.map((n) => ({ plugin: n, member: memberNamed(members, n) }));
+    const plan = planCollectionAdd(
+      members,
+      wanted.flatMap((w) => (w.member ? [w.member] : [])),
+      await installedDependencyNodes(configDir),
+      withDeps,
+    );
+    // A name that matches no member stays in: `addPlugin` refuses it with the member list.
+    picks = [...plan.add.map((m) => ({ plugin: m.path, member: m })), ...wanted.filter((w) => !w.member)];
+    failed.push(...plan.refused.map((r) => ({ plugin: r.member.id ?? r.member.path, error: r.reason })));
+    notes = plan.notes;
+    adding = new Set(plan.add.flatMap((m) => (m.id ? [m.id] : [])));
+    if (!picks.length && !failed.length) throw new CmError(`no plugins found in ${source}`);
+  }
+  const total = picks.length + failed.length;
+  if (total === 1 && failed.length) throw new CmError(failed[0]!.error);
+  const check = dependencyCheck(configDir, { allowBreaking: has(args, "allow-breaking"), alsoAdding: adding });
+  const notInstalled = new Set(failed.map((f) => f.plugin));
+  const results = [];
+  for (const { plugin, member } of picks) {
+    // A provider that failed above takes what needs it down with it, unless
+    // what is installed still serves it — never a dependent left blocked
+    // behind an error the owner may have scrolled past.
+    const lacking = member?.manifest ? await stillLacking(configDir, member.manifest, notInstalled) : undefined;
+    if (lacking) {
+      failed.push({ plugin: member!.id ?? plugin!, error: `skipped: needs ${lacking}, which was not installed` });
+      notInstalled.add(member!.id ?? plugin!);
+      continue;
+    }
     try {
-      const result = await addPlugin(configDir, source, { force: has(args, "force"), ...(plugin !== undefined ? { plugin } : {}) });
+      const result = await addPlugin(configDir, source, { force: has(args, "force"), check, ...(plugin !== undefined ? { plugin } : {}) });
       // Where it came from, in host-owned config — what `update` follows later.
       if (result.source) await setPluginSource(configDir, result.plugin.manifest!.id, result.source);
       results.push(result);
@@ -81,14 +123,15 @@ async function cmdAdd(args: ParsedArgs): Promise<void> {
       // One pick, one refusal: a single add keeps its exact error, but in a
       // batch the ones already on disk must still be reported, or `--plugin a
       // --plugin broken` leaves `a` installed with nothing having said so.
-      if (picks.length === 1 || !(err instanceof CmError)) throw err;
-      failed.push({ plugin: plugin!, error: err.message });
+      if (total === 1 || !(err instanceof CmError)) throw err;
+      failed.push({ plugin: member?.id ?? plugin!, error: err.message });
+      notInstalled.add(member?.id ?? plugin!);
     }
   }
   const failure = failed.length
-    ? new CmError(`${failed.length} of ${picks.length} not installed:\n${failed.map((f) => `  ${f.plugin}: ${f.error}`).join("\n")}`)
+    ? new CmError(`${failed.length} of ${total} not installed:\n${failed.map((f) => `  ${f.plugin}: ${f.error}`).join("\n")}`)
     : undefined;
-  if (emitJson(args, picks.length === 1 ? results[0] : { installed: results, failed })) {
+  if (emitJson(args, total === 1 ? { ...results[0], ...(notes.length ? { notes } : {}) } : { installed: results, failed, notes })) {
     if (failure) process.exitCode = 1;
     return;
   }
@@ -96,7 +139,9 @@ async function cmdAdd(args: ParsedArgs): Promise<void> {
     const m = result.plugin.manifest!;
     process.stdout.write(`${result.outcome === "replaced" ? "Replaced" : "Installed"} ${m.id} → ${result.dir}\n`);
     for (const line of consentLines(m)) process.stdout.write(`${line}\n`);
+    for (const w of result.warnings ?? []) process.stdout.write(`  warning: ${w}\n`);
   }
+  for (const n of notes) process.stdout.write(`Note: ${n}\n`);
   if (results.length) process.stdout.write(RESTART_NOTE);
   if (failure) throw failure;
 }
@@ -117,8 +162,17 @@ async function cmdLink(args: ParsedArgs): Promise<void> {
 
 async function cmdList(args: ParsedArgs): Promise<void> {
   const configDir = configDirOf(args);
-  const [plugins, toggles] = await Promise.all([discoverPlugins(configDir), readPluginToggles(configDir)]);
-  const rows = plugins.map((p) => ({ ...p, enabled: toggles[p.id] ?? true }));
+  const [plugins, toggles, nodes] = await Promise.all([
+    discoverPlugins(configDir),
+    readPluginToggles(configDir),
+    installedDependencyNodes(configDir),
+  ]);
+  // What the next boot would block, by the resolver the server runs.
+  const resolved = resolvePluginDependencies(nodes);
+  const rows = plugins.map((p) => {
+    const blocked = resolved.blocked.get(p.id);
+    return { ...p, enabled: toggles[p.id] ?? true, ...(blocked ? { blocked } : {}) };
+  });
   if (emitJson(args, { root: pluginsRoot(configDir), apiVersion: PLUGIN_API_VERSION, plugins: rows })) return;
   if (!rows.length) {
     process.stdout.write(`No plugins in ${pluginsRoot(configDir)}\n  Add one:  dispatch plugin add <path | git-url | tarball>\n`);
@@ -126,10 +180,14 @@ async function cmdList(args: ParsedArgs): Promise<void> {
   }
   process.stdout.write(`${rows.length} plugin(s) in ${pluginsRoot(configDir)}:\n`);
   for (const p of rows) {
-    const state = !p.manifest ? "invalid" : p.incompatible ? "incompatible" : p.enabled ? "enabled" : "disabled";
+    const state = !p.manifest ? "invalid" : p.incompatible ? "incompatible" : !p.enabled ? "disabled" : p.blocked ? "blocked" : "enabled";
     const name = p.manifest ? `${p.manifest.name} v${p.manifest.version}` : "";
     process.stdout.write(`  ${p.id.padEnd(20)} ${state.padEnd(12)} ${name}${p.linked ? " (linked)" : ""}\n`);
     if (p.error) process.stdout.write(`${"".padEnd(23)}${p.error}\n`);
+    if (p.enabled && p.blocked) process.stdout.write(`${"".padEnd(23)}${p.blocked}\n`);
+  }
+  if (rows.some((p) => p.enabled && p.blocked?.includes("is not installed"))) {
+    process.stdout.write("  (The CLI cannot see built-in plugins: one this depends on reads as not installed here.)\n");
   }
 }
 
@@ -140,8 +198,14 @@ async function cmdEnable(args: ParsedArgs, enabled: boolean): Promise<void> {
   const known = (await discoverPlugins(configDir)).some((p) => p.id === id);
   if (!known) throw new CmError(`No plugin "${id}" in ${pluginsRoot(configDir)}.`);
   await setPluginEnabled(configDir, id, enabled);
-  if (emitJson(args, { ok: true, id, enabled })) return;
+  // Switching a provider off is allowed — it is how the owner stops it — but
+  // never silently: what needs it stops with it, and what can use it runs
+  // with less.
+  const affected = enabled ? { required: [], optional: [] } : dependentsOf(await installedDependencyNodes(configDir), id);
+  if (emitJson(args, { ok: true, id, enabled, ...(enabled ? {} : { stops: affected.required, degrades: affected.optional }) })) return;
   process.stdout.write(`${enabled ? "Enabled" : "Disabled"} ${id}\n`);
+  if (affected.required.length) process.stdout.write(`  Also stops (they need it): ${affected.required.join(", ")}\n`);
+  if (affected.optional.length) process.stdout.write(`  Runs with less (they can use it): ${affected.optional.join(", ")}\n`);
   // Both directions need a restart from here: the server reads the toggle map
   // once at boot and only its own PUT /api/plugins/:id/enabled changes it live.
   // Settings → Plugins is the way to turn one off without restarting.
@@ -150,10 +214,26 @@ async function cmdEnable(args: ParsedArgs, enabled: boolean): Promise<void> {
 
 async function cmdRemove(args: ParsedArgs): Promise<void> {
   const [id] = args.positionals;
-  if (!id) throw new CmError("Usage: dispatch plugin remove <id> [--purge] [--data-dir <dir>]");
+  if (!id) throw new CmError("Usage: dispatch plugin remove <id> [--purge] [--data-dir <dir>] [--force]");
   const configDir = configDirOf(args);
   // Read before the directory goes: the manifest is what names its secrets.
   const found = (await discoverPlugins(configDir)).find((p) => p.id === id);
+  // Refused while anything installed uses it, as the app refuses: removing
+  // the dependents for the owner would run THEIR uninstall hooks — which may
+  // destroy what they made — so it is never done implicitly.
+  const affected = found ? dependentsOf(await installedDependencyNodes(configDir), id) : { required: [], optional: [] };
+  const usedBy = [...affected.required, ...affected.optional];
+  if (usedBy.length && !has(args, "force")) {
+    throw new CmError(
+      `${id} is used by ${usedBy.join(", ")} — remove ${usedBy.length === 1 ? "it" : "them"} first, or re-run with --force ` +
+        `(${[
+          affected.required.length ? `${affected.required.join(", ")} will be blocked` : "",
+          affected.optional.length ? `${affected.optional.join(", ")} will run with less` : "",
+        ]
+          .filter(Boolean)
+          .join("; ")})`,
+    );
+  }
   const { removed, dir } = await removePlugin(configDir, id);
   if (!removed) {
     if (emitJson(args, { ok: false, id, dir })) return;
@@ -166,8 +246,10 @@ async function cmdRemove(args: ParsedArgs): Promise<void> {
         dataDir: flag(args, "data-dir") ?? process.env.DISPATCH_DATA_DIR ?? process.env.CM_DATA_DIR,
       })
     : undefined;
-  if (emitJson(args, { ok: true, id, dir, linked: !!found?.linked, ...(purge ? { purged: purge } : {}) })) return;
+  if (emitJson(args, { ok: true, id, dir, linked: !!found?.linked, ...(purge ? { purged: purge } : {}), ...(usedBy.length ? { stops: affected.required, degrades: affected.optional } : {}) })) return;
   process.stdout.write(`${found?.linked ? "Unlinked" : "Removed"} ${id} (${dir})${found?.linked ? " — the linked directory is untouched" : ""}\n`);
+  if (affected.required.length) process.stdout.write(`  Now blocked (they need it): ${affected.required.join(", ")}\n`);
+  if (affected.optional.length) process.stdout.write(`  Running with less (they could use it): ${affected.optional.join(", ")}\n`);
   if (purge) {
     const parts = [
       purge.settings ? "its settings entry" : "",
@@ -214,7 +296,7 @@ async function cmdUpdate(args: ParsedArgs): Promise<void> {
   const configDir = configDirOf(args);
   const results = has(args, "check")
     ? await checkPluginUpdates(configDir, { ...(id ? { id } : {}) })
-    : await updatePlugins(configDir, { ...(id ? { id } : {}), acceptEscalations: has(args, "yes") });
+    : await updatePlugins(configDir, { ...(id ? { id } : {}), acceptEscalations: has(args, "yes"), allowBreaking: has(args, "allow-breaking") });
   if (emitJson(args, results)) return;
   if (!results.length) {
     process.stdout.write(`No plugins in ${pluginsRoot(configDir)}\n`);
@@ -266,18 +348,25 @@ Usage:
                      [--name <n>] [--dir <parent>] [--sdk <path>]
   dispatch plugin add <path | git-url | tarball>   Copy a plugin in, validate it, print what it asks for
                      [--plugin <path|id>]... [--all]   …or pick from a collection (several plugins in one repo)
+                     [--with-deps[=all]]               …and what the picks need from the same collection
   dispatch plugin link <path>                      Junction/symlink a working directory (development)
   dispatch plugin list                             List installed plugins and their state
   dispatch plugin enable <id>                      Turn a plugin on (takes effect after a restart)
   dispatch plugin disable <id>                     Turn a plugin off
   dispatch plugin update [<id>] [--check] [--yes]  Check git-installed plugins for a newer commit / tag, and install it
   dispatch plugin remove <id> [--purge]            Delete (or unlink) a plugin; --purge also deletes its data
+                                                   (refused while another plugin uses it, unless --force)
 
 Options:
       --config-dir <dir>   Dispatch's config root (default: $DISPATCH_CONFIG_DIR, then $DISPATCH_DATA_DIR)
-  -f, --force              Replace a plugin that is already installed
+  -f, --force              add: replace a plugin that is already installed
+                           remove: remove one that other plugins use (they are blocked, or run with less)
       --plugin <path|id>   add: one plugin of a collection, by its path in it or its id (repeatable)
       --all                add: every plugin the collection lists
+      --with-deps[=all]    add: also add what the picks require from the same collection, provider
+                           first (=all: what they can optionally use, too)
+      --allow-breaking     add, update: replace a plugin even though an installed plugin that uses
+                           it would stop working (it drops an API major, or leaves a version range)
       --check              update: report what would change, install nothing
       --yes                update: install even when the new version asks for more
                            (capabilities, secrets, OAuth clients, MCP servers, processes)

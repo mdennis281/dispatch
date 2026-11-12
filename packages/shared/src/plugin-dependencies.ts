@@ -587,6 +587,13 @@ export function judgeInstallDependencies(
           : `in this collection:${v} — installed with it`,
       };
     }
+    // Nothing satisfies it. Where nothing is installed but the collection has
+    // a copy that will not do either, say what is wrong with THAT copy — "not
+    // installed" would send the owner to install the very member that fails.
+    if (sibling && viaSibling && !byId.has(d.id)) {
+      // The resolver words it for an installed copy; this one is not, yet.
+      return { ...viaSibling, ...extra, from: "missing", detail: `in this collection, ${viaSibling.detail.replace(" is installed;", " is what it has;")}` };
+    }
     return { ...d, ...extra, from: byId.has(d.id) ? "installed" : "missing", ...(byId.get(d.id)?.version ? { found: byId.get(d.id)!.version } : {}) };
   });
 

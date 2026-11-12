@@ -32,6 +32,7 @@ import {
   PLUGIN_SHARED_DB_FILENAME,
 } from "@dispatch/shared";
 import { CmError } from "./manifest.js";
+import { dependencyCheck, providersFirst } from "./plugin-deps.js";
 import {
   addPlugin,
   hashPluginTree,
@@ -130,6 +131,15 @@ export async function pluginSurface(dir: string): Promise<PluginSurface> {
           }))
         : [],
     },
+    // An update that starts using another plugin, or uses more of one, hands
+    // data to code the owner never agreed to — an escalation, as in the pane.
+    dependencies: Object.entries(m.dependencies ?? {}).map(([id, d]) => ({
+      id,
+      uses: d.uses,
+      optional: !!d.optional,
+      ...(d.version ? { range: d.version } : {}),
+    })),
+    provides: Object.entries(m.provides ?? {}).flatMap(([name, majors]) => majors.map((major) => `${name}@${major}`)),
     mismatches: { undeclared: [], unused: [] },
     hooks: [],
     entries: {
@@ -296,13 +306,21 @@ export interface CliUpdateOutcome extends CliUpdateCheck {
  *
  * Only the directory is replaced. Settings, the toggle, kv, secrets and OAuth
  * tokens are keyed by the id outside it, so they carry over untouched.
+ *
+ * Providers go first, and each update is judged against what is installed
+ * at that moment: a consumer whose new version needs the provider's new
+ * version installs after it, in the same run. An update the installed
+ * plugins cannot satisfy is skipped with why, and one that would break an
+ * installed plugin using it needs `allowBreaking`.
  */
 export async function updatePlugins(
   configDir: string,
-  opts: { id?: string; deps?: GitDeps; acceptEscalations?: boolean } = {},
+  opts: { id?: string; deps?: GitDeps; acceptEscalations?: boolean; allowBreaking?: boolean } = {},
 ): Promise<CliUpdateOutcome[]> {
   const out: CliUpdateOutcome[] = [];
-  for (const t of await targets(configDir, opts.id)) {
+  const judge = dependencyCheck(configDir, { allowBreaking: !!opts.allowBreaking });
+  const ordered = providersFirst((await targets(configDir, opts.id)).map((t) => ({ ...t, id: t.plugin.id, manifest: t.plugin.manifest })));
+  for (const t of ordered) {
     const { check, staged, unchanged } = await checkOne(configDir, t.plugin, t.source, t.origin, opts.deps ?? realGitDeps, true);
     if (unchanged) {
       // Fast-forward the record so the next check is one ls-remote, not another clone.
@@ -317,7 +335,15 @@ export async function updatePlugins(
         out.push({ ...check, message: "asks for more than the installed version — re-run with --yes to accept" });
         continue;
       }
-      const result = await addPlugin(configDir, staged.dir, { force: true });
+      let result;
+      try {
+        result = await addPlugin(configDir, staged.dir, { force: true, check: judge });
+      } catch (err) {
+        // Refused by the dependency check: reported on the row, the rest go on.
+        if (!(err instanceof CmError)) throw err;
+        out.push({ ...check, message: err.message });
+        continue;
+      }
       // addPlugin saw a local directory (the clone); what is recorded is the
       // git source, advanced to the commit that was installed.
       await setPluginSource(configDir, t.plugin.id, {
@@ -327,7 +353,7 @@ export async function updatePlugins(
         installedAt: Date.now(),
         contentHash: await hashPluginTree(result.dir),
       });
-      out.push({ ...check, updated: true });
+      out.push({ ...check, updated: true, ...(result.warnings?.length ? { message: result.warnings.join("; ") } : {}) });
     } finally {
       await rm(staged.scratch, { recursive: true, force: true }).catch(() => {});
     }

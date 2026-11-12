@@ -33,6 +33,8 @@ import {
   grantedPluginCapabilities,
   optionalPluginCapabilities,
   ignoredOptionalCapabilitiesNote,
+  pluginDependencyLine,
+  pluginProvidesLine,
 } from "@dispatch/shared";
 import { CmError } from "./manifest.js";
 
@@ -150,6 +152,10 @@ export async function discoverPluginsAt(root: string): Promise<DiscoveredPlugin[
   }
   const found: DiscoveredPlugin[] = [];
   for (const name of names.sort()) {
+    // `.<id>.<pid>.tmp` / `.old` are an install mid-swap (see `swapInto`). A
+    // boot that lands in that window must not list them as a second, invalid
+    // copy of the plugin whose manifest id does not match its directory.
+    if (name.startsWith(".")) continue;
     const dir = join(root, name);
     // `stat`, not `readdir`'s dirent: a linked plugin is a junction or
     // symlink, which `withFileTypes` reports as neither file nor directory on
@@ -178,6 +184,8 @@ export async function discoverPluginsAt(root: string): Promise<DiscoveredPlugin[
 /** What `add` and `link` report: the validated plugin and what it asked for. */
 export interface InstallResult {
   plugin: DiscoveredPlugin;
+  /** What the `check` passed to `addPlugin` had to say without refusing. */
+  warnings?: string[];
   /** `copied` for `add`, `linked` for `link`, `replaced` when `--force` overwrote. */
   outcome: "copied" | "linked" | "replaced";
   /** Where it landed. */
@@ -284,6 +292,11 @@ export interface CollectionMember {
   id?: string;
   version?: string;
   name?: string;
+  /**
+   * The member's manifest when it validates — what `add` plans dependencies
+   * from (provider first, `--with-deps`) before installing anything.
+   */
+  manifest?: PluginManifest;
 }
 
 /**
@@ -320,6 +333,8 @@ export async function collectionIn(root: string): Promise<{ members: CollectionM
       if (typeof y?.id === "string") m.id = y.id;
       if (typeof y?.version === "string") m.version = y.version;
       if (typeof y?.name === "string") m.name = y.name;
+      const parsed = PluginManifestSchema.safeParse(y);
+      if (parsed.success) m.manifest = parsed.data;
     } catch {
       /* listed, but no readable plugin.yaml — the install of it will say why */
     }
@@ -496,7 +511,12 @@ async function validated(pluginDir: string): Promise<DiscoveredPlugin> {
   return found;
 }
 
-/** Whether something already occupies `<root>/<id>`, and what to do about it. */
+/**
+ * Whether something already occupies `<root>/<id>`, refusing without `force`.
+ * It removes nothing: the old entry stays in place until its replacement is
+ * fully on disk (`swapInto`), so a refused or failed replace leaves the
+ * installed plugin — and every plugin that depends on it — exactly as it was.
+ */
 async function claimSlot(root: string, id: string, force: boolean): Promise<boolean> {
   const target = join(root, id);
   let present = false;
@@ -510,8 +530,43 @@ async function claimSlot(root: string, id: string, force: boolean): Promise<bool
   if (!force) {
     throw new CmError(`a plugin "${id}" is already installed at ${target} — re-run with --force to replace it`);
   }
-  await removeEntry(target);
   return true;
+}
+
+/**
+ * Move a fully-written `staged` entry into `<root>/<id>`: the old entry is
+ * renamed aside first and deleted only once the new one is in, and put back
+ * if that fails. Two renames in one directory, so there is no moment a reader
+ * finds neither copy — a provider is never briefly missing under the plugins
+ * that use it.
+ */
+async function swapInto(root: string, id: string, staged: string, replacing: boolean): Promise<void> {
+  const target = join(root, id);
+  if (!replacing) {
+    await rename(staged, target);
+    return;
+  }
+  const aside = join(root, `.${id}.${process.pid}.old`);
+  if (await exists(aside)) await removeEntry(aside);
+  await rename(target, aside);
+  try {
+    await rename(staged, target);
+  } catch (err) {
+    await rename(aside, target).catch(() => {});
+    throw err;
+  }
+  // A link is unlinked, never followed: the old entry may be a `link`ed
+  // working directory, which a recursive delete would empty.
+  await removeEntry(aside).catch(() => {});
+}
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Remove a plugin entry: a link is unlinked (its target untouched); a directory is deleted. */
@@ -538,7 +593,17 @@ async function removeEntry(target: string): Promise<void> {
 export async function addPlugin(
   configDir: string,
   source: string,
-  opts: { force?: boolean; /** One plugin of a collection: its path in it, or its id. */ plugin?: string } = {},
+  opts: {
+    force?: boolean;
+    /** One plugin of a collection: its path in it, or its id. */
+    plugin?: string;
+    /**
+     * Judge the validated manifest before anything is copied — throw to
+     * refuse, return lines to warn. The CLI passes its dependency check
+     * (`core/plugin-deps.ts`); the server judges before it gets here.
+     */
+    check?: (manifest: PluginManifest) => Promise<string[] | void> | string[] | void;
+  } = {},
 ): Promise<InstallResult> {
   const { pluginDir, scratch, source: recorded } = await materialise(source, opts.plugin);
   try {
@@ -552,9 +617,11 @@ export async function addPlugin(
     // plugin.
     const id = found.manifest!.id;
     const replaced = await claimSlot(root, id, !!opts.force);
+    const warnings = (await opts.check?.(found.manifest!)) ?? [];
     const target = join(root, id);
-    // Copy to a sibling tmp dir and rename, so an interrupted copy never
-    // leaves a half-plugin the loader would list as broken.
+    // Copy to a sibling tmp dir and swap it in, so an interrupted copy never
+    // leaves a half-plugin the loader would list as broken — nor, on a
+    // replace, no plugin at all.
     const tmp = join(root, `.${id}.${process.pid}.tmp`);
     await rm(tmp, { recursive: true, force: true });
     // `.git` is history, not the plugin. `node_modules` is the author's build
@@ -564,18 +631,23 @@ export async function addPlugin(
     // built `server/index.js` is self-contained by construction (the SDK's
     // preset inlines everything but Node's builtins), so nothing in
     // node_modules is needed at runtime.
-    await cp(pluginDir, tmp, {
-      recursive: true,
-      dereference: true,
-      filter: (p) => basename(p) !== ".git" && basename(p) !== "node_modules",
-    });
-    await rename(tmp, target);
+    try {
+      await cp(pluginDir, tmp, {
+        recursive: true,
+        dereference: true,
+        filter: (p) => basename(p) !== ".git" && basename(p) !== "node_modules",
+      });
+      await swapInto(root, id, tmp, replaced);
+    } catch (err) {
+      await rm(tmp, { recursive: true, force: true }).catch(() => {});
+      throw err;
+    }
     const plugin = await readPluginDir(target, id);
     // Hashed from the INSTALLED copy: that is what a later check compares a
     // fetched commit against, whatever the source looked like.
     const source: PluginSource =
       recorded.type === "git" ? { ...recorded, contentHash: await hashPluginTree(target) } : recorded;
-    return { plugin, outcome: replaced ? "replaced" : "copied", dir: target, source };
+    return { plugin, outcome: replaced ? "replaced" : "copied", dir: target, source, ...(warnings.length ? { warnings } : {}) };
   } finally {
     if (scratch) await rm(scratch, { recursive: true, force: true }).catch(() => {});
   }
@@ -600,7 +672,15 @@ export async function linkPlugin(
   const id = found.manifest!.id;
   const replaced = await claimSlot(root, id, !!opts.force);
   const target = join(root, id);
-  await symlink(abs, target, process.platform === "win32" ? "junction" : "dir");
+  const tmp = join(root, `.${id}.${process.pid}.tmp`);
+  if (await exists(tmp)) await removeEntry(tmp);
+  await symlink(abs, tmp, process.platform === "win32" ? "junction" : "dir");
+  try {
+    await swapInto(root, id, tmp, replaced);
+  } catch (err) {
+    await removeEntry(tmp).catch(() => {});
+    throw err;
+  }
   const plugin = await readPluginDir(target, id);
   return { plugin, outcome: replaced ? "replaced" : "linked", dir: target };
 }
@@ -706,5 +786,12 @@ export function consentLines(m: PluginManifest): string[] {
   const contributes = Object.keys(m.contributes ?? {});
   if (contributes.length) lines.push(`  contributes: ${contributes.join(", ")}`);
   if (m.oauth?.clients) lines.push(`  oauth clients: ${Object.keys(m.oauth.clients).join(", ")}`);
+  // The same sentences the app's consent card shows, so the two grants read
+  // alike: using another plugin hands it data, which is a trust decision.
+  for (const [id, spec] of Object.entries(m.dependencies ?? {})) {
+    lines.push(`  ${pluginDependencyLine({ id, uses: spec.uses, ...(spec.optional ? { optional: true } : {}) })}`);
+  }
+  const provides = pluginProvidesLine(m.provides);
+  if (provides) lines.push(`  ${provides}`);
   return lines;
 }
