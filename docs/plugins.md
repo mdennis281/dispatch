@@ -93,6 +93,13 @@ capabilities:                   # declared for the consent card; see "Capabiliti
   - chats:write
   - process
 optionalCapabilities: [approvals] # granted where this host has them, ignored where not; see "Optional capabilities"
+dependencies:                   # other plugins this one calls; see "Dependencies"
+  remote-host:
+    uses: [machines@1]          # their exports it calls, <name>@<major>
+    version: ">=0.10.0"         # optional semver range over their plugin version
+    optional: true              # default false: without it, this plugin does not start
+provides:                       # what other plugins may call of this one
+  machines: [1]                 # export name → the majors it serves
 contributes:
   modes: ./modes
   skills: ./skills
@@ -201,7 +208,8 @@ service container.
    full-replace `PUT /api/settings`, carried raw through `normalize()` in the
    settings view, and has a `SECTION_SLICE` entry — the three edits every
    app-level setting needs, or a theme change deletes it.
-3. **Activate**, after `app.listen()`, from `services.warm()` — in id order,
+3. **Activate**, after `app.listen()`, from `services.warm()` — in dependency
+   order (a provider before what uses it, ties by id; see "Dependencies"),
    each `activate(ctx)` awaited with a 30 s budget, and nothing awaits the
    whole. The port is open before the first plugin runs, so a hung `activate`
    delays the plugins after it and nothing else; `install.mjs`'s health check
@@ -213,7 +221,7 @@ service container.
 4. **Run.** Everything the plugin registered (bus listeners, route handlers,
    settings listeners, processes) is tracked against the plugin id so
    deactivate can undo it.
-5. **Deactivate** on `services.dispose()` (reverse id order; an activation
+5. **Deactivate** on `services.dispose()` (reverse dependency order; an activation
    still in flight is not waited for — it tears itself down when it returns),
    when the enable toggle flips off, or on uninstall: `onShutdown` if exported
    (see "Cleanup lifecycle"), then `deactivate()` if exported (10 s budget),
@@ -224,7 +232,7 @@ service container.
    API". Flipping the toggle on requires a restart; the pane says so.
 
 `GET /api/plugins` returns, per plugin (`PluginInfo`): manifest summary, `dir`,
-`status` (`active | disabled | error | invalid | incompatible`), `error`,
+`status` (`active | disabled | error | invalid | incompatible | blocked`), `error`,
 `enabled`, `needsRestart`, `capabilities`, `hasServer`, `clientUrl` (the entry
 **module's** URL, `/plugins/<id>/<file>`, which the SPA imports as-is),
 `settingsSchema`, `settings`, `settingsErrors` (stored values the schema
@@ -238,6 +246,85 @@ recorded `source` — see "Updating and uninstalling".
 /api/plugins/:id/settings`) are targeted, not settings-draft writes;
 `POST /api/plugins/:id/reveal` opens the directory on the machine Dispatch runs
 on (from a remote browser the pane also shows and copies the path).
+
+### Dependencies
+
+One plugin may call another's API: proxmox-terminal uses remote-host to run
+what happens on a container. The consumer names the plugin and the exports it
+calls; the provider names what it exports.
+
+```yaml
+# consumer
+dependencies:
+  remote-host:
+    uses: [machines@1]       # <export>@<major>, at least one
+    version: ">=0.10.0 <1"   # optional: semver range over remote-host's `version`
+    optional: true           # default false
+# provider
+provides:
+  machines: [1]              # the majors it serves; [1, 2] during a move
+```
+
+- **Keyed by plugin, not interface.** There is no "any plugin that provides
+  `machines`": the owner consents to THIS plugin using THAT one.
+- **`uses` is the contract, `version` a floor.** An export major is binary
+  compatibility. A `version` range only says "has the fix I need". The grammar
+  is `>= > <= < =`, `^`, `~`, partial versions (`1`, `1.2`) and `x`/`*`, with
+  clauses separated by spaces ANDed (no `||`). A prerelease satisfies a range
+  only when a clause names a prerelease of the same x.y.z, npm's rule.
+- **Validation** (`PluginManifestSchema`): a dependency key is a plugin id and
+  never the plugin's own; at most 8 dependencies and 8 exports. Older hosts
+  strip both keys as unknown, so a consumer must feature-detect.
+
+**Resolution.** `resolvePluginDependencies` (`packages/shared/src/plugin-dependencies.ts`)
+runs at every boot over everything installed and gives each dependency one state:
+`ok`, `missing`, `invalid` (installed, cannot load), `disabled`, `incompatible`
+(out of range, or does not provide a `uses`), `blocked` (it is blocked itself),
+`cycle`, and, known only at run time, `failed` (its `activate` threw or ran out of
+time). `PluginInfo.dependencies` carries each one with a sentence, live;
+`dependents` and `provides` are on the provider's row.
+
+**Activation order.** Every plugin starts after everything it depends on,
+required or optional, ties broken by id — so `proxmox-terminal` starts after
+`remote-host` though it sorts first. Whether a dependency is usable is judged
+when the consumer's turn comes, not from the boot-time picture: a provider that
+threw a moment ago is not there to use.
+
+**Blocked.** A valid, enabled plugin with a REQUIRED dependency that is not `ok`
+is `blocked`. It never activates this process, its `error` names the dependency
+and why, and it contributes nothing — no skills, instructions, modes, MCP
+servers, routes or client bundle — because what it contributes may lean on what
+is missing. Every plugin on a cycle of required dependencies is blocked, with
+the cycle named. A loop that an OPTIONAL use closes is not one: the optional
+use is the one that gives — its row reads `cycle`, it blocks nothing, and the
+plugin it points at starts after it. A built-in may depend only on built-ins.
+An OPTIONAL dependency never blocks: the plugin starts without it and its row
+says what is missing.
+
+**Switching a provider off** (`PUT /api/plugins/:id/enabled`):
+
+1. Refused (409) while it, or any plugin that depends on it, is still starting —
+   an activation in flight would otherwise finish after the toggle.
+2. Every plugin that REQUIRES it, directly or through another, goes down first,
+   deepest first, with reason `disable` — never `uninstall`, because an
+   uninstall hook destroys what the plugin made (proxmox-terminal's containers)
+   and nothing is being uninstalled. Each one's teardown is awaited, including
+   the `dispose()` of a terminal backend it registered, before the next goes.
+   They become `blocked`; their own toggles are left alone.
+3. Then the provider goes down. Switching it back on is a restart, as always.
+
+**Uninstall is refused (409) for a plugin any installed plugin depends on**,
+required or optional, and the message names them. Nothing cascades: removing
+the dependents would run their uninstall hooks as a side effect of removing
+something else. Uninstall them first, or switch the provider off. An uninstall
+is also refused while the plugin is still starting at boot — it would run none
+of its hooks.
+
+**Shutdown.** `onShutdown` hooks run a consumer's before the hook of anything it
+uses, all on the one shared budget (see "Cleanup lifecycle"), and `dispose()`
+then deactivates in reverse dependency order, a consumer before what it uses. Chats waiting on a terminal backend or a provider at boot
+(`activationSettled`) are released as soon as every plugin that could register
+one has had its turn, not after everything installed.
 
 ### Plugin settings
 
@@ -398,7 +485,9 @@ export default definePlugin({
 | `uninstall` | Settings → Plugins → Uninstall | destroy EVERYTHING — nothing will ever reconcile it again |
 
 On a server shutdown every active plugin's hook runs **in parallel** on one
-shared budget, `PLUGIN_SHUTDOWN_BUDGET_MS` (5 s), alongside the shell reap and
+shared budget, `PLUGIN_SHUTDOWN_BUDGET_MS` (5 s) — except that a plugin's hook
+waits for those of the plugins that depend on it (see "Dependencies"), and
+gets what is left of the budget — alongside the shell reap and
 before `app.close()` — it is `installShutdown`, not `dispose()`, that asks,
 because only it knows a restart from a stop. Past the budget `signal` aborts,
 the host logs `plugin "<id>" onShutdown(<reason>) overran its 5s budget —

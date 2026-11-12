@@ -12,6 +12,15 @@
  */
 import * as z from "zod";
 import { ManifestMcpServerSchema } from "./project-config.js";
+import {
+  MAX_PLUGIN_DEPENDENCIES,
+  MAX_PLUGIN_EXPORTS,
+  PLUGIN_DEPENDENCY_STATES,
+  PLUGIN_EXPORT_NAME_PATTERN,
+  PLUGIN_USE_PATTERN,
+  isValidSemverRange,
+  type PluginDependencyState,
+} from "./plugin-dependencies.js";
 
 /**
  * The host's plugin-API MAJOR. A manifest's `dispatch` range is matched against
@@ -140,6 +149,31 @@ export const PluginOAuthClientSchema = z.object({
 });
 export type PluginOAuthClient = z.infer<typeof PluginOAuthClientSchema>;
 
+/**
+ * One `dependencies:` entry — what this plugin uses of another, keyed by that
+ * plugin's id. See docs/plugins.md → "Dependencies".
+ */
+export const PluginDependencySpecSchema = z.object({
+  /** The provider's exports this plugin calls, `<name>@<major>`. What the consent card names. */
+  uses: z
+    .array(z.string().regex(PLUGIN_USE_PATTERN, "a uses: entry is <export>@<major>, e.g. machines@1"))
+    .min(1, "uses: must name at least one export (e.g. machines@1)")
+    .max(16),
+  /** A semver range over the provider's plugin `version` — a floor for "has the fix I need". */
+  version: z
+    .string()
+    .min(1)
+    .refine(isValidSemverRange, { message: "version must be a semver range, e.g. >=0.10.0 or ^1.2" })
+    .optional(),
+  /**
+   * Activate without it. An optional dependency still orders activation (the
+   * provider first, when it is there) and is still offered at install; the
+   * plugin feature-detects it and is told when it goes away.
+   */
+  optional: z.boolean().optional(),
+});
+export type PluginDependencySpecManifest = z.infer<typeof PluginDependencySpecSchema>;
+
 /** Normalised parent directory of a manifest path: `./client/index.js` → `client`, `index.js` → `` (the root). */
 export function manifestPathDir(p: string): string {
   const parts = p.replace(/\\/g, "/").replace(/^\.\//, "").split("/").filter((s) => s && s !== ".");
@@ -216,6 +250,29 @@ const PluginManifestObjectSchema = z.object({
       clients: z.record(z.string().regex(PLUGIN_OAUTH_CLIENT_NAME_PATTERN), PluginOAuthClientSchema).optional(),
     })
     .optional(),
+  /**
+   * Other plugins this one calls, by id — see {@link PluginDependencySpecSchema}.
+   * Keyed by plugin, not by interface: the owner consents to THIS plugin
+   * driving THAT one, so there is no "any plugin that provides X". Older hosts
+   * strip the key; a consumer feature-detects `ctx.dependencies`.
+   */
+  dependencies: z
+    .record(PluginIdSchema, PluginDependencySpecSchema)
+    .refine((d) => Object.keys(d).length <= MAX_PLUGIN_DEPENDENCIES, {
+      message: `at most ${MAX_PLUGIN_DEPENDENCIES} dependencies`,
+    })
+    .optional(),
+  /**
+   * What this plugin lets other plugins call: export name → the majors it
+   * serves (more than one during a transition, e.g. `[1, 2]`).
+   */
+  provides: z
+    .record(
+      z.string().regex(PLUGIN_EXPORT_NAME_PATTERN, "an export name is [a-z][a-z0-9-]{0,31}"),
+      z.array(z.number().int().min(1).max(999)).min(1).max(8),
+    )
+    .refine((p) => Object.keys(p).length <= MAX_PLUGIN_EXPORTS, { message: `at most ${MAX_PLUGIN_EXPORTS} exports` })
+    .optional(),
 });
 
 /**
@@ -227,6 +284,9 @@ const PluginManifestObjectSchema = z.object({
  * refuses the layout before it is ever on disk.
  */
 export const PluginManifestSchema = PluginManifestObjectSchema.superRefine((m, ctx) => {
+  if (m.dependencies && Object.hasOwn(m.dependencies, m.id)) {
+    ctx.addIssue({ code: "custom", path: ["dependencies", m.id], message: "a plugin cannot depend on itself" });
+  }
   // `secrets:write` widens `ctx.secrets`; it is not a second, write-only
   // object. Requiring both keeps the consent card honest: the owner sees the
   // read line AND the write line, never a write that silently implies a read.
@@ -521,8 +581,10 @@ export type PluginOrigin = z.infer<typeof PluginOriginSchema>;
  *   error         — `activate` threw or ran past its budget; see `error`
  *   invalid       — the manifest failed validation; see `error`
  *   incompatible  — its `dispatch` range excludes this host's API major
+ *   blocked       — valid and enabled, but a REQUIRED dependency is not there
+ *                   to use (missing, off, failed, wrong version); see `error`
  */
-export const PluginStatusSchema = z.enum(["active", "disabled", "error", "invalid", "incompatible"]);
+export const PluginStatusSchema = z.enum(["active", "disabled", "error", "invalid", "incompatible", "blocked"]);
 export type PluginStatus = z.infer<typeof PluginStatusSchema>;
 
 /**
@@ -544,6 +606,16 @@ export const PluginCleanupSummarySchema = z.object({
   chats: z.array(z.string()),
 });
 export type PluginCleanupSummary = z.infer<typeof PluginCleanupSummarySchema>;
+
+/** One declared dependency on a plugin's row — the resolver's verdict, folded with what is running. */
+export const PluginDependencyInfoSchema = z.object({
+  id: z.string(),
+  uses: z.array(z.string()),
+  optional: z.boolean(),
+  state: z.enum(PLUGIN_DEPENDENCY_STATES as [PluginDependencyState, ...PluginDependencyState[]]),
+  detail: z.string(),
+});
+export type PluginDependencyInfo = z.infer<typeof PluginDependencyInfoSchema>;
 
 /**
  * One row of `GET /api/plugins`. A summary of the manifest plus the host's
@@ -618,6 +690,12 @@ export const PluginInfoSchema = z.object({
   warnings: z.array(z.string()).optional(),
   /** Failed per-chat cleanups still being retried — see {@link PluginCleanupSummarySchema}. */
   pendingCleanups: PluginCleanupSummarySchema.optional(),
+  /** Each declared dependency and where it stands, live — see {@link PluginDependencyInfoSchema}. */
+  dependencies: z.array(PluginDependencyInfoSchema).optional(),
+  /** Installed plugins that declare a dependency on this one (any status). */
+  dependents: z.array(z.string()).optional(),
+  /** What it lets other plugins call, as `name@major`. */
+  provides: z.array(z.string()).optional(),
   /** Where it came from — see {@link PluginOriginSchema}. */
   origin: PluginOriginSchema,
   /** The recorded install source, when there is one (`url` and `local` origins). */

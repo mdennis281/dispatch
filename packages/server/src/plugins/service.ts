@@ -66,6 +66,11 @@ import {
   grantedPluginCapabilities,
   optionalPluginCapabilities,
   ignoredOptionalCapabilitiesNote,
+  blockedReason,
+  liveDependencyState,
+  resolvePluginDependencies,
+  type PluginDependencyInfo,
+  type PluginDependencyResolution,
 } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import type { PluginContext } from "@dispatch/shared";
@@ -114,7 +119,16 @@ type Phase =
   | "active"
   | "error"
   /** Deactivated, or never eligible (disabled / invalid / incompatible). */
-  | "inactive";
+  | "inactive"
+  /**
+   * Valid and enabled, but a REQUIRED dependency is not usable (missing, off,
+   * failed, out of range, on a cycle) — never activated this process, or
+   * deactivated because the plugin it needs went down. Its own phase, not a
+   * flavour of `pending`: `activateAll` activates every `pending` record it
+   * meets, and a blocked one must be skipped by construction, not by a check
+   * someone can forget.
+   */
+  | "blocked";
 
 interface PluginRecord extends DiscoveredPlugin {
   enabled: boolean;
@@ -123,6 +137,8 @@ interface PluginRecord extends DiscoveredPlugin {
   phase: Phase;
   /** The `activate` failure, when `phase` is `error`. */
   activationError?: string;
+  /** Why it is `blocked` — the dependency that is not there to use. */
+  blockedReason?: string;
   /** Toggled on in this process: the pane says "restart to apply". */
   needsRestart: boolean;
   /**
@@ -260,6 +276,15 @@ export class PluginService implements PluginContributionSource {
   private loaded = false;
   /** Memoised `activateAll`, so a second call joins the first instead of re-running it. */
   private activating: Promise<void> | undefined;
+  /** `activateAll` has walked every record — after this, `pending` means "never reached", not "about to be". */
+  private activationDone = false;
+  /**
+   * Every plugin's dependencies, resolved against the others (shared
+   * `resolvePluginDependencies`). Recomputed after every change to the set or
+   * a toggle, so a row always says where its dependencies stand; the
+   * activation ORDER is taken from the one computed at `load()`.
+   */
+  private resolution: PluginDependencyResolution = { order: [], dependencies: new Map(), blocked: new Map(), dependents: new Map() };
   /**
    * Settles once no plugin that could still register a PROVIDER is waiting to
    * activate. Created up front rather than derived from `activating`, which
@@ -381,7 +406,115 @@ export class PluginService implements PluginContributionSource {
         this.processHost?.register(found.id, found.dir, contributions.processes);
       }
     }
+    this.resolve();
+    // A plugin whose required dependency is not there is decided before
+    // anything runs: it is never activated, and its row says which and why.
+    for (const [id, reason] of this.resolution.blocked) {
+      const rec = this.records.get(id);
+      if (rec?.phase !== "pending") continue;
+      rec.phase = "blocked";
+      rec.blockedReason = reason;
+    }
     this.loaded = true;
+  }
+
+  /** Re-resolve every plugin's dependencies against what is installed and switched on now. */
+  private resolve(): void {
+    this.resolution = resolvePluginDependencies(
+      [...this.records.values()].map((r) => ({
+        id: r.id,
+        ...(r.manifest?.version ? { version: r.manifest.version } : {}),
+        valid: !!r.manifest && !r.incompatible,
+        enabled: r.enabled,
+        builtin: r.builtin,
+        ...(r.manifest?.dependencies ? { dependencies: r.manifest.dependencies } : {}),
+        ...(r.manifest?.provides ? { provides: r.manifest.provides } : {}),
+      })),
+    );
+  }
+
+  /**
+   * Records in activation order: each after everything it depends on,
+   * required or optional (ties by id), from the resolution. A record the
+   * resolution has not seen (installed since boot) goes last, by id.
+   */
+  private ordered(): PluginRecord[] {
+    const out: PluginRecord[] = [];
+    const seen = new Set<string>();
+    for (const id of this.resolution.order) {
+      const rec = this.records.get(id);
+      if (!rec) continue;
+      out.push(rec);
+      seen.add(id);
+    }
+    const rest = [...this.records.values()].filter((r) => !seen.has(r.id)).sort((a, b) => a.id.localeCompare(b.id));
+    return [...out, ...rest];
+  }
+
+  /** Each declared dependency of `rec`, the resolver's verdict folded with what is actually running. */
+  private dependencyInfo(rec: PluginRecord): PluginDependencyInfo[] {
+    return (this.resolution.dependencies.get(rec.id) ?? []).map((d) => {
+      const p = this.records.get(d.id);
+      return liveDependencyState(
+        d,
+        p && { phase: p.phase, enabled: p.enabled, error: p.phase === "error" ? p.activationError : p.blockedReason },
+      );
+    });
+  }
+
+  /**
+   * The first REQUIRED dependency of `rec` that cannot be used right now, or
+   * undefined. A provider that is not `active` yet (still pending — only
+   * possible for a built-in waiting on `activateAll`) counts as unmet: the
+   * consumer is left for a later pass rather than started early.
+   */
+  private unmetDependency(rec: PluginRecord): PluginDependencyInfo | undefined {
+    for (const d of this.dependencyInfo(rec)) {
+      if (d.optional) continue;
+      if (d.state !== "ok") return d;
+      if (this.records.get(d.id)?.phase !== "active") return { ...d, state: "failed", detail: `${d.id} has not started` };
+    }
+    return undefined;
+  }
+
+  /** Mark `rec` blocked by `dep` (it was not, or is no longer, activated). */
+  private block(rec: PluginRecord, dep: PluginDependencyInfo): void {
+    rec.phase = "blocked";
+    rec.blockedReason = blockedReason(dep);
+  }
+
+  /**
+   * Installed plugins that need `id` to run — a REQUIRED dependency on it,
+   * directly or through another plugin that has one — deepest first, so a
+   * cascade takes each one down before what it stands on.
+   */
+  private requiredDependentsOf(id: string): PluginRecord[] {
+    const needs = new Set<string>();
+    const walk = (provider: string): void => {
+      for (const r of this.records.values()) {
+        if (needs.has(r.id) || r.id === id) continue;
+        const spec = r.manifest?.dependencies?.[provider];
+        if (!spec || spec.optional) continue;
+        needs.add(r.id);
+        walk(r.id);
+      }
+    };
+    walk(id);
+    return this.ordered()
+      .filter((r) => needs.has(r.id))
+      .reverse();
+  }
+
+  /** Every installed plugin that declares a dependency on `id`, required or optional, by id. */
+  private dependentsOf(id: string): PluginRecord[] {
+    return [...this.records.values()]
+      .filter((r) => r.id !== id && r.manifest?.dependencies && Object.hasOwn(r.manifest.dependencies, id))
+      .sort((a, b) => a.id.localeCompare(b.id));
+  }
+
+  /** Still coming up at boot: activating now, or `pending` while `activateAll` has yet to reach it. */
+  private starting(rec: PluginRecord): boolean {
+    return rec.phase === "activating" || (rec.phase === "pending" && !!this.activating && !this.activationDone);
   }
 
   /**
@@ -407,9 +540,11 @@ export class PluginService implements PluginContributionSource {
    * in `warm()`.
    */
   async activateShipped(): Promise<void> {
-    for (const rec of [...this.records.values()].sort((a, b) => a.id.localeCompare(b.id))) {
+    for (const rec of this.ordered()) {
       if (this.disposed) return;
-      if (rec.builtin && rec.phase === "pending" && !rec.contributions.processes.length) {
+      // A built-in whose dependency is not up yet waits for `activateAll`,
+      // which walks the same order; it is not blocked for being early.
+      if (rec.builtin && rec.phase === "pending" && !rec.contributions.processes.length && !this.unmetDependency(rec)) {
         await this.activateOne(rec);
       }
     }
@@ -433,11 +568,29 @@ export class PluginService implements PluginContributionSource {
   activateAll(): Promise<void> {
     if (!this.activating) {
       this.activating = (async () => {
-        for (const rec of [...this.records.values()].sort((a, b) => a.id.localeCompare(b.id))) {
+        // Dependency order (a provider before whatever uses it), not id order:
+        // `proxmox-terminal` sorts before the `remote-host` it calls.
+        for (const rec of this.ordered()) {
           if (this.disposed) return;
-          if (rec.phase === "pending") await this.activateOne(rec);
+          if (rec.phase !== "pending") continue;
+          // Judged NOW, not from the boot-time resolution: a provider that
+          // threw, overran its budget or was switched off a moment ago is not
+          // there to use, and a consumer started against it would find nothing.
+          const unmet = this.unmetDependency(rec);
+          if (unmet) {
+            this.block(rec, unmet);
+            this.log(`[dispatch] plugin "${rec.id}" is blocked: ${rec.blockedReason}`);
+          } else {
+            await this.activateOne(rec);
+          }
+          // Chats waiting on a terminal backend or a provider need only the
+          // plugins that can register one — not everything installed after them.
+          this.settleProvidersIfNoneWaiting();
         }
-      })().finally(() => this.providersSettled.resolve());
+      })().finally(() => {
+        this.activationDone = true;
+        this.providersSettled.resolve();
+      });
     }
     return this.activating;
   }
@@ -522,15 +675,32 @@ export class PluginService implements PluginContributionSource {
       }
     }
     this.teardown(rec);
+    await this.settled(rec);
     await this.stopProcesses(rec);
     rec.phase = "inactive";
   }
 
   /**
+   * Wait (bounded) for what teardown started and could not finish at once —
+   * a terminal backend's unregister, which ends its shells and runs its
+   * `dispose()`. Without this the next step of a cascade (the plugin it
+   * depends on going down) ran while that `dispose()` was still talking to it.
+   */
+  private async settled(rec: PluginRecord): Promise<void> {
+    const pending = rec.owned?.settling.splice(0) ?? [];
+    if (!pending.length) return;
+    await withBudget(Promise.allSettled(pending), this.deactivateBudgetMs, "teardown").catch((err: unknown) => {
+      this.fault(`plugin "${rec.id}" teardown did not finish`, err);
+    });
+  }
+
+  /**
    * Run `onShutdown` for each record that is active, has one, and has not had
-   * it this activation — all IN PARALLEL on one shared budget. An overrun
-   * aborts the signal, is logged by plugin, and is otherwise ignored: the
-   * caller (a Restart, a toggle) carries on regardless. Never rejects.
+   * it this activation — on one shared budget, IN PARALLEL except where one
+   * uses another: a plugin's hook waits for the hooks of every plugin that
+   * depends on it (`shutdownWaves`). An overrun aborts the signal, is logged
+   * by plugin, and is otherwise ignored: the caller (a Restart, a toggle)
+   * carries on regardless. Never rejects.
    */
   private async runShutdownHooks(recs: PluginRecord[], reason: PluginShutdownReason): Promise<void> {
     const targets = recs.filter((r) => r.phase === "active" && !r.shutDown && r.module?.onShutdown);
@@ -548,31 +718,70 @@ export class PluginService implements PluginContributionSource {
     const timer = setTimeout(() => ac.abort(new Error(`onShutdown budget of ${budget}ms exceeded`)), budget);
     timer.unref?.();
     try {
-      await Promise.all(
-        targets.map(async (rec) => {
-          const mod = rec.module!;
-          try {
-            await withBudget(
-              Promise.resolve().then(() => mod.onShutdown!({ reason, deadline, signal: ac.signal })),
-              budget,
-              `onShutdown(${reason})`,
-            );
-          } catch (err) {
-            if (err instanceof BudgetExceeded) {
-              // Not a crash — a plugin that did not return in time. Named in
-              // the log so the owner can tell whose hook made a restart slow.
-              this.log(`[dispatch] plugin "${rec.id}" onShutdown(${reason}) overran its ${budget / 1000}s budget — moving on without it`);
-            } else {
-              this.fault(`plugin "${rec.id}" onShutdown(${reason}) failed`, err);
+      for (const wave of this.shutdownWaves(targets)) {
+        await Promise.all(
+          wave.map(async (rec) => {
+            const mod = rec.module!;
+            try {
+              await withBudget(
+                Promise.resolve().then(() => mod.onShutdown!({ reason, deadline, signal: ac.signal })),
+                // What is LEFT of the shared budget: a later wave is not given
+                // more time because an earlier one used some.
+                Math.max(0, deadline - Date.now()),
+                `onShutdown(${reason})`,
+              );
+            } catch (err) {
+              if (err instanceof BudgetExceeded) {
+                // Not a crash — a plugin that did not return in time. Named in
+                // the log so the owner can tell whose hook made a restart slow.
+                this.log(`[dispatch] plugin "${rec.id}" onShutdown(${reason}) overran its ${budget / 1000}s budget — moving on without it`);
+              } else {
+                this.fault(`plugin "${rec.id}" onShutdown(${reason}) failed`, err);
+              }
             }
-          }
-        }),
-      );
+          }),
+        );
+      }
     } finally {
       clearTimeout(timer);
       // Anything still running past this point is told to stop.
       if (!ac.signal.aborted) ac.abort(new Error("shutdown pass finished"));
     }
+  }
+
+  /**
+   * `recs` grouped for {@link runShutdownHooks}: each wave after every wave
+   * holding a plugin that depends on it (required or optional), so a
+   * consumer's hook — proxmox-terminal releasing its machines — still finds
+   * the provider it calls on its feet. Plugins with no dependency between
+   * them share a wave, so a shutdown is no slower than before for them.
+   * Depth is measured over every RUNNING plugin, hook or not: in A → B → C
+   * with no hook on B, A's hook may still reach C through B.
+   */
+  private shutdownWaves(recs: PluginRecord[]): PluginRecord[][] {
+    const running = [...this.records.values()].filter((r) => r.phase === "active");
+    const depth = new Map<string, number>();
+    const visiting = new Set<string>();
+    // How many running plugins stand on top of this one, at most.
+    const depthOf = (rec: PluginRecord): number => {
+      const known = depth.get(rec.id);
+      if (known !== undefined) return known;
+      // An optional use that closes a loop: count it once, never forever.
+      if (visiting.has(rec.id)) return 0;
+      visiting.add(rec.id);
+      let d = 0;
+      for (const r of running) {
+        if (r.id !== rec.id && r.manifest?.dependencies && Object.hasOwn(r.manifest.dependencies, rec.id)) {
+          d = Math.max(d, depthOf(r) + 1);
+        }
+      }
+      visiting.delete(rec.id);
+      depth.set(rec.id, d);
+      return d;
+    };
+    const waves: PluginRecord[][] = [];
+    for (const rec of recs) (waves[depthOf(rec)] ??= []).push(rec);
+    return waves.filter((w) => w.length);
   }
 
   /**
@@ -710,7 +919,7 @@ export class PluginService implements PluginContributionSource {
   }
 
   /**
-   * Deactivate every active plugin, reverse id order.
+   * Deactivate every active plugin, reverse dependency order.
    *
    * Does NOT wait for an activation still in flight: that is third-party code
    * on a 30 s budget, and a shutdown held for it is exactly what the
@@ -726,7 +935,8 @@ export class PluginService implements PluginContributionSource {
     // Joins the pass `installShutdown` already started with the real reason;
     // a teardown that did not come through there is a stop.
     await this.shutdown("stop");
-    const recs = [...this.records.values()].sort((a, b) => b.id.localeCompare(a.id));
+    // Reverse dependency order: a plugin goes down before the one it uses.
+    const recs = this.ordered().reverse();
     for (const rec of recs) {
       if (rec.phase === "active" || rec.phase === "error") await this.deactivateOne(rec);
     }
@@ -739,6 +949,7 @@ export class PluginService implements PluginContributionSource {
     if (rec.incompatible) return "incompatible";
     if (!rec.enabled) return "disabled";
     if (rec.phase === "error") return "error";
+    if (rec.phase === "blocked") return "blocked";
     if (rec.phase === "active") return "active";
     // `pending` at boot is a window of milliseconds; `pending` after a toggle
     // is the restart-required state, and `needsRestart` says which.
@@ -768,7 +979,7 @@ export class PluginService implements PluginContributionSource {
 
   info(rec: PluginRecord): PluginInfo {
     const m = rec.manifest;
-    const error = rec.phase === "error" ? rec.activationError : rec.error;
+    const error = rec.phase === "error" ? rec.activationError : rec.phase === "blocked" ? rec.blockedReason : rec.error;
     const oauthView = m ? pluginOAuthManifestView(m) : undefined;
     const oauth = oauthView && this.ctxDeps.pluginOAuth ? this.ctxDeps.pluginOAuth.status(rec.id, oauthView) : undefined;
     const pendingCleanups = this.cleanups?.summary(rec.id);
@@ -776,6 +987,9 @@ export class PluginService implements PluginContributionSource {
     const settingsErrors = check?.ok ? check.check(rec.settings).map((e) => e.message) : [];
     const optional = optionalPluginCapabilities(m);
     const ignoredNote = ignoredOptionalCapabilitiesNote(optional.ignored);
+    const dependencies = this.dependencyInfo(rec);
+    const dependents = this.resolution.dependents.get(rec.id) ?? [];
+    const provides = Object.entries(m?.provides ?? {}).flatMap(([name, majors]) => majors.map((n) => `${name}@${n}`));
     const warnings = [
       ...(ignoredNote ? [ignoredNote] : []),
       ...rec.contributions.warnings,
@@ -809,6 +1023,9 @@ export class PluginService implements PluginContributionSource {
       ...(oauth?.length ? { oauth } : {}),
       ...(warnings.length ? { warnings } : {}),
       ...(pendingCleanups ? { pendingCleanups } : {}),
+      ...(dependencies.length ? { dependencies } : {}),
+      ...(dependents.length ? { dependents } : {}),
+      ...(provides.length ? { provides } : {}),
       origin: this.originOf(rec),
       // Served to every signed-in user and drawn on the row, so a token
       // someone put in a clone URL (the CLI strips it; a hand-edited config
@@ -850,7 +1067,10 @@ export class PluginService implements PluginContributionSource {
    */
   private contributing(): PluginRecord[] {
     return [...this.records.values()]
-      .filter((r) => r.manifest && !r.incompatible && r.enabled)
+      // A blocked plugin is not running, and what it contributes may lean on
+      // the dependency that is missing (a skill telling the agent to use a
+      // backend that is not there) — so it contributes nothing, like one off.
+      .filter((r) => r.manifest && !r.incompatible && r.enabled && r.phase !== "blocked")
       .sort((a, b) => a.id.localeCompare(b.id));
   }
 
@@ -893,12 +1113,15 @@ export class PluginService implements PluginContributionSource {
     for (const r of [...this.records.values()].sort((a, b) => a.id.localeCompare(b.id))) {
       if (!r.manifest || r.incompatible) continue;
       for (const decl of r.contributions.mcpServers) {
+        const on = r.enabled && r.phase !== "blocked";
         out.push({
           ...decl,
-          byDefault: r.enabled,
-          defaultReason: r.enabled
+          byDefault: on,
+          defaultReason: on
             ? `declared by plugin "${r.id}"`
-            : `off — plugin "${r.id}" is switched off in Settings → Plugins`,
+            : r.enabled
+              ? `off — plugin "${r.id}" is blocked: ${r.blockedReason ?? "a dependency is missing"}`
+              : `off — plugin "${r.id}" is switched off in Settings → Plugins`,
         });
       }
     }
@@ -931,6 +1154,7 @@ export class PluginService implements PluginContributionSource {
     // Installed (or toggled on) since boot and never activated: its server
     // half is not running, so its client half has nothing to talk to.
     if (rec.needsRestart && rec.phase !== "active") return undefined;
+    if (rec.phase === "blocked") return undefined;
     if (rec.filesReplaced) return undefined;
     const base = resolve(rec.dir);
     const dir = resolve(base, manifestPathDir(client));
@@ -948,19 +1172,42 @@ export class PluginService implements PluginContributionSource {
   async setEnabled(id: string, enabled: boolean): Promise<PluginInfo> {
     const rec = this.records.get(id);
     if (!rec) throw new PluginNotFound(id);
+    if (!enabled) {
+      // Not while it (or anything that uses it) is still coming up: the
+      // activation in flight would finish after the toggle and leave the
+      // plugin running with its switch off.
+      const busy = [rec, ...this.dependentsOf(id)].find((r) => this.starting(r));
+      if (busy) throw new PluginLifecycleError(`"${busy.id}" is still starting — try again in a moment`, 409);
+    }
     await this.store.updateSettings((current) => ({
       ...current,
       plugins: { ...current.plugins, [id]: { ...current.plugins?.[id], enabled } },
     }));
     rec.enabled = enabled;
     if (!enabled) {
+      // What needs it goes first, deepest first, while it is still up to be
+      // called — and as a `disable`, never an `uninstall`: a plugin whose
+      // uninstall hook destroys what it made (proxmox-terminal's containers)
+      // must only be told to put things away.
+      for (const dep of this.requiredDependentsOf(id)) {
+        if (dep.phase === "active" || dep.phase === "error") await this.deactivateOne(dep, "disable");
+        if (dep.enabled && dep.manifest && !dep.incompatible && dep.phase !== "blocked") {
+          dep.phase = "blocked";
+          dep.blockedReason = dep.manifest.dependencies?.[id]
+            ? `needs ${id}, which was switched off`
+            : `needs a plugin that needs ${id}, which was switched off`;
+          this.log(`[dispatch] plugin "${dep.id}" stopped: ${dep.blockedReason}`);
+        }
+      }
       if (rec.phase === "active" || rec.phase === "error" || rec.phase === "pending") {
         await this.deactivateOne(rec, "disable");
       }
+      if (rec.phase === "blocked") rec.phase = "inactive";
       rec.needsRestart = false;
     } else if (rec.manifest && !rec.incompatible && rec.phase !== "active") {
       rec.needsRestart = true;
     }
+    this.resolve();
     return this.info(rec);
   }
 
@@ -1121,6 +1368,7 @@ export class PluginService implements PluginContributionSource {
       contributions: EMPTY_CONTRIBUTIONS,
     };
     this.records.set(id, rec);
+    this.resolve();
     return this.info(rec);
   }
 
@@ -1218,6 +1466,22 @@ export class PluginService implements PluginContributionSource {
     if (rec.phase === "activating") {
       throw new PluginLifecycleError(`"${id}" is still activating — try again in a moment`, 409);
     }
+    if (this.starting(rec)) {
+      // `pending` at boot: removing it now runs none of its hooks, so an
+      // uninstall that should have destroyed what it made would leave it.
+      throw new PluginLifecycleError(`"${id}" is still starting — try again in a moment`, 409);
+    }
+    const users = this.dependentsOf(id);
+    if (users.length) {
+      // Never a cascade: uninstalling what depends on it would run THEIR
+      // uninstall hooks (proxmox-terminal's destroys every container it made)
+      // as a side effect of removing something else.
+      const names = users.map((r) => `"${r.id}"`).join(", ");
+      throw new PluginLifecycleError(
+        `"${id}" is used by ${names} — uninstall ${users.length === 1 ? "it" : "them"} first, or switch "${id}" off instead`,
+        409,
+      );
+    }
     const preview = await this.uninstallPreview(id);
     const wasRunning = rec.phase === "active" || rec.phase === "error";
     // Down BEFORE the files go: a process it started may hold its directory
@@ -1232,6 +1496,7 @@ export class PluginService implements PluginContributionSource {
       throw new PluginLifecycleError(`could not remove ${rec.dir}: ${describe(err)}`, 500);
     }
     this.records.delete(id);
+    this.resolve();
     // Whatever it never managed to clean up is past saving: the code that
     // could run those hooks is gone, and a row nobody can retry would sit on
     // nothing forever. Its `onShutdown("uninstall")` above was the last word.
@@ -1302,6 +1567,9 @@ export class PluginService implements PluginContributionSource {
     if (rec.phase === "pending" || rec.phase === "activating") {
       // Still coming up: the client should retry, not conclude the route is gone.
       return reply.code(503).header("retry-after", "2").send({ error: `plugin "${id}" is activating` });
+    }
+    if (rec.phase === "blocked") {
+      return reply.code(404).send({ error: `plugin "${id}" is blocked: ${rec.blockedReason ?? "a dependency is missing"}` });
     }
     if (rec.phase !== "active" || !rec.owned) {
       return reply.code(404).send({ error: `plugin "${id}" is not active` });

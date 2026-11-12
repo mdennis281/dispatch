@@ -219,10 +219,18 @@ export interface OwnedResources {
   /** The route table the prefix wildcard consults. Emptied on deactivate. */
   routes: PluginRouteTable;
   settingsListeners: Set<(next: unknown) => void>;
+  /**
+   * Work teardown started and could not finish synchronously (a provider's
+   * or a terminal backend's unregister, which runs its `dispose()`). `offs`
+   * run synchronously, so they push their promise here and deactivation
+   * awaits it — a plugin that depends on this one must not be taken down
+   * (or its API cut off) while this one's `dispose()` is still calling it.
+   */
+  settling: Array<Promise<unknown>>;
 }
 
 export function newOwnedResources(): OwnedResources {
-  return { offs: [], routes: newRouteTable(), settingsListeners: new Set() };
+  return { offs: [], routes: newRouteTable(), settingsListeners: new Set(), settling: [] };
 }
 
 /** Default `ask` wait, matching `chat_ask`'s posture of "long, but not forever". */
@@ -474,9 +482,11 @@ export function buildPluginContext(
         // harness whose `dispose()` rejects would otherwise be an unhandled
         // rejection — fatal to the whole process.
         owned.offs.push(() => {
-          providers.unregister(harness.kind).catch((err: unknown) => {
-            deps.log.error(`provider "${harness.kind}" failed to dispose`, err);
-          });
+          owned.settling.push(
+            providers.unregister(harness.kind).catch((err: unknown) => {
+              deps.log.error(`provider "${harness.kind}" failed to dispose`, err);
+            }),
+          );
         });
       },
     };
@@ -503,9 +513,11 @@ export function buildPluginContext(
           // have been claimed by another plugin, whose backend this teardown
           // must not take down.
           if (!mine.delete(backend.id)) return;
-          terminals.unregister(backend.id).catch((err: unknown) => {
-            deps.log.error(`terminal backend "${backend.id}" failed to unregister`, err);
-          });
+          owned.settling.push(
+            terminals.unregister(backend.id).catch((err: unknown) => {
+              deps.log.error(`terminal backend "${backend.id}" failed to unregister`, err);
+            }),
+          );
         });
       },
       publishPort: (backendId, port) => {

@@ -538,6 +538,8 @@ const STATUS: Record<PluginStatus, { tone: DotTone; label: string }> = {
   error: { tone: "danger", label: "Failed to start" },
   invalid: { tone: "danger", label: "Invalid manifest" },
   incompatible: { tone: "warn", label: "Incompatible" },
+  // A dependency it needs is missing, off or broken; the row's error says which.
+  blocked: { tone: "warn", label: "Blocked" },
 };
 
 /**
