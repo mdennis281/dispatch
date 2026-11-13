@@ -88,6 +88,7 @@ async function overview(app: FastifyInstance, refresh: boolean): Promise<UsageOv
           windows: usageWindowsOf(snap),
           fetchedAt: snap.fetchedAt,
           ...(snap.planType ? { planType: snap.planType } : {}),
+          ...(snap.resetCredits !== undefined ? { resetCredits: snap.resetCredits } : {}),
           ...(snap.stale ? { stale: true } : {}),
           ...(snap.error ? { error: snap.error } : {}),
         };

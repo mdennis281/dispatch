@@ -62,6 +62,13 @@ export const UsageSnapshotSchema = z.object({
    * mark a whole account exhausted just because it is now being tracked.
    */
   limits: z.array(LimitReadingSchema).optional(),
+  /**
+   * Early resets the provider says this account still has to spend (Codex's
+   * `rateLimitResetCredits`). Absent when the provider has no such thing —
+   * Claude's usage endpoint reports none — which is NOT the same as zero: the
+   * card says "0 resets" only for an account that genuinely ran out.
+   */
+  resetCredits: z.number().int().optional(),
 });
 export type UsageSnapshot = z.infer<typeof UsageSnapshotSchema>;
 
@@ -92,6 +99,8 @@ export const SubscriptionUsageSchema = z.object({
   provider: HarnessKindSchema,
   planType: z.string().optional(),
   windows: z.array(TitledUsageWindowSchema),
+  /** See {@link UsageSnapshotSchema}'s `resetCredits` — absent ≠ zero. */
+  resetCredits: z.number().int().optional(),
   fetchedAt: z.number().int(),
   stale: z.boolean().optional(),
   error: z.string().optional(),

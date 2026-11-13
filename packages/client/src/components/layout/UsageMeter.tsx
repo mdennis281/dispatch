@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { RotateCw, Gauge as GaugeIcon } from "lucide-react";
+import { RotateCcw, RotateCw, Gauge as GaugeIcon } from "lucide-react";
 import {
   chatAccountOf,
   providerFor,
@@ -14,6 +14,7 @@ import { clampPct, untilShort, relTime } from "../../lib/format.js";
 import { cn } from "../../lib/cn.js";
 import { HoverCard } from "../ui/HoverCard.js";
 import { Spinner } from "../ui/Spinner.js";
+import { Tooltip } from "../ui/Tooltip.js";
 import { SplitBar } from "../ui/SplitBar.js";
 import { windowTag } from "../../lib/usageWindow.js";
 import { BAR_W, GAUGE_LINE_TRIGGER, GAUGE_TRIGGER, Gauge, type GaugeLayout } from "./Gauge.js";
@@ -48,10 +49,87 @@ function WindowLine({ win, now }: { win: TitledUsageWindow; now: number }) {
       <span className={cn("cm-mono text-right text-2xs font-semibold", t.text)}>
         {Math.round(win.percent)}%
       </span>
-      <span className="cm-mono text-right text-2xs text-faint" title="resets in">
-        {win.resetsAt !== null ? untilShort(win.resetsAt, now) : ""}
-      </span>
+      {win.resetsAt !== null ? (
+        // A bare "2d 4h" was the only reset information the card gave, behind
+        // a native `title` that read "resets in" — which says what the column
+        // is, not when. The tooltip carries the wall-clock time, so "will this
+        // be back before my meeting" doesn't need arithmetic.
+        <Tooltip
+          side="left"
+          triggerClassName="justify-self-end"
+          className="w-56 !whitespace-normal"
+          label={
+            <span className="block text-left">
+              <span className="block font-medium">Resets {resetStamp(win.resetsAt)}</span>
+              <span className="block text-faint">
+                in {untilShort(win.resetsAt, now)} — {win.title} usage goes back to 0% then.
+              </span>
+            </span>
+          }
+        >
+          <span className="cm-mono cursor-default text-right text-2xs text-faint">
+            {untilShort(win.resetsAt, now)}
+          </span>
+        </Tooltip>
+      ) : (
+        <span />
+      )}
     </div>
+  );
+}
+
+/**
+ * "Tue 3:40 PM" within the week, "Nov 20, 3:40 PM" past it. Windows are five
+ * hours to seven days long, so a weekday is enough for nearly all of them —
+ * and a weekly window that rolled while the tab sat open still needs a date.
+ */
+function resetStamp(ts: number): string {
+  const sameWeek = ts - Date.now() < 6 * 24 * 3_600_000;
+  return new Date(ts).toLocaleString(undefined, {
+    ...(sameWeek ? { weekday: "short" } : { month: "short", day: "numeric" }),
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+/**
+ * The account's spare early resets, as a chip beside its name.
+ *
+ * Only Codex reports these (`rateLimitResetCredits`); Claude's usage endpoint
+ * has no equivalent, so a Claude row shows nothing rather than a misleading 0.
+ * The count is read-only here — spending one happens in the provider, and the
+ * tooltip says so, because a chip that looks like a button invites a click.
+ */
+function ResetCredits({ count, provider }: { count: number; provider: string }) {
+  return (
+    <Tooltip
+      side="left"
+      className="w-64 !whitespace-normal"
+      label={
+        <span className="block text-left">
+          <span className="block font-medium">
+            {count === 0
+              ? "No early resets left"
+              : `${count} early reset${count === 1 ? "" : "s"} left`}
+          </span>
+          <span className="block text-faint">
+            Reset credits {provider} grants this account. Spending one clears its usage windows
+            before their scheduled reset — use them from {provider}; Dispatch only shows the
+            count.
+          </span>
+        </span>
+      }
+    >
+      <span
+        className={cn(
+          "inline-flex cursor-default items-center gap-0.5 rounded-[4px] bg-active px-1 text-2xs tabular-nums",
+          count === 0 ? "text-faint" : "text-secondary",
+        )}
+      >
+        <RotateCcw className="size-2.5" />
+        {count}
+      </span>
+    </Tooltip>
   );
 }
 
@@ -99,7 +177,15 @@ function AccountBlock({
           {providerFor(row.provider).shortLabel}
           {row.planType && ` · ${row.planType}`}
         </span>
-        {problem && <span className="ml-auto shrink-0 text-2xs text-warn">{problem}</span>}
+        <span className="ml-auto flex shrink-0 items-center gap-1.5 self-center">
+          {problem && <span className="text-2xs text-warn">{problem}</span>}
+          {row.resetCredits !== undefined && (
+            <ResetCredits
+              count={row.resetCredits}
+              provider={providerFor(row.provider).shortLabel}
+            />
+          )}
+        </span>
       </div>
       {row.windows.length ? (
         row.windows.map((win) => <WindowLine key={win.title} win={win} now={now} />)
