@@ -77,6 +77,9 @@ export function snapshotOfLimits(
     primaryLabel: windowLabel(limits?.primary?.windowMinutes, "Primary window"),
     secondaryLabel: windowLabel(limits?.secondary?.windowMinutes, "Secondary window"),
     ...(limits?.planType ? { planType: limits.planType } : {}),
+    // The limit history has recorded this since it existed; the usage card,
+    // the one place a person would act on it, never got it.
+    ...(typeof limits?.resetCredits === "number" ? { resetCredits: limits.resetCredits } : {}),
     ...(windows ? { windows } : {}),
     ...(!limits
       ? { stale: true, error: "unavailable" }
