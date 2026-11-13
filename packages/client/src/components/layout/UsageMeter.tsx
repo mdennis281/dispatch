@@ -138,7 +138,12 @@ function ResetGrants({
   hint?: string;
   now: number;
 }) {
-  const count = grants.reduce((n, g) => n + Math.max(0, g.left), 0);
+  // The poller drops expired grants, but its answer is cached: through a 30-min
+  // 429 cooldown, and between five-minute samples. A grant that ran out at noon
+  // would keep counting until the next good read. Filtering against the card's
+  // ticking `now` is the only place that is always current.
+  const live = grants.filter((g) => g.expiresAt === undefined || g.expiresAt > now);
+  const count = live.reduce((n, g) => n + Math.max(0, g.left), 0);
   return (
     <Tooltip
       side="left"
@@ -150,7 +155,7 @@ function ResetGrants({
               ? "No early resets left"
               : `${count} early reset${count === 1 ? "" : "s"} left`}
           </span>
-          {grants.map((g) => (
+          {live.map((g) => (
             <span key={g.id} className="mt-1 block">
               <span className="block text-secondary">{g.label}</span>
               <span className="block text-faint">
