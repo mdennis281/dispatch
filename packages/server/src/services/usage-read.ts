@@ -80,6 +80,8 @@ export function snapshotOfLimits(
     // The limit history has recorded this since it existed; the usage card,
     // the one place a person would act on it, never got it.
     ...(typeof limits?.resetCredits === "number" ? { resetCredits: limits.resetCredits } : {}),
+    ...(limits?.resetGrants ? { resetGrants: limits.resetGrants } : {}),
+    ...(limits?.resetHint ? { resetHint: limits.resetHint } : {}),
     ...(windows ? { windows } : {}),
     ...(!limits
       ? { stale: true, error: "unavailable" }

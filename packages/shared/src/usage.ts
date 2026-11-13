@@ -26,6 +26,28 @@ export const TitledUsageWindowSchema = UsageWindowSchema.extend({
 export type TitledUsageWindow = z.infer<typeof TitledUsageWindowSchema>;
 
 /**
+ * One grant of early limit resets.
+ *
+ * Claude only reports these when the usage read asks with `?cedar_ember=1` AND
+ * the User-Agent names a recent CLI. Without the flag the field is null, and an
+ * old version gets `ineligible_reason: "cli_version"`. Both were true of
+ * Dispatch's read, which is why it looked as if Claude had no resets at all.
+ */
+export const ResetGrantSchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  left: z.number().int(),
+  total: z.number().int().optional(),
+  /** Epoch ms after which unspent resets are gone. */
+  expiresAt: z.number().int().optional(),
+  usableNow: z.boolean().optional(),
+  unavailableReason: z.string().optional(),
+  /** Titles of the windows spending one refills. */
+  refills: z.array(z.string()).optional(),
+});
+export type ResetGrant = z.infer<typeof ResetGrantSchema>;
+
+/**
  * A point-in-time snapshot of the account's usage. `fiveHour`/`sevenDay` are null
  * when the source didn't report that window (or the fetch failed). `error` marks
  * why the last refresh couldn't produce fresh numbers; `stale` says the shown
@@ -64,11 +86,19 @@ export const UsageSnapshotSchema = z.object({
   limits: z.array(LimitReadingSchema).optional(),
   /**
    * Early resets the provider says this account still has to spend (Codex's
-   * `rateLimitResetCredits`). Absent when the provider has no such thing —
-   * Claude's usage endpoint reports none — which is NOT the same as zero: the
-   * card says "0 resets" only for an account that genuinely ran out.
+   * `rateLimitResetCredits`). Absent when the provider reports no count, which
+   * is NOT the same as zero. The card reads {@link resetGrants}, which carries
+   * this count too.
    */
   resetCredits: z.number().int().optional(),
+  /**
+   * Every early-reset grant the account holds — what the card's reset chip
+   * draws. Claude names and dates each one; a Codex count arrives as a single
+   * unnamed grant. Absent = the provider reports no resets at all.
+   */
+  resetGrants: z.array(ResetGrantSchema).optional(),
+  /** How to spend one, in the provider's terms ("/limit-reset in Claude Code"). */
+  resetHint: z.string().optional(),
 });
 export type UsageSnapshot = z.infer<typeof UsageSnapshotSchema>;
 
@@ -101,6 +131,8 @@ export const SubscriptionUsageSchema = z.object({
   windows: z.array(TitledUsageWindowSchema),
   /** See {@link UsageSnapshotSchema}'s `resetCredits` — absent ≠ zero. */
   resetCredits: z.number().int().optional(),
+  resetGrants: z.array(ResetGrantSchema).optional(),
+  resetHint: z.string().optional(),
   fetchedAt: z.number().int(),
   stale: z.boolean().optional(),
   error: z.string().optional(),

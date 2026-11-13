@@ -23,3 +23,12 @@ describe("snapshotOfLimits — reset credits", () => {
     expect("resetCredits" in snap).toBe(false);
   });
 });
+
+describe("snapshotOfLimits — reset grants", () => {
+  it("carries grants and the provider's spend hint to the card", () => {
+    const grants = [{ id: "g", label: "One full limit reset", left: 1, total: 1, expiresAt: 5 }];
+    const snap = snapshotOfLimits(sub, { primary: { usedPercent: 1 }, resetGrants: grants, resetHint: "Use /limit-reset." }, 1);
+    expect(snap.resetGrants).toEqual(grants);
+    expect(snap.resetHint).toBe("Use /limit-reset.");
+  });
+});

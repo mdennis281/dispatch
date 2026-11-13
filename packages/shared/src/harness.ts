@@ -49,6 +49,7 @@ import type {
   TokenFigures,
   RuntimeLoginStatus,
   ContextUsage,
+  ResetGrant,
 } from "./index.js";
 
 /**
@@ -217,6 +218,14 @@ export interface HarnessLimits {
   tracked?: Array<HarnessLimitWindow & { id: string; title: string }>;
   /** Backend-granted reset credits still available (Codex). */
   resetCredits?: number;
+  /**
+   * Early resets the account holds, one entry per grant, as the runtime names
+   * them. Claude reports dated grants ("One full limit reset (November 2026)",
+   * 1 of 1 left, use by Dec 10). Absent means the runtime reports none.
+   */
+  resetGrants?: ResetGrant[];
+  /** One line on how to spend a reset, in the runtime's own terms. */
+  resetHint?: string;
   /**
    * The last read FAILED and these are the last good windows (or none), kept so
    * a meter doesn't blank on a transient blip. Only ever set on a non-`fresh`

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { ClaudeUsage, ClaudeUsagePoller, limitReadingsOf, limitsOfUsage } from "./usage.js";
+import { ClaudeUsage, ClaudeUsagePoller, limitReadingsOf, limitsOfUsage, resetGrantsOf } from "./usage.js";
 import { ClaudeHarness } from "./index.js";
 
 /** A minimal Response the poller reads (.ok/.status/.json). */
@@ -138,5 +138,95 @@ describe("limit readings", () => {
       ["seven_day", 40, Date.parse("2026-10-25T00:00:00Z")],
       ["seven_day_opus", 0, undefined],
     ]);
+  });
+});
+
+/*
+ * The `cedar_ember` block, shaped from a real 200 (2026-11-13). Dispatch read
+ * this endpoint for months without the `?cedar_ember=1` flag and with a 2.0.0
+ * User-Agent, got null or `ineligible_reason: "cli_version"`, and concluded
+ * Claude had no resets while the account held two.
+ */
+const NOW = Date.parse("2026-11-13T00:00:00Z");
+const CEDAR = {
+  eligible: true,
+  grants: [
+    {
+      id: "full-reset-2611",
+      label: "One full limit reset (November 2026)",
+      resets_total: 1,
+      resets_left: 1,
+      ends_at: "2026-12-10T22:00:00+00:00",
+      clears: ["seven_day", "seven_day_overage_included"],
+      usable_now: true,
+      unavailable_reason: null,
+    },
+    {
+      id: "launch-2610-fable",
+      label: "New model launch: one Fable reset",
+      resets_total: 1,
+      resets_left: 0,
+      ends_at: "2027-03-09T07:59:00+00:00",
+      clears: ["seven_day_overage_included"],
+      usable_now: false,
+      unavailable_reason: "not_at_wall",
+    },
+    { id: "expired", label: "Old", resets_total: 1, resets_left: 1, ends_at: "2026-10-01T00:00:00+00:00" },
+  ],
+};
+
+describe("reset grants", () => {
+  it("maps each live grant: count, use-by, what it refills, and why it can't be used", () => {
+    const limits = limitsOfUsage({ ...OK_BODY, cedar_ember: CEDAR }, NOW);
+    expect(limits.resetGrants).toEqual([
+      {
+        id: "full-reset-2611",
+        label: "One full limit reset (November 2026)",
+        left: 1,
+        total: 1,
+        expiresAt: Date.parse("2026-12-10T22:00:00+00:00"),
+        usableNow: true,
+        refills: ["Weekly", "Weekly · Overage Included"],
+      },
+      {
+        id: "launch-2610-fable",
+        label: "New model launch: one Fable reset",
+        left: 0,
+        total: 1,
+        expiresAt: Date.parse("2027-03-09T07:59:00+00:00"),
+        usableNow: false,
+        unavailableReason: "not_at_wall",
+        refills: ["Weekly · Overage Included"],
+      },
+    ]);
+    expect(limits.resetHint).toMatch(/\/limit-reset/);
+  });
+
+  // Absent and ineligible must not read as "0 resets left" on the card.
+  it("reports NO grants (not an empty list) when the block is missing or ineligible", () => {
+    expect(limitsOfUsage(OK_BODY, NOW).resetGrants).toBeUndefined();
+    const ineligible = { eligible: false, ineligible_reason: "cli_version", grants: [] };
+    expect(limitsOfUsage({ ...OK_BODY, cedar_ember: ineligible }, NOW).resetGrants).toBeUndefined();
+    expect(resetGrantsOf(null, NOW)).toBeNull();
+  });
+
+  it("asks with the cedar_ember flag and names the installed CLI version", async () => {
+    const fetchImpl = vi.fn(async () => resp(200, OK_BODY)) as unknown as typeof fetch;
+    await new ClaudeUsagePoller({
+      configDir: "/nowhere",
+      fetchImpl,
+      readToken: async () => "tok",
+      cliVersion: () => "2.1.400",
+    }).cached();
+    const [url, init] = (fetchImpl as unknown as { mock: { calls: [string, RequestInit][] } }).mock.calls[0]!;
+    expect(url).toContain("cedar_ember=1");
+    expect((init.headers as Record<string, string>)["User-Agent"]).toBe("claude-cli/2.1.400 (external, cli)");
+  });
+
+  it("falls back to a version the endpoint accepts when the runtime's is unknown", async () => {
+    const fetchImpl = vi.fn(async () => resp(200, OK_BODY)) as unknown as typeof fetch;
+    await make({ fetchImpl }).cached();
+    const [, init] = (fetchImpl as unknown as { mock: { calls: [string, RequestInit][] } }).mock.calls[0]!;
+    expect((init.headers as Record<string, string>)["User-Agent"]).not.toContain("2.0.0");
   });
 });

@@ -147,6 +147,11 @@ export const useUsage = create<UsageStore>((set, get) => {
                 ? {
                     ...row,
                     windows: usageWindowsOf(usage),
+                    // A push after a reset was spent carries the new count; a
+                    // push without grants (a failed read) keeps the last ones.
+                    ...(usage.resetGrants
+                      ? { resetGrants: usage.resetGrants, resetHint: usage.resetHint }
+                      : {}),
                     fetchedAt: usage.fetchedAt,
                     stale: usage.stale,
                     error: usage.error,

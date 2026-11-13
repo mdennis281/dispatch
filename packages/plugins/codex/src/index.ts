@@ -491,7 +491,15 @@ export function toHarnessLimits(
     reached: Boolean(s.rateLimitReachedType) || Boolean(s.spendControlReached),
     reachedType: s.rateLimitReachedType ?? undefined,
     tracked: trackedWindows(buckets),
-    ...(typeof credits === "number" ? { resetCredits: credits } : {}),
+    ...(typeof credits === "number"
+      ? {
+          resetCredits: credits,
+          // Codex gives a bare count: no name, no expiry. One grant carries it
+          // so the card draws Codex and Claude resets the same way.
+          resetGrants: [{ id: "codex-reset-credits", label: "Reset credits", left: credits }],
+          resetHint: "Use them from Codex.",
+        }
+      : {}),
   };
 }
 
