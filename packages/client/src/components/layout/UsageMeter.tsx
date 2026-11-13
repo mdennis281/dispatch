@@ -3,6 +3,7 @@ import { RotateCcw, RotateCw, Gauge as GaugeIcon } from "lucide-react";
 import {
   chatAccountOf,
   providerFor,
+  type ResetGrant,
   type SubscriptionUsage,
   type TitledUsageWindow,
   type UsageWindow,
@@ -107,19 +108,46 @@ function resetStamp(ts: number, now: number): string {
   });
 }
 
+/** "Dec 10" — a grant's use-by date; the year only when it isn't this one. */
+function useBy(ts: number, now: number): string {
+  const sameYear = new Date(ts).getFullYear() === new Date(now).getFullYear();
+  return new Date(ts).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    ...(sameYear ? {} : { year: "numeric" }),
+  });
+}
+
 /**
- * The account's spare early resets, as a chip beside its name.
+ * The account's spare early resets, as a chip beside its name, with every
+ * grant spelled out in the tooltip: what it is, how many are left, the use-by
+ * date, and what spending one refills.
  *
- * Only Codex reports these (`rateLimitResetCredits`); Claude's usage endpoint
- * has no equivalent, so a Claude row shows nothing rather than a misleading 0.
- * The count is read-only here — spending one happens in the provider, and the
- * tooltip says so, because a chip that looks like a button invites a click.
+ * Claude reports named, dated grants; Codex a bare count, carried as a single
+ * grant. A row whose provider reports neither has no chip at all, rather than
+ * a misleading 0. The count is read-only here. Spending one happens in the
+ * provider, and `hint` says where, because a chip that looks like a button
+ * invites a click.
  */
-function ResetCredits({ count, provider }: { count: number; provider: string }) {
+function ResetGrants({
+  grants,
+  hint,
+  now,
+}: {
+  grants: ResetGrant[];
+  hint?: string;
+  now: number;
+}) {
+  // The poller drops expired grants, but its answer is cached: through a 30-min
+  // 429 cooldown, and between five-minute samples. A grant that ran out at noon
+  // would keep counting until the next good read. Filtering against the card's
+  // ticking `now` is the only place that is always current.
+  const live = grants.filter((g) => g.expiresAt === undefined || g.expiresAt > now);
+  const count = live.reduce((n, g) => n + Math.max(0, g.left), 0);
   return (
     <Tooltip
       side="left"
-      className="w-64 !whitespace-normal"
+      className="w-72 !whitespace-normal"
       label={
         <span className="block text-left">
           <span className="block font-medium">
@@ -127,10 +155,25 @@ function ResetCredits({ count, provider }: { count: number; provider: string }) 
               ? "No early resets left"
               : `${count} early reset${count === 1 ? "" : "s"} left`}
           </span>
-          <span className="block text-faint">
-            Reset credits {provider} grants this account. Spending one clears its usage windows
-            before their scheduled reset — use them from {provider}; Dispatch only shows the
-            count.
+          {live.map((g) => (
+            <span key={g.id} className="mt-1 block">
+              <span className="block text-secondary">{g.label}</span>
+              <span className="block text-faint">
+                {g.total !== undefined ? `${g.left} of ${g.total} left` : `${g.left} left`}
+                {g.expiresAt !== undefined && ` · use by ${useBy(g.expiresAt, now)}`}
+                {g.refills?.length ? ` · refills ${g.refills.join(", ")}` : ""}
+              </span>
+              {g.usableNow === false && (
+                <span className="block text-warn">
+                  Can't be used right now
+                  {g.unavailableReason ? ` — ${g.unavailableReason.replace(/_/g, " ")}` : ""}
+                </span>
+              )}
+            </span>
+          ))}
+          <span className="mt-1 block text-faint">
+            A reset refills your usage limits before their scheduled reset.
+            {hint ? ` ${hint}` : ""}
           </span>
         </span>
       }
@@ -194,11 +237,8 @@ function AccountBlock({
         </span>
         <span className="ml-auto flex shrink-0 items-center gap-1.5 self-center">
           {problem && <span className="text-2xs text-warn">{problem}</span>}
-          {row.resetCredits !== undefined && (
-            <ResetCredits
-              count={row.resetCredits}
-              provider={providerFor(row.provider).shortLabel}
-            />
+          {row.resetGrants && (
+            <ResetGrants grants={row.resetGrants} hint={row.resetHint} now={now} />
           )}
         </span>
       </div>

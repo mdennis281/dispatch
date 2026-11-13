@@ -35,9 +35,25 @@ import {
   type HarnessLimitWindow,
   type HarnessLimits,
   type LimitReading,
+  type ResetGrant,
 } from "@dispatch/shared";
 
-const USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
+/**
+ * `cedar_ember=1` is what makes the endpoint report early-reset grants (the
+ * November 2026 full reset, the Fable launch reset). Without it the field comes
+ * back null, and for months Dispatch concluded Claude had no resets. This is
+ * the same query Claude Code's `/limit-reset` sends. `skip_spend=1` drops the
+ * spend block, which nothing here reads.
+ */
+const USAGE_URL = "https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1";
+
+/**
+ * Used when the runtime's version can't be read. The endpoint gates grants on
+ * the CLI version in the User-Agent: `claude-cli/2.0.0` got
+ * `ineligible_reason: "cli_version"`. The live version is preferred so the
+ * floor keeps moving with the install.
+ */
+const FALLBACK_CLI_VERSION = "2.1.319";
 
 /** After a 429, skip reads for this long (the limit persists a while). */
 const RATE_LIMIT_COOLDOWN_MS = 30 * 60_000;
@@ -46,12 +62,68 @@ const MIN_READ_GAP_MS = 5_000;
 /** Per-request timeout so a hung fetch can't wedge a read. */
 const FETCH_TIMEOUT_MS = 10_000;
 
-/** Headers the endpoint expects; the User-Agent avoids a stricter 429 bucket. */
-const REQUEST_HEADERS: Record<string, string> = {
-  "anthropic-beta": "oauth-2025-04-20",
-  "Content-Type": "application/json",
-  "User-Agent": "claude-cli/2.0.0 (external, cli)",
-};
+/**
+ * Headers the endpoint expects. The CLI-shaped User-Agent avoids a stricter 429
+ * bucket, and its version decides whether reset grants are reported at all.
+ */
+function requestHeaders(cliVersion: string | undefined): Record<string, string> {
+  return {
+    "anthropic-beta": "oauth-2025-04-20",
+    "Content-Type": "application/json",
+    "User-Agent": `claude-cli/${cliVersion || FALLBACK_CLI_VERSION} (external, cli)`,
+  };
+}
+
+/** How the card tells someone to spend a Claude reset. */
+const CLAUDE_RESET_HINT = "Use one with /limit-reset in Claude Code, or Settings → Usage on claude.ai.";
+
+/** One grant in the `cedar_ember` block (only the fields we use). */
+interface RawGrant {
+  id?: string;
+  label?: string;
+  resets_total?: number;
+  resets_left?: number;
+  ends_at?: string | null;
+  usable_now?: boolean;
+  unavailable_reason?: string | null;
+  clears?: string[];
+}
+interface RawCedarEmber {
+  eligible?: boolean;
+  grants?: RawGrant[] | null;
+}
+
+/**
+ * The `cedar_ember` block → grants. Null when the block is absent or the
+ * account is ineligible: "reports no resets" must stay distinct from "holds
+ * none", or a Claude row would show a misleading 0.
+ *
+ * A grant past its `ends_at` is dropped: unspent resets are gone at that
+ * point, and showing a dead one would inflate the count on the chip.
+ */
+export function resetGrantsOf(block: unknown, now: number): ResetGrant[] | null {
+  const ce = block as RawCedarEmber | null | undefined;
+  if (!ce || typeof ce !== "object" || ce.eligible === false || !Array.isArray(ce.grants)) return null;
+  const out: ResetGrant[] = [];
+  for (const g of ce.grants) {
+    if (!g || typeof g.id !== "string" || typeof g.resets_left !== "number") continue;
+    const expiresAt = isoToMs(g.ends_at);
+    if (expiresAt !== undefined && expiresAt <= now) continue;
+    out.push({
+      id: g.id,
+      label: typeof g.label === "string" && g.label.trim() ? g.label : "Limit reset",
+      left: g.resets_left,
+      ...(typeof g.resets_total === "number" ? { total: g.resets_total } : {}),
+      ...(expiresAt !== undefined ? { expiresAt } : {}),
+      ...(typeof g.usable_now === "boolean" ? { usableNow: g.usable_now } : {}),
+      ...(g.unavailable_reason ? { unavailableReason: g.unavailable_reason } : {}),
+      ...(Array.isArray(g.clears) && g.clears.length
+        ? { refills: g.clears.map((k) => claudeWindowOf(k).title) }
+        : {}),
+    });
+  }
+  return out;
+}
 
 const FIVE_HOUR_MINUTES = 5 * 60;
 const WEEK_MINUTES = 7 * 24 * 60;
@@ -112,10 +184,12 @@ export function limitReadingsOf(data: Record<string, unknown>): LimitReading[] {
 }
 
 /** A 200 body → limits. Exported for the tests that pin the mapping. */
-export function limitsOfUsage(data: RawUsage & Record<string, unknown>): HarnessLimits {
+export function limitsOfUsage(data: RawUsage & Record<string, unknown>, now = Date.now()): HarnessLimits {
   const primary = toWindow(data.five_hour, FIVE_HOUR_MINUTES);
   const secondary = toWindow(data.seven_day, WEEK_MINUTES);
+  const grants = resetGrantsOf(data.cedar_ember, now);
   return {
+    ...(grants ? { resetGrants: grants, resetHint: CLAUDE_RESET_HINT } : {}),
     ...(primary ? { primary } : {}),
     ...(secondary ? { secondary } : {}),
     // Named windows so the card keeps saying "5-hour session" — the generic
@@ -157,6 +231,11 @@ export interface ClaudeUsagePollerDeps {
   readToken?: () => Promise<string | null>;
   /** Injectable clock (tests). */
   now?: () => number;
+  /**
+   * The Claude Code version to name in the User-Agent — the installed
+   * runtime's, read lazily (resolving it runs `claude --version` once).
+   */
+  cliVersion?: () => string | undefined;
 }
 
 /** One account's poller: a cache, a cooldown and request coalescing — no timer. */
@@ -164,6 +243,7 @@ export class ClaudeUsagePoller {
   private readonly fetchImpl: typeof fetch;
   private readonly readToken: () => Promise<string | null>;
   private readonly now: () => number;
+  private readonly cliVersion: () => string | undefined;
 
   private latest: HarnessLimits | null = null;
   /** In-flight poll, so concurrent readers coalesce onto one request. */
@@ -176,6 +256,7 @@ export class ClaudeUsagePoller {
     this.fetchImpl = deps.fetchImpl ?? fetch;
     this.readToken = deps.readToken ?? (() => readClaudeOauthToken(deps.configDir));
     this.now = deps.now ?? Date.now;
+    this.cliVersion = deps.cliVersion ?? (() => undefined);
   }
 
   /** Latest limits, fetching once if never read. Marked `stale` when the last read failed. */
@@ -226,7 +307,7 @@ export class ClaudeUsagePoller {
       try {
         res = await this.fetchImpl(USAGE_URL, {
           method: "GET",
-          headers: { ...REQUEST_HEADERS, Authorization: `Bearer ${token}` },
+          headers: { ...requestHeaders(this.cliVersion()), Authorization: `Bearer ${token}` },
           signal: ctrl.signal,
         });
       } finally {
@@ -243,7 +324,7 @@ export class ClaudeUsagePoller {
       const data = (await res.json()) as RawUsage & Record<string, unknown>;
       // A successful fetch clears any lingering cooldown.
       this.cooldownUntil = 0;
-      return this.commit(limitsOfUsage(data));
+      return this.commit(limitsOfUsage(data, this.now()));
     } catch {
       return this.commit(this.failed("unavailable"));
     }

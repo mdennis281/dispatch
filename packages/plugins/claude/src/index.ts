@@ -38,7 +38,7 @@ import { claudeExecutable, claudeExecutableOption, claudeRuntime } from "./runti
 import { envWithAccount, transferClaudeSession } from "./account.js";
 import { probeClaudeLogin, type RunLoginProbe } from "./login.js";
 import { startClaudeLogin } from "./login-flow.js";
-import { ClaudeUsage } from "./usage.js";
+import { ClaudeUsage, ClaudeUsagePoller } from "./usage.js";
 import { ClaudeSession, type QueryFn } from "./session.js";
 
 export { parseClaudeLimitHit } from "./limit-hit.js";
@@ -90,7 +90,9 @@ export class ClaudeHarness implements Harness {
   constructor(opts: ClaudeHarnessOpts = {}) {
     this.opts = opts;
     this.genId = opts.genId ?? (() => Math.random().toString(36).slice(2, 11));
-    this.usage = opts.usage ?? new ClaudeUsage();
+    this.usage =
+      opts.usage ??
+      new ClaudeUsage((configDir) => new ClaudeUsagePoller({ configDir, cliVersion: () => claudeRuntime().version }));
   }
 
   runtime(): HarnessRuntimeInfo {

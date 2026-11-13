@@ -89,6 +89,8 @@ async function overview(app: FastifyInstance, refresh: boolean): Promise<UsageOv
           fetchedAt: snap.fetchedAt,
           ...(snap.planType ? { planType: snap.planType } : {}),
           ...(snap.resetCredits !== undefined ? { resetCredits: snap.resetCredits } : {}),
+          ...(snap.resetGrants ? { resetGrants: snap.resetGrants } : {}),
+          ...(snap.resetHint ? { resetHint: snap.resetHint } : {}),
           ...(snap.stale ? { stale: true } : {}),
           ...(snap.error ? { error: snap.error } : {}),
         };
