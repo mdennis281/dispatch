@@ -59,12 +59,26 @@ function WindowLine({ win, now }: { win: TitledUsageWindow; now: number }) {
           triggerClassName="justify-self-end"
           className="w-56 !whitespace-normal"
           label={
-            <span className="block text-left">
-              <span className="block font-medium">Resets {resetStamp(win.resetsAt)}</span>
-              <span className="block text-faint">
-                in {untilShort(win.resetsAt, now)} — {win.title} usage goes back to 0% then.
+            win.resetsAt > now ? (
+              <span className="block text-left">
+                <span className="block font-medium">Resets {resetStamp(win.resetsAt, now)}</span>
+                <span className="block text-faint">
+                  in {untilShort(win.resetsAt, now)} — {win.title} usage goes back to 0% then.
+                </span>
               </span>
-            </span>
+            ) : (
+              // A reset already behind us is a stale reading (a cached row, a
+              // card left open), not an imminent one — `untilShort` clamps it to
+              // "<1m", which read as "any second now" for a date days gone.
+              <span className="block text-left">
+                <span className="block font-medium">
+                  Was due {resetStamp(win.resetsAt, now)}
+                </span>
+                <span className="block text-faint">
+                  This window has likely reset already; refresh for a current reading.
+                </span>
+              </span>
+            )
           }
         >
           <span className="cm-mono cursor-default text-right text-2xs text-faint">
@@ -79,12 +93,13 @@ function WindowLine({ win, now }: { win: TitledUsageWindow; now: number }) {
 }
 
 /**
- * "Tue 3:40 PM" within the week, "Nov 20, 3:40 PM" past it. Windows are five
- * hours to seven days long, so a weekday is enough for nearly all of them —
- * and a weekly window that rolled while the tab sat open still needs a date.
+ * "Tue 3:40 PM" within the coming week, "Nov 20, 3:40 PM" otherwise. Windows
+ * are five hours to seven days long, so a weekday covers nearly every live one.
+ * Anything in the PAST takes the date: "Mon" for a stale weekly reset from ten
+ * days ago would name a day that isn't this week's Monday.
  */
-function resetStamp(ts: number): string {
-  const sameWeek = ts - Date.now() < 6 * 24 * 3_600_000;
+function resetStamp(ts: number, now: number): string {
+  const sameWeek = ts > now && ts - now < 6 * 24 * 3_600_000;
   return new Date(ts).toLocaleString(undefined, {
     ...(sameWeek ? { weekday: "short" } : { month: "short", day: "numeric" }),
     hour: "numeric",
