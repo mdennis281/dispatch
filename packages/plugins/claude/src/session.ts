@@ -48,11 +48,15 @@ import type {
 import { catchToolGuard, compactCommand } from "@dispatch/shared";
 import { claudeCompactWindow } from "./compact.js";
 import { ClaudeStreamDecoder, QUESTION_TOOL } from "./stream.js";
+
 import { buildQuestionAnswer, neutralQuestions } from "./questions.js";
 import { claudeExecutableOption } from "./runtime.js";
 import { envWithAccount } from "./account.js";
 import { spawnWithPid } from "./spawn.js";
 import { claudeSdkMcpServers } from "./manager-servers.js";
+
+/** Plan approval rides canUseTool too; an auto-allow would approve the plan unread. */
+const PLAN_EXIT_TOOL = "ExitPlanMode";
 
 /** The subset of the SDK `query` signature this session calls. */
 export type QueryFn = (params: {
@@ -705,9 +709,28 @@ export class ClaudeSession implements HarnessSession {
           decisionReason?: string;
           toolUseID?: string;
           agentID?: string;
+          matchedAskRule?: unknown;
         }
       | undefined,
   ): Promise<PermissionResult> {
+    // Bypass is not total in the CLI: its "safety checks" (a glob `rm`, a
+    // Windows path it can't prove is inside the project…) still call
+    // canUseTool under bypassPermissions. In a chat the human put in bypass,
+    // that surfaced as an approval card for `rm -f shots/*` in a scratch dir —
+    // dozens a night across unattended chats, each stalling the run until
+    // someone tapped Allow on a phone. The human chose bypass; Dispatch's own
+    // guards (trunk, worktree, merge, mode denylist) run as PreToolUse hooks
+    // and still fire. Two asks are NOT ours to wave through: one the human's
+    // own `permissions.ask` rule forced (they asked for that prompt), and the
+    // tools whose "permission" is really a question for the human.
+    if (
+      this.spec.permissionMode === "bypassPermissions" &&
+      !opts?.matchedAskRule &&
+      name !== QUESTION_TOOL &&
+      name !== PLAN_EXIT_TOOL
+    ) {
+      return Promise.resolve({ behavior: "allow", updatedInput: input } as PermissionResult);
+    }
     const requestId = this.genId();
     return new Promise<PermissionResult>((resolve) => {
       // An aborted turn must settle the promise, or the SDK waits forever.
