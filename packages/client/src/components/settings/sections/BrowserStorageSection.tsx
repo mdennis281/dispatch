@@ -28,6 +28,7 @@ import {
 import {
   artifactCacheLimits,
   clear as clearArtifactCache,
+  enforceArtifactCacheLimits,
   usage as artifactCacheUsage,
   type ArtifactCacheUsage,
 } from "../../../lib/artifactCache.js";
@@ -108,11 +109,15 @@ export function BrowserStorageSection({ pane }: { pane: AppPaneProps | null }) {
     });
   }, []);
 
-  // Re-survey after a Save: the bar's save calls `enforceArtifactCacheLimits`,
-  // and a lowered limit has just evicted entries this page is still showing.
+  // Re-survey after a Save, and only once the eviction it implies has run.
+  // The save bar fires `enforceArtifactCacheLimits` without awaiting it, so
+  // re-measuring straight off the settings change raced it and showed
+  // "19 MB of 10 MB" for a cache that was already at 9. Running it twice is
+  // harmless — it reads only the small index rows, and a second pass over a
+  // cache already within budget deletes nothing.
   const appRetention = useSettings((s) => s.app.retention);
   useEffect(() => {
-    void refresh();
+    void enforceArtifactCacheLimits().finally(() => void refresh());
   }, [refresh, appRetention]);
 
   const run = useCallback(
@@ -156,7 +161,7 @@ export function BrowserStorageSection({ pane }: { pane: AppPaneProps | null }) {
         <HardDrive className="mt-0.5 size-3.5 shrink-0 text-muted" />
         <p className="min-w-0 flex-1 text-xs leading-relaxed text-muted">
           Everything below is <span className="font-medium text-secondary">this browser</span> on{" "}
-          <code className="cm-mono text-fg">{origin}</code>. The installed app, a dev server on
+          <code className="cm-mono !text-xs text-fg">{origin}</code>. The installed app, a dev server on
           another port, and your phone each keep their own storage — clearing something here touches
           nothing anywhere else.
         </p>
@@ -175,13 +180,16 @@ export function BrowserStorageSection({ pane }: { pane: AppPaneProps | null }) {
                 <span className="font-medium text-primary">{bytes(estimate.usage)}</span> used of{" "}
                 {bytes(estimate.quota)} the browser will allow
               </span>
-              <span className="cm-mono text-2xs text-faint">
+              <span className="cm-mono !text-2xs text-faint">
                 {pctOf(estimate.usage, estimate.quota).toFixed(estimate.usage / estimate.quota < 0.01 ? 2 : 0)}%
               </span>
             </div>
             <SplitBar
               usedPct={pctOf(estimate.usage, estimate.quota)}
-              sharePct={pctOf(cache.bytes, estimate.quota)}
+              // Clamped to `usage`: the estimate is rounded and padded for
+              // privacy while the cache counts its own bytes exactly, so on a
+              // small origin the slice can outrun the whole it belongs to.
+              sharePct={pctOf(Math.min(cache.bytes, estimate.usage), estimate.quota)}
               size="lg"
               title={`${bytes(cache.bytes)} artifact cache · ${bytes(estimate.usage)} used · ${bytes(estimate.quota)} quota`}
             />
@@ -203,7 +211,7 @@ export function BrowserStorageSection({ pane }: { pane: AppPaneProps | null }) {
                   .map(([k, v]) => (
                     <div key={k} className="contents">
                       <dt className="text-muted">{usageDetailLabel(k)}</dt>
-                      <dd className="cm-mono text-secondary">{bytes(v)}</dd>
+                      <dd className="cm-mono !text-2xs text-secondary">{bytes(v)}</dd>
                     </div>
                   ))}
               </dl>
@@ -298,6 +306,10 @@ export function BrowserStorageSection({ pane }: { pane: AppPaneProps | null }) {
             {limits.totalMaxBytes > 0 && (
               <SplitBar
                 usedPct={pctOf(cache.bytes, limits.totalMaxBytes)}
+                // Over the limit is transient (eviction runs on the next
+                // write), but a full bar in the normal tone would read as
+                // "exactly at the limit" rather than "past it".
+                tone={cache.bytes > limits.totalMaxBytes ? "bg-warn" : "bg-accent"}
                 size="md"
                 title={`${bytes(cache.bytes)} of ${bytes(limits.totalMaxBytes)}`}
               />
@@ -318,7 +330,7 @@ export function BrowserStorageSection({ pane }: { pane: AppPaneProps | null }) {
                         <span className="min-w-0 flex-1 truncate text-xs font-medium text-primary" title={p.projectId}>
                           {projectName.get(p.projectId) ?? p.projectId}
                         </span>
-                        <span className="cm-mono shrink-0 text-2xs text-secondary">
+                        <span className="cm-mono !text-2xs shrink-0 text-secondary">
                           {bytes(p.bytes)}
                           {capped && <span className="text-faint"> / {bytes(cap)}</span>}
                         </span>
@@ -341,7 +353,7 @@ export function BrowserStorageSection({ pane }: { pane: AppPaneProps | null }) {
                               {c.versions !== c.artifacts && ` · ${c.versions} versions`}
                               {c.blobs > 0 && ` · ${c.blobs} ${c.blobs === 1 ? "file" : "files"}`}
                             </span>
-                            <span className="cm-mono w-14 shrink-0 text-right text-secondary">{bytes(c.bytes)}</span>
+                            <span className="cm-mono !text-2xs w-14 shrink-0 text-right text-secondary">{bytes(c.bytes)}</span>
                             <IconButton
                               tip="Clear this chat's cached artifacts"
                               disabled={busy !== null}
@@ -390,7 +402,7 @@ export function BrowserStorageSection({ pane }: { pane: AppPaneProps | null }) {
             <ul className="space-y-0.5">
               {survey.caches.map((c) => (
                 <li key={c.name} className="flex items-center gap-2 text-2xs">
-                  <code className="cm-mono min-w-0 flex-1 truncate text-secondary">{c.name}</code>
+                  <code className="cm-mono !text-2xs min-w-0 flex-1 truncate text-secondary">{c.name}</code>
                   <span className="shrink-0 text-faint">
                     {c.role === "shell"
                       ? "app shell, refilled on the next load"
@@ -398,7 +410,7 @@ export function BrowserStorageSection({ pane }: { pane: AppPaneProps | null }) {
                         ? "push device id — kept"
                         : `${c.entries} entries`}
                   </span>
-                  <span className="cm-mono w-14 shrink-0 text-right text-secondary">
+                  <span className="cm-mono !text-2xs w-14 shrink-0 text-right text-secondary">
                     {c.bytes == null ? "—" : bytes(c.bytes)}
                   </span>
                   {c.clearable ? (
@@ -429,9 +441,9 @@ export function BrowserStorageSection({ pane }: { pane: AppPaneProps | null }) {
             <ul className="space-y-0.5">
               {survey.idb.map((d) => (
                 <li key={d.name} className="flex items-center gap-2 text-2xs">
-                  <code className="cm-mono min-w-0 flex-1 truncate text-secondary">{d.name}</code>
+                  <code className="cm-mono !text-2xs min-w-0 flex-1 truncate text-secondary">{d.name}</code>
                   <span className="shrink-0 text-faint">v{d.version}</span>
-                  <span className="cm-mono w-14 shrink-0 text-right text-secondary">
+                  <span className="cm-mono !text-2xs w-14 shrink-0 text-right text-secondary">
                     {d.name === "dispatch-artifacts" && cache.available ? bytes(cache.bytes) : "—"}
                   </span>
                   <span className="size-6 shrink-0" />
@@ -462,7 +474,7 @@ function WebStorageBlock({ label, blurb, survey }: { label: string; blurb: strin
             ? `${survey.keys.length} ${survey.keys.length === 1 ? "key" : "keys"}`
             : "blocked"}
         </span>
-        <span className="cm-mono ml-auto w-14 shrink-0 text-right text-2xs text-secondary">
+        <span className="cm-mono !text-2xs ml-auto w-14 shrink-0 text-right text-secondary">
           {survey.available ? bytes(survey.bytes) : "—"}
         </span>
         <span className="size-6 shrink-0" />
@@ -472,10 +484,10 @@ function WebStorageBlock({ label, blurb, survey }: { label: string; blurb: strin
         <ul className="space-y-0.5 pl-2">
           {shown.map((k) => (
             <li key={k.key} className="flex items-center gap-2 text-2xs">
-              <code className="cm-mono min-w-0 flex-1 truncate text-muted" title={k.key}>
+              <code className="cm-mono !text-2xs min-w-0 flex-1 truncate text-muted" title={k.key}>
                 {k.key}
               </code>
-              <span className="cm-mono w-14 shrink-0 text-right text-muted">{bytes(k.bytes)}</span>
+              <span className="cm-mono !text-2xs w-14 shrink-0 text-right text-muted">{bytes(k.bytes)}</span>
               <span className="size-6 shrink-0" />
             </li>
           ))}
@@ -512,26 +524,28 @@ function CacheLimitFields({ draft, patch }: AppPaneProps) {
     <div className="space-y-2 pt-1">
       <div className="flex flex-wrap gap-3">
         <Field
-          label="Cache up to"
-          hint={`MB on each device — blank = ${DEFAULT_ARTIFACT_CACHE_MB}, 0 = off`}
-          className="max-w-[14rem]"
+          label="Cache up to, MB"
+          hint="0 = off"
+          className="w-44"
         >
           <TextInput
             inputMode="numeric"
             aria-label="Artifact cache limit (MB)"
+            placeholder={`${DEFAULT_ARTIFACT_CACHE_MB} (default)`}
             aria-invalid={cacheErr ? true : undefined}
             value={r.artifactCacheMb == null ? "" : String(r.artifactCacheMb)}
             onChange={(e) => set({ artifactCacheMb: numberField(e.target.value) })}
           />
         </Field>
         <Field
-          label="Preload assets up to"
-          hint={`MB per artifact — blank = ${DEFAULT_ARTIFACT_PRELOAD_MB}, 0 = page only`}
-          className="max-w-[14rem]"
+          label="Preload files up to, MB"
+          hint="0 = page only"
+          className="w-52"
         >
           <TextInput
             inputMode="numeric"
             aria-label="Artifact preload limit (MB)"
+            placeholder={`${DEFAULT_ARTIFACT_PRELOAD_MB} (default)`}
             aria-invalid={preloadErr ? true : undefined}
             value={r.artifactPreloadMb == null ? "" : String(r.artifactPreloadMb)}
             onChange={(e) => set({ artifactPreloadMb: numberField(e.target.value) })}

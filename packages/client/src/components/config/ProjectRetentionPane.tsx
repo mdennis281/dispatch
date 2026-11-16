@@ -111,13 +111,13 @@ export function ProjectRetentionPane({
       <div className="space-y-2 border-b border-line-soft pb-3">
         <Field
           label="Chats loaded"
-          hint={`blank = ${app.maxChatsPerProject.effective || "all"} from the app, 0 = all`}
-          className="max-w-[16rem]"
+          hint="0 = all"
+          className="w-44"
         >
           <TextInput
             inputMode="numeric"
             aria-label="Chats loaded for this project"
-            placeholder={String(app.maxChatsPerProject.effective)}
+            placeholder={`${app.maxChatsPerProject.effective || "all"} (app)`}
             value={draft.maxChatsPerProject == null ? "" : String(draft.maxChatsPerProject)}
             onChange={(e) => set({ maxChatsPerProject: numberField(e.target.value) })}
           />
@@ -130,27 +130,27 @@ export function ProjectRetentionPane({
       <div className="space-y-2 border-b border-line-soft pb-3">
         <div className="flex flex-wrap gap-3">
           <Field
-            label="Artifact cache share"
-            hint={`MB per device — blank = ${appCache} from the app, 0 = off`}
-            className="max-w-[16rem]"
+            label="Cache share, MB"
+            hint="0 = off"
+            className="w-44"
           >
             <TextInput
               inputMode="numeric"
               aria-label="Artifact cache share for this project (MB)"
-              placeholder={String(appCache)}
+              placeholder={`${appCache} (app)`}
               value={draft.artifactCacheMb == null ? "" : String(draft.artifactCacheMb)}
               onChange={(e) => set({ artifactCacheMb: numberField(e.target.value) })}
             />
           </Field>
           <Field
-            label="Preload assets up to"
-            hint={`MB per artifact — blank = ${app.artifactPreloadMb.effective} from the app, 0 = page only`}
-            className="max-w-[16rem]"
+            label="Preload files up to, MB"
+            hint="0 = page only"
+            className="w-52"
           >
             <TextInput
               inputMode="numeric"
               aria-label="Artifact preload limit for this project (MB)"
-              placeholder={String(app.artifactPreloadMb.effective)}
+              placeholder={`${app.artifactPreloadMb.effective} (app)`}
               value={draft.artifactPreloadMb == null ? "" : String(draft.artifactPreloadMb)}
               onChange={(e) => set({ artifactPreloadMb: numberField(e.target.value) })}
             />
