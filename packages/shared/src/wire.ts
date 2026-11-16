@@ -33,6 +33,7 @@ import {
   MessagePartSchema,
 } from "./messages.js";
 import { AttentionFilterSchema } from "./notify.js";
+import { ArtifactMetaSchema } from "./artifacts.js";
 import { ProjectConfigSchema, ProjectConfigErrorSchema } from "./project-config.js";
 import { UsageSnapshotSchema } from "./usage.js";
 import { WorkflowExemptionSchema } from "./workflow.js";
@@ -331,6 +332,31 @@ export const MemoryDeletedEventSchema = z.object({
   type: z.literal("memory-deleted"),
   projectId: z.string(),
   name: z.string(),
+});
+
+/**
+ * An artifact got a new version — `artifact_create` or `artifact_update`.
+ *
+ * Broadcast to every socket (like `memory-update`) rather than only to the
+ * chat's subscribers, because the browser cache PRELOADS: an agent editing a
+ * page in a chat you are not looking at should have that version on the
+ * device by the time you open it. It also moves a pane that follows "latest"
+ * without the transcript card having rendered — the card was the only signal
+ * before this, so a pane open over a scrolled-away or collapsed transcript sat
+ * on a stale version.
+ *
+ * Keep the shape stable: the popout window consumes it too.
+ */
+export const ArtifactUpdatedEventSchema = z.object({
+  type: z.literal("artifact-updated"),
+  chatId: z.string(),
+  projectId: z.string(),
+  artifactId: z.string(),
+  /** The version this write produced — always the newest. */
+  version: z.number().int().positive(),
+  meta: ArtifactMetaSchema,
+  /** See `ArtifactHead.expiresAt`. */
+  expiresAt: z.number(),
 });
 
 /** Account usage (5h + weekly) refreshed — drives the header usage meter. Global
@@ -671,6 +697,7 @@ export const WsServerEventSchema = z.discriminatedUnion("type", [
   ProjectConfigUpdateEventSchema,
   MemoryUpdateEventSchema,
   MemoryDeletedEventSchema,
+  ArtifactUpdatedEventSchema,
   UsageUpdateEventSchema,
   UpdateAvailableEventSchema,
   RestartResumeEventSchema,

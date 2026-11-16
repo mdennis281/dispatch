@@ -33,6 +33,8 @@ import {
   realProjects,
   composeMessageText,
   SCHEDULE_RUN_PURPOSE,
+  latestArtifactVersion,
+  resolveRetention,
 } from "@dispatch/shared";
 import { launchAgentTask } from "./agent-tasks.js";
 import { SecretsService } from "./secrets.js";
@@ -598,6 +600,25 @@ export function createServices(
   const artifacts = new ArtifactService({
     dirFor: (chatId) => store.chatArtifactsDir(chatId),
     blobDirFor: (chatId) => store.chatArtifactBlobsDir(chatId),
+    // Every browser preloads from this (and a pane following "latest" moves on
+    // it), so it carries the project — the preloader filters by project and
+    // must not do a chat lookup per event — and the expiry its cache honours.
+    onWrite: (chatId, meta) => {
+      void (async () => {
+        const chat = await store.getChat(chatId).catch(() => null);
+        if (!chat) return;
+        const settings = await store.getSettings().catch(() => null);
+        bus.publish({
+          type: "artifact-updated",
+          chatId,
+          projectId: chat.projectId,
+          artifactId: meta.id,
+          version: latestArtifactVersion(meta),
+          meta,
+          expiresAt: meta.updatedAt + resolveRetention(settings?.retention).artifactMs,
+        });
+      })().catch(() => {});
+    },
   });
   // Worktrees + subApp runner are constructed BEFORE the broker so the session
   // MCP's `run_subapp` tool can launch apps (and resolve/create worktrees).

@@ -2,7 +2,7 @@
  * The artifact viewer's REST surface, on a real Fastify app over a temp
  * dataDir. Artifacts are written through the same service the MCP tools use.
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -17,13 +17,15 @@ import { seedDefaultProvider } from "../harness/registry.testkit.js";
 let dir: string;
 let app: FastifyInstance;
 let store: Store;
+let bus: EventBus;
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "cm-artifacts-"));
   store = new Store(dir);
   await store.init();
   await seedDefaultProvider(store);
-  app = await buildApp({ config: { ...loadConfig(), dataDir: dir }, store, bus: new EventBus() });
+  bus = new EventBus();
+  app = await buildApp({ config: { ...loadConfig(), dataDir: dir }, store, bus });
 });
 
 afterEach(async () => {
@@ -32,6 +34,10 @@ afterEach(async () => {
 });
 
 async function makeChat(): Promise<string> {
+  return (await makeChatIn()).chatId;
+}
+
+async function makeChatIn(): Promise<{ chatId: string; projectId: string }> {
   const project = await app.inject({
     method: "POST",
     url: "/api/projects",
@@ -42,7 +48,7 @@ async function makeChat(): Promise<string> {
     url: "/api/chats",
     payload: { projectId: project.json().id as string, title: "Artifacts" },
   });
-  return chat.json().id as string;
+  return { chatId: chat.json().id as string, projectId: project.json().id as string };
 }
 
 describe("artifact routes", () => {
@@ -139,5 +145,61 @@ describe("artifact routes", () => {
     expect((await app.inject({ url: `/api/chats/${chatId}/artifacts/..%2F..` })).statusCode).toBe(400);
     expect((await app.inject({ url: `/api/chats/${chatId}/artifacts/${meta.id}?version=0` })).statusCode).toBe(400);
     expect((await app.inject({ url: `/api/chats/nochat/artifacts` })).statusCode).toBe(404);
+  });
+
+  it("answers head with the newest version, its project and expiry, and no content", async () => {
+    const { chatId, projectId } = await makeChatIn();
+    const { artifacts } = app.services;
+    const meta = await artifacts.create(chatId, { title: "Page", type: "html", content: "<p>1</p>" });
+    const v2 = await artifacts.update(chatId, meta.id, { content: "<p>2</p>" });
+
+    const head = await app.inject({ url: `/api/chats/${chatId}/artifacts/${meta.id}/head` });
+    expect(head.statusCode).toBe(200);
+    expect(head.headers["cache-control"]).toBe("no-store");
+    const body = head.json();
+    expect(body).toMatchObject({ version: 2, projectId, expiresAt: v2.updatedAt + 7 * 24 * 60 * 60_000 });
+    expect(body.content).toBeUndefined();
+
+    await artifacts.sweep([chatId], -1);
+    const gone = await app.inject({ url: `/api/chats/${chatId}/artifacts/${meta.id}/head` });
+    // 410, not 200-with-expiredAt: the client cache evicts on exactly this.
+    expect(gone.statusCode).toBe(410);
+    expect((await app.inject({ url: `/api/chats/${chatId}/artifacts/nope/head` })).statusCode).toBe(404);
+  });
+
+  it("publishes artifact-updated on create and update, after the version is readable", async () => {
+    const { chatId, projectId } = await makeChatIn();
+    const seen: Array<Record<string, unknown>> = [];
+    const off = bus.subscribe((evt) => {
+      if (evt.type === "artifact-updated") seen.push(evt as unknown as Record<string, unknown>);
+    });
+    const { artifacts } = app.services;
+    const meta = await artifacts.create(chatId, { title: "Page", type: "html", content: "<p>1</p>" });
+    await artifacts.update(chatId, meta.id, { content: "<p>2</p>" });
+    // The publish waits on a chat lookup; let it land.
+    await vi.waitFor(() => expect(seen).toHaveLength(2));
+    off();
+    expect(seen.map((e) => e.version)).toEqual([1, 2]);
+    expect(seen[1]).toMatchObject({ chatId, projectId, artifactId: meta.id, meta: { id: meta.id } });
+    expect(typeof seen[1]!.expiresAt).toBe("number");
+  });
+
+  it("round-trips the cache budgets through the full-replace settings PUT", async () => {
+    const before = (await app.inject({ url: "/api/settings" })).json();
+    const put = await app.inject({
+      method: "PUT",
+      url: "/api/settings",
+      payload: { ...before, retention: { artifactCacheMb: 120, artifactPreloadMb: 0 } },
+    });
+    expect(put.statusCode).toBe(200);
+    const after = (await app.inject({ url: "/api/settings" })).json();
+    expect(after.retention).toMatchObject({ artifactCacheMb: 120, artifactPreloadMb: 0 });
+    // Bounded: a typo cannot ask a device for terabytes.
+    const bad = await app.inject({
+      method: "PUT",
+      url: "/api/settings",
+      payload: { ...before, retention: { artifactCacheMb: 10_000_000 } },
+    });
+    expect(bad.statusCode).toBe(400);
   });
 });

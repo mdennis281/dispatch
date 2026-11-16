@@ -155,6 +155,26 @@ export interface ArtifactContent {
   assets?: Record<string, ArtifactAsset>;
 }
 
+/**
+ * `GET /api/chats/:id/artifacts/:aid/head` — what "latest" means right now,
+ * without the content. The browser cache keys content by version, so the
+ * viewer asks this tiny question first and only downloads a version it does
+ * not already hold. (`no-store`: it is the one answer that changes.)
+ */
+export interface ArtifactHead {
+  meta: ArtifactMeta;
+  /** The newest version's number. */
+  version: number;
+  /** The chat's project, so a cache can attribute the bytes without a chat lookup. */
+  projectId: string;
+  /**
+   * When the retention sweep will expire this artifact, given today's
+   * `artifactDays`: its last edit plus the window. A cache keeping a copy
+   * past this would be showing content the server has deleted.
+   */
+  expiresAt: number;
+}
+
 /** Total bytes of a manifest. */
 export function artifactAssetsBytes(assets: Record<string, ArtifactAsset> | undefined): number {
   let n = 0;

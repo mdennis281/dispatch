@@ -50,6 +50,8 @@ import { useModels } from "./models.js";
 import { useSettings } from "./settings.js";
 import { useHarnesses } from "./harnesses.js";
 import { usePendingSends } from "./pendingSends.js";
+import { useArtifactView } from "./artifacts.js";
+import { preloadOnArtifactUpdated } from "../lib/artifactPreload.js";
 
 import {
   MOCK_PROJECTS,
@@ -399,6 +401,14 @@ function reduceServerEvent(evt: WsServerEvent): void {
 
     case "memory-deleted":
       useMemory.getState().remove(evt.projectId, evt.name);
+      return;
+
+    case "artifact-updated":
+      // A pane following "latest" moves on this even when the transcript card
+      // that used to be its only signal never rendered (scrolled away, a
+      // collapsed tool group, another chat entirely).
+      useArtifactView.getState().noteLatest(evt.chatId, evt.artifactId, evt.version);
+      preloadOnArtifactUpdated(evt);
       return;
 
     case "usage-update":
