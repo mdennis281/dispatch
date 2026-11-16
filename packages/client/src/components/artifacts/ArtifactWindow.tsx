@@ -19,8 +19,10 @@
  * its own. Two things feed it instead: the app relays every newer version it
  * sees over the window channel (`latest`, see lib/artifactWindow), and the
  * window's own socket (main.tsx starts live data for it, as for the log
- * window) delivers any server-side artifact event the store reduces into
- * `noteLatest`. Either moves `useArtifactDoc`'s `latest` and refetches.
+ * window) delivers `artifact-updated`, which `reduceServerEvent` turns into
+ * `noteLatest`. The relay still earns its keep: it is what the window gets
+ * while its socket is reconnecting. Either moves `useArtifactDoc`'s `latest`,
+ * which re-resolves through the shared browser cache.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "../../lib/cn.js";
