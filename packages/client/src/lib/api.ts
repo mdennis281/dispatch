@@ -77,6 +77,7 @@ import type {
   HouseRulesScope,
   AgentContextSettings,
   ProjectAgentContext,
+  ProjectRetention,
   ClaudeMemoryFile,
   ClaudeMemoryListing,
   McpCatalog,
@@ -995,6 +996,15 @@ export const api = {
       put<{ target: "manifest"; project: Project; manifestPath?: string }>(
         `/api/projects/${projectId}/config/defaults`,
         patch,
+      ),
+    /**
+     * Replace (or with `null`, remove) the manifest's `retention:` block — the
+     * load cap and this project's share of each browser's artifact cache.
+     */
+    saveRetention: (projectId: string, block: ProjectRetention | null) =>
+      put<{ target: "manifest"; project: Project; manifestPath?: string }>(
+        `/api/projects/${projectId}/config/retention`,
+        block,
       ),
     /**
      * Replace (or with `null`, remove) the manifest's `issues:` block. Manifest-

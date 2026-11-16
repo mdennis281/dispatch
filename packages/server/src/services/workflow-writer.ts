@@ -33,6 +33,7 @@ import {
   type WorkflowConfig,
   type IssueConfig,
   type ProjectAgentContext,
+  type ProjectRetention,
 } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import type { ProjectConfigService } from "./project-config.js";
@@ -407,6 +408,41 @@ export async function saveProjectAgentContext(
   const pruned = block ? prune(block) : null;
   if (pruned && Object.keys(pruned).length) loaded.doc.setIn(["agentContext"], pruned);
   else loaded.doc.delete("agentContext");
+  const manifestPath = await saveManifest(loaded);
+  await deps.projectConfig.reload(projectId);
+  const project2 = (await deps.store.getProject(projectId).catch(() => null)) ?? project;
+  return { target: "manifest", project: project2, manifestPath };
+}
+
+/**
+ * Write (or remove) the manifest's `retention:` block — the load cap and the
+ * browser artifact-cache budgets this repo overrides.
+ *
+ * Whole-block replace like `saveProjectAgentContext`, and for the same reason:
+ * the pane is one form, and it is seeded from what is on disk, so a save
+ * carries every override including ones it does not render. The deletion
+ * windows are not in `ProjectRetentionSchema` at all, so nothing written here
+ * can shorten how long a transcript survives.
+ */
+export async function saveProjectRetention(
+  deps: { store: Store; projectConfig: ProjectConfigService },
+  projectId: string,
+  block: ProjectRetention | null,
+): Promise<ProjectSettingSaveResult | null> {
+  const project = await deps.store.getProject(projectId).catch(() => null);
+  if (!project) return null;
+  const externalDir = deps.store.projectConfigDir(projectId);
+  const paths = isManifestBacked(project, externalDir) ? configPathsFor(project, externalDir) : null;
+  if (!paths) {
+    throw new Error(
+      "This project has no config dir yet. Create one (Project config → Create config) " +
+        "and the retention overrides will be written to its project.yaml.",
+    );
+  }
+  const loaded = await loadManifest(paths);
+  const pruned = block ? prune(block) : null;
+  if (pruned && Object.keys(pruned).length) loaded.doc.setIn(["retention"], pruned);
+  else loaded.doc.delete("retention");
   const manifestPath = await saveManifest(loaded);
   await deps.projectConfig.reload(projectId);
   const project2 = (await deps.store.getProject(projectId).catch(() => null)) ?? project;

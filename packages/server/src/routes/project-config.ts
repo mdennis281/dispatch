@@ -4,6 +4,7 @@
  *   GET  /api/projects/:id/config          → { sourceDir, config, errors }
  *   PUT  /api/projects/:id/config/workflow  → save the workflow block (manifest or .data)
  *   PUT  /api/projects/:id/config/defaults  → patch `defaults.*` / `spawnChat.autoApprove` (manifest only)
+ *   PUT  /api/projects/:id/config/retention → replace the `retention:` block (manifest only; null removes)
  *   DELETE /api/projects/:id/config/item    → delete one config file (path-guarded)
  *   POST /api/projects/:id/config/reload    → re-read from disk (sync + emit)
  *   POST /api/projects/:id/config/scaffold  → derive a config dir from .data
@@ -28,6 +29,7 @@ import {
   isGlobalProject,
   ProjectAgentContextSchema,
   ProjectConfigLocationSchema,
+  ProjectRetentionSchema,
   ShellTranscriptFilterSchema,
   WorkflowConfigSchema,
 } from "@dispatch/shared";
@@ -35,6 +37,7 @@ import {
   ProjectDefaultsPatchSchema,
   saveProjectAgentContext,
   saveProjectDefaults,
+  saveProjectRetention,
   saveProjectShellFilter,
   saveProjectWorkflow,
 } from "../services/workflow-writer.js";
@@ -172,6 +175,28 @@ export function registerProjectConfigRoutes(app: FastifyInstance): void {
       if (body && !body.success) return reply.code(400).send({ error: body.error.message });
       try {
         const out = await saveProjectAgentContext(
+          { store, projectConfig },
+          req.params.id,
+          body ? body.data : null,
+        );
+        if (!out) return reply.code(404).send({ error: "project not found" });
+        app.services.bus.publish({ type: "project-update", project: out.project });
+        return out;
+      } catch (err) {
+        return reply.code(400).send({ error: err instanceof Error ? err.message : String(err) });
+      }
+    },
+  );
+
+  // This repo's load cap and browser artifact-cache budgets. Whole-block
+  // replace; a `null` body removes the block (inherit the app values).
+  app.put<{ Params: { id: string } }>(
+    "/api/projects/:id/config/retention",
+    async (req, reply) => {
+      const body = req.body == null ? null : ProjectRetentionSchema.safeParse(req.body);
+      if (body && !body.success) return reply.code(400).send({ error: body.error.message });
+      try {
+        const out = await saveProjectRetention(
           { store, projectConfig },
           req.params.id,
           body ? body.data : null,

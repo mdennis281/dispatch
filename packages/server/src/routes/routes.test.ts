@@ -743,6 +743,7 @@ describe("routes — REST CRUD", () => {
       ["PUT", "workflow"],
       ["PUT", "defaults"],
       ["PUT", "agent-context"],
+      ["PUT", "retention"],
       ["PUT", "shell-filter"],
       ["DELETE", "item"],
       ["GET", "export"],

@@ -48,6 +48,8 @@ import { ChatSection } from "./sections/ChatSection.js";
 import { ContextSection, normalizeContextLimits } from "./sections/ContextSection.js";
 import { AgentContextSection } from "./sections/AgentContextSection.js";
 import { RetentionSection } from "./sections/RetentionSection.js";
+import { BrowserStorageSection } from "./sections/BrowserStorageSection.js";
+import { enforceArtifactCacheLimits } from "../../lib/artifactCache.js";
 import { PermissionsSection } from "./sections/PermissionsSection.js";
 import { NotificationsSection } from "./sections/NotificationsSection.js";
 import { IntegrationsSection } from "./sections/IntegrationsSection.js";
@@ -255,6 +257,10 @@ export function AppSettingsView() {
       // Push into the live store too: transcripts read this on every render and
       // would otherwise keep the boot-time value until a reload.
       useSettings.getState().apply(result);
+      // A lowered cache budget must take effect now, not at the next write —
+      // the Browser storage page re-measures off this same settings change and
+      // would otherwise show a cache still over the limit it just saved.
+      void enforceArtifactCacheLimits();
       pushToast({ level: "info", text: "Settings saved" });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -359,6 +365,11 @@ export function AppSettingsView() {
           <PermissionsSection />
         ) : section === "plugins" ? (
           <PluginsSection />
+        ) : section === "storage" ? (
+          // Ahead of the `!paneProps` gate: the survey is of THIS device and
+          // needs nothing from the server, so a settings load failure costs
+          // only the two limit fields, not the page.
+          <BrowserStorageSection pane={paneProps} />
         ) : !paneProps ? (
           <InlineError message={error ?? "Settings could not be loaded."} />
         ) : section === "appearance" ? (

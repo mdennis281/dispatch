@@ -15,6 +15,7 @@
  * recognizable in the sidebar.
  */
 import {
+  Archive,
   Blocks,
   BookMarked,
   Bot,
@@ -155,6 +156,18 @@ export const SECTIONS: SectionDef[] = [
       "Overrides your app settings for anyone working in this project; blank fields inherit " +
       "them. Unlike Instructions below, it is capped and shown to you as a cost — because it " +
       "is paid on every turn of every chat.",
+    noun: "setting",
+    countable: false,
+  },
+  {
+    id: "retention",
+    icon: Archive,
+    label: "Retention",
+    blurb: "Chats loaded, and this repo's share of the artifact cache",
+    explainer:
+      "How many of this repo's chats load at once, and how much of each browser's artifact " +
+      "cache its artifacts may take. Overrides your app settings; blank fields inherit them. " +
+      "None of it deletes anything on the server.",
     noun: "setting",
     countable: false,
   },

@@ -49,6 +49,7 @@ export type BuiltinAppSettingsSection =
   | "context"
   | "agent-context"
   | "retention"
+  | "storage"
   | "notifications"
   | "plugins"
   | "integrations"

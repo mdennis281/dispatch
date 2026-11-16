@@ -9,6 +9,7 @@ import { ProjectConfigService } from "./project-config.js";
 import {
   isManifestBacked,
   saveProjectDefaults,
+  saveProjectRetention,
   saveProjectShellFilter,
   saveProjectWorkflow,
 } from "./workflow-writer.js";
@@ -424,5 +425,42 @@ describe("saveProjectDefaults", () => {
     await expect(
       saveProjectDefaults(deps(), "p1", { defaults: { harness: "codex" } }),
     ).rejects.toThrow(/no config dir/);
+  });
+});
+
+describe("saveProjectRetention", () => {
+  it("replaces the retention block whole and the loader reads it back", async () => {
+    await writeManifest("name: Seed\n# keep me\nretention:\n  maxChatsPerProject: 40\n");
+    await seedProject();
+
+    // Seeded from disk by the pane, so the load cap rides along with the edit.
+    await saveProjectRetention(deps(), "p1", { maxChatsPerProject: 40, artifactCacheMb: 100, artifactPreloadMb: 0 });
+
+    const yaml = await readFile(join(repoDir, ".dispatch", "project.yaml"), "utf8");
+    expect(yaml).toContain("# keep me");
+    // 0 is a real answer here (content only), so pruning must not drop it.
+    expect(yaml).toContain("artifactPreloadMb: 0");
+    expect(projectConfig.getConfig("p1")?.retention).toEqual({
+      maxChatsPerProject: 40,
+      artifactCacheMb: 100,
+      artifactPreloadMb: 0,
+    });
+  });
+
+  it("an empty or null block removes the key, so the project inherits everything", async () => {
+    await writeManifest("name: Seed\nretention:\n  artifactCacheMb: 100\n");
+    await seedProject();
+
+    await saveProjectRetention(deps(), "p1", {});
+    expect(await readFile(join(repoDir, ".dispatch", "project.yaml"), "utf8")).not.toContain("retention");
+
+    await writeManifest("name: Seed\nretention:\n  artifactCacheMb: 100\n");
+    await saveProjectRetention(deps(), "p1", null);
+    expect(await readFile(join(repoDir, ".dispatch", "project.yaml"), "utf8")).not.toContain("retention");
+  });
+
+  it("refuses rather than writing to .data when the project has no manifest", async () => {
+    await seedProject();
+    await expect(saveProjectRetention(deps(), "p1", { artifactCacheMb: 1 })).rejects.toThrow(/no config dir/);
   });
 });
