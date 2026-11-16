@@ -1,6 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   artifactWindowFeatures,
+  joinArtifactWindowChannel,
+  startArtifactWindowHub,
   artifactWindowName,
   artifactWindowUrl,
   isArtifactWindowMsg,
@@ -66,6 +68,8 @@ describe("isArtifactWindowMsg", () => {
     expect(isArtifactWindowMsg({ type: "gone", chatId: "c", id: "a", settled: true })).toBe(true);
     expect(isArtifactWindowMsg({ type: "focus", chatId: "c", id: "a" })).toBe(true);
     expect(isArtifactWindowMsg({ type: "bring-back", chatId: "c", id: "a" })).toBe(true);
+    expect(isArtifactWindowMsg({ type: "latest", chatId: "c", id: "a", version: 3 })).toBe(true);
+    expect(isArtifactWindowMsg({ type: "latest", chatId: "c", id: "a" })).toBe(false);
     expect(isArtifactWindowMsg({ type: "focus", chatId: "c" })).toBe(false);
     expect(isArtifactWindowMsg({ type: "nope", chatId: "c", id: "a" })).toBe(false);
     expect(isArtifactWindowMsg(null)).toBe(false);
@@ -82,5 +86,69 @@ describe("popped artifacts in the view store", () => {
     expect(useArtifactView.getState().popped["c:a"]).toEqual({ title: "Game", version: 2 });
     s.unmarkPopped("c", "a");
     expect(useArtifactView.getState().popped["c:a"]).toBeUndefined();
+  });
+});
+
+/*
+ * The relay, over REAL BroadcastChannels (Node has them). The module holds one
+ * channel for whichever side it is playing; `peer` plays the other window. A
+ * channel never hears its own posts, so this is the same shape as two tabs.
+ *
+ * Why it exists: the pop-out has no transcript, so nothing in ITS store ever
+ * learns of a new version unless the app tells it — the window sat on v1
+ * forever while the agent published v2 (review of #539).
+ */
+describe("the window channel relays new versions to a popped-out artifact", () => {
+  const CHANNEL = "dispatch:artifact-window";
+  let peer: BroadcastChannel;
+  let heard: unknown[];
+  const settle = () => new Promise((r) => setTimeout(r, 30));
+
+  beforeAll(() => {
+    vi.stubGlobal("window", Object.assign(new EventTarget(), { setTimeout, clearTimeout, setInterval, clearInterval, focus() {} }));
+    peer = new BroadcastChannel(CHANNEL);
+    heard = [];
+    peer.onmessage = (e: MessageEvent) => heard.push(e.data);
+  });
+  afterAll(() => {
+    peer.close();
+    vi.unstubAllGlobals();
+  });
+
+  it("app side: a version learned after the window appeared is posted to it", async () => {
+    useArtifactView.getState().noteLatest("chatA", "art1", 2);
+    startArtifactWindowHub();
+    await settle();
+    expect(heard).toContainEqual({ type: "who" });
+
+    // The window announces itself; the app catches it up on v2 at once…
+    peer.postMessage({ type: "present", chatId: "chatA", id: "art1", title: "Game" });
+    await settle();
+    expect(useArtifactView.getState().popped["chatA:art1"]).toMatchObject({ title: "Game" });
+    expect(heard).toContainEqual({ type: "latest", chatId: "chatA", id: "art1", version: 2 });
+
+    // …and relays v3 the moment its transcript shows it.
+    useArtifactView.getState().noteLatest("chatA", "art1", 3);
+    await settle();
+    expect(heard).toContainEqual({ type: "latest", chatId: "chatA", id: "art1", version: 3 });
+
+    // An artifact that is NOT out is nobody's business on the channel.
+    heard.length = 0;
+    useArtifactView.getState().noteLatest("chatA", "inPane", 9);
+    await settle();
+    expect(heard.filter((m) => (m as { type: string }).type === "latest")).toEqual([]);
+  });
+
+  it("window side: a relayed version moves the window's own store, only for its artifact", async () => {
+    const presence = joinArtifactWindowChannel("chatW", "artW", { onBringBack: () => {} });
+    await settle();
+    expect(heard).toContainEqual({ type: "present", chatId: "chatW", id: "artW" });
+
+    peer.postMessage({ type: "latest", chatId: "chatW", id: "artW", version: 4 });
+    peer.postMessage({ type: "latest", chatId: "chatW", id: "someoneElse", version: 8 });
+    await settle();
+    expect(useArtifactView.getState().latest["chatW:artW"]).toBe(4);
+    expect(useArtifactView.getState().latest["chatW:someoneElse"]).toBeUndefined();
+    presence.dispose();
   });
 });

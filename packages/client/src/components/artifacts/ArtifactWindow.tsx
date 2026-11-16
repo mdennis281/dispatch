@@ -14,11 +14,13 @@
  * the window controls overlay, and then its toolbar IS the title bar (see
  * `artifactWindowFeatures` for what Chromium's source says about that).
  *
- * Live updates: it opens its own socket (main.tsx starts live data for it, as
- * for the log window), so anything the socket teaches `stores/artifacts`
- * about a newer version reaches `useArtifactDoc`'s `latest` here too. It has
- * no transcript, so the transcript cards that feed `noteLatest` in the app
- * never run in this window.
+ * Live updates: this window has no transcript, so the transcript cards that
+ * feed `noteLatest` in the app never render here, and its zustand store is
+ * its own. Two things feed it instead: the app relays every newer version it
+ * sees over the window channel (`latest`, see lib/artifactWindow), and the
+ * window's own socket (main.tsx starts live data for it, as for the log
+ * window) delivers any server-side artifact event the store reduces into
+ * `noteLatest`. Either moves `useArtifactDoc`'s `latest` and refetches.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "../../lib/cn.js";

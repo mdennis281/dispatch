@@ -19,6 +19,14 @@
  * way to focus a window from a click (a window focusing ITSELF on a channel
  * message has no user activation to do it with) and to notice a window that
  * died without a `pagehide`.
+ *
+ * The channel also carries `latest`: the window has no transcript, so the
+ * cards that feed `noteLatest` in the app never render there. The app relays
+ * every newer version it learns of for an artifact that is out, and the window
+ * feeds it into its own store — a separate JS context with its own zustand
+ * instance, so nothing reaches it otherwise. The window's own socket may feed
+ * the same store from a server event too; `noteLatest` only moves forward, so
+ * two sources agreeing is a no-op.
  */
 import { useArtifactView, artifactKey } from "../stores/artifacts.js";
 
@@ -48,7 +56,9 @@ export type ArtifactWindowMsg =
   /** app → window: come to the front. */
   | { type: "focus"; chatId: string; id: string }
   /** app → window: hand the artifact back to the pane and close. */
-  | { type: "bring-back"; chatId: string; id: string };
+  | { type: "bring-back"; chatId: string; id: string }
+  /** app → window: the newest version the app has seen. */
+  | { type: "latest"; chatId: string; id: string; version: number };
 
 export interface ArtifactWindowTarget {
   chatId: string;
@@ -97,6 +107,7 @@ export function isArtifactWindowMsg(x: unknown): x is ArtifactWindowMsg {
   const m = x as Record<string, unknown>;
   if (m.type === "who") return true;
   if (typeof m.chatId !== "string" || typeof m.id !== "string") return false;
+  if (m.type === "latest") return typeof m.version === "number";
   return (
     m.type === "present" || m.type === "gone" || m.type === "focus" || m.type === "bring-back"
   );
@@ -215,13 +226,27 @@ export function startArtifactWindowHub(): void {
     const msg: unknown = e.data;
     if (!isArtifactWindowMsg(msg)) return;
     if (msg.type === "present") {
-      cancelGone(artifactKey(msg.chatId, msg.id));
+      const key = artifactKey(msg.chatId, msg.id);
+      cancelGone(key);
       useArtifactView.getState().markPopped(msg.chatId, msg.id, {
         ...(msg.title !== undefined ? { title: msg.title } : {}),
         ...(msg.version !== undefined ? { version: msg.version } : {}),
       });
+      // Catch a new window up on what the app already knows — it may have
+      // been opened (or reloaded) after the version it should be showing.
+      const known = useArtifactView.getState().latest[key];
+      if (known) post({ type: "latest", chatId: msg.chatId, id: msg.id, version: known });
     } else if (msg.type === "gone") {
       scheduleGone(msg.chatId, msg.id, msg.settled ? 0 : GONE_GRACE_MS);
+    }
+  });
+  // Relay every newer version the app learns of to the window showing it.
+  useArtifactView.subscribe((s, prev) => {
+    if (s.latest === prev.latest) return;
+    for (const [key, version] of Object.entries(s.latest)) {
+      if (prev.latest[key] === version || !(key in s.popped)) continue;
+      const [chatId, id] = splitKey(key);
+      post({ type: "latest", chatId, id, version });
     }
   });
   post({ type: "who" });
@@ -314,6 +339,7 @@ export function joinArtifactWindowChannel(
     if (msg.chatId !== chatId || msg.id !== id) return;
     if (msg.type === "focus") window.focus();
     else if (msg.type === "bring-back") handlers.onBringBack();
+    else if (msg.type === "latest") useArtifactView.getState().noteLatest(chatId, id, msg.version);
   };
   // `pagehide`, not `beforeunload`: it fires on close AND on reload, and
   // doesn't disable the bfcache. Unsettled — the storage hook's own pagehide
