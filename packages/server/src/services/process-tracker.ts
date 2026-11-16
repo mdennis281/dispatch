@@ -35,7 +35,6 @@
  */
 import os from "node:os";
 import type { ProcRow, ProcTableFn, TerminalRoots } from "./processes.js";
-import { defaultAlive } from "./processes.js";
 
 /** Which pids one chat holds, split by who reaps them. */
 export interface ChatOwnership {
@@ -89,8 +88,6 @@ export interface TrackerDeps {
   now?: () => number;
   /** Injectable wait, for the baseline prime (tests). */
   sleep?: (ms: number) => Promise<void>;
-  /** Is this pid still running? Defaults to a signal-0 probe. */
-  alive?: (pid: number) => boolean;
   /**
    * Background cadence while somebody is reading, ms. `0` disables the timer
    * entirely — tests drive {@link ProcessTracker.sweep} by hand.
@@ -138,7 +135,6 @@ export class ProcessTracker {
   private readonly ownsChat: (chatId: string) => boolean;
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
-  private readonly alive: (pid: number) => boolean;
   private readonly intervalMs: number;
   private readonly idleIntervalMs: number;
   private readonly activeForMs: number;
@@ -167,7 +163,6 @@ export class ProcessTracker {
     this.ownsChat = deps.ownsChat ?? (() => true);
     this.now = deps.now ?? (() => Date.now());
     this.sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
-    this.alive = deps.alive ?? defaultAlive;
     this.intervalMs = deps.intervalMs ?? DEFAULT_INTERVAL_MS;
     this.idleIntervalMs = Math.max(this.intervalMs, deps.idleIntervalMs ?? DEFAULT_IDLE_INTERVAL_MS);
     this.activeForMs = deps.activeForMs ?? DEFAULT_ACTIVE_FOR_MS;

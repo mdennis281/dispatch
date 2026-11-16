@@ -57,7 +57,6 @@ function machine(opts: { survivors?: number[] } = {}) {
     },
     sessionPids: () => sessions,
     terminals: { livePids: () => shells },
-    alive: (pid) => live.has(pid),
     intervalMs: 0,
   });
   const killPids = vi.fn(async (pids: number[]) => {
