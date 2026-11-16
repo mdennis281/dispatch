@@ -66,7 +66,7 @@ interface AppDraftPair {
  * stores them under one key.
  */
 const SECTION_SLICE: Record<
-  "chat" | "context" | "retention" | "notifications" | "plugins",
+  "chat" | "context" | "retention" | "storage" | "notifications" | "plugins",
   (s: AppSettings) => unknown
 > = {
   // The pane never edits the draft (its routes are targeted patches), so this
@@ -85,7 +85,13 @@ const SECTION_SLICE: Record<
     s.reviewAgent,
   ],
   context: (s) => [s.autoCompact, s.harness?.contextLimits, s.maxActiveSessions, s.reviewersSkipCap],
-  retention: (s) => s.retention,
+  // One server block, two panes: the cache budgets are edited under Browser
+  // storage, beside the meter they bound, so their dot belongs there.
+  retention: (s) => {
+    const { artifactCacheMb: _c, artifactPreloadMb: _p, ...rest } = s.retention ?? {};
+    return rest;
+  },
+  storage: (s) => [s.retention?.artifactCacheMb, s.retention?.artifactPreloadMb],
   notifications: (s) => s.webhook,
 };
 

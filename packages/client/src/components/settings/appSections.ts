@@ -26,6 +26,7 @@ import {
   ShieldCheck,
   ShieldOff,
   ArrowUpCircle,
+  HardDrive,
 } from "lucide-react";
 import type { AppSettingsSection } from "../../stores/view.js";
 import { useSlots, type Registered } from "../../plugins/slots.js";
@@ -101,6 +102,16 @@ export const APP_SECTIONS: AppSectionDef[] = [
       "Two different questions. How many chats LOAD is a limit on what is on screen — nothing " +
       "is deleted and everything stays reachable. The windows below are the ones that actually " +
       "delete, and the last of them deletes conversations.",
+  },
+  {
+    id: "storage",
+    icon: HardDrive,
+    label: "Browser storage",
+    blurb: "What this browser keeps, and the artifact cache",
+    explainer:
+      "Unlike the rest of Settings, this page describes the device you are on. What this " +
+      "browser holds for Dispatch — the artifact cache, preferences, the offline shell — how " +
+      "much room the browser gives it, and whether that room is kept when the disk runs low.",
   },
   {
     id: "agent-context",

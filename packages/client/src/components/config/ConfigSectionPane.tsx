@@ -22,6 +22,7 @@ import { SecretsPane } from "./SecretsPane.js";
 import { IssuesPane } from "./IssuesPane.js";
 import { SchedulesPane } from "./SchedulesPane.js";
 import { AgentContextPane } from "./AgentContextPane.js";
+import { ProjectRetentionPane } from "./ProjectRetentionPane.js";
 import { useState } from "react";
 import { FileCog, Plus, SquarePen, Trash2 } from "lucide-react";
 import {
@@ -74,6 +75,15 @@ export function ConfigSectionPane({
   if (section.id === "secrets") return <SecretsPane projectId={projectId} />;
   if (section.id === "issues" && projectId) return <IssuesPane projectId={projectId} hasConfigDir={!!config} />;
   if (section.id === "schedules" && projectId) return <SchedulesPane projectId={projectId} />;
+  if (section.id === "retention" && projectId)
+    // Seeded from `config.retention` for the same whole-block reason as below.
+    return (
+      <ProjectRetentionPane
+        projectId={projectId}
+        hasConfigDir={!!config}
+        saved={config?.retention ?? null}
+      />
+    );
   if (section.id === "agentContext" && projectId)
     // `config.agentContext` and not just `!!config`: the pane SAVES the block
     // whole, so it has to start from what is already in `project.yaml` or a save
