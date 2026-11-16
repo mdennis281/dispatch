@@ -65,7 +65,9 @@ export function useArtifactStorage(chatId: string, id: string) {
       // The page's own shim enforces the quota, so a refusal here means the
       // artifact expired or the server is gone. Nothing for the page to do —
       // say so where a developer looking at a misbehaving save would look.
-      console.warn(`[artifact ${a}] storage write not saved:`, err);
+      // The id rides as an ARGUMENT, not in the template: console.warn reads
+      // its first string as a format, so a `%` in an id would eat `err`.
+      console.warn("[artifact %s] storage write not saved:", a, err);
     });
     inflight.current = Promise.all([inflight.current, sent]);
   }, []);
