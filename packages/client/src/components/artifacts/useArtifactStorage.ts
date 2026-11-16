@@ -42,6 +42,13 @@ export function useArtifactStorage(chatId: string, id: string) {
   const timer = useRef<number | undefined>(undefined);
   /** Which artifact `pending` belongs to — a flush after switching must still go to the old one. */
   const target = useRef({ chatId, id });
+  /**
+   * The PATCH most recently sent, settled or not. Only `settle` reads it: a
+   * pop-out handing an artifact back to the app's pane must not announce
+   * "done" while its last save is still on the wire, or the pane fetches the
+   * storage first and boots the page against the save before it.
+   */
+  const inflight = useRef<Promise<unknown>>(Promise.resolve());
 
   const flush = useCallback((unloading = false) => {
     window.clearTimeout(timer.current);
@@ -54,12 +61,15 @@ export function useArtifactStorage(chatId: string, id: string) {
     // browser's 64 KiB budget; past it the request goes out normally and
     // tab-close is best-effort. (Unmount needs neither: the page stays alive.)
     const keepalive = unloading && new Blob([JSON.stringify(batch)]).size <= KEEPALIVE_MAX_BYTES;
-    void api.chats.artifactStoragePatch(c, a, batch, { keepalive }).catch((err: unknown) => {
+    const sent = api.chats.artifactStoragePatch(c, a, batch, { keepalive }).catch((err: unknown) => {
       // The page's own shim enforces the quota, so a refusal here means the
       // artifact expired or the server is gone. Nothing for the page to do —
       // say so where a developer looking at a misbehaving save would look.
-      console.warn(`[artifact ${a}] storage write not saved:`, err);
+      // The id rides as an ARGUMENT, not in the template: console.warn reads
+      // its first string as a format, so a `%` in an id would eat `err`.
+      console.warn("[artifact %s] storage write not saved:", a, err);
     });
+    inflight.current = Promise.all([inflight.current, sent]);
   }, []);
 
   useEffect(() => {
@@ -114,5 +124,11 @@ export function useArtifactStorage(chatId: string, id: string) {
     [flush],
   );
 
-  return { ready, mirror, onWrite };
+  /** Send whatever is waiting now and resolve once every PATCH so far has landed (or failed). */
+  const settle = useCallback(async () => {
+    flush();
+    await inflight.current;
+  }, [flush]);
+
+  return { ready, mirror, onWrite, settle };
 }
