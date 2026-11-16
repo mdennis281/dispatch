@@ -105,6 +105,39 @@ export const CHAT_DELETE_DAYS_MINIMUM = 7;
 /** Ceiling shared by the three day-windows — two years, past which it is "never". */
 export const RETENTION_DAYS_CEILING = 730;
 
+/* ------------------------------------------------- browser artifact cache */
+
+/**
+ * Megabytes of artifact content and asset blobs ONE browser keeps in IndexedDB
+ * so an artifact opens without downloading it again (`lib/artifactCache.ts`).
+ *
+ * A client-side budget, not a server one: it bounds what this origin holds on
+ * this device, and the server's `artifactDays` window still decides how long an
+ * artifact exists at all. 500 MB holds a busy week of pages plus a couple of
+ * asset-heavy games; a phone that wants less can be told so per project.
+ * `0` turns the cache off — every open downloads, as before it existed.
+ */
+export const DEFAULT_ARTIFACT_CACHE_MB = 500;
+
+/**
+ * Largest asset bundle the PRELOADER fetches ahead of time, in MB. Content (the
+ * page itself, ≤ 8 MB) is always preloaded; assets are the expensive part —
+ * a version may carry 256 MB of them — and fetching that for every edit an
+ * agent makes in a project you are not even looking at would eat a metered
+ * connection. `0` preloads content only.
+ */
+export const DEFAULT_ARTIFACT_PRELOAD_MB = 32;
+
+/** 20 GB — past any sane browser quota, so a typo cannot ask for terabytes. */
+export const ARTIFACT_CACHE_MB_CEILING = 20_000;
+/** A bundle can't exceed `ARTIFACT_ASSETS_MAX_BYTES` (256 MB), so neither can its preload cap. */
+export const ARTIFACT_PRELOAD_MB_CEILING = 256;
+
+const MB = 1024 * 1024;
+
+const artifactCacheMb = z.number().int().nonnegative().max(ARTIFACT_CACHE_MB_CEILING);
+const artifactPreloadMb = z.number().int().nonnegative().max(ARTIFACT_PRELOAD_MB_CEILING);
+
 /* -------------------------------------------------------------- settings */
 
 /**
@@ -136,14 +169,22 @@ export const RetentionSettingsSchema = z.object({
       message: `Use 0 for "never", or at least ${CHAT_DELETE_DAYS_MINIMUM} days — a shorter window deletes conversations you are still working through.`,
     })
     .optional(),
+  /** Browser artifact cache budget, MB. `0` = off. See {@link DEFAULT_ARTIFACT_CACHE_MB}. */
+  artifactCacheMb: artifactCacheMb.optional(),
+  /** Largest asset bundle preloaded, MB. `0` = content only. See {@link DEFAULT_ARTIFACT_PRELOAD_MB}. */
+  artifactPreloadMb: artifactPreloadMb.optional(),
 });
 export type RetentionSettings = z.infer<typeof RetentionSettingsSchema>;
 
 /**
  * The project-level block (`project.yaml` → `retention`).
  *
- * ONLY the load cap. A repo with 874 chats wants a different number on screen
- * than one with ten, and that is a per-repo fact. The deletion windows are
+ * The load cap and the two browser-cache budgets. A repo with 874 chats wants
+ * a different number on screen than one with ten, and a repo whose agents ship
+ * 200 MB WebGL builds wants a different cache than one that draws SVGs — both
+ * per-repo facts. Neither deletes anything on the server: the cache budgets
+ * only decide what a browser keeps a COPY of, and both are bounded, so the
+ * worst a manifest can do is ask a device to cache up to its ceiling. The deletion windows are
  * deliberately not overridable: they are a statement about how much disk this
  * MACHINE spends on history, and letting a manifest — a file an agent can
  * write — shorten the window on the only copy of a transcript is not a knob
@@ -156,6 +197,13 @@ export const ProjectRetentionSchema = z.object({
     .nonnegative()
     .max(MAX_CHATS_PER_PROJECT_CEILING)
     .optional(),
+  /**
+   * THIS project's share of the browser cache, MB. The app value is the
+   * device's TOTAL budget and is always enforced too, so an override can only
+   * narrow what this project keeps, never grow the cache past the app cap.
+   */
+  artifactCacheMb: artifactCacheMb.optional(),
+  artifactPreloadMb: artifactPreloadMb.optional(),
 });
 export type ProjectRetention = z.infer<typeof ProjectRetentionSchema>;
 
@@ -167,11 +215,16 @@ export interface ResolvedRetention {
   toolImageDays: Layered<number>;
   artifactDays: Layered<number>;
   chatDeleteDays: Layered<number>;
+  artifactCacheMb: Layered<number>;
+  artifactPreloadMb: Layered<number>;
   /** The three windows in ms, for the sweep. `chatDeleteMs` is 0 when off. */
   reviewerChatMs: number;
   toolImageMs: number;
   artifactMs: number;
   chatDeleteMs: number;
+  /** The two cache budgets in bytes, for `lib/artifactCache.ts`. 0 = off. */
+  artifactCacheMaxBytes: number;
+  artifactPreloadMaxBytes: number;
 }
 
 /**
@@ -199,6 +252,12 @@ export function resolveRetention(
   const toolImageDays = layer(undefined, app?.toolImageDays, DEFAULT_TOOL_IMAGE_DAYS);
   const artifactDays = layer(undefined, app?.artifactDays, DEFAULT_ARTIFACT_DAYS);
   const chatDeleteDays = layer(undefined, app?.chatDeleteDays, DEFAULT_CHAT_DELETE_DAYS);
+  const artifactCacheMb = layer(project?.artifactCacheMb, app?.artifactCacheMb, DEFAULT_ARTIFACT_CACHE_MB);
+  const artifactPreloadMb = layer(
+    project?.artifactPreloadMb,
+    app?.artifactPreloadMb,
+    DEFAULT_ARTIFACT_PRELOAD_MB,
+  );
 
   return {
     maxChatsPerProject,
@@ -206,10 +265,14 @@ export function resolveRetention(
     toolImageDays,
     artifactDays,
     chatDeleteDays,
+    artifactCacheMb,
+    artifactPreloadMb,
     reviewerChatMs: reviewerChatDays.effective * DAY_MS,
     toolImageMs: toolImageDays.effective * DAY_MS,
     artifactMs: artifactDays.effective * DAY_MS,
     chatDeleteMs: chatDeleteDays.effective * DAY_MS,
+    artifactCacheMaxBytes: artifactCacheMb.effective * MB,
+    artifactPreloadMaxBytes: artifactPreloadMb.effective * MB,
   };
 }
 

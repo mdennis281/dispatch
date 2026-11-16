@@ -129,3 +129,31 @@ describe("capChatsPerProject", () => {
     ]);
   });
 });
+
+describe("browser artifact cache budgets", () => {
+  const MB = 1024 * 1024;
+
+  it("default to 500 MB cached and 32 MB preloaded per artifact", () => {
+    const r = resolveRetention(undefined, undefined);
+    expect(r.artifactCacheMb.effective).toBe(500);
+    expect(r.artifactPreloadMb.effective).toBe(32);
+    expect(r.artifactCacheMaxBytes).toBe(500 * MB);
+    expect(r.artifactPreloadMaxBytes).toBe(32 * MB);
+  });
+
+  it("let a project override the app, and say which layer won", () => {
+    const r = resolveRetention({ artifactCacheMb: 800, artifactPreloadMb: 8 }, { artifactCacheMb: 100 });
+    expect(r.artifactCacheMb).toMatchObject({ effective: 100, source: "project" });
+    expect(r.artifactPreloadMb).toMatchObject({ effective: 8, source: "app" });
+  });
+
+  it("accept 0 as off and refuse past the ceilings", () => {
+    expect(RetentionSettingsSchema.parse({ artifactCacheMb: 0, artifactPreloadMb: 0 })).toEqual({
+      artifactCacheMb: 0,
+      artifactPreloadMb: 0,
+    });
+    expect(RetentionSettingsSchema.safeParse({ artifactCacheMb: 20_001 }).success).toBe(false);
+    expect(RetentionSettingsSchema.safeParse({ artifactPreloadMb: 257 }).success).toBe(false);
+    expect(RetentionSettingsSchema.safeParse({ artifactCacheMb: -1 }).success).toBe(false);
+  });
+});

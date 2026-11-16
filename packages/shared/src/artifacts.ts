@@ -144,6 +144,24 @@ export const ArtifactMetaSchema = z.object({
 });
 export type ArtifactMeta = z.infer<typeof ArtifactMetaSchema>;
 
+/**
+ * {@link ArtifactMeta} without the per-version asset manifests — what the
+ * `artifact-updated` event carries. A manifest is up to 2000 entries per
+ * version and a meta keeps 50 versions, so the full meta of an asset-heavy
+ * game is megabytes, broadcast to every socket on every edit. Nothing that
+ * consumes the event needs them: the manifest of the version being viewed or
+ * preloaded comes with that version's content.
+ */
+export const ArtifactSummarySchema = ArtifactMetaSchema.extend({
+  versions: z.array(ArtifactVersionSchema.omit({ assets: true })),
+});
+export type ArtifactSummary = z.infer<typeof ArtifactSummarySchema>;
+
+/** Strip a meta down to its {@link ArtifactSummary}. */
+export function summarizeArtifactMeta(meta: ArtifactMeta): ArtifactSummary {
+  return { ...meta, versions: meta.versions.map(({ n, createdAt, size }) => ({ n, createdAt, size })) };
+}
+
 /** `GET /api/chats/:id/artifacts/:aid` */
 export interface ArtifactContent {
   meta: ArtifactMeta;
@@ -153,6 +171,33 @@ export interface ArtifactContent {
   errors: string[];
   /** This version's asset manifest; fetch each by `sha256` from the blob route. */
   assets?: Record<string, ArtifactAsset>;
+}
+
+/**
+ * `GET /api/chats/:id/artifacts/:aid/head` — what "latest" means right now,
+ * without the content. The browser cache keys content by version, so the
+ * viewer asks this tiny question first and only downloads a version it does
+ * not already hold. (`no-store`: it is the one answer that changes.)
+ */
+export interface ArtifactHead {
+  meta: ArtifactMeta;
+  /** The newest version's number. */
+  version: number;
+  /** The chat's project, so a cache can attribute the bytes without a chat lookup. */
+  projectId: string;
+  /**
+   * When the retention sweep will expire this artifact, given today's
+   * `artifactDays`: its last edit plus the window. A cache keeping a copy
+   * past this would be showing content the server has deleted.
+   */
+  expiresAt: number;
+  /**
+   * Runtime errors the viewer has reported for the asked-for version
+   * (`?version=n`, default the newest). Here rather than trusted from a cached
+   * {@link ArtifactContent}: errors are the one part of a version that changes
+   * after it is written, so a cached copy's list goes stale on the first POST.
+   */
+  errors: string[];
 }
 
 /** Total bytes of a manifest. */

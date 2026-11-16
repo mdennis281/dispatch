@@ -73,6 +73,14 @@ export interface ArtifactServiceDeps {
    */
   blobDirFor?: (chatId: string) => string;
   now?: () => number;
+  /**
+   * Told after every write that cut a version (create, update) — the
+   * container publishes `artifact-updated` from it. A callback rather than a
+   * bus dependency so this service stays constructible bare in tests; and
+   * called AFTER the meta is on disk, so a client that reacts by fetching the
+   * version can never race ahead of it.
+   */
+  onWrite?: (chatId: string, meta: ArtifactMeta) => void;
 }
 
 /** One file to bundle: where it is on disk, and the path the page asks for it by. */
@@ -125,6 +133,7 @@ export class ArtifactService {
   private readonly dirFor: (chatId: string) => string;
   private readonly blobDirFor?: (chatId: string) => string;
   private readonly now: () => number;
+  private readonly onWrite?: (chatId: string, meta: ArtifactMeta) => void;
   private readonly mutex = new KeyedMutex();
   private readonly errors = new Map<string, string[]>();
 
@@ -132,6 +141,7 @@ export class ArtifactService {
     this.dirFor = deps.dirFor;
     this.blobDirFor = deps.blobDirFor;
     this.now = deps.now ?? Date.now;
+    this.onWrite = deps.onWrite;
   }
 
   /* ---------------------------------------------------------------- paths */
@@ -297,6 +307,13 @@ export class ArtifactService {
     // Meta first, files second: a crash between the two leaves an orphan file
     // nobody names, never a meta naming a file that is gone.
     for (const v of dropped) await rm(this.versionPath(chatId, meta, v.n), { force: true }).catch(() => {});
+    // A listener that throws must not turn a stored version into a failed
+    // tool call — the agent would retry and cut a duplicate.
+    try {
+      this.onWrite?.(chatId, next);
+    } catch {
+      /* the notification is best-effort; the version is already durable */
+    }
     return next;
   }
 

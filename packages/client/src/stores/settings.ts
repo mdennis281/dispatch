@@ -44,6 +44,9 @@ export type AppLayer = Pick<
   | "reviewAgent"
   // What a project's "Agent may run terminals on" field inherits.
   | "terminalLocations"
+  // The browser artifact cache's budgets (`lib/artifactCache.ts`), resolved
+  // against the project layer per artifact.
+  | "retention"
 >;
 
 interface SettingsStore {
@@ -93,6 +96,7 @@ export const useSettings = create<SettingsStore>((set) => ({
         defaultSendMode: settings.defaultSendMode,
         reviewAgent: settings.reviewAgent,
         terminalLocations: settings.terminalLocations,
+        retention: settings.retention,
       },
     });
   },

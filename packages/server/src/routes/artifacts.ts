@@ -3,6 +3,7 @@
  *
  *   GET  /api/chats/:id/artifacts                 → ArtifactMeta[] (newest edit first)
  *   GET  /api/chats/:id/artifacts/:aid?version=n  → ArtifactContent (410 once expired)
+ *   GET  /api/chats/:id/artifacts/:aid/head?version=n → ArtifactHead: newest version + n's errors, no content (410 once expired)
  *   POST /api/chats/:id/artifacts/:aid/errors     → record runtime errors the viewer caught
  *   GET  /api/chats/:id/artifacts/:aid/storage    → ArtifactStorage (the page's localStorage)
  *   PATCH /api/chats/:id/artifacts/:aid/storage   → apply { clear?, set } → { chars }
@@ -22,7 +23,10 @@ import {
   ARTIFACT_ERROR_MAX_CHARS,
   ARTIFACT_MAX_ERRORS,
   ArtifactStoragePatchSchema,
+  latestArtifactVersion,
+  resolveRetention,
   type ArtifactContent,
+  type ArtifactHead,
 } from "@dispatch/shared";
 import { ArtifactError } from "../services/artifacts.js";
 
@@ -64,6 +68,40 @@ export function registerArtifactRoutes(app: FastifyInstance): void {
         // Versions are immutable, so a pinned one can be cached; "latest" cannot.
         reply.header("cache-control", v !== undefined ? "private, max-age=3600" : "no-store");
         return got;
+      } catch (err) {
+        return sendError(reply, err);
+      }
+    },
+  );
+
+  // The browser cache's first question: which version IS latest? Answered
+  // from meta.json alone, so following "latest" costs a few hundred bytes when
+  // the cache already holds that version instead of re-downloading up to 8 MB.
+  app.get<{ Params: { id: string; aid: string }; Querystring: { version?: string } }>(
+    "/api/chats/:id/artifacts/:aid/head",
+    async (req, reply) => {
+      const chat = await store.getChat(req.params.id).catch(() => null);
+      if (!chat) return reply.code(404).send({ error: "chat not found" });
+      const v = req.query.version !== undefined ? Number(req.query.version) : undefined;
+      if (v !== undefined && !(Number.isInteger(v) && v > 0)) {
+        return reply.code(400).send({ error: "version must be a positive integer" });
+      }
+      try {
+        const meta = await artifacts.getMeta(req.params.id, req.params.aid);
+        if (!meta) return reply.code(404).send({ error: `No artifact "${req.params.aid}" in this chat.` });
+        // 410 exactly like the content route, so the cache evicts on the cheap
+        // call too — otherwise an expired artifact would keep rendering from IDB.
+        if (meta.expiredAt !== undefined) return reply.code(410).send({ error: "expired", expiredAt: meta.expiredAt });
+        const settings = await store.getSettings().catch(() => null);
+        const head: ArtifactHead = {
+          meta,
+          version: latestArtifactVersion(meta),
+          projectId: chat.projectId,
+          expiresAt: meta.updatedAt + resolveRetention(settings?.retention).artifactMs,
+          errors: artifacts.errorsFor(req.params.id, req.params.aid, v ?? latestArtifactVersion(meta)),
+        };
+        reply.header("cache-control", "no-store");
+        return head;
       } catch (err) {
         return sendError(reply, err);
       }

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { artifactAssetsBytes, isRewritableAssetType, type ArtifactAsset } from "@dispatch/shared";
-import { api } from "../../lib/api.js";
+import { loadArtifactBlob } from "../../lib/artifactCache.js";
 import type { ArtifactBootAsset } from "../../lib/artifactDoc.js";
 
 /** Downloads at once. Enough to fill the pipe; few enough not to starve the transcript's own requests. */
@@ -17,13 +17,23 @@ export type ArtifactAssetsState =
  *
  * Blobs are kept per hash for the life of the pane, so stepping between two
  * versions that share most of their textures fetches only what changed, and
- * Reload fetches nothing. (The route is `immutable` too, so a re-open after
- * closing the pane is served from the HTTP cache.)
+ * Reload fetches nothing. Below that is the IndexedDB cache (`artifactCache`),
+ * which is what makes a re-open — after closing the pane, reloading the app,
+ * or a preload — download nothing: the HTTP cache alone was not enough, since
+ * a browser evicts 200 MB of `immutable` responses whenever it likes.
+ *
+ * `owner` says which project's budget a downloaded blob is written back
+ * under; null means read the cache but don't write to it.
  */
 export function useArtifactAssets(
   chatId: string,
   manifest: Record<string, ArtifactAsset> | undefined,
+  owner: { projectId: string; expiresAt: number } | null = null,
 ): ArtifactAssetsState {
+  // A ref so the download effect isn't restarted when the head is refetched
+  // and hands back an equal-but-new owner object.
+  const ownerRef = useRef(owner);
+  ownerRef.current = owner;
   const cache = useRef(new Map<string, Blob>());
   const [result, setResult] = useState<ArtifactAssetsState>({ state: "none" });
   // The manifest object is a fresh one on every refetch of the same version;
@@ -61,7 +71,7 @@ export function useArtifactAssets(
         loaded += a.size;
         return hit;
       }
-      const blob = await api.chats.artifactBlob(chatId, a.sha256, a.type, (n) => {
+      const blob = await loadArtifactBlob(chatId, a, ownerRef.current, (n) => {
         loaded += n;
         tick();
       }, ctrl.signal);

@@ -9,8 +9,9 @@ import {
   RotateCw,
   X,
 } from "lucide-react";
-import { latestArtifactVersion, type ArtifactContent, type ArtifactType } from "@dispatch/shared";
+import { latestArtifactVersion, type ArtifactContent, type ArtifactHead, type ArtifactType } from "@dispatch/shared";
 import { api, ApiError } from "../../lib/api.js";
+import { bundleFitsCache, loadArtifact } from "../../lib/artifactCache.js";
 import { copyToClipboard } from "../../lib/clipboard.js";
 import { cn } from "../../lib/cn.js";
 import { artifactKey, useArtifactView, type OpenArtifact } from "../../stores/artifacts.js";
@@ -28,7 +29,7 @@ import { useArtifactStorage } from "./useArtifactStorage.js";
 
 type Loaded =
   | { state: "loading" }
-  | { state: "ok"; data: ArtifactContent }
+  | { state: "ok"; data: ArtifactContent; head: ArtifactHead | null }
   | { state: "expired"; expiredAt?: number }
   | { state: "error"; message: string };
 
@@ -66,15 +67,16 @@ export function ArtifactPane({ open }: { open: OpenArtifact }) {
   const [frameErrors, setFrameErrors] = useState<string[]>([]);
   const [copied, setCopied] = useState(false);
 
-  // Following "latest" means refetching whenever the transcript shows a newer
-  // version; a pinned version never changes, so it is fetched once.
+  // Following "latest" means re-resolving whenever a newer version is seen
+  // (transcript card or `artifact-updated`); a pinned version never changes.
+  // Either way the content comes through the browser cache, so re-opening —
+  // or flipping back to a version already seen — downloads nothing.
   const fetchKey = pinned ?? `latest@${latestSeen}`;
   useEffect(() => {
     let live = true;
     setLoaded((prev) => (prev.state === "ok" && prev.data.meta.id === id ? prev : { state: "loading" }));
-    api.chats
-      .artifact(chatId, id, pinned ?? undefined)
-      .then((data) => live && setLoaded({ state: "ok", data }))
+    loadArtifact(chatId, id, pinned ?? null)
+      .then(({ data, head }) => live && setLoaded({ state: "ok", data, head }))
       .catch((err: unknown) => {
         if (!live) return;
         if (err instanceof ApiError && err.status === 410) {
@@ -93,7 +95,16 @@ export function ArtifactPane({ open }: { open: OpenArtifact }) {
   const shownVersion = data?.version;
   const storage = useArtifactStorage(chatId, id);
   const type = data?.meta.type;
-  const bundle = useArtifactAssets(chatId, type === "html" ? data?.assets : undefined);
+  const head = loaded.state === "ok" ? loaded.head : null;
+  const htmlAssets = type === "html" ? data?.assets : undefined;
+  // Write the bundle back to the cache only when the server told us whose it is
+  // and until when — and only when it fits: caching the tail of a bundle bigger
+  // than the budget would evict its own head.
+  const cacheOwner =
+    head && bundleFitsCache(head.projectId, htmlAssets)
+      ? { projectId: head.projectId, expiresAt: head.expiresAt }
+      : null;
+  const bundle = useArtifactAssets(chatId, htmlAssets, cacheOwner);
 
   // The errors on screen are the ones the server already knew for this
   // version plus what the frame reports now — reset whenever the version or

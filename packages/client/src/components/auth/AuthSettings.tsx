@@ -8,6 +8,7 @@ import { SectionLabel } from "../ui/Panel.js";
 import { SessionList } from "./SessionList.js";
 import { TotpQr } from "./TotpQr.js";
 import { authDelete, authPost, authPut, sessionFetch, useAuth } from "../../stores/auth.js";
+import { clearArtifactCacheOnLogout } from "../../lib/artifactCache.js";
 
 async function get<T>(path: string): Promise<T> {
   const response = await sessionFetch(path);
@@ -92,7 +93,11 @@ export function AuthSettings() {
       <div className="flex items-center justify-between rounded-lg border border-line bg-inset/40 p-3">
         <div><p className="text-sm font-medium text-primary">Signed in as {user?.displayName}</p><p className="text-xs text-muted">{user?.username}{user?.owner ? " · bootstrap owner" : ""}</p></div>
         <Button leftIcon={<LogOut />} onClick={guard(async () => {
-          await authPost("/api/auth/logout"); useAuth.getState().clear(); location.reload();
+          await authPost("/api/auth/logout"); useAuth.getState().clear();
+          // Cached artifacts are this account's content on disk; the next
+          // person to sign in on this device must not be able to open them.
+          await clearArtifactCacheOnLogout();
+          location.reload();
         })}>Sign out</Button>
       </div>
 

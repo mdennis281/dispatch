@@ -2,12 +2,13 @@
  * Which artifact the pane beside the chat is showing, and the newest version of
  * each artifact the transcript has mentioned.
  *
- * `latest` is fed by the transcript CARDS, not by a server event: every
- * `artifact_update` lands as a tool result the card already parses, so the card
- * is the one place that learns "v4 exists" at the moment it does. A pane
- * following "latest" refetches when that number moves — an agent iterating on a
- * page is watched live without a second channel that could disagree with the
- * transcript.
+ * `latest` is fed by two sources that agree by construction: the transcript
+ * CARDS (every `artifact_update` lands as a tool result the card parses) and
+ * the server's `artifact-updated` event. The cards alone left a pane stale
+ * whenever the card wasn't rendered — scrolled out of the window, folded into a
+ * collapsed group. `noteLatest` only ever moves forward, so the two arriving in
+ * either order is harmless. A pane following "latest" re-resolves when the
+ * number moves — an agent iterating on a page is watched live.
  *
  * Not persisted: an artifact pane that reopens itself after a reload, over a
  * chat you have since navigated away from, is a sheet nobody asked for.
