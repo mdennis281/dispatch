@@ -595,6 +595,27 @@
   .cm-topbar-slab {
     min-width: calc(100vw - var(--dp-titlebar-x) - var(--dp-titlebar-w) + 1rem);
   }
+  /*
+   * A popped-out artifact's toolbar, when it is that window's title bar.
+   *
+   * ONE line, in the strip, not the main window's two: this is a viewer, and
+   * every pixel of height the bar doesn't take is the artifact's. A second line
+   * appears only when the band is too narrow for the controls (ArtifactWindow
+   * wraps them). `--ab-line` has the same floor as `--tb-l1`, for the same
+   * page-zoom reason.
+   *
+   * Both ends are reserved as PADDING, so the slab rule holds without a column
+   * to hold it open: the left by `titlebar-area-x` (the macOS traffic lights),
+   * the right by whatever the drawable band stops short of (min/max/close and
+   * Chromium's own icons on Windows). The controls live in an inner box that
+   * clips — the header's own `overflow: hidden` clips at its padding edge,
+   * which would let a squeezed control paint straight into the buttons.
+   */
+  .cm-artifact-titlebar {
+    --ab-line: max(var(--dp-titlebar-h), 1.75rem);
+    padding-left: calc(var(--dp-titlebar-x) + 0.5rem);
+    padding-right: calc(100vw - var(--dp-titlebar-x) - var(--dp-titlebar-w) + 0.5rem);
+  }
 
   .cm-hairline-b {
     border-bottom: 1px solid var(--p-line);

@@ -11,6 +11,8 @@ import {
 import { ws } from "./lib/ws.js";
 import { TraceViewer } from "./components/debug/TraceViewer.js";
 import { RunnerLogWindow } from "./components/panels/RunnerLogWindow.js";
+import { ArtifactWindow } from "./components/artifacts/ArtifactWindow.js";
+import { startArtifactWindowHub } from "./lib/artifactWindow.js";
 import { capturePwaInstall } from "./lib/pwaInstall.js";
 import { useWebPush, startPresenceReporting } from "./lib/webPush.js";
 import { focusAttentionTarget } from "./components/attention/focus.js";
@@ -58,6 +60,11 @@ lockPageZoom();
 // with `?logs=<runnerId>` — render only the read-only log terminal for it.
 const isLogWindow = new URLSearchParams(location.search).has("logs");
 
+// A popped-out artifact (opened via openArtifactWindow) loads this same bundle
+// with `?artifact=<chatId>/<artifactId>` — render only that artifact. Like the
+// log window it needs the socket (live versions) and none of the shell.
+const isArtifactWindow = new URLSearchParams(location.search).has("artifact");
+
 // `?trace` renders the interaction-trace viewer — the desktop end of the
 // phone's viewport-readout recorder (lib/interactionTrace.ts). Standalone like
 // the log window: it only needs REST, and the app shell would fight it for
@@ -80,7 +87,13 @@ const isMissionPreview =
 // modes are NOT the same shape: the preview wants everything skipped, while the
 // log popup only ever wanted the PWA half skipped — it has always needed the
 // socket.
-const isShell = !isLogWindow && !isMissionPreview && !isTraceViewer;
+const isShell = !isLogWindow && !isMissionPreview && !isTraceViewer && !isArtifactWindow;
+
+// Find artifacts already popped out into windows of their own BEFORE the first
+// render: one that outlived this tab's reload must come back as a placeholder,
+// not as a second live view fighting it for the artifact's storage. See
+// lib/artifactWindow.ts.
+if (isShell) startArtifactWindowHub();
 
 // The splash - the Dispatch mark, centred - is ALREADY on screen: index.html
 // paints it before this bundle exists, which is the whole reason it is not a
@@ -236,6 +249,8 @@ createRoot(el).render(
     <AppErrorBoundary canClearViewState={isShell}>
       {isLogWindow ? (
         <RunnerLogWindow />
+      ) : isArtifactWindow ? (
+        <ArtifactWindow />
       ) : isMissionPreview ? (
         <MissionPreview />
       ) : isTraceViewer ? (

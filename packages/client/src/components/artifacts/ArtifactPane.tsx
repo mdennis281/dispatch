@@ -1,182 +1,48 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { AppWindow, Maximize2, Minimize2, SquareArrowOutUpRight, X } from "lucide-react";
 import {
-  AlertTriangle,
-  Check,
-  Copy,
-  Download,
-  Maximize2,
-  Minimize2,
-  RotateCw,
-  X,
-} from "lucide-react";
-import { latestArtifactVersion, type ArtifactContent, type ArtifactHead, type ArtifactType } from "@dispatch/shared";
-import { api, ApiError } from "../../lib/api.js";
-import { bundleFitsCache, loadArtifact } from "../../lib/artifactCache.js";
-import { copyToClipboard } from "../../lib/clipboard.js";
-import { cn } from "../../lib/cn.js";
+  bringBackArtifact,
+  focusArtifactWindow,
+  openArtifactWindow,
+} from "../../lib/artifactWindow.js";
 import { artifactKey, useArtifactView, type OpenArtifact } from "../../stores/artifacts.js";
+import { useNotices } from "../../stores/notices.js";
+import { Button } from "../ui/Button.js";
 import { IconButton } from "../ui/IconButton.js";
-import { SegmentedControl } from "../ui/SegmentedControl.js";
-import { Select } from "../ui/Select.js";
-import { Spinner } from "../ui/Spinner.js";
-import { ScrollArea } from "../ui/ScrollArea.js";
-import { CodeBlock } from "../chat/CodeBlock.js";
-import { Markdown } from "../chat/Markdown.js";
-import { ArtifactFrame } from "./ArtifactFrame.js";
+import { ArtifactBody, ArtifactControls } from "./ArtifactViewer.js";
 import { artifactIcon } from "./artifactIcon.js";
-import { useArtifactAssets } from "./useArtifactAssets.js";
-import { useArtifactStorage } from "./useArtifactStorage.js";
-
-type Loaded =
-  | { state: "loading" }
-  | { state: "ok"; data: ArtifactContent; head: ArtifactHead | null }
-  | { state: "expired"; expiredAt?: number }
-  | { state: "error"; message: string };
-
-type View = "preview" | "source";
-
-/** Types whose preview is something other than the source itself. */
-const PREVIEWABLE: ReadonlySet<ArtifactType> = new Set(["html", "svg", "markdown"]);
-
-/**
- * Past this, Source shows a plain, truncated listing. An 8 MB page with an
- * inlined engine would otherwise go through the highlighter whole and hang
- * the tab; Copy and Download still give the full text.
- */
-const SOURCE_HIGHLIGHT_MAX = 200_000;
-
-/** How long to gather a burst of frame errors before sending them in one POST. */
-const ERROR_FLUSH_MS = 600;
+import { useArtifactDoc } from "./useArtifactDoc.js";
 
 /**
  * The artifact pane: one artifact, one version at a time, previewed or as
  * source. Placement (beside the transcript at `lg`, over it below) is the
  * host's job — see {@link ArtifactPaneHost}.
+ *
+ * While the artifact is popped out into its own window this shows a
+ * placeholder INSTEAD of a live view — it does not mount `useArtifactDoc` at
+ * all, because a second live view would fight the window over the artifact's
+ * persisted localStorage (see lib/artifactWindow).
  */
 export function ArtifactPane({ open }: { open: OpenArtifact }) {
+  const popped = useArtifactView((s) => s.popped[artifactKey(open.chatId, open.id)]);
+  return popped ? <PoppedOut open={open} title={popped.title} /> : <LivePane open={open} />;
+}
+
+function LivePane({ open }: { open: OpenArtifact }) {
   const { chatId, id, version: pinned } = open;
-  const latestSeen = useArtifactView((s) => s.latest[artifactKey(chatId, id)] ?? 0);
   const expanded = useArtifactView((s) => s.expanded);
   const setExpanded = useArtifactView((s) => s.setExpanded);
   const openArtifact = useArtifactView((s) => s.openArtifact);
   const close = useArtifactView((s) => s.close);
+  const doc = useArtifactDoc(chatId, id, pinned);
+  const Icon = artifactIcon(doc.type ?? "html");
 
-  const [loaded, setLoaded] = useState<Loaded>({ state: "loading" });
-  const [view, setView] = useState<View>("preview");
-  const [reloadKey, setReloadKey] = useState(0);
-  const [frameErrors, setFrameErrors] = useState<string[]>([]);
-  const [copied, setCopied] = useState(false);
-
-  // Following "latest" means re-resolving whenever a newer version is seen
-  // (transcript card or `artifact-updated`); a pinned version never changes.
-  // Either way the content comes through the browser cache, so re-opening —
-  // or flipping back to a version already seen — downloads nothing.
-  const fetchKey = pinned ?? `latest@${latestSeen}`;
-  useEffect(() => {
-    let live = true;
-    setLoaded((prev) => (prev.state === "ok" && prev.data.meta.id === id ? prev : { state: "loading" }));
-    loadArtifact(chatId, id, pinned ?? null)
-      .then(({ data, head }) => live && setLoaded({ state: "ok", data, head }))
-      .catch((err: unknown) => {
-        if (!live) return;
-        if (err instanceof ApiError && err.status === 410) {
-          const at = (err.detail as { expiredAt?: number } | undefined)?.expiredAt;
-          setLoaded({ state: "expired", ...(typeof at === "number" ? { expiredAt: at } : {}) });
-        } else {
-          setLoaded({ state: "error", message: err instanceof Error ? err.message : String(err) });
-        }
+  const popOut = () => {
+    if (!openArtifactWindow({ chatId, id, version: pinned }, doc.data?.meta.title)) {
+      useNotices.getState().push({
+        level: "error",
+        text: "The browser blocked the new window — allow pop-ups for this site and try again.",
       });
-    return () => {
-      live = false;
-    };
-  }, [chatId, id, pinned, fetchKey]);
-
-  const data = loaded.state === "ok" ? loaded.data : null;
-  const shownVersion = data?.version;
-  const storage = useArtifactStorage(chatId, id);
-  const type = data?.meta.type;
-  const head = loaded.state === "ok" ? loaded.head : null;
-  const htmlAssets = type === "html" ? data?.assets : undefined;
-  // Write the bundle back to the cache only when the server told us whose it is
-  // and until when — and only when it fits: caching the tail of a bundle bigger
-  // than the budget would evict its own head.
-  const cacheOwner =
-    head && bundleFitsCache(head.projectId, htmlAssets)
-      ? { projectId: head.projectId, expiresAt: head.expiresAt }
-      : null;
-  const bundle = useArtifactAssets(chatId, htmlAssets, cacheOwner);
-
-  // The errors on screen are the ones the server already knew for this
-  // version plus what the frame reports now — reset whenever the version or
-  // the render changes, since a reload is a new chance to throw.
-  useEffect(() => {
-    setFrameErrors(data?.errors ?? []);
-  }, [data, reloadKey]);
-
-  // Batch the frame's reports to the server, so `artifact_read` can tell the
-  // agent its page threw. Deduped per version: an error in an animation loop
-  // fires sixty times a second and is one fact.
-  //
-  // Two dedupes, with different lifetimes. What the BANNER shows resets with
-  // every render (the effect above), so an error that comes back after Reload
-  // is shown again. What has been POSTED lives for the version: the server
-  // already has it, and resending it on every reload says nothing new.
-  const pending = useRef<string[]>([]);
-  const posted = useRef<{ key: string; seen: Set<string> }>({ key: "", seen: new Set() });
-  const flushTimer = useRef<number | undefined>(undefined);
-  const onFrameError = useCallback(
-    (message: string) => {
-      if (shownVersion === undefined) return;
-      setFrameErrors((prev) => (prev.includes(message) ? prev : [...prev, message]));
-      const key = `${chatId}:${id}:${shownVersion}`;
-      if (posted.current.key !== key) posted.current = { key, seen: new Set() };
-      if (posted.current.seen.has(message)) return;
-      posted.current.seen.add(message);
-      pending.current.push(message);
-      window.clearTimeout(flushTimer.current);
-      flushTimer.current = window.setTimeout(() => {
-        const batch = pending.current.splice(0);
-        if (batch.length) void api.chats.artifactErrors(chatId, id, shownVersion, batch).catch(() => {});
-      }, ERROR_FLUSH_MS);
-    },
-    [chatId, id, shownVersion],
-  );
-  useEffect(() => () => window.clearTimeout(flushTimer.current), []);
-
-  const Icon = artifactIcon(type ?? "html");
-  const previewable = type ? PREVIEWABLE.has(type) : false;
-  const effectiveView: View = previewable ? view : "source";
-  const newest = data ? latestArtifactVersion(data.meta) : 0;
-
-  const versionOptions = (data?.meta.versions ?? [])
-    .slice()
-    .reverse()
-    .map((v) => ({
-      value: String(v.n),
-      label: v.n === newest ? `v${v.n} · latest` : `v${v.n}`,
-      hint: new Date(v.createdAt).toLocaleString(),
-    }));
-
-  const copy = async () => {
-    if (!data) return;
-    if (await copyToClipboard(data.content)) {
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1200);
     }
-  };
-
-  const download = () => {
-    if (!data) return;
-    // `application/octet-stream`, not text/html: the blob URL belongs to THIS
-    // origin, and a browser that decided to navigate to an html blob instead of
-    // saving it would run the artifact unsandboxed, same-origin.
-    const blob = new Blob([data.content], { type: "application/octet-stream" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${slug(data.meta.title)}-v${data.version}.${extensionOf(data.meta.type, data.meta.language)}`;
-    a.click();
-    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
 
   return (
@@ -185,44 +51,14 @@ export function ArtifactPane({ open }: { open: OpenArtifact }) {
         <span className="flex size-6 shrink-0 items-center justify-center text-accent-hi [&_svg]:size-3.5">
           <Icon />
         </span>
-        <span className="min-w-0 flex-1 truncate text-sm font-semibold text-primary" title={data?.meta.title}>
-          {data?.meta.title ?? "Artifact"}
+        <span className="min-w-0 flex-1 truncate text-sm font-semibold text-primary" title={doc.data?.meta.title}>
+          {doc.data?.meta.title ?? "Artifact"}
         </span>
-        {data && versionOptions.length > 1 && (
-          <Select
-            options={versionOptions}
-            value={String(data.version)}
-            onChange={(v) => {
-              const n = Number(v);
-              // Picking the newest goes back to FOLLOWING it, so the next edit
-              // the agent makes shows up without picking again.
-              openArtifact(chatId, id, n === newest ? null : n);
-            }}
-            align="end"
-            width={200}
-            size="md"
-          />
-        )}
-        {previewable && (
-          <SegmentedControl<View>
-            segments={[
-              { value: "preview", label: "Preview" },
-              { value: "source", label: "Source" },
-            ]}
-            value={effectiveView}
-            onChange={setView}
-          />
-        )}
-        {(type === "html" || type === "svg") && effectiveView === "preview" && (
-          <IconButton tip="Reload" onClick={() => setReloadKey((k) => k + 1)} disabled={!data}>
-            <RotateCw />
-          </IconButton>
-        )}
-        <IconButton tip={copied ? "Copied" : "Copy source"} onClick={() => void copy()} disabled={!data}>
-          {copied ? <Check /> : <Copy />}
-        </IconButton>
-        <IconButton tip="Download" onClick={download} disabled={!data}>
-          <Download />
+        <ArtifactControls doc={doc} onPickVersion={(v) => openArtifact(chatId, id, v)} />
+        {/* Not on a phone: there `window.open` is just another tab, and the
+            pane is already the whole screen. */}
+        <IconButton tip="Open in window" onClick={popOut} className="max-sm:hidden">
+          <SquareArrowOutUpRight />
         </IconButton>
         <IconButton tip={expanded ? "Restore" : "Expand"} onClick={() => setExpanded(!expanded)} className="max-lg:hidden">
           {expanded ? <Minimize2 /> : <Maximize2 />}
@@ -231,135 +67,46 @@ export function ArtifactPane({ open }: { open: OpenArtifact }) {
           <X />
         </IconButton>
       </div>
-
-      <div className="relative min-h-0 flex-1">
-        {(loaded.state === "loading" ||
-          (data && !storage.ready && (data.meta.type === "html" || data.meta.type === "svg"))) &&
-          bundle.state !== "loading" && (
-            <div className="flex h-full items-center justify-center">
-              <Spinner />
-            </div>
-          )}
-        {data && effectiveView === "preview" && bundle.state === "loading" && (
-          <div className="flex h-full flex-col items-center justify-center gap-2 p-6">
-            <div className="h-1.5 w-56 overflow-hidden rounded-full bg-line">
-              <div
-                className="h-full rounded-full bg-accent transition-[width]"
-                style={{ width: `${bundle.total ? Math.min(100, (bundle.loaded / bundle.total) * 100) : 0}%` }}
-              />
-            </div>
-            <p className="text-xs text-muted tabular-nums">
-              Loading assets — {formatMb(bundle.loaded)} of {formatMb(bundle.total)}
-            </p>
-          </div>
-        )}
-        {data && effectiveView === "preview" && bundle.state === "error" && (
-          <Notice tone="danger">The artifact&rsquo;s assets didn&rsquo;t load: {bundle.message}</Notice>
-        )}
-        {loaded.state === "expired" && (
-          <Notice>
-            This artifact expired
-            {loaded.expiredAt ? ` on ${new Date(loaded.expiredAt).toLocaleDateString()}` : ""} and its content
-            was deleted. Artifacts are kept for a number of days after their last edit — see Settings →
-            Retention.
-          </Notice>
-        )}
-        {loaded.state === "error" && <Notice tone="danger">{loaded.message}</Notice>}
-        {data &&
-          storage.ready &&
-          effectiveView === "preview" &&
-          (type === "html" || type === "svg") &&
-          (bundle.state === "none" || bundle.state === "ready") && (
-          <ArtifactFrame
-            key={`${data.version}:${reloadKey}`}
-            type={type}
-            content={data.content}
-            title={data.meta.title}
-            storage={storage.mirror.current}
-            {...(bundle.state === "ready" ? { assets: bundle.assets } : {})}
-            onError={onFrameError}
-            onStorage={storage.onWrite}
-          />
-        )}
-        {data && effectiveView === "preview" && type === "markdown" && (
-          <ScrollArea className="h-full">
-            <div className="mx-auto max-w-3xl px-5 py-4">
-              <Markdown chatId={chatId}>{data.content}</Markdown>
-            </div>
-          </ScrollArea>
-        )}
-        {data && effectiveView === "source" && (
-          <ScrollArea className="h-full">
-            <div className="p-3">
-              {data.content.length > SOURCE_HIGHLIGHT_MAX ? (
-                <>
-                  <p className="mb-2 text-xs text-muted">
-                    Showing the first {SOURCE_HIGHLIGHT_MAX.toLocaleString()} of{" "}
-                    {data.content.length.toLocaleString()} characters, unhighlighted — Copy or Download for all
-                    of it.
-                  </p>
-                  <pre className="cm-mono whitespace-pre-wrap break-all text-xs text-secondary">
-                    {data.content.slice(0, SOURCE_HIGHLIGHT_MAX)}
-                  </pre>
-                </>
-              ) : (
-                <CodeBlock
-                  code={data.content}
-                  language={sourceLanguage(data.meta.type, data.meta.language)}
-                />
-              )}
-            </div>
-          </ScrollArea>
-        )}
-      </div>
-
-      {frameErrors.length > 0 && effectiveView === "preview" && (
-        <details className="shrink-0 border-t border-line bg-danger/5 px-3 py-1.5 text-xs">
-          <summary className="flex cursor-pointer items-center gap-1.5 text-danger [&_svg]:size-3.5">
-            <AlertTriangle />
-            {frameErrors.length} runtime {frameErrors.length === 1 ? "error" : "errors"} — the agent sees these
-            through artifact_read
-          </summary>
-          <ul className="mt-1 max-h-40 space-y-1 overflow-auto">
-            {frameErrors.map((e) => (
-              <li key={e} className="cm-mono whitespace-pre-wrap break-words !text-2xs text-secondary">
-                {e}
-              </li>
-            ))}
-          </ul>
-        </details>
-      )}
+      <ArtifactBody doc={doc} />
     </div>
   );
 }
 
-function Notice({ children, tone }: { children: ReactNode; tone?: "danger" }) {
+function PoppedOut({ open, title }: { open: OpenArtifact; title: string | undefined }) {
+  const close = useArtifactView((s) => s.close);
   return (
-    <div className="flex h-full items-center justify-center p-6">
-      <p className={cn("max-w-sm text-center text-sm text-muted", tone === "danger" && "text-danger")}>
-        {children}
-      </p>
+    <div className="flex h-full min-h-0 flex-col bg-surface">
+      <div className="flex h-10 shrink-0 items-center gap-1.5 border-b border-line px-2">
+        <span className="flex size-6 shrink-0 items-center justify-center text-muted [&_svg]:size-3.5">
+          <AppWindow />
+        </span>
+        <span className="min-w-0 flex-1 truncate text-sm font-semibold text-primary" title={title}>
+          {title ?? "Artifact"}
+        </span>
+        <IconButton tip="Close" onClick={close}>
+          <X />
+        </IconButton>
+      </div>
+      <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
+        <span className="flex size-12 items-center justify-center rounded-lg border border-line bg-panel-2 text-accent-hi [&_svg]:size-6">
+          <AppWindow />
+        </span>
+        <div>
+          <p className="text-sm font-semibold text-primary">Open in a separate window</p>
+          <p className="mt-1 max-w-xs text-xs text-muted">
+            {title ? <>&ldquo;{title}&rdquo; is</> : "This artifact is"} running in its own window. It
+            shows here again when that window closes.
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <Button size="sm" variant="primary" onClick={() => focusArtifactWindow(open.chatId, open.id)}>
+            Focus window
+          </Button>
+          <Button size="sm" onClick={() => bringBackArtifact(open.chatId, open.id)}>
+            Bring back
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }
-
-function formatMb(bytes: number): string {
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function slug(title: string): string {
-  return title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "artifact";
-}
-
-function extensionOf(type: ArtifactType, language?: string): string {
-  if (type === "markdown") return "md";
-  if (type === "code") return (language ?? "txt").toLowerCase().replace(/[^a-z0-9]/g, "") || "txt";
-  return type;
-}
-
-function sourceLanguage(type: ArtifactType, language?: string): string {
-  if (type === "code") return (language ?? "text").toLowerCase();
-  if (type === "markdown") return "markdown";
-  return "markup";
-}
-
