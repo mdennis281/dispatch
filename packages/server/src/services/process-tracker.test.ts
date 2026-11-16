@@ -13,7 +13,6 @@ function harness(
   opts: {
     sessionPids?: Map<string, number>;
     shells?: { chatId: string; pid: number }[];
-    alive?: (pid: number) => boolean;
   } = {},
 ) {
   const c = clock();
@@ -32,7 +31,6 @@ function harness(
         (opts.shells ?? []).map((s) => ({ ...s, name: "main", terminalId: `${s.chatId}::main` })),
     },
     now: c.now,
-    alive: opts.alive ?? (() => true),
     // Tests sweep by hand; no timer.
     intervalMs: 0,
   });
