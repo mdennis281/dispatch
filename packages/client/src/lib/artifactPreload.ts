@@ -16,12 +16,13 @@
  *  - content (≤ 8 MB) is always fetched; assets only when the bundle is within
  *    `artifactPreloadMb`, and never under `navigator.connection.saveData`.
  */
-import { artifactAssetsBytes, type ArtifactMeta, type WsServerEvent } from "@dispatch/shared";
+import { artifactAssetsBytes, type ArtifactAsset, type WsServerEvent } from "@dispatch/shared";
 import { api } from "./api.js";
 import {
   artifactCacheAvailable,
   artifactCacheLimits,
   bundleFitsCache,
+  getContent,
   hasBlob,
   hasContent,
   putBlob,
@@ -81,17 +82,21 @@ async function drain(): Promise<void> {
 }
 
 async function preloadOne(evt: ArtifactUpdated): Promise<void> {
-  const { chatId, artifactId, version, projectId, expiresAt, meta } = evt;
+  const { chatId, artifactId, version, projectId, expiresAt } = evt;
   const limits = artifactCacheLimits(projectId);
   if (limits.projectMaxBytes <= 0) return;
 
-  if (!(await hasContent(chatId, artifactId, version))) {
+  // The event carries no asset manifest (it would make every edit of a game a
+  // megabyte broadcast); the version's content has it.
+  let assets: Record<string, ArtifactAsset> | undefined;
+  if (await hasContent(chatId, artifactId, version)) {
+    assets = (await getContent(chatId, artifactId, version))?.assets;
+  } else {
     const data = await api.chats.artifact(chatId, artifactId, version);
     await putContent(projectId, data, expiresAt);
+    assets = data.assets;
   }
-
-  const assets = assetsOf(meta, version);
-  if (!assets) return;
+  if (!assets || !Object.keys(assets).length) return;
   const total = artifactAssetsBytes(assets);
   if (total > limits.preloadMaxBytes || saveData() || !bundleFitsCache(projectId, assets)) return;
 
@@ -111,9 +116,4 @@ async function preloadOne(evt: ArtifactUpdated): Promise<void> {
     }
   };
   await Promise.all(Array.from({ length: Math.min(ASSET_CONCURRENCY, missing.length) }, worker));
-}
-
-function assetsOf(meta: ArtifactMeta, version: number) {
-  const assets = meta.versions.find((v) => v.n === version)?.assets;
-  return assets && Object.keys(assets).length ? assets : undefined;
 }

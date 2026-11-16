@@ -159,6 +159,13 @@ describe("artifact routes", () => {
     const body = head.json();
     expect(body).toMatchObject({ version: 2, projectId, expiresAt: v2.updatedAt + 7 * 24 * 60 * 60_000 });
     expect(body.content).toBeUndefined();
+    expect(body.errors).toEqual([]);
+
+    // Errors ride on head, never on a cached copy: they change after a version is written.
+    artifacts.recordErrors(chatId, meta.id, 1, ["TypeError: v1 boom"]);
+    const pinned = await app.inject({ url: `/api/chats/${chatId}/artifacts/${meta.id}/head?version=1` });
+    expect(pinned.json()).toMatchObject({ version: 2, errors: ["TypeError: v1 boom"] });
+    expect((await app.inject({ url: `/api/chats/${chatId}/artifacts/${meta.id}/head?version=0` })).statusCode).toBe(400);
 
     await artifacts.sweep([chatId], -1);
     const gone = await app.inject({ url: `/api/chats/${chatId}/artifacts/${meta.id}/head` });
@@ -174,7 +181,13 @@ describe("artifact routes", () => {
       if (evt.type === "artifact-updated") seen.push(evt as unknown as Record<string, unknown>);
     });
     const { artifacts } = app.services;
-    const meta = await artifacts.create(chatId, { title: "Page", type: "html", content: "<p>1</p>" });
+    await writeFile(join(dir, "tex.bin"), "bytes");
+    const meta = await artifacts.create(chatId, {
+      title: "Page",
+      type: "html",
+      content: "<p>1</p>",
+      assets: [{ path: "tex.bin", file: join(dir, "tex.bin") }],
+    });
     await artifacts.update(chatId, meta.id, { content: "<p>2</p>" });
     // The publish waits on a chat lookup; let it land.
     await vi.waitFor(() => expect(seen).toHaveLength(2));
@@ -182,6 +195,9 @@ describe("artifact routes", () => {
     expect(seen.map((e) => e.version)).toEqual([1, 2]);
     expect(seen[1]).toMatchObject({ chatId, projectId, artifactId: meta.id, meta: { id: meta.id } });
     expect(typeof seen[1]!.expiresAt).toBe("number");
+    // Summary only: asset manifests would make every edit of a game a megabyte broadcast.
+    const versions = (seen[1]!.meta as { versions: Array<Record<string, unknown>> }).versions;
+    expect(versions.map((v) => Object.keys(v).sort())).toEqual([["createdAt", "n", "size"], ["createdAt", "n", "size"]]);
   });
 
   it("round-trips the cache budgets through the full-replace settings PUT", async () => {

@@ -33,7 +33,7 @@ import {
   MessagePartSchema,
 } from "./messages.js";
 import { AttentionFilterSchema } from "./notify.js";
-import { ArtifactMetaSchema } from "./artifacts.js";
+import { ArtifactSummarySchema } from "./artifacts.js";
 import { ProjectConfigSchema, ProjectConfigErrorSchema } from "./project-config.js";
 import { UsageSnapshotSchema } from "./usage.js";
 import { WorkflowExemptionSchema } from "./workflow.js";
@@ -354,7 +354,12 @@ export const ArtifactUpdatedEventSchema = z.object({
   artifactId: z.string(),
   /** The version this write produced — always the newest. */
   version: z.number().int().positive(),
-  meta: ArtifactMetaSchema,
+  /**
+   * The artifact's meta WITHOUT asset manifests (see `ArtifactSummarySchema`
+   * for why) — title, type and the version list. The full meta is one `/head`
+   * away; this version's manifest comes with its content.
+   */
+  meta: ArtifactSummarySchema,
   /** See `ArtifactHead.expiresAt`. */
   expiresAt: z.number(),
 });

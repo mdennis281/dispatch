@@ -464,7 +464,11 @@ export async function putContent(projectId: string, data: ArtifactContent, expir
   const shas = Object.values(data.assets ?? {}).map((a) => a.sha256);
   await putRecord(
     CONTENT,
-    { key: contentKey(meta.chatId, meta.id, version), data },
+    // Errors are NOT cached: they are the one part of a version that changes
+    // after it is written (the viewer POSTs them), so a copy's list goes stale
+    // — and a preloaded copy's is empty by construction. `/head` carries the
+    // current list instead.
+    { key: contentKey(meta.chatId, meta.id, version), data: { ...data, errors: [] } },
     {
       key: contentKey(meta.chatId, meta.id, version),
       kind: "content",
@@ -682,8 +686,9 @@ function isUnreachable(err: unknown): boolean {
  * "Latest" (`pinned` null) is resolved with the head route first — a few
  * hundred bytes — because the cache is keyed by version and "latest" is the
  * one thing that changes. Then the content comes from IndexedDB if held, else
- * the network, and is written back. The returned meta is the HEAD's, so the
- * version picker is current even when the content is a week-old copy.
+ * the network, and is written back. The returned meta and errors are the
+ * HEAD's, so the version picker and the error banner are current even when
+ * the content is a week-old copy.
  *
  * When the server can't be reached at all, the newest cached version is shown
  * rather than an error — reading what the agent made yesterday on a train.
@@ -696,7 +701,7 @@ export async function loadArtifact(
   let head: ArtifactHead | null = null;
   let headError: unknown = null;
   try {
-    head = await api.chats.artifactHead(chatId, artifactId);
+    head = await api.chats.artifactHead(chatId, artifactId, pinned ?? undefined);
   } catch (err) {
     if (err instanceof ApiError && (err.status === 410 || err.status === 404)) {
       void evictArtifact(chatId, artifactId);
@@ -710,7 +715,7 @@ export async function loadArtifact(
   const version = pinned ?? head?.version ?? (await newestCachedVersion(chatId, artifactId));
   if (version) {
     const hit = await getContent(chatId, artifactId, version);
-    if (hit) return { data: head ? { ...hit, meta: head.meta } : hit, head, fromCache: true };
+    if (hit) return { data: head ? { ...hit, meta: head.meta, errors: head.errors } : hit, head, fromCache: true };
   }
   if (!head && headError) throw headError;
 

@@ -35,6 +35,7 @@ import {
   SCHEDULE_RUN_PURPOSE,
   latestArtifactVersion,
   resolveRetention,
+  summarizeArtifactMeta,
 } from "@dispatch/shared";
 import { launchAgentTask } from "./agent-tasks.js";
 import { SecretsService } from "./secrets.js";
@@ -614,7 +615,7 @@ export function createServices(
           projectId: chat.projectId,
           artifactId: meta.id,
           version: latestArtifactVersion(meta),
-          meta,
+          meta: summarizeArtifactMeta(meta),
           expiresAt: meta.updatedAt + resolveRetention(settings?.retention).artifactMs,
         });
       })().catch(() => {});

@@ -786,8 +786,8 @@ export const api = {
      * content. The browser cache asks this first and only downloads a version
      * it does not already hold. A 410 means retention deleted it.
      */
-    artifactHead: (id: string, artifactId: string) =>
-      get<ArtifactHead>(`/api/chats/${id}/artifacts/${encodeURIComponent(artifactId)}/head`),
+    artifactHead: (id: string, artifactId: string, version?: number) =>
+      get<ArtifactHead>(`/api/chats/${id}/artifacts/${encodeURIComponent(artifactId)}/head${qs({ version })}`),
     /** The artifact's persisted `localStorage` (per artifact, every version). */
     artifactStorage: (id: string, artifactId: string) =>
       get<ArtifactStorage>(`/api/chats/${id}/artifacts/${encodeURIComponent(artifactId)}/storage`),
