@@ -13,6 +13,9 @@ const SPEC: HarnessSessionSpec = {
   skills: [],
 };
 
+/** A chat that is NOT in bypass, so canUseTool reaches the human. */
+const ASKING: HarnessSessionSpec = { ...SPEC, permissionMode: "default" };
+
 describe("ClaudeSession workflow guard", () => {
   it("reports a native PreToolUse denial as an in-place continuation", async () => {
     const session = new ClaudeSession({
@@ -290,7 +293,7 @@ describe("ClaudeSession parity with the broker's direct loop", () => {
 
   it("puts the CLI's own wording and the asking run on the permission event", async () => {
     const { fn, q } = fakeQuery();
-    const s = new ClaudeSession({ spec: SPEC, query: fn, genId: () => "req-1" });
+    const s = new ClaudeSession({ spec: ASKING, query: fn, genId: () => "req-1" });
     const events = reader(s);
     s.send({ text: "go" });
     await settle();
@@ -324,7 +327,7 @@ describe("ClaudeSession parity with the broker's direct loop", () => {
 
   it("hands the ORIGINAL input back on an allow that names no replacement", async () => {
     const { fn, q } = fakeQuery();
-    const s = new ClaudeSession({ spec: SPEC, query: fn, genId: () => "req-1" });
+    const s = new ClaudeSession({ spec: ASKING, query: fn, genId: () => "req-1" });
     const events = reader(s);
     s.send({ text: "go" });
     await settle();
@@ -340,6 +343,50 @@ describe("ClaudeSession parity with the broker's direct loop", () => {
     s.resolvePermission("req-1", { decision: "allow" });
     // The SDK runs the tool with exactly this — `{}` ran it with no arguments.
     expect(await verdict).toEqual({ behavior: "allow", updatedInput: { command: "ls" } });
+    await s.dispose();
+  });
+
+  it("waves a bypass chat's CLI safety-check ask through without a card", async () => {
+    const { fn, q } = fakeQuery();
+    const s = new ClaudeSession({ spec: SPEC, query: fn, genId: () => "req-1" });
+    const events = reader(s);
+    s.send({ text: "go" });
+    await settle();
+    const canUseTool = q().options.canUseTool as (
+      n: string,
+      i: Record<string, unknown>,
+      o: Record<string, unknown>,
+    ) => Promise<unknown>;
+    const verdict = canUseTool("Bash", { command: "rm -f shots/*" }, {
+      toolUseID: "t1",
+      decisionReason: "dangerous rm",
+    });
+    expect(await verdict).toEqual({ behavior: "allow", updatedInput: { command: "rm -f shots/*" } });
+    expect(events.seen.some((e) => e.type === "permission-request")).toBe(false);
+    await s.dispose();
+  });
+
+  it("still asks in bypass when the human's own ask rule forced it, or it is a plan", async () => {
+    const { fn, q } = fakeQuery();
+    let n = 0;
+    const s = new ClaudeSession({ spec: SPEC, query: fn, genId: () => `req-${++n}` });
+    const events = reader(s);
+    s.send({ text: "go" });
+    await settle();
+    const canUseTool = q().options.canUseTool as (
+      n: string,
+      i: Record<string, unknown>,
+      o: Record<string, unknown>,
+    ) => Promise<unknown>;
+    void canUseTool("Bash", { command: "git push" }, {
+      toolUseID: "t1",
+      matchedAskRule: { source: "userSettings", toolName: "Bash", ruleContent: "git push:*" },
+    });
+    void canUseTool("ExitPlanMode", { plan: "p" }, { toolUseID: "t2" });
+    await settle();
+    expect(
+      events.seen.filter((e) => e.type === "permission-request").map((e) => (e as { toolName: string }).toolName),
+    ).toEqual(["Bash", "ExitPlanMode"]);
     await s.dispose();
   });
 
