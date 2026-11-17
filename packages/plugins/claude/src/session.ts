@@ -45,6 +45,7 @@ import type {
   HarnessSession,
   HarnessSessionSpec,
 } from "@dispatch/shared";
+import { HarnessEventQueue } from "@dispatch/shared";
 import { catchToolGuard, compactCommand } from "@dispatch/shared";
 import { claudeCompactWindow } from "./compact.js";
 import { ClaudeStreamDecoder, QUESTION_TOOL } from "./stream.js";
@@ -194,9 +195,7 @@ export class ClaudeSession implements HarnessSession {
 
   /* ------------------------------------------------- the event stream */
 
-  private readonly queue: HarnessEvent[] = [];
-  private waiter?: () => void;
-  private ended = false;
+  private readonly out = new HarnessEventQueue<HarnessEvent>();
 
   /**
    * Pid of the live Claude Code subprocess, or undefined between runs.
@@ -265,9 +264,9 @@ export class ClaudeSession implements HarnessSession {
       [Symbol.asyncIterator]: (): AsyncIterator<HarnessEvent> => ({
         next: async (): Promise<IteratorResult<HarnessEvent>> => {
           for (;;) {
-            const next = this.queue.shift();
+            const next = this.out.shift();
             if (next) return { value: next, done: false };
-            if (this.ended) {
+            if (this.out.ended) {
               // Once: a consumer that keeps pulling after the throw sees an
               // ordinary end, not the same death reported twice.
               const fatal = this.fatal;
@@ -286,9 +285,7 @@ export class ClaudeSession implements HarnessSession {
                 (error: unknown) => ({ error }),
               );
             }
-            const pushed = new Promise<undefined>((resolve) => {
-              this.waiter = () => resolve(undefined);
-            });
+            const pushed = this.out.wait().then(() => undefined);
             const read = await (this.pull ? Promise.race([this.pull, pushed]) : pushed);
             if (read) {
               this.pull = undefined;
@@ -301,16 +298,11 @@ export class ClaudeSession implements HarnessSession {
   }
 
   private emit(...events: HarnessEvent[]): void {
-    if (this.ended) return;
-    this.queue.push(...events);
-    this.waiter?.();
-    this.waiter = undefined;
+    this.out.push(...events);
   }
 
   private end(): void {
-    this.ended = true;
-    this.waiter?.();
-    this.waiter = undefined;
+    this.out.end();
   }
 
   /* --------------------------------------------------------- sending */
@@ -346,8 +338,7 @@ export class ClaudeSession implements HarnessSession {
     this.flush();
     this.sdk = this.query[Symbol.asyncIterator]();
     // A consumer already parked on an empty queue starts reading now.
-    this.waiter?.();
-    this.waiter = undefined;
+    this.out.wake();
   }
 
   private flush(): void {

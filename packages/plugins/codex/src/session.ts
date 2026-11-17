@@ -44,6 +44,7 @@ import type {
 } from "@dispatch/shared";
 import { CodexStreamDecoder, codexToolCall, legacySubagentToolUseId, questionsOf } from "./stream.js";
 import { toCodexPosture, toDeveloperInstructions, clampEffort } from "./options.js";
+import { HarnessEventQueue } from "@dispatch/shared";
 import { catchToolGuard } from "@dispatch/shared";
 import { codexCompactNote, normalizeCompactFocus } from "@dispatch/shared";
 import type { CodexConnection, RpcFrame, ServerRequest } from "./rpc.js";
@@ -206,9 +207,7 @@ export class CodexSession implements HarnessSession {
 
   /* ------------------------------------------------- the event stream */
 
-  private readonly queue: HarnessEvent[] = [];
-  private waiter?: () => void;
-  private ended = false;
+  private readonly out = new HarnessEventQueue<HarnessEvent>();
 
   constructor(opts: CodexSessionOpts) {
     this.opts = opts;
@@ -232,31 +231,20 @@ export class CodexSession implements HarnessSession {
             this.handedTurnEnd = false;
             this.releaseHeld();
           }
-          for (;;) {
-            const next = this.queue.shift();
-            if (next) {
-              if (next.type === "turn-end") this.handedTurnEnd = true;
-              return { value: next, done: false };
-            }
-            if (this.ended) return { value: undefined as never, done: true };
-            await new Promise<void>((resolve) => (this.waiter = resolve));
-          }
+          const next = await this.out.next();
+          if (!next.done && next.value.type === "turn-end") this.handedTurnEnd = true;
+          return next;
         },
       }),
     };
   }
 
   private emit(...events: HarnessEvent[]): void {
-    if (this.ended) return;
-    this.queue.push(...events);
-    this.waiter?.();
-    this.waiter = undefined;
+    this.out.push(...events);
   }
 
   private end(): void {
-    this.ended = true;
-    this.waiter?.();
-    this.waiter = undefined;
+    this.out.end();
   }
 
   /* --------------------------------------------------------- sending */
@@ -416,7 +404,7 @@ export class CodexSession implements HarnessSession {
     // It completed while we were asking. Its turn end hasn't reached the host
     // yet, or is being handled: the host's next pull releases the batch. Else
     // nothing else will, so go now.
-    if (this.handedTurnEnd || this.guardBarrier || this.queue.some((e) => e.type === "turn-end")) {
+    if (this.handedTurnEnd || this.guardBarrier || this.out.some((e) => e.type === "turn-end")) {
       return;
     }
     this.releaseHeld();

@@ -41,6 +41,7 @@ import { readFileSync } from "node:fs";
 import type { ImageRef, SlashCommandInfo } from "@dispatch/shared";
 import type { AcpConnection, AgentRequest, RpcFrame } from "./rpc.js";
 import { AcpStreamDecoder, turnEndOf, toolNameOf, remapInput } from "./stream.js";
+import { HarnessEventQueue } from "@dispatch/shared";
 import { catchToolGuard } from "@dispatch/shared";
 import {
   toAcpMode,
@@ -97,9 +98,7 @@ export class AcpSession implements HarnessSession {
 
   /* ------------------------------------------------- the event stream */
 
-  private readonly queue: HarnessEvent[] = [];
-  private waiter?: () => void;
-  private ended = false;
+  private readonly out = new HarnessEventQueue<HarnessEvent>();
 
   constructor(opts: AcpSessionOpts) {
     this.spec = opts.spec;
@@ -115,31 +114,15 @@ export class AcpSession implements HarnessSession {
   }
 
   get events(): AsyncIterable<HarnessEvent> {
-    return {
-      [Symbol.asyncIterator]: (): AsyncIterator<HarnessEvent> => ({
-        next: async (): Promise<IteratorResult<HarnessEvent>> => {
-          for (;;) {
-            const next = this.queue.shift();
-            if (next) return { value: next, done: false };
-            if (this.ended) return { value: undefined as never, done: true };
-            await new Promise<void>((resolve) => (this.waiter = resolve));
-          }
-        },
-      }),
-    };
+    return this.out.iterable();
   }
 
   private emit(...events: HarnessEvent[]): void {
-    if (this.ended) return;
-    this.queue.push(...events);
-    this.waiter?.();
-    this.waiter = undefined;
+    this.out.push(...events);
   }
 
   private end(): void {
-    this.ended = true;
-    this.waiter?.();
-    this.waiter = undefined;
+    this.out.end();
   }
 
   /** Surface a failure as a turn end rather than an unhandled rejection. */
