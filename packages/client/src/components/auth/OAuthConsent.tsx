@@ -72,7 +72,7 @@ export function OAuthConsent({ nonce }: { nonce: string }) {
     // so a connector asking for every scope pushed Approve below the fold with
     // no way to reach it. Flex + `min-h-full` rather than `place-items-center`,
     // which clips the TOP of a card taller than the viewport instead of scrolling.
-    <div className="fixed inset-0 overflow-y-auto bg-app">
+    <div className="cm-takeover fixed inset-x-0 bottom-0 top-(--dp-titlebar-h) overflow-y-auto bg-app">
       <div className="flex min-h-full items-center justify-center p-5">
         <div
           className="w-full max-w-md rounded-xl border border-line-strong bg-overlay p-6 shadow-[var(--shadow-pop)]"

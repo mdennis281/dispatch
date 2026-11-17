@@ -266,7 +266,7 @@ function Attempt({ flight }: { flight: UpdateFlight }) {
   return (
     <div
       style={{ zIndex: LAYER.shutdown }}
-      className="fixed inset-0 flex flex-col items-center overflow-y-auto bg-app/95 p-6 backdrop-blur-sm"
+      className="cm-takeover fixed inset-x-0 bottom-0 top-(--dp-titlebar-h) flex flex-col items-center overflow-y-auto bg-app/95 p-6 backdrop-blur-sm"
     >
       {/* `my-auto`, NOT `justify-center` on the scroller. An auto margin
           collapses to zero when the child is taller than the box, where

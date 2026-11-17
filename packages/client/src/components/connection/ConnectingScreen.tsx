@@ -220,7 +220,7 @@ export function ConnectingScreen() {
       role="alertdialog"
       aria-label="Connection problem"
       style={{ zIndex: LAYER.connecting }}
-      className="fixed inset-0 flex flex-col items-center justify-center bg-app/95 px-5 backdrop-blur-sm dp-safe-pad"
+      className="cm-takeover fixed inset-x-0 bottom-0 top-(--dp-titlebar-h) flex flex-col items-center justify-center bg-app/95 px-5 backdrop-blur-sm dp-safe-pad"
     >
       <HeadIcon diagnosis={diagnosis} />
       {/*

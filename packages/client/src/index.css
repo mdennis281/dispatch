@@ -555,6 +555,26 @@
     app-region: no-drag;
   }
   /*
+   * When the stand-in title bar (`WindowStrip`) shows.
+   *
+   * Only under the overlay — everywhere else the browser or OS already draws a
+   * title bar. Under it: whenever the shell's own two-line bar is not mounted
+   * (login, setup, "Starting Dispatch…"), and whenever it IS mounted but
+   * something full-window is on top of it (`.cm-takeover`: connecting,
+   * updating, restarting, stopped, a crash) or the boot splash has not lifted
+   * yet. Before this, those screens left the window buttons floating over a
+   * bare page with nothing to drag by.
+   */
+  .cm-wco-strip {
+    display: none;
+  }
+  @media (display-mode: window-controls-overlay) {
+    body:not(:has(header.cm-titlebar)) .cm-wco-strip,
+    body:has(.cm-takeover, #boot-splash) .cm-wco-strip {
+      display: flex;
+    }
+  }
+  /*
    * The two-line title bar's geometry.
    *
    * LINE ONE is the band the OS paints its buttons in, so it is sized from

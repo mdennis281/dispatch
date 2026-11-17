@@ -149,7 +149,7 @@ export function AppErrorBoundary({
       render={(caught) => (
         <div
           style={{ zIndex: LAYER.shutdown }}
-          className="fixed inset-0 flex flex-col items-center overflow-y-auto bg-app px-4 py-10 text-primary"
+          className="cm-takeover fixed inset-x-0 bottom-0 top-(--dp-titlebar-h) flex flex-col items-center overflow-y-auto bg-app px-4 py-10 text-primary"
         >
           <span className="mb-3.5 flex size-12 items-center justify-center rounded-xl border border-line bg-panel-2 text-danger [&_svg]:size-5">
             <AlertTriangle />

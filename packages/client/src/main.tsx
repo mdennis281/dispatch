@@ -30,6 +30,7 @@ import { parseOAuthHash, useOAuthConsent } from "./stores/oauthConsent.js";
 import { openAppSettings } from "./stores/view.js";
 import { APP_SECTIONS } from "./components/settings/appSections.js";
 import { useNotices } from "./stores/notices.js";
+import { WindowStrip } from "./components/layout/WindowStrip.js";
 
 // The palette itself was applied by the inline script in index.html (before the
 // first paint); this only subscribes to later OS changes, which matters solely
@@ -259,5 +260,9 @@ createRoot(el).render(
         <App />
       )}
     </AppErrorBoundary>
+    {/* OUTSIDE the boundary: a crash page is a takeover too, and the strip is
+        what lets you still move and close the window while reading it. Shell
+        only — the popups have their own headers and are not WCO windows. */}
+    {isShell && <WindowStrip />}
   </StrictMode>,
 );
