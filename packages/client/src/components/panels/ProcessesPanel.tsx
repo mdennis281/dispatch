@@ -9,7 +9,6 @@ import {
   AlertTriangle,
   Maximize2,
 } from "lucide-react";
-import { api } from "../../lib/api.js";
 import { useProcesses, useProjectProcesses } from "../../stores/processes.js";
 import { Button } from "../ui/Button.js";
 import { Chip } from "../ui/Chip.js";
@@ -17,6 +16,7 @@ import { IconButton } from "../ui/IconButton.js";
 import { SectionLabel } from "../ui/Panel.js";
 import { cn } from "../../lib/cn.js";
 import { openOverlay } from "../../stores/view.js";
+import { useKillProcesses } from "./useKillProcesses.js";
 
 /**
  * OS-level process inspector for a project: what's ACTUALLY listening on its
@@ -30,8 +30,6 @@ import { openOverlay } from "../../stores/view.js";
  */
 export function ProcessesPanel({ projectId }: { projectId: string }) {
   const [open, setOpen] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [killError, setKillError] = useState<string | null>(null);
 
   // Rows live in the store, not here: held locally they only existed once this
   // section had been expanded, which made the collapsed "N orphans" chip below
@@ -40,7 +38,6 @@ export function ProcessesPanel({ projectId }: { projectId: string }) {
   const rows = useProjectProcesses(projectId);
   const loading = useProcesses((s) => s.scanning[projectId] ?? false);
   const scanError = useProcesses((s) => s.errors[projectId] ?? null);
-  const error = killError ?? scanError;
 
   const refresh = useCallback(
     () => useProcesses.getState().scan(projectId),
@@ -53,30 +50,8 @@ export function ProcessesPanel({ projectId }: { projectId: string }) {
     if (open) void refresh();
   }, [open, refresh]);
 
-  const kill = useCallback(
-    async (pids: number[]) => {
-      if (pids.length === 0) return;
-      setBusy(true);
-      setKillError(null);
-      try {
-        const results = await api.processes.kill(projectId, pids);
-        const failed = results.filter((r) => !r.ok);
-        if (failed.length) {
-          setKillError(
-            `Failed to kill ${failed.length} process(es): ${failed
-              .map((f) => `${f.pid} (${f.error ?? "unknown"})`)
-              .join(", ")}`,
-          );
-        }
-      } catch (err) {
-        setKillError(err instanceof Error ? err.message : String(err));
-      } finally {
-        setBusy(false);
-        await refresh();
-      }
-    },
-    [projectId, refresh],
-  );
+  const { kill, busy, killError } = useKillProcesses(projectId, refresh);
+  const error = killError ?? scanError;
 
   const orphans = rows.filter((r) => !r.tracked);
   const Caret = open ? ChevronDown : ChevronRight;

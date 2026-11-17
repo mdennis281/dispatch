@@ -20,7 +20,7 @@
  * and global "kill everything" live here rather than in the chat menu so the
  * click always happens in front of the list of what it will kill.
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -38,13 +38,14 @@ import { Button } from "../ui/Button.js";
 import { Chip } from "../ui/Chip.js";
 import { IconButton } from "../ui/IconButton.js";
 import { Spinner } from "../ui/Spinner.js";
-import { api, type ProjectProcess } from "../../lib/api.js";
+import type { ProjectProcess } from "../../lib/api.js";
 import { useProcesses, useProjectProcesses } from "../../stores/processes.js";
 import { useChats } from "../../stores/chats.js";
 import { useTerminals } from "../../stores/terminals.js";
 import { useProjects } from "../../stores/projects.js";
 import { useOverlay } from "../../stores/view.js";
 import { cn } from "../../lib/cn.js";
+import { useKillProcesses } from "./useKillProcesses.js";
 
 /* --------------------------------------------------------------- grouping */
 
@@ -136,8 +137,6 @@ export function groupProcesses(
 export function ProcessesOverlay() {
   const { open, close } = useOverlay("processes");
   const projectId = useProjects((s) => s.activeProjectId);
-  const [busy, setBusy] = useState(false);
-  const [killError, setKillError] = useState<string | null>(null);
 
   const rows = useProjectProcesses(projectId ?? "");
   const loading = useProcesses((s) => (projectId ? (s.scanning[projectId] ?? false) : false));
@@ -170,30 +169,7 @@ export function ProcessesOverlay() {
     [groups],
   );
 
-  const kill = useCallback(
-    async (pids: number[]) => {
-      if (!projectId || pids.length === 0) return;
-      setBusy(true);
-      setKillError(null);
-      try {
-        const results = await api.processes.kill(projectId, pids);
-        const failed = results.filter((r) => !r.ok);
-        if (failed.length) {
-          setKillError(
-            `Failed to kill ${failed.length} process(es): ${failed
-              .map((f) => `${f.pid} (${f.error ?? "unknown"})`)
-              .join(", ")}`,
-          );
-        }
-      } catch (err) {
-        setKillError(err instanceof Error ? err.message : String(err));
-      } finally {
-        setBusy(false);
-        refresh();
-      }
-    },
-    [projectId, refresh],
-  );
+  const { kill, busy, killError } = useKillProcesses(projectId, refresh);
 
   const total = groups.reduce((n, g) => n + g.rows.length, 0);
 

@@ -307,7 +307,13 @@ function findPython() {
       ? [["py", ["-3"]], ["python", []], ["python3", []]]
       : [["python3", []], ["python", []]];
   for (const [cmd, prefix] of candidates) {
-    const r = spawnSync(cmd, [...prefix, "--version"], { stdio: "ignore", windowsHide: true });
+    // The launcher needs 3.10+, and `--version` exits 0 for a 3.8 too — probe the
+    // floor itself, as the installer's findPython() does, so the error below is true.
+    const r = spawnSync(
+      cmd,
+      [...prefix, "-c", "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)"],
+      { stdio: "ignore", windowsHide: true },
+    );
     if (r.status === 0) return [cmd, prefix];
   }
   throw new Error("Python 3.10+ was not found on PATH");

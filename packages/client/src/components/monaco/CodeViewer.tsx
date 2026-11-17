@@ -30,6 +30,7 @@ import {
 import { useCodeViewer, type CodeViewerMode, type CodeViewerRequest } from "./store.js";
 import { languageForPath, isImagePath } from "./lang.js";
 import { ImagePreview } from "./ImagePreview.js";
+import { StateNote } from "./StateNote.js";
 import { Spinner } from "../ui/Spinner.js";
 import { IconButton } from "../ui/IconButton.js";
 import { Button } from "../ui/Button.js";
@@ -395,26 +396,5 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
       </div>
     </div>,
     document.body,
-  );
-}
-function StateNote({
-  icon,
-  title,
-  detail,
-}: {
-  icon: React.ReactNode;
-  title: string;
-  detail?: string;
-}) {
-  return (
-    <div className="flex h-full flex-col items-center justify-center px-6 text-center">
-      <span className="mb-2 flex size-9 items-center justify-center rounded-md border border-line bg-panel-2 [&_svg]:size-4">
-        {icon}
-      </span>
-      <p className="text-base font-medium text-secondary">{title}</p>
-      {detail && (
-        <p className="mt-0.5 max-w-md cm-mono !text-xs text-faint break-words">{detail}</p>
-      )}
-    </div>
   );
 }
