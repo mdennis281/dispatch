@@ -6,6 +6,7 @@ import { ResultMediaStrip } from "./ResultMediaStrip.js";
 import { InlineCode } from "../CodeBlock.js";
 import { ToolDetailModal, type ToolDetailState } from "../ToolDetailModal.js";
 import { DispatchToolCard } from "./DispatchToolCard.js";
+import { StateMark } from "./ToolCardBits.js";
 import { Chip } from "../../ui/Chip.js";
 import { Button } from "../../ui/Button.js";
 import { IconButton } from "../../ui/IconButton.js";
@@ -15,7 +16,7 @@ import { cn } from "../../../lib/cn.js";
 import { dur } from "../../../lib/format.js";
 import { ackTaskId } from "../../../lib/subagentRuns.js";
 import { toolCallState } from "../../../lib/toolState.js";
-import { hydrateFullRows } from "../../../stores/index.js";
+import { hydrateToolCall } from "../../../stores/index.js";
 import { displayResultText, shellGroupPresentation } from "../../../lib/toolPresentations.js";
 import {
   SHELL_FILTER_OPTIONS,
@@ -32,13 +33,6 @@ export interface ShellRunEntry {
 
 function entryState({ result, task }: ShellRunEntry): ToolDetailState {
   return toolCallState(result, task);
-}
-
-function StateIcon({ state }: { state: ToolDetailState }) {
-  if (state === "running") return <Spinner size={10} />;
-  if (state === "failed") return <X className="text-danger" />;
-  if (state === "stopped") return <Circle className="text-muted" />;
-  return <Check className="text-success" />;
 }
 
 function shellLabel(language: "bash" | "powershell", short = false): string {
@@ -62,12 +56,7 @@ function ShellCommandPair({ entry }: { entry: ShellRunEntry }) {
   const clipped = Boolean(entry.use.inputOmitted) || Boolean(entry.result?.contentOmitted);
 
   const inspect = () => {
-    if (clipped) {
-      const ids: string[] = [];
-      if (entry.use.inputOmitted) ids.push(entry.use.id);
-      if (entry.result?.contentOmitted) ids.push(entry.result.id);
-      void hydrateFullRows(entry.use.chatId, ids);
-    }
+    if (clipped) void hydrateToolCall(entry.use, entry.result);
     setDetailOpen(true);
   };
 
@@ -113,7 +102,7 @@ function ShellCommandPair({ entry }: { entry: ShellRunEntry }) {
         {state !== "running" && (
           <span className="flex min-w-12 items-center justify-end gap-1.5 pt-px cm-mono !text-2xs text-faint [&_svg]:size-3">
             {elapsed !== undefined && <span>{dur(elapsed)}</span>}
-            <StateIcon state={state} />
+            <StateMark state={state} />
           </span>
         )}
       </Button>

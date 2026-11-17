@@ -18,11 +18,10 @@
  * AppSettingsSchema); saving merges + revalidates server-side.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { SlidersHorizontal, Save, Undo2 } from "lucide-react";
+import { SlidersHorizontal } from "lucide-react";
 import { SHELL_TRANSCRIPT_CATEGORIES } from "@dispatch/shared";
 import type { HarnessKind, ModelOption } from "@dispatch/shared";
 import { InlineError } from "../sidebar/Modal.js";
-import { Button } from "../ui/Button.js";
 import { Spinner } from "../ui/Spinner.js";
 import {
   api,
@@ -39,6 +38,7 @@ import {
   dirtyAppSections,
 } from "../../stores/settingsDraft.js";
 import { SettingsShell } from "./SettingsShell.js";
+import { settingsSaveBar } from "./saveBar.js";
 import { APP_SECTIONS, APP_SECTION_BY_ID, pluginSectionDef, useAppSections } from "./appSections.js";
 import { useSlots } from "../../plugins/slots.js";
 import { PluginSlot } from "../../plugins/PluginSlot.js";
@@ -295,36 +295,13 @@ export function AppSettingsView() {
       }))}
       active={section}
       onSelect={setSection}
-      footer={
-        error || dirty ? (
-          <>
-            {error ? (
-              <div className="mr-auto min-w-0 flex-1">
-                <InlineError message={error} />
-              </div>
-            ) : (
-              <span className="mr-auto truncate text-2xs font-medium text-warn">
-                Unsaved changes
-              </span>
-            )}
-            {dirty && (
-              <>
-                <Button variant="ghost" leftIcon={<Undo2 />} disabled={busy} onClick={discard}>
-                  Discard
-                </Button>
-                <Button
-                  variant="primary"
-                  leftIcon={busy ? <Spinner size={12} /> : <Save />}
-                  disabled={busy}
-                  onClick={() => void save()}
-                >
-                  Save
-                </Button>
-              </>
-            )}
-          </>
-        ) : null
-      }
+      footer={settingsSaveBar({
+        error,
+        dirty,
+        busy: busy,
+        onDiscard: discard,
+        onSave: () => void save(),
+      })}
     >
       <div className="space-y-3">
         <div>

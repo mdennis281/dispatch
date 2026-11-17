@@ -35,17 +35,15 @@ import {
   type ToolResultRow,
   type ToolUseRow,
 } from "@dispatch/shared";
-import { RowShell } from "./RowShell.js";
-import { ResultMediaStrip } from "./ResultMediaStrip.js";
+import { RunGroupCard } from "./RunGroupCard.js";
 import { PrStatePanel, PrStateStrip } from "./PrStateView.js";
 import { DetailLines, OutcomeCard, RawExchange, StateMark } from "./ToolCardBits.js";
 import { Modal } from "../../sidebar/Modal.js";
 import { Button } from "../../ui/Button.js";
-import { Chip } from "../../ui/Chip.js";
 import { OverflowTooltip } from "../../ui/OverflowTooltip.js";
 import { cn } from "../../../lib/cn.js";
 import { dur, parseMcpName, relTime, untilShort } from "../../../lib/format.js";
-import { hydrateFullRows } from "../../../stores/index.js";
+import { hydrateToolCall } from "../../../stores/index.js";
 import { useNowTick } from "../../../stores/agentRun.js";
 import { usePrs } from "../../../stores/prs.js";
 import { useChats } from "../../../stores/chats.js";
@@ -155,12 +153,7 @@ function PrToolCard({ entry }: { entry: PrRunEntry }) {
   const clipped = Boolean(entry.use.inputOmitted) || Boolean(entry.result?.contentOmitted);
 
   const inspect = () => {
-    if (clipped) {
-      const ids: string[] = [];
-      if (entry.use.inputOmitted) ids.push(entry.use.id);
-      if (entry.result?.contentOmitted) ids.push(entry.result.id);
-      void hydrateFullRows(entry.use.chatId, ids);
-    }
+    if (clipped) void hydrateToolCall(entry.use, entry.result);
     setOpen(true);
   };
 
@@ -356,42 +349,17 @@ function WatchStatus({
 
 /** A run of adjacent PR calls, framed as one pull-request card. */
 export const PrRunGroup = memo(function PrRunGroup({ entries }: { entries: PrRunEntry[] }) {
-  const states = entries.map((e) => toolCallState(e.result, e.task));
-  const tone = states.includes("running")
-    ? ("accent" as const)
-    : states.includes("failed")
-      ? ("danger" as const)
-      : ("success" as const);
   return (
-    <RowShell
-      gutter={
-        <span className="flex size-6 items-center justify-center rounded-md bg-info-ghost text-info-hi ring-1 ring-info-line [&_svg]:size-3.5">
-          <GitPullRequest />
-        </span>
-      }
+    <RunGroupCard
+      icon={<GitPullRequest />}
+      title="Pull request"
+      states={entries.map((e) => toolCallState(e.result, e.task))}
+      chatId={entries[0]?.use.chatId ?? ""}
+      results={entries.map((e) => e.result)}
     >
-      <div className="overflow-hidden rounded-md border border-line bg-panel-2/60">
-        <div className="flex h-8 items-center gap-2 border-b border-line-soft px-2.5">
-          <span className="text-sm font-semibold text-primary">Pull request</span>
-          <span className="cm-mono !text-2xs text-faint">
-            {entries.length} step{entries.length === 1 ? "" : "s"}
-          </span>
-          <span className="ml-auto">
-            <Chip tone={tone}>
-              {states.includes("running") ? "working" : states.includes("failed") ? "failed" : "ok"}
-            </Chip>
-          </span>
-        </div>
-        <div>
-          {entries.map((entry) => (
-            <PrToolCard key={entry.use.id} entry={entry} />
-          ))}
-        </div>
-        <ResultMediaStrip
-          chatId={entries[0]?.use.chatId ?? ""}
-          results={entries.map((e) => e.result)}
-        />
-      </div>
-    </RowShell>
+      {entries.map((entry) => (
+        <PrToolCard key={entry.use.id} entry={entry} />
+      ))}
+    </RunGroupCard>
   );
 });
