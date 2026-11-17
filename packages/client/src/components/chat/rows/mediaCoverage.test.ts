@@ -34,8 +34,11 @@ const SRC = fileURLToPath(new URL("../../..", import.meta.url));
  * plain substring match would keep passing after someone deleted the element
  * and left the prose behind — the precise regression this file exists to
  * catch, waved through by the thing meant to catch it.
+ *
+ * `RunGroupCard` counts: it mounts the strip unconditionally, and it is itself
+ * in RENDERERS below, so the strip inside it stays guarded.
  */
-const RENDERS_MEDIA = /<\s*(ResultMediaStrip|MediaGroup|Attachment|ImageThumb|AssetMedia)[\s/>]/;
+const RENDERS_MEDIA = /<\s*(ResultMediaStrip|MediaGroup|Attachment|ImageThumb|AssetMedia|RunGroupCard)[\s/>]/;
 
 /**
  * Blank out comments and string literals before matching, so neither a doc
@@ -80,8 +83,10 @@ const RENDERERS = [
   "components/chat/MessageList.tsx",
   "components/chat/rows/DispatchToolCard.tsx",
   "components/chat/rows/FileRunGroup.tsx",
+  "components/chat/rows/IssueRunGroup.tsx",
   "components/chat/rows/PrRunGroup.tsx",
   "components/chat/rows/ResultMediaStrip.tsx",
+  "components/chat/rows/RunGroupCard.tsx",
   "components/chat/rows/ShellRunGroup.tsx",
   "components/chat/rows/ToolCallCard.tsx",
   "components/agents/RunStream.tsx",

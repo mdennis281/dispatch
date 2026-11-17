@@ -18,7 +18,7 @@ import { OverflowTooltip } from "../../ui/OverflowTooltip.js";
 import { cn } from "../../../lib/cn.js";
 import { dur, safeJson } from "../../../lib/format.js";
 import { toolCallElapsed, toolCallState, type ToolCallState } from "../../../lib/toolState.js";
-import { hydrateFullRows } from "../../../stores/index.js";
+import { hydrateToolCall } from "../../../stores/index.js";
 import { useChats } from "../../../stores/chats.js";
 import { usePanels } from "../../../stores/panels.js";
 import { samePath } from "../../panels/panelBus.js";
@@ -164,10 +164,7 @@ function FileRow({
   const Icon = presentation.tool === "Glob" ? FileSearch : ACTION_ICON[action];
 
   const openDetail = () => {
-    const ids: string[] = [];
-    if (entry.use.inputOmitted) ids.push(entry.use.id);
-    if (entry.result?.contentOmitted) ids.push(entry.result.id);
-    if (ids.length) void hydrateFullRows(entry.use.chatId, ids);
+    void hydrateToolCall(entry.use, entry.result);
     setDetailOpen(true);
   };
 

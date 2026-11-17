@@ -987,6 +987,21 @@ export async function hydrateFullRows(chatId: string, ids: string[]): Promise<vo
   }
 }
 
+/**
+ * Hydrate whichever half of a tool call the transcript clipped: the call's
+ * input, its result, or both. Four run-group cards built this id list by hand
+ * before opening their detail view.
+ */
+export function hydrateToolCall(
+  use: { id: string; chatId: string; inputOmitted?: boolean },
+  result?: { id: string; contentOmitted?: boolean },
+): Promise<void> {
+  const ids: string[] = [];
+  if (use.inputOmitted) ids.push(use.id);
+  if (result?.contentOmitted) ids.push(result.id);
+  return hydrateFullRows(use.chatId, ids);
+}
+
 /** Load the right-panel views (worktrees, PRs, Actions) for a project. */
 export async function loadProjectPanels(projectId: string): Promise<void> {
   const worktrees: WorktreeInfo[] = await api.worktrees

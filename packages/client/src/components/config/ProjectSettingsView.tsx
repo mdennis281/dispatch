@@ -40,8 +40,6 @@ import {
   TriangleAlert,
   Sparkles,
   SquarePen,
-  Save,
-  Undo2,
   FolderInput,
   FolderOutput,
   SlidersHorizontal,
@@ -60,7 +58,6 @@ import type {
   ProjectConfigLocation,
   WorkflowConfig,
 } from "@dispatch/shared";
-import { InlineError } from "../sidebar/Modal.js";
 import { Button } from "../ui/Button.js";
 import { Spinner } from "../ui/Spinner.js";
 import { openCodeViewer } from "../monaco/store.js";
@@ -84,6 +81,7 @@ import { sectionItems } from "./configItems.js";
 import { SECTIONS } from "./sections.js";
 import { ShellFilterPanel } from "../chat/ShellFilterPanel.js";
 import { SettingsShell } from "../settings/SettingsShell.js";
+import { settingsSaveBar } from "../settings/saveBar.js";
 
 /* ------------------------------------------------------------------ errors */
 
@@ -556,36 +554,13 @@ export function ProjectSettingsView() {
           )}
         </div>
       }
-      footer={
-        error || dirty ? (
-          <>
-            {error ? (
-              <div className="mr-auto min-w-0 flex-1">
-                <InlineError message={error} />
-              </div>
-            ) : (
-              <span className="mr-auto truncate text-2xs font-medium text-warn">
-                Unsaved changes
-              </span>
-            )}
-            {dirty && (
-              <>
-                <Button variant="ghost" leftIcon={<Undo2 />} disabled={saving} onClick={discard}>
-                  Discard
-                </Button>
-                <Button
-                  variant="primary"
-                  leftIcon={saving ? <Spinner size={12} /> : <Save />}
-                  disabled={saving}
-                  onClick={() => void saveWorkflow()}
-                >
-                  Save
-                </Button>
-              </>
-            )}
-          </>
-        ) : null
-      }
+      footer={settingsSaveBar({
+        error,
+        dirty,
+        busy: saving,
+        onDiscard: discard,
+        onSave: () => void saveWorkflow(),
+      })}
     >
       {loading && !result ? (
         <div className="flex items-center justify-center gap-2 py-16 text-sm text-muted">
