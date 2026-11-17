@@ -193,6 +193,11 @@ describe("MemoryCommitter debounce", () => {
   it("coalesces a burst of memory events into a single commit", async () => {
     const committer = makeCommitter();
     committer.start();
+    // start() kicks off a boot sweep that commits whatever is dirty. Left racing
+    // the writes below, a slow runner let its `git add` land between them: it
+    // committed `a` alone and the debounce then committed `b` (#505). Let it
+    // finish against a clean dir first, so the only commit is the burst's.
+    await committer.drain();
     await writeMemory("a");
     await writeMemory("b");
     for (const name of ["a", "b"]) {

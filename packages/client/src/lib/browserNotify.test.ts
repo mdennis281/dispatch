@@ -7,7 +7,16 @@
  * of swPush.test.ts for the half that runs in the page.
  *
  * The stores read `Notification.permission` at module-eval time, so every global
- * has to be in place before the import — hence the dynamic import in `load()`.
+ * has to be in place before the import — hence the dynamic import in `beforeAll`.
+ *
+ * The module is imported ONCE. It used to be re-imported per test behind
+ * `vi.resetModules()`, which re-evaluated browserNotify and the whole store graph
+ * behind it (webPush → api → …) every time: ~4–6s a test on the loaded
+ * self-hosted runner, so whichever test ran slowest blew the 5s timeout and
+ * failed Release (#505). The only per-test state worth resetting is the
+ * `useBrowserNotify` store, which `beforeEach` puts back by hand; everything else
+ * the module reads (document, navigator, the SW registration) is looked up at
+ * call time and re-stubbed per test.
  */
 import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
 import type { AttentionItem } from "@dispatch/shared";
@@ -65,10 +74,8 @@ function stubEnvironment(options: { inFront?: boolean } = {}) {
   return { tray: () => tray, registration };
 }
 
-async function load() {
-  vi.resetModules();
-  return import("./browserNotify.js");
-}
+type BrowserNotify = typeof import("./browserNotify.js");
+let mod: BrowserNotify;
 
 function attn(over: Partial<AttentionItem> = {}): AttentionItem {
   return {
@@ -83,21 +90,23 @@ function attn(over: Partial<AttentionItem> = {}): AttentionItem {
 
 describe("in-page attention notifications", () => {
   let env: ReturnType<typeof stubEnvironment>;
-  // The first `load()` transforms browserNotify and the whole store graph
-  // behind it. On the loaded self-hosted CI runner that alone blew the 5s
-  // per-test timeout, failing whichever test happened to run first (on main
-  // too). Pay it once here, under a budget sized for it; the transform cache
-  // survives `vi.resetModules()`, so each test's own import stays cheap.
+  // The cold import transforms and evaluates browserNotify and the store graph
+  // behind it — seconds on the loaded CI runner — so it gets a budget of its own
+  // rather than eating into the first test's 5s.
   beforeAll(async () => {
     stubEnvironment();
-    await load();
+    mod = await import("./browserNotify.js");
   }, 60_000);
   beforeEach(() => {
     env = stubEnvironment();
+    // What a fresh module-eval would have read from the granted, never-muted
+    // environment above. No test here takes the constructor path, so the
+    // module's `live` map stays empty and needs no reset.
+    mod.useBrowserNotify.setState({ enabled: true, permission: "granted", asked: false });
   });
 
   it("tags by chat, the same way the worker does, and updates silently", async () => {
-    const { notifyAttention } = await load();
+    const { notifyAttention } = mod;
     await notifyAttention(attn({ id: "a1" }), "Fix the parser", 1);
     await notifyAttention(attn({ id: "a2", kind: "question" }), "Fix the parser", 2);
 
@@ -111,20 +120,20 @@ describe("in-page attention notifications", () => {
   });
 
   it("omits the suffix when the chat has exactly one item", async () => {
-    const { notifyAttention } = await load();
+    const { notifyAttention } = mod;
     await notifyAttention(attn(), "Fix the parser", 1);
     expect(env.tray()[0]!.title).toBe("Permission needed — Fix the parser");
   });
 
   it("stays quiet while you are looking at the app", async () => {
     env = stubEnvironment({ inFront: true });
-    const { notifyAttention } = await load();
+    const { notifyAttention } = mod;
     await notifyAttention(attn(), "Fix the parser", 1);
     expect(env.tray()).toHaveLength(0);
   });
 
   it("withdraws the toast when the chat has nothing left", async () => {
-    const { notifyAttention, syncChatNotification } = await load();
+    const { notifyAttention, syncChatNotification } = mod;
     await notifyAttention(attn(), "Fix the parser", 1);
     expect(env.tray()).toHaveLength(1);
     // The permission got answered — in this window, or in another one.
@@ -133,7 +142,7 @@ describe("in-page attention notifications", () => {
   });
 
   it("corrects the count instead of withdrawing when items remain", async () => {
-    const { notifyAttention, syncChatNotification } = await load();
+    const { notifyAttention, syncChatNotification } = mod;
     await notifyAttention(attn({ id: "a1" }), "Fix the parser", 2);
     expect(env.tray()[0]!.title).toBe("Permission needed — Fix the parser (+1 more)");
 
@@ -147,13 +156,13 @@ describe("in-page attention notifications", () => {
     // Resolving something in a chat you had already cleared (or were never
     // notified about) must not put a notification on screen announcing that
     // there is nothing to see.
-    const { syncChatNotification } = await load();
+    const { syncChatNotification } = mod;
     await syncChatNotification("c1", [attn({ id: "a2" })], "Fix the parser");
     expect(env.tray()).toHaveLength(0);
   });
 
   it("withdrawing one chat leaves another chat's toast alone", async () => {
-    const { notifyAttention, syncChatNotification } = await load();
+    const { notifyAttention, syncChatNotification } = mod;
     await notifyAttention(attn({ chatId: "c1" }), "One", 1);
     await notifyAttention(attn({ chatId: "c2" }), "Two", 1);
     await syncChatNotification("c1", []);
@@ -161,7 +170,7 @@ describe("in-page attention notifications", () => {
   });
 
   it("sets and clears the app badge", async () => {
-    const { setAttentionBadge } = await load();
+    const { setAttentionBadge } = mod;
     await setAttentionBadge(3);
     expect(navigator.setAppBadge).toHaveBeenCalledWith(3);
     await setAttentionBadge(0);
