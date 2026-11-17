@@ -92,6 +92,7 @@ import type {
   ProjectConfigLocation,
   UsageSnapshot,
   UsageOverview,
+  ResetSpendResult,
   ChatRuntimeResponse,
   MetricDimension,
   MetricEvent,
@@ -1955,6 +1956,9 @@ export const api = {
     /** Every logged-in account's windows at once — the card's stacked list. */
     overview: (refresh = false) =>
       get<UsageOverview>(`/api/usage/subscriptions${refresh ? "?refresh=1" : ""}`),
+    /** Spend one early reset on an account (Codex). Not refundable. */
+    spendReset: (subscriptionId: string) =>
+      post<ResetSpendResult>(`/api/usage/reset?subscription=${encodeURIComponent(subscriptionId)}`),
   },
 
   /* the usage ledger behind the Metrics view.

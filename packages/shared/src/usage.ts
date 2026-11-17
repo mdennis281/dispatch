@@ -44,6 +44,11 @@ export const ResetGrantSchema = z.object({
   unavailableReason: z.string().optional(),
   /** Titles of the windows spending one refills. */
   refills: z.array(z.string()).optional(),
+  /**
+   * Dispatch can spend this grant itself (`POST /api/usage/reset`). Absent for
+   * a grant only its provider's own client can spend — Claude's `/limit-reset`.
+   */
+  spendable: z.boolean().optional(),
 });
 export type ResetGrant = z.infer<typeof ResetGrantSchema>;
 
@@ -99,6 +104,11 @@ export const UsageSnapshotSchema = z.object({
   resetGrants: z.array(ResetGrantSchema).optional(),
   /** How to spend one, in the provider's terms ("/limit-reset in Claude Code"). */
   resetHint: z.string().optional(),
+  /**
+   * The provider says this account is out of budget, whatever the percentages
+   * read. Codex sets it from a spend cap the windows don't show.
+   */
+  reached: z.boolean().optional(),
 });
 export type UsageSnapshot = z.infer<typeof UsageSnapshotSchema>;
 
@@ -133,11 +143,48 @@ export const SubscriptionUsageSchema = z.object({
   resetCredits: z.number().int().optional(),
   resetGrants: z.array(ResetGrantSchema).optional(),
   resetHint: z.string().optional(),
+  /** See {@link UsageSnapshotSchema}'s `reached`. */
+  reached: z.boolean().optional(),
   fetchedAt: z.number().int(),
   stale: z.boolean().optional(),
   error: z.string().optional(),
 });
 export type SubscriptionUsage = z.infer<typeof SubscriptionUsageSchema>;
+
+/**
+ * Has this account hit a limit, so that spending a reset would do something?
+ *
+ * Codex answers a reset spent below the cap with `nothingToReset`, and the
+ * credit is kept. So the button stays disabled until the provider flags the
+ * account or a window reads 100%. A stale or failed row is never "at cap": a
+ * button lit by old numbers is a click that does nothing.
+ */
+export function usageAtCap(row: {
+  windows: { percent: number }[];
+  reached?: boolean;
+  stale?: boolean;
+  error?: string;
+}): boolean {
+  if (row.stale || row.error) return false;
+  return !!row.reached || row.windows.some((w) => w.percent >= 100);
+}
+
+/**
+ * What spending a reset came to, in Codex's own terms:
+ *   reset           — a credit was spent and the capped windows refilled
+ *   nothingToReset  — no window was eligible; the credit was kept
+ *   noCredit        — the account had none left
+ *   alreadyRedeemed — this attempt's idempotency key already succeeded
+ */
+export const ResetSpendOutcomeSchema = z.enum(["reset", "nothingToReset", "noCredit", "alreadyRedeemed"]);
+export type ResetSpendOutcome = z.infer<typeof ResetSpendOutcomeSchema>;
+
+/** `POST /api/usage/reset` — the outcome, and the account's row read after it. */
+export const ResetSpendResultSchema = z.object({
+  outcome: ResetSpendOutcomeSchema,
+  usage: SubscriptionUsageSchema,
+});
+export type ResetSpendResult = z.infer<typeof ResetSpendResultSchema>;
 
 /** Every logged-in account's usage at once — `GET /api/usage/subscriptions`. */
 export const UsageOverviewSchema = z.object({

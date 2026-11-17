@@ -3,7 +3,9 @@ import { RotateCcw, RotateCw, Gauge as GaugeIcon } from "lucide-react";
 import {
   chatAccountOf,
   providerFor,
+  usageAtCap,
   type ResetGrant,
+  type ResetSpendOutcome,
   type SubscriptionUsage,
   type TitledUsageWindow,
   type UsageWindow,
@@ -125,18 +127,28 @@ function useBy(ts: number, now: number): string {
  *
  * Claude reports named, dated grants; Codex a bare count, carried as a single
  * grant. A row whose provider reports neither has no chip at all, rather than
- * a misleading 0. The count is read-only here. Spending one happens in the
- * provider, and `hint` says where, because a chip that looks like a button
+ * a misleading 0.
+ *
+ * A `spendable` grant (Codex) makes the chip a button, which stays disabled
+ * until the account is actually capped: Codex answers a reset spent below the
+ * cap with `nothingToReset`, so an always-live button was a click that did
+ * nothing. Spending is not refundable, so the first click only arms it and the
+ * second one spends. Anything else stays read-only, and `hint` says where to
+ * spend it (Claude's `/limit-reset`), because a chip that looks like a button
  * invites a click.
  */
 function ResetGrants({
   grants,
   hint,
   now,
+  subscriptionId,
+  atCap,
 }: {
   grants: ResetGrant[];
   hint?: string;
   now: number;
+  subscriptionId: string;
+  atCap: boolean;
 }) {
   // The poller drops expired grants, but its answer is cached: through a 30-min
   // 429 cooldown, and between five-minute samples. A grant that ran out at noon
@@ -144,7 +156,53 @@ function ResetGrants({
   // ticking `now` is the only place that is always current.
   const live = grants.filter((g) => g.expiresAt === undefined || g.expiresAt > now);
   const count = live.reduce((n, g) => n + Math.max(0, g.left), 0);
+  const spendable = count > 0 && live.some((g) => g.spendable && g.left > 0);
+  const spending = useUsage((s) => !!s.spending[subscriptionId]);
+  const spendReset = useUsage((s) => s.spendReset);
+  const [armed, setArmed] = useState(false);
+  const [result, setResult] = useState<{ text: string; ok: boolean } | null>(null);
+  const enabled = spendable && atCap && !spending;
+  // An armed button left alone disarms, so a later stray click can't spend.
+  useEffect(() => {
+    if (!armed) return;
+    const t = setTimeout(() => setArmed(false), 4_000);
+    return () => clearTimeout(t);
+  }, [armed]);
+  useEffect(() => {
+    if (!result) return;
+    const t = setTimeout(() => setResult(null), 6_000);
+    return () => clearTimeout(t);
+  }, [result]);
+  // The cap clearing (a fresh read, the window rolling over) disarms too.
+  useEffect(() => {
+    if (!atCap) setArmed(false);
+  }, [atCap]);
+
+  const onClick = () => {
+    if (!enabled) return;
+    if (!armed) {
+      setArmed(true);
+      return;
+    }
+    setArmed(false);
+    spendReset(subscriptionId).then(
+      (outcome) => setResult(SPEND_RESULT[outcome]),
+      (err: unknown) =>
+        setResult({ text: err instanceof Error ? err.message : "Reset failed", ok: false }),
+    );
+  };
+
+  const chip = (
+    <>
+      {spending ? <Spinner size={10} /> : <RotateCcw className="size-2.5" />}
+      {armed ? `Use 1 of ${count}?` : count}
+    </>
+  );
   return (
+    <span className="inline-flex items-center gap-1">
+      {result && (
+        <span className={cn("text-2xs", result.ok ? "text-accent-hi" : "text-warn")}>{result.text}</span>
+      )}
     <Tooltip
       side="left"
       className="w-72 !whitespace-normal"
@@ -173,23 +231,62 @@ function ResetGrants({
           ))}
           <span className="mt-1 block text-faint">
             A reset refills your usage limits before their scheduled reset.
-            {hint ? ` ${hint}` : ""}
+            {spendable ? "" : hint ? ` ${hint}` : ""}
           </span>
+          {spendable && (
+            <span className={cn("mt-1 block", atCap ? "text-secondary" : "text-faint")}>
+              {armed
+                ? "Click again to spend one. It can't be undone."
+                : atCap
+                  ? "You're at a limit. Click to spend one."
+                  : "Available once you hit a limit. Spending one before then does nothing."}
+            </span>
+          )}
         </span>
       }
     >
-      <span
-        className={cn(
-          "inline-flex cursor-default items-center gap-0.5 rounded-[4px] bg-active px-1 text-2xs tabular-nums",
-          count === 0 ? "text-faint" : "text-secondary",
-        )}
-      >
-        <RotateCcw className="size-2.5" />
-        {count}
-      </span>
+      {spendable ? (
+        // aria-disabled, not `disabled`: a disabled button swallows the hover
+        // that opens this tooltip, which is the one place saying WHY it's off.
+        <button
+          type="button"
+          aria-disabled={!enabled}
+          aria-label={armed ? "Confirm: spend one early reset" : "Spend one early reset"}
+          onClick={onClick}
+          className={cn(
+            "inline-flex items-center gap-0.5 rounded-[4px] px-1 text-2xs tabular-nums transition-colors",
+            !enabled
+              ? "cursor-not-allowed bg-active text-faint"
+              : armed
+                ? "bg-warn/20 text-warn"
+                : "bg-accent/15 text-accent-hi hover:bg-accent/25",
+          )}
+        >
+          {chip}
+        </button>
+      ) : (
+        <span
+          className={cn(
+            "inline-flex cursor-default items-center gap-0.5 rounded-[4px] bg-active px-1 text-2xs tabular-nums",
+            count === 0 ? "text-faint" : "text-secondary",
+          )}
+        >
+          <RotateCcw className="size-2.5" />
+          {count}
+        </span>
+      )}
     </Tooltip>
+    </span>
   );
 }
+
+/** What each provider outcome means to the person who clicked. */
+const SPEND_RESULT: Record<ResetSpendOutcome, { text: string; ok: boolean }> = {
+  reset: { text: "Limits reset", ok: true },
+  alreadyRedeemed: { text: "Already reset", ok: true },
+  nothingToReset: { text: "Nothing to reset — credit kept", ok: false },
+  noCredit: { text: "No resets left", ok: false },
+};
 
 /**
  * The server's word for a provider that reports no usage at all (goose, a
@@ -238,7 +335,13 @@ function AccountBlock({
         <span className="ml-auto flex shrink-0 items-center gap-1.5 self-center">
           {problem && <span className="text-2xs text-warn">{problem}</span>}
           {row.resetGrants && (
-            <ResetGrants grants={row.resetGrants} hint={row.resetHint} now={now} />
+            <ResetGrants
+              grants={row.resetGrants}
+              hint={row.resetHint}
+              now={now}
+              subscriptionId={row.subscriptionId}
+              atCap={usageAtCap(row)}
+            />
           )}
         </span>
       </div>

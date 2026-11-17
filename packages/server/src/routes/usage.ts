@@ -3,6 +3,7 @@
  *   GET  /api/usage          → latest UsageSnapshot (polls once if never fetched)
  *   POST /api/usage/refresh  → force a fresh fetch now (the "refresh" button)
  *   GET  /api/usage/subscriptions[?refresh=1] → every logged-in account's windows (the card)
+ *   POST /api/usage/reset?subscription=<id>    → spend one of that account's early resets
  * Both take `?subscription=<id>` (whose windows) and/or `?harness=<provider>`
  * (that provider's default account when no subscription is named).
  * The server polls this on a timer too and pushes `usage-update` over the bus;
@@ -15,11 +16,13 @@ import {
   accountLabel,
   subscriptionFor,
   usageWindowsOf,
+  type ResetSpendResult,
+  type ResolvedSubscription,
   type SubscriptionUsage,
   type UsageOverview,
   type UsageSnapshot,
 } from "@dispatch/shared";
-import { subscriptionStatuses } from "../services/subscriptions.js";
+import { accountOf, subscriptionStatuses } from "../services/subscriptions.js";
 import { readAccountUsage } from "../services/usage-read.js";
 
 // Re-exported rather than defined here: the failover picker reads the same
@@ -56,6 +59,38 @@ async function snapshotFor(
   return usage.snapshot;
 }
 
+/** One account's row in the card. A failure stays on the row, never throws. */
+async function usageRow(
+  app: FastifyInstance,
+  sub: Pick<ResolvedSubscription, "id" | "provider" | "name" | "implicit">,
+  refresh: boolean,
+): Promise<SubscriptionUsage> {
+  const base = { subscriptionId: sub.id, name: accountLabel(sub), provider: sub.provider };
+  try {
+    const snap = await snapshotFor(app, { subscription: sub.id }, refresh);
+    return {
+      ...base,
+      windows: usageWindowsOf(snap),
+      fetchedAt: snap.fetchedAt,
+      ...(snap.planType ? { planType: snap.planType } : {}),
+      ...(snap.resetCredits !== undefined ? { resetCredits: snap.resetCredits } : {}),
+      ...(snap.resetGrants ? { resetGrants: snap.resetGrants } : {}),
+      ...(snap.resetHint ? { resetHint: snap.resetHint } : {}),
+      ...(snap.reached ? { reached: true } : {}),
+      ...(snap.stale ? { stale: true } : {}),
+      ...(snap.error ? { error: snap.error } : {}),
+    };
+  } catch (err) {
+    return {
+      ...base,
+      windows: [],
+      fetchedAt: Date.now(),
+      stale: true,
+      error: err instanceof Error ? err.message : "unavailable",
+    };
+  }
+}
+
 /**
  * Every logged-in account of an installed provider, read at once.
  *
@@ -78,33 +113,7 @@ async function overview(app: FastifyInstance, refresh: boolean): Promise<UsageOv
   const accounts = subscriptionStatuses(settings).filter(
     (s) => s.loggedIn && installed.has(s.provider),
   );
-  const subscriptions = await Promise.all(
-    accounts.map(async (sub): Promise<SubscriptionUsage> => {
-      const base = { subscriptionId: sub.id, name: accountLabel(sub), provider: sub.provider };
-      try {
-        const snap = await snapshotFor(app, { subscription: sub.id }, refresh);
-        return {
-          ...base,
-          windows: usageWindowsOf(snap),
-          fetchedAt: snap.fetchedAt,
-          ...(snap.planType ? { planType: snap.planType } : {}),
-          ...(snap.resetCredits !== undefined ? { resetCredits: snap.resetCredits } : {}),
-          ...(snap.resetGrants ? { resetGrants: snap.resetGrants } : {}),
-          ...(snap.resetHint ? { resetHint: snap.resetHint } : {}),
-          ...(snap.stale ? { stale: true } : {}),
-          ...(snap.error ? { error: snap.error } : {}),
-        };
-      } catch (err) {
-        return {
-          ...base,
-          windows: [],
-          fetchedAt: Date.now(),
-          stale: true,
-          error: err instanceof Error ? err.message : "unavailable",
-        };
-      }
-    }),
-  );
+  const subscriptions = await Promise.all(accounts.map((sub) => usageRow(app, sub, refresh)));
   return { fetchedAt: Date.now(), subscriptions };
 }
 
@@ -120,4 +129,28 @@ export function registerUsageRoutes(app: FastifyInstance): void {
   app.post<{ Querystring: UsageQuery }>("/api/usage/refresh", async (req) =>
     snapshotFor(app, req.query, true),
   );
+
+  /**
+   * Spend one early reset on a named account. The account must be named: a
+   * credit is not refundable, so "the provider's default" is too loose a target.
+   * The provider decides eligibility (Codex keeps the credit and answers
+   * `nothingToReset` below the cap) — the card's disabled button is a courtesy,
+   * not the guard. The row is re-read fresh so the card shows the refill.
+   */
+  app.post<{ Querystring: { subscription?: string } }>("/api/usage/reset", async (req, reply) => {
+    const settings = await app.cm.store.getSettings().catch(() => null);
+    const sub = findSubscription(settings, req.query.subscription);
+    if (!req.query.subscription || !sub) return reply.code(404).send({ error: "unknown account" });
+    const harness = app.services.harnesses.find(sub.provider);
+    if (!harness?.spendReset) {
+      return reply.code(409).send({ error: "this provider's resets can only be spent from its own client" });
+    }
+    try {
+      const outcome = await harness.spendReset(accountOf(sub));
+      const result: ResetSpendResult = { outcome, usage: await usageRow(app, sub, true) };
+      return result;
+    } catch (err) {
+      return reply.code(502).send({ error: err instanceof Error ? err.message : "reset failed" });
+    }
+  });
 }

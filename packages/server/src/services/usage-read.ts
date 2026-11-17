@@ -82,6 +82,9 @@ export function snapshotOfLimits(
     ...(typeof limits?.resetCredits === "number" ? { resetCredits: limits.resetCredits } : {}),
     ...(limits?.resetGrants ? { resetGrants: limits.resetGrants } : {}),
     ...(limits?.resetHint ? { resetHint: limits.resetHint } : {}),
+    // The card's reset button waits on this as well as a 100% window: Codex
+    // flags a spend cap the percentages never show.
+    ...(limits?.reached ? { reached: true } : {}),
     ...(windows ? { windows } : {}),
     ...(!limits
       ? { stale: true, error: "unavailable" }

@@ -11,10 +11,13 @@
  * and rate limits arrive as live percentages with exact reset timestamps rather
  * than an English sentence at the moment of failure.
  */
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   limitWindowTitle,
+  ResetSpendOutcomeSchema,
+  type ResetSpendOutcome,
   type Effort,
   type ModelOption,
   type RuntimeLoginStatus,
@@ -262,6 +265,31 @@ export class CodexHarness implements Harness {
     }
   }
 
+  /**
+   * `account/rateLimitResetCredit/consume` (codex-cli 0.167+). No `creditId`:
+   * the card's grant is a synthetic aggregate of the count, so the backend
+   * picks the next credit. The key is fresh per click; a retry of the SAME
+   * attempt would reuse it, but a click is never retried behind the user's back.
+   */
+  async spendReset(account?: HarnessAccount): Promise<ResetSpendOutcome> {
+    const held = this.connect(account);
+    try {
+      const res = await this.withTimeout(
+        held.conn.call<{ outcome?: string }>("account/rateLimitResetCredit/consume", {
+          idempotencyKey: randomUUID(),
+        }),
+      );
+      const parsed = ResetSpendOutcomeSchema.safeParse(res?.outcome);
+      if (!parsed.success) throw new Error(`codex answered an unknown reset outcome: ${String(res?.outcome)}`);
+      // The cached read still says "capped, N credits" — the next card read
+      // must not paint that back over the reset that just happened.
+      this.limitsCache.delete(accountKey(account));
+      return parsed.data;
+    } finally {
+      held.release();
+    }
+  }
+
   async generateText(request: HarnessTextRequest): Promise<string> {
     // Provider-owned model choice is the point of this seam: TitleService does
     // not need to know that Codex has concrete ids while Claude has aliases.
@@ -496,8 +524,10 @@ export function toHarnessLimits(
           resetCredits: credits,
           // Codex gives a bare count: no name, no expiry. One grant carries it
           // so the card draws Codex and Claude resets the same way.
-          resetGrants: [{ id: "codex-reset-credits", label: "Reset credits", left: credits }],
-          resetHint: "Use them from Codex.",
+          resetGrants: [
+            { id: "codex-reset-credits", label: "Reset credits", left: credits, spendable: true },
+          ],
+          resetHint: "Spend one here once a limit is hit.",
         }
       : {}),
   };
