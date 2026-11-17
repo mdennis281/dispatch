@@ -219,6 +219,10 @@ describe("provider readings", () => {
       },
     );
     expect(limits.resetCredits).toBe(1);
+    // Dispatch spends Codex credits itself, so the card's chip is a button.
+    expect(limits.resetGrants).toEqual([
+      { id: "codex-reset-credits", label: "Reset credits", left: 1, spendable: true },
+    ]);
     expect(readingsOfLimits(limits).map((r) => [r.windowId, r.title, r.percent, r.resetsAt])).toEqual([
       ["codex:10080m", "Weekly", 53, 1793129113000],
       ["premium:300m", "5-hour session · GPT-6 Pro", 4, 1793000000000],

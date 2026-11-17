@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { usageWindowsOf } from "./usage.js";
+import { usageAtCap, usageWindowsOf } from "./usage.js";
 
 describe("usageWindowsOf", () => {
   it("lists Claude's two slots under their own labels, in order", () => {
@@ -37,5 +37,28 @@ describe("usageWindowsOf", () => {
     expect(
       usageWindowsOf({ fiveHour: null, sevenDay: null, fetchedAt: 0, windows }),
     ).toBe(windows);
+  });
+});
+
+describe("usageAtCap", () => {
+  const w = (percent: number) => ({ percent });
+
+  it("is false below 100%, so a reset can't be spent on nothing", () => {
+    // Codex answers a reset spent below the cap with `nothingToReset`.
+    expect(usageAtCap({ windows: [w(99), w(40)] })).toBe(false);
+  });
+
+  it("is true once any window reads 100%", () => {
+    expect(usageAtCap({ windows: [w(12), w(100)] })).toBe(true);
+  });
+
+  it("is true when the provider flags the account, whatever the percentages", () => {
+    // Codex sets `reached` from a spend cap the windows don't show.
+    expect(usageAtCap({ windows: [w(30)], reached: true })).toBe(true);
+  });
+
+  it("never lights the button from stale or failed numbers", () => {
+    expect(usageAtCap({ windows: [w(100)], stale: true })).toBe(false);
+    expect(usageAtCap({ windows: [w(100)], reached: true, error: "rate_limited" })).toBe(false);
   });
 });

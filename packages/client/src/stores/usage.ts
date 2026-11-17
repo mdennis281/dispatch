@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import {
   usageWindowsOf,
+  type ResetSpendOutcome,
   type UsageOverview,
   type UsageSnapshot,
 } from "@dispatch/shared";
@@ -51,6 +52,10 @@ interface UsageStore {
   loadTarget: (target: UsageTarget) => Promise<void>;
   /** Force a server-side refresh of one account (the card's refresh button). */
   refresh: (target: UsageTarget) => Promise<void>;
+  /** Accounts with a reset being spent — disables the button against a double click. */
+  spending: Record<string, boolean>;
+  /** Spend one early reset; resolves to the provider's outcome, rejects on failure. */
+  spendReset: (subscriptionId: string) => Promise<ResetSpendOutcome>;
 }
 
 /**
@@ -106,6 +111,7 @@ export const useUsage = create<UsageStore>((set, get) => {
   return {
     bySubscription: {},
     refreshing: {},
+    spending: {},
     // No provider yet: the gauge has nothing to show until `load` finds one.
     target: null,
     overview: null,
@@ -155,6 +161,11 @@ export const useUsage = create<UsageStore>((set, get) => {
                     fetchedAt: usage.fetchedAt,
                     stale: usage.stale,
                     error: usage.error,
+                    // Replaced, never inherited: the reset button reads it, and
+                    // a cap that cleared (or arrived) between overview reads
+                    // would otherwise leave the button lit (or dark) until the
+                    // next full reload.
+                    reached: usage.reached,
                   }
                 : row,
             ),
@@ -196,6 +207,34 @@ export const useUsage = create<UsageStore>((set, get) => {
         put(target, await api.usage.get(target));
       } catch {
         fail(target);
+      }
+    },
+
+    spendReset: async (subscriptionId) => {
+      const flag = (on: boolean) =>
+        set((state) => ({ spending: { ...state.spending, [subscriptionId]: on } }));
+      flag(true);
+      try {
+        const { outcome, usage } = await api.usage.spendReset(subscriptionId);
+        // The row comes back read fresh, so the card shows the refill (and the
+        // spent credit) without waiting on the next overview read.
+        const overview = get().overview;
+        if (overview) {
+          set({
+            overview: {
+              ...overview,
+              subscriptions: overview.subscriptions.map((row) =>
+                row.subscriptionId === subscriptionId ? usage : row,
+              ),
+            },
+          });
+        }
+        // The gauge reads its own snapshot; re-read it so the header bar drops too.
+        const provider = usage.provider;
+        void get().loadTarget({ harness: provider, subscriptionId });
+        return outcome;
+      } finally {
+        flag(false);
       }
     },
 

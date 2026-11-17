@@ -50,6 +50,7 @@ import type {
   RuntimeLoginStatus,
   ContextUsage,
   ResetGrant,
+  ResetSpendOutcome,
 } from "./index.js";
 
 /**
@@ -982,6 +983,14 @@ export interface Harness {
    * rate-limited endpoint's cooldown survives a scheduler that doesn't know it.
    */
   readLimits(account?: HarnessAccount, opts?: HarnessLimitReadOpts): Promise<HarnessLimits | null>;
+  /**
+   * Spend one of the account's early resets now. Optional: a runtime whose
+   * resets only its own client can spend (Claude's `/limit-reset`) leaves it
+   * out, and its grants are not marked `spendable`. `grantId` names a specific
+   * grant; absent lets the provider pick the next one. Throws when the runtime
+   * can't be reached — an outcome is only returned when the provider answered.
+   */
+  spendReset?(account?: HarnessAccount, opts?: { grantId?: string }): Promise<ResetSpendOutcome>;
   /**
    * Limits the runtime volunteers without being asked (Codex pushes
    * `account/rateLimits/updated` after every turn). Free, fresher readings for
