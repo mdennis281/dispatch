@@ -18,6 +18,7 @@ import { cn } from "../../lib/cn.js";
 import { HoverCard } from "../ui/HoverCard.js";
 import { Spinner } from "../ui/Spinner.js";
 import { Tooltip } from "../ui/Tooltip.js";
+import { Button } from "../ui/Button.js";
 import { SplitBar } from "../ui/SplitBar.js";
 import { windowTag } from "../../lib/usageWindow.js";
 import { BAR_W, GAUGE_LINE_TRIGGER, GAUGE_TRIGGER, Gauge, type GaugeLayout } from "./Gauge.js";
@@ -248,22 +249,21 @@ function ResetGrants({
       {spendable ? (
         // aria-disabled, not `disabled`: a disabled button swallows the hover
         // that opens this tooltip, which is the one place saying WHY it's off.
-        <button
-          type="button"
+        <Button
+          variant={armed ? "danger" : "subtle"}
           aria-disabled={!enabled}
           aria-label={armed ? "Confirm: spend one early reset" : "Spend one early reset"}
           onClick={onClick}
+          // `!`: the kit's sm size is a 24px button, and `cn` is plain clsx,
+          // so only `!important` beats it down to the chip it replaces.
           className={cn(
-            "inline-flex items-center gap-0.5 rounded-[4px] px-1 text-2xs tabular-nums transition-colors",
-            !enabled
-              ? "cursor-not-allowed bg-active text-faint"
-              : armed
-                ? "bg-warn/20 text-warn"
-                : "bg-accent/15 text-accent-hi hover:bg-accent/25",
+            "!h-4 !gap-0.5 !rounded-[4px] !px-1 !text-2xs tabular-nums",
+            !enabled && "cursor-not-allowed !bg-active !text-faint",
+            enabled && !armed && "!text-accent-hi",
           )}
         >
           {chip}
-        </button>
+        </Button>
       ) : (
         <span
           className={cn(
