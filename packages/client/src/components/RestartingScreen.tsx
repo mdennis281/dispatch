@@ -79,7 +79,7 @@ export function RestartingScreen() {
   return (
     <div
       style={{ zIndex: LAYER.shutdown }}
-      className="fixed inset-0 flex flex-col items-center justify-center bg-app/95 backdrop-blur-sm"
+      className="cm-takeover fixed inset-x-0 bottom-0 top-(--dp-titlebar-h) flex flex-col items-center justify-center bg-app/95 backdrop-blur-sm"
     >
       <span className="mb-3.5 flex size-12 items-center justify-center rounded-xl border border-line bg-panel-2 text-muted">
         <Spinner size={20} />

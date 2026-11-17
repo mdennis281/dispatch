@@ -85,7 +85,10 @@ export function isWindowControlsOverlay(): boolean {
 let stripEl: Element | null = null;
 export function usableTop(): number {
   if (!wcoMatches() || typeof document === "undefined") return 0;
-  if (!stripEl?.isConnected) stripEl = document.querySelector(".cm-titlebar");
+  // `header.` because `WindowStrip` is a `.cm-titlebar` too, and it never
+  // unmounts: cached first, it would pin this to the strip forever — which
+  // measures 0 once the shell's taller bar is up and the strip is hidden.
+  if (!stripEl?.isConnected) stripEl = document.querySelector("header.cm-titlebar");
   return stripEl ? Math.round(stripEl.getBoundingClientRect().bottom) : 0;
 }
 

@@ -802,8 +802,12 @@ export function SetupWizard() {
     // "the server isn't running", and on a fresh install — no project, no
     // runtime, four steps that all call the API — it is the screen most likely
     // to be up when the server goes away.
+    //
+    // `pt-(--dp-titlebar-h)` starts the wizard under `WindowStrip` in the
+    // installed window, where its own header used to sit under the window
+    // buttons. The variable is 0 everywhere else.
     <div
-      className="flex h-[100dvh] flex-col bg-app text-primary antialiased"
+      className="flex h-[100dvh] flex-col bg-app pt-(--dp-titlebar-h) text-primary antialiased"
       // `--dp-kb` for the same reason the shell reads it (see App.tsx): `dvh`
       // tracks the URL bar and deliberately NOT the soft keyboard, which shrinks
       // the VISUAL viewport and leaves the layout viewport alone. Without this,

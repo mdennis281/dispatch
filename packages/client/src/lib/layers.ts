@@ -63,6 +63,13 @@ export const LAYER = {
    */
   connecting: 580,
   shutdown: 600,
+  /**
+   * The installed window's stand-in title bar (`WindowStrip`). Above every
+   * takeover screen AND the boot splash (700, index.html), because the whole
+   * point of it is that no screen — however early or however broken — leaves
+   * the window buttons floating over a page with no header under them.
+   */
+  windowStrip: 710,
 } as const;
 
 export const DIALOG_STEP = 10;
