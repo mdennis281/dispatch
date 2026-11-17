@@ -14,6 +14,7 @@
  * filter the user can see is not selected.
  */
 import { create } from "zustand";
+import { clearFilterDim, toggleFilterValue } from "./metrics-filter.js";
 import type {
   BucketCoarsening,
   MetricBucket,
@@ -268,26 +269,8 @@ export const useMetrics = create<MetricsStore>((set, get) => {
     // control that only changes geometry.
     setChart: (chart) => set({ chart }),
 
-    toggleFilter: (dim, value) => {
-      const current = get().filter[dim] ?? [];
-      const next = current.includes(value)
-        ? current.filter((v) => v !== value)
-        : [...current, value];
-      const filter = { ...get().filter };
-      // Delete rather than store an empty array: an empty list would read as
-      // "match nothing" on the server, when what the user did is clear the
-      // filter — which means "match everything".
-      if (next.length) filter[dim] = next;
-      else delete filter[dim];
-      applyAndLoad({ filter });
-    },
-
-    clearFilter: (dim) => {
-      if (!dim) return applyAndLoad({ filter: {} });
-      const filter = { ...get().filter };
-      delete filter[dim];
-      applyAndLoad({ filter });
-    },
+    toggleFilter: (dim, value) => applyAndLoad({ filter: toggleFilterValue(get().filter, dim, value) }),
+    clearFilter: (dim) => applyAndLoad({ filter: clearFilterDim(get().filter, dim) }),
 
     load,
     loadIfStale: () =>

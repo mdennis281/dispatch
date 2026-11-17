@@ -9,6 +9,7 @@
  * cannot disagree with itself the way four racing ones can.
  */
 import { create } from "zustand";
+import { clearFilterDim, toggleFilterValue } from "./metrics-filter.js";
 import type {
   BucketCoarsening,
   MetricBucket,
@@ -132,22 +133,8 @@ export const useTokenMetrics = create<TokenMetricsStore>((set, get) => {
     // Geometry only — the same series render as lines or bars. No refetch.
     setChart: (chart) => set({ chart }),
 
-    toggleFilter: (dim, value) => {
-      const current = get().filter[dim] ?? [];
-      const next = current.includes(value)
-        ? current.filter((v) => v !== value)
-        : [...current, value];
-      const filter = { ...get().filter };
-      if (next.length) filter[dim] = next;
-      else delete filter[dim];
-      applyAndLoad({ filter });
-    },
-    clearFilter: (dim) => {
-      if (!dim) return applyAndLoad({ filter: {} });
-      const filter = { ...get().filter };
-      delete filter[dim];
-      applyAndLoad({ filter });
-    },
+    toggleFilter: (dim, value) => applyAndLoad({ filter: toggleFilterValue(get().filter, dim, value) }),
+    clearFilter: (dim) => applyAndLoad({ filter: clearFilterDim(get().filter, dim) }),
 
     load,
     loadIfStale: () =>

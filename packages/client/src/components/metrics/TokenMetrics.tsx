@@ -27,7 +27,6 @@ import { Button } from "../ui/Button.js";
 import { Select } from "../ui/Select.js";
 import { Spinner } from "../ui/Spinner.js";
 import {
-  CHART_KIND_LABELS,
   isBarChart,
   isTimeChart,
   type ChartKind,
@@ -37,6 +36,7 @@ import { useProjects } from "../../stores/projects.js";
 import { ChartLegend, MetricsChart, type ChartShareRow } from "./MetricsChart.js";
 import { FacetRow } from "./MetricsFilters.js";
 import { Card, CoarseNote, Hero, StatTile, ago, compact, count } from "./chrome.js";
+import { ChartControls } from "./ChartControls.js";
 import type { DimLabeller } from "./labels.js";
 import { colorFor, useChartPalette } from "./palette.js";
 import { cn } from "../../lib/cn.js";
@@ -313,63 +313,33 @@ export function TokenMetrics() {
 
           <Card
             controls={
-              <>
-                <Select
-                  options={CHART_KINDS.map((k) => ({
-                    value: k,
-                    label: CHART_KIND_LABELS[k],
-                  }))}
-                  value={chart}
-                  onChange={(v) => setChart(v as ChartKind)}
-                  label="Chart"
-                  width={180}
-                />
-                <Select
-                  options={MEASURES.map((m) => ({
-                    value: m,
-                    label: TOKEN_MEASURE_LABELS[m],
-                  }))}
-                  value={measure}
-                  onChange={(v) => setMeasure(v as TokenMeasure)}
-                  label="Measure"
-                  width={180}
-                />
-                <Select
-                  options={DIMS.map((d) => ({
-                    value: d,
-                    label: TOKEN_DIMENSION_LABELS[d],
-                  }))}
-                  value={groupBy}
-                  onChange={(v) => setGroupBy(v as TokenDimension)}
-                  label="Split by"
-                  width={170}
-                />
-                {timeForm && (
+              <ChartControls
+                kinds={CHART_KINDS}
+                chart={chart}
+                setChart={setChart}
+                extra={
                   <Select
-                    options={[
-                      { value: "auto", label: "Auto" },
-                      { value: "hour", label: "Hourly" },
-                      { value: "day", label: "Daily" },
-                      { value: "week", label: "Weekly" },
-                      { value: "month", label: "Monthly" },
-                    ]}
-                    value={bucket}
-                    onChange={(v) => setBucket(v as typeof bucket)}
-                    label="Bucket"
-                    width={150}
+                    options={MEASURES.map((m) => ({
+                      value: m,
+                      label: TOKEN_MEASURE_LABELS[m],
+                    }))}
+                    value={measure}
+                    onChange={(v) => setMeasure(v as TokenMeasure)}
+                    label="Measure"
+                    width={180}
                   />
-                )}
-                <Select
-                  options={[4, 6, 8].map((n) => ({
-                    value: String(n),
-                    label: `Top ${n}`,
-                  }))}
-                  value={String(limit)}
-                  onChange={(v) => setLimit(Number(v))}
-                  label="Series"
-                  width={140}
-                />
-              </>
+                }
+                dims={DIMS}
+                dimLabels={TOKEN_DIMENSION_LABELS}
+                groupBy={groupBy}
+                setGroupBy={setGroupBy}
+                splitWidth={170}
+                timeForm={timeForm}
+                bucket={bucket}
+                setBucket={setBucket}
+                limit={limit}
+                setLimit={setLimit}
+              />
             }
             note={report?.truncated ? `${report.truncated} more folded into Other` : null}
           >
