@@ -161,6 +161,11 @@ export const useUsage = create<UsageStore>((set, get) => {
                     fetchedAt: usage.fetchedAt,
                     stale: usage.stale,
                     error: usage.error,
+                    // Replaced, never inherited: the reset button reads it, and
+                    // a cap that cleared (or arrived) between overview reads
+                    // would otherwise leave the button lit (or dark) until the
+                    // next full reload.
+                    reached: usage.reached,
                   }
                 : row,
             ),
