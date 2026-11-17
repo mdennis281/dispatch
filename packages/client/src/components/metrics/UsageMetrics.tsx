@@ -31,10 +31,8 @@ import {
   METRIC_OTHER_KEY,
 } from "@dispatch/shared";
 import { Button } from "../ui/Button.js";
-import { Select } from "../ui/Select.js";
 import { Spinner } from "../ui/Spinner.js";
 import {
-  CHART_KIND_LABELS,
   isBarChart,
   isTimeChart,
   useMetrics,
@@ -43,6 +41,7 @@ import {
 import { ChartLegend, MetricsChart, type ChartShareRow } from "./MetricsChart.js";
 import { FacetRow } from "./MetricsFilters.js";
 import { Card, CoarseNote, Hero, StatTile, ago, compact, count } from "./chrome.js";
+import { ChartControls } from "./ChartControls.js";
 import { useMetricLabel, useMetricLabels } from "./labels.js";
 import { colorFor, useChartPalette } from "./palette.js";
 import { cn } from "../../lib/cn.js";
@@ -343,49 +342,20 @@ export function UsageMetrics() {
           {/* The configurable chart. */}
           <Card
             controls={
-              <>
-                <Select
-                  options={CHART_KINDS.map((k) => ({ value: k, label: CHART_KIND_LABELS[k] }))}
-                  value={chart}
-                  onChange={(v) => setChart(v as ChartKind)}
-                  label="Chart"
-                  width={180}
-                />
-                <Select
-                  options={GROUPABLE.map((d) => ({
-                    value: d,
-                    label: METRIC_DIMENSION_LABELS[d],
-                  }))}
-                  value={groupBy}
-                  onChange={(v) => setGroupBy(v as MetricDimension)}
-                  label="Split by"
-                  width={180}
-                />
-                {/* Bucket only exists for the time forms; a donut has no time
-                    axis to bucket, so the control would be inert. */}
-                {timeForm && (
-                  <Select
-                    options={[
-                      { value: "auto", label: "Auto" },
-                      { value: "hour", label: "Hourly" },
-                      { value: "day", label: "Daily" },
-                      { value: "week", label: "Weekly" },
-                      { value: "month", label: "Monthly" },
-                    ]}
-                    value={bucket}
-                    onChange={(v) => setBucket(v as typeof bucket)}
-                    label="Bucket"
-                    width={150}
-                  />
-                )}
-                <Select
-                  options={[4, 6, 8].map((n) => ({ value: String(n), label: `Top ${n}` }))}
-                  value={String(limit)}
-                  onChange={(v) => setLimit(Number(v))}
-                  label="Series"
-                  width={140}
-                />
-              </>
+              <ChartControls
+                kinds={CHART_KINDS}
+                chart={chart}
+                setChart={setChart}
+                dims={GROUPABLE}
+                dimLabels={METRIC_DIMENSION_LABELS}
+                groupBy={groupBy}
+                setGroupBy={setGroupBy}
+                timeForm={timeForm}
+                bucket={bucket}
+                setBucket={setBucket}
+                limit={limit}
+                setLimit={setLimit}
+              />
             }
             note={
               // Never let the page bound what it shows without saying so — an
