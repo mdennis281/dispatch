@@ -9,10 +9,14 @@ describe("pathKeyOn", () => {
     expect(same("win32", "C:\\a\\b", "C:\\a\\bc")).toBe(false);
   });
 
-  it("on POSIX ignores a trailing slash but NOT case — those are two directories", () => {
+  it("on Linux ignores a trailing slash but NOT case — those are two directories", () => {
     expect(same("linux", "/repo/app", "/repo/app///")).toBe(true);
     expect(same("linux", "/repo/App", "/repo/app")).toBe(false);
-    expect(same("darwin", "/repo/App", "/repo/app")).toBe(false);
+  });
+
+  it("on macOS folds case, as the default APFS volume does", () => {
+    expect(same("darwin", "/Users/x/Proj/wt", "/Users/x/proj/wt/")).toBe(true);
+    expect(same("darwin", "/Users/x/Proj/wt", "/Users/x/Proj/wt2")).toBe(false);
   });
 
   it("resolves `.` and `..` segments before comparing", () => {
