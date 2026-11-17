@@ -33,7 +33,7 @@ import type { Checkpoint } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
 import { KeyedMutex } from "../store/fsq.js";
-import { pathKey } from "./worktree.js";
+import { pathKey } from "./path-key.js";
 
 /** Hidden ref namespace holding per-chat checkpoint commits. */
 export const CHECKPOINT_REF_NS = "refs/cm/checkpoints";

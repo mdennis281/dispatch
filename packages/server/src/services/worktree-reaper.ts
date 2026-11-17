@@ -64,12 +64,11 @@ import type { EventBus } from "../bus.js";
 import type { Store } from "../store/index.js";
 import {
   canonicalWorktreePath,
-  pathKey,
   realExec,
-  samePath,
   WorktreeLeftoverError,
   type ExecFn,
 } from "./worktree.js";
+import { pathKey, samePath } from "./path-key.js";
 import type { WorktreeService } from "./worktree.js";
 
 /* --------------------------------------------------------------- tunables */

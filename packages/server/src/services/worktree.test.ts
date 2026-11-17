@@ -10,13 +10,13 @@ import { Store } from "../store/index.js";
 import {
   WorktreeService,
   canonicalWorktreePath,
-  samePath,
   parseWorktreePorcelain,
   parseNumstat,
   resolveNumstatPath,
   splitPatch,
   type ExecFn,
 } from "./worktree.js";
+import { samePath } from "./path-key.js";
 
 /* ------------------------------------------------------------ pure parsers */
 

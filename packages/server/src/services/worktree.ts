@@ -33,6 +33,7 @@ import {
   writeFile as fsWriteFile,
 } from "node:fs/promises";
 import { basename, join, resolve, relative, isAbsolute, dirname } from "node:path";
+import { pathKey, samePath } from "./path-key.js";
 import {
   WorktreeInfoSchema,
   BranchInfoSchema,
@@ -1490,17 +1491,6 @@ const MAX_FILE_BYTES = 2 * 1024 * 1024;
  */
 export function canonicalWorktreePath(p: string): string {
   return resolve(p).replace(/[\\/]+$/, "");
-}
-
-/** Comparison key for a path — case-folded on Windows, where NTFS is. */
-export function pathKey(p: string): string {
-  const c = canonicalWorktreePath(p);
-  return process.platform === "win32" ? c.toLowerCase() : c;
-}
-
-/** Two filesystem paths point at the same location (case-insensitive on Windows). */
-export function samePath(a: string, b: string): boolean {
-  return pathKey(a) === pathKey(b);
 }
 
 /** Find a record by path, tolerating case/trailing-separator differences. */
