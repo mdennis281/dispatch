@@ -27,6 +27,7 @@ import { api, gitFileRawUrl, type WorktreeFileContent } from "../../lib/api.js";
 import { sessionFetch } from "../../stores/auth.js";
 import { languageForPath, isImagePath } from "../monaco/lang.js";
 import { ImagePreview } from "../monaco/ImagePreview.js";
+import { StateNote } from "../monaco/StateNote.js";
 import { Spinner } from "../ui/Spinner.js";
 import { IconButton } from "../ui/IconButton.js";
 import { Chip } from "../ui/Chip.js";
@@ -185,7 +186,7 @@ export function GitDiffPane({
             <Spinner size={18} />
           </Centered>
         ) : error ? (
-          <Note
+          <StateNote
             icon={<AlertTriangle className="text-danger" />}
             title="Couldn't open this file"
             detail={error}
@@ -200,7 +201,7 @@ export function GitDiffPane({
             right={right}
           />
         ) : binary ? (
-          <Note
+          <StateNote
             icon={<FileWarning className="text-warn" />}
             title="Binary file"
             detail={`${formatBytes(right?.size || left?.size || 0)} — not shown as text.`}
@@ -350,7 +351,7 @@ function ImageSide({ label, source, alt }: { label: string; source: ImageSource;
             <Spinner size={18} />
           </Centered>
         ) : source.error || decodeError ? (
-          <Note
+          <StateNote
             icon={<AlertTriangle className="text-danger" />}
             title="Couldn't preview image"
             detail={source.error ?? "The image bytes could not be decoded."}
@@ -365,26 +366,4 @@ function ImageSide({ label, source, alt }: { label: string; source: ImageSource;
 
 function Centered({ children }: { children: React.ReactNode }) {
   return <div className="flex h-full items-center justify-center">{children}</div>;
-}
-
-function Note({
-  icon,
-  title,
-  detail,
-}: {
-  icon: React.ReactNode;
-  title: string;
-  detail?: string;
-}) {
-  return (
-    <div className="flex h-full flex-col items-center justify-center px-6 text-center">
-      <span className="mb-2 flex size-9 items-center justify-center rounded-md border border-line bg-panel-2 [&_svg]:size-4">
-        {icon}
-      </span>
-      <p className="text-base font-medium text-secondary">{title}</p>
-      {detail && (
-        <p className="mt-0.5 max-w-md cm-mono !text-xs text-faint break-words">{detail}</p>
-      )}
-    </div>
-  );
 }
