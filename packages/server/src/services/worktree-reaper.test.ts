@@ -22,7 +22,8 @@ import { join } from "node:path";
 import type { Chat, Project, TerminalInfo } from "@dispatch/shared";
 import { EventBus } from "../bus.js";
 import { Store } from "../store/index.js";
-import { WorktreeService, WorktreeLeftoverError, pathKey } from "./worktree.js";
+import { WorktreeService, WorktreeLeftoverError } from "./worktree.js";
+import { pathKey } from "./path-key.js";
 import { WorktreeReaper, type WorktreeReaperDeps } from "./worktree-reaper.js";
 
 let root: string;

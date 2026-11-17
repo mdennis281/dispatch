@@ -26,7 +26,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Project } from "@dispatch/shared";
 import { EventBus } from "../bus.js";
-import { WorktreeService, realExec, samePath, type ExecFn } from "./worktree.js";
+import { WorktreeService, realExec, type ExecFn } from "./worktree.js";
+import { samePath } from "./path-key.js";
 import { severLinks, restoreLinks, type SeveredLink } from "./tree-links.js";
 
 /** Can this process make a FILE symlink? Windows says no without Developer Mode or admin. */

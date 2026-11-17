@@ -21,6 +21,7 @@ import { toolCallElapsed, toolCallState, type ToolCallState } from "../../../lib
 import { hydrateFullRows } from "../../../stores/index.js";
 import { useChats } from "../../../stores/chats.js";
 import { usePanels } from "../../../stores/panels.js";
+import { samePath } from "../../panels/panelBus.js";
 import { openCodeViewer, resolveChatFile, type WorktreeTarget } from "../../monaco/index.js";
 import { resultText, toolPresentation, type FileToolPresentation } from "../../../lib/toolPresentations.js";
 
@@ -65,12 +66,6 @@ function readStatOf(use: ToolUseRow, result?: ToolResultRow): FileToolStat | nul
 interface SplitPath {
   dir: string;
   file: string;
-}
-
-/** Same file/directory, ignoring slash flavour, a trailing slash, and Windows case. */
-function samePath(a: string, b: string): boolean {
-  const n = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
-  return n(a) === n(b);
 }
 
 function splitPath(path: string): SplitPath {

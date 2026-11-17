@@ -6,7 +6,6 @@ import {
   AgentCwdTracker,
   MAIN_THREAD,
   findWorktreeRoot,
-  samePath,
   type AgentCwdTrackerDeps,
 } from "./agent-cwd.js";
 
@@ -50,13 +49,6 @@ const bash = (thread: string, cwd: string) => ({
   toolName: "Bash",
   cwd,
   input: { command: "ls" },
-});
-
-describe("samePath", () => {
-  it("ignores separator, case and a trailing slash", () => {
-    expect(samePath("C:\\a\\b", "c:/a/b/")).toBe(true);
-    expect(samePath("C:\\a\\b", "C:\\a\\bc")).toBe(false);
-  });
 });
 
 describe("findWorktreeRoot", () => {

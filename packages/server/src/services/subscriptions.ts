@@ -14,6 +14,7 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
+import { samePath } from "./path-key.js";
 import {
   endpointOrigin,
   providerFor,
@@ -60,21 +61,6 @@ export function configDirOf(sub: Subscription, machine: MachineEnv = {}): string
     : defaultConfigDir(sub.provider, machine);
 }
 
-/** Two paths name the same directory (Windows compares case-insensitively). */
-function sameDir(a: string, b: string): boolean {
-  // A loop, not `/[\\/]+$/`: that pattern backtracks quadratically on a long
-  // run of separators, and CodeQL (js/polynomial-redos) flags it once a path
-  // can come from a stored account row.
-  const norm = (p: string) => {
-    let out = resolve(p);
-    while (out.length > 1 && (out.endsWith("/") || out.endsWith("\\"))) out = out.slice(0, -1);
-    return out;
-  };
-  return process.platform === "win32"
-    ? norm(a).toLowerCase() === norm(b).toLowerCase()
-    : norm(a) === norm(b);
-}
-
 /**
  * A subscription as a harness consumes it.
  *
@@ -85,7 +71,7 @@ function sameDir(a: string, b: string): boolean {
  */
 export function accountOf(sub: ResolvedSubscription, machine: MachineEnv = {}): HarnessAccount {
   const configDir = configDirOf(sub, machine);
-  const isDefault = sameDir(configDir, defaultConfigDir(sub.provider, machine));
+  const isDefault = samePath(configDir, defaultConfigDir(sub.provider, machine));
   const { configDirEnv, endpointEnv } = providerFor(sub.provider).account;
   return {
     subscriptionId: sub.id,
@@ -138,7 +124,7 @@ export function chatSubscription(
   // it, because goose keeps ONE config dir for every account.
   if (!providerFor(chat.harness).account.endpointEnv) {
     const home = defaultConfigDir(chat.harness, machine);
-    const legacy = mine.find((s) => sameDir(configDirOf(s, machine), home));
+    const legacy = mine.find((s) => samePath(configDirOf(s, machine), home));
     if (legacy) return legacy;
   }
   return subscriptionFor(settings, chat.harness);
@@ -169,7 +155,7 @@ export function subscriptionStatuses(
       // `loginFile` would otherwise probe the directory itself and say yes.
       loggedIn: provider.unregistered ? false : endpointEnv ? true : existsSync(join(dir, loginFile)),
       isDefault: subscriptionFor(settings, sub.provider).id === sub.id,
-      atDefaultDir: sameDir(dir, defaultConfigDir(sub.provider, machine)),
+      atDefaultDir: samePath(dir, defaultConfigDir(sub.provider, machine)),
     };
   });
 }

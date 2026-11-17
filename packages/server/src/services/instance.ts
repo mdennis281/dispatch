@@ -16,6 +16,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, hostname as osHostname } from "node:os";
 import { join, resolve } from "node:path";
+import { samePath } from "./path-key.js";
 import type { PluginInstance, PluginInstanceRemintReason } from "@dispatch/shared";
 import { installedRootPaths } from "./inspect.js";
 
@@ -203,4 +204,3 @@ function canonical(p: string): string {
 
 const fold = (s: string) => s.toLowerCase();
 const foldPath = (p: string) => (process.platform === "win32" ? p.toLowerCase() : p);
-const samePath = (a: string, b: string) => foldPath(a) === foldPath(b);

@@ -51,6 +51,7 @@
 import { dirname, isAbsolute, resolve } from "node:path";
 import { stat } from "node:fs/promises";
 import { join } from "node:path";
+import { pathKey, samePath } from "./path-key.js";
 
 /**
  * Default key for the main loop. The broker passes its OWN constant through
@@ -229,7 +230,7 @@ export class AgentCwdTracker {
 
   private rootFor(path: string): Promise<string | null> {
     const dir = isFileish(path) ? dirname(path) : path;
-    const key = canon(dir);
+    const key = pathKey(dir);
     let hit = this.rootCache.get(key);
     if (!hit) {
       hit = this.resolveRoot(dir).catch(() => null);
@@ -240,16 +241,6 @@ export class AgentCwdTracker {
 }
 
 /* ======================================================== path + fs helpers */
-
-/** Forward-slash, drop a trailing separator, case-fold (Windows is the host). */
-function canon(p: string): string {
-  return resolve(p).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
-}
-
-/** Two paths point at the same place. */
-export function samePath(a: string, b: string): boolean {
-  return canon(a) === canon(b);
-}
 
 /**
  * The path a call WRITES, when it names one.
