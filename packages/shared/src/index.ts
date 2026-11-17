@@ -7,6 +7,7 @@ export * from "./common.js";
 export * from "./providers.js";
 export * from "./harness.js";
 export * from "./harness-guard.js";
+export * from "./harness-queue.js";
 export * from "./harness-compact.js";
 export * from "./env.js";
 export * from "./subscriptions.js";
