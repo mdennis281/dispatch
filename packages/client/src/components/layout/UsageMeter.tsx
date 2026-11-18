@@ -130,13 +130,12 @@ function useBy(ts: number, now: number): string {
  * grant. A row whose provider reports neither has no chip at all, rather than
  * a misleading 0.
  *
- * A `spendable` grant (Codex) makes the chip a button, which stays disabled
+ * A `spendable` grant makes the chip a button, which stays disabled
  * until the account is actually capped: Codex answers a reset spent below the
  * cap with `nothingToReset`, so an always-live button was a click that did
  * nothing. Spending is not refundable, so the first click only arms it and the
- * second one spends. Anything else stays read-only, and `hint` says where to
- * spend it (Claude's `/limit-reset`), because a chip that looks like a button
- * invites a click.
+ * second one spends. Claude additionally reports whether each grant is usable
+ * now: a capped account can still have only paused or blocked grants.
  */
 function ResetGrants({
   grants,
@@ -158,11 +157,12 @@ function ResetGrants({
   const live = grants.filter((g) => g.expiresAt === undefined || g.expiresAt > now);
   const count = live.reduce((n, g) => n + Math.max(0, g.left), 0);
   const spendable = count > 0 && live.some((g) => g.spendable && g.left > 0);
+  const usable = live.some((g) => g.spendable && g.left > 0 && g.usableNow !== false);
   const spending = useUsage((s) => !!s.spending[subscriptionId]);
   const spendReset = useUsage((s) => s.spendReset);
   const [armed, setArmed] = useState(false);
   const [result, setResult] = useState<{ text: string; ok: boolean } | null>(null);
-  const enabled = spendable && atCap && !spending;
+  const enabled = spendable && usable && atCap && !spending;
   // An armed button left alone disarms, so a later stray click can't spend.
   useEffect(() => {
     if (!armed) return;
@@ -176,8 +176,8 @@ function ResetGrants({
   }, [result]);
   // The cap clearing (a fresh read, the window rolling over) disarms too.
   useEffect(() => {
-    if (!atCap) setArmed(false);
-  }, [atCap]);
+    if (!enabled) setArmed(false);
+  }, [enabled]);
 
   const onClick = () => {
     if (!enabled) return;
@@ -238,7 +238,9 @@ function ResetGrants({
             <span className={cn("mt-1 block", atCap ? "text-secondary" : "text-faint")}>
               {armed
                 ? "Click again to spend one. It can't be undone."
-                : atCap
+                : !usable
+                  ? "These resets aren't available right now. See the grant details above."
+                  : atCap
                   ? "You're at a limit. Click to spend one."
                   : "Available once you hit a limit. Spending one before then does nothing."}
             </span>

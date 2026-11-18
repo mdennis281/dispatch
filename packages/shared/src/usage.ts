@@ -45,8 +45,8 @@ export const ResetGrantSchema = z.object({
   /** Titles of the windows spending one refills. */
   refills: z.array(z.string()).optional(),
   /**
-   * Dispatch can spend this grant itself (`POST /api/usage/reset`). Absent for
-   * a grant only its provider's own client can spend — Claude's `/limit-reset`.
+   * Dispatch can spend this grant itself (`POST /api/usage/reset`). Eligibility
+   * is separate: `usableNow: false` keeps a blocked grant's button disabled.
    */
   spendable: z.boolean().optional(),
 });

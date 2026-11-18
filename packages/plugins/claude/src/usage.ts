@@ -27,6 +27,7 @@
  * sends it back to the provider it came from.
  */
 import { readFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
@@ -36,6 +37,7 @@ import {
   type HarnessLimits,
   type LimitReading,
   type ResetGrant,
+  type ResetSpendOutcome,
 } from "@dispatch/shared";
 
 /**
@@ -75,7 +77,7 @@ function requestHeaders(cliVersion: string | undefined): Record<string, string> 
 }
 
 /** How the card tells someone to spend a Claude reset. */
-const CLAUDE_RESET_HINT = "Use one with /limit-reset in Claude Code, or Settings → Usage on claude.ai.";
+const CLAUDE_RESET_HINT = "Spend one here once a limit is hit and a grant is available.";
 
 /** One grant in the `cedar_ember` block (only the fields we use). */
 interface RawGrant {
@@ -87,10 +89,14 @@ interface RawGrant {
   usable_now?: boolean;
   unavailable_reason?: string | null;
   clears?: string[];
+  paused?: boolean;
+  starts_at?: string | null;
 }
 interface RawCedarEmber {
   eligible?: boolean;
   grants?: RawGrant[] | null;
+  next_grant_id?: string | null;
+  at_limit?: boolean;
 }
 
 /**
@@ -106,16 +112,19 @@ export function resetGrantsOf(block: unknown, now: number): ResetGrant[] | null 
   if (!ce || typeof ce !== "object" || ce.eligible === false || !Array.isArray(ce.grants)) return null;
   const out: ResetGrant[] = [];
   for (const g of ce.grants) {
-    if (!g || typeof g.id !== "string" || typeof g.resets_left !== "number") continue;
+    if (!g || typeof g.id !== "string" || !/^[a-z0-9_-]{1,40}$/.test(g.id) ||
+        typeof g.resets_left !== "number" || !Number.isInteger(g.resets_left) || g.resets_left < 0) continue;
     const expiresAt = isoToMs(g.ends_at);
     if (expiresAt !== undefined && expiresAt <= now) continue;
     out.push({
       id: g.id,
       label: typeof g.label === "string" && g.label.trim() ? g.label : "Limit reset",
       left: g.resets_left,
+      spendable: true,
       ...(typeof g.resets_total === "number" ? { total: g.resets_total } : {}),
       ...(expiresAt !== undefined ? { expiresAt } : {}),
-      ...(typeof g.usable_now === "boolean" ? { usableNow: g.usable_now } : {}),
+      usableNow: ce.eligible === true && g.usable_now === true && !g.paused &&
+        (isoToMs(g.starts_at) ?? 0) <= now,
       ...(g.unavailable_reason ? { unavailableReason: g.unavailable_reason } : {}),
       ...(Array.isArray(g.clears) && g.clears.length
         ? { refills: g.clears.map((k) => claudeWindowOf(k).title) }
@@ -190,6 +199,7 @@ export function limitsOfUsage(data: RawUsage & Record<string, unknown>, now = Da
   const grants = resetGrantsOf(data.cedar_ember, now);
   return {
     ...(grants ? { resetGrants: grants, resetHint: CLAUDE_RESET_HINT } : {}),
+    ...((data.cedar_ember as RawCedarEmber | undefined)?.at_limit === true ? { reached: true } : {}),
     ...(primary ? { primary } : {}),
     ...(secondary ? { secondary } : {}),
     // Named windows so the card keeps saying "5-hour session" — the generic
@@ -251,6 +261,10 @@ export class ClaudeUsagePoller {
   /** Reads are held off until this time after a 429. */
   private cooldownUntil = 0;
   private lastPollAt = 0;
+  private spending: Promise<ResetSpendOutcome> | null = null;
+  // An uncertain POST may already have spent a credit. Retry its request id,
+  // never a new claim, even if the next usage read offers a different grant.
+  private pendingClaim: { organization: string; grantId: string; requestId: string; at: number } | null = null;
 
   constructor(deps: ClaudeUsagePollerDeps) {
     this.fetchImpl = deps.fetchImpl ?? fetch;
@@ -261,6 +275,7 @@ export class ClaudeUsagePoller {
 
   /** Latest limits, fetching once if never read. Marked `stale` when the last read failed. */
   async cached(): Promise<HarnessLimits> {
+    if (this.spending) await this.spending.catch(() => {});
     return this.latest ?? this.poll();
   }
 
@@ -271,11 +286,103 @@ export class ClaudeUsagePoller {
    * with the time it lifts so the sampler doesn't ask again before then.
    */
   async fresh(): Promise<HarnessLimits> {
+    if (this.spending) await this.spending.catch(() => {});
     const now = this.now();
     if (now < this.cooldownUntil) throw new ClaudeLimitReadError("rate_limited", this.cooldownUntil);
     if (this.inflight) return this.raiseStale(await this.inflight);
     if (this.latest && !this.latest.stale && now - this.lastPollAt < MIN_READ_GAP_MS) return this.latest;
     return this.raiseStale(await this.poll());
+  }
+
+  /** Account-local serialization also covers two browser tabs confirming together. */
+  spendReset(grantId?: string): Promise<ResetSpendOutcome> {
+    if (this.spending) return this.spending;
+    this.spending = this.doSpendReset(grantId).finally(() => { this.spending = null; });
+    return this.spending;
+  }
+
+  private async doSpendReset(grantId?: string): Promise<ResetSpendOutcome> {
+    // Let a poll already in flight finish before invalidating its old numbers.
+    await this.inflight;
+    if (this.now() < this.cooldownUntil) throw new ClaudeLimitReadError("rate_limited", this.cooldownUntil);
+    const token = await this.readToken();
+    if (!token) throw new Error("Sign in to this Claude account before resetting its limits.");
+    // Resolve the organization from the SAME bearer used for the claim. The
+    // global .claude.json profile can belong to a different subscription.
+    const profile = await this.resetRequest(token, "/api/oauth/profile") as { organization?: { uuid?: unknown } };
+    const organization = profile?.organization?.uuid;
+    if (typeof organization !== "string" || !/^[a-f0-9-]{36}$/i.test(organization)) {
+      throw new Error("Claude did not report this account's organization.");
+    }
+    if (this.pendingClaim && (this.pendingClaim.organization !== organization ||
+        this.now() - this.pendingClaim.at >= 10 * 60_000)) this.pendingClaim = null;
+    if (!this.pendingClaim) {
+      // A five-minute-old chip is not authority to consume an expiring grant.
+      const data = await this.resetRequest(token, "/api/oauth/usage?cedar_ember=1&skip_spend=1") as RawUsage & Record<string, unknown>;
+      const grants = resetGrantsOf(data?.cedar_ember, this.now());
+      if (!grants) throw new Error("Claude did not report reset eligibility. Refresh usage or sign in again.");
+      this.commit(limitsOfUsage(data, this.now()));
+      this.lastPollAt = this.now();
+      const available = grants.filter((g) => g.left > 0 && g.usableNow);
+      const next = (data?.cedar_ember as RawCedarEmber | undefined)?.next_grant_id;
+      const chosen = grantId ? available.find((g) => g.id === grantId) :
+        available.find((g) => g.id === next) ?? available[0];
+      if (!chosen) {
+        if (!grants.some((g) => g.left > 0)) return "noCredit";
+        throw new Error("No Claude reset can be used right now. Refresh usage for its availability.");
+      }
+      this.pendingClaim = { organization, grantId: chosen.id, requestId: randomUUID(), at: this.now() };
+    }
+    const claim = this.pendingClaim;
+    try {
+      // Matches Claude Code's /limit-reset protocol; the provider remains the
+      // authority on eligibility and deduplicates a retried request_id.
+      const body = await this.resetRequest(token, `/api/organizations/${organization}/reset_rate_limits`, {
+        program: "cedar_ember", grant_id: claim.grantId, request_id: claim.requestId,
+      }) as { result?: string; reason?: string };
+      switch (body?.result) {
+        case "reset": this.pendingClaim = null; return "reset";
+        case "already_used": this.pendingClaim = null; return "alreadyRedeemed";
+        case "not_limited": this.pendingClaim = null; return "nothingToReset";
+        case "cooldown":
+          this.pendingClaim = null;
+          throw new Error("Claude resets are on cooldown. Try again later.");
+        case "ineligible":
+          this.pendingClaim = null;
+          throw new Error("Claude says this account or grant is no longer eligible. Refresh usage.");
+        default:
+          throw new Error("Claude did not confirm the reset. Retrying will check the same request.");
+      }
+    } finally {
+      // Even a timed-out POST may have succeeded. Don't let the 5s read floor
+      // paint the old 100% and credit count over the subsequent refresh.
+      this.latest = this.failed("unavailable");
+      this.lastPollAt = 0;
+    }
+  }
+
+  private async resetRequest(token: string, path: string, body?: unknown): Promise<unknown> {
+    try {
+      const res = await this.fetchImpl(`https://api.anthropic.com${path}`, {
+        method: body === undefined ? "GET" : "POST",
+        headers: { ...requestHeaders(this.cliVersion()), Authorization: `Bearer ${token}` },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        signal: AbortSignal.timeout(25_000),
+        redirect: "error",
+      });
+      if (res.status === 429) {
+        this.cooldownUntil = this.now() + RATE_LIMIT_COOLDOWN_MS;
+        throw new ClaudeLimitReadError("rate_limited", this.cooldownUntil);
+      }
+      if (res.status === 401 || res.status === 403) throw new Error("Sign in to this Claude account again before resetting limits.");
+      if (!res.ok) throw new Error(`Claude reset request failed (HTTP ${res.status}).`);
+      return await res.json();
+    } catch (err) {
+      // Never expose a transport error that could embed the bearer or headers.
+      if (err instanceof ClaudeLimitReadError || (err instanceof Error &&
+          /^(Sign in to this Claude|Claude reset request failed)/.test(err.message))) throw err;
+      throw new Error("Could not confirm the Claude reset request. Try again.");
+    }
   }
 
   private raiseStale(limits: HarnessLimits): HarnessLimits {

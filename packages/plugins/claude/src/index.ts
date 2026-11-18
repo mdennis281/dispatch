@@ -145,6 +145,10 @@ export class ClaudeHarness implements Harness {
     return opts.fresh ? poller.fresh() : poller.cached();
   }
 
+  spendReset(account?: HarnessAccount, opts: { grantId?: string } = {}) {
+    return this.usage.for(account).spendReset(opts.grantId);
+  }
+
   async generateText(request: HarnessTextRequest): Promise<string> {
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), request.timeoutMs ?? 60_000);
