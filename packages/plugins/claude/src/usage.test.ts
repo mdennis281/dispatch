@@ -183,6 +183,7 @@ describe("reset grants", () => {
         id: "full-reset-2611",
         label: "One full limit reset (November 2026)",
         left: 1,
+        spendable: true,
         total: 1,
         expiresAt: Date.parse("2026-12-10T22:00:00+00:00"),
         usableNow: true,
@@ -192,6 +193,7 @@ describe("reset grants", () => {
         id: "launch-2610-fable",
         label: "New model launch: one Fable reset",
         left: 0,
+        spendable: true,
         total: 1,
         expiresAt: Date.parse("2027-03-09T07:59:00+00:00"),
         usableNow: false,
@@ -199,7 +201,7 @@ describe("reset grants", () => {
         refills: ["Weekly · Overage Included"],
       },
     ]);
-    expect(limits.resetHint).toMatch(/\/limit-reset/);
+    expect(limits.resetHint).toMatch(/Spend one here/);
   });
 
   // Absent and ineligible must not read as "0 resets left" on the card.
@@ -228,5 +230,116 @@ describe("reset grants", () => {
     await make({ fetchImpl }).cached();
     const [, init] = (fetchImpl as unknown as { mock: { calls: [string, RequestInit][] } }).mock.calls[0]!;
     expect((init.headers as Record<string, string>)["User-Agent"]).not.toContain("2.0.0");
+  });
+});
+
+describe("Claude reset claims", () => {
+  const organization = "11111111-1111-4111-8111-111111111111";
+  const capped = { ...OK_BODY, seven_day: { utilization: 100 }, cedar_ember: {
+    ...CEDAR, at_limit: true, next_grant_id: "full-reset-2611",
+  } };
+  function setup(options: { body?: unknown; result?: unknown; status?: number; token?: string | null } = {}) {
+    const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      if (init?.method === "POST") return resp(options.status ?? 200, options.result ?? { result: "reset" });
+      if (String(url).endsWith("/profile")) return resp(200, { organization: { uuid: organization } });
+      return resp(200, options.body ?? capped);
+    });
+    const poller = new ClaudeUsagePoller({ configDir: "/test-account", fetchImpl: fetchImpl as typeof fetch,
+      now: () => NOW, readToken: async () => options.token === undefined ? "account-token" : options.token });
+    return { poller, fetchImpl, posts: () => fetchImpl.mock.calls.filter(([, init]) => init?.method === "POST") };
+  }
+
+  it("claims the provider's next grant using the account bearer and a UUID request id", async () => {
+    const { poller, posts } = setup();
+    expect(await poller.spendReset()).toBe("reset");
+    const [url, init] = posts()[0]!;
+    expect(url).toBe(`https://api.anthropic.com/api/organizations/${organization}/reset_rate_limits`);
+    expect(init?.headers).toMatchObject({ Authorization: "Bearer account-token" });
+    expect(JSON.parse(init!.body as string)).toEqual({ program: "cedar_ember", grant_id: "full-reset-2611",
+      request_id: expect.stringMatching(/^[a-f0-9-]{36}$/) });
+    expect(posts()).toHaveLength(1);
+  });
+
+  it("coalesces concurrent confirmations into a single claim", async () => {
+    const { poller, posts } = setup();
+    expect(await Promise.all([poller.spendReset(), poller.spendReset()])).toEqual(["reset", "reset"]);
+    expect(posts()).toHaveLength(1);
+  });
+
+  it.each(["already_used", "not_limited"])("maps %s without claiming another grant", async (result) => {
+    const { poller, posts } = setup({ result: { result } });
+    expect(await poller.spendReset()).toBe(result === "already_used" ? "alreadyRedeemed" : "nothingToReset");
+    expect(posts()).toHaveLength(1);
+  });
+
+  it.each(["cooldown", "ineligible", "unavailable", "unexpected"])("does not report success for %s", async (result) => {
+    const { poller } = setup({ result: { result } });
+    await expect(poller.spendReset()).rejects.toThrow();
+  });
+
+  it.each([
+    { usable_now: false }, { paused: true }, { starts_at: "2027-01-01T00:00:00Z" },
+    { ends_at: "2026-01-01T00:00:00Z" }, { resets_left: 0 },
+  ])("never posts a blocked, future, expired or exhausted grant: %j", async (override) => {
+    const { poller, posts } = setup({ body: { ...capped, cedar_ember: { eligible: true,
+      grants: [{ ...CEDAR.grants[0], ...override }] } } });
+    await poller.spendReset().catch(() => {});
+    expect(posts()).toHaveLength(0);
+  });
+
+  it("refuses missing credentials and ineligible accounts", async () => {
+    const noToken = setup({ token: null });
+    await expect(noToken.poller.spendReset()).rejects.toThrow(/Sign in/);
+    expect(noToken.fetchImpl).not.toHaveBeenCalled();
+    const ineligible = setup({ body: { cedar_ember: { eligible: false, grants: CEDAR.grants } } });
+    await expect(ineligible.poller.spendReset()).rejects.toThrow(/eligibility/);
+    expect(ineligible.posts()).toHaveLength(0);
+  });
+
+  it("retains the claim id after an uncertain response, even when the next grant changes", async () => {
+    const { poller, fetchImpl, posts } = setup();
+    let post = 0;
+    fetchImpl.mockImplementation(async (url, init) => {
+      if (init?.method === "POST") {
+        if (++post === 1) throw new Error("network lost after provider accepted POST");
+        return resp(200, { result: "already_used" });
+      }
+      if (String(url).endsWith("/profile")) return resp(200, { organization: { uuid: organization } });
+      return resp(200, post === 0 ? capped : { cedar_ember: { eligible: true, grants: [] } });
+    });
+    await expect(poller.spendReset()).rejects.toThrow(/Could not confirm/);
+    expect(await poller.spendReset()).toBe("alreadyRedeemed");
+    expect(posts()[0]![1]!.body).toBe(posts()[1]![1]!.body);
+  });
+
+  it("invalidates the pre-reset cache so an immediate refresh bypasses the read floor", async () => {
+    const { poller, fetchImpl } = setup();
+    await poller.fresh();
+    await poller.spendReset();
+    fetchImpl.mockResolvedValueOnce(resp(200, { seven_day: { utilization: 0 }, cedar_ember: { eligible: true, grants: [] } }));
+    expect((await poller.fresh()).secondary?.usedPercent).toBe(0);
+    expect((await poller.cached()).resetGrants).toEqual([]);
+  });
+
+  it("backs off after HTTP 429 and treats auth failures as errors", async () => {
+    const limited = setup({ status: 429 });
+    await expect(limited.poller.spendReset()).rejects.toMatchObject({ message: "rate_limited" });
+    await expect(limited.poller.spendReset()).rejects.toMatchObject({ message: "rate_limited" });
+    expect(limited.posts()).toHaveLength(1);
+    await expect(setup({ status: 401 }).poller.spendReset()).rejects.toThrow(/Sign in/);
+  });
+
+  it("uses the requested account through the harness, never the default login", async () => {
+    const selected: string[] = [];
+    const harness = new ClaudeHarness({ usage: new ClaudeUsage((dir) => {
+      selected.push(dir);
+      return setup().poller;
+    }) });
+    await harness.spendReset({ subscriptionId: "claude2", configDir: "/claude2", env: {} });
+    expect(selected).toEqual(["/claude2"]);
+  });
+
+  it("carries the provider's at-limit signal for caps outside the two displayed windows", () => {
+    expect(limitsOfUsage({ ...OK_BODY, cedar_ember: { ...CEDAR, at_limit: true } }, NOW).reached).toBe(true);
   });
 });
