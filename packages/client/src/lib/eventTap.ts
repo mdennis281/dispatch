@@ -17,7 +17,6 @@ import type { WsServerEvent, WsServerEventType } from "@dispatch/shared";
 type Listener = (evt: WsServerEvent) => void;
 
 const byType = new Map<string, Set<Listener>>();
-const all = new Set<Listener>();
 
 /** Listen for one event type. Returns the unsubscribe. */
 export function onServerEvent<T extends WsServerEventType>(
@@ -36,14 +35,6 @@ export function onServerEvent<T extends WsServerEventType>(
   };
 }
 
-/** Listen for every event. Returns the unsubscribe. */
-export function subscribeServerEvents(fn: Listener): () => void {
-  all.add(fn);
-  return () => {
-    all.delete(fn);
-  };
-}
-
 /**
  * Fan one frame out. A listener that throws is reported and skipped: a
  * plugin's bug must not stop the next listener — or, since the reducer calls
@@ -52,7 +43,6 @@ export function subscribeServerEvents(fn: Listener): () => void {
 export function publishServerEvent(evt: WsServerEvent): void {
   const typed = byType.get(evt.type);
   if (typed) for (const fn of [...typed]) safely(fn, evt);
-  if (all.size) for (const fn of [...all]) safely(fn, evt);
 }
 
 function safely(fn: Listener, evt: WsServerEvent): void {
@@ -66,5 +56,4 @@ function safely(fn: Listener, evt: WsServerEvent): void {
 /** Test seam: drop every listener. */
 export function resetServerEventTap(): void {
   byType.clear();
-  all.clear();
 }

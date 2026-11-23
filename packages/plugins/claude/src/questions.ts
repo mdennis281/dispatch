@@ -103,26 +103,3 @@ export function buildQuestionAnswer(
   }
   return { ...input, answers: out };
 }
-
-/**
- * A one-line summary of what the human picked, for the persisted row.
- *
- * Prefixed with each question's header only when there was more than one, so a
- * single answer reads as the answer rather than as a labelled field.
- */
-export function answerSummary(
-  input: Record<string, unknown>,
-  answers: HarnessQuestionAnswer[],
-): string | undefined {
-  const questions = questionList(input);
-  const parts: string[] = [];
-  for (const a of answers) {
-    const index = Number.parseInt(a.questionId, 10);
-    const q = Number.isFinite(index) ? questions[index] : undefined;
-    const value = withNotes(a.selected.join(", "), a.notes);
-    if (!value.trim()) continue;
-    const header = pickStr(q?.header);
-    parts.push(header && answers.length > 1 ? `${header}: ${value}` : value);
-  }
-  return parts.length ? parts.join(" · ") : undefined;
-}

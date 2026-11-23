@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   type BakeOp,
   type Shape,
-  IDENTITY_OP,
   bakeShapes,
   bakedSize,
   clampRect,
@@ -17,7 +16,13 @@ import {
 const W = 100;
 const H = 50;
 
-const op = (patch: Partial<BakeOp> = {}): BakeOp => ({ ...IDENTITY_OP(W, H), ...patch });
+const op = (patch: Partial<BakeOp> = {}): BakeOp => ({
+  angle: 0,
+  flipH: false,
+  flipV: false,
+  crop: { x: 0, y: 0, w: W, h: H },
+  ...patch,
+});
 
 /** Shorthand: map a point through an op against the standard 100×50 source. */
 const at = (o: BakeOp, x: number, y: number) => mapPoint(o, W, H, x, y);

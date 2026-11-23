@@ -5,7 +5,6 @@ import {
   pathsFromDataTransfer,
   pathsFromDrop,
   dropIntent,
-  basenameOf,
 } from "./dropPaths.js";
 
 /** Minimal DataTransfer stand-in: only what the extractor actually reads. */
@@ -184,13 +183,5 @@ describe("dropIntent", () => {
 
   it("survives a host that exposes no types at all", () => {
     expect(dropIntent(drag({}))).toBeNull();
-  });
-});
-
-describe("basenameOf", () => {
-  it("takes the filename for either separator", () => {
-    expect(basenameOf("C:\\repo\\src\\a.ts")).toBe("a.ts");
-    expect(basenameOf("/home/mike/a.ts")).toBe("a.ts");
-    expect(basenameOf("a.ts")).toBe("a.ts");
   });
 });

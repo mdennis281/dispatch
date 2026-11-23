@@ -5,7 +5,6 @@ import {
   groupTranscriptRows,
   peerChatIdFromResult,
   peerResultProse,
-  resultPreview,
   resultText,
   toolPresentation,
 } from "./toolPresentations.js";
@@ -257,14 +256,10 @@ describe("file tool presentations", () => {
   });
 });
 
-it("builds a compact first-line result preview", () => {
-  expect(resultPreview("\nfirst\nsecond")).toBe("first");
-  expect(resultPreview([{ type: "text", text: "[build] cwd=C:\\repo exit=0\ncompiled 3 files" }])).toBe("compiled 3 files");
+it("extracts result text and strips the terminal banner", () => {
   expect(resultText([{ type: "text", text: "hello" }])).toBe("hello");
   expect(displayResultText("[build] cwd=C:\\repo exit=0\ncompiled 3 files\ncomplete")).toBe("compiled 3 files\ncomplete");
   expect(resultText([{ type: "image", data: "base64" }])).toBe("");
-  expect(resultPreview([])).toBe("No output");
-  expect(resultPreview(undefined)).toBe("No output");
 });
 
 describe("peer-chat tools", () => {

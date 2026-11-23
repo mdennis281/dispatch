@@ -9,7 +9,6 @@ import {
   toScreen,
   wheelFactor,
   zoomAt,
-  zoomToRect,
 } from "./imageViewport.js";
 
 const image = { width: 1000, height: 500 };
@@ -66,12 +65,13 @@ describe("clampPan", () => {
   });
 });
 
-describe("zoomToRect", () => {
-  it("frames the rect near the centre of the box", () => {
-    const vp = zoomToRect({ x: 400, y: 200, w: 200, h: 100 }, box, image, 0);
-    const [cx, cy] = toScreen(vp, 500, 250);
-    expect(cx).toBeCloseTo(250, 3);
-    expect(cy).toBeCloseTo(250, 3);
+describe("toScreen", () => {
+  it("is the inverse of toImage", () => {
+    const vp = { scale: 1.5, x: -120, y: 40 };
+    const [sx, sy] = toScreen(vp, 500, 250);
+    const [ix, iy] = toImage(vp, sx, sy);
+    expect(ix).toBeCloseTo(500, 6);
+    expect(iy).toBeCloseTo(250, 6);
   });
 });
 

@@ -573,14 +573,6 @@ export function displayResultText(content: unknown): string {
   return lines.join("\n").trim();
 }
 
-/** One useful output line for the collapsed command row. */
-export function resultPreview(content: unknown): string {
-  const lines = displayResultText(content).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  const first = lines[0];
-  if (!first) return "No output";
-  return first.length > 240 ? `${first.slice(0, 239)}…` : first;
-}
-
 /**
  * A legacy Codex collaboration wait that contains no information.
  *
