@@ -93,11 +93,6 @@ function dedupe(paths: string[]): string[] {
   return [...new Set(paths)];
 }
 
-/** The filename half of a path, for either separator. */
-export function basenameOf(path: string): string {
-  return path.split(/[\\/]/).pop() ?? path;
-}
-
 /**
  * Every real path this drop discloses — only the text flavors, now that
  * Dispatch runs as a PWA and the Electron `webUtils.getPathForFile` bridge is

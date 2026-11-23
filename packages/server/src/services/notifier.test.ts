@@ -5,7 +5,6 @@ import type { Store, AppSettings } from "../store/index.js";
 import {
   Notifier,
   buildWebhookRequest,
-  startNotifier,
   type FetchLike,
   type WebhookConfig,
 } from "./notifier.js";
@@ -195,6 +194,12 @@ describe("Notifier.handle — POSTs when configured", () => {
 });
 
 describe("Notifier — bus wiring", () => {
+  const startNotifier = (deps: ConstructorParameters<typeof Notifier>[0]): Notifier => {
+    const n = new Notifier(deps);
+    n.start();
+    return n;
+  };
+
   it("delivers on attention-add published to the bus, ignores other events", async () => {
     const bus = new EventBus();
     const f = fetchMock();

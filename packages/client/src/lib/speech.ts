@@ -238,13 +238,3 @@ export type PressOutcome = "latch" | "release";
 export function pressOutcome(heldMs: number): PressOutcome {
   return heldMs < HOLD_MS ? "latch" : "release";
 }
-
-/**
- * Join dictated text onto an existing draft: a space between sentences, nothing
- * doubled up, and no leading space when the box is empty.
- */
-export function appendSpoken(existing: string, spoken: string): string {
-  const left = existing.replace(/\s+$/, "");
-  if (!left) return spoken;
-  return `${left} ${spoken}`;
-}

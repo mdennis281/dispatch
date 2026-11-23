@@ -15,19 +15,6 @@
  * contain` into a fixed 64vh box, so a 3000px-wide screenshot was viewed at
  * roughly a third of scale and you annotated details you could not see.
  */
-/**
- * The rectangle `zoomToRect` frames. Declared structurally rather than imported
- * from the annotator's `doc.ts`: this module moved OUT of the annotator so the
- * chat's media viewer could share its arithmetic, and importing a shape back
- * from the feature it was extracted from would re-couple the two.
- */
-export interface Rect {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-}
-
 export interface Viewport {
   /** Image pixels per screen pixel. */
   scale: number;
@@ -116,25 +103,6 @@ export function clampPan(vp: Viewport, image: Box, box: Box): Viewport {
   const axis = (pos: number, size: number, extent: number) =>
     size <= extent ? (extent - size) / 2 : Math.max(extent - size, Math.min(0, pos));
   return { scale: vp.scale, x: axis(vp.x, w, box.width), y: axis(vp.y, h, box.height) };
-}
-
-/** Zoom so `rect` (image space) fills the box — used to frame a crop. */
-export function zoomToRect(rect: Rect, box: Box, image: Box, padding = 24): Viewport {
-  if (!rect.w || !rect.h) return fit(image, box);
-  const scale = clampScale(
-    Math.min((box.width - padding * 2) / rect.w, (box.height - padding * 2) / rect.h),
-    image,
-    box,
-  );
-  return clampPan(
-    {
-      scale,
-      x: box.width / 2 - (rect.x + rect.w / 2) * scale,
-      y: box.height / 2 - (rect.y + rect.h / 2) * scale,
-    },
-    image,
-    box,
-  );
 }
 
 /** Euclidean distance between two touch points, for pinch scale. */

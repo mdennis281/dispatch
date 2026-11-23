@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
-  appendSpoken,
   createDictation,
   pressOutcome,
   unavailableReason,
@@ -108,18 +107,6 @@ describe("pressOutcome", () => {
   it("treats a sustained press as push-to-talk, ending on release", () => {
     expect(pressOutcome(HOLD_MS)).toBe("release");
     expect(pressOutcome(5_000)).toBe("release");
-  });
-});
-
-describe("appendSpoken", () => {
-  it("does not lead with a space when the draft is empty", () => {
-    expect(appendSpoken("", "hello there")).toBe("hello there");
-  });
-
-  it("separates from existing text with exactly one space", () => {
-    expect(appendSpoken("ship it", "when tests pass")).toBe("ship it when tests pass");
-    expect(appendSpoken("ship it ", "when tests pass")).toBe("ship it when tests pass");
-    expect(appendSpoken("ship it\n\n", "when tests pass")).toBe("ship it when tests pass");
   });
 });
 

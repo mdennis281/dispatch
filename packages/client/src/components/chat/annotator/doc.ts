@@ -185,13 +185,6 @@ export function insetCrop(srcW: number, srcH: number, angle: number): Rect {
   return { x: (bounds.w - w) / 2, y: (bounds.h - h) / 2, w, h };
 }
 
-export const IDENTITY_OP = (imgW: number, imgH: number): BakeOp => ({
-  angle: 0,
-  flipH: false,
-  flipV: false,
-  crop: { x: 0, y: 0, w: imgW, h: imgH },
-});
-
 /** Output dimensions: exactly the crop box, since the crop is the last step. */
 export function bakedSize(op: BakeOp): { width: number; height: number } {
   return { width: op.crop.w, height: op.crop.h };

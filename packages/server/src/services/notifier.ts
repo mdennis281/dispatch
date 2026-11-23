@@ -223,10 +223,3 @@ export class Notifier {
     }
   }
 }
-
-/** Construct and start a Notifier in one call. */
-export function startNotifier(deps: NotifierDeps): Notifier {
-  const n = new Notifier(deps);
-  n.start();
-  return n;
-}

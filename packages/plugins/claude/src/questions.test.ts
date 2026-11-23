@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { neutralQuestions, buildQuestionAnswer, answerSummary } from "./questions.js";
+import { neutralQuestions, buildQuestionAnswer } from "./questions.js";
 
 /** The multi-question payload the tool sends. */
 const MULTI = {
@@ -110,24 +110,5 @@ describe("buildQuestionAnswer", () => {
     expect(buildQuestionAnswer(input, [{ questionId: "0", selected: ["Yes"] }]).answers).toEqual({
       "Ready?": "Yes",
     });
-  });
-});
-
-describe("answerSummary", () => {
-  it("shows a lone answer without a label", () => {
-    expect(answerSummary(MULTI, [{ questionId: "0", selected: ["Patch"] }])).toBe("Patch");
-  });
-
-  it("labels each answer when several were given", () => {
-    expect(
-      answerSummary(MULTI, [
-        { questionId: "0", selected: ["Patch"] },
-        { questionId: "1", selected: ["Server"] },
-      ]),
-    ).toBe("Approach: Patch · Scope: Server");
-  });
-
-  it("is undefined when nothing was chosen", () => {
-    expect(answerSummary(MULTI, [{ questionId: "0", selected: [] }])).toBeUndefined();
   });
 });
