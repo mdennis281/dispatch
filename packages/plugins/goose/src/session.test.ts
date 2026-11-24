@@ -203,6 +203,63 @@ describe("AcpSession", () => {
     expect(agent.frameFor("session/new")).toBeUndefined();
   });
 
+  it("swallows the conversation replay goose streams during session/load", async () => {
+    // ACP makes the agent replay the whole history as `session/update`s before
+    // it answers `session/load`. Decoded, every resume re-persisted all earlier
+    // messages and tool calls — a daily scheduled chat grew by its entire
+    // history each day.
+    const sid = "20260101_9";
+    const { agent, session, events, drain } = build({ resumeSessionId: sid });
+    const text = (t: string) => ({ type: "text", text: t });
+    agent.onRequest = (method, _p, id) => {
+      if (method === "session/load") {
+        agent.update({ sessionUpdate: "user_message_chunk", content: text("old ask") }, sid);
+        agent.update(
+          { sessionUpdate: "agent_message_chunk", messageId: "chatcmpl-380", content: text("old reply") },
+          sid,
+        );
+        agent.update({ sessionUpdate: "agent_thought_chunk", content: text("old thought") }, sid);
+        agent.update(
+          { sessionUpdate: "tool_call", toolCallId: "t1", title: "shell", rawInput: { command: "ls" } },
+          sid,
+        );
+        agent.update(
+          { sessionUpdate: "tool_call_update", toolCallId: "t1", status: "completed", content: [] },
+          sid,
+        );
+        agent.update({ sessionUpdate: "plan", entries: [{ content: "old step", status: "completed" }] }, sid);
+        // State, not history — these must still land.
+        agent.update(
+          { sessionUpdate: "available_commands_update", availableCommands: [{ name: "compact" }] },
+          sid,
+        );
+        agent.update({ sessionUpdate: "usage_update", used: 1234, size: 32768 }, sid);
+        // Returned, so the fake answers the load AFTER the replay — the order
+        // the spec requires.
+        return {};
+      }
+      if (method === "session/prompt") {
+        agent.update({ sessionUpdate: "agent_message_chunk", content: text("new reply") }, sid);
+        setTimeout(() => agent.reply(id, { stopReason: "end_turn" }), 1);
+      }
+      return undefined;
+    };
+    session.send({ text: "again" });
+    await drain();
+
+    const rows = events.filter(
+      (e) => e.type === "tool-use" || e.type === "tool-result" || e.type === "assistant",
+    );
+    // The only row is today's reply, and none of the replayed text leaked into
+    // it through the decoder's message buffer.
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ type: "assistant", text: "new reply" });
+    expect(events.some((e) => e.type === "delta" && /old/.test(e.delta))).toBe(false);
+    // The replay is dropped; the state updates are not.
+    expect(events.find((e) => e.type === "usage")).toMatchObject({ contextTokens: 1234 });
+    expect((await session.slashCommands()).map((c) => c.name)).toEqual(["compact"]);
+  });
+
   it("carries the system-prompt appends on the first prompt only", async () => {
     const { agent, session, drain } = build({ systemPromptAppends: ["POLICY"] });
     let prompts = 0;
