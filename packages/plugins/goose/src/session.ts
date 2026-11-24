@@ -317,6 +317,14 @@ export class AcpSession implements HarnessSession {
     if (!turn) return [];
     const reply = turn.reply.trim();
     if (reply === CONTROL_REPLY[turn.kind]) {
+      // The instructions were never a system prompt — ACP has no slot for one
+      // — but content in the conversation, which both commands just rewrote.
+      // `/clear` deletes them outright, and a summary keeps whatever the
+      // summariser chose to. Left set, every message after a `/clear` went
+      // out with no environment block and no project policy for the rest of
+      // the chat. Re-armed, the next real message carries them again, the way
+      // a system prompt survives compaction on every other runtime.
+      this.instructionsSent = false;
       if (turn.kind === "clear") return [];
       // Both sizes from here, not left to the host: goose sends the
       // post-compaction `usage_update` BEFORE the turn ends (seen live), so

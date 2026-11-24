@@ -717,6 +717,47 @@ describe("AcpSession compaction", () => {
     expect(events.some((e) => e.type === "assistant" || e.type === "notice")).toBe(false);
   });
 
+  it.each(["clear", "compact"] as const)(
+    "re-sends the instructions after a `/%s`, which rewrote the history they lived in",
+    async (kind) => {
+      // ACP has no system-prompt slot, so the environment block and project
+      // policy are conversation content. Not re-armed, a chat that was cleared
+      // answered every later message with neither.
+      const { agent, session, drain } = build({ systemPromptAppends: ["POLICY"] });
+      answerPrompts(agent, (t) =>
+        t === "/clear" ? "Conversation cleared" : t === "/compact" ? "Compaction complete" : undefined,
+      );
+      const texts = (): string[] =>
+        (agent.lastFrameFor("session/prompt")?.params as { prompt: { text: string }[] }).prompt.map(
+          (b) => b.text,
+        );
+      session.send({ text: "one" });
+      await drain();
+      expect(texts()).toContain("POLICY");
+      await (kind === "clear" ? session.clear() : session.compact());
+      await drain();
+      session.send({ text: "two" });
+      await drain();
+      expect(texts()).toEqual([toEnvironmentBlock(process.platform, "/work"), "POLICY", "two"]);
+    },
+  );
+
+  it("keeps the instructions spent when the command failed and the history stands", async () => {
+    const { agent, session, drain } = build({ systemPromptAppends: ["POLICY"] });
+    answerPrompts(agent, (t) => (t === "/compact" ? "Ran into this error trying to compact" : undefined));
+    session.send({ text: "one" });
+    await drain();
+    await session.compact();
+    await drain();
+    session.send({ text: "two" });
+    await drain();
+    expect(
+      (agent.lastFrameFor("session/prompt")?.params as { prompt: { text: string }[] }).prompt.map(
+        (b) => b.text,
+      ),
+    ).toEqual(["two"]);
+  });
+
   it("reports goose's own auto-compaction once, when it completes", async () => {
     const { agent, session, events, drain } = build();
     agent.onRequest = (method, _p, id) => {
