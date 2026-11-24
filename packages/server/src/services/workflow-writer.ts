@@ -215,13 +215,74 @@ export async function saveProjectWorkflow(
   // Key-by-key (rather than replacing the whole `workflow` node) so comments
   // attached to the keys we aren't touching survive the write.
   for (const key of WORKFLOW_KEYS) applyAuthored(loaded.doc, ["workflow", key], incoming[key]);
-  const manifestPath = await saveManifest(loaded);
+  return commitManifest(deps, projectId, project, loaded);
+}
 
-  // Re-read from disk so the store, the cached config and every WS client end up
-  // agreeing with the file we just wrote — the same path a watcher edit takes.
+type WriterDeps = { store: Store; projectConfig: ProjectConfigService };
+
+/**
+ * Write an edited manifest and re-sync from it — the tail of every manifest save.
+ *
+ * Re-read from disk so the store, the cached config and every WS client end up
+ * agreeing with the file we just wrote — the same path a watcher edit takes.
+ */
+async function commitManifest(
+  deps: WriterDeps,
+  projectId: string,
+  project: Project,
+  loaded: LoadedManifest,
+): Promise<ProjectSettingSaveResult> {
+  const manifestPath = await saveManifest(loaded);
   await deps.projectConfig.reload(projectId);
   const project2 = (await deps.store.getProject(projectId).catch(() => null)) ?? project;
   return { target: "manifest", project: project2, manifestPath };
+}
+
+/**
+ * Edit a manifest-ONLY block of `project.yaml`.
+ *
+ * Deliberately no `.data` fallback like the workflow and shell-filter writers
+ * have. Those two are mirrored into the stored project row (`mergeProject`),
+ * which is how the stable and dev instances came to disagree about a project's
+ * harness: each had its own row. The blocks written through here are read from
+ * the loaded config and nowhere else, so a project without a manifest has
+ * nowhere to hold them, and the caller is told so (`what` names the settings in
+ * that message) rather than handed a write that the next config reload would
+ * not know about.
+ */
+async function editManifestOnly(
+  deps: WriterDeps,
+  projectId: string,
+  what: string,
+  edit: (doc: LoadedManifest["doc"]) => void,
+): Promise<ProjectSettingSaveResult | null> {
+  const project = await deps.store.getProject(projectId).catch(() => null);
+  if (!project) return null;
+  const externalDir = deps.store.projectConfigDir(projectId);
+  const paths = isManifestBacked(project, externalDir) ? configPathsFor(project, externalDir) : null;
+  if (!paths) {
+    throw new Error(
+      "This project has no config dir yet. Create one (Project config → Create config) " +
+        `and ${what} will be written to its project.yaml.`,
+    );
+  }
+  const loaded = await loadManifest(paths);
+  edit(loaded.doc);
+  return commitManifest(deps, projectId, project, loaded);
+}
+
+/**
+ * Replace a top-level block WHOLE, or remove it when it prunes to nothing.
+ *
+ * An empty block is DELETED rather than written as `key: {}`: the two mean the
+ * same thing to the loader, but only one of them stops reading as a deliberate
+ * authored choice in a file someone else will open. Absent keys are pruned so
+ * the file reads as authored, not as a dump.
+ */
+function replaceBlock(doc: LoadedManifest["doc"], key: string, block: object | null): void {
+  const pruned = block ? prune(block) : null;
+  if (pruned && Object.keys(pruned).length) doc.setIn([key], pruned);
+  else doc.delete(key);
 }
 
 /** Persist the project's transcript-shell override, or remove it to inherit. */
@@ -251,10 +312,7 @@ export async function saveProjectShellFilter(
   const loaded = await loadManifest(paths);
   if (shellFilter === undefined) loaded.doc.deleteIn(["defaults", "shellFilter"]);
   else loaded.doc.setIn(["defaults", "shellFilter"], shellFilter);
-  const manifestPath = await saveManifest(loaded);
-  await deps.projectConfig.reload(projectId);
-  const project2 = (await deps.store.getProject(projectId).catch(() => null)) ?? project;
-  return { target: "manifest", project: project2, manifestPath };
+  return commitManifest(deps, projectId, project, loaded);
 }
 
 /**
@@ -294,48 +352,30 @@ export type ProjectDefaultsPatch = z.infer<typeof ProjectDefaultsPatchSchema>;
 /**
  * Write the project layer of the layered settings to `project.yaml`.
  *
- * Manifest ONLY — there is deliberately no `.data` fallback like the workflow
- * and shell-filter writers have. Those two are mirrored into the stored project
- * row (`mergeProject`), which is how the stable and dev instances came to
- * disagree about a project's harness: each had its own row. These keys are
- * read from the loaded config and nowhere else, so a project without a
- * manifest has nowhere to hold them, and the caller is told so rather than
- * handed a write that the next config reload would not know about.
+ * Manifest ONLY — see {@link editManifestOnly} for why there is no `.data`
+ * fallback here.
  */
 export async function saveProjectDefaults(
-  deps: { store: Store; projectConfig: ProjectConfigService },
+  deps: WriterDeps,
   projectId: string,
   patch: ProjectDefaultsPatch,
 ): Promise<ProjectSettingSaveResult | null> {
-  const project = await deps.store.getProject(projectId).catch(() => null);
-  if (!project) return null;
-  const externalDir = deps.store.projectConfigDir(projectId);
-  const paths = isManifestBacked(project, externalDir) ? configPathsFor(project, externalDir) : null;
-  if (!paths) {
-    throw new Error(
-      "This project has no config dir yet. Create one (Project config → Create config) " +
-        "and these defaults will be written to its project.yaml.",
-    );
-  }
-  const loaded = await loadManifest(paths);
-  const apply = (path: string[], value: unknown) => {
-    if (value === undefined) return;
-    if (value === null) loaded.doc.deleteIn(path);
-    else loaded.doc.setIn(path, value);
-  };
-  for (const [key, value] of Object.entries(patch.defaults ?? {})) apply(["defaults", key], value);
-  for (const [key, value] of Object.entries(patch.spawnChat ?? {})) apply(["spawnChat", key], value);
-  // An emptied block is removed outright: `defaults: {}` left behind reads as
-  // authored config in the file and as nothing in the loader, which is the kind
-  // of gap a hand-editor then "fixes" by guessing at keys.
-  for (const block of ["defaults", "spawnChat"]) {
-    const node = loaded.doc.get(block, true);
-    if (isMap(node) && node.items.length === 0) loaded.doc.delete(block);
-  }
-  const manifestPath = await saveManifest(loaded);
-  await deps.projectConfig.reload(projectId);
-  const project2 = (await deps.store.getProject(projectId).catch(() => null)) ?? project;
-  return { target: "manifest", project: project2, manifestPath };
+  return editManifestOnly(deps, projectId, "these defaults", (doc) => {
+    const apply = (path: string[], value: unknown) => {
+      if (value === undefined) return;
+      if (value === null) doc.deleteIn(path);
+      else doc.setIn(path, value);
+    };
+    for (const [key, value] of Object.entries(patch.defaults ?? {})) apply(["defaults", key], value);
+    for (const [key, value] of Object.entries(patch.spawnChat ?? {})) apply(["spawnChat", key], value);
+    // An emptied block is removed outright: `defaults: {}` left behind reads as
+    // authored config in the file and as nothing in the loader, which is the kind
+    // of gap a hand-editor then "fixes" by guessing at keys.
+    for (const block of ["defaults", "spawnChat"]) {
+      const node = doc.get(block, true);
+      if (isMap(node) && node.items.length === 0) doc.delete(block);
+    }
+  });
 }
 
 /**
@@ -346,32 +386,16 @@ export async function saveProjectDefaults(
  * the block is a single decision ("handle issues like this"), the pane edits it
  * as one form, and a partial patch would leave a filter from last week under a
  * mode chosen today. Manifest-only for the same reason as the defaults writer —
- * this block is read from the loaded config and nowhere else. Absent keys are
- * pruned from what is written so the file reads as authored, not as a dump.
+ * this block is read from the loaded config and nowhere else.
  */
 export async function saveProjectIssues(
-  deps: { store: Store; projectConfig: ProjectConfigService },
+  deps: WriterDeps,
   projectId: string,
   block: IssueConfig | null,
 ): Promise<ProjectSettingSaveResult | null> {
-  const project = await deps.store.getProject(projectId).catch(() => null);
-  if (!project) return null;
-  const externalDir = deps.store.projectConfigDir(projectId);
-  const paths = isManifestBacked(project, externalDir) ? configPathsFor(project, externalDir) : null;
-  if (!paths) {
-    throw new Error(
-      "This project has no config dir yet. Create one (Project config → Create config) " +
-        "and the issue settings will be written to its project.yaml.",
-    );
-  }
-  const loaded = await loadManifest(paths);
-  const pruned = block ? prune(block) : null;
-  if (pruned && Object.keys(pruned).length) loaded.doc.setIn(["issues"], pruned);
-  else loaded.doc.delete("issues");
-  const manifestPath = await saveManifest(loaded);
-  await deps.projectConfig.reload(projectId);
-  const project2 = (await deps.store.getProject(projectId).catch(() => null)) ?? project;
-  return { target: "manifest", project: project2, manifestPath };
+  return editManifestOnly(deps, projectId, "the issue settings", (doc) =>
+    replaceBlock(doc, "issues", block),
+  );
 }
 
 /**
@@ -384,34 +408,15 @@ export async function saveProjectIssues(
  * merging half of a new form over half of an old one can produce a pair nobody
  * chose. Manifest-only — the block is read from the loaded config and nowhere
  * else, so a project without a `project.yaml` has nowhere to hold it.
- *
- * An empty block is DELETED rather than written as `agentContext: {}`: the two
- * mean the same thing to the loader, but only one of them stops reading as a
- * deliberate authored choice in a file someone else will open.
  */
 export async function saveProjectAgentContext(
-  deps: { store: Store; projectConfig: ProjectConfigService },
+  deps: WriterDeps,
   projectId: string,
   block: ProjectAgentContext | null,
 ): Promise<ProjectSettingSaveResult | null> {
-  const project = await deps.store.getProject(projectId).catch(() => null);
-  if (!project) return null;
-  const externalDir = deps.store.projectConfigDir(projectId);
-  const paths = isManifestBacked(project, externalDir) ? configPathsFor(project, externalDir) : null;
-  if (!paths) {
-    throw new Error(
-      "This project has no config dir yet. Create one (Project config → Create config) " +
-        "and the agent-context settings will be written to its project.yaml.",
-    );
-  }
-  const loaded = await loadManifest(paths);
-  const pruned = block ? prune(block) : null;
-  if (pruned && Object.keys(pruned).length) loaded.doc.setIn(["agentContext"], pruned);
-  else loaded.doc.delete("agentContext");
-  const manifestPath = await saveManifest(loaded);
-  await deps.projectConfig.reload(projectId);
-  const project2 = (await deps.store.getProject(projectId).catch(() => null)) ?? project;
-  return { target: "manifest", project: project2, manifestPath };
+  return editManifestOnly(deps, projectId, "the agent-context settings", (doc) =>
+    replaceBlock(doc, "agentContext", block),
+  );
 }
 
 /**
@@ -425,28 +430,13 @@ export async function saveProjectAgentContext(
  * can shorten how long a transcript survives.
  */
 export async function saveProjectRetention(
-  deps: { store: Store; projectConfig: ProjectConfigService },
+  deps: WriterDeps,
   projectId: string,
   block: ProjectRetention | null,
 ): Promise<ProjectSettingSaveResult | null> {
-  const project = await deps.store.getProject(projectId).catch(() => null);
-  if (!project) return null;
-  const externalDir = deps.store.projectConfigDir(projectId);
-  const paths = isManifestBacked(project, externalDir) ? configPathsFor(project, externalDir) : null;
-  if (!paths) {
-    throw new Error(
-      "This project has no config dir yet. Create one (Project config → Create config) " +
-        "and the retention overrides will be written to its project.yaml.",
-    );
-  }
-  const loaded = await loadManifest(paths);
-  const pruned = block ? prune(block) : null;
-  if (pruned && Object.keys(pruned).length) loaded.doc.setIn(["retention"], pruned);
-  else loaded.doc.delete("retention");
-  const manifestPath = await saveManifest(loaded);
-  await deps.projectConfig.reload(projectId);
-  const project2 = (await deps.store.getProject(projectId).catch(() => null)) ?? project;
-  return { target: "manifest", project: project2, manifestPath };
+  return editManifestOnly(deps, projectId, "the retention overrides", (doc) =>
+    replaceBlock(doc, "retention", block),
+  );
 }
 
 /** Drop `undefined`, empty strings and empty arrays/objects, recursively. */

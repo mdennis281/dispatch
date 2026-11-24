@@ -22,7 +22,7 @@
  * client that wants to show or open a config file must read it from here rather
  * than composing `<repoPath>/.dispatch` for itself.
  */
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply } from "fastify";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -40,8 +40,33 @@ import {
   saveProjectRetention,
   saveProjectShellFilter,
   saveProjectWorkflow,
+  type ProjectSettingSaveResult,
 } from "../services/workflow-writer.js";
 import { safeArchivePath } from "../services/project-config-archive.js";
+
+/**
+ * Run one project-setting writer and answer the way every `PUT …/config/<block>`
+ * route does: 404 for an unknown project, a `project-update` on the bus so every
+ * open client re-renders the saved state, and the save result.
+ *
+ * A writer that throws is a 400 with the real reason rather than a 500: the
+ * usual cause is a hand-broken `project.yaml` or a project with no config dir
+ * yet, and both are things the user can fix and then save again.
+ */
+export async function replySettingSave(
+  app: FastifyInstance,
+  reply: FastifyReply,
+  save: () => Promise<ProjectSettingSaveResult | null>,
+): Promise<ProjectSettingSaveResult | FastifyReply> {
+  try {
+    const out = await save();
+    if (!out) return reply.code(404).send({ error: "project not found" });
+    app.services.bus.publish({ type: "project-update", project: out.project });
+    return out;
+  } catch (err) {
+    return reply.code(400).send({ error: err instanceof Error ? err.message : String(err) });
+  }
+}
 
 export function registerProjectConfigRoutes(app: FastifyInstance): void {
   const { store } = app.cm;
@@ -99,22 +124,9 @@ export function registerProjectConfigRoutes(app: FastifyInstance): void {
       if (!parsed.success) {
         return reply.code(400).send({ error: parsed.error.message });
       }
-      try {
-        const out = await saveProjectWorkflow(
-          { store, projectConfig },
-          req.params.id,
-          parsed.data,
-        );
-        if (!out) return reply.code(404).send({ error: "project not found" });
-        app.services.bus.publish({ type: "project-update", project: out.project });
-        return out;
-      } catch (err) {
-        // A hand-broken project.yaml surfaces here as a 400 with the real reason
-        // (rather than a 500) — the user can fix the file and save again.
-        return reply
-          .code(400)
-          .send({ error: err instanceof Error ? err.message : String(err) });
-      }
+      return replySettingSave(app, reply, () =>
+        saveProjectWorkflow({ store, projectConfig }, req.params.id, parsed.data),
+      );
     },
   );
 
@@ -130,18 +142,9 @@ export function registerProjectConfigRoutes(app: FastifyInstance): void {
         ? { success: true as const, data: undefined }
         : ShellTranscriptFilterSchema.safeParse(raw);
       if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
-      try {
-        const out = await saveProjectShellFilter(
-          { store, projectConfig },
-          req.params.id,
-          parsed.data,
-        );
-        if (!out) return reply.code(404).send({ error: "project not found" });
-        app.services.bus.publish({ type: "project-update", project: out.project });
-        return out;
-      } catch (err) {
-        return reply.code(400).send({ error: err instanceof Error ? err.message : String(err) });
-      }
+      return replySettingSave(app, reply, () =>
+        saveProjectShellFilter({ store, projectConfig }, req.params.id, parsed.data),
+      );
     },
   );
 
@@ -154,14 +157,9 @@ export function registerProjectConfigRoutes(app: FastifyInstance): void {
     async (req, reply) => {
       const parsed = ProjectDefaultsPatchSchema.safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
-      try {
-        const out = await saveProjectDefaults({ store, projectConfig }, req.params.id, parsed.data);
-        if (!out) return reply.code(404).send({ error: "project not found" });
-        app.services.bus.publish({ type: "project-update", project: out.project });
-        return out;
-      } catch (err) {
-        return reply.code(400).send({ error: err instanceof Error ? err.message : String(err) });
-      }
+      return replySettingSave(app, reply, () =>
+        saveProjectDefaults({ store, projectConfig }, req.params.id, parsed.data),
+      );
     },
   );
 
@@ -173,18 +171,9 @@ export function registerProjectConfigRoutes(app: FastifyInstance): void {
     async (req, reply) => {
       const body = req.body == null ? null : ProjectAgentContextSchema.safeParse(req.body);
       if (body && !body.success) return reply.code(400).send({ error: body.error.message });
-      try {
-        const out = await saveProjectAgentContext(
-          { store, projectConfig },
-          req.params.id,
-          body ? body.data : null,
-        );
-        if (!out) return reply.code(404).send({ error: "project not found" });
-        app.services.bus.publish({ type: "project-update", project: out.project });
-        return out;
-      } catch (err) {
-        return reply.code(400).send({ error: err instanceof Error ? err.message : String(err) });
-      }
+      return replySettingSave(app, reply, () =>
+        saveProjectAgentContext({ store, projectConfig }, req.params.id, body ? body.data : null),
+      );
     },
   );
 
@@ -195,18 +184,9 @@ export function registerProjectConfigRoutes(app: FastifyInstance): void {
     async (req, reply) => {
       const body = req.body == null ? null : ProjectRetentionSchema.safeParse(req.body);
       if (body && !body.success) return reply.code(400).send({ error: body.error.message });
-      try {
-        const out = await saveProjectRetention(
-          { store, projectConfig },
-          req.params.id,
-          body ? body.data : null,
-        );
-        if (!out) return reply.code(404).send({ error: "project not found" });
-        app.services.bus.publish({ type: "project-update", project: out.project });
-        return out;
-      } catch (err) {
-        return reply.code(400).send({ error: err instanceof Error ? err.message : String(err) });
-      }
+      return replySettingSave(app, reply, () =>
+        saveProjectRetention({ store, projectConfig }, req.params.id, body ? body.data : null),
+      );
     },
   );
 

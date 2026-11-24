@@ -39,6 +39,7 @@ import {
 } from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
 import type { Store } from "../store/index.js";
+import { clearSweepTimer, setSweepTimer } from "./sweep-timer.js";
 import type { BoundIssueTracker } from "./issues/service.js";
 
 /** How often the timer ticks. Each project then decides whether it is due. */
@@ -153,14 +154,8 @@ export class IssueWatcher {
     this.bus = opts.bus;
     this.tickMs = opts.tickMs ?? ISSUE_TICK_MS;
     this.now = opts.now ?? (() => Date.now());
-    this.setTimer =
-      opts.setTimer ??
-      ((fn, ms) => {
-        const t = setInterval(fn, ms);
-        t.unref?.();
-        return t;
-      });
-    this.clearTimer = opts.clearTimer ?? ((h) => clearInterval(h as NodeJS.Timeout));
+    this.setTimer = opts.setTimer ?? setSweepTimer;
+    this.clearTimer = opts.clearTimer ?? clearSweepTimer;
   }
 
   /** Is this instance the one that polls? */

@@ -17,6 +17,7 @@ import type { FastifyInstance } from "fastify";
 import * as z from "zod";
 import { IssueConfigSchema, resolveIssuePolicy } from "@dispatch/shared";
 import { saveProjectIssues } from "../services/workflow-writer.js";
+import { replySettingSave } from "./project-config.js";
 
 export function registerIssueRoutes(app: FastifyInstance): void {
   const { issues, issueWatcher, store, projectConfig } = app.services;
@@ -85,13 +86,8 @@ export function registerIssueRoutes(app: FastifyInstance): void {
   app.put<{ Params: { id: string } }>("/api/projects/:id/config/issues", async (req, reply) => {
     const body = req.body === null ? null : IssueConfigSchema.safeParse(req.body ?? {});
     if (body && !body.success) return reply.code(400).send({ error: body.error.message });
-    try {
-      const out = await saveProjectIssues({ store, projectConfig }, req.params.id, body ? body.data : null);
-      if (!out) return reply.code(404).send({ error: "project not found" });
-      app.services.bus.publish({ type: "project-update", project: out.project });
-      return out;
-    } catch (err) {
-      return reply.code(400).send({ error: err instanceof Error ? err.message : String(err) });
-    }
+    return replySettingSave(app, reply, () =>
+      saveProjectIssues({ store, projectConfig }, req.params.id, body ? body.data : null),
+    );
   });
 }
