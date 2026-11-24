@@ -28,14 +28,12 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  AlertTriangle,
   ArrowDownWideNarrow,
   Check,
   ExternalLink,
   FolderGit2,
   GitMerge,
   GitPullRequest,
-  Loader2,
   MessageSquare,
   Pause,
   Play,
@@ -47,9 +45,7 @@ import {
   Zap,
 } from "lucide-react";
 import type {
-  CheckRun,
   PrRecord,
-  PrReviewer,
   RegistryScope,
   RegistrySort,
   TerminalInfo,
@@ -73,7 +69,7 @@ import { useProjects } from "../../stores/projects.js";
 import { useAllPrs } from "../../stores/prs.js";
 import { selectChat } from "../../stores/navigation.js";
 import { ReviewAgentChip, ReviewerProblemNotice } from "../pr/ReviewAgentChip.js";
-import { checkIsFailing } from "../pr/checks.js";
+import { PrStatusChips } from "../chat/rows/PrStateView.js";
 import {
   useWorkspace,
   type WorkspaceFilters,
@@ -388,54 +384,10 @@ function KillAllButton({
 
 /* --------------------------------------------------------------- PR rows */
 
-/** Fold a PR's checks into one chip. Failing wins, then running, then green. */
-function ChecksChip({ checks }: { checks: CheckRun[] }) {
-  if (checks.length === 0) return <Chip tone="neutral">no checks</Chip>;
-  const running = checks.filter((c) => c.status !== "completed").length;
-  const failed = checks.filter(checkIsFailing).length;
-  if (failed > 0) return <Chip tone="danger">{failed} failed</Chip>;
-  if (running > 0) return <Chip tone="accent">{running} running</Chip>;
-  return <Chip tone="success">{checks.length} passed</Chip>;
-}
-
-/** How a reviewer's state reads and colours. */
-const REVIEWER_META: Record<PrReviewer["state"], { label: string; tone: Tone }> = {
-  requested: { label: "requested", tone: "warn" },
-  // The state this whole registry exists to surface: GitHub's spinner, made
-  // legible. "Waiting on Copilot" and "Copilot is writing it now" are different
-  // situations, and only one of them means the wait is nearly over.
-  in_progress: { label: "reviewing…", tone: "accent" },
-  approved: { label: "approved", tone: "success" },
-  changes_requested: { label: "changes requested", tone: "danger" },
-  commented: { label: "commented", tone: "neutral" },
-  dismissed: { label: "dismissed", tone: "neutral" },
-};
-
-function ReviewerChip({ reviewer }: { reviewer: PrReviewer }) {
-  const meta = REVIEWER_META[reviewer.state];
-  return (
-    <Chip
-      tone={meta.tone}
-      icon={reviewer.state === "in_progress" ? <Loader2 className="animate-spin" /> : undefined}
-      // `stale` is why this is a title and not just a colour: a reviewer who
-      // approved a commit you've since replaced has NOT approved what's there.
-      title={
-        reviewer.stale
-          ? `${reviewer.login} ${meta.label} — but on an older commit than the current head`
-          : `${reviewer.login} ${meta.label}`
-      }
-    >
-      {reviewer.login.replace(/\[bot\]$/, "")} {meta.label}
-      {reviewer.stale ? " (stale)" : ""}
-    </Chip>
-  );
-}
-
 function PrRow({ pr, showProject }: { pr: PrRecord; showProject: boolean }) {
   const closeOverlay = useOverlay("workspace").close;
   const link = pr.url && pr.url !== "#" ? pr.url : undefined;
   const open = pr.state === "open";
-  const unresolved = pr.threads.filter((t) => !t.isResolved && !t.isOutdated).length;
   // Only offered for a PR this app could act on. A discovered PR belongs to
   // somebody else, and a Merge button on it is an invitation to a mistake.
   const canAct = open && !!pr.projectId;
@@ -472,32 +424,7 @@ function PrRow({ pr, showProject }: { pr: PrRecord; showProject: boolean }) {
         <>
           <ProjectChip projectId={pr.projectId} show={showProject} />
           <ChatChip chatId={pr.chatId} />
-          {pr.state === "merged" && <Chip tone="accent">merged</Chip>}
-          {pr.state === "closed" && <Chip tone="neutral">closed</Chip>}
-          {pr.isDraft && <Chip tone="neutral">draft</Chip>}
-          {pr.hold && <Chip tone="warn">hold</Chip>}
-          {/* null is "GitHub hasn't computed it yet", not "fine" — so only an
-              explicit false raises the conflict flag. */}
-          {open && pr.mergeable === false && (
-            <Chip tone="danger" icon={<AlertTriangle />}>
-              conflicts
-            </Chip>
-          )}
-          {open && <ChecksChip checks={pr.checks} />}
-          {pr.reviewDecision === "approved" && (
-            <Chip tone="success" icon={<Check />}>
-              approved
-            </Chip>
-          )}
-          {pr.reviewDecision === "changes_requested" && (
-            <Chip tone="danger">changes requested</Chip>
-          )}
-          {unresolved > 0 && (
-            <Chip tone="warn" icon={<MessageSquare />}>
-              {unresolved} unresolved
-            </Chip>
-          )}
-          {open && pr.reviewers.map((r) => <ReviewerChip key={r.login} reviewer={r} />)}
+          <PrStatusChips pr={pr} />
           {/* Dispatch's own reviewer. Not folded into `reviewers` above: those
               come from GitHub's queue, and in self-review mode ours is not in
               it — the state lives only on our row. */}

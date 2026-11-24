@@ -29,7 +29,7 @@ import {
 } from "@dispatch/shared";
 import { Chip, type Tone } from "../../ui/Chip.js";
 import { ReviewAgentChip } from "../../pr/ReviewAgentChip.js";
-import { checkIsFailing } from "../../pr/checks.js";
+import { checkIsFailing, summarizeChecks } from "../../pr/checks.js";
 import { cn } from "../../../lib/cn.js";
 import { dur } from "../../../lib/format.js";
 import { useNowTick } from "../../../stores/agentRun.js";
@@ -60,28 +60,17 @@ interface Rollup {
   total: number;
 }
 
-/** Fold jobs into pass/fail/running. A job still queued is NOT a pass. */
+/**
+ * Fold jobs into pass/fail/running. A job still queued is NOT a pass.
+ *
+ * Off `summarizeChecks` rather than its own switch: this was the last surface
+ * still spelling "failing" by hand after `shared/checks.ts` became the one
+ * definition. `pass` keeps skipped/neutral jobs, as the chip always has — a
+ * skipped job is not one the author still owes anything.
+ */
 export function foldChecks(checks: CheckRun[]): Rollup {
-  let pass = 0;
-  let fail = 0;
-  let running = 0;
-  for (const c of checks) {
-    if (c.status !== "completed") {
-      running++;
-      continue;
-    }
-    switch (c.conclusion) {
-      case "failure":
-      case "timed_out":
-      case "cancelled":
-      case "action_required":
-        fail++;
-        break;
-      default:
-        pass++;
-    }
-  }
-  return { pass, fail, running, total: checks.length };
+  const s = summarizeChecks(checks);
+  return { pass: s.passed + s.neutral, fail: s.failed, running: s.pending, total: s.total };
 }
 
 export function ChecksChip({ checks }: { checks: CheckRun[] }) {
@@ -158,12 +147,34 @@ export function unresolvedThreads(threads: ReviewThread[]): ReviewThread[] {
  * anything that would not is in {@link PrStatePanel}.
  */
 export function PrStateStrip({ pr, live }: { pr: PrSnapshot; live?: boolean }) {
-  const open = pr.state === "open";
-  const unresolved = unresolvedThreads(pr.threads).length;
   return (
     <div className="flex flex-wrap items-center gap-1.5">
       <span className="cm-mono !text-2xs text-muted">#{pr.number}</span>
       <DiffSize pr={pr} />
+      <PrStatusChips pr={pr} />
+      {/* Says which clock this is on. A watch card tracks the PR as it stands;
+          every other card is a record of a moment, and conflating the two is
+          how a transcript starts lying about the past. */}
+      {live && (
+        <span className="ml-auto flex items-center gap-1 cm-mono !text-2xs text-faint">
+          <Circle className="size-1.5 fill-success text-success" /> live
+        </span>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The PR's state as a run of chips: lifecycle, conflicts, CI, review verdict,
+ * unresolved threads and each reviewer. Shared by the transcript strip and the
+ * Workspace roster, which had drifted into two check chips that read the same
+ * CI differently.
+ */
+export function PrStatusChips({ pr }: { pr: PrSnapshot }) {
+  const open = pr.state === "open";
+  const unresolved = unresolvedThreads(pr.threads).length;
+  return (
+    <>
       {pr.state === "merged" && <Chip tone="accent">merged</Chip>}
       {pr.state === "closed" && <Chip tone="neutral">closed</Chip>}
       {pr.isDraft && <Chip tone="neutral">draft</Chip>}
@@ -188,15 +199,7 @@ export function PrStateStrip({ pr, live }: { pr: PrSnapshot; live?: boolean }) {
         </Chip>
       )}
       {open && pr.reviewers.map((r) => <ReviewerChip key={r.login} reviewer={r} />)}
-      {/* Says which clock this is on. A watch card tracks the PR as it stands;
-          every other card is a record of a moment, and conflating the two is
-          how a transcript starts lying about the past. */}
-      {live && (
-        <span className="ml-auto flex items-center gap-1 cm-mono !text-2xs text-faint">
-          <Circle className="size-1.5 fill-success text-success" /> live
-        </span>
-      )}
-    </div>
+    </>
   );
 }
 

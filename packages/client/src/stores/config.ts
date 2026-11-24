@@ -25,19 +25,19 @@ interface ConfigStore {
 /** The per-project `.dispatch/` config — the Project config view's spine.
  *  Fetched on open + on Reload; also live-updated by the `project-config-update`
  *  WS event (a watcher edit / a scaffold / an import). */
-export const useConfig = create<ConfigStore>((set, get) => ({
-  byProject: {},
-  loading: {},
-  error: {},
-
-  load: async (projectId) => {
-    if (get().loading[projectId]) return;
+export const useConfig = create<ConfigStore>((set, get) => {
+  /** One fetch into the per-project slots: the same bookkeeping for a cached
+   *  read and a forced disk re-read, so the two cannot drift apart. */
+  const fetchInto = async (
+    projectId: string,
+    fetch: (id: string) => Promise<ProjectConfigResult>,
+  ): Promise<void> => {
     set((s) => ({
       loading: { ...s.loading, [projectId]: true },
       error: { ...s.error, [projectId]: null },
     }));
     try {
-      const result = await api.projectConfig.get(projectId);
+      const result = await fetch(projectId);
       set((s) => ({
         byProject: { ...s.byProject, [projectId]: result },
         loading: { ...s.loading, [projectId]: false },
@@ -48,35 +48,31 @@ export const useConfig = create<ConfigStore>((set, get) => ({
         error: { ...s.error, [projectId]: err instanceof Error ? err.message : String(err) },
       }));
     }
-  },
+  };
 
-  reload: async (projectId) => {
-    set((s) => ({
-      loading: { ...s.loading, [projectId]: true },
-      error: { ...s.error, [projectId]: null },
-    }));
-    try {
-      const result = await api.projectConfig.reload(projectId);
+  return {
+    byProject: {},
+    loading: {},
+    error: {},
+
+    load: async (projectId) => {
+      if (get().loading[projectId]) return;
+      await fetchInto(projectId, api.projectConfig.get);
+    },
+
+    // Not deduped against an in-flight load: Reload is an explicit ask to read the
+    // disk NOW, and a cached read already in flight would not answer it.
+    reload: (projectId) => fetchInto(projectId, api.projectConfig.reload),
+
+    set: (projectId, result) =>
       set((s) => ({
         byProject: { ...s.byProject, [projectId]: result },
-        loading: { ...s.loading, [projectId]: false },
-      }));
-    } catch (err) {
-      set((s) => ({
-        loading: { ...s.loading, [projectId]: false },
-        error: { ...s.error, [projectId]: err instanceof Error ? err.message : String(err) },
-      }));
-    }
-  },
+        error: { ...s.error, [projectId]: null },
+      })),
 
-  set: (projectId, result) =>
-    set((s) => ({
-      byProject: { ...s.byProject, [projectId]: result },
-      error: { ...s.error, [projectId]: null },
-    })),
-
-  reset: () => set({ byProject: {}, loading: {}, error: {} }),
-}));
+    reset: () => set({ byProject: {}, loading: {}, error: {} }),
+  };
+});
 
 /**
  * The PROJECT layer of the layered settings — the manifest's `defaults` block
