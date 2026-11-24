@@ -122,6 +122,9 @@ function versionOf(exe: string): string | undefined {
       encoding: "utf8",
       timeout: 15_000,
       stdio: ["ignore", "pipe", "ignore"],
+      // As the codex and goose probes already do: the installed server has no
+      // console, so without this each version probe flashes a window on Windows.
+      windowsHide: true,
     });
     return /(\d+\.\d+\.\d+)/.exec(out)?.[1];
   } catch {

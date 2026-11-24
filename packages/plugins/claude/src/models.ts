@@ -86,16 +86,19 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
 }
 
 /**
- * Ask the runtime for its model list. Returns null on any failure so the caller
- * can fall back rather than surface an error.
+ * Open a silent probe session, read the runtime's model list, and hand both to
+ * `use` — the shell {@link probe} and {@link probeWindows} share. Null on any
+ * failure or an empty list, so the caller can fall back rather than surface an
+ * error.
  *
  * `settingSources: []` keeps the probe from loading repo settings or starting
  * project MCP servers — it only needs the control channel.
  */
-async function probe(
+async function withProbeSession<T>(
   query: ModelsQueryFn,
   account: HarnessAccount | undefined,
-): Promise<ModelOption[] | null> {
+  use: (q: Query, models: ModelInfo[]) => Promise<T | null> | T | null,
+): Promise<T | null> {
   const abort = new AbortController();
   try {
     const env = envWithAccount(account);
@@ -110,13 +113,21 @@ async function probe(
     });
     const models = await withTimeout(q.supportedModels(), PROBE_TIMEOUT_MS);
     if (!models?.length) return null;
-    return models.map(toOption);
+    return await use(q, models);
   } catch {
     return null;
   } finally {
     // Always tear the subprocess down — we never consume the message stream.
     abort.abort();
   }
+}
+
+/** Ask the runtime for its model list; null on any failure. */
+function probe(
+  query: ModelsQueryFn,
+  account: HarnessAccount | undefined,
+): Promise<ModelOption[] | null> {
+  return withProbeSession(query, account, (_q, models) => models.map(toOption));
 }
 
 export interface ListModelsOptions {
@@ -206,20 +217,7 @@ async function probeWindows(
   query: ModelsQueryFn,
   account: HarnessAccount | undefined,
 ): Promise<WindowsProbe | null> {
-  const abort = new AbortController();
-  try {
-    const env = envWithAccount(account);
-    const q = query({
-      prompt: SILENT_PROMPT,
-      options: {
-        settingSources: [],
-        abortController: abort,
-        ...claudeExecutableOption(),
-        ...(env ? { env } : {}),
-      },
-    });
-    const models = await withTimeout(q.supportedModels(), PROBE_TIMEOUT_MS);
-    if (!models?.length) return null;
+  return withProbeSession(query, account, async (q, models) => {
     const windows: Record<string, number> = {};
     // Sequential on purpose: `getContextUsage` answers for whatever model the
     // session is on NOW, so interleaving two `setModel`s would cross the wires.
@@ -234,11 +232,7 @@ async function probeWindows(
     }
     const sized = Object.keys(windows).length;
     return sized ? { windows, complete: sized === models.length } : null;
-  } catch {
-    return null;
-  } finally {
-    abort.abort();
-  }
+  });
 }
 
 /**

@@ -46,6 +46,7 @@ import type { EventBus } from "../bus.js";
 import type { Store } from "../store/index.js";
 import type { PrPollSnapshot } from "./github.js";
 import type { PrScope } from "./pr-registry.js";
+import { clearSweepTimer, setSweepTimer } from "./sweep-timer.js";
 
 /** How often the watcher sweeps every chat's open PRs. */
 export const PR_REVIEW_POLL_MS = 90_000;
@@ -329,16 +330,8 @@ export class PrReviewWatcher {
     this.discoverMs = opts.discoverMs ?? PR_DISCOVER_MS;
     this.now = opts.now ?? (() => Date.now());
     this.genId = opts.genId ?? (() => Math.random().toString(36).slice(2, 11));
-    this.setTimer =
-      opts.setTimer ??
-      ((fn, ms) => {
-        const t = setInterval(fn, ms);
-        // A background sweep must never hold the process open on its own.
-        (t as unknown as { unref?: () => void }).unref?.();
-        return t;
-      });
-    this.clearTimer =
-      opts.clearTimer ?? ((h) => clearInterval(h as ReturnType<typeof setInterval>));
+    this.setTimer = opts.setTimer ?? setSweepTimer;
+    this.clearTimer = opts.clearTimer ?? clearSweepTimer;
   }
 
   /** Begin sweeping. Idempotent. */

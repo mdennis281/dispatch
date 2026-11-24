@@ -43,6 +43,7 @@ import {
   type ScheduleView,
 } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
+import { clearSweepTimer, setSweepTimer } from "./sweep-timer.js";
 
 /** How often the timer ticks. Each schedule then decides whether it is due. */
 export const SCHEDULE_TICK_MS = 30_000;
@@ -113,14 +114,8 @@ export class ScheduleRunner {
     this.store = opts.store;
     this.tickMs = opts.tickMs ?? SCHEDULE_TICK_MS;
     this.now = opts.now ?? (() => Date.now());
-    this.setTimer =
-      opts.setTimer ??
-      ((fn, ms) => {
-        const t = setInterval(fn, ms);
-        t.unref?.();
-        return t;
-      });
-    this.clearTimer = opts.clearTimer ?? ((h) => clearInterval(h as NodeJS.Timeout));
+    this.setTimer = opts.setTimer ?? setSweepTimer;
+    this.clearTimer = opts.clearTimer ?? clearSweepTimer;
   }
 
   /** Does this instance fire on the timer? */

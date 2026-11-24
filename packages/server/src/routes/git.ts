@@ -28,19 +28,19 @@
  * stderr, which is what the user actually needs to see — "your branch has no
  * upstream", "please commit your changes before switching").
  */
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply } from "fastify";
 import { NoCommitProviderError } from "../services/commit-message.js";
 import { identifyMedia } from "../services/media-sniff.js";
 import { mediaKind, mediaTypeFromName } from "../services/media-types.js";
 
 /** git ran and refused → 502 with git's own words; guard rejections → 400. */
-function fail(err: unknown): { code: number; body: { error: string } } {
+function sendFail(reply: FastifyReply, err: unknown): FastifyReply {
   const message = err instanceof Error ? err.message : String(err);
   const isGuard =
     /^invalid (rev|path|relPath|stash index)|escapes the repo|no paths given|commit message is empty/.test(
       message,
     );
-  return { code: isGuard ? 400 : 502, body: { error: message } };
+  return reply.code(isGuard ? 400 : 502).send({ error: message });
 }
 
 export function registerGitRoutes(app: FastifyInstance): void {
@@ -74,8 +74,7 @@ export function registerGitRoutes(app: FastifyInstance): void {
       try {
         return await git.status(cwd);
       } catch (err) {
-        const { code, body } = fail(err);
-        return reply.code(code).send(body);
+        return sendFail(reply, err);
       }
     },
   );
@@ -88,8 +87,7 @@ export function registerGitRoutes(app: FastifyInstance): void {
       try {
         return await git.branches(cwd);
       } catch (err) {
-        const { code, body } = fail(err);
-        return reply.code(code).send(body);
+        return sendFail(reply, err);
       }
     },
   );
@@ -106,8 +104,7 @@ export function registerGitRoutes(app: FastifyInstance): void {
           ref: req.query.ref || undefined,
         });
       } catch (err) {
-        const { code, body } = fail(err);
-        return reply.code(code).send(body);
+        return sendFail(reply, err);
       }
     },
   );
@@ -121,8 +118,7 @@ export function registerGitRoutes(app: FastifyInstance): void {
       try {
         return await git.commitFiles(cwd, req.query.rev);
       } catch (err) {
-        const { code, body } = fail(err);
-        return reply.code(code).send(body);
+        return sendFail(reply, err);
       }
     },
   );
@@ -135,8 +131,7 @@ export function registerGitRoutes(app: FastifyInstance): void {
       try {
         return await git.stashes(cwd);
       } catch (err) {
-        const { code, body } = fail(err);
-        return reply.code(code).send(body);
+        return sendFail(reply, err);
       }
     },
   );
@@ -171,8 +166,7 @@ export function registerGitRoutes(app: FastifyInstance): void {
         }
         return reply.send(file.content);
       } catch (err) {
-        const { code, body } = fail(err);
-        return reply.code(code).send(body);
+        return sendFail(reply, err);
       }
     },
   );
@@ -188,8 +182,7 @@ export function registerGitRoutes(app: FastifyInstance): void {
       try {
         return await git.readFile(cwd, req.query.relPath, req.query.rev);
       } catch (err) {
-        const { code, body } = fail(err);
-        return reply.code(code).send(body);
+        return sendFail(reply, err);
       }
     },
   );
@@ -209,8 +202,7 @@ export function registerGitRoutes(app: FastifyInstance): void {
       else await git.stage(cwd, body.paths ?? []);
       return await git.status(cwd);
     } catch (err) {
-      const { code, body: b } = fail(err);
-      return reply.code(code).send(b);
+      return sendFail(reply, err);
     }
   });
 
@@ -227,8 +219,7 @@ export function registerGitRoutes(app: FastifyInstance): void {
       else await git.unstage(cwd, body.paths ?? []);
       return await git.status(cwd);
     } catch (err) {
-      const { code, body: b } = fail(err);
-      return reply.code(code).send(b);
+      return sendFail(reply, err);
     }
   });
 
@@ -243,8 +234,7 @@ export function registerGitRoutes(app: FastifyInstance): void {
       else await git.discard(cwd, body.paths ?? []);
       return await git.status(cwd);
     } catch (err) {
-      const { code, body: b } = fail(err);
-      return reply.code(code).send(b);
+      return sendFail(reply, err);
     }
   });
 
@@ -262,8 +252,7 @@ export function registerGitRoutes(app: FastifyInstance): void {
       });
       return { commit, status: await git.status(cwd) };
     } catch (err) {
-      const { code, body: b } = fail(err);
-      return reply.code(code).send(b);
+      return sendFail(reply, err);
     }
   });
 
@@ -308,8 +297,7 @@ export function registerGitRoutes(app: FastifyInstance): void {
       });
       return await git.status(cwd);
     } catch (err) {
-      const { code, body: b } = fail(err);
-      return reply.code(code).send(b);
+      return sendFail(reply, err);
     }
   });
 
@@ -326,8 +314,7 @@ export function registerGitRoutes(app: FastifyInstance): void {
       await git.deleteBranch(cwd, body.branch, { force: body.force });
       return await git.branches(cwd);
     } catch (err) {
-      const { code, body: b } = fail(err);
-      return reply.code(code).send(b);
+      return sendFail(reply, err);
     }
   });
 
@@ -346,8 +333,7 @@ export function registerGitRoutes(app: FastifyInstance): void {
       });
       return { message, stashes: await git.stashes(cwd), status: await git.status(cwd) };
     } catch (err) {
-      const { code, body: b } = fail(err);
-      return reply.code(code).send(b);
+      return sendFail(reply, err);
     }
   });
 
@@ -366,8 +352,7 @@ export function registerGitRoutes(app: FastifyInstance): void {
       const message = await git.stashApply(cwd, body.index, { pop: body.pop });
       return { message, stashes: await git.stashes(cwd), status: await git.status(cwd) };
     } catch (err) {
-      const { code, body: b } = fail(err);
-      return reply.code(code).send(b);
+      return sendFail(reply, err);
     }
   });
 
@@ -382,8 +367,7 @@ export function registerGitRoutes(app: FastifyInstance): void {
       const message = await git.stashDrop(cwd, body.index);
       return { message, stashes: await git.stashes(cwd) };
     } catch (err) {
-      const { code, body: b } = fail(err);
-      return reply.code(code).send(b);
+      return sendFail(reply, err);
     }
   });
 
@@ -408,8 +392,7 @@ export function registerGitRoutes(app: FastifyInstance): void {
       });
       return { message, status: await git.status(cwd) };
     } catch (err) {
-      const { code, body: b } = fail(err);
-      return reply.code(code).send(b);
+      return sendFail(reply, err);
     }
   });
 
@@ -431,8 +414,7 @@ export function registerGitRoutes(app: FastifyInstance): void {
       });
       return { summary, status: await git.status(cwd) };
     } catch (err) {
-      const { code, body: b } = fail(err);
-      return reply.code(code).send(b);
+      return sendFail(reply, err);
     }
   });
 }
