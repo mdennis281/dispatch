@@ -84,6 +84,15 @@ export class AcpSession implements HarnessSession {
   /** Set once the first prompt has carried the system-prompt appends. */
   private instructionsSent = false;
   private commands: SlashCommandInfo[] = [];
+  /**
+   * True while `session/load` is in flight. ACP requires the agent to REPLAY
+   * the whole conversation as `session/update` notifications before it answers
+   * the load — and Dispatch already has that transcript. Decoding the replay
+   * re-persisted every earlier message and tool call, stamped with the current
+   * time: a daily scheduled goose chat grew to 636 rows, most of them copies
+   * of the same `chatcmpl-*` ids repeated once per run.
+   */
+  private loading = false;
   private model?: string;
   private mode: PermissionMode;
   /**
@@ -167,11 +176,16 @@ export class AcpSession implements HarnessSession {
 
     let result: { sessionId?: string; modes?: { currentModeId?: string } };
     if (this.spec.resumeSessionId && init.agentCapabilities?.loadSession) {
-      result = await this.conn.call("session/load", {
-        sessionId: this.spec.resumeSessionId,
-        cwd: this.spec.cwd,
-        mcpServers,
-      });
+      this.loading = true;
+      try {
+        result = await this.conn.call("session/load", {
+          sessionId: this.spec.resumeSessionId,
+          cwd: this.spec.cwd,
+          mcpServers,
+        });
+      } finally {
+        this.loading = false;
+      }
       // `session/load` echoes no id of its own — it reopens the one we named.
       result.sessionId ??= this.spec.resumeSessionId;
     } else {
@@ -270,6 +284,13 @@ export class AcpSession implements HarnessSession {
       this.commands = toSlashCommands(update.availableCommands);
       return;
     }
+    // Dropped BEFORE the decoder, not filtered after it: the decoder
+    // accumulates message text across chunks, so a replayed chunk left in its
+    // buffer would be glued onto the front of the next real reply — which is
+    // what the bloated chat shows ("…more accurate and helpful response.I'll
+    // do a full…"). Only the content-bearing kinds: a `usage_update` during
+    // load is the live context size, which the meter wants.
+    if (this.loading && REPLAYED_UPDATES.has(String(update.sessionUpdate))) return;
     this.emit(...this.decoder.decode(frame));
   }
 
@@ -469,6 +490,24 @@ export class AcpSession implements HarnessSession {
 }
 
 /* ------------------------------------------------------------ helpers */
+
+/**
+ * The `session/update` kinds goose's `replay_conversation_to_client` sends
+ * during `session/load` — each would become a transcript row (or, for text,
+ * decoder state) if decoded. `plan` is included because the spec replays
+ * "like `session/prompt`", which may carry one. Everything else that arrives
+ * during a load (`usage_update`, `available_commands_update`,
+ * `current_mode_update`, `session_info_update`) describes the session as it is
+ * now, not its history, and passes through.
+ */
+const REPLAYED_UPDATES = new Set([
+  "user_message_chunk",
+  "agent_message_chunk",
+  "agent_thought_chunk",
+  "tool_call",
+  "tool_call_update",
+  "plan",
+]);
 
 /**
  * Dispatch's MCP vocabulary → ACP's `mcpServers` array.
