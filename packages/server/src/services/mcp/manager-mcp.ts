@@ -170,6 +170,12 @@ import {
   type IntegrationEventType,
 } from "@dispatch/shared";
 import { classifyActivity } from "../metrics-activity.js";
+import {
+  REVIEW_RECOMMENDATIONS,
+  inferRecommendation,
+  withRecommendationHeadline,
+  type ReviewRecommendation,
+} from "../review-headline.js";
 import { createChatTreeTools, type ManagerMcpChatTree } from "./chat-tree-tool.js";
 import { createChatArchiveTools, type ManagerMcpChatArchive } from "./chat-archive-tool.js";
 import { createAttentionTools, type ManagerMcpAttention } from "./attention-tools.js";
@@ -4454,6 +4460,19 @@ export function createManagerTools(ctx: ManagerMcpContext) {
             "deliberately not offered. Every blocking finding must also appear in " +
             "`comments`; the body may summarize them but must not add an unthreaded blocker.",
         ),
+      recommendation: z
+        .enum(REVIEW_RECOMMENDATIONS)
+        .optional()
+        .describe(
+          "What you advise the human to do. The server prints it as the review's headline " +
+            "(✅ Approval recommended / ⚠️ Review recommended / ⛔ Changes recommended), so " +
+            "do NOT write a headline in `body` yourself. 'approve' means nothing found that " +
+            "should stop a merge. 'review' means it may be fine, but a human should read the " +
+            "findings before merging. 'changes' means do not merge as-is. Pick it from what " +
+            "you found, NOT from `event`: a reviewer that may not block still says 'changes' " +
+            "when that is its advice. If you leave it out, it is inferred from `event` and the " +
+            "number of findings.",
+        ),
       comments: z
         .array(
           z.object({
@@ -4534,12 +4553,29 @@ export function createManagerTools(ctx: ManagerMcpContext) {
           true,
         );
       }
+      const recommendation: ReviewRecommendation =
+        typeof args.recommendation === "string" &&
+        (REVIEW_RECOMMENDATIONS as readonly string[]).includes(args.recommendation)
+          ? (args.recommendation as ReviewRecommendation)
+          : inferRecommendation(event, comments.length);
+      // A ✅ headline over a blocking verdict would contradict itself on the
+      // page, and a human trusting the headline would merge over a blocker.
+      if (event === "REQUEST_CHANGES" && recommendation === "approve") {
+        return textResult(
+          "A request_changes review cannot recommend approval. Use recommendation " +
+            "'changes', or post with event 'comment' if nothing actually blocks.",
+          true,
+        );
+      }
 
       let res: SubmitReviewOutcome;
       try {
         res = await gh.submitReview(number, {
           event,
-          body: body || "No blocking findings.",
+          body: withRecommendationHeadline(
+            body || (recommendation === "approve" ? "No blocking findings." : ""),
+            recommendation,
+          ),
           comments,
           commitId: typeof args.commitId === "string" ? args.commitId : undefined,
         }, repo);

@@ -1145,6 +1145,10 @@ function prReviewBriefText(input: {
           "approving is not this reviewer's job."
         : "- `event`: always `comment`. This reviewer does not block: raise the findings and " +
           "let the author judge.",
+      "- `recommendation`: always set it. It becomes the review's headline, the first thing " +
+        "the human reads. `approve` when nothing should stop the merge (nits alone count as " +
+        "approve); `review` when it may be fine but a human should read your findings first; " +
+        "`changes` when it should not merge as-is. Do not write a headline in `body` too.",
       "- Every BLOCKING finding must be an inline comment, including cross-file problems: " +
         "attach it to the most relevant changed line and name the other files in the finding. " +
         "That thread is what lets the author prove it was addressed and clear your verdict.",
