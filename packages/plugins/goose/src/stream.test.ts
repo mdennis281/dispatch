@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { AcpStreamDecoder, toolNameOf, contentText, turnEndOf } from "./stream.js";
+import { AcpStreamDecoder, toolNameOf, contentText, turnEndOf, requestedToolOf } from "./stream.js";
 import type { RpcFrame } from "./rpc.js";
 
 /**
@@ -35,6 +35,42 @@ describe("toolNameOf", () => {
   it("leaves an unknown developer tool under its own name", () => {
     // Guessing a mapping would mean guessing its input shape too.
     expect(toolNameOf("tree", "developer")).toBe("tree");
+  });
+
+  it("does not double the prefix on goose's full registry name", () => {
+    // Regression: goose's meta says toolName "dispatch-project__project_info"
+    // beside extensionName "dispatch-project", and prefixing it again recorded
+    // `mcp__dispatch-project__dispatch-project__project_info`, a name no guard
+    // rule, card tracker or metrics classifier recognises.
+    expect(toolNameOf("dispatch-project__project_info", "dispatch-project"))
+      .toBe("mcp__dispatch-project__project_info");
+    expect(toolNameOf("developer__shell", "developer")).toBe("Bash");
+  });
+
+  it("reads goose's display title back into the canonical name", () => {
+    // A permission request carries only the title, which goose renders as
+    // "<ext>: <tool with spaces>". The guard has to see the same
+    // `mcp__…` name its rules are written against, not that display string.
+    expect(toolNameOf("dispatch-github: watch pr", "developer")).toBe("mcp__dispatch-github__watch_pr");
+    expect(toolNameOf("dispatch-workspace: terminal", "developer"))
+      .toBe("mcp__dispatch-workspace__terminal");
+  });
+
+  it("namespaces a bare <ext>__<tool> name with no extension beside it", () => {
+    expect(toolNameOf("dispatch-github__list_prs", undefined)).toBe("mcp__dispatch-github__list_prs");
+  });
+
+  it("leaves a name already in Claude's spelling alone", () => {
+    expect(toolNameOf("mcp__dispatch-github__list_prs", undefined)).toBe("mcp__dispatch-github__list_prs");
+  });
+});
+
+describe("requestedToolOf", () => {
+  it("pulls the requested tool out of goose's refusal", () => {
+    // Verbatim from goose 1.51.0's result for a hallucinated call.
+    expect(requestedToolOf("-32600: Tool 'dispatch-github__list_prs' was not advertised for this model turn"))
+      .toBe("dispatch-github__list_prs");
+    expect(requestedToolOf("boom")).toBeUndefined();
   });
 });
 
@@ -78,6 +114,73 @@ describe("AcpStreamDecoder", () => {
         name: "Bash",
         input: { command: "echo PERMTEST" },
       },
+    ]);
+  });
+
+  it("records an MCP call under its canonical name and server", () => {
+    const dec = d();
+    const [call] = dec.decode(notify({
+      sessionUpdate: "tool_call",
+      toolCallId: "call_proj",
+      title: "dispatch-project: project info",
+      rawInput: { project: "noxia" },
+      _meta: { goose: { toolCall: { toolName: "dispatch-project__project_info", extensionName: "dispatch-project" } } },
+    }));
+    expect(call).toEqual({
+      type: "tool-use",
+      toolUseId: "call_proj",
+      name: "mcp__dispatch-project__project_info",
+      input: { project: "noxia" },
+      server: "dispatch-project",
+    });
+  });
+
+  it("names a hallucinated call from goose's refusal instead of recording `Tool {}`", () => {
+    // goose's ToolRequest for an unadvertised tool is an Err, so the tool_call
+    // has no meta, no rawInput and the title "error". Eight of these arrived
+    // back to back before any result, exactly as below.
+    const dec = d();
+    const calls = ["call_a", "call_b"].flatMap((id) => dec.decode(notify({
+      sessionUpdate: "tool_call",
+      toolCallId: id,
+      title: "error",
+      status: "pending",
+    })));
+    expect(calls).toEqual([]);
+
+    const refusal = (id: string, tool: string) => dec.decode(notify({
+      sessionUpdate: "tool_call_update",
+      toolCallId: id,
+      status: "failed",
+      content: [{ type: "content", content: { type: "text", text: `-32600: Tool '${tool}' was not advertised for this model turn` } }],
+    }));
+    expect(refusal("call_a", "dispatch-github__list_prs")).toEqual([
+      {
+        type: "tool-use",
+        toolUseId: "call_a",
+        name: "mcp__dispatch-github__list_prs",
+        input: {},
+        server: "dispatch-github",
+      },
+      {
+        type: "tool-result",
+        toolUseId: "call_a",
+        ok: false,
+        content: [{ type: "text", text: "-32600: Tool 'dispatch-github__list_prs' was not advertised for this model turn" }],
+      },
+    ]);
+    expect(refusal("call_b", "dispatch-github__list_issues")[0])
+      .toMatchObject({ type: "tool-use", name: "mcp__dispatch-github__list_issues" });
+    // Released once, not again at turn end.
+    expect(dec.flushMessage()).toEqual([]);
+  });
+
+  it("still records an unnamed call whose result never came", () => {
+    // A cancel between goose's call and its refusal must not lose the row.
+    const dec = d();
+    dec.decode(notify({ sessionUpdate: "tool_call", toolCallId: "call_x", title: "error" }));
+    expect(dec.flushMessage()).toEqual([
+      { type: "tool-use", toolUseId: "call_x", name: "Tool", input: {} },
     ]);
   });
 

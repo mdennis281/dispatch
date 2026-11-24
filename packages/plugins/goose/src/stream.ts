@@ -77,18 +77,96 @@ export function remapInput(
 }
 
 /**
+ * Split a goose tool name into its extension and bare tool.
+ *
+ * goose spells the same tool three ways depending on which frame carries it,
+ * and every one of them has to land on the same canonical name:
+ *
+ * - `_meta.goose.toolCall.toolName` is the FULL registry name,
+ *   `dispatch-project__project_info`, with `extensionName: "dispatch-project"`
+ *   beside it. Prefixing that again is what recorded
+ *   `mcp__dispatch-project__dispatch-project__project_info` on every MCP call.
+ * - A permission request has no meta, only goose's display title, which
+ *   `format_tool_name` renders as `dispatch-project: project info` (extension,
+ *   colon, underscores turned to spaces). Read as-is that name matched no
+ *   `mcp__…` guard rule at all.
+ * - A tool the model invented arrives only inside goose's error text, as the
+ *   raw `<ext>__<tool>` it asked for, with no extension beside it.
+ *
+ * A name that already starts with `mcp__` is returned untouched: a model that
+ * hallucinates Claude's spelling must not become `mcp__mcp__…`.
+ */
+export function splitToolName(
+  toolName: string,
+  extensionName: string | undefined,
+): { extension?: string; tool: string } {
+  const name = toolName.trim();
+  const colon = name.indexOf(": ");
+  if (colon > 0) {
+    // goose's display form. Tool names do not contain spaces, so turning them
+    // back into underscores undoes `format_tool_name` exactly.
+    return {
+      extension: name.slice(0, colon).trim().replace(/ /g, "_"),
+      tool: name.slice(colon + 2).trim().replace(/ /g, "_"),
+    };
+  }
+  if (extensionName && extensionName !== "developer") {
+    const prefix = `${extensionName}__`;
+    return { extension: extensionName, tool: name.startsWith(prefix) ? name.slice(prefix.length) : name };
+  }
+  const sep = name.indexOf("__");
+  if (sep > 0) return { extension: name.slice(0, sep), tool: name.slice(sep + 2) };
+  return { extension: extensionName, tool: name };
+}
+
+/**
  * The tool name to show, given goose's metadata.
  *
- * An MCP tool arrives with an `extensionName` that is not `developer`; those
- * become `mcp__<extension>__<tool>` so they group under their server in the UI
- * exactly the way Claude's and Codex's do.
+ * An MCP tool becomes the canonical `mcp__<extension>__<tool>` so it groups
+ * under its server in the UI exactly the way Claude's and Codex's do — and,
+ * more to the point, so it is the SAME string the guard's rules, the manager
+ * card tracking and the metrics classifier key on.
  */
 export function toolNameOf(toolName: string | undefined, extensionName: string | undefined): string {
-  if (!toolName) return "Tool";
-  if (extensionName && extensionName !== "developer") {
-    return `mcp__${extensionName}__${toolName}`;
-  }
-  return TOOL_NAMES[toolName] ?? toolName;
+  if (!toolName?.trim()) return "Tool";
+  if (toolName.startsWith("mcp__")) return toolName;
+  const { extension, tool } = splitToolName(toolName, extensionName);
+  if (extension && extension !== "developer") return `mcp__${extension}__${tool}`;
+  return TOOL_NAMES[tool] ?? tool;
+}
+
+/** The MCP server a canonical tool name belongs to, if it is an MCP tool. */
+function serverOf(name: string): string | undefined {
+  if (!name.startsWith("mcp__")) return undefined;
+  const rest = name.slice("mcp__".length);
+  const sep = rest.indexOf("__");
+  return sep > 0 ? rest.slice(0, sep) : undefined;
+}
+
+/**
+ * The tool the model asked for, recovered from goose's refusal of it.
+ *
+ * When the model calls a tool that was not advertised, goose's `ToolRequest`
+ * holds an `Err` instead of a call, so the `tool_call` it sends has no
+ * `_meta.goose.toolCall`, no `rawInput`, and the title `error`. The name the
+ * model used survives only in the failed result:
+ * `-32600: Tool 'dispatch-github__list_prs' was not advertised for this model turn`.
+ */
+export function requestedToolOf(errorText: string): string | undefined {
+  const match = /Tool '([^']+)'/.exec(errorText);
+  return match?.[1];
+}
+
+/**
+ * A tool name out of a `tool_call` title, or undefined when the title carries
+ * none. goose titles a call it could not parse `error`; that is goose's
+ * placeholder, not a tool the model asked for.
+ */
+function nameFromTitle(title: unknown): string | undefined {
+  if (typeof title !== "string") return undefined;
+  const idx = title.indexOf("·");
+  const head = (idx < 0 ? title : title.slice(0, idx)).trim();
+  return head && head !== "error" ? head : undefined;
 }
 
 /** Flatten ACP content blocks to the text Dispatch persists on a tool result. */
@@ -125,8 +203,15 @@ export class AcpStreamDecoder {
   private messageId?: string;
   private lastContextTokens?: number;
   private lastContextWindow?: number;
-  /** Tool calls seen this turn, so an update can recover the name for a result. */
-  private readonly toolNames = new Map<string, string>();
+  /**
+   * Calls goose could not name, held until their result names them.
+   *
+   * Emitting them on arrival is what recorded eight `Tool {}` rows for a model
+   * that invented `dispatch-github__list_prs`: the transcript showed a nameless
+   * call instead of the hallucination it was. goose answers such a call at
+   * once, without running or asking about anything, so the hold is one frame.
+   */
+  private readonly unnamed = new Map<string, { title: unknown; input: Record<string, unknown> }>();
 
   constructor(opts: AcpStreamDecoderOpts) {
     this.genId = opts.genId;
@@ -147,13 +232,29 @@ export class AcpStreamDecoder {
   }
 
   /**
-   * Emit the finished assistant message, if one is buffered.
+   * Everything still buffered at turn end: the finished assistant message and
+   * any unnamed call whose result never came.
    *
-   * Called when a tool call interrupts the text and at turn end, because those
-   * are the two places a message is known to be complete. ACP has no explicit
-   * "message finished" update.
+   * A held call that outlives its turn (a cancel landing between goose's call
+   * and its refusal) is released under whatever its title says, or `Tool`. A
+   * vague row beats a call silently missing from the transcript.
    */
   flushMessage(): HarnessEvent[] {
+    const held: HarnessEvent[] = [];
+    for (const [toolUseId, call] of this.unnamed) {
+      held.push(this.toolUseEvent(toolUseId, toolNameOf(nameFromTitle(call.title), undefined), call.input));
+    }
+    this.unnamed.clear();
+    return [...held, ...this.flushText()];
+  }
+
+  /**
+   * Emit the finished assistant message, if one is buffered.
+   *
+   * Called when a tool call interrupts the text, because that is where a
+   * message is known to be complete. ACP has no "message finished" update.
+   */
+  private flushText(): HarnessEvent[] {
     if (!this.text && !this.thinking) return [];
     const event: HarnessEvent = {
       type: "assistant",
@@ -211,23 +312,26 @@ export class AcpStreamDecoder {
     const call = (meta?.toolCall ?? {}) as Record<string, unknown>;
     const rawName = typeof call.toolName === "string" ? call.toolName : undefined;
     const extension = typeof call.extensionName === "string" ? call.extensionName : undefined;
-    const name = toolNameOf(rawName, extension);
-    this.toolNames.set(toolCallId, name);
-
     const rawInput = (update.rawInput ?? {}) as Record<string, unknown>;
-    const input = remapInput(rawName ?? "", rawInput);
+
+    if (!rawName) {
+      // goose had no call to describe — see `unnamed`. Its result carries the
+      // name, so wait for it rather than record a `Tool` nobody asked for.
+      this.unnamed.set(toolCallId, { title: update.title, input: rawInput });
+      return this.flushText();
+    }
+
+    const name = toolNameOf(rawName, extension);
+    // remapInput keys on the bare tool, never the `<ext>__<tool>` registry name.
+    const input = remapInput(splitToolName(rawName, extension).tool, rawInput);
 
     // A tool call ends whatever text was streaming before it.
-    return [
-      ...this.flushMessage(),
-      {
-        type: "tool-use",
-        toolUseId: toolCallId,
-        name,
-        input,
-        ...(extension && extension !== "developer" ? { server: extension } : {}),
-      },
-    ];
+    return [...this.flushText(), this.toolUseEvent(toolCallId, name, input)];
+  }
+
+  private toolUseEvent(toolUseId: string, name: string, input: Record<string, unknown>): HarnessEvent {
+    const server = serverOf(name);
+    return { type: "tool-use", toolUseId, name, input, ...(server ? { server } : {}) };
   }
 
   private toolResult(update: Update): HarnessEvent[] {
@@ -238,7 +342,19 @@ export class AcpStreamDecoder {
     const toolCallId = String(update.toolCallId ?? "");
     if (!toolCallId) return [];
     const text = contentText(update.content);
+    const held = this.unnamed.get(toolCallId);
+    const use: HarnessEvent[] = [];
+    if (held) {
+      this.unnamed.delete(toolCallId);
+      // The name the model actually used, so a hallucinated tool reads as
+      // one: `mcp__dispatch-github__list_prs` failing "not advertised", not a
+      // nameless `Tool` failing. goose drops the arguments along with the
+      // call, so the input is whatever little it did send — usually nothing.
+      const requested = requestedToolOf(text) ?? nameFromTitle(held.title);
+      use.push(this.toolUseEvent(toolCallId, toolNameOf(requested, undefined), held.input));
+    }
     return [
+      ...use,
       {
         type: "tool-result",
         toolUseId: toolCallId,
@@ -279,7 +395,7 @@ export class AcpStreamDecoder {
       return { content: String(e.content ?? ""), status, activeForm: String(e.content ?? "") };
     });
     return [
-      ...this.flushMessage(),
+      ...this.flushText(),
       {
         type: "tool-use",
         toolUseId: this.genId(),
