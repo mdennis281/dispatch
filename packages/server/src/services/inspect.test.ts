@@ -66,7 +66,11 @@ async function seedChat(
   }
 }
 
-async function seedProject(id: string, name: string): Promise<void> {
+async function seedProject(
+  id: string,
+  name: string,
+  extra: Record<string, unknown> = {},
+): Promise<void> {
   await mkdir(join(root, "projects"), { recursive: true });
   await writeFile(
     join(root, "projects", `${id}.json`),
@@ -77,6 +81,7 @@ async function seedProject(id: string, name: string): Promise<void> {
       worktreeRoot: join(root, "wt"),
       subApps: [],
       createdAt: T0,
+      ...extra,
     }),
   );
 }
@@ -629,6 +634,38 @@ describe("projectInfo", () => {
     expect(result.project.id).toBe("p1");
     expect(result.recentChats.map((c) => c.id)).toEqual(["c1"]);
     expect(renderProject(result)).toContain("# Dispatch");
+  });
+
+  it("renders the workflow profile's NAME, not the config object", async () => {
+    // `project.workflow` is the whole config object; interpolating it printed
+    // `workflow: [object Object]`. project_list already said `review`.
+    await seedProject("p2", "Reviewed", { workflow: { profile: "review" } });
+    const text = renderProject(await service().projectInfo({ project: "p2" }));
+    expect(text).toContain("workflow: review ·");
+    expect(text).not.toContain("[object Object]");
+  });
+
+  it("says so when the name only matched loosely, and names the other candidates", async () => {
+    // Speech-to-text asked for "noxia" and silently got "anoxia" — the model
+    // then reported one project as the other.
+    await seedProject("p3", "anoxia");
+    await seedProject("p4", "noxia-tools");
+    const result = await service().projectInfo({ project: "noxia" });
+    expect(result.fuzzyMatch?.query).toBe("noxia");
+    const text = renderProject(result);
+    const first = text.split("\n")[0]!;
+    expect(first).toMatch(/^No exact match for "noxia" — showing /);
+    expect(first).toContain("also matched:");
+    expect(first).toContain("anoxia");
+    expect(first).toContain("noxia-tools");
+  });
+
+  it("flags no fuzziness on an exact name or id", async () => {
+    await seedProject("p3", "anoxia");
+    const byName = await service().projectInfo({ project: "ANOXIA" });
+    expect(byName.fuzzyMatch).toBeUndefined();
+    expect(renderProject(byName)).not.toContain("No exact match");
+    expect((await service().projectInfo({ project: "p3" })).fuzzyMatch).toBeUndefined();
   });
 
   it("falls back to the caller's own project when none is named", async () => {

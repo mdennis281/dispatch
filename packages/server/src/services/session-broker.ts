@@ -3911,20 +3911,33 @@ export class SessionBroker {
       if (u && u.maxTokens > 0) {
         session.contextWindow = u.maxTokens;
         const max = this.meterWindow(session, u.maxTokens);
+        // `categories ?? []`: the harness contract is typed, but a plugin
+        // runtime answers it at runtime and nothing parses what it returns.
+        const usage = { ...u, categories: u.categories ?? [] };
         return max === u.maxTokens
-          ? u
-          : { ...u, maxTokens: max, percentage: Math.round((u.totalTokens / max) * 1000) / 10 };
+          ? usage
+          : { ...usage, maxTokens: max, percentage: Math.round((u.totalTokens / max) * 1000) / 10 };
       }
     }
     if (session?.harnessSession) {
       const maxTokens = await session.harnessSession.contextWindow().catch(() => undefined);
       if (maxTokens) session.contextWindow = maxTokens;
-      return maxTokens
-        ? ({
-            totalTokens: session.lastContextTokens ?? 0,
-            maxTokens: this.meterWindow(session, maxTokens),
-          } as ContextUsage)
-        : null;
+      if (!maxTokens) return null;
+      // A goose/codex session has no per-category breakdown, only these two
+      // totals. This used to be cast `as ContextUsage` with `categories` and
+      // `percentage` simply missing, so the type promised fields that weren't
+      // there: the `context_usage` MCP tool died on `usage.categories.filter`
+      // ("Cannot read properties of undefined") as the FIRST call of every
+      // scheduled goose run, and a small model read that error as the user
+      // talking and gave up. Build the whole shape, with an honest empty list.
+      const max = this.meterWindow(session, maxTokens);
+      const totalTokens = session.lastContextTokens ?? 0;
+      return {
+        totalTokens,
+        maxTokens: max,
+        percentage: max > 0 ? Math.round((totalTokens / max) * 1000) / 10 : 0,
+        categories: [],
+      };
     }
     return null;
   }

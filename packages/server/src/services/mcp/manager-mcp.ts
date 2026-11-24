@@ -3794,7 +3794,9 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         );
       }
       const pct = Math.round(usage.percentage);
-      const cats = usage.categories
+      // `?? []` as well as the broker's fix: a missing breakdown must degrade
+      // to totals-only, never take the tool down — see getContextUsage.
+      const cats = (usage.categories ?? [])
         .filter((c) => c.tokens > 0)
         .sort((a, b) => b.tokens - a.tokens)
         .map((c) => `  ${c.name}: ${c.tokens.toLocaleString()}`)
@@ -3804,7 +3806,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         `${usage.maxTokens.toLocaleString()} tokens (${pct}% full)` +
         (usage.model ? ` — ${usage.model}` : "");
       return textResult(
-        `${summary}\n${cats ? `${cats}\n` : ""}${JSON.stringify({
+        `${summary}\n${cats ? `${cats}\n` : "(this runtime reports totals only — no per-category breakdown)\n"}${JSON.stringify({
           totalTokens: usage.totalTokens,
           maxTokens: usage.maxTokens,
           percentage: usage.percentage,
