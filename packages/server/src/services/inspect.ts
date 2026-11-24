@@ -400,6 +400,13 @@ export interface ProjectInfoQuery {
 
 export interface ProjectInfoResult {
   project: Project;
+  /** Resolved workflow profile name — how change ships there. */
+  workflow: string;
+  /**
+   * Set when `project` matched no id or name exactly and a substring match was
+   * used instead: what was asked for, and any other projects it also matched.
+   */
+  fuzzyMatch?: { query: string; others: string[] };
   /** Where the committable `.dispatch/` config was found, if any. */
   configSourceDir: string | null;
   configErrors: { file?: string; message: string }[];
@@ -713,18 +720,35 @@ export class InspectService {
     needle: string | undefined,
     fallbackId?: string,
   ): Promise<Project | null> {
+    return (await this.matchProject(store, needle, fallbackId))?.project ?? null;
+  }
+
+  /**
+   * {@link resolveProject}, plus whether the match was exact. The substring
+   * fallback is deliberate — these names arrive through speech-to-text, so a
+   * near miss is common — but it used to be silent: `project_info "noxia"`
+   * described "anoxia" with nothing saying so, and the model reported one
+   * project as the other. `fuzzy` lets the caller say what it actually showed.
+   */
+  private async matchProject(
+    store: Store,
+    needle: string | undefined,
+    fallbackId?: string,
+  ): Promise<{ project: Project; fuzzy?: { query: string; others: string[] } } | null> {
     const projects = await store.listProjects();
     if (!needle) {
-      return fallbackId ? (projects.find((p) => p.id === fallbackId) ?? null) : null;
+      const own = fallbackId ? projects.find((p) => p.id === fallbackId) : undefined;
+      return own ? { project: own } : null;
     }
-    const exact = projects.find((p) => p.id === needle);
-    if (exact) return exact;
     const lower = needle.toLowerCase();
-    return (
-      projects.find((p) => p.name.toLowerCase() === lower) ??
-      projects.find((p) => p.name.toLowerCase().includes(lower)) ??
-      null
-    );
+    const exact =
+      projects.find((p) => p.id === needle) ?? projects.find((p) => p.name.toLowerCase() === lower);
+    if (exact) return { project: exact };
+    const loose = projects.filter((p) => p.name.toLowerCase().includes(lower));
+    const [first, ...rest] = loose;
+    return first
+      ? { project: first, fuzzy: { query: needle, others: rest.map((p) => p.name) } }
+      : null;
   }
 
   private toSummary(chat: Chat, projectName?: string, prs?: ReadonlyMap<string, PrRecord>): ChatSummary {
@@ -1214,7 +1238,8 @@ export class InspectService {
 
   async projectInfo(q: ProjectInfoQuery, callerProjectId?: string): Promise<ProjectInfoResult> {
     const store = this.storeFor(q.instance);
-    const project = await this.resolveProject(store, q.project, callerProjectId);
+    const match = await this.matchProject(store, q.project, callerProjectId);
+    const project = match?.project;
     if (!project) {
       throw new Error(
         q.project
@@ -1259,6 +1284,11 @@ export class InspectService {
 
     return {
       project,
+      // The resolved profile NAME, as project_list reports it. `project.workflow`
+      // is the whole config object, and rendering that printed
+      // `workflow: [object Object]`.
+      workflow: resolveWorkflow(project).profile,
+      ...(match.fuzzy ? { fuzzyMatch: match.fuzzy } : {}),
       configSourceDir: cfg?.sourceDir ?? null,
       configErrors: cfg?.errors ?? [],
       instructions: config?.instructionsText ? clip(config.instructionsText, 4_000) : undefined,

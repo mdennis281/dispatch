@@ -835,6 +835,21 @@ describe("SessionBroker neutral harness path", () => {
       expect(usage?.categories).toEqual([{ name: "System tools", tokens: 120 }]);
     });
 
+    it("answers a runtime with no breakdown with a COMPLETE shape: empty categories, a real percentage", async () => {
+      // goose/codex report only the two totals. This branch used to cast the
+      // partial object `as ContextUsage`, so `context_usage` crashed on
+      // `usage.categories.filter` as the first call of every goose run.
+      const chat = await chatFor("context-totals-only");
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "go");
+      await broker.waitFor(chat.id, "idle");
+
+      const usage = await broker.getContextUsage(chat.id);
+      expect(usage?.categories).toEqual([]);
+      expect(Number.isFinite(usage?.percentage)).toBe(true);
+      expect(usage?.maxTokens).toBeGreaterThan(0);
+    });
+
     it("pushes a per-message effort into the live runtime, not only the next one", async () => {
       const chat = await chatFor("effort-live");
       broker.create(chat);

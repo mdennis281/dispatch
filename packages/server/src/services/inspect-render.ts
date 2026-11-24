@@ -261,10 +261,21 @@ export function renderProjectList(entries: ProjectListEntry[]): string {
 
 export function renderProject(result: ProjectInfoResult): string {
   const p = result.project;
+  const fuzzy = result.fuzzyMatch;
   const lines: string[] = [
+    // First line, before anything else: a model skimming the result must not
+    // be able to report this project as the one it asked for.
+    ...(fuzzy
+      ? [
+          `No exact match for "${fuzzy.query}" — showing ${p.name}` +
+            (fuzzy.others.length ? ` (also matched: ${fuzzy.others.join(", ")})` : "") +
+            ". Check this is the project you meant.",
+          "",
+        ]
+      : []),
     `# ${p.name}`,
     `${p.id} · ${p.repoPath}`,
-    `workflow: ${p.workflow ?? "default"} · default branch: ${p.defaultBranch ?? "main"}`,
+    `workflow: ${result.workflow} · default branch: ${p.defaultBranch ?? "main"}`,
     `worktree root: ${p.worktreeRoot ?? "(unset)"}`,
     "",
   ];
