@@ -206,3 +206,35 @@ export function toEnvironmentBlock(
 export function toAcpEffort(_effort: Effort): undefined {
   return undefined;
 }
+
+/**
+ * The `GOOSE_AUTO_COMPACT_THRESHOLD` that makes goose's OWN compaction fire at
+ * the user's limit — or undefined to leave goose's default (0.8) alone.
+ *
+ * goose has no token threshold. It compacts when `used / GOOSE_CONTEXT_LIMIT`
+ * passes a RATIO (strictly greater; `<= 0` or `>= 1` disables it), checked
+ * before every model call inside the agent loop, so it is the mid-turn trigger
+ * `contextTokenLimit` asks for. Dispatch's limit is a token count, so it has to
+ * be expressed against the window we hand goose as `GOOSE_CONTEXT_LIMIT`. With
+ * no window there is nothing to divide by: goose would be budgeting against a
+ * number of its own choosing, and a ratio of the wrong denominator compacts at
+ * the wrong point. The host's turn-end check still holds the limit then.
+ *
+ * Rounded DOWN, so goose fires at or just below the limit and never just past
+ * it. A limit at or above the window adds nothing to goose's default, which
+ * already compacts before the window fills.
+ *
+ * `autoCompact: false` is `"0"`, which goose reads as off. Its reactive
+ * compaction on a context-length error still runs, and should: that one is the
+ * difference between a summarised chat and a dead one.
+ */
+export function gooseAutoCompactThreshold(
+  limit: number | undefined,
+  window: number | undefined,
+  autoCompact?: boolean,
+): string | undefined {
+  if (autoCompact === false) return "0";
+  if (!limit || !window || limit >= window) return undefined;
+  const ratio = Math.floor((limit / window) * 10_000) / 10_000;
+  return ratio > 0 ? String(ratio) : undefined;
+}

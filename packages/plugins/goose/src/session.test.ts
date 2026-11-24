@@ -574,3 +574,197 @@ describe("toSlashCommands", () => {
     expect(toSlashCommands(undefined)).toEqual([]);
   });
 });
+
+describe("AcpSession compaction", () => {
+  /** Answer each `session/prompt` after `reply` streams, like goose 1.51.0. */
+  function answerPrompts(agent: FakeAgent, reply: (text: string) => string | undefined): void {
+    agent.onRequest = (method, params, id) => {
+      if (method !== "session/prompt") return undefined;
+      const blocks = params.prompt as { text?: string }[];
+      const text = reply(blocks.map((b) => b.text ?? "").join(""));
+      setTimeout(() => {
+        if (text) {
+          agent.update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text } });
+        }
+        agent.reply(id, { stopReason: "end_turn" });
+      }, 1);
+      return undefined;
+    };
+  }
+
+  /** Push one of goose's `_goose/unstable/session/update` notifications. */
+  function gooseUpdate(agent: FakeAgent, update: Record<string, unknown>): void {
+    agent.stdout.write(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        method: "_goose/unstable/session/update",
+        params: { sessionId: "20260923_1", update },
+      }) + "\n",
+    );
+  }
+
+  it("opts into goose's own notifications, the only place auto-compaction is reported", async () => {
+    const { agent, session, drain } = build();
+    session.send({ text: "hi" });
+    await drain();
+    const caps = (agent.frameFor("initialize")?.params as Record<string, unknown>)
+      .clientCapabilities as Record<string, unknown>;
+    expect(caps._meta).toEqual({ goose: { customNotifications: true } });
+  });
+
+  it("sends a lone `/compact` and turns goose's reply into one compacted row", async () => {
+    const { agent, session, events, drain } = build({ systemPromptAppends: ["POLICY"] });
+    agent.onRequest = (method, params, id) => {
+      if (method !== "session/prompt") return undefined;
+      const blocks = params.prompt as { text?: string }[];
+      const isCompact = blocks.length === 1 && blocks[0]!.text === "/compact";
+      setTimeout(() => {
+        if (isCompact) {
+          // goose 1.51.0 sends the shrunken reading BEFORE the turn's result.
+          agent.update({ sessionUpdate: "usage_update", used: 219, size: 8000 });
+          agent.update({
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: "Compaction complete" },
+          });
+        } else {
+          agent.update({ sessionUpdate: "usage_update", used: 2250, size: 8000 });
+        }
+        agent.reply(id, { stopReason: "end_turn" });
+      }, 1);
+      return undefined;
+    };
+    session.send({ text: "hi" });
+    await drain();
+    const before = events.length;
+    await session.compact("keep the API changes");
+    await drain();
+    const after = events.slice(before);
+
+    // ALONE: goose matches the message text exactly, so the first-prompt
+    // instruction blocks riding along would make it an ordinary question.
+    const prompt = (agent.lastFrameFor("session/prompt")?.params as { prompt: unknown[] }).prompt;
+    expect(prompt).toEqual([{ type: "text", text: "/compact" }]);
+    // goose's "Compaction complete" is not the model talking.
+    expect(after.some((e) => e.type === "assistant")).toBe(false);
+    // Both sizes from the adapter: by the time the turn ends, the host's last
+    // reading is already the post-compaction one.
+    expect(after.filter((e) => e.type === "compacted")).toEqual([
+      { type: "compacted", trigger: "manual", preTokens: 2250, postTokens: 219 },
+    ]);
+    expect(after.at(-1)).toMatchObject({ type: "turn-end", ok: true });
+  });
+
+  it("keeps the first-prompt instructions for a real message when `/compact` comes first", async () => {
+    const { agent, session, drain } = build({ systemPromptAppends: ["POLICY"] });
+    answerPrompts(agent, (t) => (t === "/compact" ? "Compaction complete" : undefined));
+    await session.compact();
+    await drain();
+    expect((agent.frameFor("session/prompt")?.params as { prompt: unknown[] }).prompt).toEqual([
+      { type: "text", text: "/compact" },
+    ]);
+    // Not spent on the command — they go with the next real message.
+    session.send({ text: "go on" });
+    await drain();
+    const next = (agent.lastFrameFor("session/prompt")?.params as { prompt: { text: string }[] })
+      .prompt;
+    expect(next.map((b) => b.text)).toContain("POLICY");
+  });
+
+  it("surfaces a failed compaction as an error, not as the model's reply", async () => {
+    // goose catches its own compaction error and returns it as assistant text.
+    const { agent, session, events, drain } = build();
+    answerPrompts(agent, () => "Ran into this error trying to compact: boom.");
+    await session.compact();
+    await drain();
+    expect(events.some((e) => e.type === "compacted")).toBe(false);
+    expect(events).toContainEqual({
+      type: "notice",
+      level: "error",
+      text: "Ran into this error trying to compact: boom.",
+    });
+  });
+
+  it("runs a compaction ahead of messages already waiting", async () => {
+    const { agent, session, drain } = build();
+    const order: string[] = [];
+    let release: (() => void) | undefined;
+    agent.onRequest = (method, params, id) => {
+      if (method !== "session/prompt") return undefined;
+      const blocks = params.prompt as { text?: string }[];
+      order.push(blocks.at(-1)?.text ?? "");
+      release = () => agent.reply(id, { stopReason: "end_turn" });
+      return undefined;
+    };
+    session.send({ text: "first" });
+    await drain();
+    session.send({ text: "second" });
+    await session.compact();
+    for (let i = 0; i < 3; i++) {
+      release?.();
+      await drain();
+    }
+    expect(order).toEqual(["first", "/compact", "second"]);
+  });
+
+  it("clears in place with goose's `/clear`, without a row of goose's own", async () => {
+    const { agent, session, events, drain } = build();
+    answerPrompts(agent, (t) => (t === "/clear" ? "Conversation cleared" : undefined));
+    await session.clear();
+    await drain();
+    expect(
+      (agent.frameFor("session/prompt")?.params as { prompt: unknown[] }).prompt,
+    ).toEqual([{ type: "text", text: "/clear" }]);
+    expect(events.some((e) => e.type === "assistant" || e.type === "notice")).toBe(false);
+  });
+
+  it("reports goose's own auto-compaction once, when it completes", async () => {
+    const { agent, session, events, drain } = build();
+    agent.onRequest = (method, _p, id) => {
+      if (method !== "session/prompt") return undefined;
+      setTimeout(() => {
+        agent.update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "before" } });
+        // The three frames goose 1.51.0 really sends, captured live.
+        gooseUpdate(agent, {
+          sessionUpdate: "status_message",
+          status: {
+            type: "notice",
+            message: "Exceeded auto-compact threshold of 27%. Performing auto-compaction...",
+          },
+        });
+        gooseUpdate(agent, {
+          sessionUpdate: "status_message",
+          status: { type: "progress", message: "goose is compacting the conversation..." },
+        });
+        gooseUpdate(agent, {
+          sessionUpdate: "status_message",
+          status: { type: "notice", message: "Compaction complete" },
+        });
+        // goose's duplicate usage frame must not become a second reading.
+        gooseUpdate(agent, { sessionUpdate: "usage_update", used: 900, contextLimit: 8000 });
+        agent.update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "after" } });
+        agent.reply(id, { stopReason: "end_turn" });
+      }, 1);
+      return undefined;
+    };
+    session.send({ text: "go" });
+    await drain();
+
+    const shown = events
+      .filter((e) => e.type === "assistant" || e.type === "compacted" || e.type === "usage")
+      .map((e) => (e.type === "assistant" ? e.text : e.type));
+    expect(shown).toEqual(["before", "compacted", "after"]);
+    expect(events.find((e) => e.type === "compacted")).toEqual({
+      type: "compacted",
+      trigger: "auto",
+    });
+  });
+
+  it("keeps the process for a limit goose would not notice, and refuses one it would", async () => {
+    const { session } = build({ contextWindow: 32_768, contextTokenLimit: 40_000 });
+    // Both at or past the window: goose runs on its default either way.
+    await expect(session.setContextTokenLimit(64_000)).resolves.toBeUndefined();
+    await expect(session.setContextTokenLimit(undefined)).resolves.toBeUndefined();
+    // A real ratio is fixed at spawn — the host must respawn for it.
+    await expect(session.setContextTokenLimit(16_384)).rejects.toThrow(/threshold/);
+  });
+});

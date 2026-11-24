@@ -14,12 +14,19 @@
  * declared false rather than an oversight:
  *   - no reasoning effort (no field anywhere in the protocol)
  *   - no fork (`session/load` resumes; there is no fork-at-message)
- *   - no host-triggered compaction
  *   - no account rate limits — a local model has none
  *   - no structured question channel (`AskUserQuestion` has no ACP twin)
  *   - no mid-session model switch: the model is chosen by the agent's own
  *     config at spawn, so {@link AcpSession.setModel} records the choice for
  *     the NEXT session rather than pretending to apply it now.
+ *
+ * COMPACTION IS A SLASH COMMAND, NOT A METHOD. ACP defines no compaction call,
+ * but goose answers `/compact` and `/clear` sent as an ordinary prompt, so
+ * {@link AcpSession.compact} and {@link AcpSession.clear} are turns of their
+ * own (`controlTurns`). goose's `/compact` takes no argument, so a focus cannot
+ * reach its summariser. goose also compacts on its own between model calls,
+ * at the ratio the spawn env sets (see `gooseAutoCompactThreshold`); both kinds
+ * surface as a `compacted` event rather than goose's own chatter.
  *
  * THE HANG HAZARD. Every agent→client request must be answered. An unanswered
  * one leaves the turn pinned forever with no error, no timeout and nothing on
@@ -48,7 +55,14 @@ import {
   toEnvironmentBlock,
   toInstructionBlock,
   pickPermissionOption,
+  gooseAutoCompactThreshold,
 } from "./options.js";
+
+/** A message waiting to go, or a slash command run as a turn of its own. */
+type QueuedInput = HarnessInput & { control?: "compact" | "clear" };
+
+/** What goose answers a successful `/compact` / `/clear` with (1.51.0). */
+const CONTROL_REPLY = { compact: "Compaction complete", clear: "Conversation cleared" } as const;
 
 /** A permission request waiting on the human. */
 interface PendingAsk {
@@ -76,7 +90,14 @@ export class AcpSession implements HarnessSession {
   private started = false;
   private disposed = false;
   /** Messages queued before the session exists / while a turn is running. */
-  private outbox: HarnessInput[] = [];
+  private outbox: QueuedInput[] = [];
+  /**
+   * The slash command the in-flight turn is running, and goose's reply to it.
+   * The reply is held back from the transcript: goose's "Compaction complete"
+   * as an assistant message would read as the MODEL saying it, and anything
+   * else it says here is an error.
+   */
+  private controlTurn?: { kind: "compact" | "clear"; reply: string; preTokens?: number };
   private unsubscribes: (() => void)[] = [];
   private readonly pendingAsks = new Map<string, PendingAsk>();
   /** True while a `session/prompt` is in flight — ACP allows one turn at a time. */
@@ -222,12 +243,24 @@ export class AcpSession implements HarnessSession {
     const next = this.outbox.shift();
     if (!next) return;
     this.turnInFlight = true;
+    if (next.control) {
+      this.controlTurn = {
+        kind: next.control,
+        reply: "",
+        preTokens: this.decoder.contextTokens(),
+      };
+    }
     try {
       const result = await this.conn.call<Record<string, unknown>>("session/prompt", {
         sessionId: this.sessionId,
-        prompt: this.promptBlocks(next),
+        // A command goes ALONE. goose recognises `/compact` only when the
+        // turn's message text is exactly that, so the first-prompt instruction
+        // blocks riding along would turn it into a request for the model to
+        // talk about compacting. They wait for the next real message instead.
+        prompt: next.control ? [{ type: "text", text: next.text }] : this.promptBlocks(next),
       });
       this.emit(...this.decoder.flushMessage());
+      this.emit(...this.endControlTurn());
       this.emit(
         turnEndOf(result, {
           contextTokens: this.decoder.contextTokens(),
@@ -236,6 +269,7 @@ export class AcpSession implements HarnessSession {
       );
     } finally {
       this.turnInFlight = false;
+      this.controlTurn = undefined;
     }
     // Anything that queued up while the turn ran goes now.
     if (this.outbox.length) void this.flush().catch((err) => this.fail(err));
@@ -271,6 +305,35 @@ export class AcpSession implements HarnessSession {
     return blocks;
   }
 
+  /**
+   * The events a finished `/compact` or `/clear` turn ends on.
+   *
+   * goose reports failure as an ordinary assistant message (its compaction
+   * errors are caught and returned as text), so anything but the known reply
+   * is surfaced as an error notice instead of being lost.
+   */
+  private endControlTurn(): HarnessEvent[] {
+    const turn = this.controlTurn;
+    if (!turn) return [];
+    const reply = turn.reply.trim();
+    if (reply === CONTROL_REPLY[turn.kind]) {
+      if (turn.kind === "clear") return [];
+      // Both sizes from here, not left to the host: goose sends the
+      // post-compaction `usage_update` BEFORE the turn ends (seen live), so
+      // the host's "last reading" would already be the shrunken one.
+      const postTokens = this.decoder.contextTokens();
+      return [
+        {
+          type: "compacted",
+          trigger: "manual",
+          ...(turn.preTokens !== undefined ? { preTokens: turn.preTokens } : {}),
+          ...(postTokens !== undefined ? { postTokens } : {}),
+        },
+      ];
+    }
+    return [{ type: "notice", level: "error", text: reply || `goose did not confirm /${turn.kind}` }];
+  }
+
   /* ------------------------------------------------------- receiving */
 
   private onNotify(frame: RpcFrame): void {
@@ -280,6 +343,13 @@ export class AcpSession implements HarnessSession {
     if (params.sessionId && this.sessionId && params.sessionId !== this.sessionId) return;
 
     const update = (params.update ?? {}) as Record<string, unknown>;
+    if (frame.method === GOOSE_UPDATE_METHOD) {
+      if (isAutoCompactionDone(update)) {
+        // Mid-turn: whatever text streamed before the summary is its own row.
+        this.emit(...this.decoder.flushMessage(), { type: "compacted", trigger: "auto" });
+      }
+      return;
+    }
     if (update.sessionUpdate === "available_commands_update") {
       this.commands = toSlashCommands(update.availableCommands);
       return;
@@ -291,6 +361,11 @@ export class AcpSession implements HarnessSession {
     // do a full…"). Only the content-bearing kinds: a `usage_update` during
     // load is the live context size, which the meter wants.
     if (this.loading && REPLAYED_UPDATES.has(String(update.sessionUpdate))) return;
+    if (this.controlTurn && update.sessionUpdate === "agent_message_chunk") {
+      const content = (update.content ?? {}) as Record<string, unknown>;
+      if (typeof content.text === "string") this.controlTurn.reply += content.text;
+      return;
+    }
     this.emit(...this.decoder.decode(frame));
   }
 
@@ -435,9 +510,52 @@ export class AcpSession implements HarnessSession {
     /* nothing to set */
   }
 
-  /** ACP has no host-triggered compaction; `compaction` is advertised false. */
+  /**
+   * goose's own `/compact`, as a turn of its own at the front of the queue.
+   *
+   * The focus is DROPPED, deliberately: goose matches the command text exactly
+   * (`/compact`, `/summarize`) and ignores anything after it, and sending the
+   * focus as a message of its own would just be a turn the model answers.
+   */
   async compact(_focus?: string): Promise<void> {
-    /* not supported */
+    this.enqueueControl("compact");
+  }
+
+  /**
+   * goose's own `/clear`, in place: the process, its session id and every MCP
+   * server it holds are kept, where a retire-and-respawn would rebuild them.
+   */
+  async clear(): Promise<void> {
+    this.enqueueControl("clear");
+  }
+
+  private enqueueControl(kind: "compact" | "clear"): void {
+    if (this.disposed) return;
+    // Ahead of queued messages, like Claude's `priority: "next"`: a compaction
+    // asked for because the window is full should not wait behind the very
+    // messages that would overflow it.
+    this.outbox.unshift({ text: `/${kind}`, control: kind });
+    if (!this.started) {
+      this.started = true;
+      void this.open().catch((err) => this.fail(err));
+    } else {
+      void this.flush().catch((err) => this.fail(err));
+    }
+  }
+
+  /**
+   * Accept a moved limit only when it changes nothing goose would notice.
+   *
+   * goose reads its threshold from the env once, at spawn, so a threshold that
+   * really moved is refused and the host respawns the session (`session/load`
+   * keeps the conversation). Two limits that round to the same ratio, or that
+   * both sit at or past the window, keep the running process.
+   */
+  async setContextTokenLimit(limit: number | undefined): Promise<void> {
+    const { contextWindow, autoCompact, contextTokenLimit } = this.spec;
+    const now = gooseAutoCompactThreshold(contextTokenLimit, contextWindow, autoCompact);
+    const next = gooseAutoCompactThreshold(limit, contextWindow, autoCompact);
+    if (now !== next) throw new Error("goose fixes its compaction threshold when it starts");
   }
 
   async contextWindow(): Promise<number | undefined> {
@@ -490,6 +608,25 @@ export class AcpSession implements HarnessSession {
 }
 
 /* ------------------------------------------------------------ helpers */
+
+/** goose's own notification channel, opted into at `initialize`. */
+const GOOSE_UPDATE_METHOD = "_goose/unstable/session/update";
+
+/**
+ * Is this goose-custom update the end of an AUTO compaction?
+ *
+ * goose 1.51.0 brackets one with two `status_message` notices, "Exceeded
+ * auto-compact threshold of N%. Performing auto-compaction..." and then
+ * "Compaction complete", plus a `progress` status between them. Only the last
+ * says it worked (a failure arrives as assistant text instead), and one row per
+ * compaction is the contract. The text is the only marker there is: the notice
+ * carries no kind, and the compaction's own `message_usage` frame is not sent.
+ */
+function isAutoCompactionDone(update: Record<string, unknown>): boolean {
+  if (update.sessionUpdate !== "status_message") return false;
+  const status = (update.status ?? {}) as Record<string, unknown>;
+  return status.type === "notice" && status.message === CONTROL_REPLY.compact;
+}
 
 /**
  * The `session/update` kinds goose's `replay_conversation_to_client` sends
