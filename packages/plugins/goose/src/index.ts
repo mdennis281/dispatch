@@ -36,6 +36,7 @@ import { gooseRuntime, windowsShell } from "./runtime.js";
 import { AcpConnection } from "./rpc.js";
 import { AcpSession } from "./session.js";
 import { GOOSE_PROVIDER } from "./descriptor.js";
+import { gooseAutoCompactThreshold } from "./options.js";
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
 /** Cap on the model probe so an unreachable Ollama can't pin a request. */
@@ -47,7 +48,7 @@ const DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434";
 /**
  * The ACP capability profile. See {@link HarnessCapabilities} for each field.
  *
- * Four of these are false because the PROTOCOL lacks the concept, not because
+ * Several of these are false because the PROTOCOL lacks the concept, not because
  * the adapter is unfinished — see the header of `session.ts`.
  */
 export const ACP_CAPABILITIES: HarnessCapabilities = {
@@ -59,8 +60,21 @@ export const ACP_CAPABILITIES: HarnessCapabilities = {
   questions: false,
   subagents: false,
   skills: true,
-  // No host-triggered compaction method.
-  compaction: false,
+  // goose answers `/compact` sent as an ordinary `session/prompt` (verified on
+  // 1.51.0: 2,250 → 219 tokens). It is a slash command, not an ACP method,
+  // which is why it is a TURN — see `controlTurns`.
+  compaction: true,
+  // `/compact` and `/clear` are prompts that end with their own
+  // `session/prompt` result, exactly like Claude's. Fired on the side instead,
+  // a compaction asked mid-turn would queue behind the turn anyway (ACP runs
+  // one prompt at a time) while the chat read idle.
+  controlTurns: true,
+  // goose compacts on its own between model calls once `used / limit` passes
+  // GOOSE_AUTO_COMPACT_THRESHOLD, and the spawn env sets that ratio from
+  // `contextTokenLimit` (see `gooseAutoCompactThreshold`). The env is fixed at
+  // spawn, so a moved limit needs the respawn this flag asks the host for —
+  // which goose survives, because it can `session/load`.
+  nativeContextLimit: true,
   // `session/load` resumes; there is no fork-at-message.
   fork: false,
   // A local model has no account and no rolling rate limit.
@@ -99,7 +113,11 @@ export interface AcpAgentSpec {
   /** Resolve the binary. */
   runtime: () => HarnessRuntimeInfo;
   /** Env that points the agent at a provider, a model, and its real limits. */
-  env: (model: string | undefined, contextWindow?: number) => Record<string, string>;
+  env: (
+    model: string | undefined,
+    contextWindow?: number,
+    compactThreshold?: string,
+  ) => Record<string, string>;
 }
 
 /** goose: `goose acp`, configured through `GOOSE_*` / `OLLAMA_HOST`. */
@@ -107,7 +125,7 @@ export const GOOSE_AGENT: AcpAgentSpec = {
   kind: "goose",
   args: ["acp"],
   runtime: gooseRuntime,
-  env: (model, contextWindow) => ({
+  env: (model, contextWindow, compactThreshold) => ({
     GOOSE_PROVIDER: process.env.GOOSE_PROVIDER ?? "ollama",
     ...(model ? { GOOSE_MODEL: model } : {}),
     OLLAMA_HOST: ollamaHost(),
@@ -122,6 +140,12 @@ export const GOOSE_AGENT: AcpAgentSpec = {
     // Only set when Dispatch actually resolved the window from Ollama. A
     // guess here would be worse than the omission it replaces.
     ...(contextWindow ? { GOOSE_CONTEXT_LIMIT: String(contextWindow) } : {}),
+    // WHERE GOOSE'S OWN COMPACTION FIRES, as a ratio of the limit above. Left
+    // at goose's 0.8, the user's Settings → Context threshold reached goose
+    // not at all: the only thing enforcing it was the host's turn-end check,
+    // and a long agentic turn never reaches its end. See
+    // `gooseAutoCompactThreshold`.
+    ...(compactThreshold ? { GOOSE_AUTO_COMPACT_THRESHOLD: compactThreshold } : {}),
     // THE SAMPLING TEMPERATURE, WHICH GOOSE OTHERWISE NEVER SENDS.
     //
     // Its request to Ollama carries `model`, `messages`, `tools` and nothing
@@ -460,7 +484,11 @@ export class AcpHarness implements Harness {
       args: this.agent.args,
       ...(spec.cwd ? { cwd: spec.cwd } : {}),
       env: {
-        ...this.agent.env(spec.model, spec.contextWindow),
+        ...this.agent.env(
+          spec.model,
+          spec.contextWindow,
+          gooseAutoCompactThreshold(spec.contextTokenLimit, spec.contextWindow, spec.autoCompact),
+        ),
         ...(spec.account?.env ?? {}),
       },
     });

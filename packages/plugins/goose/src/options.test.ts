@@ -5,6 +5,7 @@ import {
   toInstructionBlock,
   toEnvironmentBlock,
   toAcpEffort,
+  gooseAutoCompactThreshold,
 } from "./options.js";
 import { resolveGooseRuntime, gooseCandidates } from "./runtime.js";
 
@@ -222,5 +223,35 @@ describe("gooseCandidates", () => {
     });
     expect(all.some((p) => /downloads/i.test(p))).toBe(false);
     expect(all.length).toBeGreaterThan(0);
+  });
+});
+
+describe("gooseAutoCompactThreshold", () => {
+  it("expresses the token limit as goose's ratio of the window", () => {
+    expect(gooseAutoCompactThreshold(16_384, 32_768)).toBe("0.5");
+  });
+
+  it("rounds DOWN, so goose fires at the limit and never just past it", () => {
+    // 20000 / 32768 = 0.61035…; rounding up would let goose run 2 tokens long.
+    expect(gooseAutoCompactThreshold(20_000, 32_768)).toBe("0.6103");
+  });
+
+  it("adds nothing when the limit is at or past the window", () => {
+    // goose's default 0.8 already compacts before the window fills, and a
+    // ratio of 1 or more is goose's spelling of "off".
+    expect(gooseAutoCompactThreshold(32_768, 32_768)).toBeUndefined();
+    expect(gooseAutoCompactThreshold(64_000, 32_768)).toBeUndefined();
+  });
+
+  it("says nothing without a window — a ratio of an unknown is a guess", () => {
+    expect(gooseAutoCompactThreshold(16_000, undefined)).toBeUndefined();
+    expect(gooseAutoCompactThreshold(undefined, 32_768)).toBeUndefined();
+  });
+
+  it("turns goose's own trigger off when auto-compact is off", () => {
+    // `0` is goose's off; its reactive compaction on a context-length error
+    // still runs, which is what keeps the chat alive.
+    expect(gooseAutoCompactThreshold(16_384, 32_768, false)).toBe("0");
+    expect(gooseAutoCompactThreshold(undefined, undefined, false)).toBe("0");
   });
 });

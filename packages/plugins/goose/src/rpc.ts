@@ -115,6 +115,13 @@ export const ACP_PROTOCOL_VERSION = 1;
 export const DISPATCH_CLIENT_CAPABILITIES = {
   fs: { readTextFile: false, writeTextFile: false },
   terminal: false,
+  // goose reports its OWN auto-compaction only to a client that opts into its
+  // `_goose/unstable/session/update` notifications: a `status_message` notice
+  // "Compaction complete". Without this the summary happened in silence — the
+  // transcript showed no row and the meter just dropped. Opting in is purely
+  // additive (verified on 1.51.0): every standard `session/update` still comes,
+  // the extras arrive under a method the decoder already ignores.
+  _meta: { goose: { customNotifications: true } },
 } as const;
 
 /** A live ACP connection to one agent process. */

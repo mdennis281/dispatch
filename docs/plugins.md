@@ -1531,7 +1531,8 @@ else a per-chat limit, and it arrives as `HarnessSessionSpec.contextTokenLimit`
 
 - **Enforce it mid-turn**, by handing it to the runtime's own trigger
   (Codex `model_auto_compact_token_limit`; Claude an `autoCompactWindow` derived
-  from it), and declare `capabilities.nativeContextLimit: true`. The host also
+  from it; goose a `GOOSE_AUTO_COMPACT_THRESHOLD` ratio of `GOOSE_CONTEXT_LIMIT`),
+  and declare `capabilities.nativeContextLimit: true`. The host also
   compacts at turn end once past it, but a long agentic turn never ends, so
   that alone is not enough. A runtime with no trigger of its own leaves the flag
   off and gets only the turn-end check.

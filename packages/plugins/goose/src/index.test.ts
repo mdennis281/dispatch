@@ -419,3 +419,44 @@ describe("AcpHarness.readLimits", () => {
     expect(await new AcpHarness().readLimits()).toBeNull();
   });
 });
+
+describe("goose compaction", () => {
+  it("advertises compaction as a turn, and the limit as goose's own to enforce", async () => {
+    const { ACP_CAPABILITIES } = await import("./index.js");
+    // `/compact` is a prompt that ends with its own `session/prompt` result.
+    expect(ACP_CAPABILITIES.compaction).toBe(true);
+    expect(ACP_CAPABILITIES.controlTurns).toBe(true);
+    expect(ACP_CAPABILITIES.nativeContextLimit).toBe(true);
+  });
+
+  it("spawns goose with a threshold that lands on the user's limit", async () => {
+    // Left at goose's 0.8, a 16k limit on a 32k window would only have been
+    // enforced by the host's turn-end check — which a long turn never reaches.
+    const { AcpHarness } = await import("./index.js");
+    let env: Record<string, string> | undefined;
+    const h = new AcpHarness({
+      runtime: { kind: "goose", source: "installed", available: true, path: "/x/goose" },
+      connect: (o) => {
+        env = (o as { env?: Record<string, string> }).env;
+        return { ready: async () => ({}) } as never;
+      },
+    });
+    h.createSession({
+      cwd: "/work",
+      permissionMode: "default",
+      effort: "medium",
+      systemPromptAppends: [],
+      mcpServers: {},
+      skills: [],
+      contextWindow: 32_768,
+      contextTokenLimit: 16_384,
+    });
+    expect(env?.GOOSE_CONTEXT_LIMIT).toBe("32768");
+    expect(env?.GOOSE_AUTO_COMPACT_THRESHOLD).toBe("0.5");
+  });
+
+  it("leaves goose's own threshold alone when there is no limit to express", async () => {
+    const { GOOSE_AGENT } = await import("./index.js");
+    expect(GOOSE_AGENT.env("m", 32_768).GOOSE_AUTO_COMPACT_THRESHOLD).toBeUndefined();
+  });
+});
