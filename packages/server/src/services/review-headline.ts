@@ -34,16 +34,23 @@ export function inferRecommendation(
 }
 
 /**
- * Put the headline above `body`. Does nothing when the body already starts with
- * one of the headline emoji: a reviewer that followed an older instruction and
- * wrote its own headline would otherwise get two.
+ * A headline the reviewer typed itself, e.g. from following an older brief.
+ * This matches the headline WORDING, not just the emoji. A body that opens with
+ * "⚠️ Could not run the suite" is a caveat, and treating it as a headline would
+ * post the review with none.
+ */
+const OWN_HEADLINE = /^\s*(?:#+\s*)?(?:✅\s*Approval|⚠️?\s*Review|⛔\s*Changes)\s+recommended[^\n]*\n*/iu;
+
+/**
+ * Put the headline above `body`. A headline the reviewer already wrote is
+ * REPLACED, not kept. Keeping it would give two headlines, or a ✅ at the top of
+ * a review whose recommendation says ⛔.
  */
 export function withRecommendationHeadline(
   body: string,
   recommendation: ReviewRecommendation,
 ): string {
-  const trimmed = body.trimStart().replace(/^#+\s*/, "");
-  if (/^(✅|⚠️?|⛔)/u.test(trimmed)) return body;
+  const rest = body.replace(OWN_HEADLINE, "");
   const head = `### ${HEADLINES[recommendation]}`;
-  return body ? `${head}\n\n${body}` : head;
+  return rest ? `${head}\n\n${rest}` : head;
 }

@@ -16,10 +16,25 @@ describe("review recommendation headline", () => {
 
   // A reviewer on an older brief writes its own headline; stacking a second
   // one on top reads like two reviewers disagreeing.
-  it("does not double up on a body that already carries a headline", () => {
-    for (const body of ["⛔ Changes recommended\n\nx", "## ✅ Approval recommended", "⚠ Review recommended"]) {
-      expect(withRecommendationHeadline(body, "approve")).toBe(body);
-    }
+  it("replaces a headline the reviewer wrote rather than stacking or trusting it", () => {
+    expect(withRecommendationHeadline("⛔ Changes recommended\n\nx", "changes")).toBe(
+      "### ⛔ Changes recommended\n\nx",
+    );
+    // The typed headline disagrees with the recommendation; the parameter wins.
+    expect(withRecommendationHeadline("## ✅ Approval recommended\n\nx", "review")).toBe(
+      "### ⚠️ Review recommended\n\nx",
+    );
+    expect(withRecommendationHeadline("⚠ Review recommended", "review")).toBe("### ⚠️ Review recommended");
+  });
+
+  // Reviewers flag what they couldn't check, and a ⚠️ is the natural way to
+  // start that sentence. It is a caveat, not a headline.
+  it("still adds the headline when the body merely opens with one of the emoji", () => {
+    const body = "⚠️ Could not run the test suite; two findings inline.";
+    expect(withRecommendationHeadline(body, "review")).toBe(`### ⚠️ Review recommended\n\n${body}`);
+    expect(withRecommendationHeadline("✅ Tests pass, but see threads", "changes")).toMatch(
+      /^### ⛔ Changes recommended\n\n✅ Tests pass/,
+    );
   });
 
   it("infers a recommendation for a call that named none", () => {
