@@ -22,6 +22,8 @@ import {
   type PostureSource,
 } from "@dispatch/shared";
 import { useChats } from "../stores/chats.js";
+import { useProjects } from "../stores/projects.js";
+import { isKnownModeId } from "../components/chat/ModeControl.js";
 import { useProjectLayer } from "../stores/config.js";
 import { useSettings } from "../stores/settings.js";
 
@@ -29,7 +31,15 @@ import { useSettings } from "../stores/settings.js";
 export function useChatPosture(chatId: string | null): ChatPosture {
   const chat = useChats((s) => (chatId ? s.byId[chatId] : undefined));
   const project = useProjectLayer(chat?.projectId);
-  const settings = useSettings((s) => s.app);
+  const app = useSettings((s) => s.app);
+  const modes = useProjects((s) => s.modes);
+  // The broker falls back to `global` when `globalChatModeId` names a mode
+  // that no longer exists (see `resolvePosture`); mirror it, or the badge
+  // would claim a mode the session isn't running. Only once modes have
+  // loaded — an empty list would otherwise misread every custom id as gone.
+  const dangling =
+    !!app?.globalChatModeId && modes.length > 0 && !isKnownModeId(modes, app.globalChatModeId);
+  const settings = dangling ? { ...app, globalChatModeId: undefined } : app;
   return resolveChatPosture(
     enforceGlobalPosture(chat?.projectId, {
       chat: chat

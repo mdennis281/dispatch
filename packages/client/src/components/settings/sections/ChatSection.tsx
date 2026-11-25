@@ -29,7 +29,7 @@ import {
   offerTerminalLocations,
 } from "../../config/TerminalLocationsPicker.js";
 import { useTerminals } from "../../../stores/terminals.js";
-import { modeLabel } from "../../chat/ModeControl.js";
+import { isKnownModeId, modeLabel } from "../../chat/ModeControl.js";
 import { EFFORT_OPTIONS } from "../../../lib/efforts.js";
 import { useProjects, useRealProjects } from "../../../stores/projects.js";
 import { useSubscriptions } from "../../../stores/subscriptions.js";
@@ -118,6 +118,23 @@ export function ChatSection({ draft, patch, harnesses, catalogs }: AppPaneProps)
     ...modes.map((m) => ({ value: m.id, label: m.name, hint: m.permissionMode })),
   ];
 
+  const globalModeOptions: SelectOption<string>[] = [
+    { value: "", label: GLOBAL_MODE.name, hint: "spawn & observe only" },
+    ...modes.map((m) => ({ value: m.id, label: m.name, hint: m.permissionMode })),
+  ];
+  // A saved id whose mode was since deleted: the broker falls back to Global
+  // for it (fail closed), so say so instead of rendering a blank chip.
+  const savedGlobal = draft.globalChatModeId;
+  if (savedGlobal && !globalModeOptions.some((o) => o.value === savedGlobal)) {
+    globalModeOptions.push({
+      value: savedGlobal,
+      label: isKnownModeId(modes, savedGlobal) ? modeLabel(modes, savedGlobal) : savedGlobal,
+      ...(isKnownModeId(modes, savedGlobal)
+        ? {}
+        : { icon: <TriangleAlert />, hint: "missing — runs as Global" }),
+    });
+  }
+
   const harnessOptions: SelectOption<HarnessKind>[] = [
     // A real choice, not an error: with no default, a new chat has to name its
     // provider, and creation says so (#426).
@@ -177,10 +194,7 @@ export function ChatSection({ draft, patch, harnesses, catalogs }: AppPaneProps)
             align="start"
             value={draft.globalChatModeId ?? ""}
             onChange={(v) => patch({ globalChatModeId: v || undefined })}
-            options={[
-              { value: "", label: GLOBAL_MODE.name, hint: "spawn & observe only" },
-              ...modes.map((m) => ({ value: m.id, label: m.name, hint: m.permissionMode })),
-            ]}
+            options={globalModeOptions}
           />
         </Field>
         {/* Only ever consulted when a config dir is PLACED for the first time —

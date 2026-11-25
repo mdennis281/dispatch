@@ -8543,7 +8543,22 @@ export class SessionBroker {
    * so a chat starts as, and runs as, one answer.
    */
   private async resolvePosture(session: LiveSession): Promise<ChatPosture> {
-    const settings = await this.store.getSettings().catch(() => undefined);
+    let settings = await this.store.getSettings().catch(() => undefined);
+    // Fail CLOSED on a dangling global-chat default. `globalChatModeId` is a
+    // free-form id: pick a custom mode in Settings, delete that mode later,
+    // and `resolveMode` returns null — `stampModeGate(session, null)` then
+    // leaves NO denylist, so the global chat would come up with shells and
+    // PR tools merely prompted. An id nothing resolves falls back to `global`.
+    const globalDefault = settings?.globalChatModeId;
+    if (
+      settings &&
+      globalDefault &&
+      isGlobalProject(session.projectId) &&
+      !(globalDefault in BUILTIN_MODE_PERMISSION) &&
+      !(await this.resolveMode(globalDefault))
+    ) {
+      settings = { ...settings, globalChatModeId: undefined };
+    }
     return resolveChatPosture(
       enforceGlobalPosture(session.projectId, {
         chat: {

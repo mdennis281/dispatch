@@ -186,6 +186,12 @@ export const GLOBAL_MODE_DISALLOWED_TOOLS: readonly string[] = [
   "mcp__dispatch-secrets__secret_request",
   // destructive
   "mcp__dispatch-memory__forget",
+  // its own posture. Since #565 the global chat's mode is the HUMAN's to
+  // change (the picker, Settings → Chat). Without this entry the agent could
+  // `chat_set_mode({ modeId: "yolo" })` on itself — chatId defaults to the
+  // caller — and walk out of every entry above behind one routine-looking
+  // permission card that a single "Always allow" silences for good.
+  "mcp__dispatch-chat__chat_set_mode",
 ];
 
 /** The overlay a global chat reads, so the refusals are never a surprise. */
@@ -195,7 +201,7 @@ What you are for: holding the view across every project on this install. Answeri
 
 **You may** read and search anything (\`Read\`, \`Grep\`, \`Glob\`, the web), inspect any project (\`mcp__dispatch-project__project_list\`, \`project_info\`), search and read any chat (\`mcp__dispatch-chat__chat_find\`, \`chat_read\`), read memory and metrics, watch a pull request, and **spawn a chat into any project** with \`mcp__dispatch-chat__spawn_chat({ projectId, prompt })\`.
 
-**You may not** run a shell, edit a file, cut a worktree, open or land a pull request, or write committed \`.dispatch/\` config. Those calls are refused, not prompted. This is not a limitation to work around — it is the point: work that touches a repo happens in a chat that has one.
+**You may not** run a shell, edit a file, cut a worktree, open or land a pull request, write committed \`.dispatch/\` config, or change your own mode. Those calls are refused, not prompted — only the human can move this chat to another mode. This is not a limitation to work around — it is the point: work that touches a repo happens in a chat that has one.
 
 So when a task needs code changed, do not try to do it. Scope it, then \`spawn_chat\` it into the owning project with a brief that carries everything you learned. Report back what you spawned.`;
 

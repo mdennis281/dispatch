@@ -565,6 +565,26 @@ describe("SessionBroker neutral harness path", () => {
       expect(broker.getSession(chat.id)?.modeId).toBe("plan");
     });
 
+    it("falls back to global when globalChatModeId names a mode that no longer exists", async () => {
+      // Fail closed: a deleted custom mode resolves to null, and a null mode
+      // stamps NO denylist — the chat would come up with shells merely prompted.
+      await store.saveSettings({ ...(await store.getSettings()), globalChatModeId: "deleted-mode" });
+      const chat = await globalChat();
+      broker.create(chat);
+      await broker.setMode(chat.id, null);
+      expect(broker.getSession(chat.id)?.modeId).toBe(GLOBAL_MODE_ID);
+    });
+
+    it("denies the agent chat_set_mode, so it cannot leave the posture on its own", async () => {
+      const chat = await globalChat();
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "hello");
+      await broker.waitFor(chat.id, "idle");
+      expect(
+        await specs[0]!.toolGuard!("mcp__dispatch-chat__chat_set_mode", { modeId: "yolo" }, {}),
+      ).toMatch(/not available in Global mode/);
+    });
+
     it("hands the runtime a denylist, so the tools are never offered at all", async () => {
       const chat = await globalChat();
       broker.create(chat);

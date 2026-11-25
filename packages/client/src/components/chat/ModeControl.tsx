@@ -74,6 +74,27 @@ const BUILTIN_POSTURES: { id: string; name: string; icon: ReactNode; hint: strin
 ];
 
 /**
+ * Ids the broker resolves with no `ModeConfig` behind them — the keys of its
+ * `BUILTIN_MODE_PERMISSION` (session-broker.ts). Mirrored rather than shared
+ * because that map is server-side; the only reader here is
+ * {@link isKnownModeId}, whose job is to agree with the broker's fail-closed
+ * fallback for a dangling `globalChatModeId`.
+ */
+const BROKER_BUILTIN_MODE_IDS = [
+  "default", "ask", "plan", "edit", "acceptEdits", "auto",
+  "yolo", "bypass", "bypassPermissions", "dontAsk",
+];
+
+/** Would the broker resolve this mode id to anything? */
+export function isKnownModeId(modes: ModeConfig[], modeId: string): boolean {
+  return (
+    modes.some((m) => m.id === modeId) ||
+    BROKER_BUILTIN_MODE_IDS.includes(modeId) ||
+    modeId in BUILTIN_MODE_CONFIGS
+  );
+}
+
+/**
  * What the active mode is called. Exported because the composer's compaction
  * measurement has to re-run when this string changes — the label moves the
  * row's natural width without moving its box, so no ResizeObserver fires.
