@@ -303,7 +303,8 @@ export function HoverCard({
             style={{ zIndex: LAYER.popover, top: pos.top, left: pos.left, width }}
             className={cn(
               "fixed overflow-hidden rounded-md border border-line-strong outline-none",
-              "bg-overlay/98 backdrop-blur-md shadow-[var(--shadow-pop)] cm-anim-rise",
+              // Same rung as Popover — see the note there.
+              "bg-elevated/98 backdrop-blur-md shadow-[var(--shadow-pop)] cm-anim-rise",
             )}
           >
             {card(closeNow)}

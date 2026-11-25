@@ -347,9 +347,13 @@ export function Popover({
                 setAnimationFrom(null);
               }
             }}
+            // `elevated`, not `overlay`: overlay is the palette's LIGHTEST rung,
+            // reserved for modals and the command palette. Painting every menu
+            // with it put a pale blue-grey slab over a near-black sidebar — the
+            // loudest surface on screen was a three-item context menu.
             className={cn(
               "fixed cm-scroll overflow-y-auto overflow-x-hidden rounded-md border " +
-                "border-line-strong bg-overlay/98 backdrop-blur-md shadow-[var(--shadow-pop)]",
+                "border-line-strong bg-elevated/98 backdrop-blur-md shadow-[var(--shadow-pop)]",
               placement?.side === "right"
                 ? closing
                   ? "cm-anim-slide-left"

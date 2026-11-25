@@ -83,6 +83,7 @@ import { requestFocusPanel, type FocusPanelTab } from "../panels/panelBus.js";
 import { Kbd } from "../ui/Kbd.js";
 import { cn } from "../../lib/cn.js";
 import { LAYER } from "../../lib/layers.js";
+import { fuzzyScore } from "../../lib/fuzzy.js";
 import { ago } from "../metrics/chrome.js";
 
 interface Command {
@@ -99,32 +100,6 @@ interface Command {
   /** Small trailing note under the group label — a transcript hit's age. */
   meta?: string;
   run: () => void;
-}
-
-/**
- * Subsequence fuzzy score: null when `query` isn't a subsequence of `text`,
- * else a score that rewards contiguous runs and word-boundary hits. Empty query
- * → 0 (keep everything in its natural order via a stable sort).
- */
-function fuzzyScore(query: string, text: string): number | null {
-  if (!query) return 0;
-  const q = query.toLowerCase();
-  const t = text.toLowerCase();
-  let qi = 0;
-  let score = 0;
-  let streak = 0;
-  let last = -2;
-  for (let ti = 0; ti < t.length && qi < q.length; ti++) {
-    if (t[ti] === q[qi]) {
-      streak = last === ti - 1 ? streak + 1 : 0;
-      const prev = ti > 0 ? t[ti - 1] : undefined;
-      const boundary = prev === undefined || /[\s\-_/.]/.test(prev);
-      score += 1 + streak * 2 + (boundary ? 3 : 0);
-      last = ti;
-      qi++;
-    }
-  }
-  return qi === q.length ? score : null;
 }
 
 /** Below this, a query is too broad to be worth a round trip per keystroke. */
