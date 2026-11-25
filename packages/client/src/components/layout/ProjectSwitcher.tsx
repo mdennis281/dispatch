@@ -329,6 +329,12 @@ function SwitcherMenu({
             onChange={(e) => {
               setQuery(e.target.value);
               setHi(e.target.value.trim() ? 0 : -1);
+              // Back to the top on every keystroke. The scroll-into-view effect
+              // only fires when `hi` CHANGES, and typing a second letter leaves
+              // it at 0 — so a list you had wheel-scrolled kept its offset, the
+              // best match sat above the fold, and Enter opened a project you
+              // couldn't see.
+              if (listRef.current) listRef.current.scrollTop = 0;
             }}
             onKeyDown={onKeyDown}
             placeholder="Find a project…"
