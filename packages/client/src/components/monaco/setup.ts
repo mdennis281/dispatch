@@ -7,7 +7,10 @@
  */
 import * as monaco from "monaco-editor";
 import { loader } from "@monaco-editor/react";
-import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
+// The package's exports map (0.56+) already roots subpaths at `esm/vs/`, so the
+// old `monaco-editor/esm/vs/...` spelling resolves to `esm/vs/esm/vs/...` and
+// fails the build.
+import EditorWorker from "monaco-editor/editor/editor.worker?worker";
 import { useTheme } from "../../stores/theme.js";
 import { normalizeHex, withAlphaHex } from "./hex.js";
 
