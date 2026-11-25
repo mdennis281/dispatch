@@ -1,17 +1,12 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronRight,
-  ChevronsUpDown,
-  LayoutGrid,
   Plus,
-  Pause,
   Play,
   Square,
   Gamepad2,
   Database,
   Clapperboard,
-  FolderGit2,
-  Bot,
   Circle,
   Trash2,
   Pencil,
@@ -29,12 +24,11 @@ import {
   Activity,
   Skull,
   Copy,
-  Globe,
   Loader2,
   type LucideIcon,
 } from "lucide-react";
-import { GLOBAL_PROJECT_ID, isGlobalProject, parsePrRecordKey } from "@dispatch/shared";
-import type { Chat, PauseState, PrRecord, SubApp, RunnerInstance, Project } from "@dispatch/shared";
+import { isGlobalProject, parsePrRecordKey } from "@dispatch/shared";
+import type { Chat, PrRecord, SubApp, RunnerInstance, Project } from "@dispatch/shared";
 import { Popover, MenuItem } from "../ui/Popover.js";
 import { Button } from "../ui/Button.js";
 import { IconButton } from "../ui/IconButton.js";
@@ -54,11 +48,10 @@ import { Chip } from "../ui/Chip.js";
 import { Tooltip } from "../ui/Tooltip.js";
 import { Spinner } from "../ui/Spinner.js";
 import { ScrollArea } from "../ui/ScrollArea.js";
-import { useActiveProject, useRealProjects } from "../../stores/projects.js";
+import { useActiveProject } from "../../stores/projects.js";
 import {
   useChats,
   useProjectChatTree,
-  useProjectAgentCounts,
   useUnloadedChatCount,
   isChatWorking,
   isReviewerChat,
@@ -68,7 +61,6 @@ import {
   isUnstartedChat,
   type ChatBranch,
   type ChatSection,
-  type ProjectAgentCounts,
 } from "../../stores/chats.js";
 import { usePrs } from "../../stores/prs.js";
 import { useChatRuntime, branchRuntimeMs } from "../../stores/chatRuntime.js";
@@ -80,20 +72,17 @@ import {
 import { useView, openOverlay } from "../../stores/view.js";
 import { useLayout, dismissLeftDrawer } from "../../stores/layout.js";
 import {
-  goHome,
   selectChat,
-  selectGlobalChat,
-  selectProject,
 } from "../../stores/navigation.js";
 import { useProjectMemories } from "../../stores/memory.js";
 import { useGit, useGitChangeCount } from "../../stores/git.js";
 import { useRunners } from "../../stores/runners.js";
-import { useDisplayStatus, useScheduler } from "../../stores/scheduler.js";
+import { useDisplayStatus } from "../../stores/scheduler.js";
 import { useAttention } from "../../stores/attention.js";
 import { actions, loadOlderChats } from "../../lib/actions.js";
 import { createChatAndFocus, usePendingChat } from "../../stores/pendingChat.js";
 import { cn } from "../../lib/cn.js";
-import { midTruncate, relTimeShort } from "../../lib/format.js";
+import { relTimeShort } from "../../lib/format.js";
 import { useFlipReorder } from "../../lib/useFlip.js";
 import { useLongPress } from "../../lib/useLongPress.js";
 import { useCopyId } from "../../lib/useCopyId.js";
@@ -101,6 +90,7 @@ import { LAYER } from "../../lib/layers.js";
 import { foldedChildrenLabel } from "./reviewLabel.js";
 import { DeleteChatDialog } from "../chat/DeleteChatDialog.js";
 import { PauseChatMenuItem } from "../chat/PauseChatMenuItem.js";
+import { ProjectSwitcher } from "./ProjectSwitcher.js";
 import { useChatRename } from "../chat/useChatRename.js";
 import { BranchWorktreePicker } from "../panels/BranchWorktreePicker.js";
 import { SubAppRunsPopover } from "../panels/SubAppRunsPopover.js";
@@ -130,286 +120,6 @@ const SUBAPP_ICON: Record<string, LucideIcon> = {
   "metrics-server": Database,
   "studio-director": Clapperboard,
 };
-
-/* ------------------------------------------------------------ project head */
-
-/**
- * The right-hand half of a project row: how many agents are live in it.
- *
- * Three tallies, never summed into one number — "3 working", "2 queued" and
- * "1 waiting on you" are different calls to action, and a project you have to go
- * answer must not hide inside a busy-looking count. Queued is kept apart from
- * working for the same reason in the other direction: a project whose turns are
- * all parked behind the context cap has nothing moving in it, and reading as
- * busy is exactly the wrong signal when you are picking where to go next.
- *
- * `queued` and `working` share the accent family — see `statusMeta` — so they
- * are separated by FILL, not hue: a live agent is a pulsing disc, a queued one a
- * still outline. Nothing renders for a quiet project: a row of zeroes would make
- * the menu read as a dashboard rather than a picker.
- */
-function ProjectAgentBadge({ counts }: { counts: ProjectAgentCounts | undefined }) {
-  const working = counts?.working ?? 0;
-  const queued = counts?.queued ?? 0;
-  const attention = counts?.attention ?? 0;
-  if (!working && !queued && !attention) return null;
-
-  // "working" rather than "running": the count also covers `waiting`, which is
-  // an agent with a tool in flight but nothing streaming.
-  const label = [
-    attention ? `${attention} awaiting input` : null,
-    working ? `${working} working` : null,
-    queued ? `${queued} queued` : null,
-  ]
-    .filter(Boolean)
-    .join(" · ");
-
-  return (
-    <span className="flex items-center gap-1.5 tabular-nums" title={label}>
-      {/* The dots carry the meaning by colour and fill alone, so the readable
-          form goes to assistive tech directly — a `title` is not reliably
-          announced. */}
-      <span className="sr-only">{label}</span>
-      {attention > 0 && (
-        <span aria-hidden className={cn("flex items-center gap-1", toneText("warn"))}>
-          <StatusDot tone="warn" pulse size={5} />
-          {attention}
-        </span>
-      )}
-      {working > 0 && (
-        <span aria-hidden className={cn("flex items-center gap-1", toneText("working"))}>
-          <StatusDot tone="working" pulse size={5} />
-          {working}
-        </span>
-      )}
-      {queued > 0 && (
-        <span aria-hidden className={cn("flex items-center gap-1", toneText("accent"))}>
-          {/* A touch larger than the filled dots: at 5px the hole inside a
-              1.5px ring closes up and the outline reads as a disc again. */}
-          <StatusDot tone="accent" hollow size={7} />
-          {queued}
-        </span>
-      )}
-    </span>
-  );
-}
-
-/** Stable empty fallback — a fresh `{}` per render would re-render every subscriber. */
-const NO_PAUSES: Record<string, PauseState> = {};
-
-function ProjectSelector({
-  onAddProject,
-  onManageConfig,
-}: {
-  onAddProject: () => void;
-  onManageConfig: () => void;
-}) {
-  // Real repos only — the global chat is NOT one of them and gets its own row
-  // below. Listing it among the projects would read as "a repo called Global",
-  // which is exactly the leak this pseudo-project approach has to avoid.
-  const projects = useRealProjects();
-  const active = useActiveProject();
-  const agentCounts = useProjectAgentCounts();
-  const globalActive = active?.id === GLOBAL_PROJECT_ID;
-  const projectPauses = useScheduler((s) => s.snapshot?.projectPauses ?? NO_PAUSES);
-  const scopedBusy = useScheduler((s) => s.scopedBusy);
-  const activePaused = active ? projectPauses[active.id] !== undefined : false;
-
-  return (
-    <Popover
-      align="start"
-      width={236}
-      className="p-1"
-      // Without this the row is only as wide as its own content: the trigger
-      // wrapper is `inline-flex`, so the button's `w-full` measures against
-      // itself. A short project name left the highlight stopping mid-band with
-      // bare `surface` beside it, and the chevron floating mid-row.
-      triggerClassName="w-full"
-      trigger={({ open, toggle }) => (
-        <button
-          onClick={toggle}
-          aria-expanded={open}
-          className={cn(
-            // Full-bleed and square, like every other row in this column: it
-            // fills the header band rather than sitting in it as a card, so the
-            // sidebar has ONE row shape from the project name to the last chat.
-            "flex h-12 w-full items-center gap-2 px-2.5 text-left transition-colors hover:bg-hover",
-            open && "bg-active",
-          )}
-        >
-          {/* Bare glyph, no tile: the accent fill and ring read as a badge on a
-              row that is already the header, and it was the one card left in a
-              column that is otherwise full-bleed rows. The span keeps size-6 so
-              the title's left edge doesn't move. */}
-          <span className="flex size-6 items-center justify-center text-accent [&_svg]:size-4">
-            {globalActive ? <Globe /> : <FolderGit2 />}
-          </span>
-          <span className="min-w-0 flex-1">
-            <span className="block truncate text-base font-semibold text-primary">
-              {active?.name ?? "No project"}
-            </span>
-            <span className="block truncate cm-mono !text-2xs text-faint">
-              {/* A path is the useful subtitle for a repo and a misleading one
-                  for the global chat, whose repoPath is an empty scratch dir
-                  nobody should go looking for. */}
-              {globalActive
-                ? "every project · spawn and observe"
-                : active
-                  ? midTruncate(active.repoPath, 30)
-                  : "—"}
-            </span>
-          </span>
-          {/* The menu says it too, but that is closed — and a project you are
-              sitting in that silently won't run is the confusing case. */}
-          {activePaused && (
-            <Tooltip label="This project is paused — resume it from this menu">
-              <span className="flex shrink-0 text-warn [&_svg]:size-3.5">
-                <Pause aria-label="Project paused" />
-              </span>
-            </Tooltip>
-          )}
-          <ChevronsUpDown className="size-3.5 shrink-0 text-faint" />
-        </button>
-      )}
-    >
-      {(close) => (
-        <div className="flex flex-col">
-          {/* The overview leads the menu, above the projects rather than below
-              them with the actions.
-              It is the SECOND of its two entry points — the brand mark in the
-              top bar is the first — and it is here because this control is
-              already "which project am I in", so "all of them" is the same
-              question one level up. Putting it under a divider with "New
-              project…" would have filed a destination among the verbs.
-
-              Unlike picking a project, this DOES dismiss the chat picker on a
-              phone — `goHome` clears `leftOpen` itself. The overview is
-              full-bleed, so `App` stops rendering the drawer entirely, and a
-              flag left set would have `currentSlot` reporting a picker that
-              isn't on screen. Picking a project keeps the drawer open because
-              it leaves you IN the sidebar with a list to choose from; this
-              replaces the sidebar outright. */}
-          <MenuItem
-            icon={<LayoutGrid />}
-            onClick={() => {
-              goHome();
-              close();
-            }}
-          >
-            Overview &mdash; all projects
-          </MenuItem>
-          <div className="my-1 h-px bg-line" />
-          {projects.length === 0 && (
-            <p className="px-2 py-1.5 text-xs text-faint">No projects yet.</p>
-          )}
-          {projects.map((p) => {
-            const paused = projectPauses[p.id];
-            return (
-              <div key={p.id} className="group/proj relative flex items-center">
-                <MenuItem
-                  icon={<FolderGit2 />}
-                  active={p.id === active?.id}
-                  // Room for the toggle, so it never sits on top of the badge.
-                  className="pr-8"
-                  hint={
-                    paused ? (
-                      <span className="text-warn">paused</span>
-                    ) : (
-                      <ProjectAgentBadge counts={agentCounts[p.id]} />
-                    )
-                  }
-                  onClick={() => {
-                    selectProject(p.id);
-                    close();
-                    // Deliberately NOT dismissLeftDrawer(): unlike the nav items below,
-                    // switching project navigates you INTO the sidebar, not out of it.
-                    // `selectProject` clears the open chat, so closing the drawer here
-                    // left a phone staring at the empty state with the chat list it
-                    // needs to pick from hidden behind a second tap.
-                  }}
-                >
-                  {p.name}
-                </MenuItem>
-                {/* A sibling, not a child: MenuItem is itself a button, and a
-                    button inside a button is invalid and swallows the inner click.
-                    Shown on hover only while running — thirteen pause glyphs
-                    down the menu would read as thirteen things to worry about —
-                    but always once paused, since that is the state to undo.
-                    Always shown where there is no hover to reveal it. The menu
-                    stays open so the row visibly flips.
-
-                    The positioning is on THIS span, not the IconButton: a `tip`
-                    wraps the button in Tooltip's own `relative inline-flex`
-                    span, so `absolute` on the button resolved against that
-                    zero-width wrapper — which sat in the row's flex flow — and
-                    the glyph hung low and off the menu's right edge. */}
-                <span
-                  className={cn(
-                    "absolute inset-y-0 right-1 flex items-center",
-                    !paused &&
-                      "opacity-0 focus-within:opacity-100 group-hover/proj:opacity-100 [@media(hover:none)]:opacity-100",
-                  )}
-                >
-                  <IconButton
-                    tip={
-                      paused
-                        ? `Resume ${p.name} — tell ${paused.interrupted.length || "no"} interrupted chat${paused.interrupted.length === 1 ? "" : "s"} what happened, then run its queue`
-                        : `Pause ${p.name} — interrupt its running turns and hold new ones`
-                    }
-                    disabled={!!scopedBusy[`project:${p.id}`]}
-                    onClick={() => {
-                      const s = useScheduler.getState();
-                      void (paused ? s.resumeProject(p.id) : s.pauseProject(p.id));
-                    }}
-                  >
-                    {paused ? <Play className="text-accent-hi" /> : <Pause className="text-danger" />}
-                  </IconButton>
-                </span>
-              </div>
-            );
-          })}
-          <div className="my-1 h-px bg-line" />
-          {/* The global chat's entry point. Below the projects and above the
-              actions, because it is a place you GO rather than a thing you do
-              — and fenced off from them because it is not a repo.
-
-              Routed through `selectGlobalChat` like every other navigation in
-              this file: it is a project id as far as the stores are concerned,
-              so the project↔chat invariant applies to it unchanged. */}
-          <MenuItem
-            icon={<Globe />}
-            active={globalActive}
-            onClick={() => {
-              selectGlobalChat();
-              close();
-            }}
-          >
-            Global chat
-          </MenuItem>
-          <div className="my-1 h-px bg-line" />
-          <MenuItem
-            icon={<Plus />}
-            onClick={() => {
-              close();
-              onAddProject();
-            }}
-          >
-            New project…
-          </MenuItem>
-          <MenuItem
-            icon={<Bot />}
-            onClick={() => {
-              close();
-              onManageConfig();
-            }}
-          >
-            Agents &amp; modes…
-          </MenuItem>
-        </div>
-      )}
-    </Popover>
-  );
-}
 
 /* ------------------------------------------------------------------ subApp */
 
@@ -889,7 +599,7 @@ function Dot() {
  * with nothing associating it back, and the trigger is a roleless, unfocusable
  * span. So the readable form is stated directly, inside the trigger — where it
  * joins the row button's accessible name, which is where you'd want a count
- * read out. `ProjectAgentBadge` above solves the identical problem the same way
+ * read out. `ProjectAgentBadge` (ProjectSwitcher.tsx) solves the identical problem the same way
  * and for the same reason.
  *
  * `when` is what keeps that name usable: "No child chats. No processes." on
@@ -1943,7 +1653,7 @@ export function Sidebar() {
         {/* Adding a project is a full page, not a dialog: it ends by handing
             the repo to an agent, and that hand-off needs the config it's
             handing over visible beside it. See NewProjectView. */}
-        <ProjectSelector
+        <ProjectSwitcher
           onAddProject={() => setView("new-project")}
           onManageConfig={() => openOverlay("agents")}
         />
