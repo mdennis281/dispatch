@@ -116,12 +116,34 @@ export async function initializeAuth(): Promise<void> {
   }
 }
 
+/**
+ * Whether `input` resolves to this page's own origin. Every caller today hands
+ * `sessionFetch` a same-origin path, but nothing enforced it: one absolute URL
+ * from a plugin, a rendered asset reference or a future caller and the bearer
+ * token — the whole session — would ride along to a third-party host (CodeQL
+ * js/request-forgery #65). Fails closed: an unparsable input, or no `location`
+ * at all, counts as foreign.
+ */
+export function isSameOrigin(input: RequestInfo | URL): boolean {
+  if (typeof location === "undefined") return false;
+  const raw = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  try {
+    return new URL(raw, location.href).origin === location.origin;
+  } catch {
+    return false;
+  }
+}
+
 export async function sessionFetch(input: RequestInfo | URL, init: RequestInit = {}, retry = true): Promise<Response> {
+  const sameOrigin = isSameOrigin(input);
   const token = useAuth.getState().accessToken;
   const headers = new Headers(init.headers);
-  if (token) headers.set("authorization", `Bearer ${token}`);
+  if (token && sameOrigin) headers.set("authorization", `Bearer ${token}`);
   const response = await fetch(input, { ...init, headers, credentials: "same-origin" });
-  if (response.status === 401 && retry && useAuth.getState().status?.enabled && await refresh()) {
+  // A foreign host's 401 says nothing about OUR session — refreshing on it
+  // would rotate the refresh cookie on a stranger's say-so and replay the
+  // request for nothing.
+  if (sameOrigin && response.status === 401 && retry && useAuth.getState().status?.enabled && await refresh()) {
     return sessionFetch(input, init, false);
   }
   return response;
