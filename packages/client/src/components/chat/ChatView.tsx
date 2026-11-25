@@ -32,6 +32,7 @@ import { StatusDot, statusMeta } from "../ui/StatusDot.js";
 import { TitleText } from "../ui/TitleText.js";
 import { Spinner } from "../ui/Spinner.js";
 import { ChatHeaderBadges } from "./ChatHeaderBadges.js";
+import { AttachmentsMenu } from "./AttachmentsMenu.js";
 import { QueueOverride } from "./QueueOverride.js";
 import { PauseChatMenuItem } from "./PauseChatMenuItem.js";
 import { chatPrRefs, chatWorktreeRefs } from "./chatHeaderRefs.js";
@@ -591,6 +592,10 @@ export function ChatView({ chat }: { chat: Chat }) {
       {/* header */}
       <div className="relative shrink-0">
         <div className="flex h-12 items-center gap-3 px-4 cm-hairline-b">
+          {/* First in the bar, before the status: what the chat has MADE is a
+              question about the chat as a whole, not about this turn, and the
+              left edge is the one spot a phone header never squeezes out. */}
+          <AttachmentsMenu chatId={chat.id} compact={compact} />
           <StatusDot tone={meta.tone} pulse={meta.pulse} size={8} />
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-1.5">
