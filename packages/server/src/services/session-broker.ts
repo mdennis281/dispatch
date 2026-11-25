@@ -2732,27 +2732,12 @@ export class SessionBroker {
         worktreeCwd,
         // Placeholders until the first `buildOptions`, which resolves the
         // inherited chain asynchronously — `create` is sync and only has the row.
-        modeId: isGlobalProject(chat.projectId)
-          ? GLOBAL_MODE_ID
-          : (chat.modeId ?? DEFAULT_MODE_ID),
+        modeId: chat.modeId ?? (isGlobalProject(chat.projectId) ? GLOBAL_MODE_ID : DEFAULT_MODE_ID),
         agentId: chat.agentId,
         personaId: chat.personaId,
         effort: chat.effort ?? DEFAULT_EFFORT,
         pins: {
-          // A mode pin on a GLOBAL chat is ignored, whatever the row says.
-          //
-          // This is the chokepoint, and it has to be here rather than only on
-          // the routes that write the row. `PUT /api/chats/:id` merges its
-          // body and saves directly — no posture resolution, no broker — so a
-          // `{ modeId: "yolo" }` lands as a pin; `refreshInheritedPosture`
-          // then sees a defined pin and never re-resolves, and the chat comes
-          // up with `bypassPermissions` and no denylist at all. A row can also
-          // predate this change, or be edited by hand. Dropping the pin here
-          // means the posture holds no matter how the row got written, and the
-          // project layer (`enforceGlobalPosture`) answers instead.
-          ...(chat.modeId !== undefined && !isGlobalProject(chat.projectId)
-            ? { modeId: chat.modeId }
-            : {}),
+          ...(chat.modeId !== undefined ? { modeId: chat.modeId } : {}),
           ...(chat.effort !== undefined ? { effort: chat.effort } : {}),
           ...(chat.model !== undefined ? { model: chat.model } : {}),
         },
@@ -3530,18 +3515,6 @@ export class SessionBroker {
    */
   async setMode(chatId: string, modeId: string | null): Promise<PermissionMode> {
     const session = this.mustGet(chatId);
-    // A global chat's posture is not a preference. Everything that makes it
-    // safe to be project-less — no shell, no edits, no worktree, no merge —
-    // lives in that one mode, so letting the picker move off it would turn the
-    // cross-project chat into an unanchored agent with a shell. `null` is
-    // allowed because unpinning resolves straight back to `global`.
-    if (isGlobalProject(session.projectId) && modeId !== null && modeId !== GLOBAL_MODE_ID) {
-      throw new Error(
-        `The global chat always runs in ${GLOBAL_MODE_ID} mode — it has no project, so ` +
-          "there is nothing for another posture to be safe in. Spawn a chat into a " +
-          "project to work there.",
-      );
-    }
     if (modeId === null) {
       delete session.pins.modeId;
       session.modeId = (await this.resolvePosture(session)).modeId.effective;
@@ -8570,7 +8543,22 @@ export class SessionBroker {
    * so a chat starts as, and runs as, one answer.
    */
   private async resolvePosture(session: LiveSession): Promise<ChatPosture> {
-    const settings = await this.store.getSettings().catch(() => undefined);
+    let settings = await this.store.getSettings().catch(() => undefined);
+    // Fail CLOSED on a dangling global-chat default. `globalChatModeId` is a
+    // free-form id: pick a custom mode in Settings, delete that mode later,
+    // and `resolveMode` returns null — `stampModeGate(session, null)` then
+    // leaves NO denylist, so the global chat would come up with shells and
+    // PR tools merely prompted. An id nothing resolves falls back to `global`.
+    const globalDefault = settings?.globalChatModeId;
+    if (
+      settings &&
+      globalDefault &&
+      isGlobalProject(session.projectId) &&
+      !(globalDefault in BUILTIN_MODE_PERMISSION) &&
+      !(await this.resolveMode(globalDefault))
+    ) {
+      settings = { ...settings, globalChatModeId: undefined };
+    }
     return resolveChatPosture(
       enforceGlobalPosture(session.projectId, {
         chat: {

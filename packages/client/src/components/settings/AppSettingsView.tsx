@@ -73,6 +73,7 @@ function normalize(s: AppSettings): AppSettings {
     // through untouched. Nothing reads it back into the page.
     theme: s.theme ?? "dark",
     defaultModeId: s.defaultModeId,
+    globalChatModeId: s.globalChatModeId,
     // Deliberately NOT filled in with an effective default like the fields
     // below: unset is a meaningful answer here ("whatever this server was
     // started with"), and the only honest number to substitute lives on the
@@ -228,6 +229,7 @@ export function AppSettingsView() {
     const body: AppSettings = {
       ...draft,
       defaultModeId: draft.defaultModeId || undefined,
+      globalChatModeId: draft.globalChatModeId || undefined,
       // `|| undefined` so a typed-then-deleted box (and a literal 0, which the
       // server rejects as not-positive) clears back to the default rather than
       // failing the save.

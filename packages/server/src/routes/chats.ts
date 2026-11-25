@@ -27,7 +27,6 @@ import { leanRows } from "../services/transcript-lean.js";
 import { searchChatsByAge } from "../services/chat-search.js";
 import { chatTotalsByProject, listCappedChats } from "../services/chat-load-cap.js";
 import { deleteChat } from "../services/chat-deletion.js";
-import { GLOBAL_MODE_ID, isGlobalProject } from "@dispatch/shared";
 
 /** Cap on one hydrate request (a card needs 2 — its tool_use + tool_result). */
 const MAX_HYDRATE_IDS = 50;
@@ -156,25 +155,6 @@ export function registerChatRoutes(app: FastifyInstance): void {
       if (!existing) return reply.code(404).send({ error: "not found" });
       const body = (req.body ?? {}) as Record<string, unknown>;
       if ("personaId" in body) return reply.code(400).send({ error: "Use the chat persona endpoint to change persona." });
-      // The global chat's posture is not a preference, and this route is the
-      // one that bypasses every check: it merges the body over the row and
-      // saves, with no posture resolution and no call into the broker — so
-      // `{ modeId: "yolo" }` would land as a pin that `setMode` would have
-      // refused. Rejected rather than ignored, so a caller is told.
-      // (The broker drops such a pin anyway; see `pins` in `create`. Two
-      // layers, because this one explains and that one cannot be bypassed.)
-      if (
-        isGlobalProject(existing.projectId) &&
-        "modeId" in body &&
-        body.modeId !== null &&
-        body.modeId !== GLOBAL_MODE_ID
-      ) {
-        return reply.code(400).send({
-          error:
-            `The global chat always runs in ${GLOBAL_MODE_ID} mode — it has no project, ` +
-            "so there is nothing for another posture to be safe in.",
-        });
-      }
       // `ext` is the per-plugin bag (see `Chat.ext`) and merges PER KEY: a
       // plugin writing `{ ext: { voice: {…} } }` must not wipe what another
       // plugin keeps under its own id, and the spread below would. `null`

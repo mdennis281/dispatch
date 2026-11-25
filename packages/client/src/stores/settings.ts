@@ -35,6 +35,7 @@ export type AppLayer = Pick<
   | "showInjectedContext"
   | "shellFilter"
   | "defaultModeId"
+  | "globalChatModeId"
   | "harness"
   | "spawnChat"
   | "defaultSendMode"
@@ -91,6 +92,7 @@ export const useSettings = create<SettingsStore>((set) => ({
         showInjectedContext: settings.showInjectedContext,
         shellFilter: settings.shellFilter,
         defaultModeId: settings.defaultModeId,
+        globalChatModeId: settings.globalChatModeId,
         harness: settings.harness,
         spawnChat: settings.spawnChat,
         defaultSendMode: settings.defaultSendMode,

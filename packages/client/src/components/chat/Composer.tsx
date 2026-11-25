@@ -42,7 +42,6 @@ import {
 } from "lucide-react";
 import type { Chat, Effort, AgentConfig, ModeConfig, ImageRef, HarnessKind } from "@dispatch/shared";
 import {
-  isGlobalProject,
   accountLabel,
   chatAccountOf,
   defaultModelFor,
@@ -961,16 +960,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
 
   // `null` clears the pin: the chat goes back to inheriting project → app.
   // Optimistic on the row (`undefined` IS the unpinned state), then the server.
-  // One gate for every mode surface, not one per surface. The toolbar's
-  // `ModeControl` takes `locked`, but the compact options sheet renders
-  // `ModeMenu` directly — and this optimistic `upsertChat` is what makes a
-  // missed surface visible: the broker refuses a non-global mode WITHOUT a
-  // corrective `chat-update`, so the badge would claim the new mode forever
-  // while the session stayed in Global. Refusing here cannot be forgotten by
-  // whoever adds the third surface.
-  const modeLocked = isGlobalProject(chat.projectId);
   const setMode = (next: string | null) => {
-    if (modeLocked) return;
     upsertChat({ ...chat, modeId: next ?? undefined });
     actions.setMode(chat.id, next);
   };
@@ -1593,14 +1583,11 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
         >
           {dictation.listening ? "Stop dictating" : "Dictate"}
         </MenuItem>
-        {/* Not offered at all for a global chat — `setMode` would refuse it,
-            and a row that opens a menu where every choice does nothing is
-            worse than no row. The hint still says which mode it is in. */}
         <MenuItem
           dense={dense}
           icon={modeIcon(modes, modeId)}
           hint={modeLabel(modes, modeId)}
-          onClick={modeLocked ? undefined : () => setMoreView("mode")}
+          onClick={() => setMoreView("mode")}
         >
           Mode &amp; posture
         </MenuItem>
@@ -2122,12 +2109,6 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
               onChange={setMode}
               size={sizes.mode as "lg" | "md" | "sm"}
               inherit={modeInherit}
-              // The server pins the global chat's posture and refuses any
-              // other id — and this control writes its selection optimistically,
-              // so an offered-but-refused switch would leave the badge lying
-              // about what the session is running as.
-              locked={modeLocked}
-              lockedHint="The global chat always runs in Global mode — it has no project to be safe in."
             />
           )}
 

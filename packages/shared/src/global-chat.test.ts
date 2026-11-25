@@ -23,6 +23,7 @@ import {
   isToolDenied,
   realProjects,
 } from "./global-chat.js";
+import { resolveChatPosture } from "./chat-posture.js";
 
 describe("the reserved pseudo-project", () => {
   it("is recognised only by its own id", () => {
@@ -138,20 +139,40 @@ describe("the global posture", () => {
   });
 });
 
-describe("the posture cannot be escaped at creation", () => {
-  it("drops a mode asked for above the project layer, for the global project", () => {
-    // The hole this closes: `POST /api/chats { projectId: "__global__",
-    // modeId: "yolo" }` resolved to `yolo` — the chat layer outranks the
-    // project layer — so the chat was BORN with a shell and `setMode` never
-    // got a look in.
+describe("the global chat's posture chain", () => {
+  it("defaults to the global mode, and drops a parent's mode", () => {
+    // A chat in some repo running `yolo` that spawns into the global project
+    // must not hand that posture down by accident.
     const layers = enforceGlobalPosture(GLOBAL_PROJECT_ID, {
-      chat: { modeId: "yolo" },
       parent: { harness: "claude", modeId: "yolo" },
       project: { mode: "plan" },
     });
-    expect(layers.chat?.modeId).toBeUndefined();
     expect(layers.parent?.modeId).toBeUndefined();
     expect(layers.project?.mode).toBe(GLOBAL_MODE_ID);
+    expect(resolveChatPosture(layers).modeId.effective).toBe(GLOBAL_MODE_ID);
+  });
+
+  it("takes its project default from the app's globalChatModeId", () => {
+    const layers = enforceGlobalPosture(GLOBAL_PROJECT_ID, {
+      settings: { globalChatModeId: "auto", defaultModeId: "plan" },
+    });
+    const mode = resolveChatPosture(layers).modeId;
+    expect(mode.effective).toBe("auto");
+    expect(mode.source).toBe("project");
+  });
+
+  it("honours a mode the human pinned on the chat", () => {
+    const layers = enforceGlobalPosture(GLOBAL_PROJECT_ID, { chat: { modeId: "yolo" } });
+    const mode = resolveChatPosture(layers).modeId;
+    expect(mode.effective).toBe("yolo");
+    expect(mode.inherited).toBe(GLOBAL_MODE_ID);
+  });
+
+  it("ignores globalChatModeId for a real project", () => {
+    const layers = enforceGlobalPosture("dispatch", {
+      settings: { globalChatModeId: "yolo" },
+    });
+    expect(resolveChatPosture(layers).modeId.effective).toBe("auto");
   });
 
   it("leaves a real project's chain exactly as it was", () => {

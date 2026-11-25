@@ -74,6 +74,27 @@ const BUILTIN_POSTURES: { id: string; name: string; icon: ReactNode; hint: strin
 ];
 
 /**
+ * Ids the broker resolves with no `ModeConfig` behind them — the keys of its
+ * `BUILTIN_MODE_PERMISSION` (session-broker.ts). Mirrored rather than shared
+ * because that map is server-side; the only reader here is
+ * {@link isKnownModeId}, whose job is to agree with the broker's fail-closed
+ * fallback for a dangling `globalChatModeId`.
+ */
+const BROKER_BUILTIN_MODE_IDS = [
+  "default", "ask", "plan", "edit", "acceptEdits", "auto",
+  "yolo", "bypass", "bypassPermissions", "dontAsk",
+];
+
+/** Would the broker resolve this mode id to anything? */
+export function isKnownModeId(modes: ModeConfig[], modeId: string): boolean {
+  return (
+    modes.some((m) => m.id === modeId) ||
+    BROKER_BUILTIN_MODE_IDS.includes(modeId) ||
+    modeId in BUILTIN_MODE_CONFIGS
+  );
+}
+
+/**
  * What the active mode is called. Exported because the composer's compaction
  * measurement has to re-run when this string changes — the label moves the
  * row's natural width without moving its box, so no ResizeObserver fires.
@@ -219,18 +240,6 @@ export interface ModeControlProps {
    * the name in the tooltip. The toolbar never renders it at all below that.
    */
   size?: "lg" | "md" | "sm";
-  /**
-   * Render as a read-only badge: the chat's mode is not the user's to change.
-   *
-   * True for the global chat, whose posture the server pins — `setMode`
-   * refuses any other id. The picker has to go rather than merely fail,
-   * because `Composer.setMode` writes the selection optimistically and the
-   * refusal arrives with no corrective `chat-update`: the badge would sit
-   * there claiming "Plan" forever while the session stayed in Global.
-   */
-  locked?: boolean;
-  /** Why it is locked — shown on hover in place of the menu. */
-  lockedHint?: string;
 }
 
 export function ModeControl({
@@ -239,8 +248,6 @@ export function ModeControl({
   onChange,
   size = "lg",
   inherit,
-  locked,
-  lockedHint,
 }: ModeControlProps) {
   // Touch gets the taller box and the roomier menu; `Tooltip` is hover/focus, so
   // at `sm` on a phone the tap-to-open menu is what tells you the current mode.
@@ -266,10 +273,9 @@ export function ModeControl({
       trigger={({ open, toggle }) => {
         const btn = (
           <button
-            onClick={locked ? undefined : toggle}
-            aria-expanded={locked ? undefined : open}
-            aria-disabled={locked || undefined}
-            aria-label={locked ? lockedHint ?? tip : tip}
+            onClick={toggle}
+            aria-expanded={open}
+            aria-label={tip}
             className={cn(
               "inline-flex items-center gap-1.5 rounded-md border text-sm font-medium " +
                 "transition-colors [&_svg]:size-3.5",
@@ -291,12 +297,12 @@ export function ModeControl({
                 <span className={cn("truncate", size === "md" || phone ? "max-w-16" : "max-w-[84px]")}>
                   {label}
                 </span>
-                {size === "lg" && !locked && <ChevronsUpDown className="text-faint" />}
+                {size === "lg" && <ChevronsUpDown className="text-faint" />}
               </>
             )}
           </button>
         );
-        return size === "lg" && !locked ? btn : <Tooltip label={locked ? lockedHint ?? tip : tip}>{btn}</Tooltip>;
+        return size === "lg" ? btn : <Tooltip label={tip}>{btn}</Tooltip>;
       }}
     >
       {(close) => (

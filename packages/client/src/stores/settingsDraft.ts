@@ -75,6 +75,7 @@ const SECTION_SLICE: Record<
   plugins: (s) => s.plugins,
   chat: (s) => [
     s.defaultModeId,
+    s.globalChatModeId,
     s.showInjectedContext,
     s.shellFilter,
     s.terminalLocations,

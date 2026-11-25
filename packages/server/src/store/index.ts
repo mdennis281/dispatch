@@ -148,6 +148,9 @@ export const AppSettingsSchema = z.object({
    *  an answer before this endpoint can respond (see client stores/theme.ts). */
   theme: z.enum(["dark", "dim", "light", "system"]).default("dark"),
   defaultModeId: z.string().optional(),
+  /** The global chat's "project default" mode. Unset = the built-in `global`
+   *  (spawn and observe only). See `projectPostureLayer` in shared. */
+  globalChatModeId: z.string().optional(),
   /**
    * Tools that run without a permission prompt, in every chat, project and mode
    * (a mode can add to it, never subtract). Unset means the shared
