@@ -952,3 +952,32 @@ describe("buildTaskParts — issue handling", () => {
     expect(out.some((p) => p.kind === "context")).toBe(false);
   });
 });
+
+describe("launchAgentTask's repo path", () => {
+  it("lets a commit sweep target the worktree the caller names", async () => {
+    const { svc } = services({ status: status({ branch: "feature" }) });
+    const asked: string[] = [];
+    (svc as unknown as { git: { status: (p: string) => Promise<GitStatus> } }).git.status = async (p) => {
+      asked.push(p);
+      return status({ branch: "feature" });
+    };
+    await launchAgentTask(svc, {
+      projectId: "p1",
+      taskId: "git:commit-sweep",
+      params: { repoPath: "/repo/wt/feature" },
+    });
+    expect(asked).toEqual(["/repo/wt/feature"]);
+  });
+
+  it("ignores a caller path on every other task — setup briefs the project's own repo", async () => {
+    const { svc, sent } = services({ project: { id: "p1", name: "Acme", repoPath: "/repo", subApps: [], createdAt: 1 } });
+    await launchAgentTask(svc, {
+      projectId: "p1",
+      taskId: "project:setup",
+      params: { repoPath: "C:\Windows\System32" },
+    });
+    const text = sent.map((s) => s.text).join("\n");
+    expect(text).toContain("`/repo`");
+    expect(text).not.toContain("System32");
+  });
+});

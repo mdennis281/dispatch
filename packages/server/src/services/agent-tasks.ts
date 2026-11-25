@@ -1553,8 +1553,12 @@ export async function launchAgentTask(
 
   // A sweep targets whichever repo the Source Control view is pointed at — often
   // a worktree, not the checkout — so the caller's path wins over the project's.
-  const repoPath =
-    (typeof params.repoPath === "string" && params.repoPath.trim()) || project.repoPath;
+  // ONLY for the sweep: every other task is about the project itself, and
+  // honouring a caller path there let `project:setup` list an arbitrary
+  // directory (`isFreshRepo`) and brief an agent to go to work in it
+  // (CodeQL js/path-injection #67). No client launch site sends one for them.
+  const callerPath = isGit && typeof params.repoPath === "string" ? params.repoPath.trim() : "";
+  const repoPath = callerPath || project.repoPath;
 
   // Config tasks need the resolved dir layout; git tasks need the live status.
   // Each is only fetched for the task that reads it, and a failure degrades the
