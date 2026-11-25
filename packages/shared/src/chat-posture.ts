@@ -92,6 +92,8 @@ export interface PostureProject {
 /** The app layer: the slice of settings posture reads. */
 export interface PostureSettings extends SubscriptionSettings {
   defaultModeId?: string;
+  /** The global chat's "project default" mode; unset = the built-in `global`. */
+  globalChatModeId?: string;
   harness?: {
     defaultHarness?: HarnessKind;
     defaults?: Partial<Record<HarnessKind, HarnessDefaults>>;

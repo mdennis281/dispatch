@@ -233,8 +233,14 @@ export const GLOBAL_MODE: ModeConfig = {
 
 /**
  * The project layer of the posture chain, with the pseudo-project stating its
- * own: a global chat runs in {@link GLOBAL_MODE} unless its own row pins
- * something, and `setMode` is what stops it pinning anything else.
+ * own: a global chat inherits `AppSettings.globalChatModeId` (Settings → Chat →
+ * "Global chat mode"), and {@link GLOBAL_MODE} when that is unset.
+ *
+ * A SETTING rather than the usual manifest `defaults.mode` because the global
+ * project deliberately has no config dir — `routes/project-config.ts` refuses
+ * every `/config` route for it, so MCP servers can't re-enter through a
+ * `projects/__global__/project.yaml`. The app settings are the one place a
+ * per-install answer for it can live without reopening that.
  *
  * It arrives through the PROJECT layer rather than as a special case further
  * down because that is where "work in this repo starts like this" already
@@ -247,36 +253,41 @@ export const GLOBAL_MODE: ModeConfig = {
 export function projectPostureLayer(
   projectId: string | null | undefined,
   layer: PostureProject | null | undefined,
+  globalChatModeId?: string,
 ): PostureProject | null | undefined {
-  return isGlobalProject(projectId) ? { ...(layer ?? {}), mode: GLOBAL_MODE_ID } : layer;
+  return isGlobalProject(projectId)
+    ? { ...(layer ?? {}), mode: globalChatModeId || GLOBAL_MODE_ID }
+    : layer;
 }
 
 /**
- * The whole posture chain, with the global project's mode made unavoidable.
+ * The whole posture chain, with the global project's default applied.
  *
- * {@link projectPostureLayer} alone is NOT enough, and the gap is the obvious
- * attack on it: the project layer sits BELOW the chat and parent layers, so
- * `POST /api/chats` (or `spawn_chat`) with
- * `{ projectId: "__global__", modeId: "yolo" }` resolved to `yolo` and came up
- * with a shell. `setMode` never got a look in — the chat was born that way.
+ * This used to make {@link GLOBAL_MODE} UNAVOIDABLE — chat and parent mode pins
+ * were stripped, `setMode` and `PUT /api/chats/:id` refused anything else, and
+ * the composer's picker was locked. In practice that meant the global chat was
+ * the one chat whose permission prompts couldn't be turned down, which was the
+ * whole complaint. Now it behaves like a project: the human may pin a mode on
+ * the chat, and the "project default" is the setting above.
  *
- * So a conflicting mode above the project layer is DROPPED rather than
- * rejected. Dropping keeps a spawn into the global project working when the
- * parent happens to be in some other mode (a rejection there would be a
- * confusing failure for a caller who never asked for a mode at all), and it
- * leaves the project layer to answer — so the UI's "inherited from" label
- * credits the layer that actually states the rule.
+ * The PARENT's mode is still dropped. A chat in some repo running `yolo` that
+ * spawns into the global project shouldn't hand it that posture by accident —
+ * the global chat's own default should answer unless someone chose otherwise.
+ * (A spawn that explicitly ASKS for a mode is the chat layer, and is honoured.)
  */
 export function enforceGlobalPosture(
   projectId: string | null | undefined,
   layers: PostureLayers,
 ): PostureLayers {
-  const project = projectPostureLayer(projectId, layers.project);
+  const project = projectPostureLayer(
+    projectId,
+    layers.project,
+    layers.settings?.globalChatModeId,
+  );
   if (!isGlobalProject(projectId)) return { ...layers, project };
   return {
     ...layers,
     project,
-    ...(layers.chat ? { chat: { ...layers.chat, modeId: undefined } } : {}),
     ...(layers.parent ? { parent: { ...layers.parent, modeId: undefined } } : {}),
   };
 }

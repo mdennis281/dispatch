@@ -5,6 +5,7 @@ import {
   DEFAULT_REVIEW_MAX_ROUNDS,
   DEFAULT_REVIEW_ROUNDS,
   DEFAULT_MODE_ID,
+  GLOBAL_MODE,
   SHELL_TRANSCRIPT_CATEGORIES,
   accountLabel,
   listProviders,
@@ -164,6 +165,22 @@ export function ChatSection({ draft, patch, harnesses, catalogs }: AppPaneProps)
             value={draft.defaultModeId ?? ""}
             onChange={(v) => patch({ defaultModeId: v || undefined })}
             options={modeOptions}
+          />
+        </Field>
+        {/* The global chat has no project config to carry a `defaults.mode`
+            (its /config routes are refused on purpose), so its "project
+            default" lives here. Unset is the built-in spawn-and-observe mode,
+            which `/api/modes` never lists — hence its own first option. */}
+        <Field label="Global chat mode" hint="what the global chat starts in">
+          <Select
+            width={240}
+            align="start"
+            value={draft.globalChatModeId ?? ""}
+            onChange={(v) => patch({ globalChatModeId: v || undefined })}
+            options={[
+              { value: "", label: GLOBAL_MODE.name, hint: "spawn & observe only" },
+              ...modes.map((m) => ({ value: m.id, label: m.name, hint: m.permissionMode })),
+            ]}
           />
         </Field>
         {/* Only ever consulted when a config dir is PLACED for the first time —

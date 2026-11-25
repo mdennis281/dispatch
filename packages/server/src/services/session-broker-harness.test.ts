@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -537,7 +537,7 @@ describe("SessionBroker neutral harness path", () => {
         createdAt: 1,
       });
 
-    it("lands in the global mode with nothing pinned, and refuses to leave it", async () => {
+    it("lands in the global mode with nothing pinned, and can be moved off it", async () => {
       const chat = await globalChat();
       broker.create(chat);
       // Deliberately NOT asserted after a turn: `setMode(null)` walks the same
@@ -545,8 +545,24 @@ describe("SessionBroker neutral harness path", () => {
       // resolution without depending on how long a fake turn takes to settle.
       await broker.setMode(chat.id, null);
       expect(broker.getSession(chat.id)?.modeId).toBe(GLOBAL_MODE_ID);
-      await expect(broker.setMode(chat.id, "yolo")).rejects.toThrow(/always runs in global/);
+      // The global chat used to refuse this outright, which left its prompts
+      // impossible to turn down. It is a pin like any other chat's now.
+      await broker.setMode(chat.id, "plan");
+      expect(broker.getSession(chat.id)?.modeId).toBe("plan");
+      await vi.waitFor(async () => expect((await store.getChat(chat.id))?.modeId).toBe("plan"));
+      await broker.setMode(chat.id, null);
       expect(broker.getSession(chat.id)?.modeId).toBe(GLOBAL_MODE_ID);
+      // `setMode` persists the pin fire-and-forget; let the row settle so the
+      // write doesn't race the temp dir's removal in afterEach (ENOTEMPTY).
+      await vi.waitFor(async () => expect((await store.getChat(chat.id))?.modeId).toBeUndefined());
+    });
+
+    it("inherits globalChatModeId from the app settings as its project default", async () => {
+      await store.saveSettings({ ...(await store.getSettings()), globalChatModeId: "plan" });
+      const chat = await globalChat();
+      broker.create(chat);
+      await broker.setMode(chat.id, null);
+      expect(broker.getSession(chat.id)?.modeId).toBe("plan");
     });
 
     it("hands the runtime a denylist, so the tools are never offered at all", async () => {
@@ -585,31 +601,19 @@ describe("SessionBroker neutral harness path", () => {
       expect(await guard("Read", { file_path: "C:/x.ts" }, {})).toBeNull();
     });
 
-    it("ignores a mode pinned on the row, however it got there", async () => {
-      // `PUT /api/chats/:id` merges its body over the row and saves directly —
-      // no posture resolution, no broker — so `{ modeId: "yolo" }` lands as a
-      // pin. `refreshInheritedPosture` then sees a defined pin and never
-      // re-resolves: the chat would come up on `bypassPermissions` with
-      // `resolveMode("yolo")` returning null, i.e. no denylist at all. A row
-      // can also predate this change or be edited by hand, so the broker drops
-      // the pin rather than trusting whoever wrote it.
+    it("honours a mode pinned on the row", async () => {
       const chat = await store.saveChat({
-        id: "global-poisoned",
+        id: "global-pinned",
         projectId: GLOBAL_PROJECT_ID,
         title: "Global",
         harness: "codex",
-        modeId: "yolo",
+        modeId: "plan",
         worktrees: [],
         prs: [],
         createdAt: 1,
       });
       broker.create(chat);
-      expect(broker.getSession(chat.id)?.modeId).toBe(GLOBAL_MODE_ID);
-      await broker.sendMessage(chat.id, "hello");
-      await broker.waitFor(chat.id, "idle");
-      expect(specs[0]!.disallowedTools).toContain("Bash");
-      expect(specs[0]!.permissionMode).not.toBe("bypassPermissions");
-      expect(await specs[0]!.toolGuard!("Bash", { command: "echo hi" }, {})).toMatch(/not available/);
+      expect(broker.getSession(chat.id)?.modeId).toBe("plan");
     });
 
     it("refuses a runtime that cannot name an MCP call, even if it vetoes in time", async () => {

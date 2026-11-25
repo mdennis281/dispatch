@@ -220,6 +220,8 @@ export interface AppSettings {
   /** Kept in the same shape as `ThemePref` in stores/theme.ts. */
   theme: "dark" | "dim" | "light" | "system";
   defaultModeId?: string;
+  /** The global chat's default mode; unset = the built-in `global`. */
+  globalChatModeId?: string;
   /** Prompt-free tools; unset = the shared defaults. Saved by `setAutoAllowTools`. */
   autoAllowTools?: string[];
   webhook?: {
