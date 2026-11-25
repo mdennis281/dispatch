@@ -33,7 +33,6 @@ import { RowButton } from "../ui/RowButton.js";
 import { SegmentedControl } from "../ui/SegmentedControl.js";
 import { StatusDot, toneText } from "../ui/StatusDot.js";
 import { Tooltip } from "../ui/Tooltip.js";
-import { Kbd } from "../ui/Kbd.js";
 import { useActiveProject, useRealProjects } from "../../stores/projects.js";
 import { useChats, useProjectAgentCounts, type ProjectAgentCounts } from "../../stores/chats.js";
 import { useScheduler } from "../../stores/scheduler.js";
@@ -80,31 +79,40 @@ function ProjectAgentBadge({ counts }: { counts: ProjectAgentCounts | undefined 
     .filter(Boolean)
     .join(" · ");
 
+  // One tooltip PER tally, not one for the group: three coloured dots side by
+  // side are the thing you can't decode, so hovering one must name that one.
+  // The native `title` this replaced never showed — the row's own `title` (the
+  // repo path) sat on the button around it and won.
   return (
-    <span className="flex items-center gap-1.5 tabular-nums" title={label}>
+    <span className="flex items-center gap-1.5 tabular-nums">
       {/* The dots carry the meaning by colour and fill alone, so the readable
-          form goes to assistive tech directly — a `title` is not reliably
-          announced. */}
+          form goes to assistive tech directly. */}
       <span className="sr-only">{label}</span>
       {attention > 0 && (
-        <span aria-hidden className={cn("flex items-center gap-1", toneText("warn"))}>
-          <StatusDot tone="warn" pulse size={5} />
-          {attention}
-        </span>
+        <Tooltip label={`${attention} ${attention === 1 ? "chat is" : "chats are"} waiting on your input`}>
+          <span aria-hidden className={cn("flex items-center gap-1", toneText("warn"))}>
+            <StatusDot tone="warn" pulse size={5} />
+            {attention}
+          </span>
+        </Tooltip>
       )}
       {working > 0 && (
-        <span aria-hidden className={cn("flex items-center gap-1", toneText("working"))}>
-          <StatusDot tone="working" pulse size={5} />
-          {working}
-        </span>
+        <Tooltip label={`${working} ${working === 1 ? "agent" : "agents"} working`}>
+          <span aria-hidden className={cn("flex items-center gap-1", toneText("working"))}>
+            <StatusDot tone="working" pulse size={5} />
+            {working}
+          </span>
+        </Tooltip>
       )}
       {queued > 0 && (
-        <span aria-hidden className={cn("flex items-center gap-1", toneText("accent"))}>
-          {/* A touch larger than the filled dots: at 5px the hole inside a
-              1.5px ring closes up and the outline reads as a disc again. */}
-          <StatusDot tone="accent" hollow size={7} />
-          {queued}
-        </span>
+        <Tooltip label={`${queued} ${queued === 1 ? "chat" : "chats"} queued, waiting to start`}>
+          <span aria-hidden className={cn("flex items-center gap-1", toneText("accent"))}>
+            {/* A touch larger than the filled dots: at 5px the hole inside a
+                1.5px ring closes up and the outline reads as a disc again. */}
+            <StatusDot tone="accent" hollow size={7} />
+            {queued}
+          </span>
+        </Tooltip>
       )}
     </span>
   );
@@ -345,9 +353,7 @@ function SwitcherMenu({
             >
               <X />
             </IconButton>
-          ) : (
-            !touch && <Kbd>↑↓</Kbd>
-          )}
+          ) : null}
         </label>
         {/* The two destinations that are not repos, as tiles beside the search
             rather than rows among the projects. Overview leads because this
@@ -437,7 +443,6 @@ function SwitcherMenu({
                   aria-selected={isActive}
                   onClick={() => pick(p.id)}
                   onMouseMove={() => setHi(idx)}
-                  title={p.repoPath}
                   className={cn(
                     "flex w-full items-center gap-2 rounded-sm pl-2 pr-9",
                     touch ? "min-h-11 py-2 text-base" : "py-1.5 text-sm",
