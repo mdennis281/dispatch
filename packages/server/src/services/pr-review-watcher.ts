@@ -208,6 +208,44 @@ interface SeenState {
   green?: string | null;
 }
 
+/** A reviewer's row state → the `latestReviews` state `reported` carries. */
+const REPORTED_STATE: Partial<Record<PrSnapshot["reviewers"][number]["state"], string>> = {
+  approved: "APPROVED",
+  changes_requested: "CHANGES_REQUESTED",
+  commented: "COMMENTED",
+  dismissed: "DISMISSED",
+};
+
+/**
+ * Seed a fresh dedup state from the catalog row — what the LAST process saw.
+ *
+ * `seen` is in-process, so after a restart every (chat, PR) started empty and
+ * the first sweep reported every review, thread and red check already sitting
+ * on the PR as new — waking each owning chat with "New activity on your PR:
+ * dispatch-review commented" about a review from a week ago. The woken turn
+ * bumps the chat's `updatedAt`, which is what the sidebar orders idle rows by
+ * on reload, so every install visibly reshuffled the chat list (bayou-boys#430
+ * was re-announced after four consecutive updates). The row is persisted, so
+ * diffing against it keeps what arrived DURING the downtime as news and drops
+ * only what was already told.
+ *
+ * Fingerprints must match `checkOne` exactly, like `arm`'s. A reviewer whose
+ * row state is `in_progress` has no reported key to seed — worst case is the
+ * old single noisy sweep, never a missed round.
+ */
+function seedFromRow(st: SeenState, row: PrSnapshot): void {
+  for (const c of row.checks) st.checks.set(c.name, c.conclusion ?? c.status);
+  for (const t of row.threads) {
+    if (t.isResolved || t.isOutdated) continue;
+    st.threads.add(t.id);
+  }
+  for (const r of row.reviewers) {
+    const state = REPORTED_STATE[r.state];
+    if (state) st.reviews.add(`${r.login}:${state}`);
+  }
+  st.green = greenFingerprint(row) ?? null;
+}
+
 /**
  * The fingerprint of an all-green CI run, or undefined when it isn't one.
  *
@@ -671,7 +709,16 @@ export class PrReviewWatcher {
       // falls due — and wakes a chat that deliberately left its PR open (hold, a
       // denied override, "just open it") with "land it". A row this pass skipped
       // was recorded by a poll someone already acted on, so it is taken silently.
-      if (row) this.stateFor(chat.id, ref).green = greenFingerprint(row) ?? null;
+      //
+      // A FIRST sighting here (straight after a restart) seeds everything from
+      // the row, not just green: this branch used to create an otherwise-empty
+      // state, so the day the parked PR fell due its old reviews all fired.
+      if (row) {
+        const fresh = !this.seen.has(this.key(chat.id, ref));
+        const st = this.stateFor(chat.id, ref);
+        if (fresh) seedFromRow(st, row);
+        else st.green = greenFingerprint(row) ?? null;
+      }
       await this.maybeSpawnReviewFromRow(row, scope).catch(() => undefined);
       return null;
     }
@@ -684,6 +731,14 @@ export class PrReviewWatcher {
         ?.noteError(repo, ref.number, "GitHub could not be read for this PR")
         .catch(() => undefined);
       return null;
+    }
+    // Seed BEFORE `record`: that call overwrites the row with this very poll,
+    // and diffing a snapshot against itself would hide what arrived while the
+    // server was down.
+    if (!this.seen.has(this.key(chat.id, ref))) {
+      const prior = (await this.registry?.snapshot(repo, ref.number).catch(() => null)) ?? null;
+      const st = this.stateFor(chat.id, ref);
+      if (prior) seedFromRow(st, prior);
     }
     await this.registry?.record(snap, scope).catch(() => undefined);
     await this.maybeSpawnReview(snap, scope).catch(() => undefined);
