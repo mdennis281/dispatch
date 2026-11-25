@@ -734,6 +734,75 @@ describe("PrReviewWatcher — the PR catalog", () => {
     expect(woken).toEqual([]);
   });
 
+  describe("across a server restart", () => {
+    // Every install restarted the server, and every restart re-announced each
+    // open PR's old reviews ("New activity on your PR #430: dispatch-review
+    // commented") — waking week-old chats and reshuffling the sidebar. A fresh
+    // watcher over the SAME store stands in for the restarted process.
+    let threads: Array<{ id: string; isResolved: boolean; author?: string }>;
+    const review = {
+      prReviewState: async () => ({
+        requested: [],
+        reported: [{ author: "dispatch-review", state: "COMMENTED" }],
+      }),
+      reviewThreads: async () => threads,
+      prChecks: async () => [{ name: "build", status: "completed", conclusion: "failure" }],
+      patch: {
+        reviewers: [{ login: "dispatch-review", kind: "bot" as const, state: "commented" as const }],
+      },
+    };
+
+    function boot(now: { t: number }, woken: string[]) {
+      const registry = new PrRegistry({ store, bus, now: () => now.t });
+      return new PrReviewWatcher({
+        store,
+        bus,
+        github: fakeGitHub(review),
+        registry,
+        now: () => now.t,
+        resume: async (chatId) => {
+          woken.push(chatId);
+        },
+      });
+    }
+
+    beforeEach(() => {
+      threads = [{ id: "T1", isResolved: false, author: "dispatch-review" }];
+    });
+
+    for (const dueAtBoot of [false, true]) {
+      it(`does not re-announce what the last process already told (row ${dueAtBoot ? "due" : "parked"} at boot)`, async () => {
+        await makeChat("c1", [REF]);
+        const now = { t: 1_000_000 };
+        const first: string[] = [];
+        expect(await boot(now, first).sweep()).toHaveLength(1);
+        expect(first).toEqual(["c1"]);
+
+        if (dueAtBoot) now.t += PR_POLL_HOT_MS;
+        const woken: string[] = [];
+        const restarted = boot(now, woken);
+        expect(await restarted.sweep()).toEqual([]);
+        now.t += PR_POLL_HOT_MS;
+        expect(await restarted.sweep()).toEqual([]);
+        expect(woken).toEqual([]);
+      });
+    }
+
+    it("still reports what arrived WHILE the server was down", async () => {
+      await makeChat("c1", [REF]);
+      const now = { t: 1_000_000 };
+      await boot(now, []).sweep();
+
+      threads = [...threads, { id: "T2", isResolved: false, author: "dispatch-review" }];
+      now.t += PR_POLL_HOT_MS;
+      const woken: string[] = [];
+      const got = await boot(now, woken).sweep();
+      expect(got).toHaveLength(1);
+      expect(got[0]!.reasons).toEqual(["review comment from dispatch-review"]);
+      expect(woken).toEqual(["c1"]);
+    });
+  });
+
   it("honours the catalog's cadence — a parked PR is not re-polled every sweep", async () => {
     await makeChat("c1", [REF]);
     let polls = 0;
