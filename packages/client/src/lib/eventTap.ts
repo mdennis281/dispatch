@@ -49,7 +49,10 @@ function safely(fn: Listener, evt: WsServerEvent): void {
   try {
     fn(evt);
   } catch (err) {
-    console.error(`[dispatch] event listener for "${evt.type}" threw:`, err);
+    // The type comes off the wire: interpolated into the FIRST argument, a `%o`
+    // or `%c` in it is read as a format directive and swallows `err` (CodeQL
+    // js/tainted-format-string #66). As a `%s` substitution it is just text.
+    console.error('[dispatch] event listener for "%s" threw:', evt.type, err);
   }
 }
 
