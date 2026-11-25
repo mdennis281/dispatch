@@ -87,7 +87,9 @@ export function makeFakeQuery(): QueryFn {
         }
         yield {
           type: "assistant",
-          uuid: `fake-msg-${sessionSeq}-${Math.random().toString(36).slice(2, 8)}`,
+          // Nothing reads this beyond uniqueness, but a Math.random id is what
+          // CodeQL's insecure-randomness rule (#54) flags wherever it sits.
+          uuid: `fake-msg-${sessionSeq}-${crypto.randomUUID().slice(0, 8)}`,
           message: {
             role: "assistant",
             content: [{ type: "text", text: `Echo: ${text}` }],

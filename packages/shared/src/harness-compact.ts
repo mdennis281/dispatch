@@ -46,7 +46,11 @@ export function codexCompactNote(focus: string): string {
 
 /** Strip a context-window suffix so "claude-opus-4-8[1m]" and "claude-opus-4-8" compare equal. */
 function bareModel(id: string): string {
-  return id.replace(/\[[^\]]*\]$/, "");
+  // `[` is excluded from the class as well as `]`: with only `]` excluded, a
+  // run of `[` makes the engine retry the match from every one of them, which
+  // is quadratic — 100k of them pinned the thread (CodeQL js/polynomial-redos
+  // #52), and the id comes from session events and settings we don't control.
+  return id.replace(/\[[^[\]]*\]$/, "");
 }
 
 /**

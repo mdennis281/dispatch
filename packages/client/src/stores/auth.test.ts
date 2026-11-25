@@ -1,10 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { authPost, initializeAuth, sessionFetch, useAuth } from "./auth.js";
+import { authPost, initializeAuth, isSameOrigin, sessionFetch, useAuth } from "./auth.js";
 
 describe("auth bootstrap state", () => {
   beforeEach(() => {
     useAuth.setState({ ready: false, status: null, accessToken: null, user: null });
     vi.restoreAllMocks();
+    // The client suite runs under node, which has no `location`; `sessionFetch`
+    // treats that as foreign and would withhold the token these tests expect.
+    vi.stubGlobal("location", new URL("http://127.0.0.1:4318/chat/abc"));
   });
 
   it("keeps an upgraded install open when the server reports missing auth config", async () => {
@@ -132,5 +135,74 @@ describe("auth bootstrap state", () => {
     const responses = await Promise.all([sessionFetch("/api/protected"), sessionFetch("/api/protected")]);
     expect(responses.map((response) => response.status)).toEqual([200, 200]);
     expect(refreshCalls).toBe(1);
+  });
+});
+
+describe("sessionFetch only hands the bearer token to its own origin", () => {
+  const signedIn = { enabled: true, configured: true, firstRunDismissed: true, user: null };
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.stubGlobal("location", new URL("http://127.0.0.1:4318/chat/abc"));
+    useAuth.setState({ ready: true, status: signedIn, accessToken: "secret-token", user: null });
+  });
+
+  function authOf(fetchMock: ReturnType<typeof vi.fn>, call = 0): string | null {
+    return new Headers(fetchMock.mock.calls[call]?.[1]?.headers).get("authorization");
+  }
+
+  it.each([
+    ["a relative path", "/api/chats"],
+    ["a path relative to the page", "assets/shot.png"],
+    ["an absolute same-origin string", "http://127.0.0.1:4318/api/chats"],
+    ["a same-origin URL", new URL("/api/chats", "http://127.0.0.1:4318")],
+    ["a same-origin Request", new Request("http://127.0.0.1:4318/api/chats")],
+  ])("attaches it for %s", async (_label, input) => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await sessionFetch(input);
+    expect(authOf(fetchMock)).toBe("Bearer secret-token");
+  });
+
+  it.each([
+    ["a foreign string", "https://evil.example/collect"],
+    ["a protocol-relative string", "//evil.example/collect"],
+    ["another port on the same host", "http://127.0.0.1:4319/api/chats"],
+    ["a foreign URL", new URL("https://evil.example/collect")],
+    ["a foreign Request", new Request("https://evil.example/collect")],
+  ])("withholds it for %s", async (_label, input) => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await sessionFetch(input);
+    expect(authOf(fetchMock)).toBeNull();
+  });
+
+  it("does not refresh-and-retry on a foreign 401", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response("{}", { status: 401 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const response = await sessionFetch("https://evil.example/collect");
+    expect(response.status).toBe(401);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("still refreshes and retries a same-origin 401", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/api/auth/refresh") {
+        return new Response(JSON.stringify({ accessToken: "fresh-token", expiresIn: 600,
+          user: { id: "u1", username: "owner", displayName: "Owner", owner: true, disabled: false,
+            createdAt: 1, hasPassword: true, passkeyCount: 0, totpEnabled: false } }), { status: 200 });
+      }
+      return new Response("{}", { status: fetchMock.mock.calls.length === 1 ? 401 : 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const response = await sessionFetch("/api/protected");
+    expect(response.status).toBe(200);
+    expect(authOf(fetchMock, fetchMock.mock.calls.length - 1)).toBe("Bearer fresh-token");
+  });
+
+  it("fails closed without a location or on an unparsable input", () => {
+    expect(isSameOrigin("http://[bad")).toBe(false);
+    vi.stubGlobal("location", undefined);
+    expect(isSameOrigin("/api/chats")).toBe(false);
   });
 });

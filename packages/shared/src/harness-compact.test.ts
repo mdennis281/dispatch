@@ -70,6 +70,15 @@ describe("perModelThreshold", () => {
     expect(perModelThreshold({ opusx: 1 }, "claude-opus-5-5")).toBeUndefined();
   });
 
+  it("strips the suffix in linear time on a hostile run of `[`", () => {
+    // The old `/\[[^\]]*\]$/` retried from every `[`: quadratic, seconds here.
+    expect(perModelThreshold({ "claude-opus-4-8": 3 }, "claude-opus-4-8[1m]")).toBe(3);
+    const hostile = "[".repeat(100_000);
+    const started = performance.now();
+    expect(perModelThreshold({ x: 1 }, hostile)).toBeUndefined();
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+
   it("is undefined for a model with no row — compact at its own max", () => {
     expect(perModelThreshold(table, "sonnet")).toBeUndefined();
     expect(perModelThreshold({}, "opus[1m]")).toBeUndefined();
