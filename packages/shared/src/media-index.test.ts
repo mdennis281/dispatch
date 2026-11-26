@@ -108,6 +108,7 @@ describe("collectChatMedia", () => {
       result("t1", ["assets/1.png"]),
     ]);
     expect(items.map((i) => i.asset.path)).toEqual(["assets/pasted.png", "assets/1.png"]);
+    expect(items.map((i) => i.from)).toEqual(["user", "agent"]);
   });
 
   it("records the row each image came from", () => {
@@ -131,7 +132,7 @@ describe("scanned rows (the server's shape)", () => {
       },
     ]);
     expect(items).toEqual([
-      { asset: expect.objectContaining({ path: "assets/x.png", alt: "shot.png" }), rowId: "r1" },
+      { asset: expect.objectContaining({ path: "assets/x.png", alt: "shot.png" }), rowId: "r1", from: "agent" },
     ]);
   });
 

@@ -32,6 +32,7 @@ import { StatusDot, statusMeta } from "../ui/StatusDot.js";
 import { TitleText } from "../ui/TitleText.js";
 import { Spinner } from "../ui/Spinner.js";
 import { ChatHeaderBadges } from "./ChatHeaderBadges.js";
+import { AttachmentsMenu } from "./AttachmentsMenu.js";
 import { QueueOverride } from "./QueueOverride.js";
 import { PauseChatMenuItem } from "./PauseChatMenuItem.js";
 import { chatPrRefs, chatWorktreeRefs } from "./chatHeaderRefs.js";
@@ -654,6 +655,10 @@ export function ChatView({ chat }: { chat: Chat }) {
               onRevokeExemption={revokeExemption}
               chatId={chat.id}
             />
+            {/* Beside the options menu: both are about the chat as a whole,
+                not this turn, and the right cluster is where the header keeps
+                its handles. */}
+            <AttachmentsMenu chatId={chat.id} compact={compact} />
             <Popover
               align="end"
               width={200}

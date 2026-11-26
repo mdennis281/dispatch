@@ -56,6 +56,13 @@ export interface ChatMediaItem {
   asset: ImageRef;
   /** Row that produced it, so a caller can scroll the transcript to it. */
   rowId: string;
+  /**
+   * Who put it in the chat: `user` for a paste/drop/attach, `agent` for
+   * anything a tool returned. The attachments menu labels by it — "the
+   * screenshot I pasted" and "the render the agent took" are the two ways a
+   * human goes looking, and the asset itself can't say which it was.
+   */
+  from: "user" | "agent";
 }
 
 /**
@@ -123,6 +130,7 @@ export function collectChatMedia(rows: readonly MediaScanRow[]): ChatMediaItem[]
       out.push({
         asset: alt ? { ...asset, alt } : asset,
         rowId: typeof row.id === "string" ? row.id : "",
+        from: row.kind === "user" ? "user" : "agent",
       });
     }
   }
