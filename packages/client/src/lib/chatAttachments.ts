@@ -114,9 +114,12 @@ export function useChatAttachments(chatId: string) {
           artifacts: prev?.chatId === chatId ? prev.artifacts : undefined,
         }));
       })
-      // The mark stays: the next refresh after a new row retries, and until
-      // then the menu reads as short rather than spinning.
-      .catch(() => {});
+      .catch(() => {
+        // Unmark so the next open retries. Keeping it made a failed first
+        // scan permanent on an idle chat: `refresh()` saw a matching mark and
+        // skipped, and the menu sat on "Loading…" until a new row landed.
+        if (mediaMark.current === mark) mediaMark.current = null;
+      });
   }, [chatId]);
 
   useEffect(() => {
@@ -143,7 +146,16 @@ export function useChatAttachments(chatId: string) {
           media: prev?.chatId === chatId ? prev.media : undefined,
         }));
       })
-      .catch(() => {});
+      // Settle to empty rather than leave `ready` waiting on an answer that
+      // isn't coming; the next `artifact-updated` refetches anyway.
+      .catch(() => {
+        if (!live) return;
+        setLoaded((prev) => ({
+          chatId,
+          artifacts: prev?.chatId === chatId ? (prev.artifacts ?? []) : [],
+          media: prev?.chatId === chatId ? prev.media : undefined,
+        }));
+      });
     return () => {
       live = false;
     };

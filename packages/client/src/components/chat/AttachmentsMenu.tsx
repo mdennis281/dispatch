@@ -1,5 +1,5 @@
-import { useState, type ReactNode } from "react";
-import { FileIcon, Images, Music, Paperclip, Play, Sparkles } from "lucide-react";
+import { useMemo, useState, type ReactNode } from "react";
+import { Download, FileIcon, Images, Music, Paperclip, Play, Sparkles } from "lucide-react";
 import { mediaKind, type ArtifactMeta, type ChatMediaItem } from "@dispatch/shared";
 import { cn } from "../../lib/cn.js";
 import { relTime } from "../../lib/format.js";
@@ -14,6 +14,10 @@ import { Popover, MenuItem } from "../ui/Popover.js";
 import { Button } from "../ui/Button.js";
 import { SegmentedControl, type Segment } from "../ui/SegmentedControl.js";
 import { AssetImage } from "../ui/AssetImage.js";
+import { RowButton } from "../ui/RowButton.js";
+import { useNotices } from "../../stores/notices.js";
+import { sessionFetch } from "../../stores/auth.js";
+import { assetSrcTarget, directSrc } from "../../lib/assetSrc.js";
 import { artifactIcon, artifactTypeLabel } from "../artifacts/artifactIcon.js";
 import { MediaViewer, assetName } from "./rows/MediaViewer.js";
 
@@ -112,7 +116,7 @@ function ImageGrid({
         const video = mediaKind(item.asset.mimeType) === "video";
         const name = assetName(item.asset);
         return (
-          <button
+          <RowButton
             key={item.asset.path}
             onClick={() => onOpen(item)}
             title={item.from === "user" ? `${name} · from you` : name}
@@ -134,25 +138,60 @@ function ImageGrid({
             {/* The one bit of provenance worth a mark: your own paste among
                 forty agent screenshots is the needle people come looking for. */}
             {item.from === "user" && (
-              <span className="absolute bottom-1 left-1 rounded-sm bg-app/80 px-1 text-[10px] font-medium leading-4 text-secondary backdrop-blur-sm">
+              <span className="absolute bottom-1 left-1 rounded-sm bg-app/80 px-1 text-2xs font-medium leading-4 text-secondary backdrop-blur-sm">
                 You
               </span>
             )}
-          </button>
+          </RowButton>
         );
       })}
       {overflow && (
-        <button
+        <RowButton
           onClick={onMore}
           className="flex aspect-square items-center justify-center rounded-md border border-line bg-inset text-sm font-medium tabular-nums text-muted transition-colors hover:border-line-strong hover:text-primary"
         >
           +{items.length - shown.length}
-        </button>
+        </RowButton>
       )}
     </div>
   );
 }
 
+/**
+ * Save a file attachment. The same move the transcript's chip makes — an
+ * `<a download>` — but an `/api/` URL needs the session's Bearer token, which a
+ * plain anchor never sends (see `assetSrc`), so the bytes are fetched first and
+ * handed over as a short-lived object URL. Not via `assetSrc`'s shared cache:
+ * a one-off download has no business evicting a thumbnail the transcript holds.
+ */
+async function downloadAsset(chatId: string, item: ChatMediaItem): Promise<void> {
+  const name = assetName(item.asset);
+  const target = assetSrcTarget(chatId, item.asset.path);
+  try {
+    let href = directSrc(target);
+    let owned = false;
+    if (!href) {
+      const res = await sessionFetch(target);
+      if (!res.ok) throw new Error(String(res.status));
+      href = URL.createObjectURL(await res.blob());
+      owned = true;
+    }
+    const a = document.createElement("a");
+    a.href = href;
+    a.download = name;
+    a.click();
+    // Revoked on a delay: the browser reads the URL after `click()` returns.
+    if (owned) setTimeout(() => URL.revokeObjectURL(href), 30_000);
+  } catch {
+    useNotices.getState().push({ level: "error", text: `Couldn't download ${name}` });
+  }
+}
+
+/**
+ * Files are DOWNLOADED, not viewed. The viewer only knows how to draw images,
+ * video and audio; a zip or a JSON handed to it falls through to `<img>` and
+ * reads as "Could not load" under a set of zoom controls.
+ */
 function FileRows({
   items,
   compact,
@@ -169,7 +208,7 @@ function FileRows({
           key={item.asset.path}
           dense={!compact}
           title={item.asset.path}
-          hint={item.from === "user" ? "you" : undefined}
+          hint={item.from === "user" ? "you" : <Download className="size-3" />}
           icon={mediaKind(item.asset.mimeType) === "audio" ? <Music /> : <FileIcon />}
           onClick={() => onOpen(item)}
         >
@@ -201,6 +240,7 @@ function Panel({
   compact,
   onArtifact,
   onMedia,
+  onFile,
 }: {
   chatId: string;
   groups: ChatAttachments;
@@ -208,6 +248,7 @@ function Panel({
   compact: boolean;
   onArtifact: (a: ArtifactMeta) => void;
   onMedia: (item: ChatMediaItem) => void;
+  onFile: (item: ChatMediaItem) => void;
 }) {
   const [filter, setFilter] = useState<Filter>("all");
   const present = ORDER.filter((k) => groups[k].length > 0);
@@ -244,7 +285,7 @@ function Panel({
           onMore={() => setFilter("images")}
         />
       );
-    return <FileRows items={groups.files} compact={compact} onOpen={onMedia} />;
+    return <FileRows items={groups.files} compact={compact} onOpen={onFile} />;
   };
 
   return (
@@ -274,7 +315,7 @@ function Panel({
 }
 
 /**
- * The chat's attachments, behind a paperclip at the head of the title bar.
+ * The chat's attachments, behind a paperclip beside the chat-options menu.
  *
  * WHY IT EXISTS: an artifact or a screenshot is the most valuable thing a chat
  * produces and the hardest to get back to — it is a card somewhere in a
@@ -291,11 +332,23 @@ export function AttachmentsMenu({ chatId, compact }: { chatId: string; compact: 
   const openArtifact = useArtifactView((s) => s.openArtifact);
   const { ready, groups, gallery, refresh } = useChatAttachments(chatId);
   const total = attachmentCount(groups);
+  // The viewer walks ONLY what it can draw, in transcript order. Files in the
+  // sequence would make → land on a broken frame between two screenshots.
+  const viewable = useMemo(
+    () =>
+      gallery
+        .filter((item) => {
+          const kind = mediaKind(item.asset.mimeType);
+          return kind === "image" || kind === "video";
+        })
+        .map((item) => item.asset),
+    [gallery],
+  );
 
   return (
     <>
       <Popover
-        align="start"
+        align="end"
         width={compact ? 320 : 380}
         className="p-1.5"
         trigger={({ open: isOpen, toggle }) => {
@@ -311,7 +364,7 @@ export function AttachmentsMenu({ chatId, compact }: { chatId: string; compact: 
               aria-label={total > 0 ? `Attachments (${total})` : "Attachments"}
               title="Attachments"
               className={cn(
-                "-ml-1.5 shrink-0 gap-1 px-1.5",
+                "shrink-0 gap-1 px-1.5",
                 total === 0 && !isOpen && "text-faint",
                 isOpen && "bg-active text-primary",
               )}
@@ -332,13 +385,14 @@ export function AttachmentsMenu({ chatId, compact }: { chatId: string; compact: 
             compact={compact}
             onArtifact={(a) => closeAfter(() => openArtifact(chatId, a.id, null))}
             onMedia={(item) => closeAfter(() => setViewing(item.asset.path))}
+            onFile={(item) => closeAfter(() => void downloadAsset(chatId, item))}
           />
         )}
       </Popover>
       {viewing !== null && (
         <MediaViewer
           chatId={chatId}
-          assets={gallery.map((item) => item.asset)}
+          assets={viewable}
           path={viewing}
           onClose={() => setViewing(null)}
         />

@@ -592,10 +592,6 @@ export function ChatView({ chat }: { chat: Chat }) {
       {/* header */}
       <div className="relative shrink-0">
         <div className="flex h-12 items-center gap-3 px-4 cm-hairline-b">
-          {/* First in the bar, before the status: what the chat has MADE is a
-              question about the chat as a whole, not about this turn, and the
-              left edge is the one spot a phone header never squeezes out. */}
-          <AttachmentsMenu chatId={chat.id} compact={compact} />
           <StatusDot tone={meta.tone} pulse={meta.pulse} size={8} />
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-1.5">
@@ -659,6 +655,10 @@ export function ChatView({ chat }: { chat: Chat }) {
               onRevokeExemption={revokeExemption}
               chatId={chat.id}
             />
+            {/* Beside the options menu: both are about the chat as a whole,
+                not this turn, and the right cluster is where the header keeps
+                its handles. */}
+            <AttachmentsMenu chatId={chat.id} compact={compact} />
             <Popover
               align="end"
               width={200}
