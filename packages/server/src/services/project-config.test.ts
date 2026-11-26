@@ -115,6 +115,20 @@ describe("project-config helpers", () => {
     expect(body).toBe("Do the work.");
   });
 
+  it("accepts an unquoted `: ` inside a value, as Claude Code does", () => {
+    const { data, body } = parseFrontmatter(
+      "---\nname: adding-a-gun\ndescription: Use when adding a new gun (or a caliber): the steps\ntools:\n  - Read\n---\nBody.",
+    );
+    expect(data.name).toBe("adding-a-gun");
+    expect(data.description).toBe("Use when adding a new gun (or a caliber): the steps");
+    expect(data.tools).toEqual(["Read"]);
+    expect(body).toBe("Body.");
+  });
+
+  it("still reports genuinely broken frontmatter", () => {
+    expect(() => parseFrontmatter("---\nname: [unclosed\n---\nBody.")).toThrow();
+  });
+
   it("frontmatter-less content is all body", () => {
     const { data, body } = parseFrontmatter("just a body\nmore");
     expect(data).toEqual({});
