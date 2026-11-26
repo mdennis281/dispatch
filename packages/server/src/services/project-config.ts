@@ -254,11 +254,48 @@ export function parseFrontmatter(raw: string): Frontmatter {
   const front = text.slice(4, end);
   const body = text.slice(end + 4).replace(/^\n+/, "").trimEnd();
   let data: Record<string, unknown> = {};
-  const parsed = parseYaml(front) as unknown;
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(front) as unknown;
+  } catch (err) {
+    // Claude Code's own skill loader accepts `description: Use when X: do Y` —
+    // an unquoted `: ` inside a plain scalar, which strict YAML rejects with
+    // "Nested mappings are not allowed in compact mappings". Skills authored
+    // against Claude Code (bayou-boys had nine of them) then loaded fine there
+    // and surfaced here as load errors. Retry with such values quoted; if the
+    // frontmatter is broken some other way, report the ORIGINAL error.
+    const repaired = quoteColonScalars(front);
+    if (repaired === front) throw err;
+    try {
+      parsed = parseYaml(repaired) as unknown;
+    } catch {
+      throw err;
+    }
+  }
   if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
     data = parsed as Record<string, unknown>;
   }
   return { data, body };
+}
+
+/**
+ * Re-emit every top-level `key: value` line whose plain-scalar value itself
+ * contains `: ` as a double-quoted (JSON) string, which is valid YAML. Only
+ * column-0 keys with an unquoted, non-structural value are touched, so lists,
+ * nested maps, block scalars and already-quoted values pass through unchanged.
+ */
+function quoteColonScalars(front: string): string {
+  return front
+    .split("\n")
+    .map((line) => {
+      const m = /^([A-Za-z_][\w-]*):[ \t]+(.+?)[ \t]*$/.exec(line);
+      if (!m) return line;
+      const value = m[2]!;
+      if (/^["'[{|>&*!#]/.test(value)) return line;
+      if (!/:\s/.test(value)) return line;
+      return `${m[1]}: ${JSON.stringify(value)}`;
+    })
+    .join("\n");
 }
 
 /**
